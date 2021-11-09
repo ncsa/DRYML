@@ -35,7 +35,6 @@ class DryObject(object):
 
 
         obj = cls_def(*args, **kwargs)
-        print(obj)
         # Build class instance
         return obj
 
@@ -63,8 +62,6 @@ class DryObject(object):
         # Now, we need to pickle the class definition
         cls_def = dill.dumps(type(obj))
         output_file.writestr('cls_def.dill', cls_def)
-
-        print(dill.source.getimport(obj))
 
         # Close the output file
         output_file.close()
