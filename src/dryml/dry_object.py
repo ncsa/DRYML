@@ -69,8 +69,10 @@ class DryObject(object):
         return True
 
     @staticmethod
-    def load_object(file: Union[str, IO[bytes]], update:bool=False) -> Type[DryObject]:
+    def load_object(file: Union[str, IO[bytes]], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
         if type(file) is str:
+            if os.path.splitext(file)[1] == '' and not exact_path:
+                file = f"{file}.dry"
             if not os.path.exists(file):
                 raise ValueError(f"File {filepath} doesn't exist!")
             file = zipfile.ZipFile(file, mode='r')
@@ -87,14 +89,17 @@ class DryObject(object):
         return result_object
 
     @staticmethod
-    def save_object(obj: Type[DryObject], file: Union[str, IO[bytes]], version: int=1) -> bool:
+    def save_object(obj: Type[DryObject], file: Union[str, IO[bytes]], version: int=1, exact_path:bool=False) -> bool:
         # Handle creation of bytes-like
         if type(file) is str:
+            if os.path.splitext(file)[1] == '' and not exact_path:
+                # No extension specified, add default.
+                file = f"{file}.dry"
             file = open(file, 'wb')
         if version == 1:
             return DryObject.save_object_v1(obj, file)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
 
-    def save_self(self, file: Union[str, IO[bytes]], version: int=1) -> bool:
-        return DryObject.save_object(self, file, version=version)
+    def save_self(self, file: Union[str, IO[bytes]], version: int=1, **kwargs) -> bool:
+        return DryObject.save_object(self, file, version=version, **kwargs)

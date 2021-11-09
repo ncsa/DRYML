@@ -2,6 +2,7 @@ import pytest
 import dryml
 import io
 import objects
+import os
 
 def test_basic_object_1():
     # Define simple class
@@ -18,3 +19,17 @@ def test_basic_object_1():
 
     assert obj.version() == 1
     assert obj2.version() == 1
+
+def test_basic_object_2():
+    obj = objects.SimpleObject(10)
+
+    assert obj.save_self('test')
+
+    obj2 = dryml.load_object('test')
+
+    assert obj == obj2
+
+    assert obj.version() == 1
+    assert obj2.version() == 1
+
+    os.remove('test.dry')
