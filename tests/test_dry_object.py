@@ -15,3 +15,6 @@ def test_basic_object_1():
 
     # Test that restore from buffer creates identical object in this context.
     assert obj == obj2
+
+    assert obj.version() == 1
+    assert obj2.version() == 1

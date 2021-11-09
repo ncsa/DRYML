@@ -10,5 +10,8 @@ class SimpleObject(dryml.DryObject):
             dry_kwargs=dry_kwargs
         )
 
+    def version(self):
+        return 1
+
     def __eq__(self, rhs):
         return self.i == rhs.i
