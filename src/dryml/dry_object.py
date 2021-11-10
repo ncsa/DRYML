@@ -12,10 +12,11 @@ from dryml.dry_config import DryConfig
 
 # Define a base Dry Object 
 class DryObject(object):
-    def __init__(self, *args, dry_args=DryConfig(), dry_kwargs=DryConfig(), **kwargs):
+    def __init__(self, *args, dry_args={}, dry_kwargs={}, **kwargs):
         super().__init__(*args, **kwargs)
-        self.dry_kwargs = dry_kwargs
-        self.dry_args = dry_args
+        # Use DryConfig object to coerse args/kwargs to proper json serializable form.
+        self.dry_kwargs = DryConfig(dry_kwargs)
+        self.dry_args = DryConfig(dry_args)
 
     @staticmethod
     def load_object_v1(file: IO[bytes], update:bool=False) -> Type[DryObject]:
