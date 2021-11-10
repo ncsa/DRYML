@@ -33,8 +33,8 @@ class DryObject(object):
             else:
                 cls_def = dill.loads(cls_def_file.read())
 
-
         obj = cls_def(*args, **kwargs)
+
         # Build class instance
         return obj
 
@@ -84,7 +84,7 @@ class DryObject(object):
         if version == 1:
             result_object = DryObject.load_object_v1(file, update=update)
         else:
-            raise RuntimeError("DRY version {version} unknown")
+            raise RuntimeError(f"DRY version {version} unknown")
         file.close()
         return result_object
 
