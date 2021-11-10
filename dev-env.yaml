@@ -1,0 +1,15 @@
+channels:
+  - default
+  - conda-forge
+dependencies:
+  - python=3.8
+  - ipykernel
+  - numpy=1.19
+  - pandas
+  - xarray
+  - scikit-learn
+  - matplotlib
+  - pip
+  - pip:
+    - file:///home/matthew/slow-data/Software/tf_build/tensorflow_products/build_py38_np1.19/tensorflow-2.5.1-cp38-cp38-linux_x86_64.whl
+    - tensorflow_datasets
