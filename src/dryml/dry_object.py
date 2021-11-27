@@ -7,16 +7,24 @@ import dill
 import json
 import io
 import zipfile
+import uuid
 from typing import Type, IO, Union
 from dryml.dry_config import DryConfig
 
 # Define a base Dry Object 
 class DryObject(object):
-    def __init__(self, *args, dry_args={}, dry_kwargs={}, **kwargs):
+    def __init__(self, *args, dry_args={}, dry_kwargs={}, dry_id=None, **kwargs):
         super().__init__(*args, **kwargs)
         # Use DryConfig object to coerse args/kwargs to proper json serializable form.
         self.dry_kwargs = DryConfig(dry_kwargs)
         self.dry_args = DryConfig(dry_args)
+        # Generate unique id for this object. (Meant to separate between multiple instances of same object)
+        if dry_id is None:
+            self.dry_kwargs['dry_id'] = str(uuid.uuid4())
+
+    def load_object_imp(self, file: IO[bytes]):
+        # Helper function to load object specific data
+        return True
 
     @staticmethod
     def load_object_v1(file: IO[bytes], update:bool=False) -> Type[DryObject]:
@@ -34,9 +42,16 @@ class DryObject(object):
             else:
                 cls_def = dill.loads(cls_def_file.read())
 
+        print(args)
+        print(kwargs)
+
+        # Create object
         obj = cls_def(*args, **kwargs)
 
-        # Build class instance
+        # Load object content
+        obj.load_object_imp(file)
+
+        # Build object instance
         return obj
 
     @staticmethod
@@ -104,3 +119,20 @@ class DryObject(object):
 
     def save_self(self, file: Union[str, IO[bytes]], version: int=1, **kwargs) -> bool:
         return DryObject.save_object(self, file, version=version, **kwargs)
+
+class DryObjectFactory(object):
+    def __init__(self, cls, *args, callbacks=[], **kwargs):
+        self.cls = cls
+        self.args = args
+        self.kwargs = kwargs
+        self.callbacks = callbacks
+
+    def add_callback(callback):
+        self.callbacks.append(callback)
+
+    def __call__(self):
+        obj = self.cls(*self.args, **self.kwargs) 
+        for callback in self.callbacks:
+            # Call each callback
+            callback(obj)
+        return obj

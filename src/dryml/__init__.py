@@ -1,4 +1,4 @@
-from dryml.dry_object import DryObject, DryConfig
+from dryml.dry_object import DryObject, DryObjectFactory, DryConfig
 from dryml.dry_model import DryModel
 from dryml.workshop import Workshop
 

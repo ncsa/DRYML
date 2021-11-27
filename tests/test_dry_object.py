@@ -65,3 +65,14 @@ def test_basic_object_def_update_1():
 
     assert obj1.version() == 1
     assert obj2.version() == 2
+
+def test_object_config_1():
+    import objects as objs
+
+    obj = objs.HelloStr(msg="Test")
+    msg = obj.get_message()
+    assert msg == "Hello! Test"
+
+    obj = objs.HelloInt(msg=10)
+    msg = obj.get_message()
+    assert msg == "Hello! 10"
