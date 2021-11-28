@@ -165,8 +165,9 @@ class DryObject(object):
             kwargs_hash_str = self.dry_kwargs.get_hash_str()
         return class_hash_str+args_hash_str+kwargs_hash_str
 
-    def get_hash(self):
-        return hash(self.get_hash_str())
+    def get_hash(self, no_id=True):
+        return hash(self.get_hash_str(no_id=no_id))
+
 
 class DryObjectFactory(object):
     def __init__(self, cls, *args, callbacks=[], **kwargs):
