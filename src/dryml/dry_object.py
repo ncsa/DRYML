@@ -17,19 +17,20 @@ def file_resolve(file: str, exact_path:bool = False) -> str:
         file = f"{file}.dry"
     return file
 
-def load_zipfile(file: Union[str, IO[bytes]], exact_path:bool=False) -> zipfile.ZipFile:
+def load_zipfile(file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', must_exist:bool=True) -> zipfile.ZipFile:
     if type(file) is str:
-        file = file_resolve(file, exact_path=exact_path)
-        if not os.path.exists(file):
+        filepath = file
+        filepath = file_resolve(filepath, exact_path=exact_path)
+        if must_exist and not os.path.exists(filepath):
             raise ValueError(f"File {filepath} doesn't exist!")
-        file = zipfile.ZipFile(file, mode='r')
+        file = zipfile.ZipFile(filepath, mode=mode)
     if type(file) is not zipfile.ZipFile:
-        file = zipfile.ZipFile(file, mode='r')
+        file = zipfile.ZipFile(file, mode=mode)
     return file
 
 class DryObjectFile(object):
-    def __init__(self, file: Union[str, IO[bytes]], exact_path:bool=False):
-        self.file = load_zipfile(file, exact_path=exact_path)
+    def __init__(self, file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', must_exist=True):
+        self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
 
     def __enter__(self):
         return self
@@ -80,37 +81,43 @@ class DryObjectFile(object):
         # Build object instance
         return obj
 
-def save_object_v1(obj: Type[DryObject], file: IO[bytes]) -> bool:
-    # Create zipfile
-    output_file = zipfile.ZipFile(file, mode='w')
+    def save_meta_data(self):
+        # Meta_data
+        meta_data = {
+            'version': 1
+        }
 
-    # Meta_data
-    meta_data = {
-        'version': 1
-    }
+        meta_dump = json.dumps(meta_data)
+        self.file.writestr('meta_data.json', meta_dump)
 
-    meta_dump = json.dumps(meta_data)
-    output_file.writestr('meta_data.json', meta_dump)
+    def save_config_v1(self, obj: Type[DryObject]):
+        config_data = {
+            'kwargs': obj.dry_kwargs,
+            'args': obj.dry_args
+        }
 
-    config_data = {
-        'kwargs': obj.dry_kwargs,
-        'args': obj.dry_args
-    }
+        config_dump = json.dumps(config_data)
+        self.file.writestr('config.json', config_dump)
 
-    config_dump = json.dumps(config_data)
-    output_file.writestr('config.json', config_dump)
+    def save_class_def_v1(self, obj: Type[DryObject]):
+        # Now, we need to pickle the class definition
+        cls_def = dill.dumps(type(obj))
+        self.file.writestr('cls_def.dill', cls_def)
 
-    # Now, we need to pickle the class definition
-    cls_def = dill.dumps(type(obj))
-    output_file.writestr('cls_def.dill', cls_def)
+    def save_object_v1(self, obj: Type[DryObject]) -> bool:
+        # Save meta data
+        self.save_meta_data()
 
-    # Close the output file
-    output_file.close()
+        # Save config v1
+        self.save_config_v1(obj)
 
-    return True
+        # Save class def
+        self.save_class_def_v1(obj)
+
+        return True
 
 def load_object(file: Union[str, IO[bytes]], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
-    with DryObjectFile(file) as file:
+    with DryObjectFile(file, exact_path=exact_path) as file:
         meta_data = file.load_meta_data()
         version = meta_data['version']
         if version == 1:
@@ -120,14 +127,11 @@ def load_object(file: Union[str, IO[bytes]], update:bool=False, exact_path:bool=
     return result_object
 
 def save_object(obj: Type[DryObject], file: Union[str, IO[bytes]], version: int=1, exact_path:bool=False) -> bool:
-    # Handle creation of bytes-like
-    if type(file) is str:
-        file = file_resolve(file)
-        file = open(file, 'wb')
-    if version == 1:
-        return save_object_v1(obj, file)
-    else:
-        raise ValueError(f"File version {version} unknown. Can't save!")
+    with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False) as file:
+        if version == 1:
+            return file.save_object_v1(obj)
+        else:
+            raise ValueError(f"File version {version} unknown. Can't save!")
 
 # Define a base Dry Object 
 class DryObject(object):
