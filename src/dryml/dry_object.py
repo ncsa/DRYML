@@ -27,27 +27,6 @@ def load_zipfile(file: Union[str, IO[bytes]], exact_path:bool=False) -> zipfile.
         file = zipfile.ZipFile(file, mode='r')
     return file
 
-def load_config_v1(dry_file: DryObjectFile):
-    "Helper function for loading a version 1 config file"
-    with dry_file.file.open('config.json', 'r') as config_file:
-        config_data = json.loads(config_file.read())
-    return config_data
-
-def load_class_def_v1(dry_file: DryObjectFile, update:bool=True):
-    "Helper function for loading a version 1 class definition"
-    # Get class definition
-    with dry_file.file.open('cls_def.dill') as cls_def_file:
-        if update:
-            cls_def = dill.loads(cls_def_file.read(), ignore=False)
-        else:
-            cls_def = dill.loads(cls_def_file.read())
-    return cls_def
-
-def load_meta_data(dry_file: DryObjectFile):
-    with dry_file.file.open('meta_data.json', 'r') as meta_file:
-        meta_data = json.loads(meta_file.read())
-    return meta_data
-
 class DryObjectFile(object):
     def __init__(self, file: Union[str, IO[bytes]], exact_path:bool=False):
         self.file = load_zipfile(file, exact_path=exact_path)
@@ -61,24 +40,45 @@ class DryObjectFile(object):
     def close(self):
         self.file.close()
 
-def load_object_v1(file: DryObjectFile, update:bool=True) -> Type[DryObject]:
-    config_data = load_config_v1(file)
+    def load_config_v1(self):
+        "Helper function for loading a version 1 config file"
+        with self.file.open('config.json', 'r') as config_file:
+            config_data = json.loads(config_file.read())
+        return config_data
 
-    # Get arguments
-    kwargs = config_data['kwargs']
-    args = config_data['args']
+    def load_class_def_v1(self, update:bool=True):
+        "Helper function for loading a version 1 class definition"
+        # Get class definition
+        with self.file.open('cls_def.dill') as cls_def_file:
+            if update:
+                cls_def = dill.loads(cls_def_file.read(), ignore=False)
+            else:
+                cls_def = dill.loads(cls_def_file.read())
+        return cls_def
 
-    # Get class definition
-    cls_def = load_class_def_v1(file, update=update)
+    def load_meta_data(self):
+        with self.file.open('meta_data.json', 'r') as meta_file:
+            meta_data = json.loads(meta_file.read())
+        return meta_data
 
-    # Create object
-    obj = cls_def(*args, **kwargs)
+    def load_object_v1(self, update:bool=True) -> Type[DryObject]:
+        config_data = self.load_config_v1()
 
-    # Load object content
-    obj.load_object_imp(file)
+        # Get arguments
+        kwargs = config_data['kwargs']
+        args = config_data['args']
 
-    # Build object instance
-    return obj
+        # Get class definition
+        cls_def = self.load_class_def_v1(update=update)
+
+        # Create object
+        obj = cls_def(*args, **kwargs)
+
+        # Load object content
+        obj.load_object_imp(self.file)
+
+        # Build object instance
+        return obj
 
 def save_object_v1(obj: Type[DryObject], file: IO[bytes]) -> bool:
     # Create zipfile
@@ -111,10 +111,10 @@ def save_object_v1(obj: Type[DryObject], file: IO[bytes]) -> bool:
 
 def load_object(file: Union[str, IO[bytes]], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
     with DryObjectFile(file) as file:
-        meta_data = load_meta_data(file)
+        meta_data = file.load_meta_data()
         version = meta_data['version']
         if version == 1:
-            result_object = load_object_v1(file, update=update)
+            result_object = file.load_object_v1(update=update)
         else:
             raise RuntimeError(f"DRY version {version} unknown")
     return result_object
