@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 import dill
 import json
+import pickle
 import io
 import zipfile
 import uuid
 import copy
 from typing import Type, IO, Union
-from dryml.dry_config import DryConfig
+from dryml.dry_config import DryConfig, DryList
 
 def file_resolve(file: str, exact_path:bool = False) -> str:
     if os.path.splitext(file)[1] == '' and not exact_path:
@@ -43,8 +44,8 @@ class DryObjectFile(object):
 
     def load_config_v1(self):
         "Helper function for loading a version 1 config file"
-        with self.file.open('config.json', 'r') as config_file:
-            config_data = json.loads(config_file.read())
+        with self.file.open('config.pkl', 'r') as config_file:
+            config_data = pickle.loads(config_file.read())
         return config_data
 
     def load_class_def_v1(self, update:bool=True):
@@ -58,8 +59,8 @@ class DryObjectFile(object):
         return cls_def
 
     def load_meta_data(self):
-        with self.file.open('meta_data.json', 'r') as meta_file:
-            meta_data = json.loads(meta_file.read())
+        with self.file.open('meta_data.pkl', 'r') as meta_file:
+            meta_data = pickle.loads(meta_file.read())
         return meta_data
 
     def load_object_v1(self, update:bool=True) -> Type[DryObject]:
@@ -83,21 +84,21 @@ class DryObjectFile(object):
 
     def save_meta_data(self):
         # Meta_data
-        meta_data = {
+        meta_data = DryConfig({
             'version': 1
-        }
+        })
 
-        meta_dump = json.dumps(meta_data)
-        self.file.writestr('meta_data.json', meta_dump)
+        meta_dump = pickle.dumps(meta_data, protocol=5)
+        self.file.writestr('meta_data.pkl', meta_dump)
 
     def save_config_v1(self, obj: Type[DryObject]):
-        config_data = {
-            'kwargs': obj.dry_kwargs,
-            'args': obj.dry_args
-        }
+        config_data = DryConfig({
+            'kwargs': obj.dry_kwargs.data,
+            'args': obj.dry_args.data
+        })
 
-        config_dump = json.dumps(config_data)
-        self.file.writestr('config.json', config_dump)
+        config_dump = pickle.dumps(config_data, protocol=5)
+        self.file.writestr('config.pkl', config_dump)
 
     def save_class_def_v1(self, obj: Type[DryObject]):
         # Now, we need to pickle the class definition
@@ -137,9 +138,9 @@ def save_object(obj: Type[DryObject], file: Union[str, IO[bytes]], version: int=
 class DryObject(object):
     def __init__(self, *args, dry_args={}, dry_kwargs={}, dry_id=None, **kwargs):
         super().__init__(*args, **kwargs)
-        # Use DryConfig object to coerse args/kwargs to proper json serializable form.
+        # Use DryConfig/DryList object to coerse args/kwargs to proper json serializable form.
         self.dry_kwargs = DryConfig(dry_kwargs)
-        self.dry_args = DryConfig(dry_args)
+        self.dry_args = DryList(dry_args)
         # Generate unique id for this object. (Meant to separate between multiple instances of same object)
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())

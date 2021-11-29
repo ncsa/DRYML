@@ -1,22 +1,5 @@
 import dryml
 
-class SimpleObject(dryml.DryObject):
-    def __init__(self, i=0, **kwargs):
-        self.i = i
-        dry_kwargs = {
-            'i': i
-        }
-        super().__init__(
-            dry_kwargs=dry_kwargs,
-            **kwargs
-        )
-
-    def version(self):
-        return 1
-
-    def __eq__(self, rhs):
-        return self.i == rhs.i
-
 class HelloObject(dryml.DryObject):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
