@@ -156,18 +156,38 @@ class DryObject(object):
 
     def get_hash_str(self, no_id=True):
         class_hash_str = str(type(self))
-        args_hash_str = self.dry_args.get_hash_str()
+        args_hash_str = str(self.dry_args.get_hash())
         # Remove dry_id so we can test for object 'class'
         if no_id:
-            kwargs_copy = self.dry_kwargs.copy()
+            kwargs_copy = copy.copy(self.dry_kwargs)
             kwargs_copy.pop('dry_id')
-            kwargs_hash_str = kwargs_copy.get_hash_str()
+            kwargs_hash_str = str(kwargs_copy.get_hash())
         else:
-            kwargs_hash_str = self.dry_kwargs.get_hash_str()
+            kwargs_hash_str = str(self.dry_kwargs.get_hash())
         return class_hash_str+args_hash_str+kwargs_hash_str
 
     def get_hash(self, no_id=True):
         return hash(self.get_hash_str(no_id=no_id))
+
+    def is_same_category(self, rhs):
+        if type(self) != type(rhs):
+            return False
+        if self.dry_args != rhs.dry_args:
+            return False
+        kwargs_copy = copy.copy(self.dry_kwargs)
+        kwargs_copy.pop('dry_id')
+        rhs_kwargs_copy = copy.copy(rhs.dry_kwargs)
+        rhs_kwargs_copy.pop('dry_id')
+        if kwargs_copy != rhs_kwargs_copy:
+            return False
+        return True
+
+    def is_identical(self, rhs):
+        if not self.is_same_category(rhs):
+            return False
+        if self.dry_kwargs['dry_id'] != rhs.dry_kwargs['dry_id']:
+            return False
+        return True
 
 
 class DryObjectFactory(object):

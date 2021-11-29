@@ -110,3 +110,53 @@ def test_object_config_1():
     obj = objs.HelloInt(msg=10)
     msg = obj.get_message()
     assert msg == "Hello! 10"
+
+def test_object_hash_1():
+    "Test that object hashes are unique within classes"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    obj2 = objs.HelloStr(msg="Test")
+    assert obj1.get_hash(no_id=False) != obj2.get_hash(no_id=False)
+
+def test_object_hash_2():
+    "Test that object hashes are are same for two elements of the same class"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    obj2 = objs.HelloStr(msg="Test")
+    assert obj1.get_hash() == obj2.get_hash()
+
+def test_object_hash_3():
+    "Test that object hashes are the same after saving and restoring"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save_self('test')
+
+    obj2 = dryml.load_object('test')
+    assert obj1.get_hash() == obj2.get_hash()
+
+def test_object_hash_3():
+    "Test that loaded objects are identical hash wise"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save_self('test')
+
+    obj2 = dryml.load_object('test')
+    assert obj1.get_hash(no_id=False) == obj2.get_hash(no_id=False)
+
+def test_object_hash_4():
+    "Test that object hashes are the same after saving and restoring"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save_self('test')
+
+    obj2 = dryml.load_object('test')
+    assert obj1.is_same_category(obj2)
+
+def test_object_hash_5():
+    "Test that loaded objects are identical hash wise"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save_self('test')
+
+    obj2 = dryml.load_object('test')
+    assert obj1.is_identical(obj2)
