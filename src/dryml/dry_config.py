@@ -50,7 +50,7 @@ class DryCollectionInterface(object):
         # Call parent class functions
         super().__setitem__(key, value)
 
-    def save(file: Union[str, IO[bytes]]) -> bool:
+    def save(self, file: Union[str, IO[bytes]]) -> bool:
         if type(file) is str:
             with open(file, 'w') as f:
                 f.write(pickle.dumps(self.data, protocol=5))
