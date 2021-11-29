@@ -169,6 +169,12 @@ class DryObject(object):
     def get_hash(self, no_id=True):
         return hash(self.get_hash_str(no_id=no_id))
 
+    def get_category_hash(self):
+        return self.get_hash(no_id=True)
+
+    def get_individual_hash(self):
+        return self.get_hash(no_id=False)
+
     def is_same_category(self, rhs):
         if type(self) != type(rhs):
             return False
