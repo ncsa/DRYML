@@ -3,6 +3,7 @@ import json
 import pickle
 import collections
 from typing import Union, IO
+from dryml.utils import is_nonstring_iterable, is_dictlike
 
 def is_allowed_base_type(val):
     if type(val) in (str, bytes, int, float):
@@ -12,15 +13,13 @@ def is_allowed_base_type(val):
 
 def check_if_allowed(val):
     "Method to check whether values are json serializable"
-    if type(val) in [str, bytes]:
-        return True
-    if isinstance(val, collections.abc.Mapping):
+    if is_dictlike(val):
         for key in val.keys():
             if not check_if_allowed(key):
                 return False
             if not check_if_allowed(val[key]):
                 return True
-    elif isinstance(val, collections.abc.Iterable):
+    elif is_nonstring_iterable(val):
         for element in val:
             if not check_if_allowed(element):
                 return False
