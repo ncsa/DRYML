@@ -12,7 +12,7 @@ import uuid
 import copy
 from typing import Type, IO, Union
 from dryml.dry_config import DryConfig, DryList
-from dryml.utils import init_arg_list_handler
+from dryml.utils import init_arg_list_handler, init_arg_dict_handler
 
 def file_resolve(file: str, exact_path:bool = False) -> str:
     if os.path.splitext(file)[1] == '' and not exact_path:
@@ -137,9 +137,10 @@ def save_object(obj: Type[DryObject], file: Union[str, IO[bytes]], version: int=
 
 # Define a base Dry Object 
 class DryObject(object):
-    def __init__(self, *args, dry_args=None, dry_kwargs={}, dry_id=None, **kwargs):
+    def __init__(self, *args, dry_args=None, dry_kwargs=None, dry_id=None, **kwargs):
         super().__init__(*args, **kwargs)
         dry_args = init_arg_list_handler(dry_args)
+        dry_kwargs = init_arg_dict_handler(dry_kwargs)
         # Use DryConfig/DryList object to coerse args/kwargs to proper json serializable form.
         self.dry_kwargs = DryConfig(dry_kwargs)
         self.dry_args = DryList(dry_args)

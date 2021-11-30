@@ -14,3 +14,9 @@ def init_arg_list_handler(arg_list):
         return []
     else:
         return arg_list
+
+def init_arg_dict_handler(arg_dict):
+    if arg_dict is None:
+        return {}
+    else:
+        return arg_dict

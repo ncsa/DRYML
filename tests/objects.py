@@ -36,8 +36,9 @@ class HelloInt(HelloObject):
         return f"Hello! {self.int_msg}"
 
 class TestBase(dryml.DryObject):
-    def __init__(self, *args, base_msg:str="base", dry_args=None, dry_kwargs={}, **kwargs):
+    def __init__(self, *args, base_msg:str="base", dry_args=None, dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
+        dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         self.base_msg = base_msg
         dry_kwargs['base_msg'] = base_msg
         super().__init__(
@@ -48,8 +49,9 @@ class TestBase(dryml.DryObject):
         )
 
 class TestClassA(TestBase):
-    def __init__(self, *args, item=[32], dry_args=None, dry_kwargs={}, **kwargs):
+    def __init__(self, *args, item=[32], dry_args=None, dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
+        dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         dry_kwargs['item'] = item
         super().__init__(
             *args,
@@ -59,8 +61,9 @@ class TestClassA(TestBase):
         )
 
 class TestClassB(TestBase):
-    def __init__(self, layers, *args, dry_args=None, dry_kwargs={}, **kwargs):
+    def __init__(self, layers, *args, dry_args=None, dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
+        dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         dry_args.append(layers)
         super().__init__(
             *args,
