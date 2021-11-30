@@ -64,5 +64,6 @@ class DryList(DryCollectionInterface, collections.UserList):
             raise TypeError(f"Value {val} not allowed in a DryList")
         super().append(val)
 
+
 class DryConfig(DryCollectionInterface, collections.UserDict):
     pass

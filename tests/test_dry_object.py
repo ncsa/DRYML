@@ -100,6 +100,26 @@ def test_basic_object_def_update_1():
     assert obj1.version() == 1
     assert obj2.version() == 2
 
+def test_object_args_passing_1():
+    import objects as objs
+
+    obj = objs.TestClassB(1, base_msg="Test1")
+
+    assert obj.dry_args == [1]
+
+def test_object_args_passing_2():
+    import objects as objs
+
+    obj = objs.TestClassB(1, base_msg="Test1")
+
+    dryml.save_object(obj, 'test')
+
+    obj_loaded = dryml.load_object('test')
+
+    assert obj_loaded.dry_args == [1]
+
+    os.remove('test.dry')
+
 def test_object_config_1():
     import objects as objs
 
