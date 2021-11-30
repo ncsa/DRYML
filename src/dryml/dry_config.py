@@ -1,32 +1,26 @@
 import os
 import json
 import pickle
-from collections import UserList, UserDict
+import collections
 from typing import Union, IO
 
 def is_allowed_base_type(val):
-    if type(val) is str:
-        return True
-    if type(val) is int:
-        return True
-    if type(val) is float:
+    if type(val) in (str, bytes, int, float):
         return True
     return False
 
 
 def check_if_allowed(val):
     "Method to check whether values are json serializable"
-    if issubclass(type(val), dict):
+    if type(val) in [str, bytes]:
+        return True
+    if isinstance(val, collections.abc.Mapping):
         for key in val.keys():
             if not check_if_allowed(key):
                 return False
             if not check_if_allowed(val[key]):
                 return True
-    elif issubclass(type(val), tuple):
-        for element in val:
-            if not check_if_allowed(element):
-                return False
-    elif issubclass(type(val), list):
+    elif isinstance(val, collections.abc.Iterable):
         for element in val:
             if not check_if_allowed(element):
                 return False
@@ -65,11 +59,11 @@ class DryCollectionInterface(object):
         return hash(self.get_hash_str())
 
 
-class DryList(DryCollectionInterface, UserList):
+class DryList(DryCollectionInterface, collections.UserList):
     def append(self, val):
         if not check_if_allowed(val):
             raise TypeError(f"Value {val} not allowed in a DryList")
         super().append(val)
 
-class DryConfig(DryCollectionInterface, UserDict):
+class DryConfig(DryCollectionInterface, collections.UserDict):
     pass
