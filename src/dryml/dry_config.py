@@ -52,7 +52,7 @@ class DryCollectionInterface(object):
         return True
 
     def get_hash_str(self):
-        return pickle.dumps(self.data)
+        return str(self.data)
 
     def get_hash(self):
         return hash(self.get_hash_str())

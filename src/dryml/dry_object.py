@@ -36,14 +36,14 @@ def load_zipfile(file: FileType, exact_path:bool=False, mode='r', must_exist:boo
 
 def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
     class_hash_str = str(cls)
-    args_hash_str = str(args.get_hash())
+    args_hash_str = args.get_hash_str()
     # Remove dry_id so we can test for object 'class'
     if no_id:
         kwargs_copy = copy.copy(kwargs)
         kwargs_copy.pop('dry_id')
-        kwargs_hash_str = str(kwargs_copy.get_hash())
+        kwargs_hash_str = kwargs_copy.get_hash_str()
     else:
-        kwargs_hash_str = str(kwargs.get_hash())
+        kwargs_hash_str = kwargs.get_hash_str()
     return class_hash_str+args_hash_str+kwargs_hash_str
 
 
@@ -173,6 +173,19 @@ class DryObjectFile(object):
         obj.save_object_imp(self.file)
 
         return True
+
+    def get_hash_str(self, no_id=True):
+        return compute_obj_hash_str(self.cls, self.args, self.kwargs, no_id=no_id)
+
+    def get_hash(self, no_id=True):
+        return hash(self.get_hash_str(no_id=no_id))
+
+    def get_category_hash(self):
+        return self.get_hash(no_id=True)
+
+    def get_individual_hash(self):
+        return self.get_hash(no_id=False)
+
 
 
 def load_object(file: FileType, update:bool=False, exact_path:bool=False) -> Type[DryObject]:
