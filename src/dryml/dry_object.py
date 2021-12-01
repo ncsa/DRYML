@@ -30,6 +30,20 @@ def load_zipfile(file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', m
         file = zipfile.ZipFile(file, mode=mode)
     return file
 
+def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
+    class_hash_str = str(cls)
+    args_hash_str = str(args.get_hash())
+    # Remove dry_id so we can test for object 'class'
+    if no_id:
+        kwargs_copy = copy.copy(kwargs)
+        kwargs_copy.pop('dry_id')
+        kwargs_hash_str = str(kwargs_copy.get_hash())
+    else:
+        kwargs_hash_str = str(kwargs.get_hash())
+    return class_hash_str+args_hash_str+kwargs_hash_str
+
+
+
 class DryObjectFile(object):
     def __init__(self, file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', must_exist=True):
         self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
@@ -118,6 +132,8 @@ class DryObjectFile(object):
 
         return True
 
+
+
 def load_object(file: Union[str, IO[bytes]], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
     with DryObjectFile(file, exact_path=exact_path) as file:
         meta_data = file.load_meta_data()
@@ -158,16 +174,7 @@ class DryObject(object):
         return save_object(self, file, version=version, **kwargs)
 
     def get_hash_str(self, no_id=True):
-        class_hash_str = str(type(self))
-        args_hash_str = str(self.dry_args.get_hash())
-        # Remove dry_id so we can test for object 'class'
-        if no_id:
-            kwargs_copy = copy.copy(self.dry_kwargs)
-            kwargs_copy.pop('dry_id')
-            kwargs_hash_str = str(kwargs_copy.get_hash())
-        else:
-            kwargs_hash_str = str(self.dry_kwargs.get_hash())
-        return class_hash_str+args_hash_str+kwargs_hash_str
+        return compute_obj_hash_str(type(self), self.dry_args, self.dry_kwargs, no_id=no_id)
 
     def get_hash(self, no_id=True):
         return hash(self.get_hash_str(no_id=no_id))
