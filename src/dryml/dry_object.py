@@ -83,18 +83,29 @@ class DryObjectFile(object):
             meta_data = pickle.loads(meta_file.read())
         return meta_data
 
-    def load_object_v1(self, update:bool=True) -> Type[DryObject]:
+    def cache_object_data_v1_file(self, update:bool=True):
+        # Cache object data from a file
         config_data = self.load_config_v1()
 
         # Get arguments
-        kwargs = config_data['kwargs']
-        args = config_data['args']
+        self.kwargs = DryConfig(config_data['kwargs'])
+        self.args = DryList(config_data['args'])
 
         # Get class definition
-        cls_def = self.load_class_def_v1(update=update)
+        self.cls = self.load_class_def_v1(update=update)
+
+    def cache_object_data_v1_obj(self, obj: Type[DryObject]):
+        # Cache object data from an object
+        self.kwargs = obj.dry_kwargs
+        self.args = obj.dry_args
+        self.cls = type(obj)
+
+    def load_object_v1(self, update:bool=True) -> Type[DryObject]:
+        # Load object
+        self.cache_object_data_v1_file(update=update)
 
         # Create object
-        obj = cls_def(*args, **kwargs)
+        obj = self.cls(*self.args, **self.kwargs)
 
         # Load object content
         obj.load_object_imp(self.file)
@@ -111,29 +122,31 @@ class DryObjectFile(object):
         meta_dump = pickle.dumps(meta_data, protocol=5)
         self.file.writestr('meta_data.pkl', meta_dump)
 
-    def save_config_v1(self, obj: Type[DryObject]):
+    def save_config_v1(self):
         config_data = DryConfig({
-            'kwargs': obj.dry_kwargs.data,
-            'args': obj.dry_args.data
+            'kwargs': self.kwargs.data,
+            'args': self.args.data
         })
 
         config_dump = pickle.dumps(config_data, protocol=5)
         self.file.writestr('config.pkl', config_dump)
 
-    def save_class_def_v1(self, obj: Type[DryObject]):
+    def save_class_def_v1(self):
         # Now, we need to pickle the class definition
-        cls_def = dill.dumps(type(obj))
+        cls_def = dill.dumps(self.cls)
         self.file.writestr('cls_def.dill', cls_def)
 
     def save_object_v1(self, obj: Type[DryObject]) -> bool:
+        self.cache_object_data_v1_obj(obj)
+
         # Save meta data
         self.save_meta_data()
 
         # Save config v1
-        self.save_config_v1(obj)
+        self.save_config_v1()
 
         # Save class def
-        self.save_class_def_v1(obj)
+        self.save_class_def_v1()
 
         # Save object content
         obj.save_object_imp(self.file)
