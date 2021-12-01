@@ -40,7 +40,8 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
     # Remove dry_id so we can test for object 'class'
     if no_id:
         kwargs_copy = copy.copy(kwargs)
-        kwargs_copy.pop('dry_id')
+        if 'dry_id' in kwargs_copy:
+            kwargs_copy.pop('dry_id')
         kwargs_hash_str = kwargs_copy.get_hash_str()
     else:
         kwargs_hash_str = kwargs.get_hash_str()
@@ -267,8 +268,8 @@ class DryObject(object):
 class DryObjectFactory(object):
     def __init__(self, cls, *args, callbacks=[], **kwargs):
         self.cls = cls
-        self.args = args
-        self.kwargs = kwargs
+        self.args = DryList(args)
+        self.kwargs = DryConfig(kwargs)
         self.callbacks = callbacks
 
     def add_callback(callback):
@@ -280,3 +281,13 @@ class DryObjectFactory(object):
             # Call each callback
             callback(obj)
         return obj
+
+    def get_hash_str(self):
+        # For DryObjectFactory, we can't use id.
+        return compute_obj_hash_str(self.cls, self.args, self.kwargs, no_id=True)
+
+    def get_hash(self):
+        return hash(self.get_hash_str())
+
+    def get_category_hash(self):
+        return self.get_hash()

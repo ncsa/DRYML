@@ -198,3 +198,13 @@ def test_object_file_hash_2():
 
     with dryml.DryObjectFile('test') as dry_file:
         assert obj1.get_hash_str(no_id=False) == dry_file.get_hash_str(no_id=False)
+
+def test_object_file_hash_1():
+    "Test that object and object factory hashes are the same"
+    import objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save_self('test')
+
+    f = dryml.DryObjectFactory(objs.HelloStr, msg="Test")
+
+    assert obj1.get_hash() == f.get_hash()
