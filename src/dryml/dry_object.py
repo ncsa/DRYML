@@ -10,7 +10,7 @@ import io
 import zipfile
 import uuid
 import copy
-from typing import Type, IO, Union
+from typing import Type, IO, Union, Optional
 from dryml.dry_config import DryConfig, DryList
 from dryml.utils import init_arg_list_handler, init_arg_dict_handler
 
@@ -18,6 +18,7 @@ def file_resolve(file: str, exact_path:bool = False) -> str:
     if os.path.splitext(file)[1] == '' and not exact_path:
         file = f"{file}.dry"
     return file
+
 
 def load_zipfile(file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', must_exist:bool=True) -> zipfile.ZipFile:
     if type(file) is str:
@@ -29,6 +30,7 @@ def load_zipfile(file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', m
     if type(file) is not zipfile.ZipFile:
         file = zipfile.ZipFile(file, mode=mode)
     return file
+
 
 def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
     class_hash_str = str(cls)
@@ -43,10 +45,13 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
     return class_hash_str+args_hash_str+kwargs_hash_str
 
 
-
 class DryObjectFile(object):
-    def __init__(self, file: Union[str, IO[bytes]], exact_path:bool=False, mode='r', must_exist=True):
+    def __init__(self, file: Optional[Union[str, IO[bytes]]], exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None):
         self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
+
+        self.cls = None
+        self.args = None
+        self.kwargs = None
 
     def __enter__(self):
         return self
@@ -130,24 +135,26 @@ class DryObjectFile(object):
         # Save class def
         self.save_class_def_v1(obj)
 
+        # Save object content
+        obj.save_object_imp(self.file)
+
         return True
 
 
-
 def load_object(file: Union[str, IO[bytes]], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
-    with DryObjectFile(file, exact_path=exact_path) as file:
-        meta_data = file.load_meta_data()
+    with DryObjectFile(file, exact_path=exact_path) as dry_file:
+        meta_data = dry_file.load_meta_data()
         version = meta_data['version']
         if version == 1:
-            result_object = file.load_object_v1(update=update)
+            result_object = dry_file.load_object_v1(update=update)
         else:
             raise RuntimeError(f"DRY version {version} unknown")
     return result_object
 
 def save_object(obj: Type[DryObject], file: Union[str, IO[bytes]], version: int=1, exact_path:bool=False) -> bool:
-    with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False) as file:
+    with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False) as dry_file:
         if version == 1:
-            return file.save_object_v1(obj)
+            return dry_file.save_object_v1(obj)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
 
@@ -168,6 +175,10 @@ class DryObject(object):
 
     def load_object_imp(self, file: IO[bytes]) -> bool:
         # Helper function to load object specific data should return a boolean indicating if loading was successful
+        return True
+
+    def save_object_imp(self, file: IO[bytes]) -> bool:
+        # Helper function to save object specific data should return a boolean indicating if loading was successful
         return True
 
     def save_self(self, file: Union[str, IO[bytes]], version: int=1, **kwargs) -> bool:
