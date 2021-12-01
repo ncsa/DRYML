@@ -48,12 +48,20 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
 
 
 class DryObjectFile(object):
-    def __init__(self, file: Optional[FileType], exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None):
+    def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None):
         self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
-
         self.cls = None
         self.args = None
         self.kwargs = None
+
+        if obj is not None:
+            # Cache object data, can be used for updating
+            self.update_file(obj)
+        else:
+            # If we're reading the file, we probably want to compute a 
+            # hash or create an object. We can safely read and cache hash data now.
+            if mode == 'r':
+                 self.cache_object_data_file(self.file)            
 
     def __enter__(self):
         return self
@@ -63,6 +71,9 @@ class DryObjectFile(object):
 
     def close(self):
         self.file.close()
+
+    def update_file(self, obj:DryObject):
+        self.cache_object_data_obj(obj)
 
     def load_config_v1(self):
         "Helper function for loading a version 1 config file"
@@ -96,7 +107,15 @@ class DryObjectFile(object):
         # Get class definition
         self.cls = self.load_class_def_v1(update=update)
 
-    def cache_object_data_v1_obj(self, obj: DryObject):
+    def cache_object_data_file(self, update:bool=True):
+        meta_data = self.load_meta_data()
+        version = meta_data['version']
+        if version == 1:
+            self.cache_object_data_v1_file(update=update)
+        else:
+            raise RuntimeError(f"DRY version {version} unknown")
+
+    def cache_object_data_obj(self, obj: DryObject):
         # Cache object data from an object
         self.kwargs = obj.dry_kwargs
         self.args = obj.dry_args
@@ -139,7 +158,7 @@ class DryObjectFile(object):
         self.file.writestr('cls_def.dill', cls_def)
 
     def save_object_v1(self, obj: DryObject) -> bool:
-        self.cache_object_data_v1_obj(obj)
+        self.cache_object_data_obj(obj)
 
         # Save meta data
         self.save_meta_data()
