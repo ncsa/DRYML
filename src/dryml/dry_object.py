@@ -51,6 +51,7 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
 class DryObjectFile(object):
     def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None):
         self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
+
         self.cls = None
         self.args = None
         self.kwargs = None
@@ -210,11 +211,9 @@ def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=
 class DryObject(object):
     def __init__(self, *args, dry_args=None, dry_kwargs=None, dry_id=None, **kwargs):
         super().__init__(*args, **kwargs)
-        dry_args = init_arg_list_handler(dry_args)
-        dry_kwargs = init_arg_dict_handler(dry_kwargs)
         # Use DryConfig/DryList object to coerse args/kwargs to proper json serializable form.
-        self.dry_kwargs = DryConfig(dry_kwargs)
-        self.dry_args = DryList(dry_args)
+        self.dry_args = DryList(init_arg_list_handler(dry_args))
+        self.dry_kwargs = DryConfig(init_arg_dict_handler(dry_kwargs))
         # Generate unique id for this object. (Meant to separate between multiple instances of same object)
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())
