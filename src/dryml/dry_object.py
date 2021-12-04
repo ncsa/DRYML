@@ -50,6 +50,11 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
 
 class DryObjectFile(object):
     def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None):
+        if type(file) is str:
+            # Save the filename
+            self.filename = file
+        else:
+            self.filename = None
         self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
 
         self.cls = None
@@ -136,6 +141,14 @@ class DryObjectFile(object):
         # Build object instance
         return obj
 
+    def load_object(self, update:bool=False):
+    	meta_data = self.load_meta_data()
+    	version = meta_data['version']
+    	if version == 1:
+        	return self.load_object_v1(update=update)
+    	else:
+        	raise RuntimeError(f"DRY version {version} unknown")
+
     def save_meta_data(self):
         # Meta_data
         meta_data = DryConfig({
@@ -188,16 +201,12 @@ class DryObjectFile(object):
     def get_individual_hash(self):
         return self.get_hash(no_id=False)
 
-
-
-def load_object(file: FileType, update:bool=False, exact_path:bool=False) -> Type[DryObject]:
-    with DryObjectFile(file, exact_path=exact_path) as dry_file:
-        meta_data = dry_file.load_meta_data()
-        version = meta_data['version']
-        if version == 1:
-            result_object = dry_file.load_object_v1(update=update)
-        else:
-            raise RuntimeError(f"DRY version {version} unknown")
+def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
+    if not isinstance(file, DryObjectFile):
+    	with DryObjectFile(file, exact_path=exact_path) as dry_file:
+        	result_object = dry_file.load_object(update=update)
+    else:
+        result_object = dry_file.load_object(update=update)
     return result_object
 
 def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False) -> bool:

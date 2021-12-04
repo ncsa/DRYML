@@ -1,5 +1,6 @@
-from dryml.dry_object import DryObject
+from dryml.dry_object import DryObject, DryObjectFile
 from dryml.utils import is_nonstring_iterable, is_dictlike
+from typing import Union
 
 class DrySelector(object):
     "Utility object for selecting for specific dry objects"
@@ -36,20 +37,37 @@ class DrySelector(object):
 
         return True
 
-    def __call__(self, obj: DryObject):
-        # If required, check object class
-        if self.cls is not None:
-            if not isinstance(obj, self.cls):
-                return False
+    def __call__(self, obj: Union[DryObject, DryObjectFile]):
+        if isinstance(obj, DryObject):
+            # If required, check object class
+            if self.cls is not None:
+                if not isinstance(obj, self.cls):
+                    return False
 
-        # Check object args
-        if self.args is not None:
-            if not DrySelector.match_objects(self.args, obj.dry_args):
-                return False
+            # Check object args
+            if self.args is not None:
+                if not DrySelector.match_objects(self.args, obj.dry_args):
+                    return False
 
-        # Check object kwargs
-        if self.kwargs is not None:
-            if not DrySelector.match_objects(self.kwargs, obj.dry_kwargs):
-                return False
+            # Check object kwargs
+            if self.kwargs is not None:
+                if not DrySelector.match_objects(self.kwargs, obj.dry_kwargs):
+                    return False
+
+        else:
+            # If required, check object class
+            if self.cls is not None:
+                if not self.cls != obj.cls:
+                    return False
+
+            # Check object args
+            if self.args is not None:
+                if not DrySelector.match_objects(self.args, obj.args):
+                    return False
+
+            # Check object kwargs
+            if self.kwargs is not None:
+                if not DrySelector.match_objects(self.kwargs, obj.kwargs):
+                    return False
 
         return True
