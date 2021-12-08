@@ -37,37 +37,49 @@ class DrySelector(object):
 
         return True
 
-    def __call__(self, obj: Union[DryObject, DryObjectFile]):
+    def __call__(self, obj: Union[DryObject, DryObjectFile], verbose:bool=False):
         if isinstance(obj, DryObject):
             # If required, check object class
             if self.cls is not None:
                 if not isinstance(obj, self.cls):
+                    if verbose:
+                        print("Class doesn't match")
                     return False
 
             # Check object args
             if self.args is not None:
                 if not DrySelector.match_objects(self.args, obj.dry_args):
+                    if verbose:
+                        print("Args don't match")
                     return False
 
             # Check object kwargs
             if self.kwargs is not None:
                 if not DrySelector.match_objects(self.kwargs, obj.dry_kwargs):
+                    if verbose:
+                        print("Kwargs don't match")
                     return False
 
         else:
             # If required, check object class
             if self.cls is not None:
                 if not self.cls != obj.cls:
+                    if verbose:
+                        print("Class doesn't match")
                     return False
 
             # Check object args
             if self.args is not None:
                 if not DrySelector.match_objects(self.args, obj.args):
+                    if verbose:
+                        print("Args don't match")
                     return False
 
             # Check object kwargs
             if self.kwargs is not None:
                 if not DrySelector.match_objects(self.kwargs, obj.kwargs):
+                    if verbose:
+                        print("Kwargs don't match")
                     return False
 
         return True

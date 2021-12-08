@@ -77,34 +77,38 @@ class DryRepo(object):
             self.add_object(obj)
 
     @staticmethod
-    def make_filter_func(selector:DrySelector):
+    def make_filter_func(selector:DrySelector, sel_args=None, sel_kwargs=None):
+        if sel_args is None:
+            sel_args = []
+        if sel_kwargs is None:
+            sel_kwargs = {}
         def filter_func(obj_container):
             if isinstance(obj_container['val'], str):
                 # This container just a string, we need to load from disk to check against the selector
                 with DryObjectFile(filepath) as f:
-                    if selector(f):
+                    if selector(f, *sel_args, **sel_kwargs):
                         # Load the objects, as we will need them
                         obj_container['val'] = f.load_object(update=update)
                         return True
                     else:
                     	return False
             elif isinstance(obj_container['val'], DryObject):
-                if selector(obj_container['val']):
+                if selector(obj_container['val'], *sel_args, **sel_kwargs):
                     return True
                 else:
                     return False
             elif isinstance(obj_container['val'], DryObjectFile):
                 f = obj_container['val']
-                if selector(obj_container['val']):
+                if selector(obj_container['val'], *sel_args, **sel_kwargs):
                     obj_container['val'] = f.load_object(update=update)
                     return True
                 else:
                     return False
         return filter_func
 
-    def get_objs(self, selector:Optional[DrySelector]=None):
+    def get_objs(self, selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None):
         if selector is not None:
-            filter_func = DryRepo.make_filter_func(selector)
+            filter_func = DryRepo.make_filter_func(selector, sel_args=sel_args, sel_kwargs=sel_kwargs)
             obj_list = list(filter(filter_func, self.obj_list))
         else:
             obj_list = self.obj_list
@@ -112,7 +116,7 @@ class DryRepo(object):
         return list(map(lambda o: o['val'], obj_list))
 
     def apply_to_objs(self, func, func_args=None, func_kwargs=None, selector:Optional[DrySelector]=None,
-                      update:bool=True, verbosity:int=0):
+                      update:bool=True, verbosity:int=0, sel_args=None, sel_kwargs=None):
         "Apply a function to all objects tracked by the repo. We can also use a DrySelector to apply only to specific models"
         def apply_func(obj_container):
             obj = obj_container['val']
@@ -129,7 +133,7 @@ class DryRepo(object):
             return func(obj, *func_args, **func_kwargs)
 
         if selector is not None:
-            filter_func = DryRepo.make_filter_func(selector)
+            filter_func = DryRepo.make_filter_func(selector, sel_args=sel_args, sel_kwargs=sel_kwargs)
             obj_list = list(filter(filter_func, self.obj_list))
         else:
             obj_list = self.obj_list
