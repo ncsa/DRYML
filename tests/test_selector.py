@@ -38,3 +38,18 @@ def test_selector_2():
 
     assert sel(obj1)
     assert not sel(obj2)
+
+def test_selector_3():
+    "kwargs selection"
+    obj1 = objects.TestClassA(base_msg="Test1", item='a')
+    obj2 = objects.TestClassA(base_msg="Test2", item=[10,10,10])
+
+    sel = dryml.DrySelector(cls=objects.TestClassA, kwargs={'item': 'a'})
+
+    assert sel(obj1)
+    assert not sel(obj2)
+
+    sel = dryml.DrySelector(cls=objects.TestClassA, kwargs={'item': [10,10,10]})
+
+    assert not sel(obj1)
+    assert sel(obj2)
