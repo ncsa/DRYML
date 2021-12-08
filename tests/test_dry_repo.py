@@ -13,3 +13,9 @@ def test_add_object():
     repo.add_object(obj)
 
     assert repo.number_of_objects() == 1
+
+    objs = repo.get_objs()
+
+    assert len(objs) == 1
+
+    assert objs[0].get_individual_hash() == obj.get_individual_hash()
