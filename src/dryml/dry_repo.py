@@ -103,13 +103,13 @@ class DryRepo(object):
         return filter_func
 
     def get_objs(self, selector:Optional[DrySelector]=None):
-        if selector is None:
-            filter_func = DrySelector.make_filter_func(selector)
+        if selector is not None:
+            filter_func = DryRepo.make_filter_func(selector)
             obj_list = list(filter(filter_func, self.obj_list))
         else:
             obj_list = self.obj_list
 
-        return obj_list
+        return list(map(lambda o: o['val'], obj_list))
 
     def apply_to_objs(self, func, func_args=None, func_kwargs=None, selector:Optional[DrySelector]=None,
                       update:bool=True, verbosity:int=0):
