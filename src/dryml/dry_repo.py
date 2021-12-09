@@ -7,17 +7,19 @@ import tqdm
 
 # This type will act as a fascade for the various DryObject* types.
 class DryRepo(object):
-    def __init__(self, directory:Optional[str]=None, create:bool=False, **kwargs):
+    def __init__(self, directory:Optional[str]=None, create:bool=False, load_objects:bool=True, **kwargs):
         super().__init__(**kwargs)
-
-        if directory is not None: 
-            self.link_to_directory(directory)
 
         # A dictionary of objects
         self.obj_dict = {}
 
         # Model list (for iteration)
         self.obj_list = []
+
+        if directory is not None: 
+            self.link_to_directory(directory, create=create)
+            if load_objects:
+                self.load_objects_from_directory()
 
     def link_to_directory(self, directory:str, create:bool=False):
         # Check that directory exists
@@ -38,7 +40,8 @@ class DryRepo(object):
 
         num_loaded = 0
         for filepath in files:
-            with DryObjectFile(filepath) as f:
+            full_filepath = os.path.join(self.directory, filepath)
+            with DryObjectFile(full_filepath) as f:
                 if selector is not None:
                     if not selector(f):
                         # Skip non selected objects
@@ -89,7 +92,7 @@ class DryRepo(object):
                 if load_object:
                     if self.directory is None:
                         raise RuntimeError("Repo is not linked to a directory!")
-                    filepath = os.join(self.directory, obj_container['filepath'])
+                    filepath = os.path.join(self.directory, obj_container['filepath'])
                     with DryObjectFile(filepath) as f:
                         obj_container['val'] = f.load_object(update=update)
                 return container_opener(obj_container)
@@ -120,7 +123,7 @@ class DryRepo(object):
                 if self.directory is None:
                     raise RuntimeError("Repo is not connected to any directory!")
                 # This container just a string, we need to load from disk to check against the selector
-                filepath = os.join(self.directory, obj_container['val'])
+                filepath = os.path.join(self.directory, obj_container['val'])
                 if selector is not None:
                     with DryObjectFile(filepath) as f:
                         if selector(f, *sel_args, **sel_kwargs):
@@ -151,7 +154,7 @@ class DryRepo(object):
                 raise RuntimeError(f"Unsupported value type: {type(obj_container['val'])}")
         return filter_func
 
-    def get_objs(self,
+    def get(self,
             selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
             load_objects:bool=True, update:bool=True, open_container:bool=True,
             verbose:bool=True):
@@ -176,17 +179,22 @@ class DryRepo(object):
                 open_container=open_container)
         return list(map(container_handler, obj_list))
 
-    def apply_to_objs(self,
+    def apply(self,
             func, func_args=None, func_kwargs=None,
             selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
-            update:bool=True, verbosity:int=0, open_container:bool=True):
+            update:bool=True, verbose:int=0, load_objects:bool=True, open_container:bool=True):
         "Apply a function to all objects tracked by the repo. We can also use a DrySelector to apply only to specific models"
+        if func_args is None:
+            func_args = []
+        if func_kwargs is None:
+            func_kwargs = {}
+
         # Create apply function
         def apply_func(obj):
             return func(obj, *func_args, **func_kwargs)
 
         # Get object list
-        objs = self.get_objs(
+        objs = self.get(
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             update=update, load_objects=load_objects, open_container=open_container)
 
@@ -197,12 +205,12 @@ class DryRepo(object):
             results = list(map(apply_func, objs))
 
         # Handle results
-        if len(list(filter(lambda x: x is None, results))) == num_objects:
+        if len(list(filter(lambda x: x is None, results))) == len(objs):
             return None
         else:
             return results
 
-    def save_objs(self,
+    def save(self,
             selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None):
         if self.directory is None:
             raise RuntimeError("Repo's directory is not set. Set the directory")
@@ -213,8 +221,9 @@ class DryRepo(object):
                 raise RuntimeError("Can only save currently loaded DryObject")
             if 'filename' not in obj_container:
                 obj_container['filename'] = str(obj.get_individual_hash())
-            filename = os.join(self.directory, obj_container['filename'])
+            filename = os.path.join(self.directory, obj_container['filename'])
             obj.save_self(filename)
 
-        self.apply_to_objs(save_func,
-            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs)
+        self.apply(save_func,
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+            open_container=False)
