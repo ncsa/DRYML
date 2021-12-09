@@ -76,74 +76,145 @@ class DryRepo(object):
             obj = obj_factory()
             self.add_object(obj)
 
-    @staticmethod
-    def make_filter_func(selector:DrySelector, sel_args=None, sel_kwargs=None):
+    def make_container_handler(self,
+            load_object:bool=True,
+            open_container:bool=True, update:bool=True):
+        def container_handler(obj_container):
+            def container_opener(obj_container):
+                if open_container:
+                    return obj_container['val']
+                else:
+                    return obj_container
+            if isinstance(obj_container['val'], str):
+                if load_object:
+                    if self.directory is None:
+                        raise RuntimeError("Repo is not linked to a directory!")
+                    filepath = os.join(self.directory, obj_container['filepath'])
+                    with DryObjectFile(filepath) as f:
+                        obj_container['val'] = f.load_object(update=update)
+                return container_opener(obj_container)
+            elif isinstance(obj_container['val'], DryObjectFile):
+                if load_object:
+                    f = obj_container['val']
+                    obj_container['val'] = f.load_object(update=update)
+                    f.close()
+                return container_opener(obj_container)
+            elif isinstance(obj_container['val'], DryObject):
+                return container_opener(obj_container)
+            else:
+                raise RuntimeError(f"Unsupported value type: {type(obj_container['val'])}")
+
+        return container_handler
+
+    def make_filter_func(self,
+            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
+            only_objs:bool=False):
         if sel_args is None:
             sel_args = []
         if sel_kwargs is None:
             sel_kwargs = {}
         def filter_func(obj_container):
             if isinstance(obj_container['val'], str):
+                if only_objs:
+                    return False
+                if self.directory is None:
+                    raise RuntimeError("Repo is not connected to any directory!")
                 # This container just a string, we need to load from disk to check against the selector
-                with DryObjectFile(filepath) as f:
-                    if selector(f, *sel_args, **sel_kwargs):
-                        # Load the objects, as we will need them
-                        obj_container['val'] = f.load_object(update=update)
+                filepath = os.join(self.directory, obj_container['val'])
+                if selector is not None:
+                    with DryObjectFile(filepath) as f:
+                        if selector(f, *sel_args, **sel_kwargs):
+                            return True
+                        else:
+                    	    return False
+                else:
+                    return True
+            elif isinstance(obj_container['val'], DryObject):
+                if selector is not None:
+                    if selector(obj_container['val'], *sel_args, **sel_kwargs):
                         return True
                     else:
-                    	return False
-            elif isinstance(obj_container['val'], DryObject):
-                if selector(obj_container['val'], *sel_args, **sel_kwargs):
-                    return True
+                        return False
                 else:
-                    return False
+                    return True
             elif isinstance(obj_container['val'], DryObjectFile):
-                f = obj_container['val']
-                if selector(obj_container['val'], *sel_args, **sel_kwargs):
-                    obj_container['val'] = f.load_object(update=update)
-                    return True
-                else:
+                if only_objs:
                     return False
+                if selector is not None:
+                    if selector(obj_container['val'], *sel_args, **sel_kwargs):
+                        return True
+                    else:
+                        return False
+                else:
+                    return True
+            else:
+                raise RuntimeError(f"Unsupported value type: {type(obj_container['val'])}")
         return filter_func
 
-    def get_objs(self, selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None):
-        if selector is not None:
-            filter_func = DryRepo.make_filter_func(selector, sel_args=sel_args, sel_kwargs=sel_kwargs)
-            obj_list = list(filter(filter_func, self.obj_list))
-        else:
-            obj_list = self.obj_list
+    def get_objs(self,
+            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
+            load_objects:bool=True, update:bool=True, open_container:bool=True,
+            verbose:bool=True):
+        # Handle arguments for filter function
+        only_objs = True
+        if load_objects:
+            only_objs = False
 
-        return list(map(lambda o: o['val'], obj_list))
+        # Filter the internal object list
+        filter_func = \
+            self.make_filter_func(
+                selector,
+                sel_args=sel_args,
+                sel_kwargs=sel_kwargs,
+                only_objs=only_objs)
+        obj_list = list(filter(filter_func, self.obj_list))
 
-    def apply_to_objs(self, func, func_args=None, func_kwargs=None, selector:Optional[DrySelector]=None,
-                      update:bool=True, verbosity:int=0, sel_args=None, sel_kwargs=None):
+        # Build container handler
+        container_handler = \
+        	self.make_container_handler(
+                update=update,
+                open_container=open_container)
+        return list(map(container_handler, obj_list))
+
+    def apply_to_objs(self,
+            func, func_args=None, func_kwargs=None,
+            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
+            update:bool=True, verbosity:int=0, open_container:bool=True):
         "Apply a function to all objects tracked by the repo. We can also use a DrySelector to apply only to specific models"
-        def apply_func(obj_container):
-            obj = obj_container['val']
-            if not isinstance(obj, DryObject):
-                raise TypeError("Only objects of type DryObject are supported!")
-            if verbosity == 1:
-                cat_hash = obj.get_category_hash()
-                ind_hash = obj.get_individual_hash()
-                print(f"applying to model {ind_hash} of category {cat_hash}")
-            if verbosity >= 2:
-                ind_hash = obj.get_individual_hash()
-                cat_hash = obj.get_hash_str()
-                print(f"apply to model {ind_hash} of category {cat_hash}")
+        # Create apply function
+        def apply_func(obj):
             return func(obj, *func_args, **func_kwargs)
 
-        if selector is not None:
-            filter_func = DryRepo.make_filter_func(selector, sel_args=sel_args, sel_kwargs=sel_kwargs)
-            obj_list = list(filter(filter_func, self.obj_list))
-        else:
-            obj_list = self.obj_list
-
-        num_objects = len(obj_list)
+        # Get object list
+        objs = self.get_objs(
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+            update=update, load_objects=load_objects, open_container=open_container)
 
         # apply function to objects
-        results = list(map(apply_func, tqdm(obj_list)))
+        if verbose:
+            results = list(map(apply_func, tqdm(objs)))
+        else:
+            results = list(map(apply_func, objs))
 
+        # Handle results
         if len(list(filter(lambda x: x is None, results))) == num_objects:
             return None
         else:
             return results
+
+    def save_objs(self,
+            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None):
+        if self.directory is None:
+            raise RuntimeError("Repo's directory is not set. Set the directory")
+
+        def save_func(obj_container):
+            obj = obj_container['val']
+            if not isinstance(obj, DryObject):
+                raise RuntimeError("Can only save currently loaded DryObject")
+            if 'filename' not in obj_container:
+                obj_container['filename'] = str(obj.get_individual_hash())
+            filename = os.join(self.directory, obj_container['filename'])
+            obj.save_self(filename)
+
+        self.apply_to_objs(save_func,
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs)

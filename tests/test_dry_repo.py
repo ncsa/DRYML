@@ -5,7 +5,7 @@ import os
 
 import objects
 
-def test_add_object_1():
+def test_add_retrieve_object_1():
     obj = objects.HelloStr(msg='test')
 
     repo = dryml.DryRepo('test_dir')
@@ -20,7 +20,7 @@ def test_add_object_1():
 
     assert objs[0].get_individual_hash() == obj.get_individual_hash()
 
-def test_add_objects_2():
+def test_add_retrieve_objects_2():
     repo = dryml.DryRepo()
 
     objs = []
@@ -37,3 +37,11 @@ def test_add_objects_2():
     assert len(repo.get_objs(selector=dryml.DrySelector(cls=objects.HelloInt, kwargs={'msg': 10}))) == 2
     assert len(repo.get_objs(selector=dryml.DrySelector(cls=objects.TestClassA, kwargs={'item': [10,10]}))) == 1
     assert len(repo.get_objs(selector=dryml.DrySelector(cls=objects.TestClassB, args=['test']))) == 1
+
+@pytest.mark.xfail
+def test_try_write():
+    repo = dryml.DryRepo()
+    
+    repo.add_object(objects.HelloStr(msg='test'))
+
+    repo.save_objs()
