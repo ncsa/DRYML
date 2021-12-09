@@ -4,10 +4,11 @@ from typing import Union
 
 class DrySelector(object):
     "Utility object for selecting for specific dry objects"
-    def __init__(self, cls=None, args=None, kwargs=None):
+    def __init__(self, cls=None, args=None, kwargs=None, verbosity:int=0):
          self.cls = cls
          self.args = args
          self.kwargs = kwargs
+         self.verbosity = verbosity
 
     @staticmethod
     def match_objects(key_object, value_object):
@@ -37,49 +38,65 @@ class DrySelector(object):
 
         return True
 
-    def __call__(self, obj: Union[DryObject, DryObjectFile], verbose:bool=False):
+    def __call__(self, obj: Union[DryObject, DryObjectFile]):
         if isinstance(obj, DryObject):
+            if self.verbosity > 1:
+                print(f"selector Dry object branch")
             # If required, check object class
             if self.cls is not None:
                 if not isinstance(obj, self.cls):
-                    if verbose:
+                    if self.verbosity > 0:
                         print("Class doesn't match")
+                    if self.verbosity > 1:
+                        print(f"Got {type(obj)}")
                     return False
 
             # Check object args
             if self.args is not None:
                 if not DrySelector.match_objects(self.args, obj.dry_args):
-                    if verbose:
+                    if self.verbosity > 0:
                         print("Args don't match")
+                    if self.verbosity > 1:
+                        print(f"Got {obj.dry_args}")
                     return False
 
             # Check object kwargs
             if self.kwargs is not None:
                 if not DrySelector.match_objects(self.kwargs, obj.dry_kwargs):
-                    if verbose:
+                    if self.verbosity > 0:
                         print("Kwargs don't match")
+                    if self.verbosity > 1:
+                        print(f"Got {obj.dry_kwargs}")
                     return False
 
-        else:
+        elif isinstance(obj, DryObjectFile):
+            if self.verbosity > 1:
+                print(f"selector other type branch")
             # If required, check object class
             if self.cls is not None:
-                if not self.cls != obj.cls:
-                    if verbose:
+                if self.cls != obj.cls:
+                    if self.verbosity > 0:
                         print("Class doesn't match")
+                    if self.verbosity > 1:
+                        print(f"Got {obj.cls}")
                     return False
 
             # Check object args
             if self.args is not None:
                 if not DrySelector.match_objects(self.args, obj.args):
-                    if verbose:
+                    if self.verbosity > 0:
                         print("Args don't match")
+                    if self.verbosity > 1:
+                        print(f"Got {obj.args}")
                     return False
 
             # Check object kwargs
             if self.kwargs is not None:
                 if not DrySelector.match_objects(self.kwargs, obj.kwargs):
-                    if verbose:
+                    if self.verbosity > 0:
                         print("Kwargs don't match")
+                    if self.verbosity > 1:
+                        print(f"Got {obj.kwargs}")
                     return False
 
         return True
