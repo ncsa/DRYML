@@ -1,4 +1,5 @@
 import zipfile
+import pickle
 from dryml.dry_object import DryObject
 
 class DryComponent(DryObject):
@@ -11,14 +12,17 @@ class DryComponent(DryObject):
         self.train_state = DryComponent.untrained
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Helper function to load object specific data should return a boolean indicating if loading was successful
+        with file.open('component_data.pkl', 'r') as f:
+            component_data = pickle.load(f)
+        self.train_state = component_data['train_state']
         return super().load_object_imp(file)
 
     def save_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Helper function to save object specific data should return a boolean indicating if loading was successful
+        with file.open('component_data.pkl', 'r') as f:
+            pickle.dump({'train_state': self.train_state}, f)
         return super().save_object_imp(file)
 
-    def prepare_data(self, *args, **kwargs):
+    def prepare_data(self, data, *args, **kwargs):
         raise RuntimeError("Method not defined for a base DryComponent")
 
     def train(self, train_data, *args, **kwargs):
