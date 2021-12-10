@@ -229,13 +229,13 @@ class DryObject(object):
         else:
             self.dry_kwargs['dry_id'] = dry_id
 
-    def load_object_imp(self, file: IO[bytes]) -> bool:
+    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Helper function to load object specific data should return a boolean indicating if loading was successful
-        return True
+        return super().load_object_imp(file)
 
-    def save_object_imp(self, file: IO[bytes]) -> bool:
+    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Helper function to save object specific data should return a boolean indicating if loading was successful
-        return True
+        return super().save_object_imp(file)
 
     def save_self(self, file: FileType, version: int=1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)

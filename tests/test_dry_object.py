@@ -16,10 +16,16 @@ class SimpleObject(dryml.DryObject):
             dry_kwargs=dry_kwargs,
             **kwargs
         )
-    
+
+    def load_object_imp(self, file) -> bool:
+        return True
+
+    def save_object_imp(self, file) -> bool:
+        return True
+
     def version(self):
         return {version}
-    
+
     def __eq__(self, rhs):
         return self.i == rhs.i
 """
