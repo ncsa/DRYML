@@ -1,6 +1,6 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory
-from dryml.dry_model import DryModel
+from dryml.dry_component import DryComponent
 
 class Workshop(object):
     def __init__(self, work_dir, *args, create_work_dir=True, **kwargs):
@@ -26,7 +26,7 @@ class Workshop(object):
     def train_single_models(self, **kwargs):
         for model_dict in self.single_models:
             model = model_dict['model']
-            if model.train_state == DryModel.untrained:
+            if model.train_state == DryComponent.untrained:
                 model.train(self.train_ds, **kwargs)
 
 # toy usage:
