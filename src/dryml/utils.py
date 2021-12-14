@@ -1,4 +1,5 @@
 import collections
+import inspect
 
 def is_nonstring_iterable(val):
     if isinstance(val, collections.abc.Iterable) and type(val) not in [str, bytes]:
@@ -20,3 +21,9 @@ def init_arg_dict_handler(arg_dict):
         return {}
     else:
         return arg_dict
+
+def get_class_str(obj):
+    if isinstance(obj, type):
+        return '.'.join([inspect.getmodule(obj).__name__, obj.__name__])
+    else:
+        return '.'.join([inspect.getmodule(obj).__name__, obj.__class__.__name__])

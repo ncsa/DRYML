@@ -10,6 +10,8 @@ import io
 import zipfile
 import uuid
 import copy
+import inspect
+import importlib
 from typing import IO, Union, Optional
 from dryml.dry_config import DryConfig, DryList
 from dryml.utils import init_arg_list_handler, init_arg_dict_handler
@@ -93,7 +95,13 @@ class DryObjectFile(object):
         # Get class definition
         with self.file.open('cls_def.dill') as cls_def_file:
             if update:
-                cls_def = dill.loads(cls_def_file.read(), ignore=False)
+                # Get original model definition
+                cls_def = dill.loads(cls_def_file.read())
+                try:
+                    module = importlib.import_module(inspect.getmodule(cls_def))
+                    cls_def = getattr(module, cls_def.__name__)
+                except:
+                    raise RuntimeError("Failed to update module class")
             else:
                 cls_def = dill.loads(cls_def_file.read())
         return cls_def
@@ -167,12 +175,17 @@ class DryObjectFile(object):
         config_dump = pickle.dumps(config_data, protocol=5)
         self.file.writestr('config.pkl', config_dump)
 
-    def save_class_def_v1(self):
-        # Now, we need to pickle the class definition
-        cls_def = dill.dumps(self.cls)
+    def save_class_def_v1(self, update:bool=False):
+        # We need to pickle the class definition.
+        # By default, error out if class has changed. Check this.
+        mod = inspect.getmodule(self.cls)
+        mod_cls = getattr(mod, self.cls.__name__)
+        if self.cls != mod_cls and not update:
+            raise ValueError("Can't save class definition! It's been changed!")
+        cls_def = dill.dumps(mod_cls)
         self.file.writestr('cls_def.dill', cls_def)
 
-    def save_object_v1(self, obj: DryObject) -> bool:
+    def save_object_v1(self, obj: DryObject, update:bool=False) -> bool:
         self.cache_object_data_obj(obj)
 
         # Save meta data
@@ -182,7 +195,7 @@ class DryObjectFile(object):
         self.save_config_v1()
 
         # Save class def
-        self.save_class_def_v1()
+        self.save_class_def_v1(update=update)
 
         # Save object content
         obj.save_object_imp(self.file)
@@ -209,10 +222,10 @@ def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_pa
         result_object = dry_file.load_object(update=update)
     return result_object
 
-def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False) -> bool:
+def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False, update:bool=False) -> bool:
     with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False) as dry_file:
         if version == 1:
-            return dry_file.save_object_v1(obj)
+            return dry_file.save_object_v1(obj, update=update)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
 

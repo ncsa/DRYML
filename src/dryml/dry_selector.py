@@ -1,11 +1,15 @@
 from dryml.dry_object import DryObject, DryObjectFile
-from dryml.utils import is_nonstring_iterable, is_dictlike
-from typing import Union
+from dryml.utils import is_nonstring_iterable, is_dictlike, get_class_str
+from typing import Union, Callable
 
 class DrySelector(object):
     "Utility object for selecting for specific dry objects"
-    def __init__(self, cls=None, args=None, kwargs=None, verbosity:int=0):
+    def __init__(self, cls=None, args=None, kwargs=None, verbosity:int=0, cls_str_compare:bool=True):
          self.cls = cls
+         if self.cls is not None:
+             if cls_str_compare and isinstance(self.cls, type):
+                 # Convert the type to a class string
+                 self.cls = get_class_str(self.cls)
          self.args = args
          self.kwargs = kwargs
          self.verbosity = verbosity
@@ -38,65 +42,84 @@ class DrySelector(object):
 
         return True
 
+    def cls_compare(self, matcher, cls):
+        matched = True
+        if isinstance(matcher, type):
+            if not isinstance(cls, matcher):
+                matched = False
+        elif isinstance(matcher, Callable):
+            if not matcher(cls):
+                matched = False
+        elif isinstance(matcher, str):
+            if matcher != get_class_str(cls):
+                matched = False
+        else:
+            raise ValueError(f"Unsupported matcher type: {type(matcher)}")
+        if not matched:
+            # Failure message
+            if self.verbosity > 0:
+                 print("Class doesn't match")
+            if self.verbosity > 1:
+                 print(f"Got {type(cls)}")
+            return False
+        else:
+            return True
+
+    def args_compare(self, matcher, args):
+        if DrySelector.match_objects(matcher, args):
+            return True
+        else:
+            if self.verbosity > 0:
+                print("Args don't match")
+            if self.verbosity > 1:
+                print(f"Got {args}")
+            return False
+
+    def kwargs_compare(self, matcher, kwargs):
+        if DrySelector.match_objects(matcher, kwargs):
+            return True
+        else:
+            if self.verbosity > 0:
+                print("Kwargs don't match")
+            if self.verbosity > 1:
+                print(f"Got {kwargs}")
+            return False
+
     def __call__(self, obj: Union[DryObject, DryObjectFile]):
         if isinstance(obj, DryObject):
-            if self.verbosity > 1:
+            if self.verbosity > 2:
                 print(f"selector Dry object branch")
             # If required, check object class
             if self.cls is not None:
-                if not isinstance(obj, self.cls):
-                    if self.verbosity > 0:
-                        print("Class doesn't match")
-                    if self.verbosity > 1:
-                        print(f"Got {type(obj)}")
+                if not self.cls_compare(self.cls, obj):
                     return False
 
             # Check object args
             if self.args is not None:
-                if not DrySelector.match_objects(self.args, obj.dry_args):
-                    if self.verbosity > 0:
-                        print("Args don't match")
-                    if self.verbosity > 1:
-                        print(f"Got {obj.dry_args}")
+                if not self.args_compare(self.args, obj.dry_args):
                     return False
 
             # Check object kwargs
             if self.kwargs is not None:
-                if not DrySelector.match_objects(self.kwargs, obj.dry_kwargs):
-                    if self.verbosity > 0:
-                        print("Kwargs don't match")
-                    if self.verbosity > 1:
-                        print(f"Got {obj.dry_kwargs}")
+                if not self.kwargs_compare(self.kwargs, obj.dry_kwargs):
                     return False
 
         elif isinstance(obj, DryObjectFile):
-            if self.verbosity > 1:
+            if self.verbosity > 2:
                 print(f"selector other type branch")
             # If required, check object class
             if self.cls is not None:
-                if self.cls != obj.cls:
-                    if self.verbosity > 0:
-                        print("Class doesn't match")
-                    if self.verbosity > 1:
-                        print(f"Got {obj.cls}")
+                if not self.cls_compare(self.cls, obj.cls):
                     return False
 
             # Check object args
             if self.args is not None:
-                if not DrySelector.match_objects(self.args, obj.args):
-                    if self.verbosity > 0:
-                        print("Args don't match")
-                    if self.verbosity > 1:
-                        print(f"Got {obj.args}")
+                if not self.args_compare(self.args, obj.args):
                     return False
 
             # Check object kwargs
             if self.kwargs is not None:
-                if not DrySelector.match_objects(self.kwargs, obj.kwargs):
-                    if self.verbosity > 0:
-                        print("Kwargs don't match")
-                    if self.verbosity > 1:
-                        print(f"Got {obj.kwargs}")
+                if not self.kwargs_compare(self.kwargs, obj.kwargs):
                     return False
 
         return True

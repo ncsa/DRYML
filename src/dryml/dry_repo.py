@@ -1,7 +1,7 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile
 from dryml.dry_selector import DrySelector
-from typing import Optional
+from typing import Optional, Callable
 import enum
 import tqdm
 
@@ -31,7 +31,7 @@ class DryRepo(object):
     def number_of_objects(self):
         return len(self.obj_list)
 
-    def load_objects_from_directory(self, selector:Optional[DrySelector]=None, verbose:bool=False):
+    def load_objects_from_directory(self, selector:Optional[Callable]=None, verbose:bool=False):
         "Method to refresh the internal dictionary of objects."
         if self.directory is None:
             # Don't do anything if no directory is linked
@@ -41,23 +41,26 @@ class DryRepo(object):
         num_loaded = 0
         for filepath in files:
             full_filepath = os.path.join(self.directory, filepath)
-            with DryObjectFile(full_filepath) as f:
-                if selector is not None:
-                    if not selector(f):
-                        # Skip non selected objects
-                        continue
-                obj_cat_hash = f.get_category_hash()
-                obj_hash = f.get_individual_hash()
-                if obj_cat_hash not in self.obj_dict:
-                    self.obj_dict[obj_cat_hash] = {}
-                if obj_hash not in self.obj_dict[obj_cat_hash]:
-                    num_loaded += 1
-                    obj_definition = {
-                        'val': filepath,
-                        'filepath': filepath
-                    }
-                    self.obj_dict[obj_cat_hash][obj_hash] = obj_definition
-                    self.obj_list.append(obj_definition)
+            try:
+                with DryObjectFile(full_filepath) as f:
+                    if selector is not None:
+                        if not selector(f):
+                            # Skip non selected objects
+                            continue
+                    obj_cat_hash = f.get_category_hash()
+                    obj_hash = f.get_individual_hash()
+                    if obj_cat_hash not in self.obj_dict:
+                        self.obj_dict[obj_cat_hash] = {}
+                    if obj_hash not in self.obj_dict[obj_cat_hash]:
+                        num_loaded += 1
+                        obj_definition = {
+                            'val': filepath,
+                            'filepath': filepath
+                        }
+                        self.obj_dict[obj_cat_hash][obj_hash] = obj_definition
+                        self.obj_list.append(obj_definition)
+            except:
+                print(f"WARNING! Malformed file found! f{full_filepath} skipping load")
         if verbose:
             print(f"Loaded {num_loaded} objects")
 
@@ -110,7 +113,7 @@ class DryRepo(object):
         return container_handler
 
     def make_filter_func(self,
-            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
             only_objs:bool=False):
         if sel_args is None:
             sel_args = []
@@ -155,7 +158,7 @@ class DryRepo(object):
         return filter_func
 
     def get(self,
-            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
             load_objects:bool=True, update:bool=True, open_container:bool=True,
             verbose:bool=True):
         # Handle arguments for filter function
@@ -181,7 +184,7 @@ class DryRepo(object):
 
     def apply(self,
             func, func_args=None, func_kwargs=None,
-            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None,
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
             update:bool=True, verbose:int=0, load_objects:bool=True, open_container:bool=True):
         "Apply a function to all objects tracked by the repo. We can also use a DrySelector to apply only to specific models"
         if func_args is None:
@@ -210,8 +213,33 @@ class DryRepo(object):
         else:
             return results
 
+    def reload_objs(self,
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
+            update:bool=False):
+        if self.directory is None:
+            raise RuntimeError("Repo directory needs to be set for reloading.")
+
+        def reload_func(obj_container):
+            obj = obj_container['val']
+            if not isinstance(obj, DryObject):
+                raise RuntimeError("Can only save currently loaded DryObject")
+            if 'filename' not in obj_container:
+                obj_container['filename'] = str(obj.get_individual_hash())
+            filename = os.path.join(self.directory, obj_container['filename'])
+            obj.save_self(filename, update=update)
+            # Delete the object
+            del obj
+            # Reload the object
+            with DryObjectFile(filename) as f:
+                obj_container['val'] = f.load_object(update=True)
+
+        self.apply(reload_func,
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+            open_container=False, load_objects=False)
+
+
     def save(self,
-            selector:Optional[DrySelector]=None, sel_args=None, sel_kwargs=None):
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
         if self.directory is None:
             raise RuntimeError("Repo's directory is not set. Set the directory")
 

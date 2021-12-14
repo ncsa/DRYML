@@ -1,33 +1,23 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory
+from dryml.dry_repo import DryRepo
 from dryml.dry_component import DryComponent
 
 class Workshop(object):
-    def __init__(self, work_dir, *args, create_work_dir=True, **kwargs):
+    def __init__(self, *args, work_dir=None, create_work_dir=True, **kwargs):
         super().__init__(**kwargs)
-        if not os.path.exists(work_dir):
-            if create_work_dir:
-                os.mkdir(work_dir)
-            else:
-                raise RuntimeError(f"Workshop directory {work_dir} doesn't exist!")
-
-        self.work_dir = work_dir
-        self.single_models = []
+        self.repo = DryRepo(work_dir, create=create_work_dir)
 
     def data_prep(self):
-        return
+        raise RuntimeError("Not implemented for base workshop")
 
-    def add_model_from_factory(self, factory: DryObjectFactory, label: str):
-        self.single_models.append(
-            {'model': factory(),
-             'label': label}
-        )
+    def train_single_object(self, obj, *args, **kwargs):
+        raise RuntimeError("Not implemented for base workshop")
 
-    def train_single_models(self, **kwargs):
-        for model_dict in self.single_models:
-            model = model_dict['model']
-            if model.train_state == DryComponent.untrained:
-                model.train(self.train_ds, **kwargs)
+    def train_models(self, *args, selector=None, sel_args=None, sel_kwargs=None, **kwargs):
+        for obj in self.repo.get(selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs):
+            if obj.train_state == DryComponent.untrained:
+                self.train_single_object(obj, *args, **kwargs)
 
 # toy usage:
 #
