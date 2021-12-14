@@ -12,13 +12,16 @@ class DryComponent(DryObject):
         self.train_state = DryComponent.untrained
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+        # Load parent components first
+        if not super().load_object_imp(file):
+             return False
         with file.open('component_data.pkl', 'r') as f:
             component_data = pickle.load(f)
         self.train_state = component_data['train_state']
-        return super().load_object_imp(file)
+        return True
 
     def save_object_imp(self, file: zipfile.ZipFile) -> bool:
-        with file.open('component_data.pkl', 'r') as f:
+        with file.open('component_data.pkl', 'w') as f:
             pickle.dump({'train_state': self.train_state}, f)
         return super().save_object_imp(file)
 

@@ -2,6 +2,8 @@ import pytest
 import dryml
 import io
 import os
+import tempfile
+import uuid
 
 test_objs_text = """
 import dryml
@@ -51,7 +53,15 @@ def test_basic_object_1():
     assert obj.version() == 1
     assert obj2.version() == 1
 
-def test_basic_object_2():
+@pytest.fixture
+def create_name():
+    tempfile = str(uuid.uuid4())
+    yield tempfile
+    fullpath = f"{tempfile}.dry"
+    if os.path.exists(fullpath):
+        os.remove(fullpath)
+
+def test_basic_object_2(create_name):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
@@ -59,16 +69,14 @@ def test_basic_object_2():
 
     obj = objs.SimpleObject(10)
 
-    assert obj.save_self('test')
+    assert obj.save_self(create_name)
 
-    obj2 = dryml.load_object('test')
+    obj2 = dryml.load_object(create_name)
 
     assert obj == obj2
 
     assert obj.version() == 1
     assert obj2.version() == 1
-
-    os.remove('test.dry')
 
 
 @pytest.mark.skip(reason="Currently, I don't know how to properly test updating an object definition")
@@ -113,18 +121,16 @@ def test_object_args_passing_1():
 
     assert obj.dry_args == [1]
 
-def test_object_args_passing_2():
+def test_object_args_passing_2(create_name):
     import objects as objs
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    dryml.save_object(obj, 'test')
+    dryml.save_object(obj, create_name)
 
-    obj_loaded = dryml.load_object('test')
+    obj_loaded = dryml.load_object(create_name)
 
     assert obj_loaded.dry_args == [1]
-
-    os.remove('test.dry')
 
 def test_object_config_1():
     import objects as objs

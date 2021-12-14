@@ -98,7 +98,7 @@ class DryObjectFile(object):
                 # Get original model definition
                 cls_def = dill.loads(cls_def_file.read())
                 try:
-                    module = importlib.import_module(inspect.getmodule(cls_def))
+                    module = importlib.import_module(inspect.getmodule(cls_def).__name__)
                     cls_def = getattr(module, cls_def.__name__)
                 except:
                     raise RuntimeError("Failed to update module class")
@@ -243,12 +243,12 @@ class DryObject(object):
             self.dry_kwargs['dry_id'] = dry_id
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Helper function to load object specific data should return a boolean indicating if loading was successful
-        return super().load_object_imp(file)
+        # Should be the last object inherited
+        return True
 
     def save_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Helper function to save object specific data should return a boolean indicating if loading was successful
-        return super().save_object_imp(file)
+        # Should be the last object inherited
+        return True
 
     def save_self(self, file: FileType, version: int=1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)

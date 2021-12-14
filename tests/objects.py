@@ -107,3 +107,15 @@ class TestClassB(TestBase):
 
     def save_object_imp(self, file) -> bool:
         return True
+
+class HelloComponent(dryml.DryComponent):
+    def __init__(self, *args, msg="test", dry_args=None, dry_kwargs=None, **kwargs):
+        dry_args = dryml.utils.init_arg_list_handler(dry_args)
+        dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
+        dry_kwargs['msg'] = msg
+        super().__init__(
+            *args,
+            dry_args=dry_args,
+            dry_kwargs=dry_kwargs,
+            **kwargs
+        )
