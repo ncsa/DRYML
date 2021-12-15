@@ -14,7 +14,7 @@ import inspect
 import importlib
 from typing import IO, Union, Optional
 from dryml.dry_config import DryConfig, DryList
-from dryml.utils import init_arg_list_handler, init_arg_dict_handler
+from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str
 
 FileType = Union[str, IO[bytes]]
 
@@ -35,9 +35,8 @@ def load_zipfile(file: FileType, exact_path:bool=False, mode='r', must_exist:boo
         file = zipfile.ZipFile(file, mode=mode)
     return file
 
-
 def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
-    class_hash_str = str(cls)
+    class_hash_str = get_class_str(cls)
     args_hash_str = args.get_hash_str()
     # Remove dry_id so we can test for object 'class'
     if no_id:
@@ -209,10 +208,10 @@ class DryObjectFile(object):
         return hash(self.get_hash_str(no_id=no_id))
 
     def get_category_hash(self):
-        return self.get_hash(no_id=True)
+        return get_hashed_id(self.get_hash_str(no_id=True))
 
     def get_individual_hash(self):
-        return self.get_hash(no_id=False)
+        return get_hashed_id(self.get_hash_str(no_id=False))
 
 def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
     if not isinstance(file, DryObjectFile):
@@ -260,10 +259,10 @@ class DryObject(object):
         return hash(self.get_hash_str(no_id=no_id))
 
     def get_category_hash(self):
-        return self.get_hash(no_id=True)
+        return get_hashed_id(self.get_hash_str(no_id=True))
 
     def get_individual_hash(self):
-        return self.get_hash(no_id=False)
+        return get_hashed_id(self.get_hash_str(no_id=False))
 
     def is_same_category(self, rhs):
         if type(self) != type(rhs):
@@ -311,4 +310,4 @@ class DryObjectFactory(object):
         return hash(self.get_hash_str())
 
     def get_category_hash(self):
-        return self.get_hash()
+        return get_hashed_id(self.get_hash_str())

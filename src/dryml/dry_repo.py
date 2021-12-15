@@ -59,8 +59,8 @@ class DryRepo(object):
                         }
                         self.obj_dict[obj_cat_hash][obj_hash] = obj_definition
                         self.obj_list.append(obj_definition)
-            except:
-                print(f"WARNING! Malformed file found! f{full_filepath} skipping load")
+            except Exception as e:
+                print(f"WARNING! Malformed file found! {full_filepath} skipping load Error: {e}")
         if verbose:
             print(f"Loaded {num_loaded} objects")
 

@@ -1,5 +1,6 @@
 import collections
 import inspect
+import hashlib
 
 def is_nonstring_iterable(val):
     if isinstance(val, collections.abc.Iterable) and type(val) not in [str, bytes]:
@@ -27,3 +28,6 @@ def get_class_str(obj):
         return '.'.join([inspect.getmodule(obj).__name__, obj.__name__])
     else:
         return '.'.join([inspect.getmodule(obj).__name__, obj.__class__.__name__])
+
+def get_hashed_id(hashstr:str):
+    return hashlib.md5(hashstr.encode('utf-8')).hexdigest()
