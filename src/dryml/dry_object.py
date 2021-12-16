@@ -12,7 +12,7 @@ import uuid
 import copy
 import inspect
 import importlib
-from typing import IO, Union, Optional
+from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryConfig, DryList
 from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str
 
@@ -50,7 +50,7 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
 
 
 class DryObjectFile(object):
-    def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None, reload:bool=False):
+    def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None, reload:bool=False, as_cls:Optional[Type]=None):
         if type(file) is str:
             # Save the filename
             self.filename = file
@@ -70,6 +70,10 @@ class DryObjectFile(object):
             # hash or create an object. We can safely read and cache hash data now.
             if mode == 'r':
                  self.cache_object_data_file(self.file, reload=reload)
+
+        if as_cls is not None:
+            # Set the type we want to save as
+            self.cls = as_cls
 
     def __enter__(self):
         return self
@@ -224,12 +228,17 @@ def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_pa
         result_object = dry_file.load_object(update=update, reload=reload)
     return result_object
 
-def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False, update:bool=False) -> bool:
-    with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False) as dry_file:
+def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False, update:bool=False, as_cls:Optional[Type]=None) -> bool:
+    with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False, as_cls=as_cls) as dry_file:
         if version == 1:
             return dry_file.save_object_v1(obj, update=update)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
+
+def change_object_cls(obj: DryObject, cls: Type, update:bool=False, reload:bool=False) -> DryObject:
+    buffer = io.BytesIO()
+    save_object(obj, buffer, as_cls=cls)
+    return load_object(buffer, update=update, reload=reload)
 
 # Define a base Dry Object 
 class DryObject(object):

@@ -90,6 +90,24 @@ class TestClassA(TestBase):
     def save_object_imp(self, file) -> bool:
         return True
 
+class TestClassA2(TestBase):
+    def __init__(self, *args, item=[32], dry_args=None, dry_kwargs=None, **kwargs):
+        dry_args = dryml.utils.init_arg_list_handler(dry_args)
+        dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
+        dry_kwargs['item'] = item
+        super().__init__(
+            *args,
+            dry_args=dry_args,
+            dry_kwargs=dry_kwargs,
+            **kwargs
+        )
+
+    def load_object_imp(self, file) -> bool:
+        return True
+
+    def save_object_imp(self, file) -> bool:
+        return True
+
 class TestClassB(TestBase):
     def __init__(self, layers, *args, dry_args=None, dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)

@@ -258,3 +258,12 @@ def test_object_file_hash_1():
     f = dryml.DryObjectFactory(objs.HelloStr, msg="Test")
 
     assert obj1.get_hash() == f.get_hash()
+
+def test_change_obj_cls_1():
+    "Test that we can change an object's class"
+    import objects as objs
+    obj1 = objs.TestClassA(item=[5])
+    obj2 = dryml.change_object_cls(obj1, objs.TestClassA2)
+
+    assert type(obj2) is objs.TestClassA2
+    assert obj1.dry_kwargs['item'] == obj2.dry_kwargs['item']
