@@ -155,7 +155,7 @@ class DryObjectFile(object):
         # Build object instance
         return obj
 
-    def load_object(self, update:bool=False, reload:bool=False):
+    def load_object(self, update:bool=False, reload:bool=False) -> DryObject:
     	meta_data = self.load_meta_data()
     	version = meta_data['version']
     	if version == 1:
@@ -191,8 +191,10 @@ class DryObjectFile(object):
         cls_def = dill.dumps(mod_cls)
         self.file.writestr('cls_def.dill', cls_def)
 
-    def save_object_v1(self, obj: DryObject, update:bool=False) -> bool:
+    def save_object_v1(self, obj: DryObject, update:bool=False, as_cls:Optional[Type]=None) -> bool:
         self.cache_object_data_obj(obj)
+        if as_cls is not None:
+            self.cls = as_cls
 
         # Save meta data
         self.save_meta_data()
@@ -220,7 +222,7 @@ class DryObjectFile(object):
     def get_individual_hash(self):
         return get_hashed_id(self.get_hash_str(no_id=False))
 
-def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False, reload:bool=False) -> Type[DryObject]:
+def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False, reload:bool=False) -> DryObject:
     if not isinstance(file, DryObjectFile):
     	with DryObjectFile(file, exact_path=exact_path) as dry_file:
         	result_object = dry_file.load_object(update=update, reload=reload)
@@ -231,7 +233,7 @@ def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_pa
 def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False, update:bool=False, as_cls:Optional[Type]=None) -> bool:
     with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False, as_cls=as_cls) as dry_file:
         if version == 1:
-            return dry_file.save_object_v1(obj, update=update)
+            return dry_file.save_object_v1(obj, update=update, as_cls=as_cls)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
 
