@@ -231,7 +231,7 @@ class DryRepo(object):
             del obj
             # Reload the object
             with DryObjectFile(filename) as f:
-                obj_container['val'] = f.load_object(update=True)
+                obj_container['val'] = f.load_object(update=True, reload=True)
 
         self.apply(reload_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,

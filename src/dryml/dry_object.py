@@ -50,7 +50,7 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
 
 
 class DryObjectFile(object):
-    def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None):
+    def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None, reload:bool=False):
         if type(file) is str:
             # Save the filename
             self.filename = file
@@ -69,7 +69,7 @@ class DryObjectFile(object):
             # If we're reading the file, we probably want to compute a 
             # hash or create an object. We can safely read and cache hash data now.
             if mode == 'r':
-                 self.cache_object_data_file(self.file)            
+                 self.cache_object_data_file(self.file, reload=reload)
 
     def __enter__(self):
         return self
@@ -89,16 +89,19 @@ class DryObjectFile(object):
             config_data = pickle.loads(config_file.read())
         return config_data
 
-    def load_class_def_v1(self, update:bool=True):
+    def load_class_def_v1(self, update:bool=True, reload:bool=False):
         "Helper function for loading a version 1 class definition"
         # Get class definition
         with self.file.open('cls_def.dill') as cls_def_file:
             if update:
                 # Get original model definition
-                cls_def = dill.loads(cls_def_file.read())
+                cls_def_init = dill.loads(cls_def_file.read())
                 try:
-                    module = importlib.import_module(inspect.getmodule(cls_def).__name__)
-                    cls_def = getattr(module, cls_def.__name__)
+                    module = importlib.import_module(inspect.getmodule(cls_def_init).__name__)
+                    # If indicated, reload the module.
+                    if reload:
+                        module = importlib.reload(module)
+                    cls_def = getattr(module, cls_def_init.__name__)
                 except:
                     raise RuntimeError("Failed to update module class")
             else:
@@ -110,7 +113,7 @@ class DryObjectFile(object):
             meta_data = pickle.loads(meta_file.read())
         return meta_data
 
-    def cache_object_data_v1_file(self, update:bool=True):
+    def cache_object_data_v1_file(self, update:bool=True, reload:bool=False):
         # Cache object data from a file
         config_data = self.load_config_v1()
 
@@ -119,13 +122,13 @@ class DryObjectFile(object):
         self.args = DryList(config_data['args'])
 
         # Get class definition
-        self.cls = self.load_class_def_v1(update=update)
+        self.cls = self.load_class_def_v1(update=update, reload=reload)
 
-    def cache_object_data_file(self, update:bool=True):
+    def cache_object_data_file(self, update:bool=True, reload:bool=False):
         meta_data = self.load_meta_data()
         version = meta_data['version']
         if version == 1:
-            self.cache_object_data_v1_file(update=update)
+            self.cache_object_data_v1_file(update=update, reload=reload)
         else:
             raise RuntimeError(f"DRY version {version} unknown")
 
@@ -135,9 +138,9 @@ class DryObjectFile(object):
         self.args = obj.dry_args
         self.cls = type(obj)
 
-    def load_object_v1(self, update:bool=True) -> DryObject:
+    def load_object_v1(self, update:bool=True, reload:bool=False) -> DryObject:
         # Load object
-        self.cache_object_data_v1_file(update=update)
+        self.cache_object_data_v1_file(update=update, reload=reload)
 
         # Create object
         obj = self.cls(*self.args, **self.kwargs)
@@ -148,11 +151,11 @@ class DryObjectFile(object):
         # Build object instance
         return obj
 
-    def load_object(self, update:bool=False):
+    def load_object(self, update:bool=False, reload:bool=False):
     	meta_data = self.load_meta_data()
     	version = meta_data['version']
     	if version == 1:
-        	return self.load_object_v1(update=update)
+        	return self.load_object_v1(update=update, reload=reload)
     	else:
         	raise RuntimeError(f"DRY version {version} unknown")
 
@@ -213,12 +216,12 @@ class DryObjectFile(object):
     def get_individual_hash(self):
         return get_hashed_id(self.get_hash_str(no_id=False))
 
-def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False) -> Type[DryObject]:
+def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False, reload:bool=False) -> Type[DryObject]:
     if not isinstance(file, DryObjectFile):
     	with DryObjectFile(file, exact_path=exact_path) as dry_file:
-        	result_object = dry_file.load_object(update=update)
+        	result_object = dry_file.load_object(update=update, reload=reload)
     else:
-        result_object = dry_file.load_object(update=update)
+        result_object = dry_file.load_object(update=update, reload=reload)
     return result_object
 
 def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False, update:bool=False) -> bool:
@@ -265,7 +268,8 @@ class DryObject(object):
         return get_hashed_id(self.get_hash_str(no_id=False))
 
     def is_same_category(self, rhs):
-        if type(self) != type(rhs):
+        # Not an exact type test to support dynamic object reloading
+        if get_class_str(type(self)) != get_class_str(type(rhs)):
             return False
         if self.dry_args != rhs.dry_args:
             return False

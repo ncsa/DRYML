@@ -4,9 +4,11 @@ import io
 import os
 import tempfile
 import uuid
+import time
+import importlib
+import sys
 
-test_objs_text = """
-import dryml
+test_objs_text = """import dryml
 
 class SimpleObject(dryml.DryObject):
     def __init__(self, i = 0, **kwargs):
@@ -36,11 +38,12 @@ def test_basic_object_1():
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
-    import test_objs as objs
+    import test_objs
+    importlib.reload(test_objs)
 
     # Define simple class
     temp_buffer = io.BytesIO()
-    obj = objs.SimpleObject(10)
+    obj = test_objs.SimpleObject(10)
 
     # Test that save to buffer works
     assert obj.save_self(temp_buffer)
@@ -65,9 +68,10 @@ def test_basic_object_2(create_name):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
-    import test_objs as objs
+    import test_objs
+    importlib.reload(test_objs)
 
-    obj = objs.SimpleObject(10)
+    obj = test_objs.SimpleObject(10)
 
     assert obj.save_self(create_name)
 
@@ -78,16 +82,15 @@ def test_basic_object_2(create_name):
     assert obj.version() == 1
     assert obj2.version() == 1
 
-
-@pytest.mark.skip(reason="Currently, I don't know how to properly test updating an object definition")
 def test_basic_object_def_update_1():
-    with open('test_objs.py', 'w') as f:
-        f.write(test_objs_text.format(version=1))
-
     def build_and_save_obj_1():
-        import test_objs as objs
+        time.sleep(1.1)
+        with open('tests/test_objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=1))
+        import test_objs
+        importlib.reload(test_objs)
 
-        obj = objs.SimpleObject(10)
+        obj = test_objs.SimpleObject(10)
 
         buffer = io.BytesIO()
 
@@ -97,17 +100,52 @@ def test_basic_object_def_update_1():
 
     obj1, buffer = build_and_save_obj_1()
 
-    with open('test_objs.py', 'w') as f:
-        f.write(test_objs_text.format(version=2))
-
     def build_obj_2(buffer):
-        import test_objs as objs
+        time.sleep(1.1)
+        with open('tests/test_objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=2))
+            #f.write("\n")
+        # Sleep to invalidate the cache.
 
-        obj2 = dryml.load_object(buffer)
+        obj2 = dryml.load_object(buffer, update=True, reload=True)
 
         return obj2
 
     obj2 = build_obj_2(buffer)
+
+    assert obj1 == obj2
+
+    assert obj1.version() == 1
+    assert obj2.version() == 2
+
+def test_basic_object_def_update_2(create_name):
+    def build_and_save_obj_1():
+        time.sleep(1.1)
+        with open('tests/test_objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=1))
+        import test_objs
+        importlib.reload(test_objs)
+
+        obj = test_objs.SimpleObject(10)
+
+        assert obj.save_self(create_name)
+
+        return obj
+
+    obj1 = build_and_save_obj_1()
+
+    def build_obj_2():
+        time.sleep(1.1)
+        with open('tests/test_objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=2))
+            # Add a newline to invalidate the cache. for some reason it's also checking number of lines? This isn't needed in other examples I've done, but I guess It's needed now.
+        # Sleep to invalidate the cache.
+
+        obj2 = dryml.load_object(create_name, update=True, reload=True)
+
+        return obj2
+
+    obj2 = build_obj_2()
 
     assert obj1 == obj2
 
