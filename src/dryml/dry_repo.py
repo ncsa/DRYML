@@ -33,6 +33,12 @@ class DryRepo(object):
     def number_of_objects(self):
         return len(self.obj_list)
 
+    def add_obj_def(self, cat_hash:str, ind_hash:str, obj_def:dict):
+        if ind_hash in self.obj_dict.get(cat_hash, {}):
+            raise ValueError("Object {ind_hash} in category {cat_hash} already exists in the repo!")
+        self.obj_dict.get(cat_hash, {})[ind_hash] = obj_def
+        self.obj_list.append(obj_def)
+
     def load_objects_from_directory(self, selector:Optional[Callable]=None, verbose:bool=False):
         "Method to refresh the internal dictionary of objects."
         if self.directory is None:
@@ -51,16 +57,12 @@ class DryRepo(object):
                             continue
                     obj_cat_hash = f.get_category_hash()
                     obj_hash = f.get_individual_hash()
-                    if obj_cat_hash not in self.obj_dict:
-                        self.obj_dict[obj_cat_hash] = {}
-                    if obj_hash not in self.obj_dict[obj_cat_hash]:
-                        num_loaded += 1
-                        obj_definition = {
-                            'val': filepath,
-                            'filepath': filepath
-                        }
-                        self.obj_dict[obj_cat_hash][obj_hash] = obj_definition
-                        self.obj_list.append(obj_definition)
+                    obj_definition = {
+                        'val': filepath,
+                        'filepath': filepath
+                    }
+                    self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
+                    num_loaded += 1
             except Exception as e:
                 print(f"WARNING! Malformed file found! {full_filepath} skipping load Error: {e}")
         if verbose:
@@ -71,12 +73,9 @@ class DryRepo(object):
         obj_cat_hash = obj.get_category_hash()
         obj_hash = obj.get_individual_hash()
         obj_definition = {'val': obj}
-        if obj_cat_hash not in self.obj_dict:
-            self.obj_dict[obj_cat_hash] = {}
-        if obj_hash in self.obj_dict[obj_cat_hash]:
-            raise ValueError("Object {obj_hash} in category {obj_cat_hash} already exists in the repo!")
-        self.obj_dict[obj_cat_hash][obj_hash] = obj_definition
-        self.obj_list.append(obj_definition)
+        if filename is not None:
+            obj_definition['filepath'] = filename
+        self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
 
     def add_objects(self, obj_factory: DryObjectFactory, num=1):
         # Create numerous objects from a factory function
