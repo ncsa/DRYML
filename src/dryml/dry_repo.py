@@ -1,5 +1,5 @@
 import os
-from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile
+from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, change_object_cls
 from dryml.dry_selector import DrySelector
 from typing import Optional, Callable
 import io
@@ -225,13 +225,9 @@ class DryRepo(object):
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only reload DryObjects")
             # Get current definition of class
-            buffer = io.BytesIO()
-            obj.save_self(buffer, update=update)
-            # Delete the object
+            new_cls = get_current_cls(type(obj), reload=reload)
             del obj
-            # Reload the object
-            with DryObjectFile(buffer) as f:
-                obj_container['val'] = f.load_object(update=update, reload=reload)
+            obj_container['val'] = change_object_cls(obj, new_cls)
 
         self.apply(reload_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
