@@ -50,9 +50,11 @@ class DryRepo(object):
         return len(self.obj_list)
 
     def add_obj_def(self, cat_hash:str, ind_hash:str, obj_def:dict):
-        if ind_hash in self.obj_dict.get(cat_hash, {}):
+        cat_dict = self.obj_dict.get(cat_hash, {})
+        if ind_hash in cat_dict:
             raise ValueError("Object {ind_hash} in category {cat_hash} already exists in the repo!")
-        self.obj_dict.get(cat_hash, {})[ind_hash] = obj_def
+        cat_dict[ind_hash] = obj_def
+        self.obj_dict[cat_hash] = cat_dict
         self.obj_list.append(obj_def)
 
     def load_objects_from_directory(self, directory:Optional[str]=None, selector:Optional[Callable]=None, verbose:bool=False):
@@ -273,7 +275,7 @@ class DryRepo(object):
                 raise RuntimeError("Can only save currently loaded DryObject")
             if directory is None:
                 if 'filepath' not in obj_container:
-                    obj_container['filepath'] = str(obj.get_individual_hash())
+                    obj_container['filepath'] = obj.get_individual_hash()+'.dry'
                 filepath = obj_container['filepath']
                 if path_needs_directory(filepath):
                     if self.directory is None:
@@ -297,7 +299,7 @@ class DryRepo(object):
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only save currently loaded DryObject")
             if 'filepath' not in obj_container:
-                obj_container['filepath'] = str(obj.get_individual_hash())
+                obj_container['filepath'] = obj.get_individual_hash()+'.dry'
             filepath = obj_container['filepath']
             orig_filepath = filepath
             if path_needs_directory(filepath):
@@ -314,3 +316,36 @@ class DryRepo(object):
         self.apply(save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
+
+    def delete_objs(self,
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
+        "Unload and delete from disk selected models"
+
+        # Get all selected objects
+        obj_containers = self.get(
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+            open_container=False, load_objects=False)
+
+        for obj_container in obj_containers:
+            filepath = obj_container['filepath']
+            if path_needs_directory(filepath):
+                if self.directory is None:
+                    raise RuntimeError("Repo's directory is not set. Set the directory.")
+                filepath = os.path.join(self.directory, filepath)
+
+            obj = obj_container['val']
+            if type(obj) is not str:
+               print(self.obj_dict)
+               print(self.obj_list)
+               # Delete the object from internal tracking
+               del self.obj_dict[obj.get_category_hash()][obj.get_individual_hash()]
+               # Delete the object from object list
+               del self.obj_list[self.obj_list.index(obj_container)]
+               # Delete the object itself.
+               del obj
+
+            # delete the container
+            del obj_container
+
+            # Delete the object file
+            os.remove(filepath)
