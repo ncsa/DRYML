@@ -39,16 +39,20 @@ class DryRepo(object):
         self.obj_dict.get(cat_hash, {})[ind_hash] = obj_def
         self.obj_list.append(obj_def)
 
-    def load_objects_from_directory(self, selector:Optional[Callable]=None, verbose:bool=False):
+    def load_objects_from_directory(self, directory:Optional[str]=None, selector:Optional[Callable]=None, verbose:bool=False):
         "Method to refresh the internal dictionary of objects."
-        if self.directory is None:
-            # Don't do anything if no directory is linked
-            return
-        files = os.listdir(self.directory)
+        need_directory = True
+        if directory is None:
+            if self.directory is None:
+                raise RuntimeError("No default directory selected for this repo!")
+            directory = self.directory
+            need_directory = False
+
+        files = os.listdir(directory)
 
         num_loaded = 0
-        for filepath in files:
-            full_filepath = os.path.join(self.directory, filepath)
+        for filename in files:
+            full_filepath = os.path.join(directory, filename)
             try:
                 with DryObjectFile(full_filepath) as f:
                     if selector is not None:
@@ -58,9 +62,11 @@ class DryRepo(object):
                     obj_cat_hash = f.get_category_hash()
                     obj_hash = f.get_individual_hash()
                     obj_definition = {
-                        'val': filepath,
-                        'filepath': filepath
+                        'val': filename,
+                        'filepath': filename
                     }
+                    if need_directory:
+                        obj_definition['filepath'] = os.path.join(directory, obj_definition['filepath'])
                     self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
                     num_loaded += 1
             except Exception as e:
