@@ -186,3 +186,19 @@ def test_save_3(prep_and_clean_test_dir2):
     repo = dryml.DryRepo(dir2)
 
     assert len(repo.get(load_objects=False)) == 0
+
+def test_save_4(prep_and_clean_test_dir2):
+    dir1, dir2 = prep_and_clean_test_dir2
+    repo = dryml.DryRepo(dir1, create=True)
+
+    repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
+    repo.add_object(objects.HelloInt(msg=5))
+
+    # Save objects in repository
+    repo.save()
+    repo.save(directory=dir2)
+
+    # Delete the repo
+    del repo
+
+    assert set(os.listdir(dir1)) == set(os.listdir(dir2))

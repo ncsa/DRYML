@@ -248,19 +248,24 @@ class DryRepo(object):
             open_container=False, load_objects=False)
 
     def save(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
+            directory:Optional[str]=None):
 
         def save_func(obj_container):
             obj = obj_container['val']
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only save currently loaded DryObject")
-            if 'filepath' not in obj_container:
-                obj_container['filepath'] = str(obj.get_individual_hash())
-            filepath = obj_container['filepath']
-            if path_needs_directory(filepath):
-                if self.directory is None:
-                    raise RuntimeError("Repo's directory is not set. Set the directory.")
-                filepath = os.path.join(self.directory, filepath)
+            if directory is None:
+                if 'filepath' not in obj_container:
+                    obj_container['filepath'] = str(obj.get_individual_hash())
+                filepath = obj_container['filepath']
+                if path_needs_directory(filepath):
+                    if self.directory is None:
+                        raise RuntimeError("Repo's directory is not set. Set the directory.")
+                    filepath = os.path.join(self.directory, filepath)
+            else:
+                _, tail = os.path.split(obj_container['filepath'])
+                filepath = os.path.join(directory, tail)
             obj.save_self(filepath)
 
         self.apply(save_func,
