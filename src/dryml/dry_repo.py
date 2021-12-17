@@ -224,6 +224,7 @@ class DryRepo(object):
             obj = obj_container['val']
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only reload DryObjects")
+            # Get current definition of class
             buffer = io.BytesIO()
             obj.save_self(buffer, update=update)
             # Delete the object
