@@ -19,16 +19,16 @@ class DryRepo(object):
         self.obj_list = []
 
         if directory is not None: 
-            self.link_to_directory(directory, create=create)
-            if load_objects:
-                self.load_objects_from_directory()
+            self.link_to_directory(directory, create=create, load_objects=load_objects)
 
-    def link_to_directory(self, directory:str, create:bool=False):
+    def link_to_directory(self, directory:str, create:bool=False, load_objects:bool=True):
         # Check that directory exists
         if not os.path.exists(directory):
             if create:
                 os.mkdir(directory)
         self.directory = directory
+        if load_objects:
+            self.load_objects_from_directory()
 
     def number_of_objects(self):
         return len(self.obj_list)
