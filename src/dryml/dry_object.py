@@ -10,11 +10,9 @@ import io
 import zipfile
 import uuid
 import copy
-import inspect
-import importlib
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryConfig, DryList
-from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str
+from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str, get_current_cls
 
 FileType = Union[str, IO[bytes]]
 
@@ -35,7 +33,7 @@ def load_zipfile(file: FileType, exact_path:bool=False, mode='r', must_exist:boo
         file = zipfile.ZipFile(file, mode=mode)
     return file
 
-def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
+def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id:bool=True):
     class_hash_str = get_class_str(cls)
     args_hash_str = args.get_hash_str()
     # Remove dry_id so we can test for object 'class'
@@ -50,7 +48,7 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id=True):
 
 
 class DryObjectFile(object):
-    def __init__(self, file: FileType, exact_path:bool=False, mode='r', must_exist=True, obj:Optional[DryObject]=None, reload:bool=False, as_cls:Optional[Type]=None):
+    def __init__(self, file: FileType, exact_path:bool=False, mode:str='r', must_exist:bool=True, obj:Optional[DryObject]=None, reload:bool=False, as_cls:Optional[Type]=None):
         if type(file) is str:
             # Save the filename
             self.filename = file
@@ -101,11 +99,7 @@ class DryObjectFile(object):
                 # Get original model definition
                 cls_def_init = dill.loads(cls_def_file.read())
                 try:
-                    module = importlib.import_module(inspect.getmodule(cls_def_init).__name__)
-                    # If indicated, reload the module.
-                    if reload:
-                        module = importlib.reload(module)
-                    cls_def = getattr(module, cls_def_init.__name__)
+                    cls_def = get_current_cls(cls_def_init, reload=reload)
                 except:
                     raise RuntimeError("Failed to update module class")
             else:
@@ -184,8 +178,7 @@ class DryObjectFile(object):
     def save_class_def_v1(self, update:bool=False):
         # We need to pickle the class definition.
         # By default, error out if class has changed. Check this.
-        mod = inspect.getmodule(self.cls)
-        mod_cls = getattr(mod, self.cls.__name__)
+        mod_cls = get_current_cls(self.cls)
         if self.cls != mod_cls and not update:
             raise ValueError("Can't save class definition! It's been changed!")
         cls_def = dill.dumps(mod_cls)

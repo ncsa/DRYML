@@ -2,6 +2,7 @@ import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile
 from dryml.dry_selector import DrySelector
 from typing import Optional, Callable
+import io
 import enum
 import tqdm
 
@@ -215,23 +216,21 @@ class DryRepo(object):
 
     def reload_objs(self,
             selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            update:bool=False):
+            update:bool=False, reload:bool=False):
         if self.directory is None:
             raise RuntimeError("Repo directory needs to be set for reloading.")
 
         def reload_func(obj_container):
             obj = obj_container['val']
             if not isinstance(obj, DryObject):
-                raise RuntimeError("Can only save currently loaded DryObject")
-            if 'filename' not in obj_container:
-                obj_container['filename'] = str(obj.get_individual_hash())
-            filename = os.path.join(self.directory, obj_container['filename'])
-            obj.save_self(filename, update=update)
+                raise RuntimeError("Can only reload DryObjects")
+            buffer = io.BytesIO()
+            obj.save_self(buffer, update=update)
             # Delete the object
             del obj
             # Reload the object
-            with DryObjectFile(filename) as f:
-                obj_container['val'] = f.load_object(update=True, reload=True)
+            with DryObjectFile(buffer) as f:
+                obj_container['val'] = f.load_object(update=update, reload=reload)
 
         self.apply(reload_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
