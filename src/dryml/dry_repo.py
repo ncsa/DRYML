@@ -249,8 +249,6 @@ class DryRepo(object):
 
     def save(self,
             selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
-        if self.directory is None:
-            raise RuntimeError("Repo's directory is not set. Set the directory.")
 
         def save_func(obj_container):
             obj = obj_container['val']
@@ -260,6 +258,8 @@ class DryRepo(object):
                 obj_container['filepath'] = str(obj.get_individual_hash())
             filepath = obj_container['filepath']
             if path_needs_directory(filepath):
+                if self.directory is None:
+                    raise RuntimeError("Repo's directory is not set. Set the directory.")
                 filepath = os.path.join(self.directory, filepath)
             obj.save_self(filepath)
 
