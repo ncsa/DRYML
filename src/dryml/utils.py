@@ -1,3 +1,4 @@
+import os
 import collections
 import inspect
 import hashlib
@@ -40,3 +41,11 @@ def get_current_cls(cls:Type, reload:bool=False):
 
 def get_hashed_id(hashstr:str):
     return hashlib.md5(hashstr.encode('utf-8')).hexdigest()
+
+def path_needs_directory(path):
+    "Method to determine whether a path is absolute, relative, or just a plain filename. If it's a plain filename, it needs a directory"
+    head, tail = os.path.split(path)
+    if head == '':
+        return True
+    else:
+        return False

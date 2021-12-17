@@ -1,7 +1,7 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, change_object_cls
 from dryml.dry_selector import DrySelector
-from dryml.utils import get_current_cls
+from dryml.utils import get_current_cls, path_needs_directory
 from typing import Optional, Callable
 import io
 import enum
@@ -68,13 +68,13 @@ class DryRepo(object):
         if verbose:
             print(f"Loaded {num_loaded} objects")
 
-    def add_object(self, obj: DryObject, filename:Optional[str]=None):
+    def add_object(self, obj: DryObject, filepath:Optional[str]=None):
         # Add a single object
         obj_cat_hash = obj.get_category_hash()
         obj_hash = obj.get_individual_hash()
         obj_definition = {'val': obj}
-        if filename is not None:
-            obj_definition['filepath'] = filename
+        if filepath is not None:
+            obj_definition['filepath'] = filepath
         self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
 
     def add_objects(self, obj_factory: DryObjectFactory, num=1):
@@ -94,9 +94,11 @@ class DryRepo(object):
                     return obj_container
             if isinstance(obj_container['val'], str):
                 if load_object:
-                    if self.directory is None:
-                        raise RuntimeError("Repo is not linked to a directory!")
-                    filepath = os.path.join(self.directory, obj_container['filepath'])
+                    filepath = obj_container['filepath']
+                    if path_needs_directory(filepath):
+                        if self.directory is None:
+                            raise RuntimeError("Repo is not linked to a directory!")
+                        filepath = os.path.join(self.directory, filepath)
                     with DryObjectFile(filepath) as f:
                         obj_container['val'] = f.load_object(update=update)
                 return container_opener(obj_container)
@@ -124,10 +126,12 @@ class DryRepo(object):
             if isinstance(obj_container['val'], str):
                 if only_objs:
                     return False
-                if self.directory is None:
-                    raise RuntimeError("Repo is not connected to any directory!")
                 # This container just a string, we need to load from disk to check against the selector
-                filepath = os.path.join(self.directory, obj_container['val'])
+                filepath = obj_container['val']
+                if path_needs_directory(filepath):
+                    if self.directory is None:
+                         raise RuntimeError("Repo is not connected to any directory!")
+                    filepath = os.path.join(self.directory, filepath)
                 if selector is not None:
                     with DryObjectFile(filepath) as f:
                         if selector(f, *sel_args, **sel_kwargs):
@@ -248,8 +252,10 @@ class DryRepo(object):
                 raise RuntimeError("Can only save currently loaded DryObject")
             if 'filepath' not in obj_container:
                 obj_container['filepath'] = str(obj.get_individual_hash())
-            filename = os.path.join(self.directory, obj_container['filepath'])
-            obj.save_self(filename)
+            filepath = obj_container['filepath']
+            if path_needs_directory(filepath):
+                filepath = os.path.join(self.directory, filepath)
+            obj.save_self(filepath)
 
         self.apply(save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,

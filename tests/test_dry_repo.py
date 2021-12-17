@@ -138,7 +138,7 @@ def test_save_1(prep_and_clean_test_dir):
 def test_save_2(prep_and_clean_test_dir):
     repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
 
-    repo.add_object(objects.HelloStr(msg='test'), filename='test_file')
+    repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
     # Save objects in repository
     repo.save()
