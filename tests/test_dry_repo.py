@@ -202,3 +202,15 @@ def test_save_4(prep_and_clean_test_dir2):
     del repo
 
     assert set(os.listdir(dir1)) == set(os.listdir(dir2))
+
+def test_save_5(prep_and_clean_test_dir):
+    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+
+    repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
+
+    repo.save_objs_on_deletion = True
+
+    # Delete the repo
+    del repo
+
+    assert len(os.listdir(prep_and_clean_test_dir)) == 1
