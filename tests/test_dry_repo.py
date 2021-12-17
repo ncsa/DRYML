@@ -214,3 +214,13 @@ def test_save_5(prep_and_clean_test_dir):
     del repo
 
     assert len(os.listdir(prep_and_clean_test_dir)) == 1
+
+def test_save_5(prep_and_clean_test_dir):
+    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+
+    repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
+
+    repo.save_and_cache()
+
+    assert len(repo.get(load_objects=False)) == 0
+    assert len(os.listdir(prep_and_clean_test_dir)) == 1

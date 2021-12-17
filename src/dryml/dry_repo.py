@@ -287,3 +287,30 @@ class DryRepo(object):
         self.apply(save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
+
+    def save_and_cache(self,
+            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
+        "Save and then delete objects. Replace their entries with strings"
+
+        def save_func(obj_container):
+            obj = obj_container['val']
+            if not isinstance(obj, DryObject):
+                raise RuntimeError("Can only save currently loaded DryObject")
+            if 'filepath' not in obj_container:
+                obj_container['filepath'] = str(obj.get_individual_hash())
+            filepath = obj_container['filepath']
+            orig_filepath = filepath
+            if path_needs_directory(filepath):
+                if self.directory is None:
+                    raise RuntimeError("Repo's directory is not set. Set the directory.")
+                filepath = os.path.join(self.directory, filepath)
+            obj.save_self(filepath)
+            del obj
+            if orig_filepath == filepath:
+                obj_container['val'] = filepath
+            else:
+                obj_container['val'] = orig_filepath
+
+        self.apply(save_func,
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+            open_container=False, load_objects=False)
