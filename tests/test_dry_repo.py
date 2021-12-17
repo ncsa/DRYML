@@ -114,3 +114,23 @@ def test_reload_1(prep_and_clean_test_dir):
 
     obj = repo.get(selector=dryml.DrySelector(cls=objects.TestClassA2, kwargs={'item': 'a'}))[0]
     assert objs[2].dry_kwargs['item'] == obj.dry_kwargs['item']
+
+def test_save_1(prep_and_clean_test_dir):
+    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+
+    repo.add_object(objects.HelloStr(msg='test'))
+
+    # Save objects in repository
+    repo.save()
+
+    # Delete the repo
+    del repo
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.DryRepo(prep_and_clean_test_dir)
+
+    assert len(repo.get(load_objects=False)) == 0
+
+    repo.save()
+
+    assert len(os.listdir(prep_and_clean_test_dir)) == 1

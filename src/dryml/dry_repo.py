@@ -186,7 +186,7 @@ class DryRepo(object):
     def apply(self,
             func, func_args=None, func_kwargs=None,
             selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            update:bool=True, verbose:int=0, load_objects:bool=True, open_container:bool=True):
+            update:bool=True, verbose:bool=False, load_objects:bool=False, open_container:bool=True):
         "Apply a function to all objects tracked by the repo. We can also use a DrySelector to apply only to specific models"
         if func_args is None:
             func_args = []
@@ -237,21 +237,20 @@ class DryRepo(object):
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
 
-
     def save(self,
             selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
         if self.directory is None:
-            raise RuntimeError("Repo's directory is not set. Set the directory")
+            raise RuntimeError("Repo's directory is not set. Set the directory.")
 
         def save_func(obj_container):
             obj = obj_container['val']
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only save currently loaded DryObject")
-            if 'filename' not in obj_container:
-                obj_container['filename'] = str(obj.get_individual_hash())
-            filename = os.path.join(self.directory, obj_container['filename'])
+            if 'filepath' not in obj_container:
+                obj_container['filepath'] = str(obj.get_individual_hash())
+            filename = os.path.join(self.directory, obj_container['filepath'])
             obj.save_self(filename)
 
         self.apply(save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False)
+            open_container=False, load_objects=False)
