@@ -195,65 +195,65 @@ def test_object_hash_2():
     obj2 = objs.HelloStr(msg="Test")
     assert obj1.get_hash() == obj2.get_hash()
 
-def test_object_hash_3():
+def test_object_hash_3(create_name):
     "Test that object hashes are the same after saving and restoring"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
-    obj2 = dryml.load_object('test')
+    obj2 = dryml.load_object(create_name)
     assert obj1.get_hash() == obj2.get_hash()
 
-def test_object_hash_4():
+def test_object_hash_4(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
-    obj2 = dryml.load_object('test')
+    obj2 = dryml.load_object(create_name)
     assert obj1.get_hash(no_id=False) == obj2.get_hash(no_id=False)
 
-def test_object_hash_5():
+def test_object_hash_5(create_name):
     "Test that object hashes are the same after saving and restoring"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
-    obj2 = dryml.load_object('test')
+    obj2 = dryml.load_object(create_name)
     assert obj1.is_same_category(obj2)
 
-def test_object_hash_6():
+def test_object_hash_6(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
-    obj2 = dryml.load_object('test')
+    obj2 = dryml.load_object(create_name)
     assert obj1.is_identical(obj2)
 
-def test_object_file_hash_1():
+def test_object_file_hash_1(create_name):
     "Test that object hashes are the same after saving and restoring"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
-    with dryml.DryObjectFile('test') as dry_file:
+    with dryml.DryObjectFile(create_name) as dry_file:
         assert obj1.get_hash() == dry_file.get_hash()
 
-def test_object_file_hash_2():
+def test_object_file_hash_2(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
-    with dryml.DryObjectFile('test') as dry_file:
+    with dryml.DryObjectFile(create_name) as dry_file:
         assert obj1.get_hash_str(no_id=False) == dry_file.get_hash_str(no_id=False)
 
-def test_object_file_hash_1():
+def test_object_file_hash_1(create_name):
     "Test that object and object factory hashes are the same"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self('test')
+    assert obj1.save_self(create_name)
 
     f = dryml.DryObjectFactory(objs.HelloStr, msg="Test")
 
