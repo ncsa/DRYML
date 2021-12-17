@@ -21,6 +21,22 @@ class DryRepo(object):
         if directory is not None: 
             self.link_to_directory(directory, create=create, load_objects=load_objects)
 
+        self._save_objs_on_deletion = False
+
+    @property
+    def save_objs_on_deletion(self):
+        return self._save_objs_on_deletion
+
+    @save_objs_on_deletion.setter
+    def save_objs_on_deletion(self, val:bool):
+        if val and self.directory is None:
+            raise RuntimeError("Give the repo a directory if you want it to save objects upon deletion")
+        self._save_objs_on_deletion = val
+
+    def __del__(self):
+        if self.save_objs_on_deletion:
+            self.save()
+
     def link_to_directory(self, directory:str, create:bool=False, load_objects:bool=True):
         # Check that directory exists
         if not os.path.exists(directory):
