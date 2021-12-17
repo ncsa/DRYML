@@ -134,3 +134,23 @@ def test_save_1(prep_and_clean_test_dir):
     repo.save()
 
     assert len(os.listdir(prep_and_clean_test_dir)) == 1
+
+def test_save_2(prep_and_clean_test_dir):
+    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+
+    repo.add_object(objects.HelloStr(msg='test'), filename='test_file')
+
+    # Save objects in repository
+    repo.save()
+
+    # Delete the repo
+    del repo
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.DryRepo(prep_and_clean_test_dir)
+
+    assert len(repo.get(load_objects=False)) == 0
+
+    repo.save()
+
+    assert len(os.listdir(prep_and_clean_test_dir)) == 1
