@@ -91,3 +91,26 @@ def test_write_1(prep_and_clean_test_dir):
     obj_list = repo.get(selector=dryml.DrySelector(cls=objects.TestClassB, args=['test']))
     assert len(obj_list) == 1
     assert objs[4].get_individual_hash() == obj_list[0].get_individual_hash()
+
+def test_reload_1(prep_and_clean_test_dir):
+    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+
+    objs = []
+
+    objs.append(objects.TestClassA(item=[10]))
+    objs.append(objects.TestClassA(item=[10, 10]))
+    objs.append(objects.TestClassA(item='a'))
+
+    for obj in objs:
+        repo.add_object(obj)
+
+    repo.reload_objs(selector=dryml.DrySelector(cls=objects.TestClassA), as_cls=objects.TestClassA2)
+
+    obj = repo.get(selector=dryml.DrySelector(cls=objects.TestClassA2, kwargs={'item': [10]}))[0]
+    assert objs[0].dry_kwargs['item'] == obj.dry_kwargs['item']
+
+    obj = repo.get(selector=dryml.DrySelector(cls=objects.TestClassA2, kwargs={'item': [10, 10]}))[0]
+    assert objs[1].dry_kwargs['item'] == obj.dry_kwargs['item']
+
+    obj = repo.get(selector=dryml.DrySelector(cls=objects.TestClassA2, kwargs={'item': 'a'}))[0]
+    assert objs[2].dry_kwargs['item'] == obj.dry_kwargs['item']

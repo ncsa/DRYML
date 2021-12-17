@@ -27,7 +27,6 @@ class DryComponent(DryObject):
 
     def prepare_data(self, data, *args, **kwargs):
         #Base component does nothing to input data.
-        print("component prepare_data")
         return data
 
     def train(self, train_data, *args, **kwargs):

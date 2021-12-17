@@ -1,6 +1,7 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, change_object_cls
 from dryml.dry_selector import DrySelector
+from dryml.utils import get_current_cls
 from typing import Optional, Callable
 import io
 import enum
@@ -216,7 +217,7 @@ class DryRepo(object):
 
     def reload_objs(self,
             selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            update:bool=False, reload:bool=False):
+            update:bool=False, reload:bool=False, as_cls=None):
         if self.directory is None:
             raise RuntimeError("Repo directory needs to be set for reloading.")
 
@@ -225,9 +226,13 @@ class DryRepo(object):
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only reload DryObjects")
             # Get current definition of class
-            new_cls = get_current_cls(type(obj), reload=reload)
-            del obj
+            if as_cls is not None:
+                cls = as_cls
+            else:
+                cls = type(obj)
+            new_cls = get_current_cls(cls, reload=reload)
             obj_container['val'] = change_object_cls(obj, new_cls)
+            del obj
 
         self.apply(reload_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
