@@ -154,3 +154,35 @@ def test_save_2(prep_and_clean_test_dir):
     repo.save()
 
     assert len(os.listdir(prep_and_clean_test_dir)) == 1
+
+@pytest.fixture
+def prep_and_clean_test_dir2():
+    with tempfile.TemporaryDirectory() as dir1, tempfile.TemporaryDirectory() as dir2:
+        yield dir1, dir2
+
+def test_save_3(prep_and_clean_test_dir2):
+    dir1, dir2 = prep_and_clean_test_dir2
+    repo = dryml.DryRepo(dir1, create=True)
+
+    repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
+    repo.add_object(objects.HelloInt(msg=5), filepath=os.path.join(dir2, 'test_file'))
+
+    # Save objects in repository
+    repo.save()
+
+    # Delete the repo
+    del repo
+
+    assert len(os.listdir(dir1)) == 1
+    assert len(os.listdir(dir2)) == 1
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.DryRepo(dir1)
+
+    assert len(repo.get(load_objects=False)) == 0
+
+    del repo
+
+    repo = dryml.DryRepo(dir2)
+
+    assert len(repo.get(load_objects=False)) == 0
