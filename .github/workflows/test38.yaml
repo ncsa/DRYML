@@ -26,3 +26,7 @@ jobs:
       - name: Run Tests
         run: |
           ./tests.sh --cov-report=xml --cov-report=html
+
+      - name: Run Linter
+        run: |
+          ./flake.sh
