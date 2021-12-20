@@ -1,11 +1,8 @@
 import pytest
 import dryml
 import io
-import os
-import uuid
 import time
 import importlib
-import tempfile
 
 test_objs_text = """import dryml
 
@@ -58,29 +55,7 @@ def test_basic_object_1():
     assert obj2.version() == 1
 
 
-@pytest.fixture
-def create_name():
-    tempf = str(uuid.uuid4())
-    yield tempf
-    fullpath = f"{tempf}.dry"
-    if os.path.exists(fullpath):
-        os.remove(fullpath)
-
-
-@pytest.fixture
-def create_temp_named_file():
-    with tempfile.NamedTemporaryFile(mode='wb') as f:
-        yield f.name
-
-
-@pytest.fixture
-def create_temp_file():
-    # We need to open with 'w+b' permission so that we can both
-    # Read and write
-    with tempfile.TemporaryFile(mode='w+b') as f:
-        yield f
-
-
+@pytest.mark.usefixtures("create_name")
 def test_basic_object_2(create_name):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
@@ -100,6 +75,7 @@ def test_basic_object_2(create_name):
     assert obj2.version() == 1
 
 
+@pytest.mark.usefixtures("create_temp_named_file")
 def test_basic_object_3(create_temp_named_file):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
@@ -119,6 +95,7 @@ def test_basic_object_3(create_temp_named_file):
     assert obj2.version() == 1
 
 
+@pytest.mark.usefixtures("create_temp_file")
 def test_basic_object_4(create_temp_file):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
@@ -176,6 +153,7 @@ def test_basic_object_def_update_1():
     assert obj2.version() == 2
 
 
+@pytest.mark.usefixtures("create_name")
 def test_basic_object_def_update_2(create_name):
     def build_and_save_obj_1():
         time.sleep(1.1)
@@ -218,6 +196,7 @@ def test_object_args_passing_1():
     assert obj.dry_args == [1]
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_args_passing_2(create_name):
     import objects as objs
 
@@ -258,6 +237,7 @@ def test_object_hash_2():
     assert obj1.get_hash() == obj2.get_hash()
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_hash_3(create_name):
     "Test that object hashes are the same after saving and restoring"
     import objects as objs
@@ -268,6 +248,7 @@ def test_object_hash_3(create_name):
     assert obj1.get_hash() == obj2.get_hash()
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_hash_4(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
@@ -278,6 +259,7 @@ def test_object_hash_4(create_name):
     assert obj1.get_hash(no_id=False) == obj2.get_hash(no_id=False)
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_hash_5(create_name):
     "Test that object hashes are the same after saving and restoring"
     import objects as objs
@@ -288,6 +270,7 @@ def test_object_hash_5(create_name):
     assert obj1.is_same_category(obj2)
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_hash_6(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
@@ -298,6 +281,7 @@ def test_object_hash_6(create_name):
     assert obj1.is_identical(obj2)
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_file_hash_1(create_name):
     "Test that object hashes are the same after saving and restoring"
     import objects as objs
@@ -308,6 +292,7 @@ def test_object_file_hash_1(create_name):
         assert obj1.get_hash() == dry_file.get_hash()
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_file_hash_2(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
@@ -319,6 +304,7 @@ def test_object_file_hash_2(create_name):
             dry_file.get_hash_str(no_id=False)
 
 
+@pytest.mark.usefixtures("create_name")
 def test_object_file_hash_3(create_name):
     "Test that object and object factory hashes are the same"
     import objects as objs

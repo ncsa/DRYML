@@ -1,14 +1,16 @@
 import zipfile
 import pickle
 from dryml.dry_object import DryObject
+from dryml.utils import init_arg_dict_handler
 
 
 class DryComponent(DryObject):
     untrained = 0
     trained = 2
 
-    def __init__(self, *args, description="", dry_args={},
-                 dry_kwargs={}, **kwargs):
+    def __init__(self, *args, description="", dry_args=None,
+                 dry_kwargs=None, **kwargs):
+        dry_kwargs = init_arg_dict_handler(dry_kwargs)
         dry_kwargs['description'] = description
 
         super().__init__(*args, dry_args=dry_args,
