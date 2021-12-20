@@ -68,9 +68,17 @@ def create_name():
 
 
 @pytest.fixture
-def create_temp_file():
-    with tempfile.NamedTemporaryFile(mode='w') as f:
+def create_temp_named_file():
+    with tempfile.NamedTemporaryFile(mode='wb') as f:
         yield f.name
+
+
+@pytest.fixture
+def create_temp_file():
+    # We need to open with 'w+b' permission so that we can both
+    # Read and write
+    with tempfile.TemporaryFile(mode='w+b') as f:
+        yield f
 
 
 def test_basic_object_2(create_name):
@@ -92,7 +100,26 @@ def test_basic_object_2(create_name):
     assert obj2.version() == 1
 
 
-def test_basic_object_3(create_temp_file):
+def test_basic_object_3(create_temp_named_file):
+    with open('./tests/test_objs.py', 'w') as f:
+        f.write(test_objs_text.format(version=1))
+
+    import test_objs
+    importlib.reload(test_objs)
+
+    obj = test_objs.SimpleObject(10)
+
+    assert obj.save_self(create_temp_named_file)
+
+    obj2 = dryml.load_object(create_temp_named_file)
+
+    assert obj == obj2
+
+    assert obj.version() == 1
+    assert obj2.version() == 1
+
+
+def test_basic_object_4(create_temp_file):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
@@ -103,6 +130,8 @@ def test_basic_object_3(create_temp_file):
 
     assert obj.save_self(create_temp_file)
 
+    create_temp_file.flush()
+    create_temp_file.seek(0)
     obj2 = dryml.load_object(create_temp_file)
 
     assert obj == obj2
