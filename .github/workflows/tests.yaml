@@ -34,4 +34,4 @@ jobs:
 
       - name: Run Tests
         run: |
-          bash tests.sh --cov-report=xml --cov-report=html
+          ./tests.sh --cov-report=xml --cov-report=html

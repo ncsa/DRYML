@@ -3,7 +3,7 @@ import json
 import pickle
 import collections
 from typing import Union, IO
-from dryml.utils import is_nonstring_iterable, is_dictlike
+from dryml.utils import is_nonstring_iterable, is_dictlike, pickler
 
 def is_allowed_base_type(val):
     if type(val) in (str, bytes, int, float):
@@ -46,9 +46,9 @@ class DryCollectionInterface(object):
     def save(self, file: Union[str, IO[bytes]]) -> bool:
         if type(file) is str:
             with open(file, 'w') as f:
-                f.write(pickle.dumps(self.data, protocol=5))
+                f.write(pickler(self.data))
         else:
-            file.write(pickle.dumps(self.data, protocol=5))
+            file.write(pickler(self.data))
         return True
 
     def get_hash_str(self):

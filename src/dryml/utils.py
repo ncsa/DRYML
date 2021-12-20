@@ -3,6 +3,7 @@ import collections
 import inspect
 import hashlib
 import importlib
+import pickle
 from typing import Type
 
 def is_nonstring_iterable(val):
@@ -49,3 +50,8 @@ def path_needs_directory(path):
         return True
     else:
         return False
+
+def pickler(obj):
+    "Method to ensure all objects are pickled in the same way"
+    # Consider updating to protocol=5 when python 3.7 is deprecated
+    return pickle.dumps(obj, protocol=4)

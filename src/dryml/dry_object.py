@@ -12,7 +12,7 @@ import uuid
 import copy
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryConfig, DryList
-from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str, get_current_cls
+from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str, get_current_cls, pickler
 
 FileType = Union[str, IO[bytes]]
 
@@ -163,7 +163,7 @@ class DryObjectFile(object):
             'version': 1
         })
 
-        meta_dump = pickle.dumps(meta_data, protocol=5)
+        meta_dump = pickler(meta_data)
         self.file.writestr('meta_data.pkl', meta_dump)
 
     def save_config_v1(self):
@@ -172,7 +172,7 @@ class DryObjectFile(object):
             'args': self.args.data
         })
 
-        config_dump = pickle.dumps(config_data, protocol=5)
+        config_dump = pickler(config_data)
         self.file.writestr('config.pkl', config_dump)
 
     def save_class_def_v1(self, update:bool=False):
