@@ -1,20 +1,17 @@
-name: Tests
+name: Tests Py 3.9
 
 on: [push]
 
 jobs:
   tests:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.7", "3.8", "3.9", "3.10"]
 
     steps:
       - uses: actions/checkout@v2
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python 3.9
         uses: actions/setup-python@v2
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: 3.9
 
       - name: Install Dependencies
         run: |
@@ -25,12 +22,6 @@ jobs:
       - name: Install DRYML
         run: |
           python setup.py install
-
-      - name: Investigate
-        run: |
-          ls
-          pip list
-          print ${PYTHON_PATH}
 
       - name: Run Tests
         run: |
