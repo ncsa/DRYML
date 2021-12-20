@@ -5,6 +5,7 @@ import os
 import uuid
 import time
 import importlib
+import tempfile
 
 test_objs_text = """import dryml
 
@@ -66,6 +67,12 @@ def create_name():
         os.remove(fullpath)
 
 
+@pytest.fixture
+def create_temp_file():
+    with tempfile.NamedTemporaryFile(mode='w') as f:
+        yield f.name
+
+
 def test_basic_object_2(create_name):
     with open('./tests/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
@@ -78,6 +85,25 @@ def test_basic_object_2(create_name):
     assert obj.save_self(create_name)
 
     obj2 = dryml.load_object(create_name)
+
+    assert obj == obj2
+
+    assert obj.version() == 1
+    assert obj2.version() == 1
+
+
+def test_basic_object_3(create_temp_file):
+    with open('./tests/test_objs.py', 'w') as f:
+        f.write(test_objs_text.format(version=1))
+
+    import test_objs
+    importlib.reload(test_objs)
+
+    obj = test_objs.SimpleObject(10)
+
+    assert obj.save_self(create_temp_file)
+
+    obj2 = dryml.load_object(create_temp_file)
 
     assert obj == obj2
 

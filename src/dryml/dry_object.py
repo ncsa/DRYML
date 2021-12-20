@@ -177,7 +177,8 @@ class DryObjectFile(object):
         })
 
         meta_dump = pickler(meta_data)
-        self.file.writestr('meta_data.pkl', meta_dump)
+        with self.file.open('meta_data.pkl', mode='w') as f:
+            f.write(meta_dump)
 
     def save_config_v1(self):
         config_data = DryConfig({
@@ -186,7 +187,8 @@ class DryObjectFile(object):
         })
 
         config_dump = pickler(config_data)
-        self.file.writestr('config.pkl', config_dump)
+        with self.file.open('config.pkl', mode='w') as f:
+            f.write(config_dump)
 
     def save_class_def_v1(self, update: bool = False):
         # We need to pickle the class definition.
@@ -195,7 +197,8 @@ class DryObjectFile(object):
         if self.cls != mod_cls and not update:
             raise ValueError("Can't save class definition! It's been changed!")
         cls_def = dill.dumps(mod_cls)
-        self.file.writestr('cls_def.dill', cls_def)
+        with self.file.open('cls_def.dill', mode='w') as f:
+            f.write(cls_def)
 
     def save_object_v1(self, obj: DryObject, update: bool = False,
                        as_cls: Optional[Type] = None) -> bool:
