@@ -2,16 +2,15 @@ import pytest
 import dryml
 import io
 import os
-import tempfile
 import uuid
 import time
 import importlib
-import sys
 
 test_objs_text = """import dryml
 
+
 class SimpleObject(dryml.DryObject):
-    def __init__(self, i = 0, **kwargs):
+    def __init__(self, i=0, **kwargs):
         self.i = i
         dry_kwargs = {{
             'i': i
@@ -33,6 +32,7 @@ class SimpleObject(dryml.DryObject):
     def __eq__(self, rhs):
         return self.i == rhs.i
 """
+
 
 def test_basic_object_1():
     with open('./tests/test_objs.py', 'w') as f:
@@ -56,13 +56,15 @@ def test_basic_object_1():
     assert obj.version() == 1
     assert obj2.version() == 1
 
+
 @pytest.fixture
 def create_name():
-    tempfile = str(uuid.uuid4())
-    yield tempfile
-    fullpath = f"{tempfile}.dry"
+    tempf = str(uuid.uuid4())
+    yield tempf
+    fullpath = f"{tempf}.dry"
     if os.path.exists(fullpath):
         os.remove(fullpath)
+
 
 def test_basic_object_2(create_name):
     with open('./tests/test_objs.py', 'w') as f:
@@ -81,6 +83,7 @@ def test_basic_object_2(create_name):
 
     assert obj.version() == 1
     assert obj2.version() == 1
+
 
 def test_basic_object_def_update_1():
     def build_and_save_obj_1():
@@ -104,7 +107,6 @@ def test_basic_object_def_update_1():
         time.sleep(1.1)
         with open('tests/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=2))
-            #f.write("\n")
         # Sleep to invalidate the cache.
 
         obj2 = dryml.load_object(buffer, update=True, reload=True)
@@ -117,6 +119,7 @@ def test_basic_object_def_update_1():
 
     assert obj1.version() == 1
     assert obj2.version() == 2
+
 
 def test_basic_object_def_update_2(create_name):
     def build_and_save_obj_1():
@@ -135,11 +138,10 @@ def test_basic_object_def_update_2(create_name):
     obj1 = build_and_save_obj_1()
 
     def build_obj_2():
+        # Sleep to invalidate the cache.
         time.sleep(1.1)
         with open('tests/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=2))
-            # Add a newline to invalidate the cache. for some reason it's also checking number of lines? This isn't needed in other examples I've done, but I guess It's needed now.
-        # Sleep to invalidate the cache.
 
         obj2 = dryml.load_object(create_name, update=True, reload=True)
 
@@ -152,12 +154,14 @@ def test_basic_object_def_update_2(create_name):
     assert obj1.version() == 1
     assert obj2.version() == 2
 
+
 def test_object_args_passing_1():
     import objects as objs
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
     assert obj.dry_args == [1]
+
 
 def test_object_args_passing_2(create_name):
     import objects as objs
@@ -170,6 +174,7 @@ def test_object_args_passing_2(create_name):
 
     assert obj_loaded.dry_args == [1]
 
+
 def test_object_config_1():
     import objects as objs
 
@@ -181,6 +186,7 @@ def test_object_config_1():
     msg = obj.get_message()
     assert msg == "Hello! 10"
 
+
 def test_object_hash_1():
     "Test that object hashes are unique within classes"
     import objects as objs
@@ -188,12 +194,14 @@ def test_object_hash_1():
     obj2 = objs.HelloStr(msg="Test")
     assert obj1.get_hash(no_id=False) != obj2.get_hash(no_id=False)
 
+
 def test_object_hash_2():
     "Test that object hashes are are same for two elements of the same class"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj2 = objs.HelloStr(msg="Test")
     assert obj1.get_hash() == obj2.get_hash()
+
 
 def test_object_hash_3(create_name):
     "Test that object hashes are the same after saving and restoring"
@@ -204,6 +212,7 @@ def test_object_hash_3(create_name):
     obj2 = dryml.load_object(create_name)
     assert obj1.get_hash() == obj2.get_hash()
 
+
 def test_object_hash_4(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
@@ -212,6 +221,7 @@ def test_object_hash_4(create_name):
 
     obj2 = dryml.load_object(create_name)
     assert obj1.get_hash(no_id=False) == obj2.get_hash(no_id=False)
+
 
 def test_object_hash_5(create_name):
     "Test that object hashes are the same after saving and restoring"
@@ -222,6 +232,7 @@ def test_object_hash_5(create_name):
     obj2 = dryml.load_object(create_name)
     assert obj1.is_same_category(obj2)
 
+
 def test_object_hash_6(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
@@ -230,6 +241,7 @@ def test_object_hash_6(create_name):
 
     obj2 = dryml.load_object(create_name)
     assert obj1.is_identical(obj2)
+
 
 def test_object_file_hash_1(create_name):
     "Test that object hashes are the same after saving and restoring"
@@ -240,6 +252,7 @@ def test_object_file_hash_1(create_name):
     with dryml.DryObjectFile(create_name) as dry_file:
         assert obj1.get_hash() == dry_file.get_hash()
 
+
 def test_object_file_hash_2(create_name):
     "Test that loaded objects are identical hash wise"
     import objects as objs
@@ -247,9 +260,11 @@ def test_object_file_hash_2(create_name):
     assert obj1.save_self(create_name)
 
     with dryml.DryObjectFile(create_name) as dry_file:
-        assert obj1.get_hash_str(no_id=False) == dry_file.get_hash_str(no_id=False)
+        assert obj1.get_hash_str(no_id=False) == \
+            dry_file.get_hash_str(no_id=False)
 
-def test_object_file_hash_1(create_name):
+
+def test_object_file_hash_3(create_name):
     "Test that object and object factory hashes are the same"
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
@@ -258,6 +273,7 @@ def test_object_file_hash_1(create_name):
     f = dryml.DryObjectFactory(objs.HelloStr, msg="Test")
 
     assert obj1.get_hash() == f.get_hash()
+
 
 def test_change_obj_cls_1():
     "Test that we can change an object's class"

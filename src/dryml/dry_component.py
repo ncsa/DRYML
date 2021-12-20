@@ -2,19 +2,23 @@ import zipfile
 import pickle
 from dryml.dry_object import DryObject
 
+
 class DryComponent(DryObject):
     untrained = 0
     trained = 2
-    def __init__(self, *args, description="", dry_args={}, dry_kwargs={}, **kwargs):
+
+    def __init__(self, *args, description="", dry_args={},
+                 dry_kwargs={}, **kwargs):
         dry_kwargs['description'] = description
 
-        super().__init__(*args, dry_args=dry_args, dry_kwargs=dry_kwargs, **kwargs)
+        super().__init__(*args, dry_args=dry_args,
+                         dry_kwargs=dry_kwargs, **kwargs)
         self.train_state = DryComponent.untrained
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Load parent components first
         if not super().load_object_imp(file):
-             return False
+            return False
         with file.open('component_data.pkl', 'r') as f:
             component_data = pickle.load(f)
         self.train_state = component_data['train_state']
@@ -26,7 +30,7 @@ class DryComponent(DryObject):
         return super().save_object_imp(file)
 
     def prepare_data(self, data, *args, **kwargs):
-        #Base component does nothing to input data.
+        # Base component does nothing to input data.
         return data
 
     def train(self, train_data, *args, **kwargs):

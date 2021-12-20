@@ -1,8 +1,8 @@
 import pytest
 import dryml
-import io
 import os
 import uuid
+
 
 @pytest.fixture
 def create_name():
@@ -11,6 +11,7 @@ def create_name():
     fullpath = f"{tempfile}.dry"
     if os.path.exists(fullpath):
         os.remove(fullpath)
+
 
 def test_basic_component_1(create_name):
     import objects

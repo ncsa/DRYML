@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import dill
-import json
 import pickle
 import io
 import zipfile
@@ -12,17 +11,20 @@ import uuid
 import copy
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryConfig, DryList
-from dryml.utils import init_arg_list_handler, init_arg_dict_handler, get_hashed_id, get_class_str, get_current_cls, pickler
+from dryml.utils import init_arg_list_handler, init_arg_dict_handler, \
+    get_hashed_id, get_class_str, get_current_cls, pickler
 
 FileType = Union[str, IO[bytes]]
 
-def file_resolve(file: str, exact_path:bool = False) -> str:
+
+def file_resolve(file: str, exact_path: bool = False) -> str:
     if os.path.splitext(file)[1] == '' and not exact_path:
         file = f"{file}.dry"
     return file
 
 
-def load_zipfile(file: FileType, exact_path:bool=False, mode='r', must_exist:bool=True) -> zipfile.ZipFile:
+def load_zipfile(file: FileType, exact_path: bool = False,
+                 mode='r', must_exist: bool = True) -> zipfile.ZipFile:
     if type(file) is str:
         filepath = file
         filepath = file_resolve(filepath, exact_path=exact_path)
@@ -33,7 +35,9 @@ def load_zipfile(file: FileType, exact_path:bool=False, mode='r', must_exist:boo
         file = zipfile.ZipFile(file, mode=mode)
     return file
 
-def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id:bool=True):
+
+def compute_obj_hash_str(cls: type, args: DryList, kwargs: DryConfig,
+                         no_id: bool = True):
     class_hash_str = get_class_str(cls)
     args_hash_str = args.get_hash_str()
     # Remove dry_id so we can test for object 'class'
@@ -48,13 +52,17 @@ def compute_obj_hash_str(cls:type, args:DryList, kwargs:DryConfig, no_id:bool=Tr
 
 
 class DryObjectFile(object):
-    def __init__(self, file: FileType, exact_path:bool=False, mode:str='r', must_exist:bool=True, obj:Optional[DryObject]=None, reload:bool=False, as_cls:Optional[Type]=None):
+    def __init__(self, file: FileType, exact_path: bool = False,
+                 mode: str = 'r', must_exist: bool = True,
+                 obj: Optional[DryObject] = None,
+                 reload: bool = False, as_cls: Optional[Type] = None):
         if type(file) is str:
             # Save the filename
             self.filename = file
         else:
             self.filename = None
-        self.file = load_zipfile(file, exact_path=exact_path, mode=mode, must_exist=must_exist)
+        self.file = load_zipfile(file, exact_path=exact_path,
+                                 mode=mode, must_exist=must_exist)
 
         self.cls = None
         self.args = None
@@ -64,10 +72,11 @@ class DryObjectFile(object):
             # Cache object data, can be used for updating
             self.update_file(obj)
         else:
-            # If we're reading the file, we probably want to compute a 
-            # hash or create an object. We can safely read and cache hash data now.
+            # If we're reading the file, we probably want to compute a
+            # hash or create an object. We can safely read and cache
+            # hash data now.
             if mode == 'r':
-                 self.cache_object_data_file(self.file, reload=reload)
+                self.cache_object_data_file(self.file, reload=reload)
 
         if as_cls is not None:
             # Set the type we want to save as
@@ -82,7 +91,7 @@ class DryObjectFile(object):
     def close(self):
         self.file.close()
 
-    def update_file(self, obj:DryObject):
+    def update_file(self, obj: DryObject):
         self.cache_object_data_obj(obj)
 
     def load_config_v1(self):
@@ -91,7 +100,7 @@ class DryObjectFile(object):
             config_data = pickle.loads(config_file.read())
         return config_data
 
-    def load_class_def_v1(self, update:bool=True, reload:bool=False):
+    def load_class_def_v1(self, update: bool = True, reload: bool = False):
         "Helper function for loading a version 1 class definition"
         # Get class definition
         with self.file.open('cls_def.dill') as cls_def_file:
@@ -100,8 +109,8 @@ class DryObjectFile(object):
                 cls_def_init = dill.loads(cls_def_file.read())
                 try:
                     cls_def = get_current_cls(cls_def_init, reload=reload)
-                except:
-                    raise RuntimeError("Failed to update module class")
+                except Exception as e:
+                    raise RuntimeError(f"Failed to update module class {e}")
             else:
                 cls_def = dill.loads(cls_def_file.read())
         return cls_def
@@ -111,7 +120,8 @@ class DryObjectFile(object):
             meta_data = pickle.loads(meta_file.read())
         return meta_data
 
-    def cache_object_data_v1_file(self, update:bool=True, reload:bool=False):
+    def cache_object_data_v1_file(self, update: bool = True,
+                                  reload: bool = False):
         # Cache object data from a file
         config_data = self.load_config_v1()
 
@@ -122,7 +132,8 @@ class DryObjectFile(object):
         # Get class definition
         self.cls = self.load_class_def_v1(update=update, reload=reload)
 
-    def cache_object_data_file(self, update:bool=True, reload:bool=False):
+    def cache_object_data_file(self, update: bool = True,
+                               reload: bool = False):
         meta_data = self.load_meta_data()
         version = meta_data['version']
         if version == 1:
@@ -136,7 +147,8 @@ class DryObjectFile(object):
         self.args = obj.dry_args
         self.cls = type(obj)
 
-    def load_object_v1(self, update:bool=True, reload:bool=False) -> DryObject:
+    def load_object_v1(self, update: bool = True,
+                       reload: bool = False) -> DryObject:
         # Load object
         self.cache_object_data_v1_file(update=update, reload=reload)
 
@@ -149,13 +161,14 @@ class DryObjectFile(object):
         # Build object instance
         return obj
 
-    def load_object(self, update:bool=False, reload:bool=False) -> DryObject:
-    	meta_data = self.load_meta_data()
-    	version = meta_data['version']
-    	if version == 1:
-        	return self.load_object_v1(update=update, reload=reload)
-    	else:
-        	raise RuntimeError(f"DRY version {version} unknown")
+    def load_object(self, update: bool = False,
+                    reload: bool = False) -> DryObject:
+        meta_data = self.load_meta_data()
+        version = meta_data['version']
+        if version == 1:
+            return self.load_object_v1(update=update, reload=reload)
+        else:
+            raise RuntimeError(f"DRY version {version} unknown")
 
     def save_meta_data(self):
         # Meta_data
@@ -175,7 +188,7 @@ class DryObjectFile(object):
         config_dump = pickler(config_data)
         self.file.writestr('config.pkl', config_dump)
 
-    def save_class_def_v1(self, update:bool=False):
+    def save_class_def_v1(self, update: bool = False):
         # We need to pickle the class definition.
         # By default, error out if class has changed. Check this.
         mod_cls = get_current_cls(self.cls)
@@ -184,7 +197,8 @@ class DryObjectFile(object):
         cls_def = dill.dumps(mod_cls)
         self.file.writestr('cls_def.dill', cls_def)
 
-    def save_object_v1(self, obj: DryObject, update:bool=False, as_cls:Optional[Type]=None) -> bool:
+    def save_object_v1(self, obj: DryObject, update: bool = False,
+                       as_cls: Optional[Type] = None) -> bool:
         self.cache_object_data_obj(obj)
         if as_cls is not None:
             self.cls = as_cls
@@ -204,7 +218,8 @@ class DryObjectFile(object):
         return True
 
     def get_hash_str(self, no_id=True):
-        return compute_obj_hash_str(self.cls, self.args, self.kwargs, no_id=no_id)
+        return compute_obj_hash_str(self.cls, self.args,
+                                    self.kwargs, no_id=no_id)
 
     def get_hash(self, no_id=True):
         return hash(self.get_hash_str(no_id=no_id))
@@ -215,34 +230,48 @@ class DryObjectFile(object):
     def get_individual_hash(self):
         return get_hashed_id(self.get_hash_str(no_id=False))
 
-def load_object(file: Union[FileType,DryObjectFile], update:bool=False, exact_path:bool=False, reload:bool=False) -> DryObject:
+
+def load_object(file: Union[FileType, DryObjectFile],
+                update: bool = False, exact_path: bool = False,
+                reload: bool = False) -> DryObject:
     if not isinstance(file, DryObjectFile):
-    	with DryObjectFile(file, exact_path=exact_path) as dry_file:
-        	result_object = dry_file.load_object(update=update, reload=reload)
+        with DryObjectFile(file, exact_path=exact_path) as dry_file:
+            result_object = dry_file.load_object(update=update,
+                                                 reload=reload)
     else:
         result_object = dry_file.load_object(update=update, reload=reload)
     return result_object
 
-def save_object(obj: DryObject, file: FileType, version: int=1, exact_path:bool=False, update:bool=False, as_cls:Optional[Type]=None) -> bool:
-    with DryObjectFile(file, exact_path=exact_path, mode='w', must_exist=False, as_cls=as_cls) as dry_file:
+
+def save_object(obj: DryObject, file: FileType, version: int = 1,
+                exact_path: bool = False, update: bool = False,
+                as_cls: Optional[Type] = None) -> bool:
+    with DryObjectFile(file, exact_path=exact_path, mode='w',
+                       must_exist=False, as_cls=as_cls) as dry_file:
         if version == 1:
             return dry_file.save_object_v1(obj, update=update, as_cls=as_cls)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
 
-def change_object_cls(obj: DryObject, cls: Type, update:bool=False, reload:bool=False) -> DryObject:
+
+def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
+                      reload: bool = False) -> DryObject:
     buffer = io.BytesIO()
     save_object(obj, buffer, as_cls=cls)
     return load_object(buffer, update=update, reload=reload)
 
-# Define a base Dry Object 
+
+# Define a base Dry Object
 class DryObject(object):
-    def __init__(self, *args, dry_args=None, dry_kwargs=None, dry_id=None, **kwargs):
+    def __init__(self, *args, dry_args=None, dry_kwargs=None,
+                 dry_id=None, **kwargs):
         super().__init__(*args, **kwargs)
-        # Use DryConfig/DryList object to coerse args/kwargs to proper json serializable form.
+        # Use DryConfig/DryList object to coerse args/kwargs to proper
+        # json serializable form.
         self.dry_args = DryList(init_arg_list_handler(dry_args))
         self.dry_kwargs = DryConfig(init_arg_dict_handler(dry_kwargs))
-        # Generate unique id for this object. (Meant to separate between multiple instances of same object)
+        # Generate unique id for this object. (Meant to separate between
+        # multiple instances of same object)
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())
         else:
@@ -256,11 +285,12 @@ class DryObject(object):
         # Should be the last object inherited
         return True
 
-    def save_self(self, file: FileType, version: int=1, **kwargs) -> bool:
+    def save_self(self, file: FileType, version: int = 1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)
 
     def get_hash_str(self, no_id=True):
-        return compute_obj_hash_str(type(self), self.dry_args, self.dry_kwargs, no_id=no_id)
+        return compute_obj_hash_str(type(self), self.dry_args,
+                                    self.dry_kwargs, no_id=no_id)
 
     def get_hash(self, no_id=True):
         return hash(self.get_hash_str(no_id=no_id))
@@ -300,11 +330,11 @@ class DryObjectFactory(object):
         self.kwargs = DryConfig(kwargs)
         self.callbacks = callbacks
 
-    def add_callback(callback):
+    def add_callback(self, callback):
         self.callbacks.append(callback)
 
     def __call__(self):
-        obj = self.cls(*self.args, **self.kwargs) 
+        obj = self.cls(*self.args, **self.kwargs)
         for callback in self.callbacks:
             # Call each callback
             callback(obj)
@@ -312,7 +342,8 @@ class DryObjectFactory(object):
 
     def get_hash_str(self):
         # For DryObjectFactory, we can't use id.
-        return compute_obj_hash_str(self.cls, self.args, self.kwargs, no_id=True)
+        return compute_obj_hash_str(self.cls, self.args,
+                                    self.kwargs, no_id=True)
 
     def get_hash(self):
         return hash(self.get_hash_str())

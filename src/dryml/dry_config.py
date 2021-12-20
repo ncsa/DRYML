@@ -1,9 +1,7 @@
-import os
-import json
-import pickle
 import collections
 from typing import Union, IO
 from dryml.utils import is_nonstring_iterable, is_dictlike, pickler
+
 
 def is_allowed_base_type(val):
     if type(val) in (str, bytes, int, float):
@@ -33,7 +31,8 @@ class DryCollectionInterface(object):
         # Initialize object
         super().__init__(*args, **kwargs)
         if not check_if_allowed(self.data):
-            raise TypeError(f"DryCollection initialized with disallowed values!")
+            raise TypeError(
+                "DryCollection initialized with disallowed values!")
 
     def __setitem__(self, key, value):
         if not check_if_allowed(key):

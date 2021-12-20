@@ -1,7 +1,6 @@
-import os
-from dryml.dry_object import DryObject, DryObjectFactory
 from dryml.dry_repo import DryRepo
 from dryml.dry_component import DryComponent
+
 
 class Workshop(object):
     def __init__(self, *args, work_dir=None, create_work_dir=True, **kwargs):
@@ -14,8 +13,13 @@ class Workshop(object):
     def train_single_object(self, obj, *args, **kwargs):
         raise RuntimeError("Not implemented for base workshop")
 
-    def train_models(self, *args, selector=None, sel_args=None, sel_kwargs=None, **kwargs):
-        for obj in self.repo.get(selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs):
+    def train_models(self, *args,
+                     selector=None,
+                     sel_args=None, sel_kwargs=None,
+                     **kwargs):
+        for obj in self.repo.get(selector=selector,
+                                 sel_args=sel_args,
+                                 sel_kwargs=sel_kwargs):
             if obj.train_state == DryComponent.untrained:
                 self.train_single_object(obj, *args, **kwargs)
 
@@ -39,5 +43,3 @@ class Workshop(object):
 #
 # Measure model performance
 # shop.model_performance()
-
-

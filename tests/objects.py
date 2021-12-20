@@ -1,5 +1,6 @@
 import dryml
 
+
 class HelloObject(dryml.DryObject):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -13,8 +14,9 @@ class HelloObject(dryml.DryObject):
     def get_message(self):
         raise RuntimeError("Not implemented for this class")
 
+
 class HelloStr(HelloObject):
-    def __init__(self, msg:str="Test", **kwargs):
+    def __init__(self, msg: str = "Test", **kwargs):
         self.str_message = msg
         dry_kwargs = {
             'msg': msg,
@@ -33,8 +35,9 @@ class HelloStr(HelloObject):
     def get_message(self):
         return f"Hello! {self.str_message}"
 
+
 class HelloInt(HelloObject):
-    def __init__(self, msg:int=1, **kwargs):
+    def __init__(self, msg: int = 1, **kwargs):
         self.int_msg = msg
         dry_kwargs = {
             'msg': msg,
@@ -53,8 +56,10 @@ class HelloInt(HelloObject):
     def get_message(self):
         return f"Hello! {self.int_msg}"
 
+
 class TestBase(dryml.DryObject):
-    def __init__(self, *args, base_msg:str="base", dry_args=None, dry_kwargs=None, **kwargs):
+    def __init__(self, *args, base_msg: str = "base",
+                 dry_args=None, dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
         dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         self.base_msg = base_msg
@@ -72,8 +77,10 @@ class TestBase(dryml.DryObject):
     def save_object_imp(self, file) -> bool:
         return super().save_object_imp(file)
 
+
 class TestClassA(TestBase):
-    def __init__(self, *args, item=[32], dry_args=None, dry_kwargs=None, **kwargs):
+    def __init__(self, *args, item=[32], dry_args=None,
+                 dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
         dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         dry_kwargs['item'] = item
@@ -89,9 +96,11 @@ class TestClassA(TestBase):
 
     def save_object_imp(self, file) -> bool:
         return True
+
 
 class TestClassA2(TestBase):
-    def __init__(self, *args, item=[32], dry_args=None, dry_kwargs=None, **kwargs):
+    def __init__(self, *args, item=[32], dry_args=None,
+                 dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
         dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         dry_kwargs['item'] = item
@@ -108,8 +117,10 @@ class TestClassA2(TestBase):
     def save_object_imp(self, file) -> bool:
         return True
 
+
 class TestClassB(TestBase):
-    def __init__(self, layers, *args, dry_args=None, dry_kwargs=None, **kwargs):
+    def __init__(self, layers, *args, dry_args=None,
+                 dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
         dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         dry_args.append(layers)
@@ -126,8 +137,10 @@ class TestClassB(TestBase):
     def save_object_imp(self, file) -> bool:
         return True
 
+
 class HelloComponent(dryml.DryComponent):
-    def __init__(self, *args, msg="test", dry_args=None, dry_kwargs=None, **kwargs):
+    def __init__(self, *args, msg="test", dry_args=None,
+                 dry_kwargs=None, **kwargs):
         dry_args = dryml.utils.init_arg_list_handler(dry_args)
         dry_kwargs = dryml.utils.init_arg_dict_handler(dry_kwargs)
         dry_kwargs['msg'] = msg

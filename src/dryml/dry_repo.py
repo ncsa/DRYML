@@ -1,15 +1,15 @@
 import os
-from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, change_object_cls
-from dryml.dry_selector import DrySelector
+from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, \
+    change_object_cls
 from dryml.utils import get_current_cls, path_needs_directory
 from typing import Optional, Callable
-import io
-import enum
 import tqdm
+
 
 # This type will act as a fascade for the various DryObject* types.
 class DryRepo(object):
-    def __init__(self, directory:Optional[str]=None, create:bool=False, load_objects:bool=True, **kwargs):
+    def __init__(self, directory: Optional[str] = None, create: bool = False,
+                 load_objects: bool = True, **kwargs):
         super().__init__(**kwargs)
 
         # A dictionary of objects
@@ -18,8 +18,9 @@ class DryRepo(object):
         # Model list (for iteration)
         self.obj_list = []
 
-        if directory is not None: 
-            self.link_to_directory(directory, create=create, load_objects=load_objects)
+        if directory is not None:
+            self.link_to_directory(directory, create=create,
+                                   load_objects=load_objects)
 
         self._save_objs_on_deletion = False
 
@@ -28,16 +29,19 @@ class DryRepo(object):
         return self._save_objs_on_deletion
 
     @save_objs_on_deletion.setter
-    def save_objs_on_deletion(self, val:bool):
+    def save_objs_on_deletion(self, val: bool):
         if val and self.directory is None:
-            raise RuntimeError("Give the repo a directory if you want it to save objects upon deletion")
+            raise RuntimeError(
+                "Give the repo a directory if you want it to "
+                "save objects upon deletion")
         self._save_objs_on_deletion = val
 
     def __del__(self):
         if self.save_objs_on_deletion:
             self.save()
 
-    def link_to_directory(self, directory:str, create:bool=False, load_objects:bool=True):
+    def link_to_directory(self, directory: str, create: bool = False,
+                          load_objects: bool = True):
         # Check that directory exists
         if not os.path.exists(directory):
             if create:
@@ -49,20 +53,25 @@ class DryRepo(object):
     def number_of_objects(self):
         return len(self.obj_list)
 
-    def add_obj_def(self, cat_hash:str, ind_hash:str, obj_def:dict):
+    def add_obj_def(self, cat_hash: str, ind_hash: str, obj_def: dict):
         cat_dict = self.obj_dict.get(cat_hash, {})
         if ind_hash in cat_dict:
-            raise ValueError("Object {ind_hash} in category {cat_hash} already exists in the repo!")
+            raise ValueError(
+                f"Object {ind_hash} in category {cat_hash} "
+                "already exists in the repo!")
         cat_dict[ind_hash] = obj_def
         self.obj_dict[cat_hash] = cat_dict
         self.obj_list.append(obj_def)
 
-    def load_objects_from_directory(self, directory:Optional[str]=None, selector:Optional[Callable]=None, verbose:bool=False):
+    def load_objects_from_directory(self, directory: Optional[str] = None,
+                                    selector: Optional[Callable] = None,
+                                    verbose: bool = False):
         "Method to refresh the internal dictionary of objects."
         need_directory = True
         if directory is None:
             if self.directory is None:
-                raise RuntimeError("No default directory selected for this repo!")
+                raise RuntimeError(
+                    "No default directory selected for this repo!")
             directory = self.directory
             need_directory = False
 
@@ -84,15 +93,18 @@ class DryRepo(object):
                         'filepath': filename
                     }
                     if need_directory:
-                        obj_definition['filepath'] = os.path.join(directory, obj_definition['filepath'])
+                        obj_definition['filepath'] = \
+                            os.path.join(directory,
+                                         obj_definition['filepath'])
                     self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
                     num_loaded += 1
             except Exception as e:
-                print(f"WARNING! Malformed file found! {full_filepath} skipping load Error: {e}")
+                print(f"WARNING! Malformed file found! {full_filepath}"
+                      f"skipping load Error: {e}")
         if verbose:
             print(f"Loaded {num_loaded} objects")
 
-    def add_object(self, obj: DryObject, filepath:Optional[str]=None):
+    def add_object(self, obj: DryObject, filepath: Optional[str] = None):
         # Add a single object
         obj_cat_hash = obj.get_category_hash()
         obj_hash = obj.get_individual_hash()
@@ -108,8 +120,9 @@ class DryRepo(object):
             self.add_object(obj)
 
     def make_container_handler(self,
-            load_object:bool=True,
-            open_container:bool=True, update:bool=True):
+                               load_object: bool = True,
+                               open_container: bool = True,
+                               update: bool = True):
         def container_handler(obj_container):
             def container_opener(obj_container):
                 if open_container:
@@ -121,7 +134,8 @@ class DryRepo(object):
                     filepath = obj_container['filepath']
                     if path_needs_directory(filepath):
                         if self.directory is None:
-                            raise RuntimeError("Repo is not linked to a directory!")
+                            raise RuntimeError(
+                                "Repo is not linked to a directory!")
                         filepath = os.path.join(self.directory, filepath)
                     with DryObjectFile(filepath) as f:
                         obj_container['val'] = f.load_object(update=update)
@@ -135,33 +149,39 @@ class DryRepo(object):
             elif isinstance(obj_container['val'], DryObject):
                 return container_opener(obj_container)
             else:
-                raise RuntimeError(f"Unsupported value type: {type(obj_container['val'])}")
+                raise RuntimeError(
+                    f"Unsupported value type: {type(obj_container['val'])}")
 
         return container_handler
 
-    def make_filter_func(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            only_objs:bool=False):
+    def make_filter_func(
+            self,
+            selector: Optional[Callable] = None,
+            sel_args=None, sel_kwargs=None,
+            only_objs: bool = False):
         if sel_args is None:
             sel_args = []
         if sel_kwargs is None:
             sel_kwargs = {}
+
         def filter_func(obj_container):
             if isinstance(obj_container['val'], str):
                 if only_objs:
                     return False
-                # This container just a string, we need to load from disk to check against the selector
+                # This container just a string, we need to
+                # load from disk to check against the selector
                 filepath = obj_container['val']
                 if path_needs_directory(filepath):
                     if self.directory is None:
-                         raise RuntimeError("Repo is not connected to any directory!")
+                        raise RuntimeError(
+                            "Repo is not connected to any directory!")
                     filepath = os.path.join(self.directory, filepath)
                 if selector is not None:
                     with DryObjectFile(filepath) as f:
                         if selector(f, *sel_args, **sel_kwargs):
                             return True
                         else:
-                    	    return False
+                            return False
                 else:
                     return True
             elif isinstance(obj_container['val'], DryObject):
@@ -183,13 +203,17 @@ class DryRepo(object):
                 else:
                     return True
             else:
-                raise RuntimeError(f"Unsupported value type: {type(obj_container['val'])}")
+                raise RuntimeError(
+                    f"Unsupported value type: {type(obj_container['val'])}")
         return filter_func
 
     def get(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            load_objects:bool=True, update:bool=True, open_container:bool=True,
-            verbose:bool=True):
+            selector: Optional[Callable] = None,
+            sel_args=None, sel_kwargs=None,
+            load_objects: bool = True,
+            update: bool = True,
+            open_container: bool = True,
+            verbose: bool = True):
         # Handle arguments for filter function
         only_objs = True
         if load_objects:
@@ -206,16 +230,23 @@ class DryRepo(object):
 
         # Build container handler
         container_handler = \
-        	self.make_container_handler(
+            self.make_container_handler(
                 update=update,
                 open_container=open_container)
         return list(map(container_handler, obj_list))
 
     def apply(self,
-            func, func_args=None, func_kwargs=None,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            update:bool=True, verbose:bool=False, load_objects:bool=False, open_container:bool=True):
-        "Apply a function to all objects tracked by the repo. We can also use a DrySelector to apply only to specific models"
+              func, func_args=None, func_kwargs=None,
+              selector: Optional[Callable] = None,
+              sel_args=None, sel_kwargs=None,
+              update: bool = True,
+              verbose: bool = False,
+              load_objects: bool = False,
+              open_container: bool = True):
+        """
+        Apply a function to all objects tracked by the repo.
+        We can also use a DrySelector to apply only to specific models
+        """
         if func_args is None:
             func_args = []
         if func_kwargs is None:
@@ -227,8 +258,11 @@ class DryRepo(object):
 
         # Get object list
         objs = self.get(
-            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            update=update, load_objects=load_objects, open_container=open_container)
+            selector=selector,
+            sel_args=sel_args, sel_kwargs=sel_kwargs,
+            update=update,
+            load_objects=load_objects,
+            open_container=open_container)
 
         # apply function to objects
         if verbose:
@@ -242,9 +276,13 @@ class DryRepo(object):
         else:
             return results
 
-    def reload_objs(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            update:bool=False, reload:bool=False, as_cls=None):
+    def reload_objs(
+            self,
+            selector: Optional[Callable] = None,
+            sel_args=None, sel_kwargs=None,
+            update: bool = False,
+            reload: bool = False,
+            as_cls=None):
         if self.directory is None:
             raise RuntimeError("Repo directory needs to be set for reloading.")
 
@@ -261,13 +299,15 @@ class DryRepo(object):
             obj_container['val'] = change_object_cls(obj, new_cls)
             del obj
 
-        self.apply(reload_func,
+        self.apply(
+            reload_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
 
     def save(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None,
-            directory:Optional[str]=None):
+             selector: Optional[Callable] = None,
+             sel_args=None, sel_kwargs=None,
+             directory: Optional[str] = None):
 
         def save_func(obj_container):
             obj = obj_container['val']
@@ -275,23 +315,28 @@ class DryRepo(object):
                 raise RuntimeError("Can only save currently loaded DryObject")
             if directory is None:
                 if 'filepath' not in obj_container:
-                    obj_container['filepath'] = obj.get_individual_hash()+'.dry'
+                    obj_container['filepath'] = \
+                        obj.get_individual_hash()+'.dry'
                 filepath = obj_container['filepath']
                 if path_needs_directory(filepath):
                     if self.directory is None:
-                        raise RuntimeError("Repo's directory is not set. Set the directory.")
+                        raise RuntimeError(
+                            "Repo's directory is not set. Set the directory.")
                     filepath = os.path.join(self.directory, filepath)
             else:
                 _, tail = os.path.split(obj_container['filepath'])
                 filepath = os.path.join(directory, tail)
             obj.save_self(filepath)
 
-        self.apply(save_func,
+        self.apply(
+            save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
 
-    def save_and_cache(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
+    def save_and_cache(
+            self,
+            selector: Optional[Callable] = None,
+            sel_args=None, sel_kwargs=None):
         "Save and then delete objects. Replace their entries with strings"
 
         def save_func(obj_container):
@@ -304,7 +349,8 @@ class DryRepo(object):
             orig_filepath = filepath
             if path_needs_directory(filepath):
                 if self.directory is None:
-                    raise RuntimeError("Repo's directory is not set. Set the directory.")
+                    raise RuntimeError(
+                        "Repo's directory is not set. Set the directory.")
                 filepath = os.path.join(self.directory, filepath)
             obj.save_self(filepath)
             del obj
@@ -313,12 +359,15 @@ class DryRepo(object):
             else:
                 obj_container['val'] = orig_filepath
 
-        self.apply(save_func,
+        self.apply(
+            save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
 
-    def delete_objs(self,
-            selector:Optional[Callable]=None, sel_args=None, sel_kwargs=None):
+    def delete_objs(
+            self,
+            selector: Optional[Callable] = None,
+            sel_args=None, sel_kwargs=None):
         "Unload and delete from disk selected models"
 
         # Get all selected objects
@@ -330,19 +379,22 @@ class DryRepo(object):
             filepath = obj_container['filepath']
             if path_needs_directory(filepath):
                 if self.directory is None:
-                    raise RuntimeError("Repo's directory is not set. Set the directory.")
+                    raise RuntimeError(
+                        "Repo's directory is not set. Set the directory.")
                 filepath = os.path.join(self.directory, filepath)
 
             obj = obj_container['val']
             if type(obj) is not str:
-               print(self.obj_dict)
-               print(self.obj_list)
-               # Delete the object from internal tracking
-               del self.obj_dict[obj.get_category_hash()][obj.get_individual_hash()]
-               # Delete the object from object list
-               del self.obj_list[self.obj_list.index(obj_container)]
-               # Delete the object itself.
-               del obj
+                print(self.obj_dict)
+                print(self.obj_list)
+                # Delete the object from internal tracking
+                cat_hash = obj.get_category_hash()
+                ind_hash = obj.get_individual_hash()
+                del self.obj_dict[cat_hash][ind_hash]
+                # Delete the object from object list
+                del self.obj_list[self.obj_list.index(obj_container)]
+                # Delete the object itself.
+                del obj
 
             # delete the container
             del obj_container
