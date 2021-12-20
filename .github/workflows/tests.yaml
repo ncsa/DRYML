@@ -22,6 +22,10 @@ jobs:
           pip install pytest
           pip install pytest-cov
 
+      - name: Install DRYML
+        run: |
+          python setup.py install
+
       - name: Investigate
         run: |
           ls
