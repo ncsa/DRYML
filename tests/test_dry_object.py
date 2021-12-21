@@ -325,3 +325,13 @@ def test_change_obj_cls_1():
 
     assert type(obj2) is objs.TestClassA2
     assert obj1.dry_kwargs['item'] == obj2.dry_kwargs['item']
+
+
+def test_object_def_1():
+    import objects
+    obj_def = dryml.DryObjectDefinition(objects.HelloInt, msg=10)
+    other_def = dryml.DryObjectDefinition.from_dict({'cls': 'objects.HelloInt', 'dry_kwargs': {'msg':10}})
+
+    assert obj_def['cls'] is other_def['cls']
+    assert obj_def['dry_args'] == obj_def['dry_args']
+    assert obj_def['dry_kwargs'] == obj_def['dry_kwargs']

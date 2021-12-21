@@ -59,8 +59,8 @@ class DryObjectDefinition(collections.UserDict):
         if isinstance(def_dict['cls'], str):
             cls = get_class_from_str(def_dict['cls'])
         return DryObjectDefinition(cls,
-            dry_args=def_dict['dry_args'],
-            dry_kwargs=def_dict['dry_kwargs'])
+            dry_args=def_dict.get('dry_args', DryList()),
+            dry_kwargs=def_dict.get('dry_kwargs', DryConfig()))
 
     def __init__(self, cls: Type,
                  *args, **kwargs):
