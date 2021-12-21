@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import os
 import dill
 import pickle
@@ -9,10 +10,11 @@ import io
 import zipfile
 import uuid
 import copy
-from typing import IO, Union, Optional, Type
+from typing import IO, Union, Optional, Type, Mapping
 from dryml.dry_config import DryConfig, DryList
 from dryml.utils import init_arg_list_handler, init_arg_dict_handler, \
-    get_hashed_id, get_class_str, get_current_cls, pickler
+    get_hashed_id, get_class_str, get_current_cls, get_class_from_str, \
+    pickler
 
 FileType = Union[str, IO[bytes]]
 
@@ -49,6 +51,45 @@ def compute_obj_hash_str(cls: type, args: DryList, kwargs: DryConfig,
     else:
         kwargs_hash_str = kwargs.get_hash_str()
     return class_hash_str+args_hash_str+kwargs_hash_str
+
+
+class DryObjectDefinition(collections.UserDict):
+    @staticmethod
+    def from_dict(def_dict: Mapping):
+        if isinstance(def_dict['cls'], str):
+            cls = get_class_from_str(def_dict['cls'])
+        return DryObjectDefinition(cls,
+            dry_args=def_dict['dry_args'],
+            dry_kwargs=def_dict['dry_kwargs'])
+
+    def __init__(self, cls: Type,
+                 *args, **kwargs):
+        super().__init__()
+        self['cls'] = cls
+        self['dry_args'] = DryList(args)
+        self['dry_kwargs'] = DryConfig(kwargs)
+
+    def to_dict(self):
+        return {
+            'cls': get_class_str(self['cls']),
+            'dry_args': self['dry_args'],
+            'dry_kwargs': self['dry_kwargs'],
+        }
+
+    def __call__(self):
+        "Construct an object"
+        return self.cls(*self.args, **self.kwargs)
+
+    def get_hash_str(self):
+        # For DryObjectDefinition, we can't use id.
+        return compute_obj_hash_str(self['cls'], self['dry_args'],
+                                    self['dry_kwargs'], no_id=True)
+
+    def get_hash(self):
+        return hash(self.get_hash_str())
+
+    def get_category_hash(self):
+        return get_hashed_id(self.get_hash_str())
 
 
 class DryObjectFile(object):
@@ -327,29 +368,18 @@ class DryObject(object):
 
 
 class DryObjectFactory(object):
-    def __init__(self, cls, *args, callbacks=[], **kwargs):
-        self.cls = cls
-        self.args = DryList(args)
-        self.kwargs = DryConfig(kwargs)
+    def __init__(self, obj_def: DryObjectDefinition, callbacks=[]):
+        self.obj_def = obj_def
         self.callbacks = callbacks
 
     def add_callback(self, callback):
         self.callbacks.append(callback)
 
     def __call__(self):
-        obj = self.cls(*self.args, **self.kwargs)
+        obj = self.obj_def()
         for callback in self.callbacks:
             # Call each callback
             callback(obj)
         return obj
 
-    def get_hash_str(self):
-        # For DryObjectFactory, we can't use id.
-        return compute_obj_hash_str(self.cls, self.args,
-                                    self.kwargs, no_id=True)
 
-    def get_hash(self):
-        return hash(self.get_hash_str())
-
-    def get_category_hash(self):
-        return get_hashed_id(self.get_hash_str())

@@ -42,12 +42,25 @@ def get_class_str(obj):
                          obj.__class__.__name__])
 
 
-def get_current_cls(cls: Type, reload: bool = False):
-    module = importlib.import_module(inspect.getmodule(cls).__name__)
+def get_class_by_name(module: str, cls: str, reload: bool = False):
+    module = importlib.import_module(module)
     # If indicated, reload the module.
     if reload:
         module = importlib.reload(module)
-    return getattr(module, cls.__name__)
+    return getattr(module, cls)
+
+
+def get_class_from_str(cls_str: str, reload: bool = False):
+    cls_split = split(cls_str, '.')
+    module_string = '.'.join(cls_split[:-1])
+    cls_name = cls_split[-1]
+    return get_class_by_name(module_string, cls_name, reload=reload)
+
+
+def get_current_cls(cls: Type, reload: bool = False):
+    return get_class_by_name(
+        inspect.getmodule(cls).__name__,
+        cls.__name__, reload=reload)
 
 
 def get_hashed_id(hashstr: str):

@@ -122,6 +122,7 @@ def test_basic_object_def_update_1():
         time.sleep(1.1)
         with open('tests/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=1))
+
         import test_objs
         importlib.reload(test_objs)
 
@@ -311,9 +312,9 @@ def test_object_file_hash_3(create_name):
     obj1 = objs.HelloStr(msg="Test")
     assert obj1.save_self(create_name)
 
-    f = dryml.DryObjectFactory(objs.HelloStr, msg="Test")
+    f = dryml.DryObjectFactory(dryml.DryObjectDefinition(objs.HelloStr, msg="Test"))
 
-    assert obj1.get_hash() == f.get_hash()
+    assert obj1.get_hash() == f.obj_def.get_hash()
 
 
 def test_change_obj_cls_1():
