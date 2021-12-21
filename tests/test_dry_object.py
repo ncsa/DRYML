@@ -339,3 +339,25 @@ def test_object_def_1():
     assert obj_def['cls'] is other_def['cls']
     assert obj_def['dry_args'] == obj_def['dry_args']
     assert obj_def['dry_kwargs'] == obj_def['dry_kwargs']
+
+
+def test_object_def_2():
+    import objects
+    obj_def = dryml.DryObjectDefinition(objects.HelloInt, msg=10)
+
+    new_obj = obj_def()
+
+    assert isinstance(new_obj, objects.HelloInt)
+    assert new_obj.dry_kwargs['msg'] == 10
+
+
+def test_object_fac_1():
+    import objects
+
+    obj_fac = dryml.DryObjectFactory(
+        dryml.DryObjectDefinition(objects.HelloInt, msg=10))
+
+    obj = obj_fac()
+
+    assert isinstance(obj, objects.HelloInt)
+    assert obj.dry_kwargs['msg'] == 10

@@ -79,7 +79,7 @@ class DryObjectDefinition(collections.UserDict):
 
     def __call__(self):
         "Construct an object"
-        return self.cls(*self.args, **self.kwargs)
+        return self['cls'](*self['dry_args'], **self['dry_kwargs'])
 
     def get_hash_str(self):
         # For DryObjectDefinition, we can't use id.
