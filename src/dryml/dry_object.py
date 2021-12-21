@@ -72,8 +72,8 @@ class DryObjectDefinition(collections.UserDict):
     def to_dict(self):
         return {
             'cls': get_class_str(self['cls']),
-            'dry_args': self['dry_args'],
-            'dry_kwargs': self['dry_kwargs'],
+            'dry_args': self['dry_args'].data,
+            'dry_kwargs': self['dry_kwargs'].data,
         }
 
     def __call__(self):

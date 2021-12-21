@@ -51,7 +51,7 @@ def get_class_by_name(module: str, cls: str, reload: bool = False):
 
 
 def get_class_from_str(cls_str: str, reload: bool = False):
-    cls_split = split(cls_str, '.')
+    cls_split = cls_str.split('.')
     module_string = '.'.join(cls_split[:-1])
     cls_name = cls_split[-1]
     return get_class_by_name(module_string, cls_name, reload=reload)
