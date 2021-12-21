@@ -312,7 +312,8 @@ def test_object_file_hash_3(create_name):
     obj1 = objs.HelloStr(msg="Test")
     assert obj1.save_self(create_name)
 
-    f = dryml.DryObjectFactory(dryml.DryObjectDefinition(objs.HelloStr, msg="Test"))
+    f = dryml.DryObjectFactory(dryml.DryObjectDefinition(
+        objs.HelloStr, msg="Test"))
 
     assert obj1.get_hash() == f.obj_def.get_hash()
 
@@ -330,7 +331,10 @@ def test_change_obj_cls_1():
 def test_object_def_1():
     import objects
     obj_def = dryml.DryObjectDefinition(objects.HelloInt, msg=10)
-    other_def = dryml.DryObjectDefinition.from_dict({'cls': 'objects.HelloInt', 'dry_kwargs': {'msg':10}})
+    other_def = dryml.DryObjectDefinition.from_dict({
+        'cls': 'objects.HelloInt',
+        'dry_kwargs': {'msg': 10}
+    })
 
     assert obj_def['cls'] is other_def['cls']
     assert obj_def['dry_args'] == obj_def['dry_args']

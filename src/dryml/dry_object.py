@@ -58,7 +58,8 @@ class DryObjectDefinition(collections.UserDict):
     def from_dict(def_dict: Mapping):
         if isinstance(def_dict['cls'], str):
             cls = get_class_from_str(def_dict['cls'])
-        return DryObjectDefinition(cls,
+        return DryObjectDefinition(
+            cls,
             dry_args=def_dict.get('dry_args', DryList()),
             dry_kwargs=def_dict.get('dry_kwargs', DryConfig()))
 
@@ -381,5 +382,3 @@ class DryObjectFactory(object):
             # Call each callback
             callback(obj)
         return obj
-
-
