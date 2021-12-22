@@ -26,19 +26,19 @@ def check_if_allowed(val):
     return True
 
 
-class DryCollectionInterface(object):
+class DryConfigInterface(object):
     def __init__(self, *args, **kwargs):
         # Initialize object
         super().__init__(*args, **kwargs)
         if not check_if_allowed(self.data):
             raise TypeError(
-                "DryCollection initialized with disallowed values!")
+                "DryConfig initialized with disallowed values!")
 
     def __setitem__(self, key, value):
         if not check_if_allowed(key):
-            raise TypeError(f"Key {key} not allowed in a DryCollection")
+            raise TypeError(f"Key {key} not allowed in a DryConfig")
         if not check_if_allowed(value):
-            raise TypeError(f"Value {value} not allowed in a DryCollection")
+            raise TypeError(f"Value {value} not allowed in a DryConfig")
         # Call parent class functions
         super().__setitem__(key, value)
 
@@ -57,12 +57,12 @@ class DryCollectionInterface(object):
         return hash(self.get_hash_str())
 
 
-class DryArgs(DryCollectionInterface, collections.UserList):
+class DryArgs(DryConfigInterface, collections.UserList):
     def append(self, val):
         if not check_if_allowed(val):
             raise TypeError(f"Value {val} not allowed in a DryList")
         super().append(val)
 
 
-class DryKwargs(DryCollectionInterface, collections.UserDict):
+class DryKwargs(DryConfigInterface, collections.UserDict):
     pass

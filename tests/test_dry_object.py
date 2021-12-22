@@ -315,7 +315,7 @@ def test_object_file_hash_3(create_name):
     f = dryml.DryObjectFactory(dryml.DryObjectDefinition(
         objs.HelloStr, msg="Test"))
 
-    assert obj1.get_hash() == f.obj_def.get_hash()
+    assert obj1.get_hash(no_id=True) == f.obj_def.get_hash(no_id=True)
 
 
 def test_change_obj_cls_1():

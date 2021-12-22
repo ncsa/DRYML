@@ -81,16 +81,29 @@ class DryObjectDefinition(collections.UserDict):
         "Construct an object"
         return self['cls'](*self['dry_args'], **self['dry_kwargs'])
 
-    def get_hash_str(self):
-        # For DryObjectDefinition, we can't use id.
-        return compute_obj_hash_str(self['cls'], self['dry_args'],
-                                    self['dry_kwargs'], no_id=True)
+    def __hash__(self):
+        return self.get_hash(no_id=False)
 
-    def get_hash(self):
-        return hash(self.get_hash_str())
+    def __eq__(self, rhs: DryObjectDefinition):
+        return hash(self) == hash(rhs)
+
+    def get_hash_str(self, no_id=False):
+        if not no_id:
+            if 'dry_id' not in self['dry_kwargs']:
+                raise RuntimeError(
+                    "Tried to make an individual hash on a "
+                    "DryObjectDefinition without a dry_id!")
+        return compute_obj_hash_str(self['cls'], self['dry_args'],
+                                    self['dry_kwargs'], no_id=no_id)
+
+    def get_hash(self, no_id=False):
+        return hash(self.get_hash_str(no_id=no_id))
+
+    def get_individual_hash(self):
+        return get_hashed_id(self.get_hash_str(no_id=False))
 
     def get_category_hash(self):
-        return get_hashed_id(self.get_hash_str())
+        return get_hashed_id(self.get_hash_str(no_id=True))
 
 
 class DryObjectFile(object):
@@ -339,6 +352,9 @@ class DryObject(object):
     def save_self(self, file: FileType, version: int = 1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)
 
+    def __hash__(self):
+        return self.get_hash(no_id=False)
+
     def get_hash_str(self, no_id=True):
         return compute_obj_hash_str(type(self), self.dry_args,
                                     self.dry_kwargs, no_id=no_id)
@@ -376,6 +392,9 @@ class DryObject(object):
 
 class DryObjectFactory(object):
     def __init__(self, obj_def: DryObjectDefinition, callbacks=[]):
+        if 'dry_id' in obj_def:
+            raise ValueError(
+                "An Object factory can't use a definition with a dry_id")
         self.obj_def = obj_def
         self.callbacks = callbacks
 

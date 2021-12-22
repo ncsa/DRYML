@@ -4,6 +4,7 @@ from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
 from dryml.dry_selector import DrySelector
 from dryml.dry_repo import DryRepo
 from dryml.dry_component import DryComponent
+from dryml.dry_collections import DryList
 from dryml.dry_model_average import DryModelAverage
 from dryml.workshop import Workshop
 
@@ -18,6 +19,7 @@ __all__ = [
     DryObjectFactory,
     DrySelector,
     DryRepo,
+    DryList,
     DryComponent,
     DryModelAverage,
     Workshop,
