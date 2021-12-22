@@ -4,12 +4,12 @@ import io
 import pickle
 
 
-def test_dry_config_add_items_1():
+def test_dry_kwargs_add_items_1():
     test_val = {'a': 1, 1.0: 'test', 5: {'A': 'C', 'B': 20},
                 (1, 'a'): 'test2', 'nest': {'Z': {'Y': {'X': 5}}}}
 
     # Val shouldn't raise error here
-    stored_val = dryml.DryConfig(test_val)
+    stored_val = dryml.DryKwargs(test_val)
 
     buffer = io.BytesIO()
 
@@ -18,22 +18,22 @@ def test_dry_config_add_items_1():
     new_val = pickle.loads(buffer.read())
 
     assert new_val == test_val
-    assert dryml.DryConfig(new_val) == stored_val
-    assert dryml.DryConfig(new_val).get_hash() == stored_val.get_hash()
+    assert dryml.DryKwargs(new_val) == stored_val
+    assert dryml.DryKwargs(new_val).get_hash() == stored_val.get_hash()
 
 
 @pytest.mark.xfail
-def test_dry_config_add_items_2():
+def test_dry_kwargs_add_items_2():
     test_val = {'a': lambda x: x}
 
-    dryml.DryConfig(test_val)
+    dryml.DryKwargs(test_val)
 
 
-def test_dry_list_add_items_1():
+def test_dry_args_add_items_1():
     test_val = [1, 1.0, {'A': 'C', 'B': 20}, (1, 'a'), {'Z': {'Y': {'X': 5}}}]
 
     # Val shouldn't raise error here
-    stored_val = dryml.DryList(test_val)
+    stored_val = dryml.DryArgs(test_val)
 
     buffer = io.BytesIO()
 
@@ -42,12 +42,12 @@ def test_dry_list_add_items_1():
     new_val = pickle.loads(buffer.read())
 
     assert new_val == test_val
-    assert dryml.DryList(new_val) == stored_val
-    assert dryml.DryList(new_val).get_hash() == stored_val.get_hash()
+    assert dryml.DryArgs(new_val) == stored_val
+    assert dryml.DryArgs(new_val).get_hash() == stored_val.get_hash()
 
 
 @pytest.mark.xfail
-def test_dry_list_add_items_2():
+def test_dry_args_add_items_2():
     test_val = [lambda x: x]
 
-    dryml.DryList(test_val)
+    dryml.DryArgs(test_val)

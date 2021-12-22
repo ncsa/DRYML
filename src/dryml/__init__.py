@@ -1,4 +1,4 @@
-from dryml.dry_config import DryList, DryConfig
+from dryml.dry_config import DryArgs, DryKwargs
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
     DryObjectDefinition, load_object, save_object, change_object_cls
 from dryml.dry_selector import DrySelector
@@ -10,8 +10,8 @@ from dryml.workshop import Workshop
 __version__ = "0.0.0"
 
 __all__ = [
-    DryList,
-    DryConfig,
+    DryArgs,
+    DryKwargs,
     DryObject,
     DryObjectFile,
     DryObjectDefinition,

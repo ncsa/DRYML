@@ -57,12 +57,12 @@ class DryCollectionInterface(object):
         return hash(self.get_hash_str())
 
 
-class DryList(DryCollectionInterface, collections.UserList):
+class DryArgs(DryCollectionInterface, collections.UserList):
     def append(self, val):
         if not check_if_allowed(val):
             raise TypeError(f"Value {val} not allowed in a DryList")
         super().append(val)
 
 
-class DryConfig(DryCollectionInterface, collections.UserDict):
+class DryKwargs(DryCollectionInterface, collections.UserDict):
     pass

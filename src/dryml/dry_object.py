@@ -11,7 +11,7 @@ import zipfile
 import uuid
 import copy
 from typing import IO, Union, Optional, Type, Mapping
-from dryml.dry_config import DryConfig, DryList
+from dryml.dry_config import DryKwargs, DryArgs
 from dryml.utils import init_arg_list_handler, init_arg_dict_handler, \
     get_hashed_id, get_class_str, get_current_cls, get_class_from_str, \
     pickler
@@ -38,7 +38,7 @@ def load_zipfile(file: FileType, exact_path: bool = False,
     return file
 
 
-def compute_obj_hash_str(cls: type, args: DryList, kwargs: DryConfig,
+def compute_obj_hash_str(cls: type, args: DryArgs, kwargs: DryKwargs,
                          no_id: bool = True):
     class_hash_str = get_class_str(cls)
     args_hash_str = args.get_hash_str()
@@ -60,15 +60,15 @@ class DryObjectDefinition(collections.UserDict):
             cls = get_class_from_str(def_dict['cls'])
         return DryObjectDefinition(
             cls,
-            dry_args=def_dict.get('dry_args', DryList()),
-            dry_kwargs=def_dict.get('dry_kwargs', DryConfig()))
+            *def_dict.get('dry_args', DryArgs()),
+            **def_dict.get('dry_kwargs', DryKwargs()))
 
     def __init__(self, cls: Type,
                  *args, **kwargs):
         super().__init__()
         self['cls'] = cls
-        self['dry_args'] = DryList(args)
-        self['dry_kwargs'] = DryConfig(kwargs)
+        self['dry_args'] = DryArgs(args)
+        self['dry_kwargs'] = DryKwargs(kwargs)
 
     def to_dict(self):
         return {
@@ -168,8 +168,8 @@ class DryObjectFile(object):
         config_data = self.load_config_v1()
 
         # Get arguments
-        self.kwargs = DryConfig(config_data['kwargs'])
-        self.args = DryList(config_data['args'])
+        self.kwargs = DryKwargs(config_data['kwargs'])
+        self.args = DryArgs(config_data['args'])
 
         # Get class definition
         self.cls = self.load_class_def_v1(update=update, reload=reload)
@@ -214,7 +214,7 @@ class DryObjectFile(object):
 
     def save_meta_data(self):
         # Meta_data
-        meta_data = DryConfig({
+        meta_data = DryKwargs({
             'version': 1
         })
 
@@ -223,7 +223,7 @@ class DryObjectFile(object):
             f.write(meta_dump)
 
     def save_config_v1(self):
-        config_data = DryConfig({
+        config_data = DryKwargs({
             'kwargs': self.kwargs.data,
             'args': self.args.data
         })
@@ -311,16 +311,22 @@ class DryObject(object):
     def __init__(self, *args, dry_args=None, dry_kwargs=None,
                  dry_id=None, **kwargs):
         super().__init__(*args, **kwargs)
-        # Use DryConfig/DryList object to coerse args/kwargs to proper
+        # Use DryKwargs/DryArgs object to coerse args/kwargs to proper
         # json serializable form.
-        self.dry_args = DryList(init_arg_list_handler(dry_args))
-        self.dry_kwargs = DryConfig(init_arg_dict_handler(dry_kwargs))
+        self.dry_args = DryArgs(init_arg_list_handler(dry_args))
+        self.dry_kwargs = DryKwargs(init_arg_dict_handler(dry_kwargs))
         # Generate unique id for this object. (Meant to separate between
         # multiple instances of same object)
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())
         else:
             self.dry_kwargs['dry_id'] = dry_id
+
+    def get_definition(self):
+        return DryObjectDefinition(
+            type(self),
+            *self.dry_args,
+            **self.dry_kwargs)
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Should be the last object inherited
