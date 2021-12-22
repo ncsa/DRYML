@@ -207,6 +207,14 @@ class DryRepo(object):
                     f"Unsupported value type: {type(obj_container['val'])}")
         return filter_func
 
+    def get_obj_by_hash(
+            self,
+            cat_hash,
+            ind_hash):
+        obj_container = self.obj_dict[cat_hash][ind_hash]
+        container_handler = self.make_container_handler()
+        return container_handler(obj_container)
+
     def get(self,
             selector: Optional[Callable] = None,
             sel_args=None, sel_kwargs=None,

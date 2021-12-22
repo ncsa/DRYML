@@ -54,6 +54,12 @@ def compute_obj_hash_str(cls: type, args: DryArgs, kwargs: DryKwargs,
 
 
 class DryObjectDefinition(collections.UserDict):
+    # We may have to adjust this behavior in the future.
+    # For now, this is the only way I can think to have nested
+    # collections of dry objects all find objects from the same
+    # repository.
+    call_repo = None
+
     @staticmethod
     def from_dict(def_dict: Mapping):
         if isinstance(def_dict['cls'], str):
@@ -77,9 +83,50 @@ class DryObjectDefinition(collections.UserDict):
             'dry_kwargs': self['dry_kwargs'].data,
         }
 
-    def __call__(self):
+    def __call__(self, repo=None):
         "Construct an object"
-        return self['cls'](*self['dry_args'], **self['dry_kwargs'])
+        reset_repo = False
+        construct_object = True
+
+        if repo is not None:
+            from dryml.dry_repo import DryRepo
+            if not isinstance(repo, DryRepo):
+                raise TypeError(
+                    "Only objects of type DryRepo are supported for"
+                    " repo argument")
+            if DryObjectDefinition.call_repo is not None:
+                raise RuntimeError(
+                    "different call repos not currently supported")
+            else:
+                # Set the call_repo
+                DryObjectDefinition.call_repo = repo
+                reset_repo = True
+
+        # Check whether a repo was given in a prior call
+        if DryObjectDefinition.call_repo is not None:
+            cat_hash = self.get_category_hash()
+            try:
+                ind_hash = self.get_individual_hash()
+            except Exception as e:
+                print("Can't use a repo with a non-specific object"
+                      " definition")
+                raise e
+            try:
+                obj = DryObjectDefinition.call_repo.get_obj_by_hash(
+                    cat_hash, ind_hash)
+                construct_object = False
+            except Exception:
+                pass
+
+        if construct_object:
+            obj = self['cls'](*self['dry_args'], **self['dry_kwargs'])
+
+        # Reset the repo for this function
+        if reset_repo:
+            DryObjectDefinition.call_repo = None
+
+        # Return the result
+        return obj
 
     def __hash__(self):
         return self.get_hash(no_id=False)
@@ -292,6 +339,9 @@ class DryObjectFile(object):
 def load_object(file: Union[FileType, DryObjectFile],
                 update: bool = False, exact_path: bool = False,
                 reload: bool = False) -> DryObject:
+    """
+    A method for loading an object from disk.
+    """
     if not isinstance(file, DryObjectFile):
         with DryObjectFile(file, exact_path=exact_path) as dry_file:
             result_object = dry_file.load_object(update=update,
