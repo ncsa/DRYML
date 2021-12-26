@@ -1,2 +1,9 @@
 #!/bin/bash
-pytest --cov=dryml $@ ./tests
+
+if [ -z "$@" ]; then
+    dirs=./tests
+else
+    dirs=$@
+fi;
+
+pytest --cov=dryml ${dirs}
