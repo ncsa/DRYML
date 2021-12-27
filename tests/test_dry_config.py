@@ -19,7 +19,6 @@ def test_dry_kwargs_add_items_1():
 
     assert new_val == test_val
     assert dryml.DryKwargs(new_val) == stored_val
-    assert dryml.DryKwargs(new_val).get_hash() == stored_val.get_hash()
 
 
 @pytest.mark.xfail
@@ -43,7 +42,6 @@ def test_dry_args_add_items_1():
 
     assert new_val == test_val
     assert dryml.DryArgs(new_val) == stored_val
-    assert dryml.DryArgs(new_val).get_hash() == stored_val.get_hash()
 
 
 @pytest.mark.xfail

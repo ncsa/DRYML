@@ -227,7 +227,8 @@ def test_object_hash_1():
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj2 = objs.HelloStr(msg="Test")
-    assert obj1.get_hash(no_id=False) != obj2.get_hash(no_id=False)
+    assert obj1.definition().get_individual_id() != \
+        obj2.definition().get_individual_id()
 
 
 def test_object_hash_2():
@@ -235,7 +236,8 @@ def test_object_hash_2():
     import objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj2 = objs.HelloStr(msg="Test")
-    assert obj1.get_hash() == obj2.get_hash()
+    assert obj1.definition().get_category_id() == \
+        obj2.definition().get_category_id()
 
 
 @pytest.mark.usefixtures("create_name")
@@ -246,7 +248,8 @@ def test_object_hash_3(create_name):
     assert obj1.save_self(create_name)
 
     obj2 = dryml.load_object(create_name)
-    assert obj1.get_hash() == obj2.get_hash()
+    assert obj1.definition().get_category_id() == \
+        obj2.definition().get_category_id()
 
 
 @pytest.mark.usefixtures("create_name")
@@ -257,29 +260,8 @@ def test_object_hash_4(create_name):
     assert obj1.save_self(create_name)
 
     obj2 = dryml.load_object(create_name)
-    assert obj1.get_hash(no_id=False) == obj2.get_hash(no_id=False)
-
-
-@pytest.mark.usefixtures("create_name")
-def test_object_hash_5(create_name):
-    "Test that object hashes are the same after saving and restoring"
-    import objects as objs
-    obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self(create_name)
-
-    obj2 = dryml.load_object(create_name)
-    assert obj1.is_same_category(obj2)
-
-
-@pytest.mark.usefixtures("create_name")
-def test_object_hash_6(create_name):
-    "Test that loaded objects are identical hash wise"
-    import objects as objs
-    obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save_self(create_name)
-
-    obj2 = dryml.load_object(create_name)
-    assert obj1.is_identical(obj2)
+    assert obj1.definition().get_individual_id() == \
+        obj2.definition().get_individual_id()
 
 
 @pytest.mark.usefixtures("create_name")
@@ -290,7 +272,8 @@ def test_object_file_hash_1(create_name):
     assert obj1.save_self(create_name)
 
     with dryml.DryObjectFile(create_name) as dry_file:
-        assert obj1.get_hash() == dry_file.get_hash()
+        assert obj1.definition().get_category_id() == \
+            dry_file.definition().get_category_id()
 
 
 @pytest.mark.usefixtures("create_name")
@@ -301,8 +284,8 @@ def test_object_file_hash_2(create_name):
     assert obj1.save_self(create_name)
 
     with dryml.DryObjectFile(create_name) as dry_file:
-        assert obj1.get_hash_str(no_id=False) == \
-            dry_file.get_hash_str(no_id=False)
+        assert obj1.definition().get_individual_id() == \
+            dry_file.definition().get_individual_id()
 
 
 @pytest.mark.usefixtures("create_name")
@@ -312,10 +295,11 @@ def test_object_file_hash_3(create_name):
     obj1 = objs.HelloStr(msg="Test")
     assert obj1.save_self(create_name)
 
-    f = dryml.DryObjectFactory(dryml.DryObjectDefinition(
+    f = dryml.DryObjectFactory(dryml.DryObjectDef(
         objs.HelloStr, msg="Test"))
 
-    assert obj1.get_hash(no_id=True) == f.obj_def.get_hash(no_id=True)
+    assert obj1.definition().get_category_id() == \
+        f.obj_def.get_category_id()
 
 
 def test_change_obj_cls_1():
@@ -330,8 +314,8 @@ def test_change_obj_cls_1():
 
 def test_object_def_1():
     import objects
-    obj_def = dryml.DryObjectDefinition(objects.HelloInt, msg=10)
-    other_def = dryml.DryObjectDefinition.from_dict({
+    obj_def = dryml.DryObjectDef(objects.HelloInt, msg=10)
+    other_def = dryml.DryObjectDef.from_dict({
         'cls': 'objects.HelloInt',
         'dry_kwargs': {'msg': 10}
     })
@@ -343,9 +327,9 @@ def test_object_def_1():
 
 def test_object_def_2():
     import objects
-    obj_def = dryml.DryObjectDefinition(objects.HelloInt, msg=10)
+    obj_def = dryml.DryObjectDef(objects.HelloInt, msg=10)
 
-    new_obj = obj_def()
+    new_obj = obj_def.build()
 
     assert isinstance(new_obj, objects.HelloInt)
     assert new_obj.dry_kwargs['msg'] == 10
@@ -355,7 +339,7 @@ def test_object_fac_1():
     import objects
 
     obj_fac = dryml.DryObjectFactory(
-        dryml.DryObjectDefinition(objects.HelloInt, msg=10))
+        dryml.DryObjectDef(objects.HelloInt, msg=10))
 
     obj = obj_fac()
 

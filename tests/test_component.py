@@ -22,6 +22,7 @@ def test_basic_component_1(create_name):
 
     test_obj2 = dryml.load_object(create_name)
 
-    assert test_obj.get_individual_hash() == test_obj2.get_individual_hash()
+    assert test_obj.definition().get_individual_id() == \
+        test_obj2.definition().get_individual_id()
 
     assert test_obj2.dry_kwargs['msg'] == 'test1'

@@ -69,7 +69,8 @@ def test_selector_4():
     obj7 = objects.HelloStr(msg='test')
     obj8 = objects.HelloStr(msg='2test')
 
-    sel = dryml.DrySelector(cls=objects.TestBase, cls_str_compare=False)
+    sel = dryml.DrySelector(
+        cls=objects.TestBase, cls_str_compare=False, verbosity=2)
 
     assert sel(obj1)
     assert sel(obj2)
@@ -80,7 +81,8 @@ def test_selector_4():
     assert not sel(obj7)
     assert not sel(obj8)
 
-    sel = dryml.DrySelector(cls=objects.HelloObject, cls_str_compare=False)
+    sel = dryml.DrySelector(
+        cls=objects.HelloObject, cls_str_compare=False)
 
     assert not sel(obj1)
     assert not sel(obj2)

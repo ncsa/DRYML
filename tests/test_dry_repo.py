@@ -25,7 +25,8 @@ def test_add_retrieve_object_1(prep_and_clean_test_dir):
 
     assert len(objs) == 1
 
-    assert objs[0].get_individual_hash() == obj.get_individual_hash()
+    assert objs[0].definition().get_individual_id() == \
+        obj.definition().get_individual_id()
 
 
 def test_add_retrieve_objects_2():
@@ -86,23 +87,28 @@ def test_write_1(prep_and_clean_test_dir):
     obj_list = repo.get(selector=dryml.DrySelector(
         cls=objects.HelloStr, kwargs={'msg': 'test'}))
     assert len(obj_list) == 1
-    assert objs[0].get_individual_hash() == obj_list[0].get_individual_hash()
+    assert objs[0].definition().get_individual_id() == \
+        obj_list[0].definition().get_individual_id()
 
     obj_list = repo.get(selector=dryml.DrySelector(
         cls=objects.HelloInt, kwargs={'msg': 10}))
     assert len(obj_list) == 2
-    assert objs[1].get_category_hash() == obj_list[0].get_category_hash()
-    assert objs[1].get_category_hash() == obj_list[1].get_category_hash()
+    assert objs[1].definition().get_category_id() == \
+        obj_list[0].definition().get_category_id()
+    assert objs[1].definition().get_category_id() == \
+        obj_list[1].definition().get_category_id()
 
     obj_list = repo.get(selector=dryml.DrySelector(
         cls=objects.TestClassA, kwargs={'item': [10, 10]}))
     assert len(obj_list) == 1
-    assert objs[3].get_individual_hash() == obj_list[0].get_individual_hash()
+    assert objs[3].definition().get_individual_id() == \
+        obj_list[0].definition().get_individual_id()
 
     obj_list = repo.get(selector=dryml.DrySelector(
         cls=objects.TestClassB, args=['test']))
     assert len(obj_list) == 1
-    assert objs[4].get_individual_hash() == obj_list[0].get_individual_hash()
+    assert objs[4].definition().get_individual_id() == \
+        obj_list[0].definition().get_individual_id()
 
 
 def test_reload_1(prep_and_clean_test_dir):

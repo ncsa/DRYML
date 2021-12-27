@@ -1,9 +1,53 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, \
-    change_object_cls
+    DryObjectDef, change_object_cls
 from dryml.utils import get_current_cls, path_needs_directory
 from typing import Optional, Callable
 import tqdm
+
+
+class DryRepoContainer(object):
+    @classmethod
+    def build_from_filepath(filepath: str):
+        new_container = DryRepoContainer()
+        new_container.filepath = filepath
+        return new_container
+
+    @classmethod
+    def build_from_object(obj: DryObject, filepath: Optional[str] = None):
+        new_container = DryRepoContainer()
+        new_container.obj = obj
+        if filepath is not None:
+            new_container.filepath = filepath
+        return new_container
+
+    def __init__(self):
+        self._filepath = None
+        self._obj = None
+
+    def load(self, directory: Optional[str] = None,
+             update: bool = True, reload: bool = False) -> bool:
+        if self._obj is not None:
+            # Object is already loaded
+            return True
+        if self._filepath is None and directory is None:
+            raise RuntimeError(
+                "No filepath indicated, and no directory! "
+                "Can't load from disk.")
+        # Get full filepath of file
+        # Load object at filepath
+
+    @property
+    def obj(self):
+        if self.obj is None and self._filepath is None:
+            raise RuntimeError(
+                "Container has neither filepath nor object defined")
+
+        # Handle loading of file
+        # if self._obj is not None:
+        #    return self._obj
+        # else:
+        #    self._obj =
 
 
 # This type will act as a fascade for the various DryObject* types.
@@ -61,6 +105,9 @@ class DryRepo(object):
                 "already exists in the repo!")
         cat_dict[ind_hash] = obj_def
         self.obj_dict[cat_hash] = cat_dict
+        print("Adding object to repo")
+        print(f"cat id: {cat_hash}")
+        print(f"ind id: {ind_hash}")
         self.obj_list.append(obj_def)
 
     def load_objects_from_directory(self, directory: Optional[str] = None,
@@ -86,8 +133,9 @@ class DryRepo(object):
                         if not selector(f):
                             # Skip non selected objects
                             continue
-                    obj_cat_hash = f.get_category_hash()
-                    obj_hash = f.get_individual_hash()
+                    obj_def = f.definition()
+                    obj_cat_id = obj_def.get_category_id()
+                    obj_id = obj_def.get_individual_id()
                     obj_definition = {
                         'val': filename,
                         'filepath': filename
@@ -96,7 +144,7 @@ class DryRepo(object):
                         obj_definition['filepath'] = \
                             os.path.join(directory,
                                          obj_definition['filepath'])
-                    self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
+                    self.add_obj_def(obj_cat_id, obj_id, obj_definition)
                     num_loaded += 1
             except Exception as e:
                 print(f"WARNING! Malformed file found! {full_filepath}"
@@ -106,12 +154,13 @@ class DryRepo(object):
 
     def add_object(self, obj: DryObject, filepath: Optional[str] = None):
         # Add a single object
-        obj_cat_hash = obj.get_category_hash()
-        obj_hash = obj.get_individual_hash()
+        obj_def = obj.definition()
+        obj_cat_id = obj_def.get_category_id()
+        obj_ind_id = obj_def.get_individual_id()
         obj_definition = {'val': obj}
         if filepath is not None:
             obj_definition['filepath'] = filepath
-        self.add_obj_def(obj_cat_hash, obj_hash, obj_definition)
+        self.add_obj_def(obj_cat_id, obj_ind_id, obj_definition)
 
     def add_objects(self, obj_factory: DryObjectFactory, num=1):
         # Create numerous objects from a factory function
@@ -207,11 +256,18 @@ class DryRepo(object):
                     f"Unsupported value type: {type(obj_container['val'])}")
         return filter_func
 
-    def get_obj_by_hash(
+    def get_obj(
             self,
-            cat_hash,
-            ind_hash):
-        obj_container = self.obj_dict[cat_hash][ind_hash]
+            obj_def: DryObjectDef):
+        cat_id = obj_def.get_category_id()
+        ind_id = obj_def.get_individual_id()
+        return self.get_obj_by_id(cat_id, ind_id)
+
+    def get_obj_by_id(
+            self,
+            cat_id,
+            ind_id):
+        obj_container = self.obj_dict[cat_id][ind_id]
         container_handler = self.make_container_handler()
         return container_handler(obj_container)
 
@@ -324,7 +380,7 @@ class DryRepo(object):
             if directory is None:
                 if 'filepath' not in obj_container:
                     obj_container['filepath'] = \
-                        obj.get_individual_hash()+'.dry'
+                        obj.definition().get_individual_id()+'.dry'
                 filepath = obj_container['filepath']
                 if path_needs_directory(filepath):
                     if self.directory is None:
@@ -352,7 +408,8 @@ class DryRepo(object):
             if not isinstance(obj, DryObject):
                 raise RuntimeError("Can only save currently loaded DryObject")
             if 'filepath' not in obj_container:
-                obj_container['filepath'] = obj.get_individual_hash()+'.dry'
+                obj_container['filepath'] = \
+                    obj.definition().get_individual_id()+'.dry'
             filepath = obj_container['filepath']
             orig_filepath = filepath
             if path_needs_directory(filepath):
@@ -396,8 +453,9 @@ class DryRepo(object):
                 print(self.obj_dict)
                 print(self.obj_list)
                 # Delete the object from internal tracking
-                cat_hash = obj.get_category_hash()
-                ind_hash = obj.get_individual_hash()
+                obj_def = obj.definition()
+                cat_hash = obj_def.get_category_id()
+                ind_hash = obj_def.get_individual_id()
                 del self.obj_dict[cat_hash][ind_hash]
                 # Delete the object from object list
                 del self.obj_list[self.obj_list.index(obj_container)]
