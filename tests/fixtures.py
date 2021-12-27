@@ -25,3 +25,8 @@ def create_temp_file():
     # Read and write
     with tempfile.TemporaryFile(mode='w+b') as f:
         yield f
+
+@pytest.fixture
+def create_temp_dir():
+    with tempfile.TemporaryDirectory() as directory:
+        yield directory

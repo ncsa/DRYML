@@ -6,16 +6,11 @@ import tempfile
 import objects
 
 
-@pytest.fixture
-def prep_and_clean_test_dir():
-    with tempfile.TemporaryDirectory() as directory:
-        yield directory
-
-
-def test_add_retrieve_object_1(prep_and_clean_test_dir):
+@pytest.mark.usefixtures("create_temp_dir")
+def test_add_retrieve_object_1(create_temp_dir):
     obj = objects.HelloStr(msg='test')
 
-    repo = dryml.DryRepo(prep_and_clean_test_dir)
+    repo = dryml.DryRepo(create_temp_dir)
 
     repo.add_object(obj)
 
@@ -61,8 +56,9 @@ def test_try_write():
     repo.save()
 
 
-def test_write_1(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_write_1(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     objs = []
 
@@ -80,7 +76,7 @@ def test_write_1(prep_and_clean_test_dir):
     # Delete repo
     del repo
 
-    repo = dryml.DryRepo(prep_and_clean_test_dir)
+    repo = dryml.DryRepo(create_temp_dir)
 
     assert repo.number_of_objects() == 5
 
@@ -111,8 +107,9 @@ def test_write_1(prep_and_clean_test_dir):
         obj_list[0].definition().get_individual_id()
 
 
-def test_reload_1(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_reload_1(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     objs = []
 
@@ -139,8 +136,9 @@ def test_reload_1(prep_and_clean_test_dir):
     assert objs[2].dry_kwargs['item'] == obj.dry_kwargs['item']
 
 
-def test_save_1(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_1(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -151,17 +149,18 @@ def test_save_1(prep_and_clean_test_dir):
     del repo
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.DryRepo(prep_and_clean_test_dir)
+    repo = dryml.DryRepo(create_temp_dir)
 
     assert len(repo.get(load_objects=False)) == 0
 
     repo.save()
 
-    assert len(os.listdir(prep_and_clean_test_dir)) == 1
+    assert len(os.listdir(create_temp_dir)) == 1
 
 
-def test_save_2(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_2(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
@@ -172,13 +171,13 @@ def test_save_2(prep_and_clean_test_dir):
     del repo
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.DryRepo(prep_and_clean_test_dir)
+    repo = dryml.DryRepo(create_temp_dir)
 
     assert len(repo.get(load_objects=False)) == 0
 
     repo.save()
 
-    assert len(os.listdir(prep_and_clean_test_dir)) == 1
+    assert len(os.listdir(create_temp_dir)) == 1
 
 
 @pytest.fixture
@@ -235,8 +234,9 @@ def test_save_4(prep_and_clean_test_dir2):
     assert set(os.listdir(dir1)) == set(os.listdir(dir2))
 
 
-def test_save_5(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_5(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
@@ -245,22 +245,24 @@ def test_save_5(prep_and_clean_test_dir):
     # Delete the repo
     del repo
 
-    assert len(os.listdir(prep_and_clean_test_dir)) == 1
+    assert len(os.listdir(create_temp_dir)) == 1
 
 
-def test_save_6(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_6(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
     repo.save_and_cache()
 
     assert len(repo.get(load_objects=False)) == 0
-    assert len(os.listdir(prep_and_clean_test_dir)) == 1
+    assert len(os.listdir(create_temp_dir)) == 1
 
 
-def test_delete_1(prep_and_clean_test_dir):
-    repo = dryml.DryRepo(prep_and_clean_test_dir, create=True)
+@pytest.mark.usefixtures("create_temp_dir")
+def test_delete_1(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -269,9 +271,9 @@ def test_delete_1(prep_and_clean_test_dir):
     print(repo.obj_dict)
     print(repo.obj_list)
 
-    assert len(os.listdir(prep_and_clean_test_dir)) == 1
+    assert len(os.listdir(create_temp_dir)) == 1
 
     repo.delete_objs()
 
-    assert len(os.listdir(prep_and_clean_test_dir)) == 0
+    assert len(os.listdir(create_temp_dir)) == 0
     assert len(repo.get(load_objects=True)) == 0

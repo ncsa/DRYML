@@ -1,7 +1,7 @@
+import pytest
 from dryml import DryList
 from dryml import DryRepo
 import objects
-import fixtures
 
 
 def test_dry_list_1():
@@ -45,6 +45,63 @@ def test_dry_list_2():
 
 
 def test_dry_list_3():
+    # Create a repo
+    repo = DryRepo()
+
+    # Create objects
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg="a test")
+
+    # Add them to the repo
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+
+    # Create a list object
+    the_list = DryList(obj1, obj2)
+
+    # Add that to the repo
+    repo.add_object(the_list)
+
+    # Create a new list object from a definition, but use a repo
+    new_list = the_list.definition().build(repo=repo)
+
+    # The list object should've extracted the objects themselves
+    # From the repo instead of constructing them
+    assert the_list[0] is new_list[0]
+    assert the_list[1] is new_list[1]
+
+    # BUT we should not have a 'new' list object.
+    assert the_list is new_list
+
+@pytest.mark.usefixtures("create_name")
+def test_dry_list_4():
+    # Create a repo
+    repo = DryRepo()
+
+    # Create objects
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg="a test")
+
+    # Add them to the repo
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+
+    # Create a list object
+    the_list = DryList(obj1, obj2)
+
+    # Create a new list object from a definition, but use a repo
+    new_list = the_list.definition().build(repo=repo)
+
+    # The list object should've extracted the objects themselves
+    # From the repo instead of constructing them
+    assert the_list[0] is new_list[0]
+    assert the_list[1] is new_list[1]
+
+    # BUT we should have a 'new' list object.
+    assert the_list is not new_list
+
+
+def test_dry_list_5():
     # Create a repo
     repo = DryRepo()
 
