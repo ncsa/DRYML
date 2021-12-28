@@ -1,6 +1,6 @@
 import pytest
 import os
-from dryml import DryList, DryRepo, load_object
+from dryml import DryList, DryTuple, DryRepo, load_object
 import objects
 
 
@@ -15,6 +15,7 @@ def test_dry_list_1():
     assert new_list is not the_list
     assert new_list[0] is not obj1
     assert new_list[1] is not obj2
+    assert the_list.definition().dry_mut
 
 
 def test_dry_list_2():
@@ -172,3 +173,49 @@ def test_dry_list_7(create_temp_dir):
     assert list_2 is not loaded_list
     assert list_2[0] is loaded_list[0]
     assert list_2[1] is loaded_list[1]
+
+
+def test_dry_tuple_1():
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg="a test")
+    the_tuple = DryTuple(obj1, obj2)
+
+    new_tuple = the_tuple.definition().build()
+    assert new_tuple[0].definition() == obj1.definition()
+    assert new_tuple[1].definition() == obj2.definition()
+    assert new_tuple is not the_tuple
+    assert new_tuple[0] is not obj1
+    assert new_tuple[1] is not obj2
+    assert not new_tuple.definition().dry_mut
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_dry_tuple_2(create_temp_dir):
+    # Create Repo
+    repo = DryRepo(create_temp_dir)
+
+    # Create objects
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg='a test')
+
+    # Add objects to Repo
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+
+    # Create lists
+    tuple_1 = DryTuple(obj1)
+
+    # Add list to repo
+    repo.add_object(tuple_1)
+
+    # Create second list, and save it
+    tuple_2 = DryTuple(obj2, tuple_1)
+    tuple_2.save_self(os.path.join(create_temp_dir, 'tuple.dry'))
+
+    loaded_tuple = load_object(os.path.join(create_temp_dir, 'tuple.dry'),
+                               repo=repo)
+
+    assert tuple_2.definition() == loaded_tuple.definition()
+    assert tuple_2 is not loaded_tuple
+    assert tuple_2[0] is loaded_tuple[0]
+    assert tuple_2[1] is loaded_tuple[1]

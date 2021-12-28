@@ -96,3 +96,104 @@ class DryList(DryObject, UserList):
 
         # Super classes should save their information
         return super().save_object_imp(file)
+
+
+class DryTuple(DryObject):
+    def __init__(
+            self, *args, dry_args=None,
+            dry_kwargs=None, **kwargs):
+        # Ingest Dry Args/Kwargs
+        dry_args = init_arg_list_handler(dry_args)
+        dry_kwargs = init_arg_dict_handler(dry_kwargs)
+
+        objs = []
+
+        for arg in args:
+            if isinstance(arg, DryObject):
+                # The list is given a DryObject directly.
+                # We don't need to consult any repo.
+                # Add definition dictionary to dry_args
+                dry_args.append(arg.definition().to_dict())
+                # Append the object to the list of objects
+                objs.append(arg)
+            elif is_dictlike(arg):
+                # Create definition from dictlike argument
+                # This means we might need to look in a repo
+                obj_def = DryObjectDef.from_dict(arg)
+                # Create the object and add it to the list
+                obj = obj_def.build()
+                objs.append(obj)
+                # Append DryObjectDef dict to the arguments
+                dry_args.append(obj_def.to_dict())
+            else:
+                raise ValueError(f"Unsupported argument type: {arg}")
+
+        super().__init__(
+            dry_args=dry_args,
+            dry_kwargs=dry_kwargs,
+            **kwargs)
+
+        self.data = tuple(objs)
+
+    def __getitem__(self, key):
+        # Accessor
+        return self.data[key]
+
+    def __len__(self):
+        return len(self.data)
+
+    # We have to do a special implementation of definition
+    # We want the reported dry_args to always match whats in
+    # the list. this should be computed dynamically
+    def definition(self):
+        dry_args = []
+        is_mutable = False
+        for obj in self.data:
+            obj_def = obj.definition()
+            if obj_def.dry_mut:
+                is_mutable = True
+            dry_args.append(obj_def)
+        return DryObjectDef(
+            type(self),
+            *dry_args,
+            dry_mut=is_mutable,
+            **self.dry_kwargs)
+
+    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+        # Load super classes information
+        if not super().load_object_imp(file):
+            return False
+
+        # Load object list
+        with file.open('obj_list.pkl', mode='r') as f:
+            obj_filenames = pickle.loads(f.read())
+
+        if len(self) != len(obj_filenames):
+            # Didn't load as many objects as saved filenames
+            return False
+
+        # Replace existing objects in the tuple
+        new_tuple = []
+        for i in range(len(obj_filenames)):
+            with file.open(obj_filenames[i], mode='r') as f:
+                new_tuple.append(load_object(f))
+        self.data = tuple(new_tuple)
+
+        return True
+
+    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
+        obj_filenames = []
+
+        # We save each object inside the file first.
+        for obj in self:
+            filename = f"{obj.definition().get_individual_id()}.dry"
+            with file.open(filename, mode='w') as f:
+                obj.save_self(f)
+            obj_filenames.append(filename)
+
+        # Save object list
+        with file.open('obj_list.pkl', mode='w') as f:
+            f.write(pickler(obj_filenames))
+
+        # Super classes should save their information
+        return super().save_object_imp(file)
