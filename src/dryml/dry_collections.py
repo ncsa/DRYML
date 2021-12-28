@@ -54,6 +54,7 @@ class DryList(DryObject, UserList):
         return DryObjectDef(
             type(self),
             *dry_args,
+            dry_mut=True,
             **self.dry_kwargs)
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:

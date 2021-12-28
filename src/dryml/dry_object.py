@@ -107,6 +107,10 @@ class DryObjectFile(object):
         with self.file.open('dry_kwargs.pkl', mode='w') as kwargs_file:
             kwargs_file.write(pickler(obj_def.kwargs.data))
 
+        # Save mutability from object def
+        with self.file.open('dry_mut.pkl', mode='w') as mut_file:
+            mut_file.write(pickler(obj_def.dry_mut))
+
     def load_definition_v1(self, update: bool = True, reload: bool = False):
         "Load object def"
 
@@ -121,7 +125,11 @@ class DryObjectFile(object):
         with self.file.open('dry_kwargs.pkl', mode='r') as kwargs_file:
             kwargs = pickle.loads(kwargs_file.read())
 
-        return DryObjectDef(cls, *args, **kwargs)
+        # Load mutability
+        with self.file.open('dry_mut.pkl', mode='r') as mut_file:
+            mut = pickle.loads(mut_file.read())
+
+        return DryObjectDef(cls, *args, dry_mut=mut, **kwargs)
 
     def definition(self, update: bool = True, reload: bool = False):
         meta_data = self.load_meta_data()
@@ -208,16 +216,10 @@ def load_object(file: FileType, update: bool = False,
                 # Load the object from the repo
                 obj = load_object.load_repo.get_obj(obj_def)
                 load_obj = False
-                print("Fetched object from repo")
-            except Exception as e:
-                print("Failed to find object in repo")
-                print(f"cat_id: {obj_def.get_category_id()}")
-                print(f"ind_id: {obj_def.get_individual_id()}")
-                print(f"error was: {e}")
+            except Exception:
                 pass
 
         if load_obj:
-            print("Load object from disk")
             obj = dry_file.load_object(update=update,
                                        reload=reload,
                                        as_cls=as_cls)

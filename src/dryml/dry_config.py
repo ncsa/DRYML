@@ -73,12 +73,14 @@ class DryObjectDef(collections.UserDict):
         return DryObjectDef(
             def_dict['cls'],
             *def_dict.get('dry_args', DryArgs()),
+            dry_mut=def_dict.get('dry_mut', False),
             **def_dict.get('dry_kwargs', DryKwargs()))
 
     def __init__(self, cls: Union[Type, str],
-                 *args, **kwargs):
+                 *args, dry_mut: bool = False, **kwargs):
         super().__init__()
         self.cls = cls
+        self.data['dry_mut'] = dry_mut
         self.args = args
         self.kwargs = kwargs
 
@@ -89,6 +91,10 @@ class DryObjectDef(collections.UserDict):
     @cls.setter
     def cls(self, val: Union[Type, str]):
         self['cls'] = val
+
+    @property
+    def dry_mut(self):
+        return self['dry_mut']
 
     @property
     def args(self):
@@ -108,7 +114,8 @@ class DryObjectDef(collections.UserDict):
 
     def __setitem__(self, key, value):
         if key not in ['cls', 'dry_args', 'dry_kwargs']:
-            raise ValueError(f"Key {key} not supported by DryObjectDef")
+            raise ValueError(
+                f"Setting Key {key} not supported by DryObjectDef")
 
         if key == 'cls':
             if type(value) is type or type(value) is abc.ABCMeta:
@@ -129,6 +136,7 @@ class DryObjectDef(collections.UserDict):
     def to_dict(self, cls_str: bool = False):
         return {
             'cls': self.cls if not cls_str else get_class_str(self.cls),
+            'dry_mut': self.dry_mut,
             'dry_args': self.args.data,
             'dry_kwargs': self.kwargs.data,
         }
@@ -152,16 +160,10 @@ class DryObjectDef(collections.UserDict):
             try:
                 obj = DryObjectDef.build_repo.get_obj(self)
                 construct_object = False
-                print("Fetched object from repo")
-            except Exception as e:
-                print("Failed to find object in repo")
-                print(f"cat_id: {self.get_category_id()}")
-                print(f"ind_id: {self.get_individual_id()}")
-                print(f"error was: {e}")
+            except Exception:
                 pass
 
         if construct_object:
-            print("Built object from scratch")
             obj = self.cls(*self.args, **self.kwargs)
 
         # Reset the repo for this function
