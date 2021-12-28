@@ -1,7 +1,5 @@
 import pytest
 import dryml
-import os
-import uuid
 
 
 @pytest.mark.usefixtures("create_name")
