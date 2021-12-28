@@ -44,33 +44,54 @@ class DryList(DryObject, UserList):
         for obj in objs:
             self.append(obj)
 
+    # We have to do a special implementation of definition
+    # We want the reported dry_args to always match whats in
+    # the list. this should be computed dynamically
+    def definition(self):
+        dry_args = []
+        for obj in self:
+            dry_args.append(obj.definition())
+        return DryObjectDef(
+            type(self),
+            *dry_args,
+            **self.dry_kwargs)
+
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Load super classes information
         if not super().load_object_imp(file):
             return False
 
-        # Load component list
-        with file.open('component_list.pkl', mode='r') as f:
-            component_filenames = pickle.loads(f.read())
+        # Load object list
+        with file.open('obj_list.pkl', mode='r') as f:
+            obj_filenames = pickle.loads(f.read())
 
-        # Load individual components
-        for filename in component_filenames:
+        if len(self) != len(obj_filenames):
+            # Didn't load as many objects as saved filenames
+            return False
+
+        # Unload existing objects from the list
+        self.clear()
+
+        # Load objects
+        for filename in obj_filenames:
             with file.open(filename, mode='r') as f:
-                self.components.append(load_object(f))
+                self.append(load_object(f))
 
         return True
 
     def save_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # We save each component inside the file first.
-        component_filenames = []
-        for component in self.components:
-            filename = f"{component.get_individual_hash()}.dry"
-            with file.open(filename, mode='w') as f:
-                component.save_self(f)
-            component_filenames.append(filename)
+        obj_filenames = []
 
-        with file.open('component_list.pkl', mode='w') as f:
-            f.write(pickler(component_filenames))
+        # We save each object inside the file first.
+        for obj in self:
+            filename = f"{obj.definition().get_individual_id()}.dry"
+            with file.open(filename, mode='w') as f:
+                obj.save_self(f)
+            obj_filenames.append(filename)
+
+        # Save object list
+        with file.open('obj_list.pkl', mode='w') as f:
+            f.write(pickler(obj_filenames))
 
         # Super classes should save their information
         return super().save_object_imp(file)

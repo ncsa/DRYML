@@ -11,7 +11,7 @@ import uuid
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryKwargs, DryArgs, DryObjectDef
 from dryml.utils import init_arg_list_handler, init_arg_dict_handler, \
-    get_current_cls, pickler
+    get_current_cls, pickler, static_var
 
 FileType = Union[str, IO[bytes]]
 
@@ -177,18 +177,56 @@ class DryObjectFile(object):
         return True
 
 
+@static_var('load_repo', None)
 def load_object(file: FileType, update: bool = False,
                 exact_path: bool = False,
                 reload: bool = False,
-                as_cls: Optional[Type] = None) -> DryObject:
+                as_cls: Optional[Type] = None,
+                repo=None) -> DryObject:
     """
     A method for loading an object from disk.
     """
+    reset_repo = False
+    load_obj = True
+
+    # Handle repo management variables
+    if repo is not None:
+        if load_object.load_repo is not None:
+            raise RuntimeError(
+                "different repos not currently supported")
+        else:
+            # Set the call_repo
+            load_object.load_repo = repo
+            reset_repo = True
+
+    # We now need the object definition
     with DryObjectFile(file, exact_path=exact_path) as dry_file:
-        result_object = dry_file.load_object(update=update,
-                                             reload=reload,
-                                             as_cls=as_cls)
-    return result_object
+        obj_def = dry_file.definition()
+        # Check whether a repo was given in a prior call
+        if load_object.load_repo is not None:
+            try:
+                # Load the object from the repo
+                obj = load_object.load_repo.get_obj(obj_def)
+                load_obj = False
+                print("Fetched object from repo")
+            except Exception as e:
+                print("Failed to find object in repo")
+                print(f"cat_id: {obj_def.get_category_id()}")
+                print(f"ind_id: {obj_def.get_individual_id()}")
+                print(f"error was: {e}")
+                pass
+
+        if load_obj:
+            print("Load object from disk")
+            obj = dry_file.load_object(update=update,
+                                       reload=reload,
+                                       as_cls=as_cls)
+
+    # Reset the repo for this function
+    if reset_repo:
+        load_object.load_repo = None
+
+    return obj
 
 
 def save_object(obj: DryObject, file: FileType, version: int = 1,

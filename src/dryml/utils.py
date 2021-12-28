@@ -83,3 +83,10 @@ def pickler(obj):
     "Method to ensure all objects are pickled in the same way"
     # Consider updating to protocol=5 when python 3.7 is deprecated
     return pickle.dumps(obj, protocol=4)
+
+
+def static_var(varname, value):
+    def decorate(func):
+        setattr(func, varname, value)
+        return func
+    return decorate
