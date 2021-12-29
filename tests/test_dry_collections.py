@@ -1,6 +1,6 @@
 import pytest
 import os
-from dryml import DryList, DryTuple, DryRepo, load_object
+from dryml import DryList, DryTuple, DryDict, DryRepo, load_object
 import objects
 
 
@@ -212,6 +212,37 @@ def test_dry_tuple_2(create_temp_dir):
     tuple_2 = DryTuple(obj2, tuple_1)
     tuple_2.save_self(os.path.join(create_temp_dir, 'tuple.dry'))
 
+    new_tuple = tuple_2.definition().build(repo=repo)
+
+    assert tuple_2.definition() == new_tuple.definition()
+    assert tuple_2 is not new_tuple
+    assert tuple_2[0] is new_tuple[0]
+    assert tuple_2[1] is new_tuple[1]
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_dry_tuple_3(create_temp_dir):
+    # Create Repo
+    repo = DryRepo(create_temp_dir)
+
+    # Create objects
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg='a test')
+
+    # Add objects to Repo
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+
+    # Create lists
+    tuple_1 = DryTuple(obj1)
+
+    # Add list to repo
+    repo.add_object(tuple_1)
+
+    # Create second list, and save it
+    tuple_2 = DryTuple(obj2, tuple_1)
+    tuple_2.save_self(os.path.join(create_temp_dir, 'tuple.dry'))
+
     loaded_tuple = load_object(os.path.join(create_temp_dir, 'tuple.dry'),
                                repo=repo)
 
@@ -219,3 +250,85 @@ def test_dry_tuple_2(create_temp_dir):
     assert tuple_2 is not loaded_tuple
     assert tuple_2[0] is loaded_tuple[0]
     assert tuple_2[1] is loaded_tuple[1]
+
+
+def test_dry_dict_1():
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg="a test")
+    the_dict = DryDict({'a': obj1, 2: obj2})
+
+    # Assert storage works properly
+    assert the_dict['a'] is obj1
+    assert the_dict[2] is obj2
+
+    # Build new dict copy
+    new_dict = the_dict.definition().build()
+    assert new_dict['a'].definition() == obj1.definition()
+    assert new_dict[2].definition() == obj2.definition()
+    assert new_dict is not the_dict
+    assert new_dict['a'] is not obj1
+    assert new_dict[2] is not obj2
+    assert new_dict.definition().dry_mut
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_dry_dict_2(create_temp_dir):
+    # Create Repo
+    repo = DryRepo(create_temp_dir)
+
+    # Create objects
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg='a test')
+
+    # Add objects to Repo
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+
+    # Create dicts
+    dict_1 = DryDict({'a': obj1})
+
+    # Add list to repo
+    repo.add_object(dict_1)
+
+    # Create second list, and save it
+    dict_2 = DryDict({'b': obj2, 1.0: dict_1})
+    dict_2.save_self(os.path.join(create_temp_dir, 'dict.dry'))
+
+    new_dict = dict_2.definition().build(repo=repo)
+
+    assert dict_2.definition() == new_dict.definition()
+    assert dict_2 is not new_dict
+    assert dict_2['b'] is new_dict['b']
+    assert dict_2[1.0] is new_dict[1.0]
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_dry_dict_3(create_temp_dir):
+    # Create Repo
+    repo = DryRepo(create_temp_dir)
+
+    # Create objects
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.HelloStr(msg='a test')
+
+    # Add objects to Repo
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+
+    # Create lists
+    dict_1 = DryDict({'a': obj1})
+
+    # Add list to repo
+    repo.add_object(dict_1)
+
+    # Create second list, and save it
+    dict_2 = DryDict({'b': obj2, 2.0: dict_1})
+    dict_2.save_self(os.path.join(create_temp_dir, 'dict.dry'))
+
+    loaded_dict = load_object(os.path.join(create_temp_dir, 'dict.dry'),
+                              repo=repo)
+
+    assert dict_2.definition() == loaded_dict.definition()
+    assert dict_2 is not loaded_dict
+    assert dict_2['b'] is loaded_dict['b']
+    assert dict_2[2.0] is loaded_dict[2.0]

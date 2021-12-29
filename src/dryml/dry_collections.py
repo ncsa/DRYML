@@ -1,6 +1,6 @@
 import zipfile
 import pickle
-from collections import UserList
+from collections import UserList, UserDict
 from dryml.dry_object import DryObject, DryObjectDef, load_object
 from dryml.utils import init_arg_dict_handler, init_arg_list_handler, \
     is_dictlike, pickler
@@ -194,6 +194,100 @@ class DryTuple(DryObject):
         # Save object list
         with file.open('obj_list.pkl', mode='w') as f:
             f.write(pickler(obj_filenames))
+
+        # Super classes should save their information
+        return super().save_object_imp(file)
+
+
+class DryDict(DryObject, UserDict):
+    def __init__(
+            self, in_dict, dry_args=None,
+            dry_kwargs=None, **kwargs):
+        # Ingest Dry Args/Kwargs
+        dry_kwargs = init_arg_dict_handler(dry_kwargs)
+
+        dry_arg = {}
+        obj_dict = {}
+
+        for key in in_dict:
+            val = in_dict[key]
+            if isinstance(val, DryObject):
+                # The dict value is a DryObject directly.
+                # We don't need to consult any repo.
+                # Add definition dictionary to dry_arg
+                dry_arg[key] = val.definition().to_dict()
+                # Add the object to the dict
+                obj_dict[key] = val
+            elif is_dictlike(val):
+                # Create DryObject from definition from dictlike argument
+                # This means we might need to look in a repo
+                obj_def = DryObjectDef.from_dict(val)
+                # Add definition dict to the dry_arg
+                dry_arg[key] = obj_def.to_dict()
+                # Create the object and add it to the list
+                obj = obj_def.build()
+                obj_dict[key] = obj
+            else:
+                raise ValueError(f"Unsupported value type: {type(val)}")
+
+        super().__init__(
+            dry_args=[dry_arg],
+            dry_kwargs=dry_kwargs,
+            **kwargs)
+
+        for key in obj_dict:
+            self[key] = obj_dict[key]
+
+    # We have to do a special implementation of definition
+    # We want the reported dry_args to always match whats in
+    # the list. this should be computed dynamically
+    def definition(self):
+        # Build dry arg dictionary
+        dry_arg = {}
+        for key in self:
+            obj = self[key]
+            dry_arg[key] = obj.definition()
+        return DryObjectDef(
+            type(self),
+            dry_arg,
+            dry_mut=True,
+            **self.dry_kwargs)
+
+    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+        # Load super classes information
+        if not super().load_object_imp(file):
+            return False
+
+        # Load object list
+        with file.open('obj_dict.pkl', mode='r') as f:
+            obj_dict = pickle.loads(f.read())
+
+        if len(self) != len(obj_dict):
+            # Didn't load as many objects as saved filenames
+            return False
+
+        # Load objects
+        for key in obj_dict:
+            filename = obj_dict[key]
+            with file.open(filename, mode='r') as f:
+                self[key] = load_object(f)
+
+        return True
+
+    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
+        obj_dict = {}
+
+        # We save each object inside the file first.
+        for key in self:
+            obj = self[key]
+            filename = f"{obj.definition().get_individual_id()}.dry"
+            with file.open(filename, mode='w') as f:
+                obj.save_self(f)
+            obj_dict[key] = filename
+
+        # Save object list
+        with file.open('obj_dict.pkl', mode='w') as f:
+            f.write(pickler(obj_dict))
 
         # Super classes should save their information
         return super().save_object_imp(file)
