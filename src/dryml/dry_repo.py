@@ -105,9 +105,6 @@ class DryRepo(object):
                 "already exists in the repo!")
         cat_dict[ind_hash] = obj_def
         self.obj_dict[cat_hash] = cat_dict
-        print("Adding object to repo")
-        print(f"cat id: {cat_hash}")
-        print(f"ind id: {ind_hash}")
         self.obj_list.append(obj_def)
 
     def load_objects_from_directory(self, directory: Optional[str] = None,
@@ -450,8 +447,6 @@ class DryRepo(object):
 
             obj = obj_container['val']
             if type(obj) is not str:
-                print(self.obj_dict)
-                print(self.obj_list)
                 # Delete the object from internal tracking
                 obj_def = obj.definition()
                 cat_hash = obj_def.get_category_id()
