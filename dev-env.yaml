@@ -6,9 +6,11 @@ dependencies:
   - ipykernel
   - numpy=1.19
   - pandas
+  - pandas-datareader
   - xarray
   - scikit-learn
   - matplotlib
+  - openpyxl # for reading excel files
   - pytest
   - flake8
   - pip
