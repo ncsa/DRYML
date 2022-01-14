@@ -9,3 +9,5 @@ def test_tfbase_1():
 
     # Attempt to change class of the object.
     test_obj2 = dryml.change_object_cls(test_obj, objects_tf.TestTF1)
+
+    assert test_obj2.definition() == test_obj.definition()
