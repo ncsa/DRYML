@@ -17,11 +17,13 @@ def test_basic_component_1(create_name):
 
     assert test_obj2.dry_kwargs['msg'] == 'test1'
 
+
 def test_basic_component_2():
     import objects
 
     test_obj = objects.HelloComponent(msg='test1')
 
-    new_obj = dryml.change_object_cls(test_obj, cls=objects.HelloComponent, update=True)
+    new_obj = dryml.change_object_cls(
+        test_obj, cls=objects.HelloComponent, update=True)
 
     assert test_obj.definition() == new_obj.definition()
