@@ -89,7 +89,7 @@ class DryRepo(object):
         # Check that directory exists
         if not os.path.exists(directory):
             if create:
-                os.mkdir(directory)
+                os.makedirs(directory)
         self.directory = directory
         if load_objects:
             self.load_objects_from_directory()
@@ -357,7 +357,7 @@ class DryRepo(object):
             else:
                 cls = type(obj)
             new_cls = get_current_cls(cls, reload=reload)
-            obj_container['val'] = change_object_cls(obj, new_cls)
+            obj_container['val'] = change_object_cls(obj, new_cls, update=True)
             del obj
 
         self.apply(

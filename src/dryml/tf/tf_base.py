@@ -6,8 +6,11 @@ import os
 
 
 def keras_load_weights_from_zip(
-        mdl: tf.keras.Model, zipfile: zipfile.ZipFile,
+        mdl, zipfile: zipfile.ZipFile,
         filename: str) -> bool:
+    if mdl is None:
+        raise RuntimeError("keras model can't be None!")
+
     try:
         with tempfile.NamedTemporaryFile(mode='w+b') as f:
             # Copy the zipfile saved weights file to a named temp file
@@ -17,7 +20,8 @@ def keras_load_weights_from_zip(
             # Load the weights into the model with the load weights function
             mdl.load_weights(f.name)
             return True
-    except Exception:
+    except Exception as e:
+        print(f"Issue loading weights! {e}")
         return False
 
 
@@ -28,7 +32,7 @@ def keras_save_weights_to_zip(
         # Create a temporary directory
         with tempfile.TemporaryDirectory() as d:
             # Save weights to a file
-            temp_weights_path = os.path.join(d.name, filename)
+            temp_weights_path = os.path.join(d, filename)
             mdl.save_weights(temp_weights_path)
 
             # Copy file into the zipfile
@@ -36,7 +40,8 @@ def keras_save_weights_to_zip(
                 with open(temp_weights_path, 'rb') as f:
                     zf.write(f.read())
                     return True
-    except Exception:
+    except Exception as e:
+        print(f"Error saving keras weights! {e}")
         return False
 
 
@@ -60,6 +65,7 @@ class TFBase(DryComponent):
 
         # Load Weights
         if not keras_load_weights_from_zip(self.mdl, file, 'weights.hdf5'):
+            print("Error loading keras weights")
             return False
 
         return True
@@ -76,7 +82,7 @@ class TFBase(DryComponent):
               shuffle_buffer=None, callbacks=[], **kwargs):
         # Here, we provide a basic training algorithm which
         # will work in many TF model cases
-        data = self.prepare_data(data)
+        data = self.prepare_data(data, target=True, index=False)
         # Check if we need to create a dataset
         if not isinstance(data, tf.data.Dataset):
             ds = tf.data.Dataset.from_tensor_slices(data)

@@ -151,7 +151,8 @@ class DryObjectFile(object):
         obj = obj_def.build()
 
         # Load object content
-        obj.load_object_imp(self.file)
+        if not obj.load_object_imp(self.file):
+            raise RuntimeError("Error loading object!")
 
         # Build object instance
         return obj
@@ -177,12 +178,10 @@ class DryObjectFile(object):
         if as_cls is not None:
             obj_def.cls = as_cls
 
-        self.save_definition_v1(obj_def)
+        self.save_definition_v1(obj_def, update=update)
 
         # Save object content
-        obj.save_object_imp(self.file)
-
-        return True
+        return obj.save_object_imp(self.file)
 
 
 @static_var('load_repo', None)
@@ -245,7 +244,8 @@ def save_object(obj: DryObject, file: FileType, version: int = 1,
 def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
                       reload: bool = False) -> DryObject:
     buffer = io.BytesIO()
-    save_object(obj, buffer)
+    if not save_object(obj, buffer):
+        raise RuntimeError("Error saving object!")
     return load_object(buffer, update=update, reload=reload,
                        as_cls=cls)
 

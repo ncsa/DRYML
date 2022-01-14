@@ -29,7 +29,7 @@ class DryComponent(DryObject):
 
     def save_object_imp(self, file: zipfile.ZipFile) -> bool:
         with file.open('component_data.pkl', 'w') as f:
-            pickle.dump({'train_state': self.train_state}, f)
+            f.write(pickle.dumps({'train_state': self.train_state}))
         return super().save_object_imp(file)
 
     def prepare_data(self, data, *args, **kwargs):
