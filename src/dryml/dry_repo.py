@@ -34,14 +34,18 @@ class DryRepoContainer(object):
 
     def __str__(self):
         if self._obj is None:
-            obj_part = "Object Unloaded"
+            obj_part = "Unloaded"
         else:
             obj_part = f"{self._obj}"
+
         try:
             path_part = f"{self.filepath}"
         except Exception:
             path_part = "No current filepath"
-        return f"DryRepoContainer: {obj_part} at: {path_part}"
+
+        def_part = str(self.definition())
+
+        return f"DryRepoContainer: {obj_part} {def_part} at {path_part}"
 
     @property
     def filepath(self):
@@ -252,7 +256,7 @@ class DryRepo(object):
             self.add_object(obj)
 
     def make_container_handler(self,
-                               load_object: bool = True,
+                               load_objects: bool = True,
                                open_container: bool = True,
                                update: bool = True):
 
@@ -263,8 +267,9 @@ class DryRepo(object):
                 return obj_cont
 
         def container_handler(obj_cont):
-            if load_object:
-                obj_cont.load(update=update)
+            if not obj_cont.is_loaded():
+                if load_objects:
+                    obj_cont.load(update=update)
 
             return container_opener(obj_cont, open_container=open_container)
 
@@ -274,15 +279,15 @@ class DryRepo(object):
             self,
             selector: Optional[Callable] = None,
             sel_args=None, sel_kwargs=None,
-            only_objs: bool = False):
+            only_loaded: bool = False):
         if sel_args is None:
             sel_args = []
         if sel_kwargs is None:
             sel_kwargs = {}
 
         def filter_func(obj_cont):
-            if not obj_cont.is_loaded():
-                if only_objs:
+            if only_loaded:
+                if not obj_cont.is_loaded():
                     return False
 
             if selector is not None:
@@ -311,27 +316,24 @@ class DryRepo(object):
             selector: Optional[Callable] = None,
             sel_args=None, sel_kwargs=None,
             load_objects: bool = True,
+            only_loaded: bool = False,
             update: bool = True,
             open_container: bool = True,
             verbose: bool = True):
-        # Handle arguments for filter function
-        only_objs = True
-        if load_objects:
-            only_objs = False
-
         # Filter the internal object list
         filter_func = \
             self.make_filter_func(
                 selector,
                 sel_args=sel_args,
                 sel_kwargs=sel_kwargs,
-                only_objs=only_objs)
+                only_loaded=only_loaded)
         obj_list = list(filter(filter_func, self.obj_dict.values()))
 
         # Build container handler
         container_handler = \
             self.make_container_handler(
                 update=update,
+                load_objects=load_objects,
                 open_container=open_container)
         return list(map(container_handler, obj_list))
 
@@ -339,13 +341,12 @@ class DryRepo(object):
               func, func_args=None, func_kwargs=None,
               selector: Optional[Callable] = None,
               sel_args=None, sel_kwargs=None,
-              update: bool = True,
               verbose: bool = False,
-              load_objects: bool = False,
-              open_container: bool = True):
+              **kwargs):
         """
         Apply a function to all objects tracked by the repo.
         We can also use a DrySelector to apply only to specific models
+        **kwargs is passed to self.get
         """
         if func_args is None:
             func_args = []
@@ -360,9 +361,7 @@ class DryRepo(object):
         objs = self.get(
             selector=selector,
             sel_args=sel_args, sel_kwargs=sel_kwargs,
-            update=update,
-            load_objects=load_objects,
-            open_container=open_container)
+            **kwargs)
 
         # apply function to objects
         if verbose:
@@ -409,7 +408,7 @@ class DryRepo(object):
         self.apply(
             reload_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False, load_objects=False)
+            open_container=False, only_loaded=True, load_objects=False)
 
     def save(self,
              selector: Optional[Callable] = None,
@@ -426,7 +425,7 @@ class DryRepo(object):
         self.apply(
             save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False, load_objects=False)
+            open_container=False, only_loaded=True, load_objects=False)
 
     def save_and_cache(
             self,
@@ -445,7 +444,7 @@ class DryRepo(object):
         self.apply(
             save_func,
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False, load_objects=False)
+            open_container=False, only_loaded=True, load_objects=False)
 
     def delete_objs(
             self,
@@ -456,7 +455,7 @@ class DryRepo(object):
         # Get all selected objects
         obj_containers = self.get(
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False, load_objects=False)
+            open_container=False, only_loaded=True, load_objects=False)
 
         for obj_cont in obj_containers:
             # Delete object from disk
@@ -480,8 +479,6 @@ class DryRepo(object):
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
 
-        print(f"we have {len(obj_containers)} containers")
-
         results = {}
 
         for obj_cont in obj_containers:
@@ -491,20 +488,23 @@ class DryRepo(object):
                     continue
             obj_def = obj_cont.definition()
             obj_cat_def = obj_def.get_cat_def()
+            cat_id = obj_cat_def.get_category_id()
 
             if only_loaded:
                 entry = results.get(
-                    obj_cat_def.get_category_id(),
+                    cat_id,
                     {'def': obj_cat_def, 'num': 0})
                 entry['num'] += 1
+                results[cat_id] = entry
             else:
                 entry = results.get(
-                    obj_cat_def.get_category_id(),
+                    cat_id,
                     {'def': obj_cat_def, 'loaded': 0, 'unloaded': 0})
                 if obj_cont.is_loaded():
                     entry['loaded'] += 1
                 else:
                     entry['unloaded'] += 1
+                results[cat_id] = entry
 
         for cat_id in results:
             entry = results[cat_id]
@@ -512,5 +512,5 @@ class DryRepo(object):
             if only_loaded:
                 print(f"{entry['num']} loaded")
             else:
-                print(f"{entry['loaded']} loaded, "
-                      f"{entry['unloaded']} unloaded")
+                print(f"{entry['loaded']}/"
+                      f"{entry['loaded']+entry['unloaded']} loaded")

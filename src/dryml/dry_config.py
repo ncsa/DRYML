@@ -175,7 +175,7 @@ class DryObjectDef(collections.UserDict):
 
     def get_cat_def(self):
         def_dict = self.to_dict()
-        kwargs_copy = copy.copy(def_dict['dry_kwargs'].data)
+        kwargs_copy = copy.copy(def_dict['dry_kwargs'])
         if 'dry_id' in kwargs_copy:
             kwargs_copy.pop('dry_id')
         def_dict['dry_kwargs'] = kwargs_copy

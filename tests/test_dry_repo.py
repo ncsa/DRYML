@@ -197,7 +197,7 @@ def test_save_1(create_temp_dir):
     # Load the repository objects should not be loaded right away
     repo = dryml.DryRepo(create_temp_dir)
 
-    assert len(repo.get(load_objects=False)) == 0
+    assert len(repo.get(only_loaded=True)) == 0
 
     repo.save()
 
@@ -219,7 +219,7 @@ def test_save_2(create_temp_dir):
     # Load the repository objects should not be loaded right away
     repo = dryml.DryRepo(create_temp_dir)
 
-    assert len(repo.get(load_objects=False)) == 0
+    assert len(repo.get(only_loaded=True)) == 0
 
     repo.save()
 
@@ -254,13 +254,13 @@ def test_save_3(prep_and_clean_test_dir2):
     # Load the repository objects should not be loaded right away
     repo = dryml.DryRepo(dir1)
 
-    assert len(repo.get(load_objects=False)) == 0
+    assert len(repo.get(only_loaded=True)) == 0
 
     del repo
 
     repo = dryml.DryRepo(dir2)
 
-    assert len(repo.get(load_objects=False)) == 0
+    assert len(repo.get(only_loaded=True)) == 0
 
 
 def test_save_4(prep_and_clean_test_dir2):
@@ -302,7 +302,7 @@ def test_save_6(create_temp_dir):
 
     repo.save_and_cache()
 
-    assert len(repo.get(load_objects=False)) == 0
+    assert len(repo.get(only_loaded=True)) == 0
     assert len(os.listdir(create_temp_dir)) == 1
 
 
