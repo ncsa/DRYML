@@ -173,6 +173,14 @@ class DryObjectDef(collections.UserDict):
         # Return the result
         return obj
 
+    def get_cat_def(self):
+        def_dict = self.to_dict()
+        kwargs_copy = copy.copy(def_dict['dry_kwargs'].data)
+        if 'dry_id' in kwargs_copy:
+            kwargs_copy.pop('dry_id')
+        def_dict['dry_kwargs'] = kwargs_copy
+        return DryObjectDef.from_dict(def_dict)
+
     def get_hash_str(self, no_id: bool = False):
         class_hash_str = get_class_str(self.cls)
         args_hash_str = str(self.args.data)

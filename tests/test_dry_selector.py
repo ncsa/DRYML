@@ -12,7 +12,9 @@ def test_selector_1():
 
     # Test selectors work with built classes
     assert sel(obj1)
+    assert sel(obj1.definition())
     assert not sel(obj2)
+    assert not sel(obj2.definition())
 
     dryml.save_object(obj1, 'test1')
     dryml.save_object(obj2, 'test2')
@@ -37,7 +39,9 @@ def test_selector_2():
     sel = dryml.DrySelector(cls=objects.TestClassB, args=[1])
 
     assert sel(obj1)
+    assert sel(obj1.definition())
     assert not sel(obj2)
+    assert not sel(obj2.definition())
 
 
 def test_selector_3():
@@ -48,13 +52,17 @@ def test_selector_3():
     sel = dryml.DrySelector(cls=objects.TestClassA, kwargs={'item': 'a'})
 
     assert sel(obj1)
+    assert sel(obj1.definition())
     assert not sel(obj2)
+    assert not sel(obj2.definition())
 
     sel = dryml.DrySelector(cls=objects.TestClassA,
                             kwargs={'item': [10, 10, 10]})
 
     assert not sel(obj1)
+    assert not sel(obj1.definition())
     assert sel(obj2)
+    assert sel(obj2.definition())
 
 
 def test_selector_4():
@@ -73,22 +81,38 @@ def test_selector_4():
         cls=objects.TestBase, cls_str_compare=False, verbosity=2)
 
     assert sel(obj1)
+    assert sel(obj1.definition())
     assert sel(obj2)
+    assert sel(obj2.definition())
     assert sel(obj3)
+    assert sel(obj3.definition())
     assert sel(obj4)
+    assert sel(obj4.definition())
     assert not sel(obj5)
+    assert not sel(obj5.definition())
     assert not sel(obj6)
+    assert not sel(obj6.definition())
     assert not sel(obj7)
+    assert not sel(obj7.definition())
     assert not sel(obj8)
+    assert not sel(obj8.definition())
 
     sel = dryml.DrySelector(
         cls=objects.HelloObject, cls_str_compare=False)
 
     assert not sel(obj1)
+    assert not sel(obj1.definition())
     assert not sel(obj2)
+    assert not sel(obj2.definition())
     assert not sel(obj3)
+    assert not sel(obj3.definition())
     assert not sel(obj4)
+    assert not sel(obj4.definition())
     assert sel(obj5)
+    assert sel(obj5.definition())
     assert sel(obj6)
+    assert sel(obj6.definition())
     assert sel(obj7)
+    assert sel(obj7.definition())
     assert sel(obj8)
+    assert sel(obj8.definition())

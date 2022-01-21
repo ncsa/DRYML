@@ -7,6 +7,52 @@ import objects
 
 
 @pytest.mark.usefixtures("create_temp_dir")
+def test_container_selector_1(create_temp_dir):
+    # Create objects
+    obj1 = objects.TestClassA(base_msg="Test1", item=5)
+    obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
+
+    # Create containers for these objects
+    obj1_cont = dryml.dry_repo.DryRepoContainer.from_object(
+        obj1, directory=create_temp_dir)
+    obj2_cont = dryml.dry_repo.DryRepoContainer.from_object(
+        obj2, directory=create_temp_dir)
+
+    # Create selector
+    sel = dryml.DrySelector(cls=objects.TestClassA)
+
+    # Test selectors work with built classes
+    assert sel(obj1_cont.definition())
+    assert not sel(obj2_cont.definition())
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_container_selector_2(create_temp_dir):
+    # Create objects
+    obj1 = objects.TestClassA(base_msg="Test1", item=5)
+    obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
+
+    # Create containers for these objects
+    obj1_cont = dryml.dry_repo.DryRepoContainer.from_object(
+        obj1, directory=create_temp_dir)
+    obj2_cont = dryml.dry_repo.DryRepoContainer.from_object(
+        obj2, directory=create_temp_dir)
+
+    # Save to disk, and unload these objects
+    obj1_cont.save()
+    obj2_cont.save()
+    obj1_cont.unload()
+    obj2_cont.unload()
+
+    # Create selector
+    sel = dryml.DrySelector(cls=objects.TestClassA)
+
+    # Test selectors work with built classes
+    assert sel(obj1_cont.definition())
+    assert not sel(obj2_cont.definition())
+
+
+@pytest.mark.usefixtures("create_temp_dir")
 def test_add_retrieve_object_1(create_temp_dir):
     obj = objects.HelloStr(msg='test')
 
@@ -14,7 +60,7 @@ def test_add_retrieve_object_1(create_temp_dir):
 
     repo.add_object(obj)
 
-    assert repo.number_of_objects() == 1
+    assert len(repo) == 1
 
     objs = repo.get()
 
@@ -78,7 +124,7 @@ def test_write_1(create_temp_dir):
 
     repo = dryml.DryRepo(create_temp_dir)
 
-    assert repo.number_of_objects() == 5
+    assert len(repo) == 5
 
     obj_list = repo.get(selector=dryml.DrySelector(
         cls=objects.HelloStr, kwargs={'msg': 'test'}))
@@ -267,9 +313,6 @@ def test_delete_1(create_temp_dir):
     repo.add_object(objects.HelloStr(msg='test'))
 
     repo.save()
-
-    print(repo.obj_dict)
-    print(repo.obj_list)
 
     assert len(os.listdir(create_temp_dir)) == 1
 
