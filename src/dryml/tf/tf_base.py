@@ -16,6 +16,8 @@ def keras_load_weights_from_zip(
             # Copy the zipfile saved weights file to a named temp file
             with zipfile.open(filename) as zf:
                 f.write(zf.read())
+            # Flush data to disk
+            f.flush()
 
             # Load the weights into the model with the load weights function
             mdl.load_weights(f.name)
