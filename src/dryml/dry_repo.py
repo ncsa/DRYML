@@ -227,8 +227,8 @@ class DryRepo(object):
                 self.add_obj_cont(obj_cont)
                 num_loaded += 1
             except Exception as e:
-                print(f"WARNING! Malformed file found! {obj_cont.filepath()}"
-                      f"skipping load Error: {e}")
+                print(f"WARNING! Malformed file found! {obj_cont.filepath} "
+                      f"skipping load. Error was: {e}")
         if verbose:
             print(f"Loaded {num_loaded} objects")
 
