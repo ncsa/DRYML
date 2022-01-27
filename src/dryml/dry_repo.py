@@ -446,24 +446,38 @@ class DryRepo(object):
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, only_loaded=True, load_objects=False)
 
-    def delete_objs(
+    def unload(self,
+               selector: Optional[Callable] = None,
+               sel_args=None, sel_kwargs=None):
+
+        def unload_func(obj_cont):
+            if obj_cont.is_loaded():
+                obj_cont.unload()
+
+        self.apply(
+            unload_func,
+            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+            open_container=False, only_loaded=True, load_objects=False)
+
+    def delete(
             self,
             selector: Optional[Callable] = None,
-            sel_args=None, sel_kwargs=None):
+            sel_args=None, sel_kwargs=None,
+            only_loaded: bool = True):
         "Unload and delete from disk selected models"
 
         # Get all selected objects
         obj_containers = self.get(
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False, only_loaded=True, load_objects=False)
+            open_container=False, only_loaded=only_loaded, load_objects=False)
 
         for obj_cont in obj_containers:
-            # Delete object from disk
-            obj_cont.delete()
-
             # Delete object from repo object tracker
             ind_hash = obj_cont.definition().get_individual_id()
             del self.obj_dict[ind_hash]
+
+            # Delete object from disk
+            obj_cont.delete()
 
             # Delete object container
             del obj_cont

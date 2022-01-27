@@ -316,7 +316,7 @@ def test_delete_1(create_temp_dir):
 
     assert len(os.listdir(create_temp_dir)) == 1
 
-    repo.delete_objs()
+    repo.delete()
 
     assert len(os.listdir(create_temp_dir)) == 0
     assert len(repo.get(load_objects=True)) == 0
