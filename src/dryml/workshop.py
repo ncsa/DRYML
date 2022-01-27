@@ -20,10 +20,14 @@ class Workshop(object):
     def train_models(self, *args,
                      selector=None,
                      sel_args=None, sel_kwargs=None,
+                     load_objects: bool = True,
+                     only_loaded: bool = False,
                      **kwargs):
         self.repo.apply(self.train_component_outer,
                         func_args=args,
                         func_kwargs=kwargs,
                         selector=selector,
                         sel_args=sel_args,
-                        sel_kwargs=sel_kwargs)
+                        sel_kwargs=sel_kwargs,
+                        load_objects=load_objects,
+                        only_loaded=only_loaded)
