@@ -90,3 +90,9 @@ def static_var(varname, value):
         setattr(func, varname, value)
         return func
     return decorate
+
+
+def show_sig(sig):
+    for key in sig.parameters:
+        par = sig.parameters[key]
+        print(f"{par.name} - {par.kind} - {par.default}")

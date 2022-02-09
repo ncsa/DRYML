@@ -1,9 +1,12 @@
 import collections
 import copy
 import abc
+import inspect
+import functools
 from typing import Union, IO, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
-    get_class_from_str, get_class_str, get_hashed_id
+    get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
+    init_arg_dict_handler
 
 
 def is_allowed_base_type(val):
@@ -65,6 +68,144 @@ class DryKwargs(DryConfigInterface, collections.UserDict):
     pass
 
 
+class DryMeta(abc.ABCMeta):
+    def __new__(cls, clsname, bases, attrs):
+        # Create class
+        new_cls = super().__new__(cls, clsname, bases, attrs)
+
+        # Get init function
+        init_func = new_cls.__init__
+
+        # Run check for self
+        DryMeta.check_for_self(init_func, clsname)
+
+        # Detect if we have the base class.
+        base = False
+        if '__dry_meta_base__' in attrs:
+            base = True
+
+        new_cls.__init__ = DryMeta.make_dry_init(new_cls, init_func, base=base)
+
+        return new_cls
+
+    @staticmethod
+    def check_for_self(f, clsname):
+        sig = inspect.signature(f)
+        keys = list(sig.parameters.keys())
+        first_par = sig.parameters[keys[0]]
+        if first_par.name != 'self':
+            raise RuntimeError(
+                "__init__ signature of DryMeta Objects must have a first "
+                f"argument named self. Found when initializing type {clsname}")
+
+    @staticmethod
+    def track_args(f):
+        """
+        Build a list of explicitly mentioned arguments which will be
+        consumed by dry args systems
+        """
+        # Get function signature
+        sig = inspect.signature(f)
+
+        # Build list of positional and keyword arguments for dry_init
+        track_args = getattr(f, '__dry_args__', [])
+        track_kwargs = getattr(f, '__dry_kwargs__', [])
+        for key in sig.parameters:
+            par = sig.parameters[key]
+            if par.name == 'self':
+                continue
+            if par.kind == inspect.Parameter.VAR_POSITIONAL:
+                continue
+            if par.kind == inspect.Parameter.VAR_KEYWORD:
+                continue
+            if par.default == inspect.Parameter.empty and \
+               par.kind != inspect.Parameter.KEYWORD_ONLY:
+                track_args.append(par.name)
+            else:
+                track_kwargs.append((par.name, par.default))
+
+        f.__dry_args__ = track_args
+        f.__dry_kwargs__ = track_kwargs
+
+        return f
+
+    @staticmethod
+    def skip_args(f):
+        f.__dry_skip_args__ = True
+        return f
+
+    # Create scope with __class__ defined so super can find a cell
+    # with the right name.
+    # Python issue: https://bugs.python.org/issue29944
+    @staticmethod
+    def make_dry_init(__class__, init_func, base=False):
+        # Track arguments
+        init_func = DryMeta.track_args(init_func)
+
+        @functools.wraps(init_func)
+        def dry_init(self, *args, dry_args=None, dry_kwargs=None, **kwargs):
+            # First, preprocess the arguments
+            if hasattr(__class__, 'args_preprocess'):
+                (pargs, pkwargs) = __class__.args_preprocess(
+                    self, *args, dry_args=None, dry_kwargs=None, **kwargs)
+            else:
+                pargs = args
+                pkwargs = kwargs
+
+            # Initialize dry arguments
+            dry_args = init_arg_list_handler(dry_args)
+            dry_kwargs = init_arg_dict_handler(dry_kwargs)
+
+            # grab args/kwargs into dry_args/dry_kwargs
+            skip_args = False
+            if hasattr(init_func, '__dry_skip_args__'):
+                if init_func.__dry_skip_args__:
+                    skip_args = True
+            if not skip_args:
+                num_args = len(init_func.__dry_args__)
+                for i in range(num_args):
+                    dry_args.append(pargs[i])
+            for k, v in init_func.__dry_kwargs__:
+                dry_kwargs[k] = pkwargs.get(k, v)
+
+            # Grab unaltered arguments to pass to super
+            if not skip_args:
+                super_args = args[num_args:]
+            else:
+                super_args = []
+            used_kwargs = list(map(lambda t: t[0], init_func.__dry_kwargs__))
+            used_kwargs += ['dry_args', 'dry_kwargs']
+            super_kwargs = {
+                k: v for k, v in kwargs.items() if k not in used_kwargs
+            }
+
+            if base:
+                # At the base, we need to set dry_args/dry_kwargs finally
+                # Use DryKwargs/DryArgs object to coerse args/kwargs to proper
+                # json serializable form.
+                self.dry_args = DryArgs(dry_args)
+                self.dry_kwargs = DryKwargs(dry_kwargs)
+
+                # Construct parents
+                super().__init__(
+                    *super_args,
+                    **super_kwargs,
+                )
+            else:
+                # Construct parents
+                super().__init__(
+                    *super_args,
+                    dry_args=dry_args,
+                    dry_kwargs=dry_kwargs,
+                    **super_kwargs,
+                )
+
+            # Execute user init
+            init_func(self, *args, **kwargs)
+
+        return dry_init
+
+
 class DryObjectDef(collections.UserDict):
     build_repo = None
 
@@ -118,7 +259,7 @@ class DryObjectDef(collections.UserDict):
                 f"Setting Key {key} not supported by DryObjectDef")
 
         if key == 'cls':
-            if type(value) is type or type(value) is abc.ABCMeta:
+            if type(value) is type or issubclass(type(value), abc.ABCMeta):
                 self.data['cls'] = value
             elif type(value) is str:
                 self.data['cls'] = get_class_from_str(value)

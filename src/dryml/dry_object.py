@@ -9,9 +9,9 @@ import io
 import zipfile
 import uuid
 from typing import IO, Union, Optional, Type
-from dryml.dry_config import DryKwargs, DryArgs, DryObjectDef
-from dryml.utils import init_arg_list_handler, init_arg_dict_handler, \
-    get_current_cls, pickler, static_var
+from dryml.dry_config import DryObjectDef, DryMeta
+from dryml.utils import get_current_cls, pickler, static_var
+import copy
 
 FileType = Union[str, IO[bytes]]
 
@@ -251,20 +251,19 @@ def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
 
 
 # Define a base Dry Object
-class DryObject(object):
-    def __init__(self, *args, dry_args=None, dry_kwargs=None,
-                 dry_id=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Use DryKwargs/DryArgs object to coerse args/kwargs to proper
-        # json serializable form.
-        self.dry_args = DryArgs(init_arg_list_handler(dry_args))
-        self.dry_kwargs = DryKwargs(init_arg_dict_handler(dry_kwargs))
-        # Generate unique id for this object. (Meant to separate between
-        # multiple instances of same object)
-        if dry_id is None:
-            self.dry_kwargs['dry_id'] = str(uuid.uuid4())
-        else:
-            self.dry_kwargs['dry_id'] = dry_id
+class DryObject(metaclass=DryMeta):
+    # Only ever set for this class.
+    __dry_meta_base__ = True
+
+    @staticmethod
+    def args_preprocess(obj, *args, **kwargs):
+        new_kwargs = copy.copy(kwargs)
+        new_kwargs['dry_id'] = kwargs.get('dry_id', str(uuid.uuid4()))
+        return (args, new_kwargs)
+
+    # Define the dry_id
+    def __init__(self, *args, dry_id=None, **kwargs):
+        pass
 
     def definition(self):
         return DryObjectDef(

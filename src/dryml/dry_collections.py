@@ -2,18 +2,13 @@ import zipfile
 import pickle
 from collections import UserList, UserDict
 from dryml.dry_object import DryObject, DryObjectDef, load_object
-from dryml.utils import init_arg_dict_handler, init_arg_list_handler, \
-    is_dictlike, pickler
+from dryml.dry_config import DryMeta
+from dryml.utils import is_dictlike, pickler
 
 
 class DryList(DryObject, UserList):
-    def __init__(
-            self, *args, dry_args=None,
-            dry_kwargs=None, **kwargs):
-        # Ingest Dry Args/Kwargs
-        dry_args = init_arg_list_handler(dry_args)
-        dry_kwargs = init_arg_dict_handler(dry_kwargs)
-
+    @DryMeta.skip_args
+    def __init__(self, *args, **kwargs):
         objs = []
 
         for arg in args:
@@ -21,7 +16,7 @@ class DryList(DryObject, UserList):
                 # The list is given a DryObject directly.
                 # We don't need to consult any repo.
                 # Add definition dictionary to dry_args
-                dry_args.append(arg.definition().to_dict())
+                self.dry_args.append(arg.definition().to_dict())
                 # Append the object to the list of objects
                 objs.append(arg)
             elif is_dictlike(arg):
@@ -32,17 +27,12 @@ class DryList(DryObject, UserList):
                 obj = obj_def.build()
                 objs.append(obj)
                 # Append DryObjectDef dict to the arguments
-                dry_args.append(obj_def.to_dict())
+                self.dry_args.append(obj_def.to_dict())
             else:
-                raise ValueError(f"Unsupported argument type: {arg}")
+                raise ValueError(
+                    f"Unsupported argument type: {type(arg)} - {arg}")
 
-        super().__init__(
-            dry_args=dry_args,
-            dry_kwargs=dry_kwargs,
-            **kwargs)
-
-        for obj in objs:
-            self.append(obj)
+        self.data.extend(objs)
 
     # We have to do a special implementation of definition
     # We want the reported dry_args to always match whats in
@@ -99,13 +89,8 @@ class DryList(DryObject, UserList):
 
 
 class DryTuple(DryObject):
-    def __init__(
-            self, *args, dry_args=None,
-            dry_kwargs=None, **kwargs):
-        # Ingest Dry Args/Kwargs
-        dry_args = init_arg_list_handler(dry_args)
-        dry_kwargs = init_arg_dict_handler(dry_kwargs)
-
+    @DryMeta.skip_args
+    def __init__(self, *args, **kwargs):
         objs = []
 
         for arg in args:
@@ -113,7 +98,7 @@ class DryTuple(DryObject):
                 # The list is given a DryObject directly.
                 # We don't need to consult any repo.
                 # Add definition dictionary to dry_args
-                dry_args.append(arg.definition().to_dict())
+                self.dry_args.append(arg.definition().to_dict())
                 # Append the object to the list of objects
                 objs.append(arg)
             elif is_dictlike(arg):
@@ -124,14 +109,9 @@ class DryTuple(DryObject):
                 obj = obj_def.build()
                 objs.append(obj)
                 # Append DryObjectDef dict to the arguments
-                dry_args.append(obj_def.to_dict())
+                self.dry_args.append(obj_def.to_dict())
             else:
                 raise ValueError(f"Unsupported argument type: {arg}")
-
-        super().__init__(
-            dry_args=dry_args,
-            dry_kwargs=dry_kwargs,
-            **kwargs)
 
         self.data = tuple(objs)
 
@@ -200,11 +180,21 @@ class DryTuple(DryObject):
 
 
 class DryDict(DryObject, UserDict):
-    def __init__(
-            self, in_dict, dry_args=None,
-            dry_kwargs=None, **kwargs):
-        # Ingest Dry Args/Kwargs
-        dry_kwargs = init_arg_dict_handler(dry_kwargs)
+    @staticmethod
+    def args_preprocess(obj, *args, **kwargs):
+        if len(args) == 0:
+            # WARNING! This could cause a race condition if python
+            # becomes truely parallel!
+            DryDict.__dry_data_temp__ = {}
+            return ([], kwargs)
+
+        if len(args) > 1:
+            raise ValueError(
+                "Extra positional arguments beyond the first are ignored "
+                "for DryDict objects.")
+
+        # get first argument
+        in_dict = args[0]
 
         dry_arg = {}
         obj_dict = {}
@@ -230,13 +220,15 @@ class DryDict(DryObject, UserDict):
             else:
                 raise ValueError(f"Unsupported value type: {type(val)}")
 
-        super().__init__(
-            dry_args=[dry_arg],
-            dry_kwargs=dry_kwargs,
-            **kwargs)
+        DryDict.__dry_data_temp__ = obj_dict
 
-        for key in obj_dict:
-            self[key] = obj_dict[key]
+        return ([dry_arg], kwargs)
+
+    def __init__(
+            self, in_dict, **kwargs):
+        # Copy data over from temp storage spot
+        self.data = DryDict.__dry_data_temp__
+        del DryDict.__dry_data_temp__
 
     # We have to do a special implementation of definition
     # We want the reported dry_args to always match whats in

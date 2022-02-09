@@ -2,15 +2,8 @@ import dryml
 
 
 class SimpleObject(dryml.DryObject):
-    def __init__(self, i=0, **kwargs):
+    def __init__(self, i, **kwargs):
         self.i = i
-        dry_kwargs = {
-            'i': i
-        }
-        super().__init__(
-            dry_kwargs=dry_kwargs,
-            **kwargs
-        )
 
     def load_object_imp(self, file) -> bool:
         return True

@@ -106,16 +106,10 @@ def keras_save_checkpoint_to_zip(
 
 class TFBase(DryComponent):
     def __init__(
-            self, *args, dry_args=None,
-            dry_kwargs=None, **kwargs):
+            self, *args, **kwargs):
         # It is subclass's responsibility to fill this
         # attribute with an actual keras class
         self.mdl = None
-        super().__init__(
-            *args,
-            dry_args=dry_args,
-            dry_kwargs=dry_kwargs,
-            **kwargs)
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Load parent components first

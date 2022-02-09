@@ -5,6 +5,7 @@ from dryml.dry_selector import DrySelector
 from dryml.dry_repo import DryRepo
 from dryml.dry_component import DryComponent
 from dryml.dry_collections import DryList, DryTuple, DryDict
+from dryml.dry_pipe import DryPipe
 from dryml.workshop import Workshop
 
 __version__ = "0.0.0"
@@ -22,6 +23,7 @@ __all__ = [
     DryTuple,
     DryDict,
     DryComponent,
+    DryPipe,
     Workshop,
     load_object,
     save_object,
