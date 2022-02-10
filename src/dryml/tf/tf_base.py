@@ -112,10 +112,6 @@ class TFBase(DryComponent):
         self.mdl = None
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load parent components first
-        if not super().load_object_imp(file):
-            return False
-
         # Load Weights
         if not keras_load_checkpoint_from_zip(self.mdl, file, 'ckpt'):
             print("Error loading keras weights")
@@ -128,8 +124,7 @@ class TFBase(DryComponent):
         if not keras_save_checkpoint_to_zip(self.mdl, file, 'ckpt'):
             return False
 
-        # Save parent components
-        return super().save_object_imp(file)
+        return True
 
     def train(self, data, *args, val_split=0.2, batch_size=32,
               shuffle_buffer=None, callbacks=[], **kwargs):

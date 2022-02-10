@@ -151,7 +151,7 @@ class DryObjectFile(object):
         obj = obj_def.build()
 
         # Load object content
-        if not obj.load_object_imp(self.file):
+        if not obj.load_object(self.file):
             raise RuntimeError("Error loading object!")
 
         # Build object instance
@@ -181,7 +181,7 @@ class DryObjectFile(object):
         self.save_definition_v1(obj_def, update=update)
 
         # Save object content
-        return obj.save_object_imp(self.file)
+        return obj.save_object(self.file)
 
 
 @static_var('load_repo', None)
@@ -270,14 +270,6 @@ class DryObject(metaclass=DryMeta):
             type(self),
             *self.dry_args,
             **self.dry_kwargs)
-
-    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Should be the last object inherited
-        return True
-
-    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Should be the last object inherited
-        return True
 
     def save_self(self, file: FileType, version: int = 1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)

@@ -48,10 +48,6 @@ class DryList(DryObject, UserList):
             **self.dry_kwargs)
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load super classes information
-        if not super().load_object_imp(file):
-            return False
-
         # Load object list
         with file.open('obj_list.pkl', mode='r') as f:
             obj_filenames = pickle.loads(f.read())
@@ -84,8 +80,7 @@ class DryList(DryObject, UserList):
         with file.open('obj_list.pkl', mode='w') as f:
             f.write(pickler(obj_filenames))
 
-        # Super classes should save their information
-        return super().save_object_imp(file)
+        return True
 
 
 class DryTuple(DryObject):
@@ -140,10 +135,6 @@ class DryTuple(DryObject):
             **self.dry_kwargs)
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load super classes information
-        if not super().load_object_imp(file):
-            return False
-
         # Load object list
         with file.open('obj_list.pkl', mode='r') as f:
             obj_filenames = pickle.loads(f.read())
@@ -175,8 +166,7 @@ class DryTuple(DryObject):
         with file.open('obj_list.pkl', mode='w') as f:
             f.write(pickler(obj_filenames))
 
-        # Super classes should save their information
-        return super().save_object_imp(file)
+        return True
 
 
 class DryDict(DryObject, UserDict):
@@ -246,10 +236,6 @@ class DryDict(DryObject, UserDict):
             **self.dry_kwargs)
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load super classes information
-        if not super().load_object_imp(file):
-            return False
-
         # Load object list
         with file.open('obj_dict.pkl', mode='r') as f:
             obj_dict = pickle.loads(f.read())
@@ -281,5 +267,4 @@ class DryDict(DryObject, UserDict):
         with file.open('obj_dict.pkl', mode='w') as f:
             f.write(pickler(obj_dict))
 
-        # Super classes should save their information
-        return super().save_object_imp(file)
+        return True

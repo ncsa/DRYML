@@ -13,12 +13,6 @@ class SimpleObject(dryml.DryObject):
     def __init__(self, i, **kwargs):
         self.i = i
 
-    def load_object_imp(self, file) -> bool:
-        return True
-
-    def save_object_imp(self, file) -> bool:
-        return True
-
     def version(self):
         return {version}
 

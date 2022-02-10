@@ -3,6 +3,7 @@ import copy
 import abc
 import inspect
 import functools
+import zipfile
 from typing import Union, IO, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
@@ -85,6 +86,8 @@ class DryMeta(abc.ABCMeta):
             base = True
 
         new_cls.__init__ = DryMeta.make_dry_init(new_cls, init_func, base=base)
+        new_cls.load_object = DryMeta.make_load_object(new_cls)
+        new_cls.save_object = DryMeta.make_save_object(new_cls)
 
         return new_cls
 
@@ -204,6 +207,36 @@ class DryMeta(abc.ABCMeta):
             init_func(self, *args, **kwargs)
 
         return dry_init
+
+    @staticmethod
+    def make_load_object(__class__):
+        """
+        Method for making a load_object function
+        """
+        def load_object(self, file: zipfile.ZipFile) -> bool:
+            if not hasattr(__class__, '__dry_meta_base__'):
+                # If we're not the base, call the super class's load.
+                super().load_object(self, file)
+            if hasattr(__class__, 'load_object_imp'):
+                if not __class__.load_object_imp(self, file):
+                    return False
+            return True
+        return load_object
+
+    @staticmethod
+    def make_save_object(__class__):
+        """
+        Method for making a save_object function
+        """
+        def save_object(self, file: zipfile.ZipFile) -> bool:
+            if hasattr(__class__, 'save_object_imp'):
+                if not __class__.save_object_imp(self, file):
+                    return False
+            if not hasattr(__class__, '__dry_meta_base__'):
+                # If we're not the base, call the super class's load.
+                super().save_object(self, file)
+            return True
+        return save_object
 
 
 class DryObjectDef(collections.UserDict):
