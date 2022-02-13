@@ -407,6 +407,20 @@ class DryObjectDef(collections.UserDict):
             except Exception:
                 pass
 
+        # Detect and Construct dryobjects as we encounter them.
+        def detect_and_construct(val):
+            if is_dictlike(val):
+                if 'dry_def' in val:
+                    if val['dry_def']:
+                        # We have a dry object definition.
+                        val_def = DryObjectDef.from_dict(val)
+                        return val_def.build()
+            return val
+
+        args = list(map(detect_and_construct, self.args))
+        kwargs = {k: detect_and_construct(v)
+                  for k, v in self.kwargs.items()}
+
         if construct_object:
             obj = self.cls(*self.args, **self.kwargs)
 
