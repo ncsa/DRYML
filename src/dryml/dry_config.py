@@ -182,7 +182,8 @@ class DryMeta(abc.ABCMeta):
             # Execute user init
             # Here we make sure to remove special arguments
             used_kwargs = ['dry_args', 'dry_kwargs', 'dry_id']
-            sub_kwargs = { k: v for k, v in kwargs.items() if k not in used_kwargs }
+            sub_kwargs = {k: v for k, v in kwargs.items()
+                          if k not in used_kwargs}
             init_func(self, *args, **sub_kwargs)
 
         return dry_init
@@ -219,15 +220,17 @@ class DryMeta(abc.ABCMeta):
 
 
 def is_allowed_value_type(val):
-    if type(val) in (str, bytes, int, float):
+    if type(val) in (str, bytes, int, float, bool):
         return True
     if type(val) is type:
         return True
     if val is None:
         return True
-    if issubclass(type(val), DryMeta):
+    if type(val) is DryMeta:
         return True
-    print(f"Value {val} is not an allowed value type.")
+    from dryml import DryObject
+    if issubclass(type(val), DryObject):
+        return True
     return False
 
 
@@ -262,8 +265,9 @@ def check_if_allowed(val):
 
 
 def adapt_val(val):
+    from dryml import DryObject
     # we need to turn DryMeta types into definitions
-    if issubclass(type(val), DryMeta):
+    if issubclass(type(val), DryObject):
         return val.definition().to_dict()
     return val
 
