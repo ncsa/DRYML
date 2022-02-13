@@ -15,6 +15,8 @@ def is_allowed_base_type(val):
         return True
     if type(val) is type:
         return True
+    if val is None:
+        return True
     return False
 
 
