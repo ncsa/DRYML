@@ -9,14 +9,16 @@ class DryPipe(DryComponent, DryList):
 
     def train(self, data, *args, **kwargs):
         last_val = data
-        for step in self:
+        for i in range(len(self)):
+            step = self[i]
             # Prepare data for this step
             last_val = step.prepare_data(last_val)
             # Train step if needed
             if step.train_state == DryComponent.untrained:
                 step.train(last_val, *args, **kwargs)
             # Eval data for next step in training
-            last_val = step.eval(last_val)
+            if i < len(self)-1:
+                last_val = step.eval(last_val)
 
         # Call DryComponent Train
         super().train(data, *args, **kwargs)

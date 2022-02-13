@@ -1,4 +1,4 @@
-from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef
+from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
     load_object, save_object, change_object_cls
 from dryml.dry_selector import DrySelector
@@ -16,6 +16,7 @@ __all__ = [
     DryObject,
     DryObjectFile,
     DryObjectDef,
+    DryMeta,
     DryObjectFactory,
     DrySelector,
     DryRepo,

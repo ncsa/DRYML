@@ -13,6 +13,8 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
 def is_allowed_base_type(val):
     if type(val) in (str, bytes, int, float):
         return True
+    if type(val) is type:
+        return True
     return False
 
 
@@ -137,6 +139,16 @@ class DryMeta(abc.ABCMeta):
         f.__dry_skip_args__ = True
         return f
 
+    @staticmethod
+    def collect_args(f):
+        f.__dry_collect_args__ = True
+        return f
+
+    @staticmethod
+    def collect_kwargs(f):
+        f.__dry_collect_kwargs__ = True
+        return f
+
     # Create scope with __class__ defined so super can find a cell
     # with the right name.
     # Python issue: https://bugs.python.org/issue29944
@@ -164,19 +176,44 @@ class DryMeta(abc.ABCMeta):
             if hasattr(init_func, '__dry_skip_args__'):
                 if init_func.__dry_skip_args__:
                     skip_args = True
+            collect_args = False
+            if hasattr(init_func, '__dry_collect_args__'):
+                if init_func.__dry_collect_args__:
+                    collect_args = True
+            if skip_args and collect_args:
+                raise ValueError(
+                    "Cannot set both __dry_skip_args__ and "
+                    "__dry_collect_args__ on an __init__ function.")
             if not skip_args:
-                num_args = len(init_func.__dry_args__)
+                if collect_args:
+                    # Collect all the arguments
+                    num_args = len(pargs)
+                else:
+                    num_args = len(init_func.__dry_args__)
                 for i in range(num_args):
                     dry_args.append(pargs[i])
-            for k, v in init_func.__dry_kwargs__:
-                dry_kwargs[k] = pkwargs.get(k, v)
+            collect_kwargs = False
+            used_kwargs = []
+            exception_kwargs = ['dry_args', 'dry_kwargs', 'dry_id']
+            if hasattr(init_func, '__dry_collect_kwargs__'):
+                if init_func.__dry_collect_kwargs__:
+                    collect_kwargs = True
+            if collect_kwargs:
+                for k, v in pkwargs.items():
+                    if k not in exception_kwargs:
+                        # Get all the arguments
+                        dry_kwargs[k] = v
+                        used_kwargs.append(k)
+            else:
+                for k, v in init_func.__dry_kwargs__:
+                    dry_kwargs[k] = pkwargs.get(k, v)
+                    used_kwargs.append(k)
 
             # Grab unaltered arguments to pass to super
             if not skip_args:
                 super_args = args[num_args:]
             else:
                 super_args = []
-            used_kwargs = list(map(lambda t: t[0], init_func.__dry_kwargs__))
             used_kwargs += ['dry_args', 'dry_kwargs']
             super_kwargs = {
                 k: v for k, v in kwargs.items() if k not in used_kwargs
