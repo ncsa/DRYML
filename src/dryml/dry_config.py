@@ -10,69 +10,6 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     init_arg_dict_handler
 
 
-def is_allowed_base_type(val):
-    if type(val) in (str, bytes, int, float):
-        return True
-    if type(val) is type:
-        return True
-    if val is None:
-        return True
-    return False
-
-
-def check_if_allowed(val):
-    "Method to check whether values are json serializable"
-    if is_dictlike(val):
-        for key in val.keys():
-            if not check_if_allowed(key):
-                return False
-            if not check_if_allowed(val[key]):
-                return True
-    elif is_nonstring_iterable(val):
-        for element in val:
-            if not check_if_allowed(element):
-                return False
-    else:
-        return is_allowed_base_type(val)
-    return True
-
-
-class DryConfigInterface(object):
-    def __init__(self, *args, **kwargs):
-        # Initialize object
-        super().__init__(*args, **kwargs)
-        if not check_if_allowed(self.data):
-            raise TypeError(
-                "DryConfig initialized with disallowed values!")
-
-    def __setitem__(self, key, value):
-        if not check_if_allowed(key):
-            raise TypeError(f"Key {key} not allowed in a DryConfig object")
-        if not check_if_allowed(value):
-            raise TypeError(f"Value {value} not allowed in a DryConfig object")
-        # Call parent class functions
-        super().__setitem__(key, value)
-
-    def save(self, file: Union[str, IO[bytes]]) -> bool:
-        if type(file) is str:
-            with open(file, 'w') as f:
-                f.write(pickler(self.data))
-        else:
-            file.write(pickler(self.data))
-        return True
-
-
-class DryArgs(DryConfigInterface, collections.UserList):
-    def append(self, val):
-        if not check_if_allowed(val):
-            raise TypeError(f"Value {val} not allowed in a DryList")
-        super().append(val)
-
-
-class DryKwargs(DryConfigInterface, collections.UserDict):
-    pass
-
-
 class DryMeta(abc.ABCMeta):
     def __new__(cls, clsname, bases, attrs):
         # Create class
@@ -243,7 +180,10 @@ class DryMeta(abc.ABCMeta):
                 )
 
             # Execute user init
-            init_func(self, *args, **kwargs)
+            # Here we make sure to remove special arguments
+            used_kwargs = ['dry_args', 'dry_kwargs', 'dry_id']
+            sub_kwargs = { k: v for k, v in kwargs.items() if k not in used_kwargs }
+            init_func(self, *args, **sub_kwargs)
 
         return dry_init
 
@@ -276,6 +216,92 @@ class DryMeta(abc.ABCMeta):
                 super().save_object(self, file)
             return True
         return save_object
+
+
+def is_allowed_value_type(val):
+    if type(val) in (str, bytes, int, float):
+        return True
+    if type(val) is type:
+        return True
+    if val is None:
+        return True
+    if issubclass(type(val), DryMeta):
+        return True
+    print(f"Value {val} is not an allowed value type.")
+    return False
+
+
+def is_allowed_key_type(val):
+    if type(val) in (str, bytes, int, float):
+        return True
+    if type(val) is tuple:
+        for el in val:
+            if not is_allowed_key_type(el):
+                print(f"element {el} within {val} is not an allowed key type.")
+                return False
+        return True
+    print(f"Key {val} is not an allowed key type.")
+    return False
+
+
+def check_if_allowed(val):
+    "Method to check whether values are json serializable"
+    if is_dictlike(val):
+        for key in val.keys():
+            if not is_allowed_key_type(key):
+                return False
+            if not check_if_allowed(val[key]):
+                return True
+    elif is_nonstring_iterable(val):
+        for element in val:
+            if not check_if_allowed(element):
+                return False
+    else:
+        return is_allowed_value_type(val)
+    return True
+
+
+def adapt_val(val):
+    # we need to turn DryMeta types into definitions
+    if issubclass(type(val), DryMeta):
+        return val.definition().to_dict()
+    return val
+
+
+class DryConfigInterface(object):
+    def __init__(self, *args, **kwargs):
+        # Initialize object
+        super().__init__(*args, **kwargs)
+        if not check_if_allowed(self.data):
+            raise TypeError(
+                "DryConfig initialized with disallowed values!")
+
+    def __setitem__(self, key, value):
+        if not check_if_allowed(key):
+            raise TypeError(f"Key {key} not allowed in a DryConfig object")
+        if not check_if_allowed(value):
+            raise TypeError(f"Value {value} not allowed in a DryConfig object")
+        # Call parent class functions
+        super().__setitem__(key, adapt_val(value))
+
+    def save(self, file: Union[str, IO[bytes]]) -> bool:
+        if type(file) is str:
+            with open(file, 'w') as f:
+                f.write(pickler(self.data))
+        else:
+            file.write(pickler(self.data))
+        return True
+
+
+class DryArgs(DryConfigInterface, collections.UserList):
+    def append(self, val):
+        if not check_if_allowed(val):
+            raise TypeError(f"Value {val} not allowed in DryArgs")
+        super().append(adapt_val(val))
+
+
+class DryKwargs(DryConfigInterface, collections.UserDict):
+    pass
 
 
 class DryObjectDef(collections.UserDict):
@@ -352,6 +378,7 @@ class DryObjectDef(collections.UserDict):
             'dry_mut': self.dry_mut,
             'dry_args': self.args.data,
             'dry_kwargs': self.kwargs.data,
+            'dry_def': True,
         }
 
     def build(self, repo=None):
