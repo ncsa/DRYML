@@ -55,6 +55,11 @@ class HelloComponentB(dryml.DryComponent):
         pass
 
 
+class HelloComponentC(dryml.DryComponent):
+    def __init__(self, A):
+        pass
+
+
 class TestNest(dryml.DryObject):
     def __init__(self, A):
         self.A = A

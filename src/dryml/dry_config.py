@@ -95,6 +95,11 @@ class DryMeta(abc.ABCMeta):
     def make_dry_init(__class__, init_func, base=False):
         # Track arguments
         init_func = DryMeta.track_args(init_func)
+        sig = inspect.signature(init_func)
+        _, final_par = list(sig.parameters.items())[-1]
+        no_final_kwargs = False
+        if final_par.kind != inspect.Parameter.VAR_KEYWORD:
+            no_final_kwargs = True
 
         @functools.wraps(init_func)
         def dry_init(self, *args, dry_args=None, dry_kwargs=None, **kwargs):
@@ -182,8 +187,12 @@ class DryMeta(abc.ABCMeta):
             # Execute user init
             # Here we make sure to remove special arguments
             used_kwargs = ['dry_args', 'dry_kwargs', 'dry_id']
-            sub_kwargs = {k: v for k, v in kwargs.items()
-                          if k not in used_kwargs}
+            if no_final_kwargs:
+                sub_kwargs = {k: v for k, v in kwargs.items()
+                              if k in init_func.__dry_kwargs__}
+            else:
+                sub_kwargs = {k: v for k, v in kwargs.items()
+                              if k not in used_kwargs}
             init_func(self, *args, **sub_kwargs)
 
         return dry_init

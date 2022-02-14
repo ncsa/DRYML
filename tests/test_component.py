@@ -27,3 +27,14 @@ def test_basic_component_2():
         test_obj, cls=objects.HelloComponent, update=True)
 
     assert test_obj.definition() == new_obj.definition()
+
+
+def test_component_def():
+    import objects
+
+    test_obj = objects.HelloComponentC('test1')
+
+    test_obj2 = test_obj.definition().build()
+
+    assert test_obj.definition() == test_obj2.definition()
+    assert test_obj.dry_args[0] == test_obj2.dry_args[0]
