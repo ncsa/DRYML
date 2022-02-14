@@ -49,3 +49,24 @@ def test_dry_args_add_items_2():
     test_val = [lambda x: x]
 
     dryml.DryArgs(test_val)
+
+
+def test_adapt_val_1():
+    test_val = [[('test', 0)]]
+
+    adapted_val = dryml.dry_config.adapt_val(test_val)
+
+    assert test_val == adapted_val
+
+
+def test_adapt_val_2():
+    """
+    Test that adapt_val and detect_and_construct leave certain arguments
+    Unchanged.
+    """
+    test_val = [[('test', 0)]]
+
+    test_val_2 = dryml.dry_config.detect_and_construct(
+        dryml.dry_config.adapt_val(test_val))
+
+    assert test_val == test_val_2

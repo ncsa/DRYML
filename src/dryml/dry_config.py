@@ -30,8 +30,15 @@ def detect_and_construct(val):
         dict_val = {k: detect_and_construct(v) for k, v in val.items()}
         return dict_val
     elif is_nonstring_iterable(val):
-        # We have a list-like item, and must build its contents
-        return list(map(detect_and_construct, val))
+        if type(val) is tuple:
+            # We have a list-like item, and must build its contents
+            return tuple(map(detect_and_construct, val))
+        elif type(val) is list or type(val) is DryArgs:
+            # We have a list-like item, and must build its contents
+            return list(map(detect_and_construct, val))
+        else:
+            raise ValueError(
+                f"Unsupported iterable type {type(val)}!")
     else:
         # We have some other value, and assume it can be passed directly.
         # Such as 'int, float, etc...'
@@ -145,6 +152,7 @@ class DryMeta(abc.ABCMeta):
                 num_args = len(init_func.__dry_args__)
             for i in range(num_args):
                 dry_args.append(args[i])
+
             used_kwargs = []
             for k, v in init_func.__dry_kwargs__:
                 dry_kwargs[k] = kwargs.get(k, v)
