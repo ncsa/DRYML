@@ -10,6 +10,7 @@ def test_dry_list_1():
     the_list = DryList(obj1, obj2)
 
     new_list = the_list.definition().build()
+
     assert new_list[0].definition() == obj1.definition()
     assert new_list[1].definition() == obj2.definition()
     assert new_list is not the_list

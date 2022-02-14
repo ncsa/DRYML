@@ -10,6 +10,34 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     init_arg_dict_handler
 
 
+# Detect and Construct dryobjects as we encounter them.
+def detect_and_construct(val):
+    from dryml.dry_object import DryObject
+    if isinstance(val, DryObject):
+        # If we already have a DryObject, do nothing
+        return val
+    elif isinstance(val, DryObjectDef):
+        # We have an object definition. Build the object.
+        return val.build()
+    if is_dictlike(val):
+        # We might have an object definition
+        if 'dry_def' in val:
+            if val['dry_def']:
+                # We have a dry object definition.
+                val_def = DryObjectDef.from_dict(val)
+                return val_def.build()
+        # Otherwise, we have a mapping, and need to build its content
+        dict_val = {k: detect_and_construct(v) for k, v in val.items()}
+        return dict_val
+    elif is_nonstring_iterable(val):
+        # We have a list-like item, and must build its contents
+        return list(map(detect_and_construct, val))
+    else:
+        # We have some other value, and assume it can be passed directly.
+        # Such as 'int, float, etc...'
+        return val
+
+
 class DryMeta(abc.ABCMeta):
     def __new__(cls, clsname, bases, attrs):
         # Create class
@@ -74,18 +102,8 @@ class DryMeta(abc.ABCMeta):
         return f
 
     @staticmethod
-    def skip_args(f):
-        f.__dry_skip_args__ = True
-        return f
-
-    @staticmethod
     def collect_args(f):
         f.__dry_collect_args__ = True
-        return f
-
-    @staticmethod
-    def collect_kwargs(f):
-        f.__dry_collect_kwargs__ = True
         return f
 
     # Create scope with __class__ defined so super can find a cell
@@ -96,68 +114,44 @@ class DryMeta(abc.ABCMeta):
         # Track arguments
         init_func = DryMeta.track_args(init_func)
         sig = inspect.signature(init_func)
-        _, final_par = list(sig.parameters.items())[-1]
+
+        # Detect var signature components
+        no_var_pars = False
         no_final_kwargs = False
-        if final_par.kind != inspect.Parameter.VAR_KEYWORD:
+        last_par_kind = None
+        for key in sig.parameters:
+            par = sig.parameters[key]
+            last_par_kind = par.kind
+            if par.kind == inspect.Parameter.VAR_POSITIONAL:
+                no_var_pars = True
+        if last_par_kind != inspect.Parameter.VAR_KEYWORD:
             no_final_kwargs = True
 
         @functools.wraps(init_func)
         def dry_init(self, *args, dry_args=None, dry_kwargs=None, **kwargs):
-            # First, preprocess the arguments
-            if hasattr(__class__, 'args_preprocess'):
-                (pargs, pkwargs) = __class__.args_preprocess(
-                    self, *args, dry_args=None, dry_kwargs=None, **kwargs)
-            else:
-                pargs = args
-                pkwargs = kwargs
-
             # Initialize dry arguments
             dry_args = init_arg_list_handler(dry_args)
             dry_kwargs = init_arg_dict_handler(dry_kwargs)
 
-            # grab args/kwargs into dry_args/dry_kwargs
-            skip_args = False
-            if hasattr(init_func, '__dry_skip_args__'):
-                if init_func.__dry_skip_args__:
-                    skip_args = True
+            # grab all args into dry_args
             collect_args = False
             if hasattr(init_func, '__dry_collect_args__'):
                 if init_func.__dry_collect_args__:
                     collect_args = True
-            if skip_args and collect_args:
-                raise ValueError(
-                    "Cannot set both __dry_skip_args__ and "
-                    "__dry_collect_args__ on an __init__ function.")
-            if not skip_args:
-                if collect_args:
-                    # Collect all the arguments
-                    num_args = len(pargs)
-                else:
-                    num_args = len(init_func.__dry_args__)
-                for i in range(num_args):
-                    dry_args.append(pargs[i])
-            collect_kwargs = False
-            used_kwargs = []
-            exception_kwargs = ['dry_args', 'dry_kwargs', 'dry_id']
-            if hasattr(init_func, '__dry_collect_kwargs__'):
-                if init_func.__dry_collect_kwargs__:
-                    collect_kwargs = True
-            if collect_kwargs:
-                for k, v in pkwargs.items():
-                    if k not in exception_kwargs:
-                        # Get all the arguments
-                        dry_kwargs[k] = v
-                        used_kwargs.append(k)
+            if collect_args:
+                # Collect all the arguments
+                num_args = len(args)
             else:
-                for k, v in init_func.__dry_kwargs__:
-                    dry_kwargs[k] = pkwargs.get(k, v)
-                    used_kwargs.append(k)
+                num_args = len(init_func.__dry_args__)
+            for i in range(num_args):
+                dry_args.append(args[i])
+            used_kwargs = []
+            for k, v in init_func.__dry_kwargs__:
+                dry_kwargs[k] = kwargs.get(k, v)
+                used_kwargs.append(k)
 
             # Grab unaltered arguments to pass to super
-            if not skip_args:
-                super_args = args[num_args:]
-            else:
-                super_args = []
+            super_args = args[num_args:]
             used_kwargs += ['dry_args', 'dry_kwargs']
             super_kwargs = {
                 k: v for k, v in kwargs.items() if k not in used_kwargs
@@ -186,13 +180,22 @@ class DryMeta(abc.ABCMeta):
 
             # Execute user init
             # Here we make sure to remove special arguments
-            used_kwargs = ['dry_args', 'dry_kwargs', 'dry_id']
+            used_kwargs = ['dry_args', 'dry_kwargs']
             if no_final_kwargs:
-                sub_kwargs = {k: v for k, v in kwargs.items()
-                              if k in init_func.__dry_kwargs__}
+                known_kwargs = list(map(
+                    lambda t: t[0],
+                    init_func.__dry_kwargs__))
+                sub_kwargs = {
+                    k: detect_and_construct(v) for k, v in kwargs.items()
+                    if k in known_kwargs}
             else:
-                sub_kwargs = {k: v for k, v in kwargs.items()
-                              if k not in used_kwargs}
+                sub_kwargs = {
+                    k: detect_and_construct(v) for k, v in kwargs.items()
+                    if k not in used_kwargs}
+            if no_var_pars:
+                args = args[:num_args]
+            # Make sure we process args.
+            args = list(map(detect_and_construct, args))
             init_func(self, *args, **sub_kwargs)
 
         return dry_init
@@ -248,6 +251,9 @@ def adapt_val(val):
     from dryml import DryObject
     if issubclass(type(val), DryObject):
         return val.definition().to_dict()
+    if issubclass(type(val), DryObjectDef):
+        # Handle DryObjectDef, otherwise it'll get mangled
+        return val.to_dict()
     if type(val) is tuple:
         adjusted_value = list(map(adapt_val, val))
         return tuple(adjusted_value)
@@ -394,21 +400,6 @@ class DryObjectDef(collections.UserDict):
                 construct_object = False
             except Exception:
                 pass
-
-        # Detect and Construct dryobjects as we encounter them.
-        def detect_and_construct(val):
-            if is_dictlike(val):
-                if 'dry_def' in val:
-                    if val['dry_def']:
-                        # We have a dry object definition.
-                        val_def = DryObjectDef.from_dict(val)
-                        return val_def.build()
-                dict_val = {k: detect_and_construct(v) for k, v in val.items()}
-                return dict_val
-            elif is_nonstring_iterable(val):
-                return list(map(detect_and_construct, val))
-            else:
-                return val
 
         if construct_object:
             args = detect_and_construct(self.args)

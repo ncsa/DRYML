@@ -11,7 +11,6 @@ import uuid
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryObjectDef, DryMeta
 from dryml.utils import get_current_cls, pickler, static_var
-import copy
 
 FileType = Union[str, IO[bytes]]
 
@@ -255,15 +254,10 @@ class DryObject(metaclass=DryMeta):
     # Only ever set for this class.
     __dry_meta_base__ = True
 
-    @staticmethod
-    def args_preprocess(obj, *args, **kwargs):
-        new_kwargs = copy.copy(kwargs)
-        new_kwargs['dry_id'] = kwargs.get('dry_id', str(uuid.uuid4()))
-        return (args, new_kwargs)
-
     # Define the dry_id
     def __init__(self, *args, dry_id=None, **kwargs):
-        pass
+        if dry_id is None:
+            self.dry_kwargs['dry_id'] = str(uuid.uuid4())
 
     def definition(self):
         return DryObjectDef(
