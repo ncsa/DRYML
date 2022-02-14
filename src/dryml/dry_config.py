@@ -219,74 +219,50 @@ class DryMeta(abc.ABCMeta):
         return save_object
 
 
-def is_allowed_value_type(val):
-    if type(val) in (str, bytes, int, float, bool):
-        return True
-    if type(val) is type:
-        return True
-    if val is None:
-        return True
-    if type(val) is DryMeta:
-        return True
-    from dryml import DryObject
-    if issubclass(type(val), DryObject):
-        return True
-    return False
-
-
-def is_allowed_key_type(val):
+def adapt_key(val):
     if type(val) in (str, bytes, int, float):
-        return True
+        return val
     if type(val) is tuple:
-        for el in val:
-            if not is_allowed_key_type(el):
-                print(f"element {el} within {val} is not an allowed key type.")
-                return False
-        return True
-    print(f"Key {val} is not an allowed key type.")
-    return False
-
-
-def check_if_allowed(val):
-    "Method to check whether values are json serializable"
-    if is_dictlike(val):
-        for key in val.keys():
-            if not is_allowed_key_type(key):
-                return False
-            if not check_if_allowed(val[key]):
-                return True
-    elif is_nonstring_iterable(val):
-        for element in val:
-            if not check_if_allowed(element):
-                return False
-    else:
-        return is_allowed_value_type(val)
-    return True
+        return tuple(map(adapt_key, val))
+    raise ValueError(f"Key {val} not supported by Dry Configuration")
 
 
 def adapt_val(val):
+    if type(val) in (str, bytes, int, float, bool):
+        return val
+    if type(val) is type:
+        return val
+    if val is None:
+        return val
+    if type(val) is DryMeta:
+        return val
     from dryml import DryObject
-    # we need to turn DryMeta types into definitions
     if issubclass(type(val), DryObject):
         return val.definition().to_dict()
-    return val
+    if type(val) is tuple:
+        adjusted_value = list(map(adapt_val, val))
+        return tuple(adjusted_value)
+    if is_dictlike(val):
+        adjusted_value = {adapt_key(k): adapt_val(v) for k, v in val.items()}
+        return adjusted_value
+    if is_nonstring_iterable(val):
+        adjusted_value = list(map(adapt_val, val))
+        return adjusted_value
+    raise ValueError(f"value {val} not supported by Dry Configuration")
 
 
 class DryConfigInterface(object):
     def __init__(self, *args, **kwargs):
         # Initialize object
-        super().__init__(*args, **kwargs)
-        if not check_if_allowed(self.data):
-            raise TypeError(
-                "DryConfig initialized with disallowed values!")
+        adapted_args = adapt_val(args)
+        adapted_kwargs = adapt_val(kwargs)
+        super().__init__(*adapted_args, **adapted_kwargs)
 
     def __setitem__(self, key, value):
-        if not check_if_allowed(key):
-            raise TypeError(f"Key {key} not allowed in a DryConfig object")
-        if not check_if_allowed(value):
-            raise TypeError(f"Value {value} not allowed in a DryConfig object")
+        adapted_key = adapt_key(key)
+        adapted_val = adapt_val(value)
         # Call parent class functions
-        super().__setitem__(key, adapt_val(value))
+        super().__setitem__(adapted_key, adapted_val)
 
     def save(self, file: Union[str, IO[bytes]]) -> bool:
         if type(file) is str:
@@ -298,9 +274,12 @@ class DryConfigInterface(object):
 
 
 class DryArgs(DryConfigInterface, collections.UserList):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for i in range(len(self.data)):
+            self.data[i] = adapt_val(self.data[i])
+
     def append(self, val):
-        if not check_if_allowed(val):
-            raise TypeError(f"Value {val} not allowed in DryArgs")
         super().append(adapt_val(val))
 
 
@@ -415,14 +394,18 @@ class DryObjectDef(collections.UserDict):
                         # We have a dry object definition.
                         val_def = DryObjectDef.from_dict(val)
                         return val_def.build()
-            return val
-
-        args = list(map(detect_and_construct, self.args))
-        kwargs = {k: detect_and_construct(v)
-                  for k, v in self.kwargs.items()}
+                dict_val = {k: detect_and_construct(v) for k, v in val.items()}
+                return dict_val
+            elif is_nonstring_iterable(val):
+                return list(map(detect_and_construct, val))
+            else:
+                return val
 
         if construct_object:
-            obj = self.cls(*self.args, **self.kwargs)
+            args = detect_and_construct(self.args)
+            kwargs = detect_and_construct(self.kwargs)
+
+            obj = self.cls(*args, **kwargs)
 
         # Reset the repo for this function
         if reset_repo:

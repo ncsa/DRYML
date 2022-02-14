@@ -21,7 +21,7 @@ class SimpleObject(dryml.DryObject):
 """
 
 
-def test_basic_object_1():
+def test_save_object_1():
     """
     Test Saving objects through an io buffer
     """
@@ -48,7 +48,7 @@ def test_basic_object_1():
 
 
 @pytest.mark.usefixtures("create_name")
-def test_basic_object_2(create_name):
+def test_save_object_2(create_name):
     """
     Test Saving objects to a file which doesn't yet exist
     """
@@ -71,7 +71,7 @@ def test_basic_object_2(create_name):
 
 
 @pytest.mark.usefixtures("create_temp_named_file")
-def test_basic_object_3(create_temp_named_file):
+def test_save_object_3(create_temp_named_file):
     """
     Test Saving objects to a file using file which was already created
     """
@@ -94,7 +94,7 @@ def test_basic_object_3(create_temp_named_file):
 
 
 @pytest.mark.usefixtures("create_temp_file")
-def test_basic_object_4(create_temp_file):
+def test_save_object_4(create_temp_file):
     """
     Test Saving objects to a file using bytes-like file object
     """
@@ -120,7 +120,7 @@ def test_basic_object_4(create_temp_file):
 
 @pytest.mark.xfail
 @pytest.mark.usefixtures("create_temp_file")
-def test_basic_object_5(create_temp_file):
+def test_save_object_5(create_temp_file):
     """
     Test Saving objects to a file, then loading in an environment
     without class definition
@@ -250,6 +250,139 @@ def test_object_args_passing_2(create_name):
     obj_loaded = dryml.load_object(create_name)
 
     assert obj_loaded.dry_args == [1]
+
+
+def test_object_args_passing_3():
+    """
+    Test passing nested dryobjects as arguments
+    """
+    import objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest(obj1)
+
+    obj3 = objs.TestNest(obj2)
+
+    obj1_cpy = obj1.definition().build()
+
+    assert obj1.definition() == obj1_cpy.definition()
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition().build()
+
+    assert obj2.definition() == obj2_cpy.definition()
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A) is type(obj1)
+    assert type(obj2_cpy.A) is type(obj1)
+
+    obj3_cpy = obj3.definition().build()
+
+    assert obj3.definition() == obj3_cpy.definition()
+    assert obj3 is not obj3_cpy
+    assert obj3.A is not obj3_cpy.A
+    assert type(obj3.A) is type(obj2)
+    assert type(obj3_cpy.A) is type(obj2)
+    assert obj3.A.A is not obj3_cpy.A.A
+    assert type(obj3.A.A) is type(obj1)
+    assert type(obj3_cpy.A.A) is type(obj1)
+
+
+def test_object_args_passing_4():
+    """
+    Test passing nested dryobjects as arguments, within a list
+    """
+    import objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest([obj1])
+
+    obj1_cpy = obj1.definition().build()
+
+    assert obj1.definition() == obj1_cpy.definition()
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition().build()
+
+    assert obj2.definition() == obj2_cpy.definition()
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A[0]) is type(obj1)
+    assert type(obj2_cpy.A[0]) is type(obj1)
+
+
+def test_object_args_passing_5():
+    """
+    Test passing nested dryobjects as arguments, within a nested list
+    """
+    import objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest([[obj1]])
+
+    obj1_cpy = obj1.definition().build()
+
+    assert obj1.definition() == obj1_cpy.definition()
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition().build()
+
+    assert obj2.definition() == obj2_cpy.definition()
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A[0][0]) is type(obj1)
+    assert type(obj2_cpy.A[0][0]) is type(obj1)
+
+
+def test_object_args_passing_6():
+    """
+    Test passing nested dryobjects as arguments, within a dict
+    """
+    import objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest({'A': obj1})
+
+    obj1_cpy = obj1.definition().build()
+
+    assert obj1.definition() == obj1_cpy.definition()
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition().build()
+
+    assert obj2.definition() == obj2_cpy.definition()
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A['A']) is type(obj1)
+    assert type(obj2_cpy.A['A']) is type(obj1)
+
+
+def test_object_args_passing_7():
+    """
+    Test passing nested dryobjects as arguments, within a dict with a list
+    """
+    import objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest({'A': [[obj1]]})
+
+    obj1_cpy = obj1.definition().build()
+
+    assert obj1.definition() == obj1_cpy.definition()
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition().build()
+
+    assert obj2.definition() == obj2_cpy.definition()
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A['A'][0][0]) is type(obj1)
+    assert type(obj2_cpy.A['A'][0][0]) is type(obj1)
 
 
 def test_object_config_1():
