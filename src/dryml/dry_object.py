@@ -11,6 +11,7 @@ import uuid
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryObjectDef, DryMeta
 from dryml.utils import get_current_cls, pickler, static_var
+import tempfile
 
 FileType = Union[str, IO[bytes]]
 
@@ -21,25 +22,31 @@ def file_resolve(file: str, exact_path: bool = False) -> str:
     return file
 
 
-def load_zipfile(file: FileType, exact_path: bool = False,
-                 mode='r', must_exist: bool = True) -> zipfile.ZipFile:
-    if type(file) is str:
-        filepath = file
-        filepath = file_resolve(filepath, exact_path=exact_path)
-        if must_exist and not os.path.exists(filepath):
-            raise ValueError(f"File {filepath} doesn't exist!")
-        file = zipfile.ZipFile(filepath, mode=mode)
-    if type(file) is not zipfile.ZipFile:
-        file = zipfile.ZipFile(file, mode=mode)
-    return file
-
-
 class DryObjectFile(object):
     def __init__(self, file: FileType, exact_path: bool = False,
                  mode: str = 'r', must_exist: bool = True):
 
-        self.file = load_zipfile(file, exact_path=exact_path,
-                                 mode=mode, must_exist=must_exist)
+        if type(file) is str:
+            filepath = file
+            filepath = file_resolve(filepath, exact_path=exact_path)
+            if must_exist and not os.path.exists(filepath):
+                raise ValueError(f"File {filepath} doesn't exist!")
+            if mode == 'w':
+                # Since we're writing a file, we first need to
+                # Open a temp file. This is because
+                # python zipfile module doesn't support have good support
+                # for updating zipfiles.
+                self.temp_file = tempfile.NamedTemporaryFile()
+                self.filepath = filepath
+                self.file = zipfile.ZipFile(self.temp_file.name, mode=mode)
+            else:
+                # Since we're reading the file, we can
+                # Open as zipfile directly
+                self.file = zipfile.ZipFile(filepath, mode=mode)
+        elif type(file) is not zipfile.ZipFile:
+            self.file = zipfile.ZipFile(file, mode=mode)
+        else:
+            self.file = file
 
     def __enter__(self):
         return self
@@ -49,6 +56,12 @@ class DryObjectFile(object):
 
     def close(self):
         self.file.close()
+        if hasattr(self, 'temp_file'):
+            # We need to overwrite any existing file
+            with open(self.filepath, 'wb') as f:
+                self.temp_file.seek(0)
+                f.write(self.temp_file.read())
+            self.temp_file.close()
 
     # def update_file(self, obj: DryObject):
     #     self.cache_object_data_obj(obj)

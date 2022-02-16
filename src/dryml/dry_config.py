@@ -10,8 +10,13 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     init_arg_dict_handler
 
 
+class IncompleteDefinitionError(Exception):
+    pass
+
+
 # Create a couple global variables
 build_repo = None
+build_cache = None
 
 
 # Detect and Construct dryobjects as we encounter them.
@@ -255,9 +260,10 @@ class DryMeta(abc.ABCMeta):
             for obj in self.__dry_obj_container_list__:
                 obj_id = obj.definition().get_individual_id()
                 save_path = f'dry_objects/{obj_id}.dry'
-                with file.open(save_path, 'w') as f:
-                    if not obj.save_self(f):
-                        return False
+                if save_path not in file.namelist():
+                    with file.open(save_path, 'w') as f:
+                        if not obj.save_self(f):
+                            return False
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's load.
                 super().save_object(self, file)
@@ -416,9 +422,11 @@ class DryObjectDef(collections.UserDict):
     def build(self, repo=None, load_zip=None):
         "Construct an object"
         reset_repo = False
+        reset_cache = False
         construct_object = True
 
         global build_repo
+        global build_cache
 
         if repo is not None:
             if build_repo is not None:
@@ -429,27 +437,45 @@ class DryObjectDef(collections.UserDict):
                 build_repo = repo
                 reset_repo = True
 
-        # Check whether a repo was given in a prior call
-        if build_repo is not None:
+        if build_cache is None:
+            build_cache = {}
+            reset_cache = True
+
+        construction_required = True
+        try:
+            obj_id = self.get_individual_id()
+            construction_required = False
+        except IncompleteDefinitionError:
+            pass
+
+        # Check the cache
+        if not construction_required and build_cache is not None:
+            if obj_id in build_cache:
+                obj = build_cache[obj_id]
+                construct_object = False
+
+        # Check the repo
+        if not construction_required and build_repo is not None:
             try:
                 obj = build_repo.get_obj(self)
+                build_cache[obj_id] = obj
                 construct_object = False
-            except Exception:
+            except KeyError:
+                # Didn't find the object in the repo
                 pass
 
-        # If we haven't built the object yet, search the zipfile
-        if construct_object and load_zip is not None:
-            try:
-                obj_id = self.get_individual_id()
-                target_filename = f"dry_objects/{obj_id}.dry"
-                from dryml import load_object
-                if target_filename in load_zip.namelist():
-                    with load_zip.open(target_filename) as f:
-                        obj = load_object(f)
-                        construct_object = False
-            except RuntimeError:
-                pass
+        # Check the zipfile
+        if not construction_required and \
+                construct_object and load_zip is not None:
+            target_filename = f"dry_objects/{obj_id}.dry"
+            from dryml import load_object
+            if target_filename in load_zip.namelist():
+                with load_zip.open(target_filename) as f:
+                    obj = load_object(f)
+                    build_cache[obj_id] = obj
+                    construct_object = False
 
+        # Finally, actually construct the object
         if construct_object:
             args = detect_and_construct(self.args, load_zip=load_zip)
             kwargs = detect_and_construct(self.kwargs, load_zip=load_zip)
@@ -459,6 +485,10 @@ class DryObjectDef(collections.UserDict):
         # Reset the repo for this function
         if reset_repo:
             build_repo = None
+
+        # Reset the build cache
+        if reset_cache:
+            build_cache = None
 
         # Return the result
         return obj
@@ -486,16 +516,14 @@ class DryObjectDef(collections.UserDict):
 
     def __hash__(self):
         if 'dry_id' not in self.kwargs:
-            raise RuntimeError(
-                "Tried to make an individual hash on a "
-                "DryObjectDef without a dry_id!")
+            raise IncompleteDefinitionError(
+                "Definition {self} has no dry_id!")
         return hash(self.get_individual_id())
 
     def get_individual_id(self):
         if 'dry_id' not in self.kwargs:
-            raise RuntimeError(
-                "Tried to make an individual id on a "
-                "DryObjectDef without a dry_id!")
+            raise IncompleteDefinitionError(
+                "Definition {self} has no dry_id!")
         return get_hashed_id(self.get_hash_str(no_id=False))
 
     def get_category_id(self):

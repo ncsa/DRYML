@@ -320,3 +320,34 @@ def test_delete_1(create_temp_dir):
 
     assert len(os.listdir(create_temp_dir)) == 0
     assert len(repo.get(load_objects=True)) == 0
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_object_save_restore_with_repo_1(create_temp_dir):
+    """
+    We test save and restore of nested objects through arguments
+    """
+    import objects
+
+    repo = dryml.DryRepo(create_temp_dir, create=True)
+
+    # Create the data containing objects
+    data_obj1 = objects.TestClassC2(10)
+    data_obj1.set_val(20)
+
+    # Add and save object in repo
+    repo.add_object(data_obj1)
+    repo.save()
+
+    # Enclose them in another object
+    obj = objects.TestClassC(data_obj1, B=data_obj1)
+
+    # Load the object from the file
+    obj2 = obj.definition().build(repo=repo)
+
+    assert obj.definition() == obj2.definition()
+    assert obj.A is obj.B
+    assert obj2.A is obj2.B
+    assert obj.A is obj2.A
+    assert obj.B is obj2.B
+    assert obj.A is obj2.B

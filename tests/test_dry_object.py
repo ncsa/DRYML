@@ -567,6 +567,31 @@ def test_object_save_restore_1(create_temp_named_file):
 def test_object_save_restore_2(create_temp_named_file):
     """
     We test save and restore of nested objects through arguments
+    This time, we make sure identical objects are loaded as
+    the same object.
+    """
+    import objects
+
+    # Create the data containing objects
+    data_obj1 = objects.TestClassC2(10)
+    data_obj1.set_val(20)
+
+    # Enclose them in another object
+    obj = objects.TestClassC(data_obj1, B=data_obj1)
+
+    assert obj.save_self(create_temp_named_file)
+
+    # Load the object from the file
+    obj2 = dryml.load_object(create_temp_named_file)
+
+    assert obj.definition() == obj2.definition()
+    assert obj.A is obj.B
+
+
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_object_save_restore_3(create_temp_named_file):
+    """
+    We test save and restore of nested objects through arguments
     Deeper nesting
     """
     import objects
