@@ -231,6 +231,20 @@ def test_basic_object_def_update_2(create_name):
     assert obj2.version() == 2
 
 
+def test_object_build_from_def_1():
+    """
+    Test that an object definition with no id results in an object with an id.
+    """
+
+    import objects
+    obj = dryml.DryObjectDef.from_dict({
+        'cls': objects.TestClassB,
+        'dry_args': [1],
+        'dry_kwargs': {'base_msg': 'Test'}}).build()
+
+    assert 'dry_id' in obj.dry_kwargs
+
+
 def test_object_args_passing_1():
     import objects as objs
 
@@ -520,3 +534,69 @@ def test_object_fac_1():
 
     assert isinstance(obj, objects.HelloInt)
     assert obj.dry_kwargs['msg'] == 10
+
+
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_object_save_restore_1(create_temp_named_file):
+    """
+    We test save and restore of nested objects through arguments
+    """
+    import objects
+
+    # Create the data containing objects
+    data_obj1 = objects.TestClassC2(10)
+    data_obj1.set_val(20)
+
+    data_obj2 = objects.TestClassC2(20)
+    data_obj2.set_val(40)
+
+    # Enclose them in another object
+    obj = objects.TestClassC(data_obj1, B=data_obj2)
+
+    assert obj.save_self(create_temp_named_file)
+
+    # Load the object from the file
+    obj2 = dryml.load_object(create_temp_named_file)
+
+    assert obj.definition() == obj2.definition()
+    assert obj.A.data == obj2.A.data
+    assert obj.B.data == obj2.B.data
+
+
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_object_save_restore_2(create_temp_named_file):
+    """
+    We test save and restore of nested objects through arguments
+    Deeper nesting
+    """
+    import objects
+
+    # Create the data containing objects
+    data_obj1 = objects.TestClassC2(10)
+    data_obj1.set_val(20)
+
+    data_obj2 = objects.TestClassC2(20)
+    data_obj2.set_val(40)
+
+    data_obj3 = objects.TestClassC2('test')
+    data_obj3.set_val('test')
+
+    data_obj4 = objects.TestClassC2(0.5)
+    data_obj4.set_val(30.5)
+
+    obj1 = objects.TestClassC(data_obj1, B=data_obj2)
+    obj2 = objects.TestClassC(data_obj3, B=data_obj4)
+
+    # Enclose them in another object
+    obj = objects.TestClassC(obj1, B=obj2)
+
+    assert obj.save_self(create_temp_named_file)
+
+    # Load the object from the file
+    obj2 = dryml.load_object(create_temp_named_file)
+
+    assert obj.definition() == obj2.definition()
+    assert obj.A.A.data == obj2.A.A.data
+    assert obj.A.B.data == obj2.A.B.data
+    assert obj.B.A.data == obj2.B.A.data
+    assert obj.B.B.data == obj2.B.B.data

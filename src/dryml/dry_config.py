@@ -10,32 +10,39 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     init_arg_dict_handler
 
 
+# Create a couple global variables
+build_repo = None
+
+
 # Detect and Construct dryobjects as we encounter them.
-def detect_and_construct(val):
+def detect_and_construct(val, load_zip=None):
     from dryml.dry_object import DryObject
     if isinstance(val, DryObject):
         # If we already have a DryObject, do nothing
         return val
     elif isinstance(val, DryObjectDef):
         # We have an object definition. Build the object.
-        return val.build()
+        return val.build(load_zip=load_zip)
     if is_dictlike(val):
         # We might have an object definition
         if 'dry_def' in val:
             if val['dry_def']:
                 # We have a dry object definition.
                 val_def = DryObjectDef.from_dict(val)
-                return val_def.build()
+                return val_def.build(load_zip=load_zip)
         # Otherwise, we have a mapping, and need to build its content
-        dict_val = {k: detect_and_construct(v) for k, v in val.items()}
+        dict_val = {k: detect_and_construct(v, load_zip=load_zip)
+                    for k, v in val.items()}
         return dict_val
     elif is_nonstring_iterable(val):
         if type(val) is tuple:
             # We have a list-like item, and must build its contents
-            return tuple(map(detect_and_construct, val))
+            return tuple(map(
+                lambda v: detect_and_construct(v, load_zip=load_zip), val))
         elif type(val) is list or type(val) is DryArgs:
             # We have a list-like item, and must build its contents
-            return list(map(detect_and_construct, val))
+            return list(map(
+                lambda v: detect_and_construct(v, load_zip=load_zip), val))
         else:
             raise ValueError(
                 f"Unsupported iterable type {type(val)}!")
@@ -204,6 +211,18 @@ class DryMeta(abc.ABCMeta):
                 args = args[:num_args]
             # Make sure we process args.
             args = list(map(detect_and_construct, args))
+
+            # Store list of DryObjects we need to later save.
+            self.__dry_obj_container_list__ = []
+            from dryml import DryObject
+            for arg in args:
+                if isinstance(arg, DryObject):
+                    self.__dry_obj_container_list__.append(arg)
+            for name in sub_kwargs:
+                obj = sub_kwargs[name]
+                if isinstance(obj, DryObject):
+                    self.__dry_obj_container_list__.append(obj)
+
             init_func(self, *args, **sub_kwargs)
 
         return dry_init
@@ -232,6 +251,13 @@ class DryMeta(abc.ABCMeta):
             if hasattr(__class__, 'save_object_imp'):
                 if not __class__.save_object_imp(self, file):
                     return False
+            # Save contained dry objects passed as arguments to construct
+            for obj in self.__dry_obj_container_list__:
+                obj_id = obj.definition().get_individual_id()
+                save_path = f'dry_objects/{obj_id}.dry'
+                with file.open(save_path, 'w') as f:
+                    if not obj.save_self(f):
+                        return False
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's load.
                 super().save_object(self, file)
@@ -387,37 +413,52 @@ class DryObjectDef(collections.UserDict):
             'dry_def': True,
         }
 
-    def build(self, repo=None):
+    def build(self, repo=None, load_zip=None):
         "Construct an object"
         reset_repo = False
         construct_object = True
 
+        global build_repo
+
         if repo is not None:
-            if DryObjectDef.build_repo is not None:
+            if build_repo is not None:
                 raise RuntimeError(
                     "different repos not currently supported")
             else:
                 # Set the call_repo
-                DryObjectDef.build_repo = repo
+                build_repo = repo
                 reset_repo = True
 
         # Check whether a repo was given in a prior call
-        if DryObjectDef.build_repo is not None:
+        if build_repo is not None:
             try:
-                obj = DryObjectDef.build_repo.get_obj(self)
+                obj = build_repo.get_obj(self)
                 construct_object = False
             except Exception:
                 pass
 
+        # If we haven't built the object yet, search the zipfile
+        if construct_object and load_zip is not None:
+            try:
+                obj_id = self.get_individual_id()
+                target_filename = f"dry_objects/{obj_id}.dry"
+                from dryml import load_object
+                if target_filename in load_zip.namelist():
+                    with load_zip.open(target_filename) as f:
+                        obj = load_object(f)
+                        construct_object = False
+            except RuntimeError:
+                pass
+
         if construct_object:
-            args = detect_and_construct(self.args)
-            kwargs = detect_and_construct(self.kwargs)
+            args = detect_and_construct(self.args, load_zip=load_zip)
+            kwargs = detect_and_construct(self.kwargs, load_zip=load_zip)
 
             obj = self.cls(*args, **kwargs)
 
         # Reset the repo for this function
         if reset_repo:
-            DryObjectDef.build_repo = None
+            build_repo = None
 
         # Return the result
         return obj

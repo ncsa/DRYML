@@ -147,7 +147,7 @@ class DryObjectFile(object):
             obj_def.cls = as_cls
 
         # Create object
-        obj = obj_def.build()
+        obj = obj_def.build(load_zip=self.file)
 
         # Load object content
         if not obj.load_object(self.file):

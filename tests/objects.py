@@ -1,4 +1,6 @@
 import dryml
+import zipfile
+import pickle
 
 
 class HelloObject(dryml.DryObject):
@@ -68,3 +70,28 @@ class HelloComponentD(dryml.DryComponent):
 class TestNest(dryml.DryObject):
     def __init__(self, A):
         self.A = A
+
+
+class TestClassC(dryml.DryObject):
+    def __init__(self, A, B=None):
+        self.A = A
+        self.B = B
+
+
+class TestClassC2(dryml.DryObject):
+    def __init__(self, C):
+        self.C = C
+        self.data = 0
+
+    def set_val(self, val):
+        self.data = val
+
+    def save_object_imp(self, file: zipfile.ZipFile):
+        with file.open('data.pkl', 'w') as f:
+            f.write(dryml.utils.pickler(self.data))
+        return True
+
+    def load_object_imp(self, file: zipfile.ZipFile):
+        with file.open('data.pkl', 'r') as f:
+            self.data = pickle.loads(f.read())
+        return True
