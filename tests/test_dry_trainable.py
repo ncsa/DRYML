@@ -3,10 +3,10 @@ import dryml
 
 
 @pytest.mark.usefixtures("create_name")
-def test_basic_component_1(create_name):
+def test_basic_trainable_1(create_name):
     import objects
 
-    test_obj = objects.HelloComponent(msg='test1')
+    test_obj = objects.HelloTrainable(msg='test1')
 
     test_obj.save_self(create_name)
 
@@ -18,21 +18,21 @@ def test_basic_component_1(create_name):
     assert test_obj2.dry_kwargs['msg'] == 'test1'
 
 
-def test_basic_component_2():
+def test_basic_trainable_2():
     import objects
 
-    test_obj = objects.HelloComponent(msg='test1')
+    test_obj = objects.HelloTrainable(msg='test1')
 
     new_obj = dryml.change_object_cls(
-        test_obj, cls=objects.HelloComponent, update=True)
+        test_obj, cls=objects.HelloTrainable, update=True)
 
     assert test_obj.definition() == new_obj.definition()
 
 
-def test_component_def_1():
+def test_trainable_def_1():
     import objects
 
-    test_obj = objects.HelloComponentC('test1', description='test obj')
+    test_obj = objects.HelloTrainableC('test1', description='test obj')
 
     test_obj2 = test_obj.definition().build()
 
@@ -40,10 +40,10 @@ def test_component_def_1():
     assert test_obj.dry_args[0] == test_obj2.dry_args[0]
 
 
-def test_component_def_2():
+def test_trainable_def_2():
     import objects
 
-    test_obj = objects.HelloComponentC(objects.HelloStr(msg='test'))
+    test_obj = objects.HelloTrainableC(objects.HelloStr(msg='test'))
 
     test_obj2 = test_obj.definition().build()
 
@@ -55,10 +55,10 @@ def test_component_def_2():
     assert test_obj.A.str_message == test_obj2.A.str_message
 
 
-def test_component_def_3():
+def test_trainable_def_3():
     import objects
 
-    test_obj = objects.HelloComponentD(A='test1')
+    test_obj = objects.HelloTrainableD(A='test1')
 
     assert test_obj.A == 'test1'
 
@@ -72,10 +72,10 @@ def test_component_def_3():
     assert test_obj.A == test_obj2.A
 
 
-def test_component_def_4():
+def test_trainable_def_4():
     import objects
 
-    test_obj = objects.HelloComponentD(A=objects.HelloStr(msg='test'))
+    test_obj = objects.HelloTrainableD(A=objects.HelloStr(msg='test'))
 
     test_obj2 = test_obj.definition().build()
 

@@ -4,12 +4,12 @@ from dryml.dry_object import DryObject
 from dryml.dry_collections import DryTuple
 
 
-class DryComponent(DryObject):
+class DryTrainable(DryObject):
     untrained = 0
     trained = 2
 
     def __init__(self, *args, description="", **kwargs):
-        self.train_state = DryComponent.untrained
+        self.train_state = DryTrainable.untrained
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Load parent components first
@@ -29,24 +29,24 @@ class DryComponent(DryObject):
 
     def train(self, *args, **kwargs):
         # Handle the setting of the train state flag
-        self.train_state = DryComponent.trained
+        self.train_state = DryTrainable.trained
         # This should be the last step in training so no more super is needed
 
     def eval(self, X, *args, **kwargs):
-        raise RuntimeError("Method not defined for a base DryComponent")
+        raise RuntimeError("Method not defined for a base DryTrainable")
 
 
-class DryPipe(DryComponent, DryTuple):
+class DryPipe(DryTrainable, DryTuple):
     def __init__(self, *args, **kwargs):
         for obj in self.data:
-            if not isinstance(obj, DryComponent):
-                raise ValueError("All stored objects must be DryComponents")
+            if not isinstance(obj, DryTrainable):
+                raise ValueError("All stored objects must be DryTrainables")
 
     def train(self, train_data, *args, **kwargs):
         raise RuntimeError("Training of DryPipe not supported currently")
 
     def eval(self, X, *args, **kwargs):
         results = []
-        for component in self:
-            results.append(component.eval(X, *args, **kwargs))
+        for trainable in self:
+            results.append(trainable.eval(X, *args, **kwargs))
         return results

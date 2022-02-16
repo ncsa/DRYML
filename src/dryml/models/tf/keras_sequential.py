@@ -1,4 +1,4 @@
-from dryml.tf.tf_base import TFBase
+from dryml.models.tf.tf_base import TFBase
 import tensorflow as tf
 import numpy as np
 

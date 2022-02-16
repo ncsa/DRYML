@@ -1,5 +1,5 @@
 from dryml.dry_repo import DryRepo
-from dryml.dry_component import DryComponent
+from dryml.models.dry_trainable import DryTrainable
 
 
 class Workshop(object):
@@ -10,12 +10,12 @@ class Workshop(object):
     def data_prep(self):
         raise RuntimeError("Not implemented for base workshop")
 
-    def train_component(self, obj: DryComponent, *args, **kwargs):
+    def train_trainable(self, obj: DryTrainable, *args, **kwargs):
         obj.train(self.train_data, *args, **kwargs)
 
-    def train_component_outer(self, obj: DryComponent, *args, **kwargs):
-        if obj.train_state == DryComponent.untrained:
-            self.train_component(obj, *args, **kwargs)
+    def train_trainable_outer(self, obj: DryTrainable, *args, **kwargs):
+        if obj.train_state == DryTrainable.untrained:
+            self.train_trainable(obj, *args, **kwargs)
 
     def train_models(self, *args,
                      selector=None,
@@ -23,7 +23,7 @@ class Workshop(object):
                      load_objects: bool = True,
                      only_loaded: bool = False,
                      **kwargs):
-        self.repo.apply(self.train_component_outer,
+        self.repo.apply(self.train_trainable_outer,
                         func_args=args,
                         func_kwargs=kwargs,
                         selector=selector,

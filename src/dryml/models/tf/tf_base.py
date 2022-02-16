@@ -1,5 +1,5 @@
 import tensorflow as tf
-from dryml import DryComponent
+from dryml.models import DryTrainable
 import tempfile
 import zipfile
 import os
@@ -104,7 +104,7 @@ def keras_save_checkpoint_to_zip(
     return True
 
 
-class TFBase(DryComponent):
+class TFBase(DryTrainable):
     def __init__(
             self, *args, **kwargs):
         # It is subclass's responsibility to fill this

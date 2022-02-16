@@ -1,8 +1,8 @@
-from dryml.dry_component import DryComponent
+from dryml.models.dry_trainable import DryTrainable
 from dryml.dry_collections import DryList
 
 
-class DryPipe(DryComponent, DryList):
+class DryPipe(DryTrainable, DryList):
     """A Sequential processing pipeline modelled after sklearn pipe"""
     def __init__(self, *args, **kwargs):
         pass
@@ -14,13 +14,13 @@ class DryPipe(DryComponent, DryList):
             # Prepare data for this step
             last_val = step.prepare_data(last_val)
             # Train step if needed
-            if step.train_state == DryComponent.untrained:
+            if step.train_state == DryTrainable.untrained:
                 step.train(last_val, *args, **kwargs)
             # Eval data for next step in training
             if i < len(self)-1:
                 last_val = step.eval(last_val)
 
-        # Call DryComponent Train
+        # Call DryTrainable Train
         super().train(data, *args, **kwargs)
 
     def eval(self, X, *args, **kwargs):
