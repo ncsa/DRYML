@@ -12,6 +12,7 @@ from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryObjectDef, DryMeta
 from dryml.utils import get_current_cls, pickler, static_var
 import tempfile
+from typing import Type
 
 FileType = Union[str, IO[bytes]]
 
@@ -299,3 +300,18 @@ class DryObjectFactory(object):
             # Call each callback
             callback(obj)
         return obj
+
+
+class ObjectWrapper(dryml.DryObject):
+    """
+    An object wrapper for simple python objects
+    """
+    def __init__(self, cls: Type, obj_args=None, obj_kwargs=None):
+        if obj_args is None:
+             obj_args = []
+             self.dry_kwargs['obj_args'] = obj_args
+        if obj_kwargs is None:
+             obj_kwargs = {}
+             self.dry_kwargs['obj_kwargs'] = obj_kwargs
+
+        self.obj = cls(*obj_args, **obj_kwargs)
