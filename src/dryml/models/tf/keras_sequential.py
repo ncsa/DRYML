@@ -1,10 +1,10 @@
-from dryml.models.tf.tf_base import TFBase
+from dryml.models.tf.tf_base import TFLikeModel
 import tensorflow as tf
 import numpy as np
 
 
 def keras_sequential_functional_class(
-        name, input_shape, output_shape, base_classes=(TFBase,)):
+        name, input_shape, output_shape, base_classes=(TFLikeModel,)):
 
     def __init__(
             self, layer_defs, *args, out_activation='linear',

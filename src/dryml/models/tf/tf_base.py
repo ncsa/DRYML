@@ -1,9 +1,193 @@
 import tensorflow as tf
-from dryml.models import DryTrainable
+from dryml.models import DryTrainable, DryModel
+from dryml import DryObject
 import tempfile
 import zipfile
 import os
 import re
+
+
+class TFLikeTrainFunction(DryObject):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def train(self, mdl, train_data, *args, **kwargs):
+        raise NotImplementedError("method must be implemented in a subclass")
+
+
+class TFBasicTraining(TFLikeTrainFunction):
+    def __init__(
+            self, *args, val_split=0.2, val_num=None,
+            shuffle_buffer=None, num_total=None, **kwargs):
+        self.val_split = val_split
+        self.val_num = val_num
+        self.shuffle_buffer = shuffle_buffer
+        self.num_total = num_total
+
+    def train(
+            self, trainable, data, *args, batch_size=32,
+            callbacks=[], **kwargs):
+        # Here, we provide a basic training algorithm which
+        # will work in many TF model cases
+        # data = trainable.mdl.prepare_data(data, target=True, index=False)
+        # Check if we need to create a dataset
+        # We may not want this piece of code for basic training in the future
+        if not isinstance(data, tf.data.Dataset):
+            ds = tf.data.Dataset.from_tensor_slices(data)
+        else:
+            ds = data
+
+        num_total = self.num_total
+        if num_total is None:
+            # Attempt to measure dataset size
+            num_total = len(ds)
+        if self.num_val is not None:
+            num_val = self.num_val
+            if self.val_split is not None:
+                print("Overridding val_split with val_num.")
+            if self.num_val > num_total:
+                raise ValueError("num_val cannot be larger than num_total!")
+        else:
+            num_val = int(num_total*self.val_split)
+
+        num_train = num_total-num_val
+
+        if self.shuffle_buffer is None:
+            shuffle_buffer = num_train
+        else:
+            shuffle_buffer = self.shuffle_buffer
+
+        ds_val = ds.take(num_val)
+        ds_val = ds_val.batch(batch_size)
+        ds_val = ds_val.prefetch(tf.data.AUTOTUNE)
+
+        ds_train = ds.skip(num_val)
+        ds_train = ds_train.cache()
+        ds_train = ds_train.shuffle(shuffle_buffer)
+        ds_train = ds_train.batch(batch_size)
+        ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
+
+        # Fit model
+        trainable.model.mdl.fit(
+            ds_train, validation_data=ds_val,
+            callbacks=callbacks, **kwargs)
+
+
+class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
+    def __init__(
+            self, *args, val_split=0.2, val_num=None, num_total=None,
+            shuffle_buffer=None, patience=3, epochs=10000, **kwargs):
+        self.val_split = val_split
+        self.val_num = val_num
+        self.shuffle_buffer = shuffle_buffer
+        self.patience = patience
+        self.epochs = epochs
+        self.num_total = num_total
+
+    def train(
+            self, trainable, data, *args, batch_size=32,
+            callbacks=[], **kwargs):
+        # Here, we provide a basic training algorithm which
+        # will work in many TF model cases
+        # data = trainable.mdl.prepare_data(data, target=True, index=False)
+        # Check if we need to create a dataset
+        # We may not want this piece of code for basic training in the future
+        if not isinstance(data, tf.data.Dataset):
+            ds = tf.data.Dataset.from_tensor_slices(data)
+        else:
+            ds = data
+
+        num_total = self.num_total
+        if num_total is None:
+            # Attempt to measure dataset size
+            num_total = len(ds)
+        if self.val_num is not None:
+            num_val = self.val_num
+            if self.val_split is not None:
+                print("Overridding val_split with val_num.")
+            if self.val_num > num_total:
+                raise ValueError("val_num cannot be larger than num_total!")
+        else:
+            num_val = int(num_total*self.val_split)
+
+        num_train = num_total-num_val
+
+        if self.shuffle_buffer is None:
+            shuffle_buffer = num_train
+        else:
+            shuffle_buffer = self.shuffle_buffer
+
+        ds_val = ds.take(num_val)
+        ds_val = ds_val.batch(batch_size)
+        ds_val = ds_val.prefetch(tf.data.AUTOTUNE)
+
+        ds_train = ds.skip(num_val)
+        ds_train = ds_train.cache()
+        ds_train = ds_train.shuffle(shuffle_buffer)
+        ds_train = ds_train.batch(batch_size)
+        ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
+
+        # Add Early Stopping Callback
+        callbacks.append(tf.keras.callbacks.EarlyStopping(
+            patience=self.patience,
+            monitor='val_loss',
+            restore_best_weights=True))
+
+        # Fit model
+        trainable.model.mdl.fit(
+            ds_train, validation_data=ds_val,
+            callbacks=callbacks, epochs=self.epochs, **kwargs)
+
+
+class TFLikeModel(DryModel):
+    def eval(self, X, *args, **kwargs):
+        return self.mdl(X, *args, **kwargs)
+
+
+class TFLikeTrainable(DryTrainable):
+    def __init__(
+            self, model: DryModel = None, optimizer=None, loss=None,
+            train_fn: TFLikeTrainFunction = None, prepare_data=None):
+        if model is None:
+            raise ValueError(
+                "You need to set the model component of this trainable!")
+        self.model = model
+
+        if optimizer is None:
+            raise ValueError(
+                "You need to set the optimizer component of this trainable!")
+        self.optimizer = optimizer
+
+        if loss is None:
+            raise ValueError(
+                "You need to set the loss component of this trainable!")
+        self.loss = loss
+
+        if train_fn is None:
+            raise ValueError(
+                "You need to set the train_fn component of this trainable!")
+        self.train_fn = train_fn
+
+        if prepare_data is None:
+            raise ValueError(
+                "You need to set the prepare_data component "
+                "of this trainable!")
+        self.prepare_data_comp = prepare_data
+
+    def prepare_data(self, *args, **kwargs):
+        return self.prepare_data_comp(self, *args, **kwargs)
+
+    def train(self, data, metrics=[], *args, **kwargs):
+        # compile the model.
+        self.model.mdl.compile(
+            optimizer=self.optimizer.obj,
+            loss=self.loss.obj,
+            metrics=metrics)
+
+        self.train_fn.train(self, data, *args, **kwargs)
+
+    def eval(self, X, *args, **kwargs):
+        self.model.eval(X, *args, **kwargs)
 
 
 def keras_load_checkpoint_from_zip(

@@ -281,6 +281,12 @@ class DryObject(metaclass=DryMeta):
     def save_self(self, file: FileType, version: int = 1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)
 
+    def __str__(self):
+        return str(self.definition())
+
+    def __repr__(self):
+        return str(self.definition())
+
 
 class DryObjectFactory(object):
     def __init__(self, obj_def: DryObjectDef, callbacks=[]):
@@ -314,3 +320,33 @@ class ObjectWrapper(DryObject):
             self.dry_kwargs['obj_kwargs'] = obj_kwargs
 
         self.obj = cls(*obj_args, **obj_kwargs)
+
+
+class CallableWrapper(DryObject):
+    """
+    A wrapper for a callable object to cement some arguments
+    """
+
+    def __init__(
+            self, obj: ObjectWrapper, obj_args=None, obj_kwargs=None,
+            call_args=None, call_kwargs=None):
+        if obj_args is None:
+            obj_args = []
+            self.dry_kwargs['obj_args'] = obj_args
+        if obj_kwargs is None:
+            obj_kwargs = {}
+            self.dry_kwargs['obj_kwargs'] = obj_kwargs
+        if call_args is None:
+            call_args = []
+            self.dry_kwargs['call_args'] = call_args
+        self.call_args = call_args
+        if call_kwargs is None:
+            call_kwargs = {}
+            self.dry_kwargs['call_kwargs'] = call_kwargs
+        self.call_kwargs = call_kwargs
+        self.obj = obj
+
+    def __call__(self, *args, **kwargs):
+        return self.obj.obj(
+            *(self.call_args+args),
+            **{**self.call_kwargs, **kwargs})

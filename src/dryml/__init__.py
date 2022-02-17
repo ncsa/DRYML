@@ -1,6 +1,7 @@
 from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
-    load_object, save_object, change_object_cls
+    load_object, save_object, change_object_cls, \
+    ObjectWrapper, CallableWrapper
 from dryml.dry_selector import DrySelector
 from dryml.dry_repo import DryRepo
 from dryml.dry_collections import DryList, DryTuple, DryDict
@@ -21,6 +22,8 @@ __all__ = [
     DryList,
     DryTuple,
     DryDict,
+    ObjectWrapper,
+    CallableWrapper,
     Workshop,
     load_object,
     save_object,

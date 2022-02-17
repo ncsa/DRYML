@@ -3,7 +3,7 @@ import dryml.models.tf
 import tensorflow as tf
 
 
-class TestTF1(dryml.models.tf.TFBase):
+class TestTF1(dryml.models.tf.TFLikeModel):
     def __init__(
             self, *args, in_dim=32,
             dense_layers=[128, 128, 128, 128, 128], **kwargs):
