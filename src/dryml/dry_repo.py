@@ -314,7 +314,8 @@ class DryRepo(object):
 
     def __contains__(
             self, item: Union[DryObject, DryObjectDef, dict, DryObjectFile]):
-        if issubclass(type(item), DryObject) or issubclass(item, DryObjectFile):
+        if issubclass(type(item), DryObject) or \
+           issubclass(item, DryObjectFile):
             obj_id = item.definition().get_individual_id()
         elif issubclass(type(item), DryObjectDef):
             obj_id = item.get_individual_id()
