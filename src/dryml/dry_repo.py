@@ -2,7 +2,7 @@ import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, \
     DryObjectDef, change_object_cls, load_object
 from dryml.utils import get_current_cls
-from typing import Optional, Callable
+from typing import Optional, Callable, Union
 import tqdm
 from pprint import pprint
 
@@ -311,6 +311,18 @@ class DryRepo(object):
             ind_id):
         obj_container = self.obj_dict[ind_id]
         return obj_container.obj
+
+    def __contains__(
+            self, item: Union[DryObject, DryObjectDef, dict, DryObjectFile]):
+        if issubclass(type(item), DryObject) or issubclass(item, DryObjectFile):
+            obj_id = item.definition().get_individual_id()
+        elif issubclass(type(item), DryObjectDef):
+            obj_id = item.get_individual_id()
+        elif issubclass(type(item), dict):
+            obj_id = DryObjectDef.from_dict(item).get_individual_id()
+        else:
+            raise TypeError("Unsupported type for repo.contains!")
+        return obj_id in self.obj_dict
 
     def get(self,
             selector: Optional[Callable] = None,
