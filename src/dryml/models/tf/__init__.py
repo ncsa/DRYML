@@ -1,4 +1,4 @@
-from dryml.models.tf.tf_base import TFBase, \
+from dryml.models.tf.tf_base import TFKerasModelBase, \
     keras_save_checkpoint_to_zip, keras_load_checkpoint_from_zip, \
     TFLikeTrainFunction, TFLikeModel, TFLikeTrainable, \
     TFBasicTraining, TFBasicEarlyStoppingTraining
@@ -6,7 +6,7 @@ from dryml.models.tf.keras_sequential import \
     keras_sequential_functional_class
 
 __all__ = [
-    TFBase,
+    TFKerasModelBase,
     TFLikeTrainFunction,
     TFLikeModel,
     TFLikeTrainable,

@@ -1,17 +1,15 @@
 import tensorflow as tf
-from dryml.models import DryTrainable, DryModel
-from dryml import DryObject
+from dryml.models import DryTrainable, DryComponent
+from dryml.data import DryData
+from dryml.data.tf import TFDataset
 import tempfile
 import zipfile
 import os
 import re
 
 
-class TFLikeTrainFunction(DryObject):
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def train(self, mdl, train_data, *args, **kwargs):
+class TFLikeTrainFunction(DryComponent):
+    def __call__(self, trainable, train_data, *args, **kwargs):
         raise NotImplementedError("method must be implemented in a subclass")
 
 
@@ -24,18 +22,27 @@ class TFBasicTraining(TFLikeTrainFunction):
         self.shuffle_buffer = shuffle_buffer
         self.num_total = num_total
 
-    def train(
-            self, trainable, data, *args, batch_size=32,
+    def __call__(
+            self, trainable, data: DryData, *args, batch_size=32,
             callbacks=[], **kwargs):
-        # Here, we provide a basic training algorithm which
-        # will work in many TF model cases
-        # data = trainable.mdl.prepare_data(data, target=True, index=False)
-        # Check if we need to create a dataset
-        # We may not want this piece of code for basic training in the future
-        if not isinstance(data, tf.data.Dataset):
-            ds = tf.data.Dataset.from_tensor_slices(data)
-        else:
-            ds = data
+
+        # Type checking training data, and converting if necessary
+        if type(data) is not TFDataset:
+            if not hasattr(data, 'to_TFDataset'):
+                raise TypeError(
+                    f"Type {type(data)} can't be converted to TFDataset!")
+            data = data.to_TFDataset()
+
+        # Check data is supervised.
+        if not data.supervised():
+            raise RuntimeError(
+                "TFBasicTraining requires supervised data")
+
+        # Make sure data is unbatched. We want the function to control this.
+        data = data.unbatch()
+
+        # Get tf.data.Dataset backing type
+        ds = data.data()
 
         num_total = self.num_total
         if num_total is None:
@@ -84,18 +91,27 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         self.epochs = epochs
         self.num_total = num_total
 
-    def train(
+    def __call__(
             self, trainable, data, *args, batch_size=32,
             callbacks=[], **kwargs):
-        # Here, we provide a basic training algorithm which
-        # will work in many TF model cases
-        # data = trainable.mdl.prepare_data(data, target=True, index=False)
-        # Check if we need to create a dataset
-        # We may not want this piece of code for basic training in the future
-        if not isinstance(data, tf.data.Dataset):
-            ds = tf.data.Dataset.from_tensor_slices(data)
-        else:
-            ds = data
+
+        # Type checking training data, and converting if necessary
+        if type(data) is not TFDataset:
+            if not hasattr(data, 'to_TFDataset'):
+                raise TypeError(
+                    f"Type {type(data)} can't be converted to TFDataset!")
+            data = data.to_TFDataset()
+
+        # Check data is supervised.
+        if not data.supervised():
+            raise RuntimeError(
+                "TFBasicTraining requires supervised data")
+
+        # Make sure data is unbatched. We want the function to control this.
+        data = data.unbatch()
+
+        # Get tf.data.Dataset backing type
+        ds = data.data()
 
         num_total = self.num_total
         if num_total is None:
@@ -139,15 +155,15 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
             callbacks=callbacks, epochs=self.epochs, **kwargs)
 
 
-class TFLikeModel(DryModel):
-    def eval(self, X, *args, **kwargs):
+class TFLikeModel(DryComponent):
+    def __call__(self, X, *args, target=True, index=False, **kwargs):
         return self.mdl(X, *args, **kwargs)
 
 
 class TFLikeTrainable(DryTrainable):
     def __init__(
-            self, model: DryModel = None, optimizer=None, loss=None,
-            train_fn: TFLikeTrainFunction = None, prepare_data=None):
+            self, model: TFLikeModel = None, optimizer=None, loss=None,
+            train_fn: TFLikeTrainFunction = None):
         if model is None:
             raise ValueError(
                 "You need to set the model component of this trainable!")
@@ -168,15 +184,6 @@ class TFLikeTrainable(DryTrainable):
                 "You need to set the train_fn component of this trainable!")
         self.train_fn = train_fn
 
-        if prepare_data is None:
-            raise ValueError(
-                "You need to set the prepare_data component "
-                "of this trainable!")
-        self.prepare_data_comp = prepare_data
-
-    def prepare_data(self, *args, **kwargs):
-        return self.prepare_data_comp(self, *args, **kwargs)
-
     def train(self, data, metrics=[], *args, **kwargs):
         # compile the model.
         self.model.mdl.compile(
@@ -184,10 +191,21 @@ class TFLikeTrainable(DryTrainable):
             loss=self.loss.obj,
             metrics=metrics)
 
-        self.train_fn.train(self, data, *args, **kwargs)
+        self.train_fn(self, data, *args, **kwargs)
 
-    def eval(self, X, *args, **kwargs):
-        self.model.eval(X, *args, **kwargs)
+        self.train_state = DryTrainable.trained
+
+    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
+        if data.batched():
+            # We can execute the method directly on the data
+            return data.apply_X(func=lambda X: self.model(X, *args, **kwargs))
+        else:
+            # We first need to batch the data, then unbatch to leave
+            # The dataset character unchanged.
+            return data.batch(batch_size=eval_batch_size) \
+                       .apply_X(
+                            func=lambda X: self.model(X, *args, **kwargs)) \
+                       .unbatch()
 
 
 def keras_load_checkpoint_from_zip(
@@ -288,7 +306,7 @@ def keras_save_checkpoint_to_zip(
     return True
 
 
-class TFBase(DryTrainable):
+class TFKerasModelBase(TFLikeModel):
     def __init__(
             self, *args, **kwargs):
         # It is subclass's responsibility to fill this
@@ -309,40 +327,3 @@ class TFBase(DryTrainable):
             return False
 
         return True
-
-    def train(self, data, *args, val_split=0.2, batch_size=32,
-              shuffle_buffer=None, callbacks=[], **kwargs):
-        # Here, we provide a basic training algorithm which
-        # will work in many TF model cases
-        data = self.prepare_data(data, target=True, index=False)
-        # Check if we need to create a dataset
-        if not isinstance(data, tf.data.Dataset):
-            ds = tf.data.Dataset.from_tensor_slices(data)
-        else:
-            ds = data
-        num_total = len(ds)
-        num_val = int(num_total*val_split)
-        num_train = num_total-num_val
-        if shuffle_buffer is None:
-            shuffle_buffer = num_train
-
-        ds_val = ds.take(num_val)
-        ds_val = ds_val.batch(batch_size)
-        ds_val = ds_val.prefetch(tf.data.AUTOTUNE)
-
-        ds_train = ds.skip(num_val)
-        ds_train = ds_train.cache()
-        ds_train = ds_train.shuffle(shuffle_buffer)
-        ds_train = ds_train.batch(batch_size)
-        ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
-
-        # Fit model
-        self.mdl.fit(
-            ds_train, validation_data=ds_val,
-            callbacks=callbacks, **kwargs)
-
-        # Finalization of training
-        super().train()
-
-    def eval(self, X, *args, **kwargs):
-        return self.mdl(X, *args, **kwargs)

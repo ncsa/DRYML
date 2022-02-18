@@ -6,5 +6,5 @@ class DryComponent(DryObject):
     A Type for an ML component
     """
 
-    def __call__(self, trainable, *args, **kwargs):
+    def __call__(self, *args, **kwargs):
         raise NotImplementedError()

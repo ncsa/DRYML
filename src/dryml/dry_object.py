@@ -299,8 +299,8 @@ class DryObjectFactory(object):
     def add_callback(self, callback):
         self.callbacks.append(callback)
 
-    def __call__(self):
-        obj = self.obj_def.build()
+    def __call__(self, repo=None):
+        obj = self.obj_def.build(repo=repo)
         for callback in self.callbacks:
             # Call each callback
             callback(obj)

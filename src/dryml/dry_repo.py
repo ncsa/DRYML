@@ -252,7 +252,7 @@ class DryRepo(object):
     def add_objects(self, obj_factory: DryObjectFactory, num=1):
         # Create numerous objects from a factory function
         for i in range(num):
-            obj = obj_factory()
+            obj = obj_factory(repo=self)
             self.add_object(obj)
 
     def make_container_handler(self,
