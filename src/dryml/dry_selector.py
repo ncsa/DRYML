@@ -1,24 +1,84 @@
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectDef
 from dryml.utils import is_nonstring_iterable, is_dictlike, get_class_str
-from typing import Union, Callable
+from typing import Union, Callable, Type, Mapping
 
 
 class DrySelector(object):
     "Utility object for selecting for specific dry objects"
-    def __init__(self, cls=None, args=None, kwargs=None,
+
+    @staticmethod
+    def from_def(
+            obj_def: DryObjectDef,
+            verbosity: int = 0,
+            cls_str_compare: bool = True):
+        return DrySelector(
+            obj_def['cls'],
+            args=obj_def['dry_args'],
+            kwargs=obj_def['dry_kwargs'],
+            verbosity=verbosity,
+            cls_str_compare=cls_str_compare)
+
+    @staticmethod
+    def from_dict(
+            obj_dict: Mapping,
+            verbosity: int = 0,
+            cls_str_compare: bool = True):
+        args = obj_dict.get('dry_args', ())
+        kwargs = obj_dict.get('dry_kwargs', {})
+        return DrySelector(
+            obj_dict['cls'],
+            args=args,
+            kwargs=kwargs,
+            verbosity=verbosity,
+            cls_str_compare=cls_str_compare)
+
+    @staticmethod
+    def from_obj(
+            obj: DryObject,
+            verbosity: int = 0,
+            cls_str_compare: bool = True):
+        return DrySelector.from_def(
+            obj.definition(),
+            verbosity=verbosity,
+            cls_str_compare=cls_str_compare)
+
+    @staticmethod
+    def build(
+            obj,
+            verbosity: int = 0,
+            cls_str_compare: bool = True):
+        if isinstance(obj, DryObject):
+            return DrySelector.from_obj(
+                obj,
+                verbosity=verbosity,
+                cls_str_compare=cls_str_compare)
+        elif isinstance(obj, DryObjectDef):
+            return DrySelector.from_def(
+                obj,
+                verbosity=verbosity,
+                cls_str_compare=cls_str_compare)
+        elif isinstance(obj, Mapping):
+            return DrySelector.from_dict(
+                obj,
+                verbosity=verbosity,
+                cls_str_compare=cls_str_compare)
+        else:
+            raise TypeError(
+                f"Can't construct DrySelector from type {type(obj)}")
+
+    def __init__(self, cls: Type, args=None, kwargs=None,
                  verbosity: int = 0, cls_str_compare: bool = True):
         self.cls = cls
-        if self.cls is not None:
-            if cls_str_compare and isinstance(self.cls, type):
-                # Convert the type to a class string
-                self.cls = get_class_str(self.cls)
         self.args = args
         self.kwargs = kwargs
         self.verbosity = verbosity
 
     @staticmethod
     def match_objects(key_object, value_object):
-        if callable(key_object):
+        if issubclass(type(key_object), type):
+            # We have a type object. They match if
+            return issubclass(key_object, value_object)
+        elif callable(key_object):
             return key_object(value_object)
         elif is_dictlike(key_object):
             # dictlike branch is first because dictlike objects
@@ -91,12 +151,16 @@ class DrySelector(object):
                 print(f"Got {kwargs}")
             return False
 
-    def __call__(self, obj: Union[DryObject, DryObjectFile, DryObjectDef]):
+    def __call__(
+            self,
+            obj: Union[DryObject, DryObjectFile, DryObjectDef, Mapping]):
         # Get definition
         if isinstance(obj, DryObjectDef):
             obj_def = obj
-        else:
+        elif isinstance(obj, DryObject) or isinstance(obj, DryObjectFile):
             obj_def = obj.definition()
+        else:
+            obj_def = DryObjectDef.from_dict(obj)
 
         # If required, check object class
         if self.cls is not None:

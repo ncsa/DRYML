@@ -1,8 +1,9 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, \
     DryObjectDef, change_object_cls, load_object
+from dryml.dry_selector import DrySelector
 from dryml.utils import get_current_cls
-from typing import Optional, Callable, Union
+from typing import Optional, Callable, Union, Mapping
 import tqdm
 from pprint import pprint
 
@@ -277,13 +278,18 @@ class DryRepo(object):
 
     def make_filter_func(
             self,
-            selector: Optional[Callable] = None,
+            selector: Optional[Union[Callable, DryObjectDef,
+                                     Mapping, DryObject]] = None,
             sel_args=None, sel_kwargs=None,
             only_loaded: bool = False):
         if sel_args is None:
             sel_args = []
         if sel_kwargs is None:
             sel_kwargs = {}
+
+        if type(selector) is DryObjectDef:
+            # Wrap automatically for convenience
+            selector = DrySelector.build(selector)
 
         def filter_func(obj_cont):
             if only_loaded:
