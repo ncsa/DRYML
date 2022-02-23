@@ -2,6 +2,8 @@ import pytest
 import dryml
 import io
 import pickle
+import objects
+import copy
 
 
 def test_dry_kwargs_add_items_1():
@@ -70,3 +72,59 @@ def test_adapt_val_2():
         dryml.dry_config.adapt_val(test_val))
 
     assert test_val == test_val_2
+
+
+def test_def_1():
+    """
+    Test conditions under which a definition is concrete
+    """
+
+    obj_def = dryml.DryObjectDef(objects.HelloStr)
+
+    assert not obj_def.is_concrete()
+
+    obj = obj_def.build()
+
+    assert obj.definition().is_concrete()
+
+
+def test_def_2():
+    """
+    A definition is only concrete if all of its components are concrete
+    """
+
+    obj = objects.TestClassC(objects.TestClassC2(10), B=objects.TestClassC2(20))
+
+    obj_def = obj.definition()
+
+    assert obj_def.is_concrete()
+
+    obj_def_cpy = copy.copy(obj_def)
+    del obj_def_cpy['dry_args'][0]['dry_kwargs']['dry_id']
+
+    assert not obj_def_cpy.is_concrete()
+
+    obj_def_cpy = copy.copy(obj_def)
+    del obj_def_cpy['dry_kwargs']['B']['dry_kwargs']['dry_id']
+
+    assert not obj_def_cpy.is_concrete()
+
+
+def test_def_3():
+    """
+    A definition is only concrete if all of its components are concrete
+    """
+
+    obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
+
+    assert obj.definition().is_concrete()
+
+    obj_def = obj.definition()
+    del obj_def['dry_args'][0]['dry_kwargs']['dry_id']
+
+    assert not obj_def.is_concrete()
+
+    obj_def = obj.definition()
+    del obj_def['dry_args'][0]['dry_kwargs']['A']['dry_kwargs']['dry_id']
+
+    assert not obj_def.is_concrete()
