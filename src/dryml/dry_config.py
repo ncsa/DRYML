@@ -58,7 +58,6 @@ def detect_and_construct(val, load_zip=None):
 
 
 def is_concrete_val(input_object):
-    print("is_concrete_val called")
     from dryml import DryObject
     # Is this object a dry definition?
     if isinstance(input_object, DryObject):
@@ -68,33 +67,27 @@ def is_concrete_val(input_object):
             is_dictlike(input_object) and 'dry_def' in input_object:
         # Check that there's a Dry ID here.
         if 'dry_id' not in input_object['dry_kwargs']:
-            print("Fail A")
             return False
         # Check the args
         for arg in input_object['dry_args']:
             if not is_concrete_val(arg):
-                print("Fail B")
                 return False
         # Check the kwargs
         for key in input_object['dry_kwargs']:
             kwarg = input_object['dry_kwargs'][key]
             if not is_concrete_val(kwarg):
-                print("Fail C")
                 return False
     elif is_nonstring_iterable(input_object):
         for obj in input_object:
             if not is_concrete_val(obj):
-                print("Fail D")
                 return False
     elif is_dictlike(input_object):
         for key in input_object:
             val = input_object[key]
             if not is_concrete_val(val):
-                print("Fail E")
                 return False
     elif callable(input_object):
         # Callables aren't concrete. They don't have a definite value
-        print("Fail F")
         return False
     # Assuming all other types are concrete for now.
     return True
