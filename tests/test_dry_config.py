@@ -93,7 +93,9 @@ def test_def_2():
     A definition is only concrete if all of its components are concrete
     """
 
-    obj = objects.TestClassC(objects.TestClassC2(10), B=objects.TestClassC2(20))
+    obj = objects.TestClassC(
+        objects.TestClassC2(10),
+        B=objects.TestClassC2(20))
 
     obj_def = obj.definition()
 

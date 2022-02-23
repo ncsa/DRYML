@@ -62,10 +62,10 @@ def is_concrete_val(input_object):
     from dryml import DryObject
     # Is this object a dry definition?
     if isinstance(input_object, DryObject):
-       # A DryObject itself is a concrete value
-       return True
+        # A DryObject itself is a concrete value
+        return True
     elif isinstance(input_object, DryObjectDef) or \
-       is_dictlike(input_object) and 'dry_def' in input_object:
+            is_dictlike(input_object) and 'dry_def' in input_object:
         # Check that there's a Dry ID here.
         if 'dry_id' not in input_object['dry_kwargs']:
             print("Fail A")
