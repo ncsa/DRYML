@@ -86,12 +86,12 @@ class TestClassC2(dryml.DryObject):
     def set_val(self, val):
         self.data = val
 
-    def save_object_imp(self, file: zipfile.ZipFile):
+    def save_imp(self, file: zipfile.ZipFile):
         with file.open('data.pkl', 'w') as f:
             f.write(dryml.utils.pickler(self.data))
         return True
 
-    def load_object_imp(self, file: zipfile.ZipFile):
+    def load_imp(self, file: zipfile.ZipFile):
         with file.open('data.pkl', 'r') as f:
             self.data = pickle.loads(f.read())
         return True

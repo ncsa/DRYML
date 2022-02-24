@@ -313,7 +313,7 @@ class TFKerasModelBase(TFLikeModel):
         # attribute with an actual keras class
         self.mdl = None
 
-    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def load_imp(self, file: zipfile.ZipFile) -> bool:
         # Load Weights
         if not keras_load_checkpoint_from_zip(self.mdl, file, 'ckpt'):
             print("Error loading keras weights")
@@ -321,7 +321,7 @@ class TFKerasModelBase(TFLikeModel):
 
         return True
 
-    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def save_imp(self, file: zipfile.ZipFile) -> bool:
         # Save Weights
         if not keras_save_checkpoint_to_zip(self.mdl, file, 'ckpt'):
             return False

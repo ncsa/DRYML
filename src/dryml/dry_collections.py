@@ -34,7 +34,7 @@ class DryList(DryObject, UserList):
             dry_mut=True,
             **self.dry_kwargs)
 
-    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def load_imp(self, file: zipfile.ZipFile) -> bool:
         # Load object list
         with file.open('obj_list.pkl', mode='r') as f:
             obj_filenames = pickle.loads(f.read())
@@ -53,7 +53,7 @@ class DryList(DryObject, UserList):
 
         return True
 
-    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def save_imp(self, file: zipfile.ZipFile) -> bool:
         obj_filenames = []
 
         # We save each object inside the file first.
@@ -105,7 +105,7 @@ class DryTuple(DryObject):
             dry_mut=is_mutable,
             **self.dry_kwargs)
 
-    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def load_imp(self, file: zipfile.ZipFile) -> bool:
         # Load object list
         with file.open('obj_list.pkl', mode='r') as f:
             obj_filenames = pickle.loads(f.read())
@@ -123,7 +123,7 @@ class DryTuple(DryObject):
 
         return True
 
-    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def save_imp(self, file: zipfile.ZipFile) -> bool:
         obj_filenames = []
 
         # We save each object inside the file first.
@@ -161,7 +161,7 @@ class DryDict(DryObject, UserDict):
             dry_mut=True,
             **self.dry_kwargs)
 
-    def load_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def load_imp(self, file: zipfile.ZipFile) -> bool:
         # Load object list
         with file.open('obj_dict.pkl', mode='r') as f:
             obj_dict = pickle.loads(f.read())
@@ -178,7 +178,7 @@ class DryDict(DryObject, UserDict):
 
         return True
 
-    def save_object_imp(self, file: zipfile.ZipFile) -> bool:
+    def save_imp(self, file: zipfile.ZipFile) -> bool:
         obj_dict = {}
 
         # We save each object inside the file first.
