@@ -276,7 +276,7 @@ class DryMeta(abc.ABCMeta):
         def load_object(self, file: zipfile.ZipFile) -> bool:
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's load.
-                super().load_object(self, file)
+                super().load_object(file)
             if hasattr(__class__, 'load_imp'):
                 if not __class__.load_imp(self, file):
                     return False
@@ -301,8 +301,8 @@ class DryMeta(abc.ABCMeta):
                         if not obj.save_self(f):
                             return False
             if not hasattr(__class__, '__dry_meta_base__'):
-                # If we're not the base, call the super class's load.
-                super().save_object(self, file)
+                # If we're not the base, call the super class's save.
+                super().save_object(file)
             return True
         return save_object
 
