@@ -199,6 +199,10 @@ class DryMeta(abc.ABCMeta):
             if not hasattr(self, '__dry_compute_data__'):
                 self.__dry_compute_data__ = None
 
+            # Initialize compute mode indicator
+            if not hasattr(self, '__dry_compute_mode__'):
+                self.__dry_compute_mode__ = False
+
             # manage whether to collect all arguments
             collect_args = False
             if hasattr(init_func, '__dry_collect_args__'):
@@ -315,6 +319,10 @@ class DryMeta(abc.ABCMeta):
             if hasattr(__class__, 'save_imp'):
                 if not __class__.save_imp(self, file):
                     return False
+            # Save any compute data from compute components.
+            # If compute mode is active
+            if self.__dry_compute_mode__:
+                self.save_compute()
             # Save compute data if it's there
             if self.__dry_compute_data__ is not None:
                 compute_data_path = 'compute_data.zip'
@@ -368,6 +376,8 @@ class DryMeta(abc.ABCMeta):
             if hasattr(self, 'compute_prepare_imp'):
                 self.compute_prepare_imp()
 
+            self.__dry_compute_mode__ = True
+
         return compute_prepare
 
     @staticmethod
@@ -389,6 +399,8 @@ class DryMeta(abc.ABCMeta):
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's save.
                 super().compute_cleanup()
+
+            self.__dry_compute_mode__ = False
 
         return compute_cleanup
 
