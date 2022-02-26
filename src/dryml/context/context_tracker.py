@@ -10,13 +10,18 @@ from typing import Type
 _current_context = None
 
 
+contexts = {
+}
+
+
 def context():
     global _current_context
     return _current_context
 
 
-contexts = {
-}
+def get_context_class(ctx_name):
+    global contexts
+    return contexts[ctx_name][0]
 
 
 class ResourcesUnavailableError(Exception):
@@ -30,6 +35,14 @@ class ResourcesUnavailableError(Exception):
 class ContextAlreadyActiveError(Exception):
     """
     Signals a context is already active.
+    """
+    def __init__(self, msg):
+        super().__init__(msg)
+
+
+class WrongContextError(Exception):
+    """
+    Signals the wrong context is active.
     """
     def __init__(self, msg):
         super().__init__(msg)
@@ -66,7 +79,7 @@ def make_context_manager(ctx_cls: Type):
 def register_context_manager(name: str, ctx_cls: Type):
     if name in contexts:
         raise ValueError(f"Context with name {name} already exists!")
-    contexts[name] = make_context_manager(ctx_cls)
+    contexts[name] = (ctx_cls, make_context_manager(ctx_cls))
 
 
 register_context_manager('default', ComputeContext)
