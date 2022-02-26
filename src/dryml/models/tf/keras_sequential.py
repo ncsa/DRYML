@@ -29,8 +29,17 @@ def keras_sequential_functional_class(
         # Respect final shape
         last_layer = tf.keras.layers.Reshape(output_shape)(last_layer)
         self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
+        print("Keras init finished")
+
+    def compute_cleanup_imp(self):
+        # Delete the contained model
+        del self.mdl
 
     # Create the new class
-    new_cls = type(name, base_classes, {'__init__': __init__})
+    new_cls = type(name, base_classes, {
+        '__init__': __init__,
+        'compute_prepare_imp': compute_prepare_imp,
+        'compute_cleanup_imp': compute_cleanup_imp,
+    })
 
     return new_cls

@@ -307,13 +307,15 @@ def keras_save_checkpoint_to_zip(
 
 
 class TFKerasModelBase(TFLikeModel):
+    __dry_compute_context__ = 'tf'
+
     def __init__(
             self, *args, **kwargs):
         # It is subclass's responsibility to fill this
         # attribute with an actual keras class
         self.mdl = None
 
-    def load_imp(self, file: zipfile.ZipFile) -> bool:
+    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
         # Load Weights
         if not keras_load_checkpoint_from_zip(self.mdl, file, 'ckpt'):
             print("Error loading keras weights")
@@ -321,7 +323,7 @@ class TFKerasModelBase(TFLikeModel):
 
         return True
 
-    def save_imp(self, file: zipfile.ZipFile) -> bool:
+    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
         # Save Weights
         if not keras_save_checkpoint_to_zip(self.mdl, file, 'ckpt'):
             return False
