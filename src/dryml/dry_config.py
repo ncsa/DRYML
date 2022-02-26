@@ -10,7 +10,7 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
     init_arg_dict_handler
 from dryml.context.context_tracker import get_context_class, \
-    WrongContextError, context
+    WrongContextError, context, NoContextError
 
 
 class IncompleteDefinitionError(Exception):
@@ -367,10 +367,13 @@ class DryMeta(abc.ABCMeta):
                 required_ctx_cls = get_context_class(required_context_name)
                 current_ctx = context()
 
-                if not issubclass(current_ctx, required_ctx_cls):
-                    raise WrongContextError(
-                        f"{current_ctx} doesn't satisfy "
-                        f"requirement {required_ctx_cls}")
+                if current_ctx is None:
+                    raise NoContextError("There is no context active.")
+                else:
+                    if not issubclass(type(current_ctx), required_ctx_cls):
+                        raise WrongContextError(
+                            f"{current_ctx} doesn't satisfy "
+                            f"requirement {required_ctx_cls}")
 
             # Execute user compute prepare method
             if hasattr(self, 'compute_prepare_imp'):

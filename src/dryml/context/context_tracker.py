@@ -48,6 +48,14 @@ class WrongContextError(Exception):
         super().__init__(msg)
 
 
+class NoContextError(Exception):
+    """
+    Signals there is no context active.
+    """
+    def __init__(self, msg):
+        super().__init__(msg)
+
+
 class ComputeContext(object):
     def acquire_context(self):
         print("base acquire context being run")
@@ -55,7 +63,6 @@ class ComputeContext(object):
         if _current_context is not None:
             raise ContextAlreadyActiveError()
         _current_context = self
-        print(f"current context: {self}")
 
     def release_context(self):
         print("base release context being run")
