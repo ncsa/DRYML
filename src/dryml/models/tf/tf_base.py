@@ -326,6 +326,7 @@ class TFKerasModelBase(TFLikeModel):
     def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
         # Save Weights
         if not keras_save_checkpoint_to_zip(self.mdl, file, 'ckpt'):
+            print("Error saving keras weights")
             return False
 
         return True

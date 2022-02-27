@@ -327,6 +327,8 @@ class DryMeta(abc.ABCMeta):
             if self.__dry_compute_data__ is not None:
                 compute_data_path = 'compute_data.zip'
                 data_buff = self.__dry_compute_data__
+                # Seek to beginning of io stream before read
+                data_buff.seek(0)
                 with file.open(compute_data_path, 'w') as f:
                     f.write(data_buff.read())
 
@@ -424,6 +426,8 @@ class DryMeta(abc.ABCMeta):
             # Load this object's compute
             if hasattr(__class__, 'load_compute_imp'):
                 if self.__dry_compute_data__ is not None:
+                    # Need to seek the io stream to the beginning
+                    self.__dry_compute_data__.seek(0)
                     with zipfile.ZipFile(
                             self.__dry_compute_data__, mode='r') as zf:
                         if not __class__.load_compute_imp(
@@ -438,7 +442,7 @@ class DryMeta(abc.ABCMeta):
         Method for making a save_compute function
         """
         def save_compute(self) -> bool:
-            if hasattr(__class__, 'save_imp'):
+            if hasattr(__class__, 'save_compute_imp'):
                 self.__dry_compute_data__ = io.BytesIO()
                 with zipfile.ZipFile(
                         self.__dry_compute_data__, mode='w') as zf:

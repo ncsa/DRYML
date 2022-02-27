@@ -1,6 +1,8 @@
 from dryml.models.tf.tf_base import TFKerasModelBase
 import tensorflow as tf
 import numpy as np
+import inspect
+from dryml.utils import adjust_class_module
 
 
 def keras_sequential_functional_class(
@@ -41,5 +43,7 @@ def keras_sequential_functional_class(
         'compute_prepare_imp': compute_prepare_imp,
         'compute_cleanup_imp': compute_cleanup_imp,
     })
+
+    adjust_class_module(new_cls)
 
     return new_cls

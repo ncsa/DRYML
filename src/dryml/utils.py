@@ -96,3 +96,15 @@ def show_sig(sig):
     for key in sig.parameters:
         par = sig.parameters[key]
         print(f"{par.name} - {par.kind} - {par.default}")
+
+
+def adjust_class_module(cls):
+    # Set module properly
+    # From https://stackoverflow.com/questions/1095543/
+    #              get-name-of-calling-functions-module-in-python
+    # We go up two functions, one to get to the calling function,
+    # Another to get to that function's caller. That should be
+    # in a module.
+    frm = inspect.stack()[2]
+    calling_mod = inspect.getmodule(frm[0])
+    cls.__module__ = calling_mod.__name__
