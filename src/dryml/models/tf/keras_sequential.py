@@ -1,7 +1,6 @@
 from dryml.models.tf.tf_base import TFKerasModelBase
 import tensorflow as tf
 import numpy as np
-import inspect
 from dryml.utils import adjust_class_module
 
 
