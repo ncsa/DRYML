@@ -118,6 +118,8 @@ class DryMeta(abc.ABCMeta):
         if '__dry_meta_base__' in attrs:
             base = True
 
+        # Set new methods which need the class object
+        # to be set properly
         new_cls.__init__ = DryMeta.make_dry_init(new_cls, init_func, base=base)
         new_cls.load_object = DryMeta.make_load_object(new_cls)
         new_cls.save_object = DryMeta.make_save_object(new_cls)
