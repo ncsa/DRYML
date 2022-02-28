@@ -144,6 +144,7 @@ class DryMeta(abc.ABCMeta):
         # Build list of positional and keyword arguments for dry_init
         track_args = getattr(f, '__dry_args__', [])
         track_kwargs = getattr(f, '__dry_kwargs__', [])
+        existing_kwargs = list(map(lambda t: t[0], track_kwargs))
         for key in sig.parameters:
             par = sig.parameters[key]
             if par.name == 'self':
@@ -156,7 +157,8 @@ class DryMeta(abc.ABCMeta):
                par.kind != inspect.Parameter.KEYWORD_ONLY:
                 track_args.append(par.name)
             else:
-                track_kwargs.append((par.name, par.default))
+                if par.name not in existing_kwargs:
+                    track_kwargs.append((par.name, par.default))
 
         f.__dry_args__ = track_args
         f.__dry_kwargs__ = track_kwargs
