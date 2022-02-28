@@ -98,6 +98,12 @@ def is_concrete_val(input_object):
 
 class DryMeta(abc.ABCMeta):
     def __new__(cls, clsname, bases, attrs):
+        # Set default init function as python's default
+        # init tries to use super which shouldn't be done
+        # here.
+        if '__init__' not in attrs:
+            attrs['__init__'] = DryMeta.default_init
+
         # Create class
         new_cls = super().__new__(cls, clsname, bases, attrs)
 
@@ -169,6 +175,10 @@ class DryMeta(abc.ABCMeta):
     def collect_args(f):
         f.__dry_collect_args__ = True
         return f
+
+    @staticmethod
+    def default_init(self, *args, **kwargs):
+        pass
 
     # Create scope with __class__ defined so super can find a cell
     # with the right name.
@@ -286,6 +296,7 @@ class DryMeta(abc.ABCMeta):
                 if isinstance(obj, DryObject):
                     self.__dry_obj_container_list__.append(obj)
 
+            # Call user defined init
             init_func(self, *args, **sub_kwargs)
 
         return dry_init
