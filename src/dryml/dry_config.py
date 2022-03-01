@@ -105,6 +105,9 @@ def is_concrete_val(input_object):
             val = input_object[key]
             if not is_concrete_val(val):
                 return False
+    elif issubclass(type(input_object), type):
+        # We have a type which is 'callable'
+        return True
     elif callable(input_object):
         # Callables aren't concrete. They don't have a definite value
         return False

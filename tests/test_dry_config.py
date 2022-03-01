@@ -130,3 +130,13 @@ def test_def_3():
     del obj_def['dry_args'][0]['dry_kwargs']['A']['dry_kwargs']['dry_id']
 
     assert not obj_def.is_concrete()
+
+
+def test_def_4():
+    """
+    A case where a fully specified definition wasn't marked as concrete
+    """
+
+    obj = dryml.ObjectWrapper(objects.HelloTrainableD, obj_kwargs={'A': 5})
+
+    assert obj.definition().is_concrete()
