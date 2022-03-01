@@ -11,6 +11,7 @@ import uuid
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryObjectDef, DryMeta
 from dryml.utils import get_current_cls, pickler, static_var
+from dryml.context.context_tracker import consolidate_contexts
 import tempfile
 
 FileType = Union[str, IO[bytes]]
@@ -286,6 +287,13 @@ class DryObject(metaclass=DryMeta):
 
     def __repr__(self):
         return str(self.definition())
+
+    def dry_compute_context(self) -> str:
+        contexts = [self.__dry_compute_context__]
+        for obj in self.__dry_obj_container_list__:
+            contexts.append(obj.dry_compute_context())
+
+        return consolidate_contexts(contexts)
 
 
 class DryObjectFactory(object):

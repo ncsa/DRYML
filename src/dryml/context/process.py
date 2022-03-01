@@ -4,7 +4,7 @@ Code to run subprocesses with proper contexts
 
 
 from dryml.context.context_tracker import get_context_class, \
-    contexts, WrongContextError, context
+    contexts, WrongContextError, context, consolidate_contexts
 import copy
 import multiprocessing as mp
 import traceback
@@ -125,18 +125,10 @@ def compute_context(
 
             if ctx_name is None:
                 # Determine context type
-                ctx_cls = get_context_class('default')
-                ctx_name = 'default'
+                ctxs = []
                 for obj in get_dry_objects(*args, **kwargs):
-                    obj_ctx_cls = get_context_class(
-                        obj.__dry_compute_context__)
-                    if issubclass(obj_ctx_cls, ctx_cls):
-                        ctx_cls = obj_ctx_cls
-                        ctx_name = obj.__dry_compute_context__
-                    else:
-                        raise WrongContextError(
-                            "Unable to find a context which works for all "
-                            "input objects")
+                    ctxs.append(obj.dry_compute_context())
+                ctx_name = consolidate_contexts(ctxs)
 
             if use_existing_context:
                 cur_ctx = context()

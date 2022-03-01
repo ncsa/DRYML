@@ -236,6 +236,10 @@ class DryMeta(abc.ABCMeta):
             if not hasattr(self, '__dry_compute_mode__'):
                 self.__dry_compute_mode__ = False
 
+            # Initialize compute context indicator
+            if not hasattr(self, '__dry_compute_context__'):
+                self.__dry_compute_context__ = 'default'
+
             # manage whether to collect all arguments
             collect_args = False
             if hasattr(init_func, '__dry_collect_args__'):
