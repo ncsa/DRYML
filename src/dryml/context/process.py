@@ -12,6 +12,7 @@ import inspect
 import functools
 import io
 import zipfile
+import time
 
 
 # Wrapping process base starting from
@@ -44,7 +45,6 @@ def compute_context(
         ctx_use_existing_context=True,
         ctx_dont_create_context=False,
         ctx_update_objs=False,
-        ctx_has_retval=None,
         **ctx_context_kwargs):
 
     """
@@ -56,21 +56,11 @@ def compute_context(
         ctx_update_objs: if True, will serialize objects after method is run
             and update local objects by running load_object with
             the serialized results
-        ctx_has_retval: indicates whether there's a return value to get.
-            if None, will determine with function signature
     """
 
     def _func_dec(f):
         # Get function signature for later use
         f_sig = inspect.signature(f)
-
-        # Determine whether function has a return value
-        has_retval = ctx_has_retval
-        if ctx_has_retval is None:
-            if f_sig.return_annotation is not inspect.Signature.empty:
-                has_retval = True
-            else:
-                has_retval = False
 
         nonlocal ctx_context_kwargs
         if ctx_context_kwargs is None:
@@ -172,11 +162,7 @@ def compute_context(
                 # We don't have to wory about any of the
                 # context management stuff
 
-                # return
-                if has_retval:
-                    return res
-                else:
-                    return
+                return res
             else:
                 if dont_create_context:
                     raise RuntimeError("Instructed to not create a context!")
@@ -218,14 +204,16 @@ def compute_context(
                 context_kwargs = copy.copy(ctx_context_kwargs)
                 context_kwargs.update(call_context_kwargs)
 
-                if has_retval or len(update_obj_defs) > 0:
-                    ctx_ret_q = mp.Queue()
+                ctx_ret_q = mp.Queue()
 
                 # Define function for process
                 def process_func(
                         *args,
                         ctx_ret_q=None,
                         **kwargs):
+                    if ctx_ret_q is None: 
+                        raise RuntimeError("A queue is required.")
+
                     # Activate context
                     with contexts[ctx_name][1](**context_kwargs):
                         # Get list of dry_objects
@@ -240,8 +228,7 @@ def compute_context(
                         deactivate_objects(activated_objects)
 
                         # Put result in return queue
-                        if has_retval:
-                            ctx_ret_q.put(res)
+                        ctx_ret_q.put(res)
 
                         # Put object updates in queue
                         if len(update_obj_defs) > 0:
@@ -262,41 +249,82 @@ def compute_context(
 
                 # If necessary add the queue
                 call_kwargs = copy.copy(kwargs)
-                if has_retval or len(update_obj_defs) > 0:
-                    call_kwargs['ctx_ret_q'] = ctx_ret_q
+                call_kwargs['ctx_ret_q'] = ctx_ret_q
 
                 # run function
                 p = Process(target=process_func, args=args, kwargs=call_kwargs)
                 p.start()
-                p.join()
 
-                # Exception handling
+                print(f"Started context isolation process, pid: {p.pid}")
+
+                # Check loop
+                queue_results = []
+
+                # Num elements which need to be fetched before joining
+                num_to_fetch = 1
+                num_to_fetch += len(update_objs_list)
+
+                def check_queue():
+                    while len(queue_results) < num_to_fetch:
+                        # Check whether the queue is empty
+                        if not ctx_ret_q.empty():
+                            # Get result
+                            queue_results.append(ctx_ret_q.get())
+                        else:
+                            break
+
+                while p.is_alive():
+                    # check for exception
+                    if p.exception is not None:
+                        e, tb = p.exception
+                        print("Exception encountered in context thread! pid: {p.pid}")
+                        print(tb)
+                        # rejoin thread
+                        p.join()
+                        # Reraise
+                        raise e
+
+                    # Get results, we need to do this before the join to prevent
+                    # deadlock from large data being shuttled through the
+                    # queue.
+                    check_queue()
+
+                    # Sleep a bit
+                    time.sleep(0.1)
+
                 if p.exception is not None:
                     e, tb = p.exception
-                    print("Exception encountered in context thread!")
+                    print("Exception encountered in context thread! pid: {p.pid}")
                     print(tb)
+                    # rejoin thread
+                    p.join()
                     # Reraise
                     raise e
 
+                # Check queue again
+                check_queue()
+
+                # join the thread
+                p.join()
+
+                if len(queue_results) < num_to_fetch:
+                    raise RuntimeError("Didn't get all expected results!")
+
                 # retrieve return value
-                if has_retval:
-                    retval = ctx_ret_q.get()
+                retval = queue_results.pop(0)
 
                 # Update dry objects
                 for obj in update_objs_list:
-                    obj_buf = ctx_ret_q.get()
+                    obj_buf = queue_results.pop(0)
                     zf = zipfile.ZipFile(io.BytesIO(obj_buf), mode='r')
                     obj.load_object(zf)
 
                 # Delete the temporary queue
-                if has_retval or len(update_objs_list) > 0:
-                    del ctx_ret_q
+                del ctx_ret_q
 
-                # Return final value
-                if has_retval:
-                    return retval
-                else:
-                    return
+                print(f"Ended context isolation process, pid: {p.pid}")
+
+                return retval
 
         # Return wrapped function
         return wrapped_func

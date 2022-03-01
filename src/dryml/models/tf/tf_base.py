@@ -2,7 +2,7 @@ import tensorflow as tf
 from dryml.models import DryTrainable, DryComponent
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
-from dryml.context import compute
+from dryml.context import compute, compute_context
 import tempfile
 import zipfile
 import os
@@ -24,6 +24,7 @@ class TFBasicTraining(TFLikeTrainFunction):
         self.shuffle_buffer = shuffle_buffer
         self.num_total = num_total
 
+    @compute
     def __call__(
             self, trainable, data: DryData, *args, batch_size=32,
             callbacks=[], **kwargs):
@@ -165,6 +166,8 @@ class TFLikeModel(DryComponent):
 
 
 class TFLikeTrainable(DryTrainable):
+    __dry_compute_context__ = 'tf'
+
     def __init__(
             self, model: TFLikeModel = None, optimizer=None, loss=None,
             train_fn: TFLikeTrainFunction = None):
