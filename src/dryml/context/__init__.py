@@ -2,7 +2,7 @@ from dryml.context.context_tracker import context, \
     contexts, register_context_manager, ComputeContext, \
     ResourcesUnavailableError, WrongContextError, \
     NoContextError, ContextAlreadyActiveError
-from dryml.context.process import Process, compute_context
+from dryml.context.process import Process, compute_context, compute
 
 
 __all__ = [
@@ -16,4 +16,5 @@ __all__ = [
     ContextAlreadyActiveError,
     Process,
     compute_context,
+    compute,
 ]

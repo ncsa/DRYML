@@ -2,6 +2,7 @@ import tensorflow as tf
 from dryml.models import DryTrainable, DryComponent
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
+from dryml.context import compute
 import tempfile
 import zipfile
 import os
@@ -9,6 +10,7 @@ import re
 
 
 class TFLikeTrainFunction(DryComponent):
+    @compute
     def __call__(self, trainable, train_data, *args, **kwargs):
         raise NotImplementedError("method must be implemented in a subclass")
 
@@ -91,6 +93,7 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         self.epochs = epochs
         self.num_total = num_total
 
+    @compute
     def __call__(
             self, trainable, data, *args, batch_size=32,
             callbacks=[], **kwargs):
@@ -156,6 +159,7 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
 
 
 class TFLikeModel(DryComponent):
+    @compute
     def __call__(self, X, *args, target=True, index=False, **kwargs):
         return self.mdl(X, *args, **kwargs)
 
@@ -184,6 +188,7 @@ class TFLikeTrainable(DryTrainable):
                 "You need to set the train_fn component of this trainable!")
         self.train_fn = train_fn
 
+    @compute
     def train(self, data, metrics=[], *args, **kwargs):
         # compile the model.
         self.model.mdl.compile(
@@ -195,6 +200,7 @@ class TFLikeTrainable(DryTrainable):
 
         self.train_state = DryTrainable.trained
 
+    @compute
     def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
         if data.batched():
             # We can execute the method directly on the data
