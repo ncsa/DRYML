@@ -2,7 +2,7 @@ import tensorflow as tf
 from dryml.models import DryTrainable, DryComponent
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
-from dryml.context import compute, compute_context
+from dryml.context import compute
 import tempfile
 import zipfile
 import os

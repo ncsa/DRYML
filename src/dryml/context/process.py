@@ -8,7 +8,6 @@ from dryml.context.context_tracker import get_context_class, \
 import copy
 import multiprocessing as mp
 import traceback
-import inspect
 import functools
 import io
 import zipfile
@@ -59,9 +58,6 @@ def compute_context(
     """
 
     def _func_dec(f):
-        # Get function signature for later use
-        f_sig = inspect.signature(f)
-
         nonlocal ctx_context_kwargs
         if ctx_context_kwargs is None:
             ctx_context_kwargs = {}
@@ -211,7 +207,7 @@ def compute_context(
                         *args,
                         ctx_ret_q=None,
                         **kwargs):
-                    if ctx_ret_q is None: 
+                    if ctx_ret_q is None:
                         raise RuntimeError("A queue is required.")
 
                     # Activate context
@@ -277,16 +273,18 @@ def compute_context(
                     # check for exception
                     if p.exception is not None:
                         e, tb = p.exception
-                        print("Exception encountered in context thread! pid: {p.pid}")
+                        print(
+                            "Exception encountered in context "
+                            f"thread! pid: {p.pid}")
                         print(tb)
                         # rejoin thread
                         p.join()
                         # Reraise
                         raise e
 
-                    # Get results, we need to do this before the join to prevent
-                    # deadlock from large data being shuttled through the
-                    # queue.
+                    # Get results, we need to do this before the join
+                    # to prevent deadlock from large data being shuttled
+                    # through the queue.
                     check_queue()
 
                     # Sleep a bit
@@ -294,7 +292,8 @@ def compute_context(
 
                 if p.exception is not None:
                     e, tb = p.exception
-                    print("Exception encountered in context thread! pid: {p.pid}")
+                    print("Exception encountered in context "
+                          f"thread! pid: {p.pid}")
                     print(tb)
                     # rejoin thread
                     p.join()
