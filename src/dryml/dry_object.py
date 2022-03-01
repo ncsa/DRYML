@@ -288,6 +288,10 @@ class DryObject(metaclass=DryMeta):
     def __repr__(self):
         return str(self.definition())
 
+    @property
+    def dry_id(self):
+        return self.dry_kwargs.get('dry_id', None)
+
     def dry_compute_context(self) -> str:
         contexts = [self.__dry_compute_context__]
         for obj in self.__dry_obj_container_list__:
