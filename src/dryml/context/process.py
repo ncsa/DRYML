@@ -58,6 +58,11 @@ def compute_context(
     """
 
     def _func_dec(f):
+        if hasattr(f, '__dry_context_wrapped__'):
+            # Don't wrap a function twice
+            if f.__dry_context_wrapped__:
+                return f
+
         nonlocal ctx_context_kwargs
         if ctx_context_kwargs is None:
             ctx_context_kwargs = {}
@@ -324,6 +329,8 @@ def compute_context(
                 print(f"Ended context isolation process, pid: {p.pid}")
 
                 return retval
+
+        wrapped_func.__dry_context_wrapped__ = True
 
         # Return wrapped function
         return wrapped_func
