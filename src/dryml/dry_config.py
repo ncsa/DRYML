@@ -311,7 +311,9 @@ class DryMeta(abc.ABCMeta):
             args = list(map(detect_and_construct, args))
 
             # Store list of DryObjects we need to later save.
-            self.__dry_obj_container_list__ = []
+            if not hasattr(self, '__dry_obj_container_list__'):
+                self.__dry_obj_container_list__ = []
+
             from dryml import DryObject
             for arg in args:
                 if isinstance(arg, DryObject):
