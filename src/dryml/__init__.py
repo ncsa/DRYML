@@ -9,6 +9,7 @@ from dryml.dry_selector import DrySelector
 from dryml.dry_repo import DryRepo
 from dryml.dry_collections import DryList, DryTuple, DryDict
 from dryml.workshop import Workshop
+from dryml.context import compute_context
 import dryml.context as context
 
 __version__ = "0.0.0"
@@ -38,4 +39,5 @@ __all__ = [
     ComputeModeLoadError,
     ComputeModeNotActiveError,
     ComputeModeSaveError,
+    compute_context,
 ]
