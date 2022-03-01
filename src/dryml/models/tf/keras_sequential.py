@@ -14,7 +14,6 @@ def keras_sequential_functional_class(
         self.out_activation = out_activation
 
     def compute_prepare_imp(self):
-        print("Keras Init start")
         # Build Functional Model
         inp = tf.keras.layers.Input(input_shape)
         last_layer = inp
@@ -30,7 +29,6 @@ def keras_sequential_functional_class(
         # Respect final shape
         last_layer = tf.keras.layers.Reshape(output_shape)(last_layer)
         self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
-        print("Keras init finished")
 
     def compute_cleanup_imp(self):
         # Delete the contained model

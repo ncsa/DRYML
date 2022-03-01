@@ -1,4 +1,7 @@
-from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta
+from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta, \
+    IncompleteDefinitionError, ComputeModeAlreadyActiveError, \
+    ComputeModeLoadError, ComputeModeNotActiveError, \
+    ComputeModeSaveError
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
     load_object, save_object, change_object_cls, \
     ObjectWrapper, CallableWrapper
@@ -30,4 +33,9 @@ __all__ = [
     save_object,
     change_object_cls,
     context,
+    IncompleteDefinitionError,
+    ComputeModeAlreadyActiveError,
+    ComputeModeLoadError,
+    ComputeModeNotActiveError,
+    ComputeModeSaveError,
 ]

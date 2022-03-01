@@ -58,14 +58,12 @@ class NoContextError(Exception):
 
 class ComputeContext(object):
     def acquire_context(self):
-        print("base acquire context being run")
         global _current_context
         if _current_context is not None:
             raise ContextAlreadyActiveError()
         _current_context = self
 
     def release_context(self):
-        print("base release context being run")
         global _current_context
         _current_context = None
 

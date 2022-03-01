@@ -17,6 +17,22 @@ class IncompleteDefinitionError(Exception):
     pass
 
 
+class ComputeModeAlreadyActiveError(Exception):
+    pass
+
+
+class ComputeModeLoadError(Exception):
+    pass
+
+
+class ComputeModeNotActiveError(Exception):
+    pass
+
+
+class ComputeModeSaveError(Exception):
+    pass
+
+
 # Create a couple global variables
 build_repo = None
 build_cache = None
@@ -368,6 +384,9 @@ class DryMeta(abc.ABCMeta):
         """
 
         def compute_prepare(self):
+            if self.__dry_compute_mode__:
+                raise ComputeModeAlreadyActiveError()
+
             # Prepare contained objects
             for obj in self.__dry_obj_container_list__:
                 obj.compute_prepare()
@@ -407,6 +426,9 @@ class DryMeta(abc.ABCMeta):
         """
 
         def compute_cleanup(self):
+            if not self.__dry_compute_mode__:
+                raise ComputeModeNotActiveError()
+
             # Cleanup this object
             if hasattr(self, 'compute_cleanup_imp'):
                 self.compute_cleanup_imp()
