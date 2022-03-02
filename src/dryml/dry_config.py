@@ -11,6 +11,7 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     init_arg_dict_handler
 from dryml.context.context_tracker import get_context_class, \
     WrongContextError, context, NoContextError
+from dryml.context.process import compute
 
 
 class IncompleteDefinitionError(Exception):
@@ -147,6 +148,13 @@ class DryMeta(abc.ABCMeta):
         new_cls.compute_prepare = DryMeta.make_compute_prepare(new_cls)
         new_cls.compute_cleanup = DryMeta.make_compute_cleanup(new_cls)
 
+        # Wrap marked compute methods
+        if hasattr(new_cls, '__dry_compute_methods__'):
+            for attr in new_cls.__dry_compute_methods__:
+                if hasattr(new_cls, attr):
+                    method = getattr(new_cls, attr)
+                    setattr(new_cls, attr, compute(method))
+
         return new_cls
 
     @staticmethod
@@ -195,6 +203,11 @@ class DryMeta(abc.ABCMeta):
     @staticmethod
     def collect_args(f):
         f.__dry_collect_args__ = True
+        return f
+
+    @staticmethod
+    def mark_compute(f):
+        f.__dry_compute_mark__ = True
         return f
 
     @staticmethod

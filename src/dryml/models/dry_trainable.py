@@ -1,8 +1,11 @@
 import zipfile
 import pickle
 from dryml.dry_object import DryObject
+from dryml.context import cls_method_compute
 
 
+@cls_method_compute('train')
+@cls_method_compute('eval')
 class DryTrainable(DryObject):
     untrained = 0
     trained = 2
