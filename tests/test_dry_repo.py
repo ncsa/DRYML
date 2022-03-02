@@ -93,6 +93,27 @@ def test_add_retrieve_objects_2():
         cls=objects.TestClassB, args=['test']))) == 1
 
 
+def test_add_retrieve_objects_3():
+    """
+    Should be able to add all objects within an object at once.
+    """
+
+    repo = dryml.DryRepo()
+
+    obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
+
+    repo.add_object(obj)
+
+    assert len(repo.get()) == 3
+    assert len(repo.get(selector=dryml.DrySelector(
+        cls=objects.TestNest, args=(10,)))) == 1
+    assert len(repo.get(selector=dryml.DrySelector(
+        cls=objects.HelloTrainableD))) == 1
+    assert len(repo.get(selector=dryml.DrySelector(
+        cls=objects.TestNest, args=(
+            dryml.DrySelector(objects.HelloTrainableD),), verbosity=2))) == 1
+
+
 @pytest.mark.xfail
 def test_try_write():
     repo = dryml.DryRepo()

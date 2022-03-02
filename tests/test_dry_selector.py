@@ -152,6 +152,28 @@ def test_selector_5():
     assert sel(obj)
 
 
+def test_selector_6():
+    """
+    A Selector usage pattern
+    """
+
+    obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
+
+    obj_def = dryml.DryObjectDef(
+        objects.TestNest,
+        dryml.DryObjectDef(
+            objects.HelloTrainableD,
+            A=dryml.DryObjectDef(
+                objects.TestNest,
+                10)
+        )
+    )
+
+    sel = dryml.DrySelector.build(obj_def)
+
+    assert sel(obj)
+
+
 def test_selector_build_1():
     """
     Test that we can construct DrySelectors from various objects

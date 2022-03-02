@@ -233,7 +233,8 @@ class DryRepo(object):
         if verbose:
             print(f"Loaded {num_loaded} objects")
 
-    def add_object(self, obj: DryObject, filepath: Optional[str] = None):
+    def add_object(self, obj: DryObject, filepath: Optional[str] = None,
+                   add_nested: bool = True):
         # Add a single object
         if filepath is not None:
             directory, filename = os.path.split(filepath)
@@ -245,6 +246,13 @@ class DryRepo(object):
         else:
             filename = None
             directory = self.directory
+
+        # Add other nested objects into the repository too
+        if add_nested:
+            if hasattr(obj, '__dry_obj_container_list__'):
+                for o in obj.__dry_obj_container_list__:
+                    if o not in self:
+                        self.add_object(o, add_nested=add_nested)
 
         obj_cont = DryRepoContainer.from_object(
             obj, directory=directory, filename=filename)
