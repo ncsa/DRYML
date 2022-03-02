@@ -59,6 +59,7 @@ def compute_context(
         ctx_use_existing_context=True,
         ctx_dont_create_context=False,
         ctx_update_objs=False,
+        ctx_verbose=False,
         **ctx_context_kwargs):
 
     """
@@ -91,6 +92,7 @@ def compute_context(
                 call_update_objs=None,
                 call_update_skiplist=None,
                 call_context_kwargs=None,
+                call_verbose=None,
                 **kwargs):
             """
                 call_*: call version of the ctx variables which take
@@ -111,6 +113,10 @@ def compute_context(
             dont_create_context = ctx_dont_create_context
             if call_dont_create_context is not None:
                 dont_create_context = call_dont_create_context
+
+            verbose = ctx_verbose
+            if call_verbose is not None:
+                verbose = call_verbose
 
             ctx_name = ctx_context_type
             if call_context_type is not None:
@@ -271,7 +277,8 @@ def compute_context(
                 p = Process(target=process_func, args=args, kwargs=call_kwargs)
                 p.start()
 
-                print(f"Started context isolation process, pid: {p.pid}")
+                if verbose:
+                    print(f"Started context isolation process, pid: {p.pid}")
 
                 # Check loop
                 queue_results = []
@@ -341,7 +348,8 @@ def compute_context(
                 # Delete the temporary queue
                 del ctx_ret_q
 
-                print(f"Ended context isolation process, pid: {p.pid}")
+                if verbose:
+                    print(f"Ended context isolation process, pid: {p.pid}")
 
                 return retval
 
