@@ -15,11 +15,17 @@ class DryData():
     A Simple wrapper class to house Dry Level data operations
     """
 
+    def __init__(self, indexed=False, supervised=False,
+                 batch_size=None):
+        self._indexed = indexed
+        self._supervised = supervised
+        self._batch_size = batch_size
+
     def indexed(self) -> bool:
         """
         Indicate whether this dataset is indexed.
         """
-        raise NotImplementedError()
+        return self._indexed
 
     def index(self):
         """
@@ -44,7 +50,7 @@ class DryData():
         """
         Indicate whether this dataset is supervised (has targets as well)
         """
-        raise NotImplementedError()
+        return self._supervised
 
     def as_not_supervised(self) -> DryData:
         """
@@ -68,7 +74,17 @@ class DryData():
         """
         Indicate whether this data has been batched
         """
-        raise NotImplementedError()
+        if self._batch_size is not None:
+            return True
+        else:
+            return False
+
+    def batch_size(self):
+        """
+        Get the batch size
+        """
+
+        return self._batch_size
 
     def batch(self, batch_size=32) -> DryData:
         """
@@ -97,5 +113,11 @@ class DryData():
     def apply(self, func: Callable = None) -> DryData:
         """
         Apply a function to (X, Y)
+        """
+        raise NotImplementedError()
+
+    def __iter__(self):
+        """
+        Create an iterator
         """
         raise NotImplementedError()

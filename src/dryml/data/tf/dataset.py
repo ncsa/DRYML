@@ -6,17 +6,11 @@ import tensorflow as tf
 class TFDataset(DryData):
     def __init__(
             self, in_ds: tf.data.Dataset, indexed=False,
-            supervised=False, batched=False):
+            supervised=False, batch_size=None):
+        super().__init__(
+            indexed=indexed, supervised=supervised,
+            batch_size=batch_size)
         self.ds = in_ds
-        self._indexed = indexed
-        self._supervised = supervised
-        self._batched = batched
-
-    def indexed(self) -> bool:
-        """
-        Indicate whether this dataset is indexed.
-        """
-        return self._indexed
 
     def index(self, start=0):
         """
@@ -41,7 +35,7 @@ class TFDataset(DryData):
                 self.ds.enumerate(start=0),
                 indexed=True,
                 supervised=self.supervised(),
-                batched=self.batched())
+                batch_size=self.batch_size())
 
     def as_not_indexed(self):
         """
@@ -56,13 +50,7 @@ class TFDataset(DryData):
                     num_parallel_calls=tf.data.AUTOTUNE),
                 indexed=False,
                 supervised=self.supervised(),
-                batched=self.batched())
-
-    def supervised(self) -> bool:
-        """
-        Indicate whether this dataset is supervised (has targets as well)
-        """
-        return self._supervised
+                batch_size=self.batch_size())
 
     def as_not_supervised(self) -> DryData:
         """
@@ -78,14 +66,14 @@ class TFDataset(DryData):
                         num_parallel_calls=tf.data.AUTOTUNE),
                     indexed=self.indexed(),
                     supervised=False,
-                    batched=self.batched())
+                    batch_size=self.batch_size())
             else:
                 return TFDataset(self.ds.map(
                         lambda x, y: x,
                         num_parallel_calls=tf.data.AUTOTUNE),
                     indexed=self.indexed(),
                     supervised=False,
-                    batched=self.batched())
+                    batch_size=self.batch_size())
 
     def intersect(self) -> DryData:
         """
@@ -99,12 +87,6 @@ class TFDataset(DryData):
         """
         return self.ds
 
-    def batched(self) -> bool:
-        """
-        Indicate whether this data has been batched
-        """
-        return self._batched
-
     def batch(self, batch_size=32) -> DryData:
         """
         Batch this data
@@ -116,7 +98,7 @@ class TFDataset(DryData):
                 self.ds.batch(batch_size=batch_size),
                 indexed=self.indexed(),
                 supervised=self.supervised(),
-                batched=True)
+                batch_size=batch_size)
 
     def unbatch(self) -> DryData:
         """
@@ -128,8 +110,7 @@ class TFDataset(DryData):
             return TFDataset(
                 self.ds.unbatch(),
                 indexed=self.indexed(),
-                supervised=self.supervised(),
-                batched=False)
+                supervised=self.supervised())
 
     def apply_X(self, func: Callable = None) -> DryData:
         """
@@ -144,7 +125,7 @@ class TFDataset(DryData):
                         num_parallel_calls=tf.data.AUTOTUNE),
                     indexed=self.indexed(),
                     supervised=self.supervised(),
-                    batched=self.batched())
+                    batch_size=self.batch_size())
             else:
                 return TFDataset(
                     self.ds.map(
@@ -152,7 +133,7 @@ class TFDataset(DryData):
                         num_parallel_calls=tf.data.AUTOTUNE),
                     indexed=self.indexed(),
                     supervised=self.supervised(),
-                    batched=self.batched())
+                    batch_size=self.batch_size())
         else:
             if self.supervised():
                 return TFDataset(
@@ -161,7 +142,7 @@ class TFDataset(DryData):
                         num_parallel_calls=tf.data.AUTOTUNE),
                     indexed=self.indexed(),
                     supervised=self.supervised(),
-                    batched=self.batched())
+                    batch_size=self.batch_size())
             else:
                 return TFDataset(
                     self.ds.map(
@@ -169,7 +150,7 @@ class TFDataset(DryData):
                         num_parallel_calls=tf.data.AUTOTUNE),
                     indexed=self.indexed(),
                     supervised=self.supervised(),
-                    batched=self.batched())
+                    batch_size=self.batch_size())
 
     def apply_Y(self, func=None) -> DryData:
         """
@@ -188,7 +169,7 @@ class TFDataset(DryData):
                     num_parallel_calls=tf.data.AUTOTUNE),
                 indexed=self.indexed(),
                 supervised=self.supervised(),
-                batched=self.batched())
+                batch_size=self.batch_size())
         else:
             return TFDataset(
                 self.ds.map(
@@ -196,7 +177,7 @@ class TFDataset(DryData):
                     num_parallel_calls=tf.data.AUTOTUNE),
                 indexed=self.indexed(),
                 supervised=self.supervised(),
-                batched=self.batched())
+                batch_size=self.batch_size())
 
     def apply(self, func=None) -> DryData:
         """
@@ -215,7 +196,7 @@ class TFDataset(DryData):
                     num_parallel_calls=tf.data.AUTOTUNE),
                 indexed=self.indexed(),
                 supervised=self.supervised(),
-                batched=self.batched())
+                batch_size=self.batch_size())
         else:
             return TFDataset(
                 self.ds.map(
@@ -223,4 +204,11 @@ class TFDataset(DryData):
                     num_parallel_calls=tf.data.AUTOTUNE),
                 indexed=self.indexed(),
                 supervised=self.supervised(),
-                batched=self.batched())
+                batch_size=self.batch_size())
+
+    def __iter__(self):
+        """
+        Create iterator
+        """
+
+        return iter(self.data())

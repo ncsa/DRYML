@@ -17,7 +17,7 @@ def category_accuracy(trainable, test_data: DryData):
     num_correct = 0
     num_total = 0
 
-    for Y_eval, Y in data.data():
+    for Y_eval, Y in data:
         num_correct += (Y_eval == Y).numpy().sum()
         num_total += len(Y)
 
