@@ -39,7 +39,7 @@ class Process(mp.Process):
         return self._exception
 
 
-def cls_method_compute(fn_name):
+def cls_method_compute(fn_name, **ctx_kwargs):
     """
     Mark a class method as compute. DryMeta will ensure
     such named methods are wrapped in a compute context.
@@ -47,7 +47,7 @@ def cls_method_compute(fn_name):
 
     def _dec(cls):
         cls_method_list = getattr(cls, '__dry_compute_methods__', [])
-        cls_method_list.append(fn_name)
+        cls_method_list.append((fn_name, ctx_kwargs))
         cls.__dry_compute_methods__ = cls_method_list
         return cls
 

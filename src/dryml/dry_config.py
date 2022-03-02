@@ -11,7 +11,7 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     init_arg_dict_handler
 from dryml.context.context_tracker import get_context_class, \
     WrongContextError, context, NoContextError
-from dryml.context.process import compute
+from dryml.context.process import compute_context
 
 
 class IncompleteDefinitionError(Exception):
@@ -150,10 +150,14 @@ class DryMeta(abc.ABCMeta):
 
         # Wrap marked compute methods
         if hasattr(new_cls, '__dry_compute_methods__'):
-            for attr in new_cls.__dry_compute_methods__:
+            for (attr, ctx_kwargs) in new_cls.__dry_compute_methods__:
                 if hasattr(new_cls, attr):
                     method = getattr(new_cls, attr)
-                    setattr(new_cls, attr, compute(method))
+                    if 'ctx_dont_create_context' not in ctx_kwargs:
+                        ctx_kwargs['ctx_dont_create_context'] = True
+                    setattr(
+                        new_cls, attr,
+                        compute_context(**ctx_kwargs)(method))
 
         return new_cls
 
