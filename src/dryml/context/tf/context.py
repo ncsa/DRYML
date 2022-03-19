@@ -16,7 +16,8 @@ class TFComputeContext(ComputeContext):
             raise ResourcesUnavailableError("Not enough gpus available!")
         if len(gpus) > 1 and self.num_gpus > 1:
             prefix_len = len('/physical_device:')
-            gpu_names = list(map(lambda p: p.name[prefix_len:], gpus[:self.num_gpus]))
+            gpu_names = list(map(
+                lambda p: p.name[prefix_len:], gpus[:self.num_gpus]))
             self.strategy = tf.distribute.MirroredStrategy(gpu_names)
 
         cpus = tf.config.list_physical_devices(device_type='CPU')
@@ -24,7 +25,8 @@ class TFComputeContext(ComputeContext):
             raise ResourcesUnavailableError("Not enough cpus available!")
 
         if self.num_cpus > 1:
-            raise NotImplementedError("Don't support more than one cpu simultaneously yet")
+            raise NotImplementedError(
+                "Don't support more than one cpu simultaneously yet")
 
         # Constrict tf to use just the specified cpus/gpus
         tf.config.set_visible_devices(

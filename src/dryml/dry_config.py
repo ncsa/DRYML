@@ -533,10 +533,11 @@ def adapt_key(val):
 
 
 def adapt_val(val):
-    if type(val) in (str, bytes, int, float, bool, np.float, np.float32, \
-            np.float64, np.int, np.int64, np.int32, np.int16, np.int8, \
-            np.bool, np.short, np.ushort, np.uint, np.uint64, np.uint32, \
-            np.uint16, np.uint8, np.byte, np.ubyte, np.single, np.double, \
+    if type(val) in (
+            str, bytes, int, float, bool, np.float, np.float32,
+            np.float64, np.int, np.int64, np.int32, np.int16, np.int8,
+            np.bool, np.short, np.ushort, np.uint, np.uint64, np.uint32,
+            np.uint16, np.uint8, np.byte, np.ubyte, np.single, np.double,
             np.longdouble):
         return val
     if type(val) is type:
@@ -560,7 +561,8 @@ def adapt_val(val):
     if is_nonstring_iterable(val):
         adjusted_value = list(map(adapt_val, val))
         return adjusted_value
-    raise ValueError(f"value {val} (type {type(val)}) not supported by Dry Configuration")
+    raise ValueError(
+        f"value {val} (type {type(val)}) not supported by Dry Configuration")
 
 
 class DryConfigInterface(object):
