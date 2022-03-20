@@ -3,7 +3,7 @@ from dryml.context import ComputeContext, ResourcesUnavailableError
 
 
 class TFComputeContext(ComputeContext):
-    def __init__(self, num_cpus=1, num_gpus=0):
+    def __init__(self, num_cpus=1, num_gpus=-1):
         self.num_cpus = num_cpus
         self.num_gpus = num_gpus
         self.strategy = None
@@ -12,8 +12,11 @@ class TFComputeContext(ComputeContext):
     def acquire_context(self):
         # Get a list of available GPUs
         gpus = tf.config.list_physical_devices(device_type='GPU')
-        if len(gpus) < self.num_gpus:
-            raise ResourcesUnavailableError("Not enough gpus available!")
+        if self.num_gpus >= 0:
+            if len(gpus) < self.num_gpus:
+                raise ResourcesUnavailableError("Not enough gpus available!")
+        elif self.num_gpus < 0:
+            self.num_gpus = len(gpus)
         if len(gpus) > 1 and self.num_gpus > 1:
             prefix_len = len('/physical_device:')
             gpu_names = list(map(
