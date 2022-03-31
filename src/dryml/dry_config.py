@@ -15,6 +15,10 @@ from dryml.context.context_tracker import get_context_class, \
 from dryml.context.process import compute_context
 
 
+class MissingIdError(Exception):
+    pass
+
+
 class IncompleteDefinitionError(Exception):
     pass
 
@@ -392,7 +396,7 @@ class DryMeta(abc.ABCMeta):
 
             # Save contained dry objects passed as arguments to construct
             for obj in self.__dry_obj_container_list__:
-                obj_id = obj.definition().get_individual_id()
+                obj_id = obj.dry_id
                 save_path = f'dry_objects/{obj_id}.dry'
                 if save_path not in file.namelist():
                     with file.open(save_path, 'w') as f:
@@ -648,6 +652,12 @@ class DryObjectDef(collections.UserDict):
     def kwargs(self, value):
         self['dry_kwargs'] = value
 
+    @property
+    def dry_id(self):
+        if 'dry_id' not in self['dry_kwargs']:
+            raise MissingIdError()
+        return self['dry_kwargs']['dry_id']
+
     def __setitem__(self, key, value):
         if key not in ['cls', 'dry_args', 'dry_kwargs']:
             raise ValueError(
@@ -700,18 +710,21 @@ class DryObjectDef(collections.UserDict):
             build_cache = {}
             reset_cache = True
 
+        # Indicates whether we need to construct the object because this
+        # definition isn't concrete
         construction_required = True
-        try:
-            obj_id = self.get_individual_id()
+        if self.is_concrete():
+            # This is a concrete object and we can get an id.
+            obj_id = self.dry_id
             construction_required = False
-        except IncompleteDefinitionError:
-            pass
 
         # Check the cache
         if not construction_required and build_cache is not None:
-            if obj_id in build_cache:
+            try:
                 obj = build_cache[obj_id]
                 construct_object = False
+            except KeyError:
+                pass
 
         # Check the repo
         if not construction_required and build_repo is not None:
@@ -740,6 +753,10 @@ class DryObjectDef(collections.UserDict):
             kwargs = detect_and_construct(self.kwargs, load_zip=load_zip)
 
             obj = self.cls(*args, **kwargs)
+
+            # Save object in the build cache.
+            obj_id = obj.dry_id
+            build_cache[obj_id] = obj
 
         # Reset the repo for this function
         if reset_repo:

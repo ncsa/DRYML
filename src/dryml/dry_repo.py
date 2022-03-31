@@ -25,7 +25,7 @@ class DryRepoContainer(object):
         else:
             # Set default filename
             new_container._filename = \
-                obj.definition().get_individual_id()+'.dry'
+                obj.dry_id+'.dry'
         return new_container
 
     def __init__(self, directory: Optional[str] = None):
@@ -193,12 +193,11 @@ class DryRepo(object):
         return len(self.obj_dict)
 
     def add_obj_cont(self, cont: DryRepoContainer):
-        obj_def = cont.definition()
-        ind_hash = obj_def.get_individual_id()
-        if ind_hash in self.obj_dict:
+        obj_id = cont.definition().dry_id
+        if obj_id in self.obj_dict:
             raise ValueError(
-                f"Object {ind_hash} already exists in the repo!")
-        self.obj_dict[ind_hash] = cont
+                f"Object {obj_id} already exists in the repo!")
+        self.obj_dict[obj_id] = cont
 
     def load_objects_from_directory(self, directory: Optional[str] = None,
                                     selector: Optional[Callable] = None,
@@ -317,24 +316,24 @@ class DryRepo(object):
     def get_obj(
             self,
             obj_def: DryObjectDef):
-        ind_id = obj_def.get_individual_id()
+        ind_id = obj_def.dry_id
         return self.get_obj_by_id(ind_id)
 
     def get_obj_by_id(
             self,
-            ind_id):
-        obj_container = self.obj_dict[ind_id]
+            obj_id):
+        obj_container = self.obj_dict[obj_id]
         return obj_container.obj
 
     def __contains__(
             self, item: Union[DryObject, DryObjectDef, dict, DryObjectFile]):
         if issubclass(type(item), DryObject) or \
            issubclass(item, DryObjectFile):
-            obj_id = item.definition().get_individual_id()
+            obj_id = item.definition().dry_id
         elif issubclass(type(item), DryObjectDef):
-            obj_id = item.get_individual_id()
+            obj_id = item.dry_id
         elif issubclass(type(item), dict):
-            obj_id = DryObjectDef.from_dict(item).get_individual_id()
+            obj_id = DryObjectDef.from_dict(item).dry_id
         else:
             raise TypeError("Unsupported type for repo.contains!")
         return obj_id in self.obj_dict
@@ -500,8 +499,8 @@ class DryRepo(object):
 
         for obj_cont in obj_containers:
             # Delete object from repo object tracker
-            ind_hash = obj_cont.definition().get_individual_id()
-            del self.obj_dict[ind_hash]
+            obj_id = obj_cont.definition().dry_id
+            del self.obj_dict[obj_id]
 
             # Delete object from disk
             obj_cont.delete()

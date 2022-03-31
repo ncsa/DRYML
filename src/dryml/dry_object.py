@@ -9,7 +9,7 @@ import io
 import zipfile
 import uuid
 from typing import IO, Union, Optional, Type
-from dryml.dry_config import DryObjectDef, DryMeta
+from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var
 from dryml.context.context_tracker import consolidate_contexts
 import tempfile
@@ -290,7 +290,9 @@ class DryObject(metaclass=DryMeta):
 
     @property
     def dry_id(self):
-        return self.dry_kwargs.get('dry_id', None)
+        if 'dry_id' not in self.dry_kwargs:
+            raise MissingIdError()
+        return self.dry_kwargs['dry_id']
 
     def dry_compute_context(self) -> str:
         contexts = [self.__dry_compute_context__]

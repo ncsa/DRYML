@@ -1,7 +1,7 @@
 from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta, \
     IncompleteDefinitionError, ComputeModeAlreadyActiveError, \
     ComputeModeLoadError, ComputeModeNotActiveError, \
-    ComputeModeSaveError
+    ComputeModeSaveError, MissingIdError
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
     load_object, save_object, change_object_cls, \
     ObjectWrapper, CallableWrapper
@@ -39,6 +39,7 @@ __all__ = [
     ComputeModeLoadError,
     ComputeModeNotActiveError,
     ComputeModeSaveError,
+    MissingIdError,
     compute_context,
     compute,
 ]
