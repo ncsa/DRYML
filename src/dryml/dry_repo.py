@@ -453,6 +453,12 @@ class DryRepo(object):
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, only_loaded=True, load_objects=False)
 
+    def save_by_id(self,
+                   obj_id, directory: Optional[str] = None):
+        if directory is None:
+            directory = self.directory
+        self.obj_dict[obj_id].save(directory=directory)
+
     def save_and_cache(
             self,
             selector: Optional[Callable] = None,
