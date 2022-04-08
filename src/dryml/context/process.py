@@ -12,16 +12,19 @@ import functools
 import io
 import zipfile
 import time
+import dill
+
+mp_ctx = mp.get_context('spawn')
 
 
 # Wrapping process base starting from
 # https://stackoverflow.com/a/33599967/2485932
 # This ensures the process will exit even if an error
 # is thrown.
-class Process(mp.Process):
+class Process(mp_ctx.Process):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._pconn, self._cconn = mp.Pipe()
+        self._pconn, self._cconn = mp_ctx.Pipe()
         self._exception = None
 
     def run(self):
@@ -52,6 +55,114 @@ def cls_method_compute(fn_name, **ctx_kwargs):
         return cls
 
     return _dec
+
+
+# Get list of dry objects because we need to find a good
+# context to use.
+def get_dry_objects(*args, **kwargs):
+    from dryml import DryObject
+
+    dry_objects = []
+    for arg in args:
+        if isinstance(arg, DryObject):
+            dry_objects.append(arg)
+    for name in kwargs:
+        arg = kwargs[name]
+        if isinstance(arg, DryObject):
+            dry_objects.append(arg)
+    return dry_objects
+
+
+# extra methods for activating/deactivating objects
+def activate_objects(obj_list):
+    activated_objects = []
+    for obj in obj_list:
+        if not obj.__dry_compute_mode__:
+            obj.compute_prepare()
+            obj.load_compute()
+
+    return activated_objects
+
+
+def deactivate_objects(obj_list):
+    for obj in obj_list:
+        obj.save_compute()
+        obj.compute_cleanup()
+
+
+class process_executor(object):
+    def __init__(
+            self,
+            f=None,
+            ctx_name=None,
+            context_kwargs={},
+            update_obj_defs=[],
+            args=[],
+            kwargs={}):
+        self.f_ser = dill.dumps(f)
+        self.ctx_name = ctx_name
+        self.context_kwargs = context_kwargs
+        self.update_obj_defs = update_obj_defs
+        self.args_ser = dill.dumps(args)
+        self.kwargs_ser = dill.dumps(kwargs)
+
+    def final_call(
+            self,
+            f,
+            ctx_ret_q,
+            *args,
+            **kwargs):
+
+        if ctx_ret_q is None:
+            raise RuntimeError("A queue is required.")
+
+        # Activate context
+        with contexts[self.ctx_name][1](**self.context_kwargs):
+            # Get list of dry_objects
+            dry_objects = get_dry_objects(*args, **kwargs)
+            # Activate unactivated objects
+            activated_objects = activate_objects(dry_objects)
+
+            # Execute method
+            res = f(*args, **kwargs)
+
+            # Deactivate activated objects
+            deactivate_objects(activated_objects)
+
+            # Put result in return queue
+            ctx_ret_q.put(res)
+
+            # Put object updates in queue
+            if len(self.update_obj_defs) > 0:
+                for obj_def in self.update_obj_defs:
+                    found = False
+                    for obj in dry_objects:
+                        if obj_def == obj.definition():
+                            res_buf = io.BytesIO()
+                            obj.save_self(res_buf)
+                            res_buf.seek(0)
+                            ctx_ret_q.put(res_buf.read())
+                            found = True
+                            break
+                    if not found:
+                        raise RuntimeError(
+                            "Couldn't find an object to associate"
+                            " a definition to!")
+
+            # Wait until return queue is empty (parent thread has emptied it)
+            if not ctx_ret_q.empty():
+                # Sleep a bit
+                time.sleep(0.1)
+
+    def __call__(self, ctx_ret_q):
+        # Undill function
+        f = dill.loads(self.f_ser)
+
+        # Undill args/kwargs
+        args = dill.loads(self.args_ser)
+        kwargs = dill.loads(self.kwargs_ser)
+
+        self.final_call(f, ctx_ret_q, *args, **kwargs)
 
 
 def compute_context(
@@ -108,8 +219,6 @@ def compute_context(
             use_existing_context = ctx_use_existing_context
             if call_use_existing_context is not None:
                 use_existing_context = call_use_existing_context
-
-            # Combine dont create context
             dont_create_context = ctx_dont_create_context
             if call_dont_create_context is not None:
                 dont_create_context = call_dont_create_context
@@ -121,19 +230,6 @@ def compute_context(
             ctx_name = ctx_context_type
             if call_context_type is not None:
                 ctx_name = call_context_type
-
-            # Get list of dry objects because we need to find a good
-            # context to use.
-            def get_dry_objects(*args, **kwargs):
-                dry_objects = []
-                for arg in args:
-                    if isinstance(arg, DryObject):
-                        dry_objects.append(arg)
-                for name in kwargs:
-                    arg = kwargs[name]
-                    if isinstance(arg, DryObject):
-                        dry_objects.append(arg)
-                return dry_objects
 
             if ctx_name is None:
                 # Determine context type
@@ -153,21 +249,6 @@ def compute_context(
                 else:
                     # No currently active context, need to create one
                     use_existing_context = False
-
-            # extra methods for activating/deactivating objects
-            def activate_objects(obj_list):
-                activated_objects = []
-                for obj in obj_list:
-                    if not obj.__dry_compute_mode__:
-                        obj.compute_prepare()
-                        obj.load_compute()
-
-                return activated_objects
-
-            def deactivate_objects(obj_list):
-                for obj in obj_list:
-                    obj.save_compute()
-                    obj.compute_cleanup()
 
             if use_existing_context:
                 # Execute the method in this thread.
@@ -226,55 +307,17 @@ def compute_context(
                 context_kwargs = copy.copy(ctx_context_kwargs)
                 context_kwargs.update(call_context_kwargs)
 
-                ctx_ret_q = mp.Queue()
+                ctx_ret_q = mp_ctx.Queue()
 
-                # Define function for process
-                def process_func(
-                        *args,
-                        ctx_ret_q=None,
-                        **kwargs):
-                    if ctx_ret_q is None:
-                        raise RuntimeError("A queue is required.")
-
-                    # Activate context
-                    with contexts[ctx_name][1](**context_kwargs):
-                        # Get list of dry_objects
-                        dry_objects = get_dry_objects(*args, **kwargs)
-                        # Activate unactivated objects
-                        activated_objects = activate_objects(dry_objects)
-
-                        # Execute method
-                        res = f(*args, **kwargs)
-
-                        # Deactivate activated objects
-                        deactivate_objects(activated_objects)
-
-                        # Put result in return queue
-                        ctx_ret_q.put(res)
-
-                        # Put object updates in queue
-                        if len(update_obj_defs) > 0:
-                            for obj_def in update_obj_defs:
-                                found = False
-                                for obj in dry_objects:
-                                    if obj_def == obj.definition():
-                                        res_buf = io.BytesIO()
-                                        obj.save_self(res_buf)
-                                        res_buf.seek(0)
-                                        ctx_ret_q.put(res_buf.read())
-                                        found = True
-                                        break
-                                if not found:
-                                    raise RuntimeError(
-                                        "Couldn't find an object to associate"
-                                        " a definition to!")
-
-                # If necessary add the queue
-                call_kwargs = copy.copy(kwargs)
-                call_kwargs['ctx_ret_q'] = ctx_ret_q
+                executor = process_executor(
+                    f=f, ctx_name=ctx_name,
+                    context_kwargs=context_kwargs,
+                    update_obj_defs=update_obj_defs,
+                    args=args,
+                    kwargs=kwargs)
 
                 # run function
-                p = Process(target=process_func, args=args, kwargs=call_kwargs)
+                p = Process(target=executor, args=[ctx_ret_q])
                 p.start()
 
                 if verbose:
@@ -344,6 +387,9 @@ def compute_context(
                     obj_buf = queue_results.pop(0)
                     zf = zipfile.ZipFile(io.BytesIO(obj_buf), mode='r')
                     obj.load_object(zf)
+
+                # Close thread
+                p.close()
 
                 # Delete the temporary queue
                 del ctx_ret_q
