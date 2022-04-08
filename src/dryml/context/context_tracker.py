@@ -66,6 +66,10 @@ class ContextIncompatibilityError(Exception):
 
 
 class ComputeContext(object):
+    def __init__(self, num_cpus=1, num_gpus=-1):
+        self.num_cpus = num_cpus
+        self.num_gpus = num_gpus
+
     def acquire_context(self):
         global _current_context
         if _current_context is not None:
