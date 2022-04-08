@@ -4,8 +4,7 @@ from dryml.context import ComputeContext, ResourcesUnavailableError
 
 class TFComputeContext(ComputeContext):
     def __init__(self, num_cpus=1, num_gpus=-1):
-        self.num_cpus = num_cpus
-        self.num_gpus = num_gpus
+        super().__init__(num_cpus=num_cpus, num_gpus=num_gpus)
         self.strategy = None
         self.strategy_scope = None
 
