@@ -23,7 +23,6 @@ class TFBasicTraining(TFLikeTrainFunction):
         self.epochs = epochs
         self.num_total = num_total
 
-
     def __call__(
             self, trainable, data: DryData, *args, batch_size=32,
             callbacks=[], **kwargs):

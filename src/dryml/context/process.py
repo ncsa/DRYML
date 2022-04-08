@@ -212,9 +212,6 @@ def compute_context(
                     when updating objects.
             """
 
-            # Make sure this function knows what DryObject is.
-            from dryml import DryObject
-
             # Check whether we are using an existing context
             use_existing_context = ctx_use_existing_context
             if call_use_existing_context is not None:

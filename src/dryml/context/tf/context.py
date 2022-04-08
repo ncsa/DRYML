@@ -17,7 +17,8 @@ class TFComputeContext(ComputeContext):
         elif self.num_gpus < 0:
             self.num_gpus = len(gpus)
         if len(gpus) > 1 and self.num_gpus > 1:
-            tf.config.set_visible_devices(gpus[:self.num_gpus], device_type="GPU")
+            tf.config.set_visible_devices(
+                gpus[:self.num_gpus], device_type="GPU")
             prefix_len = len('/physical_device:')
             gpu_names = list(map(
                 lambda p: p.name[prefix_len:], gpus[:self.num_gpus]))
@@ -25,7 +26,8 @@ class TFComputeContext(ComputeContext):
             # Fix improper tear-down on program exit:
             # https://github.com/tensorflow/tensorflow/issues/50487
             import atexit
-            atexit.register(self.strategy._extended._collective_ops._pool.close)
+            atexit.register(
+                self.strategy._extended._collective_ops._pool.close)
 
         cpus = tf.config.list_physical_devices(device_type='CPU')
         if len(cpus) < self.num_cpus:
