@@ -15,12 +15,14 @@ class TFLikeTrainFunction(DryComponent):
 
 class TFBasicTraining(TFLikeTrainFunction):
     def __init__(
-            self, *args, val_split=0.2, val_num=None,
-            shuffle_buffer=None, num_total=None, **kwargs):
+            self, *args, val_split=0.2, val_num=None, num_total=None,
+            shuffle_buffer=None, epochs=10000, **kwargs):
         self.val_split = val_split
         self.val_num = val_num
         self.shuffle_buffer = shuffle_buffer
+        self.epochs = epochs
         self.num_total = num_total
+
 
     def __call__(
             self, trainable, data: DryData, *args, batch_size=32,
@@ -48,12 +50,12 @@ class TFBasicTraining(TFLikeTrainFunction):
         if num_total is None:
             # Attempt to measure dataset size
             num_total = len(ds)
-        if self.num_val is not None:
-            num_val = self.num_val
+        if self.val_num is not None:
+            num_val = self.val_num
             if self.val_split is not None:
                 print("Overridding val_split with val_num.")
-            if self.num_val > num_total:
-                raise ValueError("num_val cannot be larger than num_total!")
+            if self.val_num > num_total:
+                raise ValueError("val_num cannot be larger than num_total!")
         else:
             num_val = int(num_total*self.val_split)
 
@@ -77,7 +79,7 @@ class TFBasicTraining(TFLikeTrainFunction):
         # Fit model
         trainable.model.mdl.fit(
             ds_train, validation_data=ds_val,
-            callbacks=callbacks, **kwargs)
+            callbacks=callbacks, epochs=self.epochs, **kwargs)
 
 
 class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
@@ -105,7 +107,7 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         # Check data is supervised.
         if not data.supervised():
             raise RuntimeError(
-                "TFBasicTraining requires supervised data")
+                "TFBasicEarlyStoppingTraining requires supervised data")
 
         # Make sure data is unbatched. We want the function to control this.
         data = data.unbatch()
