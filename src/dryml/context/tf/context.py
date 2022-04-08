@@ -17,6 +17,7 @@ class TFComputeContext(ComputeContext):
         elif self.num_gpus < 0:
             self.num_gpus = len(gpus)
         if len(gpus) > 1 and self.num_gpus > 1:
+            tf.config.set_visible_devices(gpus[:self.num_gpus], device_type="GPU")
             prefix_len = len('/physical_device:')
             gpu_names = list(map(
                 lambda p: p.name[prefix_len:], gpus[:self.num_gpus]))
@@ -29,10 +30,6 @@ class TFComputeContext(ComputeContext):
         if self.num_cpus > 1:
             raise NotImplementedError(
                 "Don't support more than one cpu simultaneously yet")
-
-        # Constrict tf to use just the specified cpus/gpus
-        tf.config.set_visible_devices(
-            cpus[:self.num_cpus]+gpus[:self.num_gpus])
 
         if self.strategy is not None:
             self.strategy_scope = self.strategy.scope()
