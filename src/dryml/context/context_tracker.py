@@ -105,6 +105,9 @@ def consolidate_contexts(ctx_name_list):
     requirements.
     """
 
+    # Add default context in case no context names are given
+    ctx_name_list.append('default')
+
     # Build list of unique context names
     ctx_name_list = list(set(ctx_name_list))
     ctx_cls_list = list(map(
