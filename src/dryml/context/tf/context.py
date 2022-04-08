@@ -22,6 +22,10 @@ class TFComputeContext(ComputeContext):
             gpu_names = list(map(
                 lambda p: p.name[prefix_len:], gpus[:self.num_gpus]))
             self.strategy = tf.distribute.MirroredStrategy(gpu_names)
+            # Fix improper tear-down on program exit:
+            # https://github.com/tensorflow/tensorflow/issues/50487
+            import atexit
+            atexit.register(self.strategy._extended._collective_ops._pool.close)
 
         cpus = tf.config.list_physical_devices(device_type='CPU')
         if len(cpus) < self.num_cpus:
