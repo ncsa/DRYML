@@ -1,9 +1,6 @@
-import zipfile
-import pickle
 from collections import UserList, UserDict
-from dryml.dry_object import DryObject, DryObjectDef, load_object
+from dryml.dry_object import DryObject, DryObjectDef
 from dryml.dry_config import DryMeta
-from dryml.utils import pickler
 from typing import Mapping
 
 
@@ -33,41 +30,6 @@ class DryList(DryObject, UserList):
             *dry_args,
             dry_mut=True,
             **self.dry_kwargs)
-
-    def load_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load object list
-        with file.open('obj_list.pkl', mode='r') as f:
-            obj_filenames = pickle.loads(f.read())
-
-        if len(self) != len(obj_filenames):
-            # Didn't load as many objects as saved filenames
-            return False
-
-        # Unload existing objects from the list
-        self.clear()
-
-        # Load objects
-        for filename in obj_filenames:
-            with file.open(filename, mode='r') as f:
-                self.append(load_object(f))
-
-        return True
-
-    def save_imp(self, file: zipfile.ZipFile) -> bool:
-        obj_filenames = []
-
-        # We save each object inside the file first.
-        for obj in self:
-            filename = f"{obj.definition().get_individual_id()}.dry"
-            with file.open(filename, mode='w') as f:
-                obj.save_self(f)
-            obj_filenames.append(filename)
-
-        # Save object list
-        with file.open('obj_list.pkl', mode='w') as f:
-            f.write(pickler(obj_filenames))
-
-        return True
 
 
 class DryTuple(DryObject):
@@ -105,40 +67,6 @@ class DryTuple(DryObject):
             dry_mut=is_mutable,
             **self.dry_kwargs)
 
-    def load_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load object list
-        with file.open('obj_list.pkl', mode='r') as f:
-            obj_filenames = pickle.loads(f.read())
-
-        if len(self) != len(obj_filenames):
-            # Didn't load as many objects as saved filenames
-            return False
-
-        # Replace existing objects in the tuple
-        new_tuple = []
-        for i in range(len(obj_filenames)):
-            with file.open(obj_filenames[i], mode='r') as f:
-                new_tuple.append(load_object(f))
-        self.data = tuple(new_tuple)
-
-        return True
-
-    def save_imp(self, file: zipfile.ZipFile) -> bool:
-        obj_filenames = []
-
-        # We save each object inside the file first.
-        for obj in self:
-            filename = f"{obj.definition().get_individual_id()}.dry"
-            with file.open(filename, mode='w') as f:
-                obj.save_self(f)
-            obj_filenames.append(filename)
-
-        # Save object list
-        with file.open('obj_list.pkl', mode='w') as f:
-            f.write(pickler(obj_filenames))
-
-        return True
-
 
 class DryDict(DryObject, UserDict):
     def __init__(
@@ -160,37 +88,3 @@ class DryDict(DryObject, UserDict):
             dry_arg,
             dry_mut=True,
             **self.dry_kwargs)
-
-    def load_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load object list
-        with file.open('obj_dict.pkl', mode='r') as f:
-            obj_dict = pickle.loads(f.read())
-
-        if len(self) != len(obj_dict):
-            # Didn't load as many objects as saved filenames
-            return False
-
-        # Load objects
-        for key in obj_dict:
-            filename = obj_dict[key]
-            with file.open(filename, mode='r') as f:
-                self[key] = load_object(f)
-
-        return True
-
-    def save_imp(self, file: zipfile.ZipFile) -> bool:
-        obj_dict = {}
-
-        # We save each object inside the file first.
-        for key in self:
-            obj = self[key]
-            filename = f"{obj.definition().get_individual_id()}.dry"
-            with file.open(filename, mode='w') as f:
-                obj.save_self(f)
-            obj_dict[key] = filename
-
-        # Save object list
-        with file.open('obj_dict.pkl', mode='w') as f:
-            f.write(pickler(obj_dict))
-
-        return True
