@@ -24,6 +24,13 @@ def get_context_class(ctx_name):
     return contexts[ctx_name][0]
 
 
+def set_context(ctx):
+    """
+    Set a context globally. Good for local compute sessions
+    """
+    ctx.acquire_context()
+
+
 class ResourcesUnavailableError(Exception):
     """
     Signals a context is unable to allocate necessary resources
