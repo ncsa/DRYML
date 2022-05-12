@@ -121,3 +121,15 @@ class DryData():
         Create an iterator
         """
         raise NotImplementedError()
+
+    def take(self, n):
+        """
+        Take only a specific number of examples
+        """
+        raise NotImplementedError()
+
+    def skip(self, n):
+        """
+        Skip a specific number of examples
+        """
+        raise NotImplementedError()

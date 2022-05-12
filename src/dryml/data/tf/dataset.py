@@ -212,3 +212,23 @@ class TFDataset(DryData):
         """
 
         return iter(self.data())
+
+    def take(self, n):
+        """
+        Take only a specific number of examples
+        """
+        return TFDataset(
+            self.ds.take(n),
+            indexed=self.indexed(),
+            supervised=self.supervised(),
+            batch_size=self.batch_size())
+
+    def skip(self, n):
+        """
+        Skip a specific number of examples
+        """
+        return TFDataset(
+            self.ds.skip(n),
+            indexed=self.indexed(),
+            supervised=self.supervised(),
+            batch_size=self.batch_size())
