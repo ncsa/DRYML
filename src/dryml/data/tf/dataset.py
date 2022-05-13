@@ -1,6 +1,7 @@
 from dryml.data import DryData, NotIndexedError, NotSupervisedError
 from typing import Callable
 import tensorflow as tf
+import numpy as np
 
 
 class TFDataset(DryData):
@@ -232,3 +233,15 @@ class TFDataset(DryData):
             indexed=self.indexed(),
             supervised=self.supervised(),
             batch_size=self.batch_size())
+
+    def __len__(self):
+        """
+        Get length of dataset. Will return Infinite if infinite,
+        and unknown if it can't be determined.
+        """
+        cardinality = self.ds.cardinality()
+        if cardinality == tf.data.INFINITE_CARDINALITY:
+            return np.inf
+        if cardinality == tf.data.UNKNOWN_CARDINALITY:
+            return np.NA
+        return cardinality.numpy()

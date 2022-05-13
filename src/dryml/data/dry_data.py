@@ -133,3 +133,10 @@ class DryData():
         Skip a specific number of examples
         """
         raise NotImplementedError()
+
+    def __len__(self):
+        """
+        Get length of dataset. Will return Infinite if infinite,
+        and unknown if it can't be determined.
+        """
+        raise NotImplementedError()
