@@ -60,6 +60,20 @@ file_blocklist = [
 ]
 
 
+def create_zip_branch(input_file, tag):
+    with zipfile.ZipFile(input_file, mode='r') as zf:
+        content_names = zf.namelist()
+        content_nodes = []
+        for name in content_names:
+            content_nodes.append(Leaf(name))
+    if len(content_nodes) > 0:
+        return Node(
+            tag,
+            *content_nodes)
+    else:
+        return Leaf(tag)
+
+
 def create_tree_from_dryfile(input_file, tag):
     with dryml.DryObjectFile(input_file) as dry_f:
         obj_def = dry_f.definition()
@@ -73,16 +87,21 @@ def create_tree_from_dryfile(input_file, tag):
                         content_nodes.append(
                             create_tree_from_dryfile(sub_zip, name))
             elif name not in file_blocklist:
-                content_nodes.append(Leaf(name))
+                if name[-4:] == '.zip':
+                    with dry_f.file.open(name, mode='r') as f:
+                        content_nodes.append(create_zip_branch(f, name))
+                else:
+                    content_nodes.append(Leaf(name))
+
         if len(content_nodes) > 0:
             return Node(
                 f"{tag}: {obj_def.dry_id} "
-                "[{dryml.utils.get_class_str(obj_def.cls)}]",
+                f"[{dryml.utils.get_class_str(obj_def.cls)}]",
                 *content_nodes)
         else:
             return Leaf(
                 f"{tag}: {obj_def.dry_id} "
-                "[{dryml.utils.get_class_str(obj_def.cls)}]")
+                f"[{dryml.utils.get_class_str(obj_def.cls)}]")
 
 
 if __name__ == "__main__":
