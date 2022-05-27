@@ -60,7 +60,7 @@ class FuncXMap(DryTrainable):
         self.func = func
         self.train_state = DryTrainable.trained
 
-    def train(self, *args, **kwargs):
+    def train(self, *args, train_spec=None, **kwargs):
         # We can't train a plain function
         pass
 
@@ -94,7 +94,7 @@ class FuncYMap(DryTrainable):
         self.func = func
         self.train_state = DryTrainable.trained
 
-    def train(self, *args, **kwargs):
+    def train(self, *args, train_spec=None, **kwargs):
         # We can't train a plain function
         pass
 
@@ -128,7 +128,7 @@ class FuncMap(DryTrainable):
         self.func = func
         self.train_state = DryTrainable.trained
 
-    def train(self, *args, **kwargs):
+    def train(self, *args, train_spec=None, **kwargs):
         # We can't train a plain function
         pass
 
@@ -140,7 +140,7 @@ class BestCat(DryTrainable):
     def __init__(self):
         self.train_state = DryTrainable.trained
 
-    def train(self, *args, **kwargs):
+    def train(self, *args, train_spec=None, **kwargs):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
