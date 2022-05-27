@@ -253,6 +253,18 @@ def test_dry_tuple_3(create_temp_dir):
     assert tuple_2[1] is loaded_tuple[1]
 
 
+def test_dry_tuple_4():
+    obj1 = objects.HelloInt(msg=5)
+    obj2 = objects.TestNest2(A=obj1)
+    obj3 = objects.HelloInt(msg=10)
+    obj4 = objects.TestNest2(A=obj3)
+    tuple_1 = DryTuple(obj2, obj4)
+    tuple_def = tuple_1.definition()
+    tuple_2 = tuple_def.build()
+    assert tuple_1[0].A.int_msg == tuple_2[0].A.int_msg
+    assert tuple_1[1].A.int_msg == tuple_2[1].A.int_msg
+
+
 def test_dry_dict_1():
     obj1 = objects.HelloInt(msg=5)
     obj2 = objects.HelloStr(msg="a test")
@@ -333,3 +345,5 @@ def test_dry_dict_3(create_temp_dir):
     assert dict_2 is not loaded_dict
     assert dict_2['b'] is loaded_dict['b']
     assert dict_2[2.0] is loaded_dict[2.0]
+
+

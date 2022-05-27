@@ -174,6 +174,26 @@ def test_selector_6():
     assert sel(obj)
 
 
+def test_selector_7():
+    """
+    Test real life example
+    """
+
+    import dryml.data.tf
+
+    # Create transform object
+    def test_func(x):
+        return x*2
+
+    real_obj = dryml.data.tf.transforms.FuncXMap.from_function(test_func)
+
+    obj_def = dryml.DryObjectDef(
+        dryml.data.tf.transforms.FuncXMap,
+        real_obj.dry_args[0])
+
+    assert dryml.DrySelector.from_def(obj_def)(real_obj)
+
+
 def test_selector_build_1():
     """
     Test that we can construct DrySelectors from various objects
@@ -236,3 +256,5 @@ def test_selector_build_4():
     })
 
     assert sel(obj)
+
+

@@ -62,11 +62,11 @@ def test_add_retrieve_object_1(create_temp_dir):
 
     assert len(repo) == 1
 
-    objs = repo.get()
+    obj_ret = repo.get()
 
-    assert len(objs) == 1
+    assert type(obj_ret) is not list
 
-    assert objs[0].definition().get_individual_id() == \
+    assert obj_ret.definition().get_individual_id() == \
         obj.definition().get_individual_id()
 
 
@@ -83,14 +83,14 @@ def test_add_retrieve_objects_2():
     for obj in objs:
         repo.add_object(obj)
 
-    assert len(repo.get(selector=dryml.DrySelector(
-        cls=objects.HelloStr, kwargs={'msg': 'test'}))) == 1
+    assert type(repo.get(selector=dryml.DrySelector(
+        cls=objects.HelloStr, kwargs={'msg': 'test'}))) is not list
     assert len(repo.get(selector=dryml.DrySelector(
         cls=objects.HelloInt, kwargs={'msg': 10}))) == 2
-    assert len(repo.get(selector=dryml.DrySelector(
-        cls=objects.TestClassA, kwargs={'item': [10, 10]}))) == 1
-    assert len(repo.get(selector=dryml.DrySelector(
-        cls=objects.TestClassB, args=['test']))) == 1
+    assert type(repo.get(selector=dryml.DrySelector(
+        cls=objects.TestClassA, kwargs={'item': [10, 10]}))) is not list
+    assert type(repo.get(selector=dryml.DrySelector(
+        cls=objects.TestClassB, args=['test']))) is not list
 
 
 def test_add_retrieve_objects_3():
@@ -105,13 +105,13 @@ def test_add_retrieve_objects_3():
     repo.add_object(obj)
 
     assert len(repo.get()) == 3
-    assert len(repo.get(selector=dryml.DrySelector(
-        cls=objects.TestNest, args=(10,)))) == 1
-    assert len(repo.get(selector=dryml.DrySelector(
-        cls=objects.HelloTrainableD))) == 1
-    assert len(repo.get(selector=dryml.DrySelector(
+    assert type(repo.get(selector=dryml.DrySelector(
+        cls=objects.TestNest, args=(10,)))) is not list
+    assert type(repo.get(selector=dryml.DrySelector(
+        cls=objects.HelloTrainableD))) is not list
+    assert type(repo.get(selector=dryml.DrySelector(
         cls=objects.TestNest, args=(
-            dryml.DrySelector(objects.HelloTrainableD),), verbosity=2))) == 1
+            dryml.DrySelector(objects.HelloTrainableD),), verbosity=2))) is not list
 
 
 @pytest.mark.xfail
@@ -121,6 +121,38 @@ def test_try_write():
     repo.add_object(objects.HelloStr(msg='test'))
 
     repo.save()
+
+
+def test_get_api_1():
+    repo = dryml.DryRepo()
+
+    repo.add_object(objects.HelloStr(msg='test'))
+
+    repo.get(sel_kwargs={'verbosity': 10})
+
+def test_get_api_2():
+    repo = dryml.DryRepo()
+
+    obj1 = objects.TestNest(1)
+    obj2 = objects.TestNest(2)
+    obj3 = objects.TestNest(3)
+    obj4 = objects.TestNest(4)
+
+    repo.add_object(obj1)
+    repo.add_object(obj2)
+    repo.add_object(obj3)
+    repo.add_object(obj4)
+
+    # Get container for first object
+    res1 = repo[obj1]
+    assert type(res1) is objects.TestNest
+    assert obj1.dry_id == res1.dry_id
+    assert res1.A == 1
+
+    res3 = repo[obj3]
+    assert type(res3) is objects.TestNest
+    assert res3.dry_id == obj3.dry_id
+    assert res3.A == 3
 
 
 @pytest.mark.usefixtures("create_temp_dir")
@@ -147,11 +179,11 @@ def test_write_1(create_temp_dir):
 
     assert len(repo) == 5
 
-    obj_list = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.DrySelector(
         cls=objects.HelloStr, kwargs={'msg': 'test'}))
-    assert len(obj_list) == 1
+    assert type(obj) is not list
     assert objs[0].definition().get_individual_id() == \
-        obj_list[0].definition().get_individual_id()
+        obj.definition().get_individual_id()
 
     obj_list = repo.get(selector=dryml.DrySelector(
         cls=objects.HelloInt, kwargs={'msg': 10}))
@@ -161,17 +193,17 @@ def test_write_1(create_temp_dir):
     assert objs[1].definition().get_category_id() == \
         obj_list[1].definition().get_category_id()
 
-    obj_list = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.DrySelector(
         cls=objects.TestClassA, kwargs={'item': [10, 10]}))
-    assert len(obj_list) == 1
+    assert type(obj) is not list
     assert objs[3].definition().get_individual_id() == \
-        obj_list[0].definition().get_individual_id()
+        obj.definition().get_individual_id()
 
-    obj_list = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.DrySelector(
         cls=objects.TestClassB, args=['test']))
-    assert len(obj_list) == 1
+    assert type(obj) is not list
     assert objs[4].definition().get_individual_id() == \
-        obj_list[0].definition().get_individual_id()
+        obj.definition().get_individual_id()
 
 
 @pytest.mark.usefixtures("create_temp_dir")
@@ -191,15 +223,15 @@ def test_reload_1(create_temp_dir):
                      as_cls=objects.TestClassA2)
 
     obj = repo.get(selector=dryml.DrySelector(
-        cls=objects.TestClassA2, kwargs={'item': [10]}))[0]
+        cls=objects.TestClassA2, kwargs={'item': [10]}))
     assert objs[0].dry_kwargs['item'] == obj.dry_kwargs['item']
 
     obj = repo.get(selector=dryml.DrySelector(
-        cls=objects.TestClassA2, kwargs={'item': [10, 10]}))[0]
+        cls=objects.TestClassA2, kwargs={'item': [10, 10]}))
     assert objs[1].dry_kwargs['item'] == obj.dry_kwargs['item']
 
     obj = repo.get(selector=dryml.DrySelector(
-        cls=objects.TestClassA2, kwargs={'item': 'a'}))[0]
+        cls=objects.TestClassA2, kwargs={'item': 'a'}))
     assert objs[2].dry_kwargs['item'] == obj.dry_kwargs['item']
 
 
@@ -218,7 +250,11 @@ def test_save_1(create_temp_dir):
     # Load the repository objects should not be loaded right away
     repo = dryml.DryRepo(create_temp_dir)
 
-    assert len(repo.get(only_loaded=True)) == 0
+    try:
+        repo.get(only_loaded=True)
+        assert False
+    except KeyError:
+        pass
 
     repo.save()
 
@@ -240,7 +276,11 @@ def test_save_2(create_temp_dir):
     # Load the repository objects should not be loaded right away
     repo = dryml.DryRepo(create_temp_dir)
 
-    assert len(repo.get(only_loaded=True)) == 0
+    try:
+        repo.get(only_loaded=True)
+        assert False
+    except KeyError:
+        pass
 
     repo.save()
 
@@ -275,13 +315,21 @@ def test_save_3(prep_and_clean_test_dir2):
     # Load the repository objects should not be loaded right away
     repo = dryml.DryRepo(dir1)
 
-    assert len(repo.get(only_loaded=True)) == 0
+    try:
+        repo.get(only_loaded=True)
+        assert False
+    except KeyError:
+        pass
 
     del repo
 
     repo = dryml.DryRepo(dir2)
 
-    assert len(repo.get(only_loaded=True)) == 0
+    try:
+        repo.get(only_loaded=True)
+        assert False
+    except KeyError:
+        pass
 
 
 def test_save_4(prep_and_clean_test_dir2):
@@ -323,7 +371,11 @@ def test_save_6(create_temp_dir):
 
     repo.save_and_cache()
 
-    assert len(repo.get(only_loaded=True)) == 0
+    try:
+        repo.get(only_loaded=True)
+        assert False
+    except KeyError:
+        pass
     assert len(os.listdir(create_temp_dir)) == 1
 
 
@@ -340,7 +392,11 @@ def test_delete_1(create_temp_dir):
     repo.delete()
 
     assert len(os.listdir(create_temp_dir)) == 0
-    assert len(repo.get(load_objects=True)) == 0
+    try:
+        repo.get(load_objects=True)
+        assert False
+    except KeyError:
+        pass
 
 
 @pytest.mark.usefixtures("create_temp_dir")

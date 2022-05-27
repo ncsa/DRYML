@@ -140,3 +140,45 @@ def test_def_4():
     obj = dryml.ObjectWrapper(objects.HelloTrainableD, obj_kwargs={'A': 5})
 
     assert obj.definition().is_concrete()
+
+
+def test_detect_and_construct_1():
+    """
+    Test detect_and_construct method checking
+    """
+
+    val = 5
+
+    res_obj = dryml.dry_config.detect_and_construct(dryml.DryObjectDef(objects.HelloInt, msg=val))
+
+    assert type(res_obj) is objects.HelloInt
+
+    assert res_obj.int_msg == val
+
+
+def test_detect_and_construct_2():
+    """
+    Test detect_and_construct method checking
+    """
+
+    val = 5
+
+    res_obj = dryml.dry_config.detect_and_construct([dryml.DryObjectDef(objects.HelloInt, msg=val)])
+
+    assert type(res_obj) is list
+    assert type(res_obj[0]) is objects.HelloInt
+    assert res_obj[0].int_msg == val
+
+
+def test_detect_and_construct_3():
+    """
+    Test detect_and_construct method checking
+    """
+
+    val = 5
+
+    res_obj = dryml.dry_config.detect_and_construct((dryml.DryObjectDef(objects.HelloInt, msg=val),))
+
+    assert type(res_obj) is tuple
+    assert type(res_obj[0]) is objects.HelloInt
+    assert res_obj[0].int_msg == val

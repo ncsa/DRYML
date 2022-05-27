@@ -72,6 +72,11 @@ class TestNest(dryml.DryObject):
         self.A = A
 
 
+class TestNest2(dryml.DryObject):
+    def __init__(self, A=None):
+        self.A = A
+
+
 class TestClassC(dryml.DryObject):
     def __init__(self, A, B=None):
         self.A = A
