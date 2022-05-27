@@ -1,15 +1,276 @@
 import tensorflow as tf
+from dryml import DryObject
+from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir
 from dryml.models import DryTrainable, DryComponent
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
+import dryml.models.tf
 import tempfile
 import zipfile
 import os
 import re
+import shutil
+from typing import List
+
+
+def keras_load_checkpoint_from_zip(
+        mdl: tf.keras.Model,
+        zf: zipfile.ZipFile,
+        checkpoint_name: str,
+        checkpoint_dir: str = 'checkpoints') -> bool:
+    if mdl is None:
+        raise RuntimeError("keras model can't be None! Did you run the object's compute_prepare method?")
+
+    try:
+        # Get namelist
+        ns = zf.namelist()
+
+        # Detect actual checkpoint name
+        checkpoint_name_re = re.compile(f"({checkpoint_name}.*)\\.index")
+
+        checkpoint_name_matches = []
+        for n in ns:
+            re_res = checkpoint_name_re.search(n)
+            if re_res is not None:
+                checkpoint_name_matches.append(re_res.groups(1)[0])
+
+        if len(checkpoint_name_matches) > 1:
+            print("Warning! More than one checkpoing matched in save file!")
+
+        checkpoint_name = checkpoint_name_matches[-1]
+
+        # Add a slash at the end
+        if checkpoint_dir[-1] != '/':
+            checkpoint_dir += '/'
+
+        # Get files inside the checkpoint directory
+        orig_ns = list(filter(lambda n: n.startswith(checkpoint_dir), ns))
+        if len(orig_ns) == 0:
+            raise RuntimeError(f"No directory {checkpoint_dir} in zipfile!")
+
+        # Get destination names
+        dest_ns = list(map(lambda n: n[len(checkpoint_dir):], orig_ns))
+
+        ns = zip(orig_ns, dest_ns)
+
+        checkpoint_file_re = re.compile(f"{checkpoint_name}.*\\.(index|data)")
+        ns = filter(lambda t: checkpoint_file_re.search(t[0]) is not None, ns)
+
+        # Create temp directory
+        with tempfile.TemporaryDirectory() as d:
+            # Extract files from zipfile to the temp directory
+            for orig_n, dest_n in ns:
+                zf.extract(orig_n, path=d)
+
+            # Load the weights into the model with the load weights function
+            checkpoint_path = os.path.join(d, checkpoint_dir, checkpoint_name)
+            # expect to load partial because we may not have optimizer in place yet.
+            tf.train.Checkpoint(mdl).restore(checkpoint_path).expect_partial()
+    except Exception as e:
+        print(f"Issue loading checkpoint! {e}")
+        return False
+    return True
+
+
+def keras_load_checkpoint_from_zip_to_dir(
+        mdl: tf.keras.Model,
+        zf: zipfile.ZipFile,
+        checkpoint_name: str,
+        temp_checkpoint_dir: str,
+        zip_checkpoint_dir: str = 'checkpoints') -> bool:
+    if mdl is None:
+        raise RuntimeError("keras model can't be None! Did you run the object's compute_prepare method?")
+
+    try:
+        # Get namelist
+        ns = zf.namelist()
+
+        # Detect actual checkpoint name
+        checkpoint_name_re = re.compile(f"({checkpoint_name}.*)\\.index")
+
+        checkpoint_name_matches = []
+        for n in ns:
+            re_res = checkpoint_name_re.search(n)
+            if re_res is not None:
+                checkpoint_name_matches.append(re_res.groups(1)[0])
+
+        if len(checkpoint_name_matches) > 1:
+            print("Warning! More than one checkpoing matched in save file!")
+
+        checkpoint_name = checkpoint_name_matches[-1]
+
+        # Add a slash at the end
+        if zip_checkpoint_dir[-1] != '/':
+            zip_checkpoint_dir += '/'
+
+        # Get files inside the checkpoint directory
+        orig_ns = list(filter(lambda n: n.startswith(zip_checkpoint_dir), ns))
+        if len(orig_ns) == 0:
+            raise RuntimeError(f"No directory {zip_checkpoint_dir} in zipfile!")
+
+        # Get destination names
+        dest_ns = list(map(lambda n: n[len(zip_checkpoint_dir):], orig_ns))
+
+        ns = zip(orig_ns, dest_ns)
+
+        checkpoint_file_re = re.compile(f"{checkpoint_name}.*\\.(index|data)")
+        ns = filter(lambda t: checkpoint_file_re.search(t[0]) is not None, ns)
+
+        # Extract files from zipfile to the temp directory
+        for orig_n, dest_n in ns:
+            zf.extract(orig_n, path=temp_checkpoint_dir)
+
+        # Load the weights into the model with the load weights function
+        checkpoint_path = os.path.join(temp_checkpoint_dir, checkpoint_name)
+        # expect to load partial because we may not have optimizer in place yet.
+        tf.train.Checkpoint(mdl).restore(checkpoint_path).expect_partial()
+    except Exception as e:
+        print(f"Issue loading checkpoint! {e}")
+        return False
+    return True
+
+
+def keras_save_checkpoint_to_zip(
+        mdl: tf.keras.Model,
+        zf: zipfile.ZipFile,
+        checkpoint_name: str,
+        checkpoint_dir: str = 'checkpoints') -> bool:
+    try:
+        # Adjust checkpoint directory
+        if checkpoint_dir[-1] != '/':
+            checkpoint_dir += '/'
+
+        # Get namelist
+        ns = zf.namelist()
+
+        # Get files inside the checkpoint directory
+        ns = filter(lambda n: n.startswith(checkpoint_dir), ns)
+        checkpoint_file_re = re.compile(f"{checkpoint_name}\\.(index|data)")
+        ns = list(filter(
+            lambda n: checkpoint_file_re.search(n) is not None,
+            ns))
+
+        # Save checkpoint to a temporary directory
+        with tempfile.TemporaryDirectory() as d:
+            # Load the weights into the model with the load weights function
+            checkpoint_path = os.path.join(d, checkpoint_name)
+
+            # Create checkpoint object and save
+            checkpoint = tf.train.Checkpoint(mdl)
+            checkpoint.save(checkpoint_path)
+
+            checkpoint_files = os.listdir(d)
+
+            # We would like to delete existing files from the directory
+            # But we currently can't do this with python.
+            # Instead, we should fail if the files which were written
+            # for the new checkpoint don't match those in the
+            # zipfile already.
+            if len(ns) != 0:
+                # List
+                for f_name in checkpoint_files:
+                    if f_name not in ns:
+                        raise RuntimeError(
+                            f"Zipfile {zf.filename} already has a checkpoint "
+                            f"of name {checkpoint_name} saved. The new "
+                            f"checkpoint file {f_name} not already in "
+                            "existing checkpoint file set! (python can't "
+                            "remove files from open zipfiles)")
+
+            # Write or Overwrite files in the zipfile
+            for f_name in checkpoint_files:
+                zf.write(
+                    os.path.join(d, f_name),
+                    arcname=os.path.join(checkpoint_dir, f_name))
+    except Exception as e:
+        print(f"Error saving keras weights! {e}")
+        return False
+    return True
+
+
+def keras_save_checkpoint_to_zip_from_dir(
+        mdl: tf.keras.Model,
+        zf: zipfile.ZipFile,
+        checkpoint_name: str,
+        temp_checkpoint_dir: str,
+        zip_checkpoint_dir: str = 'checkpoints') -> bool:
+    try:
+        # Adjust checkpoint directory
+        if zip_checkpoint_dir[-1] != '/':
+            zip_checkpoint_dir += '/'
+
+        # Get namelist
+        ns = zf.namelist()
+
+        # Get files inside the checkpoint directory
+        ns = filter(lambda n: n.startswith(zip_checkpoint_dir), ns)
+        checkpoint_file_re = re.compile(f"{checkpoint_name}\\.(index|data)")
+        ns = list(filter(
+            lambda n: checkpoint_file_re.search(n) is not None,
+            ns))
+
+        # clear existing checkpoint data
+        for el_name in os.listdir(temp_checkpoint_dir):
+            el_path = os.path.join(temp_checkpoint_dir, el_name)
+            if os.path.isdir(el_path):
+                shutil.rmtree(el_path)
+            else:
+                os.remove(el_path)
+
+        # get the full checkpoint path
+        checkpoint_path = os.path.join(temp_checkpoint_dir, checkpoint_name)
+
+        # Create checkpoint object and save
+        checkpoint = tf.train.Checkpoint(mdl)
+        checkpoint.save(checkpoint_path)
+
+        # Get list of saved files
+        checkpoint_files = os.listdir(temp_checkpoint_dir)
+
+        # We would like to delete existing files from the directory
+        # But we currently can't do this with python.
+        # Instead, we should fail if the files which were written
+        # for the new checkpoint don't match those in the
+        # zipfile already.
+        if len(ns) != 0:
+            # List
+            for f_name in checkpoint_files:
+                if f_name not in ns:
+                    raise RuntimeError(
+                        f"Zipfile {zf.filename} already has a checkpoint "
+                        f"of name {checkpoint_name} saved. The new "
+                        f"checkpoint file {f_name} not already in "
+                        "existing checkpoint file set! (python can't "
+                        "remove files from open zipfiles)")
+
+        # Write or Overwrite files in the zipfile
+        for f_name in checkpoint_files:
+            zf.write(
+                os.path.join(temp_checkpoint_dir, f_name),
+                arcname=os.path.join(zip_checkpoint_dir, f_name))
+    except Exception as e:
+        print(f"Error saving keras weights! {e}")
+        return False
+    return True
+
+
+class TFObjectWrapper(DryObject):
+    def __init__(self, obj_cls, obj_args=(), obj_kwargs={}):
+        self.obj_args = obj_args
+        self.obj_kwargs = obj_kwargs
+        self.obj_cls = obj_cls
+        self.obj = None
+
+    def compute_prepare_imp(self):
+        self.obj = self.obj_cls(*self.obj_args, **self.obj_kwargs)
+
+    def compute_cleanup_imp(self):
+        del self.obj
+        self.obj = None
 
 
 class TFLikeTrainFunction(DryComponent):
-    def __call__(self, trainable, train_data, *args, **kwargs):
+    def __call__(self, trainable, train_data, *args, train_spec=None, **kwargs):
         raise NotImplementedError("method must be implemented in a subclass")
 
 
@@ -24,8 +285,13 @@ class TFBasicTraining(TFLikeTrainFunction):
         self.num_total = num_total
 
     def __call__(
-            self, trainable, data: DryData, *args, batch_size=32,
-            callbacks=[], **kwargs):
+            self, trainable, data: DryData, *args, train_spec=None, train_callbacks=[], batch_size=32,
+            callbacks=None, **kwargs):
+
+        # Pop the epoch to resume from
+        start_epoch = 0
+        if train_spec is not None:
+            start_epoch = train_spec.level_step()
 
         # Type checking training data, and converting if necessary
         if type(data) is not TFDataset:
@@ -75,10 +341,21 @@ class TFBasicTraining(TFLikeTrainFunction):
         ds_train = ds_train.batch(batch_size)
         ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
 
+        if callbacks is None:
+            callbacks = []
+
+        if train_spec is not None:
+            callbacks.append(dryml.models.tf.utils.keras_train_spec_updater(train_spec))
+
+        for callback in train_callbacks:
+            new_callback = dryml.models.tf.utils.keras_callback_wrapper(callback)
+            callbacks.append(new_callback)
+
         # Fit model
         trainable.model.mdl.fit(
             ds_train, validation_data=ds_val,
-            callbacks=callbacks, epochs=self.epochs, **kwargs)
+            callbacks=callbacks, epochs=self.epochs,
+            initial_epoch=start_epoch, **kwargs)
 
 
 class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
@@ -94,7 +371,12 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
 
     def __call__(
             self, trainable, data, *args, batch_size=32,
-            callbacks=[], **kwargs):
+            train_spec=None, train_callbacks=[], callbacks=None, **kwargs):
+
+        # Pop the epoch to resume from
+        start_epoch = 0
+        if train_spec is not None:
+            start_epoch = train_spec.level_step()
 
         # Type checking training data, and converting if necessary
         if type(data) is not TFDataset:
@@ -144,16 +426,27 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         ds_train = ds_train.batch(batch_size)
         ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
 
+        if callbacks is None:
+            callbacks = []
+
         # Add Early Stopping Callback
         callbacks.append(tf.keras.callbacks.EarlyStopping(
             patience=self.patience,
             monitor='val_loss',
             restore_best_weights=True))
 
+        if train_spec is not None:
+            callbacks.append(dryml.models.tf.utils.keras_train_spec_updater(train_spec))
+
+        for callback in train_callbacks:
+            new_callback = dryml.models.tf.utils.keras_callback_wrapper(callback)
+            callbacks.append(new_callback)
+
         # Fit model
         trainable.model.mdl.fit(
             ds_train, validation_data=ds_val,
-            callbacks=callbacks, epochs=self.epochs, **kwargs)
+            callbacks=callbacks, epochs=self.epochs,
+            initial_epoch=start_epoch, **kwargs)
 
 
 class TFLikeModel(DryComponent):
@@ -161,11 +454,35 @@ class TFLikeModel(DryComponent):
         return self.mdl(X, *args, **kwargs)
 
 
+class TFKerasModel(TFLikeModel):
+    pass
+
+
 class TFLikeTrainable(DryTrainable):
     __dry_compute_context__ = 'tf'
 
+    def __init__(self):
+        pass
+
+    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
+        if data.batched():
+            # We can execute the method directly on the data
+            return data.apply_X(func=lambda X: self.model(X, *args, **kwargs))
+        else:
+            # We first need to batch the data, then unbatch to leave
+            # The dataset character unchanged.
+            return data.batch(batch_size=eval_batch_size) \
+                       .apply_X(
+                            func=lambda X: self.model(X, *args, **kwargs)) \
+                       .unbatch()
+
+
+class TFKerasTrainable(TFLikeTrainable):
+    __dry_compute_context__ = 'tf'
+
     def __init__(
-            self, model: TFLikeModel = None, optimizer=None, loss=None,
+            self, model: TFKerasModel = None, optimizer: TFObjectWrapper = None, loss: TFObjectWrapper = None,
+            metrics: List[TFObjectWrapper] = [],
             train_fn: TFLikeTrainFunction = None):
         if model is None:
             raise ValueError(
@@ -182,131 +499,56 @@ class TFLikeTrainable(DryTrainable):
                 "You need to set the loss component of this trainable!")
         self.loss = loss
 
+        self.metrics = metrics
+
         if train_fn is None:
             raise ValueError(
                 "You need to set the train_fn component of this trainable!")
         self.train_fn = train_fn
 
-    def train(self, data, metrics=[], *args, **kwargs):
-        # compile the model.
+        self._temp_checkpoint_dir = None
+
+    def compute_prepare_imp(self):
+        self._temp_checkpoint_dir = get_temp_checkpoint_dir(self.dry_id)
+
+    def compute_cleanup_imp(self):
+        if self._temp_checkpoint_dir is not None:
+            cleanup_checkpoint_dir(self._temp_checkpoint_dir)
+            self._temp_checkpoint_dir = None
+
+    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        # Load Weights
+        if not keras_load_checkpoint_from_zip_to_dir(self.model.mdl, file, 'ckpt-1', self._temp_checkpoint_dir):
+            print("Error loading keras weights")
+            return False
+
+        return True
+
+    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
+
+        # Save Weights
+        if not keras_save_checkpoint_to_zip_from_dir(self.model.mdl, file, 'ckpt', self._temp_checkpoint_dir):
+            print("Error saving keras weights")
+            return False
+
+        return True
+
+    def train(self, data, train_spec=None, train_callbacks=[], metrics=[], *args, **kwargs):
+        self.train_fn(self, data, *args, train_spec=train_spec, train_callbacks=train_callbacks, **kwargs)
+        self.train_state = DryTrainable.trained
+
+    def prep_train(self):
+        metric_list = []
+        for metric in self.metrics:
+            metric_list.append(metric.obj)
+
         self.model.mdl.compile(
             optimizer=self.optimizer.obj,
             loss=self.loss.obj,
-            metrics=metrics)
+            metrics=metric_list)
 
-        self.train_fn(self, data, *args, **kwargs)
-
-        self.train_state = DryTrainable.trained
-
-    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
-        if data.batched():
-            # We can execute the method directly on the data
-            return data.apply_X(func=lambda X: self.model(X, *args, **kwargs))
-        else:
-            # We first need to batch the data, then unbatch to leave
-            # The dataset character unchanged.
-            return data.batch(batch_size=eval_batch_size) \
-                       .apply_X(
-                            func=lambda X: self.model(X, *args, **kwargs)) \
-                       .unbatch()
-
-
-def keras_load_checkpoint_from_zip(
-        mdl: tf.keras.Model,
-        zf: zipfile.ZipFile,
-        checkpoint_name: str,
-        checkpoint_dir: str = 'checkpoints') -> bool:
-    if mdl is None:
-        raise RuntimeError("keras model can't be None!")
-
-    try:
-        # Get namelist
-        ns = zf.namelist()
-
-        # Add a slash at the end
-        if checkpoint_dir[-1] != '/':
-            checkpoint_dir += '/'
-
-        # Get files inside the checkpoint directory
-        orig_ns = list(filter(lambda n: n.startswith(checkpoint_dir), ns))
-        if len(orig_ns) == 0:
-            raise RuntimeError(f"No directory {checkpoint_dir} in zipfile!")
-
-        # Get destination names
-        dest_ns = list(map(lambda n: n[len(checkpoint_dir):], orig_ns))
-
-        ns = zip(orig_ns, dest_ns)
-
-        checkpoint_file_re = re.compile(f"{checkpoint_name}\\.(index|data)")
-        ns = filter(lambda t: checkpoint_file_re.search(t[0]) is not None, ns)
-
-        # Create temp directory
-        with tempfile.TemporaryDirectory() as d:
-            # Extract files from zipfile to the temp directory
-            for orig_n, dest_n in ns:
-                zf.extract(orig_n, path=d)
-
-            # Load the weights into the model with the load weights function
-            mdl.load_weights(os.path.join(d, checkpoint_dir, checkpoint_name))
-    except Exception as e:
-        print(f"Issue loading checkpoint! {e}")
-        return False
-    return True
-
-
-def keras_save_checkpoint_to_zip(
-        mdl: tf.keras.Model,
-        zf: zipfile.ZipFile,
-        checkpoint_name: str,
-        checkpoint_dir: str = 'checkpoints') -> bool:
-    try:
-        # Adjust checkpoint directory
-        if checkpoint_dir[-1] != '/':
-            checkpoint_dir += '/'
-
-        # Get namelist
-        ns = zf.namelist()
-
-        # Get files inside the checkpoint directory
-        ns = filter(lambda n: n.startswith(checkpoint_dir), ns)
-        checkpoint_file_re = re.compile(f"{checkpoint_name}\\.(index|data)")
-        ns = list(filter(
-            lambda n: checkpoint_file_re.search(n) is not None,
-            ns))
-
-        # Save checkpoint to a temporary directory
-        with tempfile.TemporaryDirectory() as d:
-            mdl.save_weights(
-                os.path.join(d, checkpoint_name),
-                save_format='tf')
-
-            checkpoint_files = os.listdir(d)
-
-            # We would like to delete existing files from the directory
-            # But we currently can't do this with python.
-            # Instead, we should fail if the files which were written
-            # for the new checkpoint don't match those in the
-            # zipfile already.
-            if len(ns) != 0:
-                # List
-                for f_name in checkpoint_files:
-                    if f_name not in ns:
-                        raise RuntimeError(
-                            f"Zipfile {zf.filename} already has a checkpoint "
-                            f"of name {checkpoint_name} saved. The new "
-                            f"checkpoint file {f_name} not already in "
-                            "existing checkpoint file set! (python can't "
-                            "remove files from open zipfiles)")
-
-            # Write or Overwrite files in the zipfile
-            for f_name in checkpoint_files:
-                zf.write(
-                    os.path.join(d, f_name),
-                    arcname=os.path.join(checkpoint_dir, f_name))
-    except Exception as e:
-        print(f"Error saving keras weights! {e}")
-        return False
-    return True
+    def prep_eval(self):
+        pass
 
 
 class TFKerasModelBase(TFLikeModel):
@@ -318,18 +560,4 @@ class TFKerasModelBase(TFLikeModel):
         # attribute with an actual keras class
         self.mdl = None
 
-    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        # Load Weights
-        if not keras_load_checkpoint_from_zip(self.mdl, file, 'ckpt'):
-            print("Error loading keras weights")
-            return False
 
-        return True
-
-    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        # Save Weights
-        if not keras_save_checkpoint_to_zip(self.mdl, file, 'ckpt'):
-            print("Error saving keras weights")
-            return False
-
-        return True

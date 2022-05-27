@@ -25,10 +25,18 @@ class DryTrainable(DryObject):
             f.write(pickle.dumps({'train_state': self.train_state}))
         return True
 
-    def train(self, *args, **kwargs):
+    def prep_train(self):
+        # Configure the model for training
+        pass
+
+    def prep_eval(self):
+        # Configure the model for evaluation
+        pass
+
+    def train(self, *args, train_spec=None, train_callbacks=[], **kwargs):
         # Handle the setting of the train state flag
         self.train_state = DryTrainable.trained
         # This should be the last step in training so no more super is needed
 
     def eval(self, data, *args, **kwargs):
-        raise RuntimeError("Method not defined for a base DryTrainable")
+        raise NotImplementedError("Method not defined for a base DryTrainable")

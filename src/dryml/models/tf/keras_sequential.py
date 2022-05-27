@@ -33,6 +33,7 @@ def keras_sequential_functional_class(
     def compute_cleanup_imp(self):
         # Delete the contained model
         del self.mdl
+        self.mdl = None
 
     # Create the new class
     new_cls = type(name, base_classes, {
