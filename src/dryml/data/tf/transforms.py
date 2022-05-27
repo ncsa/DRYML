@@ -17,11 +17,11 @@ def func_source_extract(func):
     for line in code_lines[1:]:
         i = 0
         while i < len(init_strip) and \
-              i < len(line) and \
-              init_strip[i] == line[i]:
+                i < len(line) and \
+                init_strip[i] == line[i]:
             i += 1
         if i == len(init_strip) or \
-           i == len(line):
+                i == len(line):
             continue
 
         init_strip = init_strip[:i]

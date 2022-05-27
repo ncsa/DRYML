@@ -473,19 +473,21 @@ class tune_process_executor(object):
                             "Couldn't find an object to associate"
                             " a definition to!")
 
-            # Wait until return queue is empty (parent thread has emptied it)
+            # Wait until return queue is empty
+            # (parent thread has emptied it)
             while not ctx_ret_q.empty():
                 # Sleep a bit
                 time.sleep(0.1)
 
-            # Wait until tune report queue is empty (parent thread has emptied it)
+            # Wait until tune report queue is empty
+            # (parent thread has emptied it)
             while not tune_report_q.empty():
                 time.sleep(0.1)
 
-            # Wait until checkpoint request queue is empty (parent thread should empty it.)
+            # Wait until checkpoint request queue is empty
+            # (parent thread should empty it.)
             while not checkpoint_req_q.empty():
                 time.sleep(0.1)
-
 
         # Activate context
         with contexts[self.ctx_name][1](**self.context_kwargs):
@@ -495,13 +497,17 @@ class tune_process_executor(object):
             self._activated_objects = activate_objects(self._dry_objects)
 
             try:
-                res = f(*args, **kwargs, tune_report_q=tune_report_q, checkpoint_req_q=checkpoint_req_q, checkpoint_ret_q=checkpoint_ret_q)
+                res = f(
+                    *args, **kwargs, tune_report_q=tune_report_q,
+                    checkpoint_req_q=checkpoint_req_q,
+                    checkpoint_ret_q=checkpoint_ret_q)
                 cleanup_process(res)
             except KeyboardInterrupt:
                 cleanup_process(None)
 
-
-    def __call__(self, ctx_ret_q, tune_report_q=None, checkpoint_ret_q=None, checkpoint_req_q=None):
+    def __call__(
+            self, ctx_ret_q, tune_report_q=None,
+            checkpoint_ret_q=None, checkpoint_req_q=None):
         # Undill function
         f = dill.loads(self.f_ser)
 
@@ -509,7 +515,9 @@ class tune_process_executor(object):
         args = dill.loads(self.args_ser)
         kwargs = dill.loads(self.kwargs_ser)
 
-        self.final_call(f, ctx_ret_q, tune_report_q, checkpoint_req_q, checkpoint_ret_q, *args, **kwargs)
+        self.final_call(
+            f, ctx_ret_q, tune_report_q, checkpoint_req_q,
+            checkpoint_ret_q, *args, **kwargs)
 
 
 def tune_compute_context(
@@ -603,7 +611,7 @@ def tune_compute_context(
                 # Translate direct list into definitions
                 update_obj_defs = list(map(
                     lambda o: o.definition(),
-                        update_objs_list))
+                    update_objs_list))
 
             # Prepare context args
             if call_context_kwargs is None:
@@ -630,7 +638,12 @@ def tune_compute_context(
             checkpoint_ret_q = mp_ctx.Queue()
 
             # run function
-            p = Process(target=executor, args=[ctx_ret_q], kwargs={'tune_report_q': tune_report_q, 'checkpoint_req_q': checkpoint_req_q, 'checkpoint_ret_q': checkpoint_ret_q})
+            p = Process(
+                target=executor, args=[ctx_ret_q],
+                kwargs={
+                    'tune_report_q': tune_report_q,
+                    'checkpoint_req_q': checkpoint_req_q,
+                    'checkpoint_ret_q': checkpoint_ret_q})
             p.start()
 
             if verbose:
@@ -644,7 +657,12 @@ def tune_compute_context(
             num_to_fetch += len(update_objs_list)
 
             def check_queues():
-                while len(queue_results) < num_to_fetch or not tune_report_q.empty():
+                nonlocal tune_report_q
+                nonlocal ctx_ret_q
+                nonlocal checkpoint_req_q
+                nonlocal checkpoint_ret_q
+                while len(queue_results) < num_to_fetch or \
+                        not tune_report_q.empty():
                     # Check whether the queue is empty
                     if not ctx_ret_q.empty():
                         # Get result
@@ -652,7 +670,9 @@ def tune_compute_context(
                     elif not tune_report_q.empty():
                         report_dict = tune_report_q.get()
                         if type(report_dict) is not dict:
-                            raise ValueError("Value in tune report queue was not a dictionary!")
+                            raise ValueError(
+                                "Value in tune report queue was "
+                                "not a dictionary!")
                         # Report result to tune
                         tune.report(**report_dict)
                     elif not checkpoint_req_q.empty():

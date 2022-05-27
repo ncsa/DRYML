@@ -115,7 +115,7 @@ def adjust_class_module(cls):
 def get_temp_checkpoint_dir(dry_id):
     home_dir = os.environ['HOME']
     # Create checkpoint dir
-    temp_checkpoint_dir = os.path.join(home_dir, '.dryml', dry_id) 
+    temp_checkpoint_dir = os.path.join(home_dir, '.dryml', dry_id)
     # Create directory if needed
     pathlib.Path(temp_checkpoint_dir).mkdir(parents=True, exist_ok=True)
     return temp_checkpoint_dir
@@ -123,4 +123,3 @@ def get_temp_checkpoint_dir(dry_id):
 
 def cleanup_checkpoint_dir(checkpoint_dir):
     shutil.rmtree(checkpoint_dir)
-    

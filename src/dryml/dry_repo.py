@@ -368,26 +368,24 @@ class DryRepo(object):
             open_container: bool = True,
             verbose: bool = True):
 
-        # First, handle all cases where the selector refers to a specific object
+        # First, handle all cases where the selector refers to a specific
+        # object
         obj_id = None
-        if (issubclass(type(selector), DryObject) or \
+        if (issubclass(type(selector), DryObject) or
            type(selector) is DryObjectFile) and \
            selector is not None:
             obj_id = selector.definition().dry_id
-        elif type(selector) is DryObjectDef and \
-             selector is not None:
+        elif type(selector) is DryObjectDef and selector is not None:
             try:
                 obj_id = selector.dry_id
             except MissingIdError:
                 obj_id = None
-        elif issubclass(type(selector), dict) and \
-             selector is not None:
+        elif issubclass(type(selector), dict) and selector is not None:
             try:
-                obj_id = DryObjectDef.from_dict(item).dry_id
+                obj_id = DryObjectDef.from_dict(selector).dry_id
             except MissingIdError:
                 obj_id = None
-        elif type(selector) is str and \
-             selector is not None:
+        elif type(selector) is str and selector is not None:
             obj_id = selector
 
         # Build container handler
@@ -400,14 +398,16 @@ class DryRepo(object):
         if obj_id is not None:
             # We have a single object request
             if obj_id not in self.obj_dict:
-                raise KeyError(f"Object {selector} (type: {type(selector)}) (dry_id: {obj_id}) not in the Repository.")
+                raise KeyError(
+                    f"Object {selector} (type: {type(selector)}) "
+                    f"(dry_id: {obj_id}) not in the Repository.")
 
             obj_cont = self.obj_dict[obj_id]
             if only_loaded:
                 if not obj_cont.is_loaded():
                     # No objects were found
                     return []
-            result = container_handler(obj_cont) 
+            result = container_handler(obj_cont)
             return result
 
         # Now handle all cases where we have collections of keys to query
@@ -420,7 +420,7 @@ class DryRepo(object):
             for sub_key in selector:
                 try:
                     res = self.get(
-                        sub_key, 
+                        sub_key,
                         sel_args=sel_args,
                         sel_kwargs=sel_kwargs,
                         load_objects=load_objects,
@@ -446,11 +446,11 @@ class DryRepo(object):
             results = list(result_set)
             if len(results) == 0:
                 # handle the case of an empty list
-                raise KeyError(f"Key Collection {selector} didn't match any object!")
+                raise KeyError(
+                    f"Key Collection {selector} didn't match any object!")
             elif len(results) == 1:
                 # Handle a single result
                 return results[0]
-            # 
             return list(result_set)
 
         # Now we do the 'vector' methods
@@ -572,7 +572,8 @@ class DryRepo(object):
                             save_func(obj)
 
                 # Save
-                save_path = os.path.join(directory, f"{obj_or_cont.dry_id}.dry")
+                save_path = os.path.join(
+                    directory, f"{obj_or_cont.dry_id}.dry")
                 obj_or_cont.save_self(save_path)
 
                 save_cache.add(obj_or_cont)
@@ -580,7 +581,8 @@ class DryRepo(object):
             else:
                 # We have an object container.
                 if not obj_or_cont.is_loaded():
-                    raise RuntimeError("Can only save currently loaded DryObject")
+                    raise RuntimeError(
+                        "Can only save currently loaded DryObject")
 
             # Get/save contained objects
             if recursive:
@@ -588,7 +590,6 @@ class DryRepo(object):
 
                 for obj in contained_objs:
                     if obj in self:
-                        # If it's in the repo, 
                         sub_obj_cont = self.get(obj, open_container=False)
                         save_func(sub_obj_cont)
                     else:
@@ -688,7 +689,6 @@ class DryRepo(object):
                 del_cont(obj_cont)
         else:
             del_cont(obj_containers)
-
 
     def list_unique_objs(
             self,

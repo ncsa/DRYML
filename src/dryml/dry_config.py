@@ -306,7 +306,8 @@ class DryMeta(abc.ABCMeta):
                         **super_kwargs,
                     )
                 except TypeError as e:
-                    print(f"error constructing possibly 'object' parent. args: {super_args} kwargs: {super_kwargs}")
+                    print(f"error constructing possibly 'object' parent. args:"
+                          f" {super_args} kwargs: {super_kwargs}")
                     raise e
             else:
                 # Construct parents

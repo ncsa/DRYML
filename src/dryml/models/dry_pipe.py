@@ -9,7 +9,9 @@ class DryPipe(DryTrainable, DryTuple):
         # May need to test that elements of the pipes are trainable too
         pass
 
-    def train(self, data, *args, train_spec=None, train_callbacks=[], **kwargs):
+    def train(
+            self, data, *args, train_spec=None,
+            train_callbacks=[], **kwargs):
         # get start epoch (only way to do this is to pass a train_spec.
         # Non-zero start epoch can only happen with no train_spec?
         start_epoch = 0
@@ -32,7 +34,9 @@ class DryPipe(DryTrainable, DryTuple):
                     train_spec.descend()
 
                 # Perform training
-                step.train(last_val, *args, train_spec=train_spec, train_callbacks=train_callbacks, **kwargs)
+                step.train(
+                    last_val, *args, train_spec=train_spec,
+                    train_callbacks=train_callbacks, **kwargs)
 
                 # manage train spec
                 if train_spec is not None:

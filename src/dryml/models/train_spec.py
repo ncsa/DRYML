@@ -1,9 +1,10 @@
-import os
 import pickle
 from typing import List
 
+
 class TrainStateException(Exception):
     pass
+
 
 class TrainSpec(object):
     def __init__(self, level_steps: List[int] = None, global_steps=0):
@@ -52,10 +53,14 @@ class TrainSpec(object):
 
     def save(self, path):
         with open(path, 'wb') as f:
-            f.write(pickle.dumps({'level_steps': self.level_steps, 'global_steps': self.global_steps}))
+            f.write(pickle.dumps({
+                'level_steps': self.level_steps,
+                'global_steps': self.global_steps}))
 
     @staticmethod
     def load(path):
         with open(path, 'rb') as f:
             def_dict = pickle.loads(f.read())
-        return TrainSpec(level_steps=def_dict['level_steps'], global_steps=def_dict['global_steps'])
+        return TrainSpec(
+            level_steps=def_dict['level_steps'],
+            global_steps=def_dict['global_steps'])

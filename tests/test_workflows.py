@@ -1,7 +1,5 @@
 import pytest
 import dryml
-import os
-import tempfile
 
 import objects
 

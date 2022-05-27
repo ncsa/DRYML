@@ -345,5 +345,3 @@ def test_dry_dict_3(create_temp_dir):
     assert dict_2 is not loaded_dict
     assert dict_2['b'] is loaded_dict['b']
     assert dict_2[2.0] is loaded_dict[2.0]
-
-

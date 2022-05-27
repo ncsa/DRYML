@@ -256,5 +256,3 @@ def test_selector_build_4():
     })
 
     assert sel(obj)
-
-

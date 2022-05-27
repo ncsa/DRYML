@@ -58,7 +58,6 @@ class WrongContextError(Exception):
     pass
 
 
-
 class NoContextError(Exception):
     """
     Signals there is no context active.
@@ -167,9 +166,11 @@ def get_appropriate_context_name(objs):
         objs = [objs]
 
     if not is_nonstring_iterable(objs):
-        raise ValueError("set_appropriate_context only supports single DryObjects or an iterable of DryObjects.")
+        raise ValueError(
+            "set_appropriate_context only supports single "
+            "DryObjects or an iterable of DryObjects.")
 
-    ctx_name_list = []    
+    ctx_name_list = []
 
     for obj in objs:
         ctx_name_list.append(obj.dry_compute_context())

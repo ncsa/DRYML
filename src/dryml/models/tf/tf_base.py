@@ -19,7 +19,9 @@ def keras_load_checkpoint_from_zip(
         checkpoint_name: str,
         checkpoint_dir: str = 'checkpoints') -> bool:
     if mdl is None:
-        raise RuntimeError("keras model can't be None! Did you run the object's compute_prepare method?")
+        raise RuntimeError(
+            "keras model can't be None! "
+            "Did you run the object's compute_prepare method?")
 
     try:
         # Get namelist
@@ -64,7 +66,8 @@ def keras_load_checkpoint_from_zip(
 
             # Load the weights into the model with the load weights function
             checkpoint_path = os.path.join(d, checkpoint_dir, checkpoint_name)
-            # expect to load partial because we may not have optimizer in place yet.
+            # expect to load partial because we may
+            # not have optimizer in place yet.
             tf.train.Checkpoint(mdl).restore(checkpoint_path).expect_partial()
     except Exception as e:
         print(f"Issue loading checkpoint! {e}")
@@ -79,7 +82,9 @@ def keras_load_checkpoint_from_zip_to_dir(
         temp_checkpoint_dir: str,
         zip_checkpoint_dir: str = 'checkpoints') -> bool:
     if mdl is None:
-        raise RuntimeError("keras model can't be None! Did you run the object's compute_prepare method?")
+        raise RuntimeError(
+            "keras model can't be None! "
+            "Did you run the object's compute_prepare method?")
 
     try:
         # Get namelist
@@ -106,7 +111,8 @@ def keras_load_checkpoint_from_zip_to_dir(
         # Get files inside the checkpoint directory
         orig_ns = list(filter(lambda n: n.startswith(zip_checkpoint_dir), ns))
         if len(orig_ns) == 0:
-            raise RuntimeError(f"No directory {zip_checkpoint_dir} in zipfile!")
+            raise RuntimeError(
+                f"No directory {zip_checkpoint_dir} in zipfile!")
 
         # Get destination names
         dest_ns = list(map(lambda n: n[len(zip_checkpoint_dir):], orig_ns))
@@ -121,9 +127,13 @@ def keras_load_checkpoint_from_zip_to_dir(
             zf.extract(orig_n, path=temp_checkpoint_dir)
 
         # Load the weights into the model with the load weights function
-        checkpoint_path = os.path.join(temp_checkpoint_dir, checkpoint_name)
-        # expect to load partial because we may not have optimizer in place yet.
-        tf.train.Checkpoint(mdl).restore(checkpoint_path).expect_partial()
+        checkpoint_path = os.path.join(
+            temp_checkpoint_dir, checkpoint_name)
+        # expect to load partial because we may
+        # not have optimizer in place yet.
+        tf.train.Checkpoint(mdl) \
+                .restore(checkpoint_path) \
+                .expect_partial()
     except Exception as e:
         print(f"Issue loading checkpoint! {e}")
         return False
@@ -270,7 +280,9 @@ class TFObjectWrapper(DryObject):
 
 
 class TFLikeTrainFunction(DryComponent):
-    def __call__(self, trainable, train_data, *args, train_spec=None, **kwargs):
+    def __call__(
+            self, trainable, train_data, *args,
+            train_spec=None, **kwargs):
         raise NotImplementedError("method must be implemented in a subclass")
 
 
@@ -285,7 +297,8 @@ class TFBasicTraining(TFLikeTrainFunction):
         self.num_total = num_total
 
     def __call__(
-            self, trainable, data: DryData, *args, train_spec=None, train_callbacks=[], batch_size=32,
+            self, trainable, data: DryData, *args, train_spec=None,
+            train_callbacks=[], batch_size=32,
             callbacks=None, **kwargs):
 
         # Pop the epoch to resume from
@@ -345,10 +358,13 @@ class TFBasicTraining(TFLikeTrainFunction):
             callbacks = []
 
         if train_spec is not None:
-            callbacks.append(dryml.models.tf.utils.keras_train_spec_updater(train_spec))
+            callbacks.append(
+                dryml.models.tf.utils.keras_train_spec_updater(
+                    train_spec))
 
         for callback in train_callbacks:
-            new_callback = dryml.models.tf.utils.keras_callback_wrapper(callback)
+            new_callback = \
+                dryml.models.tf.utils.keras_callback_wrapper(callback)
             callbacks.append(new_callback)
 
         # Fit model
@@ -436,10 +452,13 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
             restore_best_weights=True))
 
         if train_spec is not None:
-            callbacks.append(dryml.models.tf.utils.keras_train_spec_updater(train_spec))
+            callbacks.append(
+                dryml.models.tf.utils.keras_train_spec_updater(
+                    train_spec))
 
         for callback in train_callbacks:
-            new_callback = dryml.models.tf.utils.keras_callback_wrapper(callback)
+            new_callback = \
+                dryml.models.tf.utils.keras_callback_wrapper(callback)
             callbacks.append(new_callback)
 
         # Fit model
@@ -481,7 +500,9 @@ class TFKerasTrainable(TFLikeTrainable):
     __dry_compute_context__ = 'tf'
 
     def __init__(
-            self, model: TFKerasModel = None, optimizer: TFObjectWrapper = None, loss: TFObjectWrapper = None,
+            self, model: TFKerasModel = None,
+            optimizer: TFObjectWrapper = None,
+            loss: TFObjectWrapper = None,
             metrics: List[TFObjectWrapper] = [],
             train_fn: TFLikeTrainFunction = None):
         if model is None:
@@ -518,7 +539,8 @@ class TFKerasTrainable(TFLikeTrainable):
 
     def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
         # Load Weights
-        if not keras_load_checkpoint_from_zip_to_dir(self.model.mdl, file, 'ckpt-1', self._temp_checkpoint_dir):
+        if not keras_load_checkpoint_from_zip_to_dir(
+                self.model.mdl, file, 'ckpt-1', self._temp_checkpoint_dir):
             print("Error loading keras weights")
             return False
 
@@ -527,14 +549,19 @@ class TFKerasTrainable(TFLikeTrainable):
     def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
 
         # Save Weights
-        if not keras_save_checkpoint_to_zip_from_dir(self.model.mdl, file, 'ckpt', self._temp_checkpoint_dir):
+        if not keras_save_checkpoint_to_zip_from_dir(
+                self.model.mdl, file, 'ckpt', self._temp_checkpoint_dir):
             print("Error saving keras weights")
             return False
 
         return True
 
-    def train(self, data, train_spec=None, train_callbacks=[], metrics=[], *args, **kwargs):
-        self.train_fn(self, data, *args, train_spec=train_spec, train_callbacks=train_callbacks, **kwargs)
+    def train(
+            self, data, train_spec=None, train_callbacks=[],
+            metrics=[], *args, **kwargs):
+        self.train_fn(
+            self, data, *args, train_spec=train_spec,
+            train_callbacks=train_callbacks, **kwargs)
         self.train_state = DryTrainable.trained
 
     def prep_train(self):
@@ -559,5 +586,3 @@ class TFKerasModelBase(TFLikeModel):
         # It is subclass's responsibility to fill this
         # attribute with an actual keras class
         self.mdl = None
-
-

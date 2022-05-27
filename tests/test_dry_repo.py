@@ -111,7 +111,8 @@ def test_add_retrieve_objects_3():
         cls=objects.HelloTrainableD))) is not list
     assert type(repo.get(selector=dryml.DrySelector(
         cls=objects.TestNest, args=(
-            dryml.DrySelector(objects.HelloTrainableD),), verbosity=2))) is not list
+            dryml.DrySelector(objects.HelloTrainableD),),
+        verbosity=2))) is not list
 
 
 @pytest.mark.xfail
@@ -129,6 +130,7 @@ def test_get_api_1():
     repo.add_object(objects.HelloStr(msg='test'))
 
     repo.get(sel_kwargs={'verbosity': 10})
+
 
 def test_get_api_2():
     repo = dryml.DryRepo()
