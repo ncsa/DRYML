@@ -1,4 +1,6 @@
 import os
+import shutil
+import pathlib
 import collections
 import inspect
 import hashlib
@@ -108,3 +110,17 @@ def adjust_class_module(cls):
     frm = inspect.stack()[2]
     calling_mod = inspect.getmodule(frm[0])
     cls.__module__ = calling_mod.__name__
+
+
+def get_temp_checkpoint_dir(dry_id):
+    home_dir = os.environ['HOME']
+    # Create checkpoint dir
+    temp_checkpoint_dir = os.path.join(home_dir, '.dryml', dry_id) 
+    # Create directory if needed
+    pathlib.Path(temp_checkpoint_dir).mkdir(parents=True, exist_ok=True)
+    return temp_checkpoint_dir
+
+
+def cleanup_checkpoint_dir(checkpoint_dir):
+    shutil.rmtree(checkpoint_dir)
+    
