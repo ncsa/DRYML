@@ -1,11 +1,15 @@
 import os
 from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, \
-    DryObjectDef, change_object_cls, load_object
+    DryObjectDef, change_object_cls, load_object, get_contained_objects
+from dryml.dry_config import MissingIdError
 from dryml.dry_selector import DrySelector
 from dryml.utils import get_current_cls
 from typing import Optional, Callable, Union, Mapping
 import tqdm
 from pprint import pprint
+
+
+RepoKey = Union[DryObject, DryObjectDef, dict, DryObjectFile, DrySelector, str]
 
 
 class DryRepoContainer(object):
@@ -100,7 +104,8 @@ class DryRepoContainer(object):
         return self.obj
 
     def save(self, directory: Optional[str] = None,
-             fail_without_directory: bool = True):
+             fail_without_directory: bool = True,
+             save_cache=None):
         if self._obj is not None:
             # Get object filepath
             filepath = self.filepath
@@ -136,6 +141,12 @@ class DryRepoContainer(object):
 
     def set_filename(self, filename):
         self._filename = filename
+
+    def get_contained_objects(self):
+        if self._obj is None:
+            return set()
+
+        return get_contained_objects(self._obj)
 
     def definition(self):
         if self._obj is None:
@@ -223,9 +234,10 @@ class DryRepo(object):
                 if selector is not None:
                     if not selector(obj_cont.definition()):
                         continue
-                # Add the object
-                self.add_obj_cont(obj_cont)
-                num_loaded += 1
+                if obj_cont.definition().dry_id not in self.obj_dict:
+                    # Add the object
+                    self.add_obj_cont(obj_cont)
+                    num_loaded += 1
             except Exception as e:
                 print(f"WARNING! Malformed file found! {obj_cont.filepath} "
                       f"skipping load. Error was: {e}")
@@ -296,7 +308,7 @@ class DryRepo(object):
 
         if type(selector) is DryObjectDef:
             # Wrap automatically for convenience
-            selector = DrySelector.build(selector)
+            selector = DrySelector.build(selector, *sel_args, **sel_kwargs)
 
         def filter_func(obj_cont):
             if only_loaded:
@@ -304,7 +316,7 @@ class DryRepo(object):
                     return False
 
             if selector is not None:
-                if selector(obj_cont.definition(), *sel_args, **sel_kwargs):
+                if selector(obj_cont.definition()):
                     return True
                 else:
                     return False
@@ -338,14 +350,111 @@ class DryRepo(object):
             raise TypeError("Unsupported type for repo.contains!")
         return obj_id in self.obj_dict
 
+    def __getitem__(
+            self, key: Union[RepoKey, list, tuple, Callable]):
+        """
+        Easy access to objects within.
+
+        if unpack is true, plain objects are returned
+        """
+        return self.get(key, open_container=True)
+
     def get(self,
-            selector: Optional[Callable] = None,
+            selector: Optional[Union[RepoKey, list, tuple, Callable]] = None,
             sel_args=None, sel_kwargs=None,
             load_objects: bool = True,
             only_loaded: bool = False,
             update: bool = True,
             open_container: bool = True,
             verbose: bool = True):
+
+        # First, handle all cases where the selector refers to a specific object
+        obj_id = None
+        if (issubclass(type(selector), DryObject) or \
+           type(selector) is DryObjectFile) and \
+           selector is not None:
+            obj_id = selector.definition().dry_id
+        elif type(selector) is DryObjectDef and \
+             selector is not None:
+            try:
+                obj_id = selector.dry_id
+            except MissingIdError:
+                obj_id = None
+        elif issubclass(type(selector), dict) and \
+             selector is not None:
+            try:
+                obj_id = DryObjectDef.from_dict(item).dry_id
+            except MissingIdError:
+                obj_id = None
+        elif type(selector) is str and \
+             selector is not None:
+            obj_id = selector
+
+        # Build container handler
+        container_handler = \
+            self.make_container_handler(
+                update=update,
+                load_objects=load_objects,
+                open_container=open_container)
+
+        if obj_id is not None:
+            # We have a single object request
+            if obj_id not in self.obj_dict:
+                raise KeyError(f"Object {selector} (type: {type(selector)}) (dry_id: {obj_id}) not in the Repository.")
+
+            obj_cont = self.obj_dict[obj_id]
+            if only_loaded:
+                if not obj_cont.is_loaded():
+                    # No objects were found
+                    return []
+            result = container_handler(obj_cont) 
+            return result
+
+        # Now handle all cases where we have collections of keys to query
+
+        if type(selector) is list or \
+           type(selector) is tuple:
+
+            # We need to combine objects from each key.
+            result_set = set()
+            for sub_key in selector:
+                try:
+                    res = self.get(
+                        sub_key, 
+                        sel_args=sel_args,
+                        sel_kwargs=sel_kwargs,
+                        load_objects=load_objects,
+                        only_loaded=only_loaded,
+                        update=update,
+                        open_container=open_container,
+                        verbose=verbose)
+                except KeyError:
+                    # Skip element
+                    continue
+
+                if res is None:
+                    # Skip it if None
+                    continue
+                if type(res) is list:
+                    # Multiple results from this key
+                    for el in res:
+                        result_set.add(el)
+                else:
+                    # A single key
+                    result_set.add(el)
+
+            results = list(result_set)
+            if len(results) == 0:
+                # handle the case of an empty list
+                raise KeyError(f"Key Collection {selector} didn't match any object!")
+            elif len(results) == 1:
+                # Handle a single result
+                return results[0]
+            # 
+            return list(result_set)
+
+        # Now we do the 'vector' methods
+
         # Filter the internal object list
         filter_func = \
             self.make_filter_func(
@@ -355,13 +464,13 @@ class DryRepo(object):
                 only_loaded=only_loaded)
         obj_list = list(filter(filter_func, self.obj_dict.values()))
 
-        # Build container handler
-        container_handler = \
-            self.make_container_handler(
-                update=update,
-                load_objects=load_objects,
-                open_container=open_container)
-        return list(map(container_handler, obj_list))
+        results = list(map(container_handler, obj_list))
+        if len(results) == 0:
+            raise KeyError(f"Key {selector} didn't match any object!")
+        elif len(results) == 1:
+            return results[0]
+        else:
+            return results
 
     def apply(self,
               func, func_args=None, func_kwargs=None,
@@ -384,22 +493,22 @@ class DryRepo(object):
             return func(obj, *func_args, **func_kwargs)
 
         # Get object list
-        objs = self.get(
-            selector=selector,
-            sel_args=sel_args, sel_kwargs=sel_kwargs,
-            **kwargs)
-
-        # apply function to objects
-        if verbose:
-            results = list(map(apply_func, tqdm(objs)))
-        else:
-            results = list(map(apply_func, objs))
-
-        # Handle results
-        if len(list(filter(lambda x: x is None, results))) == len(objs):
+        try:
+            objs = self.get(
+                selector=selector,
+                sel_args=sel_args, sel_kwargs=sel_kwargs,
+                **kwargs)
+        except KeyError:
             return None
+
+        if type(objs) is list:
+            # apply function to objects
+            if verbose:
+                return list(map(apply_func, tqdm(objs)))
+            else:
+                return list(map(apply_func, objs))
         else:
-            return results
+            return apply_func(objs)
 
     def reload_objs(
             self,
@@ -439,14 +548,55 @@ class DryRepo(object):
     def save(self,
              selector: Optional[Callable] = None,
              sel_args=None, sel_kwargs=None,
-             directory: Optional[str] = None):
+             directory: Optional[str] = None,
+             recursive=True):
 
-        def save_func(obj_cont):
-            if not obj_cont.is_loaded():
-                raise RuntimeError("Can only save currently loaded DryObject")
+        save_cache = set()
+
+        def save_func(obj_or_cont):
+            if type(obj_or_cont) is DryObject:
+                # we have a plain dry object
+
+                if obj_or_cont in save_cache:
+                    # don't need to save, it's already done.
+                    return
+
+                if recursive:
+                    contained_objs = get_contained_objects(obj_or_cont)
+
+                    for obj in contained_objs:
+                        if obj in self:
+                            sub_obj_cont = self.get(obj, open_container=False)
+                            save_func(sub_obj_cont)
+                        else:
+                            save_func(obj)
+
+                # Save
+                save_path = os.path.join(directory, f"{obj_or_cont.dry_id}.dry")
+                obj_or_cont.save_self(save_path)
+
+                save_cache.add(obj_or_cont)
+
+            else:
+                # We have an object container.
+                if not obj_or_cont.is_loaded():
+                    raise RuntimeError("Can only save currently loaded DryObject")
+
+            # Get/save contained objects
+            if recursive:
+                contained_objs = obj_or_cont.get_contained_objects()
+
+                for obj in contained_objs:
+                    if obj in self:
+                        # If it's in the repo, 
+                        sub_obj_cont = self.get(obj, open_container=False)
+                        save_func(sub_obj_cont)
+                    else:
+                        obj.save_self(os.path.join())
 
             # Save object
-            obj_cont.save(directory=directory)
+            obj_or_cont.save(directory=directory, save_cache=save_cache)
+            save_cache.add(obj_or_cont.obj)
 
         self.apply(
             save_func,
@@ -478,6 +628,25 @@ class DryRepo(object):
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, only_loaded=True, load_objects=False)
 
+    def update(self,
+               obj: DryObject):
+        """
+        Update existing object entry with new object.
+        if object doesn't exist, create entry for it.
+        """
+
+        obj_id = obj.definition().dry_id
+
+        if obj_id not in self.obj_dict:
+            # Add the object as it doesn't exist yet.
+            self.add_object(obj)
+        else:
+            # Set the object for existing container.
+            self.obj_dict[obj_id].set_obj(obj)
+
+        # Save object to disk.
+        self.save_by_id(obj_id)
+
     def unload(self,
                selector: Optional[Callable] = None,
                sel_args=None, sel_kwargs=None):
@@ -503,7 +672,7 @@ class DryRepo(object):
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, only_loaded=only_loaded, load_objects=False)
 
-        for obj_cont in obj_containers:
+        def del_cont(obj_cont):
             # Delete object from repo object tracker
             obj_id = obj_cont.definition().dry_id
             del self.obj_dict[obj_id]
@@ -513,6 +682,13 @@ class DryRepo(object):
 
             # Delete object container
             del obj_cont
+
+        if type(obj_containers) is list:
+            for obj_cont in obj_containers:
+                del_cont(obj_cont)
+        else:
+            del_cont(obj_containers)
+
 
     def list_unique_objs(
             self,
