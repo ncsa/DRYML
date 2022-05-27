@@ -300,10 +300,14 @@ class DryMeta(abc.ABCMeta):
                 self.dry_kwargs = DryKwargs(dry_kwargs)
 
                 # Construct parents
-                super().__init__(
-                    *super_args,
-                    **super_kwargs,
-                )
+                try:
+                    super().__init__(
+                        *super_args,
+                        **super_kwargs,
+                    )
+                except TypeError as e:
+                    print(f"error constructing possibly 'object' parent. args: {super_args} kwargs: {super_kwargs}")
+                    raise e
             else:
                 # Construct parents
                 super().__init__(
@@ -336,14 +340,20 @@ class DryMeta(abc.ABCMeta):
             if not hasattr(self, '__dry_obj_container_list__'):
                 self.__dry_obj_container_list__ = []
 
-            from dryml import DryObject
-            for arg in args:
-                if isinstance(arg, DryObject):
-                    self.__dry_obj_container_list__.append(arg)
-            for name in sub_kwargs:
-                obj = sub_kwargs[name]
-                if isinstance(obj, DryObject):
-                    self.__dry_obj_container_list__.append(obj)
+            def _add_dry_objs(el):
+                from dryml import DryObject
+                if isinstance(el, DryObject):
+                    self.__dry_obj_container_list__.append(el)
+                if is_nonstring_iterable(el):
+                    for elm in el:
+                        _add_dry_objs(elm)
+                if is_dictlike(el):
+                    for key in el:
+                        elm = el[key]
+                        _add_dry_objs(elm)
+
+            _add_dry_objs(args)
+            _add_dry_objs(sub_kwargs)
 
             # Call user defined init
             init_func(self, *args, **sub_kwargs)
@@ -556,6 +566,9 @@ def adapt_val(val):
     if issubclass(type(val), DryObjectDef):
         # Handle DryObjectDef, otherwise it'll get mangled
         return val.to_dict()
+    if issubclass(type(val), abc.ABCMeta):
+        # This is another type of class we need to catch
+        return val
     if type(val) is tuple:
         adjusted_value = list(map(adapt_val, val))
         return tuple(adjusted_value)

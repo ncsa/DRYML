@@ -4,7 +4,7 @@ from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta, \
     ComputeModeSaveError, MissingIdError
 from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
     load_object, save_object, change_object_cls, \
-    ObjectWrapper, CallableWrapper
+    ObjectWrapper, CallableWrapper, get_contained_objects
 from dryml.dry_selector import DrySelector
 from dryml.dry_repo import DryRepo
 from dryml.dry_collections import DryList, DryTuple, DryDict
@@ -42,4 +42,5 @@ __all__ = [
     MissingIdError,
     compute_context,
     compute,
+    get_contained_objects,
 ]

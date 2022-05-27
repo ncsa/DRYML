@@ -294,6 +294,9 @@ class DryObject(metaclass=DryMeta):
             raise MissingIdError()
         return self.dry_kwargs['dry_id']
 
+    def __hash__(self):
+        return hash(self.dry_id)
+
     def dry_compute_context(self) -> str:
         contexts = [self.__dry_compute_context__]
         for obj in self.__dry_obj_container_list__:
@@ -364,3 +367,11 @@ class CallableWrapper(DryObject):
         return self.obj.obj(
             *(self.call_args+args),
             **{**self.call_kwargs, **kwargs})
+
+
+def get_contained_objects(obj: DryObject) -> [DryObject]:
+    contained_objs = set()
+    for contained_obj in obj.__dry_obj_container_list__:
+        sub_set = get_contained_objects(contained_obj)
+        contained_objs.update(sub_set)
+    return contained_objs
