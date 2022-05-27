@@ -148,7 +148,7 @@ class DrySelector(object):
             if self.verbosity > 0:
                 print("Class doesn't match")
             if self.verbosity > 1:
-                print(f"Got {type(cls)}")
+                print(f"Got {cls}, matcher: {matcher}")
             return False
         else:
             return True
@@ -161,7 +161,7 @@ class DrySelector(object):
             if self.verbosity > 0:
                 print("Args don't match")
             if self.verbosity > 1:
-                print(f"Got {args}")
+                print(f"Got {args}, matcher: {matcher}")
             return False
 
     def kwargs_compare(self, matcher, kwargs):
@@ -172,12 +172,14 @@ class DrySelector(object):
             if self.verbosity > 0:
                 print("Kwargs don't match")
             if self.verbosity > 1:
-                print(f"Got {kwargs}")
+                print(f"Got {kwargs}, matcher: {matcher}")
             return False
 
     def __call__(
             self,
             obj: Union[DryObject, DryObjectFile, DryObjectDef, Mapping]):
+        if self.verbosity > 0:
+            print("====== Selection started ======")
         # Get definition
         if isinstance(obj, DryObjectDef):
             obj_def = obj
