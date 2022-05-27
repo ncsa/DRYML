@@ -5,6 +5,7 @@ A module for tracking the currently available computing context
 
 from contextlib import contextmanager
 from typing import Type
+from dryml.utils import is_nonstring_iterable
 
 
 _current_context = None
@@ -24,6 +25,11 @@ def get_context_class(ctx_name):
     return contexts[ctx_name][0]
 
 
+def get_context_manager(ctx_name):
+    global contexts
+    return contexts[ctx_name][1]
+
+
 def set_context(ctx):
     """
     Set a context globally. Good for local compute sessions
@@ -35,32 +41,29 @@ class ResourcesUnavailableError(Exception):
     """
     Signals a context is unable to allocate necessary resources
     """
-    def __init__(self, msg):
-        super().__init__(msg)
+    pass
 
 
 class ContextAlreadyActiveError(Exception):
     """
     Signals a context is already active.
     """
-    def __init__(self, msg):
-        super().__init__(msg)
+    pass
 
 
 class WrongContextError(Exception):
     """
     Signals the wrong context is active.
     """
-    def __init__(self, msg):
-        super().__init__(msg)
+    pass
+
 
 
 class NoContextError(Exception):
     """
     Signals there is no context active.
     """
-    def __init__(self, msg):
-        super().__init__(msg)
+    pass
 
 
 class ContextIncompatibilityError(Exception):
@@ -68,8 +71,7 @@ class ContextIncompatibilityError(Exception):
     Signals there is no single context which satisfies
     all requirements.
     """
-    def __init__(self, msg):
-        super().__init__(msg)
+    pass
 
 
 class ComputeContext(object):
@@ -153,3 +155,23 @@ def consolidate_contexts(ctx_name_list):
             "Was unable to find a single context..")
 
     return ctx_name_list[max_i]
+
+
+def get_appropriate_context_name(objs):
+    """
+    Set a context appropriate for the object or set of objects
+    """
+    from dryml import DryObject
+
+    if issubclass(type(objs), DryObject):
+        objs = [objs]
+
+    if not is_nonstring_iterable(objs):
+        raise ValueError("set_appropriate_context only supports single DryObjects or an iterable of DryObjects.")
+
+    ctx_name_list = []    
+
+    for obj in objs:
+        ctx_name_list.append(obj.dry_compute_context())
+
+    return consolidate_contexts(ctx_name_list)
