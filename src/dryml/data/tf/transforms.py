@@ -5,10 +5,39 @@ import tensorflow as tf
 import inspect
 
 
+def func_source_extract(func):
+    # Get the source code
+    code_string = inspect.getsource(func)
+
+    # Possibly strip leading spaces
+    code_lines = code_string.split('\n')
+
+    init_strip = code_lines[0]
+
+    for line in code_lines[1:]:
+        i = 0
+        while i < len(init_strip) and \
+              i < len(line) and \
+              init_strip[i] == line[i]:
+            i += 1
+        if i == len(init_strip) or \
+           i == len(line):
+            continue
+
+        init_strip = init_strip[:i]
+
+    if len(init_strip) > 0:
+        code_lines = list(map(
+            lambda l: l[len(init_strip):],
+            code_lines))
+
+    return '\n'.join(code_lines)
+
+
 class FuncXMap(DryTrainable):
     @staticmethod
     def from_function(func, *args, **kwargs):
-        return FuncXMap(inspect.getsource(func), *args, **kwargs)
+        return FuncXMap(func_source_extract(func), *args, **kwargs)
 
     def __init__(self, func_code, *args, **kwargs):
         # Evaluate passed function code
@@ -42,7 +71,7 @@ class FuncXMap(DryTrainable):
 class FuncYMap(DryTrainable):
     @staticmethod
     def from_function(func, *args, **kwargs):
-        return FuncYMap(inspect.getsource(func), *args, **kwargs)
+        return FuncYMap(func_source_extract(func), *args, **kwargs)
 
     def __init__(self, func_code, *args, **kwargs):
         # Evaluate passed function code
