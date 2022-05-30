@@ -189,6 +189,26 @@ def test_get_api_4(create_temp_dir):
 
 
 @pytest.mark.usefixtures("create_temp_dir")
+def test_get_api_5(create_temp_dir):
+    repo = dryml.DryRepo()
+
+    test_obj_def = dryml.DryObjectDef(
+        objects.TestNest,
+        dryml.DryObjectDef(
+            objects.TestNest2,
+            A=5)
+        )
+
+    obj = repo.get(test_obj_def)
+
+    assert len(repo) == 2
+
+    obj2 = repo.get(test_obj_def)
+    assert obj is obj2
+    assert len(repo) == 2
+
+
+@pytest.mark.usefixtures("create_temp_dir")
 def test_write_1(create_temp_dir):
     repo = dryml.DryRepo(create_temp_dir, create=True)
 

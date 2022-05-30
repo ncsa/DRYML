@@ -123,3 +123,15 @@ def get_temp_checkpoint_dir(dry_id):
 
 def cleanup_checkpoint_dir(checkpoint_dir):
     shutil.rmtree(checkpoint_dir)
+
+
+def head(get_result):
+    if type(get_result) is list or type(get_result) is tuple:
+        return get_result[0]
+    return get_result
+
+
+def tail(get_result):
+    if type(get_result) is list or type(get_result) is tuple:
+        return get_result[-1]
+    return get_result
