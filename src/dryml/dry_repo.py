@@ -367,7 +367,8 @@ class DryRepo(object):
             only_loaded: bool = False,
             update: bool = True,
             open_container: bool = True,
-            verbose: bool = True):
+            verbose: bool = True,
+            build_missing_def=True):
 
         # First, handle all cases where the selector refers to a specific
         # object
@@ -396,9 +397,16 @@ class DryRepo(object):
                 load_objects=load_objects,
                 open_container=open_container)
 
+        def def_builder(sel):
+            new_obj = selector.build(repo=self)
+            self.add_object(new_obj)
+            return new_obj
+
         if obj_id is not None:
             # We have a single object request
             if obj_id not in self.obj_dict:
+                if type(selector) is DryObjectDef and build_missing_def:
+                    return def_builder(selector)
                 raise KeyError(
                     f"Object {selector} (type: {type(selector)}) "
                     f"(dry_id: {obj_id}) not in the Repository.")
@@ -467,6 +475,8 @@ class DryRepo(object):
 
         results = list(map(container_handler, obj_list))
         if len(results) == 0:
+            if type(selector) is DryObjectDef and build_missing_def:
+                return def_builder(selector)
             raise KeyError(f"Key {selector} didn't match any object!")
         elif len(results) == 1:
             return results[0]
