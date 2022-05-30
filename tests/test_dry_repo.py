@@ -382,6 +382,50 @@ def test_save_6(create_temp_dir):
 
 
 @pytest.mark.usefixtures("create_temp_dir")
+def test_save_7(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
+
+    obj1 = objects.TestNest2(A=5)
+    obj2 = objects.TestNest(obj1)
+
+    repo.add_object(obj2)
+
+    assert len(repo) == 2
+
+    assert obj1 is repo[obj1]
+    assert obj1 is repo[obj1.dry_id]
+    assert obj2 is repo[obj2]
+    assert obj2 is repo[obj2.dry_id]
+
+    repo.save(obj2)
+
+    assert len(os.listdir(create_temp_dir)) == 2
+
+    del repo
+
+    repo = dryml.DryRepo(create_temp_dir)
+
+    assert len(repo) == 2
+
+    assert type(repo.get(obj1)) is not list
+    assert type(repo.get(obj2)) is not list
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_8(create_temp_dir):
+    repo = dryml.DryRepo(create_temp_dir, create=True)
+
+    obj1 = objects.TestNest2(A=5)
+    obj2 = objects.TestNest(obj1)
+
+    repo.save(obj2)
+
+    assert len(repo) == 2
+
+    assert len(os.listdir(create_temp_dir)) == 2
+
+
+@pytest.mark.usefixtures("create_temp_dir")
 def test_delete_1(create_temp_dir):
     repo = dryml.DryRepo(create_temp_dir, create=True)
 

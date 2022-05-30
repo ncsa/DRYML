@@ -373,5 +373,8 @@ def get_contained_objects(obj: DryObject) -> [DryObject]:
     contained_objs = set()
     for contained_obj in obj.__dry_obj_container_list__:
         sub_set = get_contained_objects(contained_obj)
+        # Add contained objects contained objects.
         contained_objs.update(sub_set)
+        # Add the contained object.
+        contained_objs.add(contained_obj)
     return contained_objs

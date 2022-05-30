@@ -340,14 +340,15 @@ class DryRepo(object):
     def __contains__(
             self, item: Union[DryObject, DryObjectDef, dict, DryObjectFile]):
         if issubclass(type(item), DryObject) or \
-           issubclass(item, DryObjectFile):
+           type(item) is DryObjectFile:
             obj_id = item.definition().dry_id
         elif issubclass(type(item), DryObjectDef):
             obj_id = item.dry_id
         elif issubclass(type(item), dict):
             obj_id = DryObjectDef.from_dict(item).dry_id
         else:
-            raise TypeError("Unsupported type for repo.contains!")
+            raise TypeError(
+                f"Unsupported type {type(item)} for repo.contains!")
         return obj_id in self.obj_dict
 
     def __getitem__(
@@ -493,13 +494,10 @@ class DryRepo(object):
             return func(obj, *func_args, **func_kwargs)
 
         # Get object list
-        try:
-            objs = self.get(
-                selector=selector,
-                sel_args=sel_args, sel_kwargs=sel_kwargs,
-                **kwargs)
-        except KeyError:
-            return None
+        objs = self.get(
+            selector=selector,
+            sel_args=sel_args, sel_kwargs=sel_kwargs,
+            **kwargs)
 
         if type(objs) is list:
             # apply function to objects
@@ -546,10 +544,20 @@ class DryRepo(object):
             open_container=False, only_loaded=True, load_objects=False)
 
     def save(self,
-             selector: Optional[Callable] = None,
+             selector: Optional[Union[RepoKey, list, tuple, Callable]] = None,
              sel_args=None, sel_kwargs=None,
              directory: Optional[str] = None,
-             recursive=True):
+             recursive=True,
+             error_on_none=False):
+
+        """
+        Saves the object or objects matching the input selector to disk.
+        if a single object is passed and not already in the repo, it's added
+        then saved.
+
+        error_on_none: Whether to throw the KeyError, when no object is in
+            the repo matching the key.
+        """
 
         save_cache = set()
 
@@ -584,25 +592,38 @@ class DryRepo(object):
                     raise RuntimeError(
                         "Can only save currently loaded DryObject")
 
-            # Get/save contained objects
-            if recursive:
-                contained_objs = obj_or_cont.get_contained_objects()
+                if obj_or_cont.obj in save_cache:
+                    # don't need to save, it's already done.
+                    return
 
-                for obj in contained_objs:
-                    if obj in self:
-                        sub_obj_cont = self.get(obj, open_container=False)
-                        save_func(sub_obj_cont)
-                    else:
-                        obj.save_self(os.path.join())
+                # Get/save contained objects
+                if recursive:
+                    contained_objs = obj_or_cont.get_contained_objects()
 
-            # Save object
-            obj_or_cont.save(directory=directory, save_cache=save_cache)
-            save_cache.add(obj_or_cont.obj)
+                    for obj in contained_objs:
+                        if obj in self:
+                            sub_obj_cont = self.get(obj, open_container=False)
+                            save_func(sub_obj_cont)
+                        else:
+                            obj.save_self(os.path.join())
 
-        self.apply(
-            save_func,
-            selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
-            open_container=False, only_loaded=True, load_objects=False)
+                # Save object
+                obj_or_cont.save(directory=directory, save_cache=save_cache)
+                save_cache.add(obj_or_cont.obj)
+
+        # If we haven't added the object to the repo yet, add it now.
+        if issubclass(type(selector), DryObject):
+            if selector not in self:
+                self.add_object(selector)
+
+        try:
+            self.apply(
+                save_func,
+                selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
+                open_container=False, only_loaded=True, load_objects=False)
+        except KeyError as e:
+            if error_on_none:
+                raise e
 
     def save_by_id(self,
                    obj_id, directory: Optional[str] = None):
