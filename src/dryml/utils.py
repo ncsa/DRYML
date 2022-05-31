@@ -126,12 +126,21 @@ def cleanup_checkpoint_dir(checkpoint_dir):
 
 
 def head(get_result):
-    if type(get_result) is list or type(get_result) is tuple:
-        return get_result[0]
-    return get_result
+    from dryml import DryObject
+    if issubclass(type(get_result), DryObject):
+        return get_result
+    return get_result[0]
 
 
 def tail(get_result):
-    if type(get_result) is list or type(get_result) is tuple:
-        return get_result[-1]
-    return get_result
+    from dryml import DryObject
+    if issubclass(type(get_result), DryObject):
+        return get_result
+    return get_result[-1]
+
+
+def count(get_result):
+    from dryml import DryObject
+    if issubclass(type(get_result), DryObject):
+        return 1
+    return len(get_result)
