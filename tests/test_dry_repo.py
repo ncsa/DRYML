@@ -165,7 +165,13 @@ def test_get_api_3(create_temp_dir):
         objects.HelloStr,
         msg='test')
 
-    test_obj = repo.get(test_obj_def)
+    try:
+        test_obj = repo.get(test_obj_def)
+        assert False
+    except KeyError:
+        pass
+
+    test_obj = repo.get(test_obj_def, build_missing_def=True)
 
     assert len(repo) == 1
     assert dryml.DrySelector.build(test_obj_def)(test_obj)
@@ -199,7 +205,7 @@ def test_get_api_5(create_temp_dir):
             A=5)
         )
 
-    obj = repo.get(test_obj_def)
+    obj = repo.get(test_obj_def, build_missing_def=True)
 
     assert len(repo) == 2
 

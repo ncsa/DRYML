@@ -368,7 +368,7 @@ class DryRepo(object):
             update: bool = True,
             open_container: bool = True,
             verbose: bool = True,
-            build_missing_def=True):
+            build_missing_def=False):
 
         # First, handle all cases where the selector refers to a specific
         # object
