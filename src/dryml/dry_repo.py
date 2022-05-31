@@ -133,8 +133,9 @@ class DryRepoContainer(object):
             self._obj = None
 
     def delete(self):
-        # Delete on-disk file
-        os.remove(self.filepath)
+        # Delete on-disk file if it exists
+        if os.path.exists(self.filepath):
+            os.remove(self.filepath)
 
     def set_directory(self, directory):
         self._directory = directory
