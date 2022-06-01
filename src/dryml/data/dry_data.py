@@ -33,7 +33,7 @@ class DryData():
         """
         raise NotImplementedError()
 
-    def as_indexed(self) -> DryData:
+    def as_indexed(self, start=0) -> DryData:
         """
         If not already indexed, return a version of this dataset
         which is indexed.
