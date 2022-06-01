@@ -6,13 +6,44 @@ A module for tracking the currently available computing context
 from contextlib import contextmanager
 from typing import Type
 from dryml.utils import is_nonstring_iterable
+from collections import UserDict
 
 
 _current_context = None
 
 
-contexts = {
+def default_context_loader():
+    from dryml.context import ComputeContext
+    return ComputeContext
+
+
+def tf_context_loader():
+    from dryml.context.tf import TFComputeContext
+    return TFComputeContext
+
+
+context_loaders = {
+    'default': default_context_loader,
+    'tf': tf_context_loader,
 }
+
+
+class context_map(UserDict):
+    def __getitem__(self, key):
+        try:
+            return self.data[key]
+        except KeyError:
+            ctx_cls = context_loaders[key]()
+            self.data[key] = (ctx_cls, make_context_manager(ctx_cls))
+            return self.data[key]
+
+
+contexts = context_map({})
+
+
+def replace_context(name, val):
+    global _current_context
+    _current_context[name] = val
 
 
 def context():
@@ -100,15 +131,6 @@ def make_context_manager(ctx_cls: Type):
             ctx_obj.release_context()
 
     return context_manager
-
-
-def register_context_manager(name: str, ctx_cls: Type):
-    if name in contexts:
-        raise ValueError(f"Context with name {name} already exists!")
-    contexts[name] = (ctx_cls, make_context_manager(ctx_cls))
-
-
-register_context_manager('default', ComputeContext)
 
 
 def consolidate_contexts(ctx_name_list):

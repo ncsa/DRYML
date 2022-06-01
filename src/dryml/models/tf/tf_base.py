@@ -4,7 +4,7 @@ from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir
 from dryml.models import DryTrainable, DryComponent
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
-import dryml.models.tf
+from dryml.models.tf.utils import keras_train_spec_updater, keras_callback_wrapper
 import tempfile
 import zipfile
 import os
@@ -359,12 +359,10 @@ class TFBasicTraining(TFLikeTrainFunction):
 
         if train_spec is not None:
             callbacks.append(
-                dryml.models.tf.utils.keras_train_spec_updater(
-                    train_spec))
+                keras_train_spec_updater(train_spec))
 
         for callback in train_callbacks:
-            new_callback = \
-                dryml.models.tf.utils.keras_callback_wrapper(callback)
+            new_callback = keras_callback_wrapper(callback)
             callbacks.append(new_callback)
 
         # Fit model
@@ -453,12 +451,10 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
 
         if train_spec is not None:
             callbacks.append(
-                dryml.models.tf.utils.keras_train_spec_updater(
-                    train_spec))
+                keras_train_spec_updater(train_spec))
 
         for callback in train_callbacks:
-            new_callback = \
-                dryml.models.tf.utils.keras_callback_wrapper(callback)
+            new_callback = keras_callback_wrapper(callback)
             callbacks.append(new_callback)
 
         # Fit model

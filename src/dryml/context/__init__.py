@@ -1,5 +1,5 @@
 from dryml.context.context_tracker import context, set_context, \
-    contexts, register_context_manager, ComputeContext, get_context_class, \
+    contexts, ComputeContext, get_context_class, \
     ResourcesUnavailableError, WrongContextError, get_context_manager, \
     NoContextError, ContextAlreadyActiveError, get_appropriate_context_name
 from dryml.context.process import Process, compute_context, compute, \
@@ -13,7 +13,6 @@ __all__ = [
     get_context_manager,
     get_appropriate_context_name,
     contexts,
-    register_context_manager,
     ComputeContext,
     ResourcesUnavailableError,
     WrongContextError,
