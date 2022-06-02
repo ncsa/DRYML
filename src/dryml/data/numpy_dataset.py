@@ -249,7 +249,7 @@ class NumpyDataset(DryData):
         Skip a specific number of examples
         """
 
-        def skip(gen, n):
+        def skiper(gen, n):
             i = 0
             it = iter(gen)
             while i < n:
@@ -265,7 +265,7 @@ class NumpyDataset(DryData):
                     return
 
         return NumpyDataset(
-            skip(self.data_gen, n),
+            skiper(self.data_gen, n),
             indexed=self.indexed(),
             supervised=self.supervised(),
             batch_size=self.batch_size())
