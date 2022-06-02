@@ -1,5 +1,96 @@
 import numpy as np
 from dryml.data import NumpyDataset
+from dryml.data import util
+
+
+def test_data_util_slicer_1():
+    array_shape = (10, 20)
+    data1 = np.random.random(array_shape)
+    data2 = np.random.random(array_shape)
+
+    slice1 = slice(None, 5)
+    slice2 = slice(5, None)
+
+    data_tup = (data1, data2)
+
+    data_tup_slice1 = util.nested_slice(data_tup, slice1)
+
+    assert np.all(data_tup_slice1[0] == data1[slice1])
+    assert np.all(data_tup_slice1[1] == data2[slice1])
+
+    data_tup_slice2 = util.nested_slice(data_tup, slice2)
+
+    assert np.all(data_tup_slice2[0] == data1[slice2])
+    assert np.all(data_tup_slice2[1] == data2[slice2])
+
+
+def test_data_util_slicer_2():
+    array_shape = (10, 20)
+    data1 = np.random.random(array_shape)
+    data2 = np.random.random(array_shape)
+
+    slice1 = slice(None, 5)
+    slice2 = slice(5, None)
+
+    data_dict = {'key1': data1, 'key2': data2}
+
+    data_dict_slice1 = util.nested_slice(data_dict, slice1)
+
+    assert np.all(data_dict_slice1['key1'] == data1[slice1])
+    assert np.all(data_dict_slice1['key2'] == data2[slice1])
+
+    data_dict_slice2 = util.nested_slice(data_dict, slice2)
+
+    assert np.all(data_dict_slice2['key1'] == data1[slice2])
+    assert np.all(data_dict_slice2['key2'] == data2[slice2])
+
+
+def test_data_util_slicer_3():
+    array_shape = (10, 20)
+    data1 = np.random.random(array_shape)
+    data2 = np.random.random(array_shape)
+    data3 = np.random.random(array_shape)
+
+    slice1 = slice(None, 5)
+    slice2 = slice(5, None)
+
+    data = (data1, {'key1': data2, 'key2': data3})
+
+    data_slice1 = util.nested_slice(data, slice1)
+
+    assert np.all(data_slice1[0] == data1[slice1])
+    assert np.all(data_slice1[1]['key1'] == data2[slice1])
+    assert np.all(data_slice1[1]['key2'] == data3[slice1])
+
+    data_slice2 = util.nested_slice(data, slice2)
+
+    assert np.all(data_slice2[0] == data1[slice2])
+    assert np.all(data_slice2[1]['key1'] == data2[slice2])
+    assert np.all(data_slice2[1]['key2'] == data3[slice2])
+
+
+def test_data_util_slicer_4():
+    array_shape = (10, 20)
+    data1 = np.random.random(array_shape)
+    data2 = np.random.random(array_shape)
+    data3 = np.random.random(array_shape)
+
+    slice1 = slice(None, 5)
+    slice2 = slice(5, None)
+
+    data = {'key1': (data1, data2), 'key2': data3}
+
+    data_slice1 = util.nested_slice(data, slice1)
+
+    assert np.all(data_slice1['key1'][0] == data1[slice1])
+    assert np.all(data_slice1['key1'][1] == data2[slice1])
+    assert np.all(data_slice1['key2'] == data3[slice1])
+
+    data_slice2 = util.nested_slice(data, slice2)
+
+    assert np.all(data_slice2['key1'][0] == data1[slice2])
+    assert np.all(data_slice2['key1'][1] == data2[slice2])
+    assert np.all(data_slice2['key2'] == data3[slice2])
 
 
 def test_numpy_dataset_1():
