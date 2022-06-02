@@ -1,6 +1,6 @@
 from dryml.data.dry_data import DryData, NotIndexedError, \
     NotSupervisedError
-from dryml.data.util import nested_batcher
+from dryml.data.util import nested_batcher, nested_unbatcher
 import numpy as np
 from typing import Callable
 
@@ -124,18 +124,8 @@ class NumpyDataset(DryData):
         if not self.batched():
             return self
         else:
-            def unbatcher(gen):
-                it = iter(gen)
-                while True:
-                    try:
-                        d = next(it)
-                        for i in range(len(d)):
-                            yield d[i]
-                    except StopIteration:
-                        break
-
             return NumpyDataset(
-                unbatcher(self.data_gen),
+                nested_unbatcher(self.data_gen),
                 indexed=self.indexed(),
                 supervised=self.supervised())
 
