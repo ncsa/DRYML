@@ -1,4 +1,5 @@
-from dryml.data import DryData, NotIndexedError, NotSupervisedError
+from dryml.data import DryData, NotIndexedError, NotSupervisedError, \
+    NumpyDataset, util
 from typing import Callable
 import tensorflow as tf
 import numpy as np
@@ -245,3 +246,27 @@ class TFDataset(DryData):
         if cardinality == tf.data.UNKNOWN_CARDINALITY:
             return np.NA
         return cardinality.numpy()
+
+    def numpy(self):
+        def numpy_transform(el):
+            if type(el) is not np.ndarray:
+                return el.numpy()
+            else:
+                return el
+
+        def numpy_transformer(gen):
+            it = iter(gen)
+            while True:
+                try:
+                    el = next(it)
+                except StopIteration:
+                    break
+                yield util.nested_apply(el, numpy_transform)
+
+            return
+
+        return NumpyDataset(
+            numpy_transformer(self.ds),
+            indexed=self.indexed(),
+            supervised=self.supervised(),
+            batch_size=self.batch_size())
