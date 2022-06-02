@@ -120,7 +120,8 @@ class NumpyDataset(DryData):
                             elements.append(next(it))
                     except StopIteration:
                         nonempty = False
-                    yield np.stack(elements, axis=0)
+                    if len(elements) > 0:
+                        yield np.stack(elements, axis=0)
 
             return NumpyDataset(
                 batcher(self.data_gen, batch_size),
