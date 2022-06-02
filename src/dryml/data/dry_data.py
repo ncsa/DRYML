@@ -140,3 +140,10 @@ class DryData():
         and unknown if it can't be determined.
         """
         raise NotImplementedError()
+
+    def numpy(self):
+        """
+        Create a Numpy Dataset from this dataset.
+        """
+
+        raise NotImplementedError()

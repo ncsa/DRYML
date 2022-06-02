@@ -205,3 +205,62 @@ def test_numpy_dataset_8():
 
     for el, el2 in zip(dataset, dataset2):
         assert np.all(el == el2)
+
+
+def test_numpy_dataset_9():
+    batch_size = 32
+
+    batch_rows = []
+    for i in range(batch_size):
+        batch_rows.append(np.random.random((20,)))
+
+    dataset = NumpyDataset(batch_rows)
+
+    i = 0
+    for idx, el in dataset.as_indexed():
+        assert idx == i
+        assert np.all(el == batch_rows[i])
+        i += 1
+
+
+def test_numpy_dataset_10():
+    batch_size = 32
+
+    data = np.random.random((batch_size, 20))
+
+    dataset = NumpyDataset(data)
+
+    i = 0
+    for idx, el in dataset.as_indexed().unbatch():
+        assert idx == i
+        assert np.all(el == data[i])
+        i += 1
+
+
+def test_numpy_dataset_11():
+    batch_size = 32
+
+    data = np.random.random((batch_size, 20))
+
+    dataset = NumpyDataset(data)
+
+    i = 0
+    for el in dataset.as_indexed().as_not_indexed().unbatch():
+        assert np.all(el == data[i])
+        i += 1
+
+
+def test_numpy_dataset_12():
+    batch_size = 32
+
+    data1 = np.random.random((batch_size, 20))
+    data2 = np.random.random((batch_size, 20))
+
+    dataset = NumpyDataset([(data1, data2)], batch_size=batch_size)
+
+    i = 0
+    for idx, el in dataset.as_indexed().unbatch():
+        assert idx == i
+        assert np.all(el[0] == data1[i])
+        assert np.all(el[1] == data2[i])
+        i += 1

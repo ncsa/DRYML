@@ -17,9 +17,27 @@ class NumpyDataset(DryData):
         if type(data) is np.ndarray:
             super().__init__(
                 indexed=indexed, supervised=supervised,
-                batch_size=data.shape[0])
+                batch_size=len(data))
 
             self.data_gen = [data]
+            return
+
+        try:
+            import pandas as pd
+            if type(data) is pd.core.frame.DataFrame:
+                if indexed is False:
+                    super().__init__(
+                        indexed=indexed, supervised=supervised,
+                        batch_size=len(data))
+                    self.data_gen = [data.to_numpy()]
+                elif indexed is True:
+                    super().__init__(
+                        indexed=indexed, supervised=supervised,
+                        batch_size=len(data))
+                    self.data_gen = [(data.index.to_numpy(), data.to_numpy())]
+        except ImportError:
+            pass
+
         else:
             super().__init__(
                 indexed=indexed, supervised=supervised,
@@ -44,19 +62,42 @@ class NumpyDataset(DryData):
         if self.indexed():
             return self
         else:
-            def enumerate_dataset(gen, start=0):
-                i = start
-                it = iter(gen)
-                while True:
-                    d = next(it)
-                    yield (i, d)
-                    i += 1
+            if not self.batched():
+                def enumerate_dataset(gen, start=0):
+                    i = start
+                    it = iter(gen)
+                    while True:
+                        try:
+                            d = next(it)
+                        except StopIteration:
+                            return
+                        yield (i, d)
+                        i += 1
 
-            return NumpyDataset(
-                enumerate_dataset(self.data_gen, start=start),
-                indexed=True,
-                supervised=self.supervised(),
-                batch_size=self.batch_size())
+                return NumpyDataset(
+                    enumerate_dataset(self.data_gen, start=start),
+                    indexed=True,
+                    supervised=self.supervised(),
+                    batch_size=self.batch_size())
+            else:
+                def enumerate_dataset(gen, start=0):
+                    it = iter(gen)
+                    i = start
+                    while True:
+                        try:
+                            d = next(it)
+                        except StopIteration:
+                            return
+                        batch_size = len(d)
+                        idx = np.array(list(range(i, i+batch_size)))
+                        i += batch_size
+                        yield (idx, d)
+
+                return NumpyDataset(
+                    enumerate_dataset(self.data_gen, start=start),
+                    indexed=True,
+                    supervised=self.supervised(),
+                    batch_size=self.batch_size())
 
     def as_not_indexed(self):
         """
@@ -276,3 +317,6 @@ class NumpyDataset(DryData):
         and unknown if it can't be determined.
         """
         raise NotImplementedError()
+
+    def numpy(self):
+        return self
