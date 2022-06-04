@@ -480,7 +480,7 @@ class TFLikeTrainable(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
-        if data.batched():
+        if data.batched:
             # We can execute the method directly on the data
             return data.apply_X(func=lambda X: self.model(X, *args, **kwargs))
         else:

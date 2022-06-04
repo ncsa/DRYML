@@ -49,7 +49,7 @@ class NumpyDataset(DryData):
         """
         If indexed, return the index of this dataset
         """
-        if not self.indexed():
+        if not self.indexed:
             raise NotIndexedError()
 
         return map(lambda t: t[0], self.data_gen)
@@ -59,10 +59,10 @@ class NumpyDataset(DryData):
         If not already indexed, return a version of this dataset
         which is indexed.
         """
-        if self.indexed():
+        if self.indexed:
             return self
         else:
-            if not self.batched():
+            if not self.batched:
                 def enumerate_dataset(gen, start=0):
                     i = start
                     it = iter(gen)
@@ -77,8 +77,8 @@ class NumpyDataset(DryData):
                 return NumpyDataset(
                     enumerate_dataset(self.data_gen, start=start),
                     indexed=True,
-                    supervised=self.supervised(),
-                    batch_size=self.batch_size())
+                    supervised=self.supervised,
+                    batch_size=self.batch_size)
             else:
                 def enumerate_dataset(gen, start=0):
                     it = iter(gen)
@@ -96,42 +96,42 @@ class NumpyDataset(DryData):
                 return NumpyDataset(
                     enumerate_dataset(self.data_gen, start=start),
                     indexed=True,
-                    supervised=self.supervised(),
-                    batch_size=self.batch_size())
+                    supervised=self.supervised,
+                    batch_size=self.batch_size)
 
     def as_not_indexed(self):
         """
         Strip index from dataset
         """
-        if not self.indexed():
+        if not self.indexed:
             return self
         else:
             return NumpyDataset(
                 map(lambda t: t[1], self.data_gen),
                 indexed=False,
-                supervised=self.supervised(),
-                batch_size=self.batch_size())
+                supervised=self.supervised,
+                batch_size=self.batch_size)
 
     def as_not_supervised(self) -> DryData:
         """
         Strip supervised targets
         """
 
-        if not self.supervised():
+        if not self.supervised:
             return self
         else:
-            if self.indexed():
+            if self.indexed:
                 return NumpyDataset(
                     map(lambda i, xy: (i, xy[0]), self.data_gen),
-                    indexed=self.indexed(),
+                    indexed=self.indexed,
                     supervised=False,
-                    batch_size=self.batch_size())
+                    batch_size=self.batch_size)
             else:
                 return NumpyDataset(
                     map(lambda x, y: x, self.data_gen),
-                    indexed=self.indexed(),
+                    indexed=self.indexed,
                     supervised=False,
-                    batch_size=self.batch_size())
+                    batch_size=self.batch_size)
 
     def intersect(self) -> DryData:
         """
@@ -149,112 +149,112 @@ class NumpyDataset(DryData):
         """
         Batch this data
         """
-        if self.batched():
+        if self.batched:
             return self
         else:
             return NumpyDataset(
                 nested_batcher(self.data_gen, batch_size),
-                indexed=self.indexed(),
-                supervised=self.supervised(),
+                indexed=self.indexed,
+                supervised=self.supervised,
                 batch_size=batch_size)
 
     def unbatch(self) -> DryData:
         """
         Unbatch this data
         """
-        if not self.batched():
+        if not self.batched:
             return self
         else:
             return NumpyDataset(
                 nested_unbatcher(self.data_gen),
-                indexed=self.indexed(),
-                supervised=self.supervised())
+                indexed=self.indexed,
+                supervised=self.supervised)
 
     def apply_X(self, func: Callable = None) -> DryData:
         """
         Apply a function to the X component of DryData
         """
 
-        if self.indexed():
-            if self.supervised():
+        if self.indexed:
+            if self.supervised:
                 return NumpyDataset(
                     map(lambda i, xy: (i, (func(xy[0]), xy[1])),
                         self.data_gen),
-                    indexed=self.indexed(),
-                    supervised=self.supervised(),
-                    batch_size=self.batch_size())
+                    indexed=self.indexed,
+                    supervised=self.supervised,
+                    batch_size=self.batch_size)
             else:
                 return NumpyDataset(
                     map(lambda i, x: (i, func(x)),
                         self.data_gen),
-                    indexed=self.indexed(),
-                    supervised=self.supervised(),
-                    batch_size=self.batch_size())
+                    indexed=self.indexed,
+                    supervised=self.supervised,
+                    batch_size=self.batch_size)
         else:
-            if self.supervised():
+            if self.supervised:
                 return NumpyDataset(
                     map(lambda x, y: (func(x), y),
                         self.data_gen),
-                    indexed=self.indexed(),
-                    supervised=self.supervised(),
-                    batch_size=self.batch_size())
+                    indexed=self.indexed,
+                    supervised=self.supervised,
+                    batch_size=self.batch_size)
             else:
                 return NumpyDataset(
                     map(lambda x: func(x),
                         self.data_gen),
-                    indexed=self.indexed(),
-                    supervised=self.supervised(),
-                    batch_size=self.batch_size())
+                    indexed=self.indexed,
+                    supervised=self.supervised,
+                    batch_size=self.batch_size)
 
     def apply_Y(self, func=None) -> DryData:
         """
         Apply a function to the Y component of DryData
         """
 
-        if not self.supervised():
+        if not self.supervised:
             raise NotSupervisedError(
                 "Can't apply a function to the Y component of "
                 "non supervised dataset")
 
-        if self.indexed():
+        if self.indexed:
             return NumpyDataset(
                 map(lambda i, xy: (i, (xy[0], func(xy[1]))),
                     self.data_gen),
-                indexed=self.indexed(),
-                supervised=self.supervised(),
-                batch_size=self.batch_size())
+                indexed=self.indexed,
+                supervised=self.supervised,
+                batch_size=self.batch_size)
         else:
             return NumpyDataset(
                 map(lambda x, y: (x, func(y)),
                     self.data_gen),
-                indexed=self.indexed(),
-                supervised=self.supervised(),
-                batch_size=self.batch_size())
+                indexed=self.indexed,
+                supervised=self.supervised,
+                batch_size=self.batch_size)
 
     def apply(self, func=None) -> DryData:
         """
         Apply a function to (X, Y)
         """
 
-        if not self.supervised():
+        if not self.supervised:
             raise NotSupervisedError(
                 "Can't apply a function to the Y component of "
                 "non supervised dataset")
 
-        if self.indexed():
+        if self.indexed:
             return NumpyDataset(
                 map(lambda i, xy: (i, func(*xy)),
                     self.data_gen),
-                indexed=self.indexed(),
-                supervised=self.supervised(),
-                batch_size=self.batch_size())
+                indexed=self.indexed,
+                supervised=self.supervised,
+                batch_size=self.batch_size)
         else:
             return NumpyDataset(
                 map(lambda x, y: func(x, y),
                     self.data_gen),
-                indexed=self.indexed(),
-                supervised=self.supervised(),
-                batch_size=self.batch_size())
+                indexed=self.indexed,
+                supervised=self.supervised,
+                batch_size=self.batch_size)
 
     def __iter__(self):
         """
@@ -281,9 +281,9 @@ class NumpyDataset(DryData):
 
         return NumpyDataset(
             taker(self.data_gen, n),
-            indexed=self.indexed(),
-            supervised=self.supervised(),
-            batch_size=self.batch_size())
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size)
 
     def skip(self, n):
         """
@@ -307,9 +307,9 @@ class NumpyDataset(DryData):
 
         return NumpyDataset(
             skiper(self.data_gen, n),
-            indexed=self.indexed(),
-            supervised=self.supervised(),
-            batch_size=self.batch_size())
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size)
 
     def __len__(self):
         """

@@ -21,6 +21,7 @@ class DryData():
         self._supervised = supervised
         self._batch_size = batch_size
 
+    @property
     def indexed(self) -> bool:
         """
         Indicate whether this dataset is indexed.
@@ -46,6 +47,7 @@ class DryData():
         """
         raise NotImplementedError()
 
+    @property
     def supervised(self) -> bool:
         """
         Indicate whether this dataset is supervised (has targets as well)
@@ -70,6 +72,7 @@ class DryData():
         """
         raise NotImplementedError()
 
+    @property
     def batched(self) -> bool:
         """
         Indicate whether this data has been batched
@@ -79,6 +82,7 @@ class DryData():
         else:
             return False
 
+    @property
     def batch_size(self):
         """
         Get the batch size
