@@ -4,7 +4,8 @@ from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir
 from dryml.models import DryTrainable, DryComponent
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
-from dryml.models.tf.utils import keras_train_spec_updater, keras_callback_wrapper
+from dryml.models.tf.utils import keras_train_spec_updater, \
+    keras_callback_wrapper
 import tempfile
 import zipfile
 import os
