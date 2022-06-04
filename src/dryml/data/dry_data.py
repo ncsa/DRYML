@@ -151,3 +151,20 @@ class DryData():
         """
 
         raise NotImplementedError()
+
+    def collect(self):
+        """
+        Collect all data from the dataset
+        """
+
+        result = []
+        for el in self:
+            result.append(el)
+        return result
+
+    def peek(self):
+        """
+        Get the first element to have a look
+        """
+
+        return self.take(1).collect()[0]
