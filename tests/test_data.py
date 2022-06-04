@@ -264,3 +264,26 @@ def test_numpy_dataset_12():
         assert np.all(el[0] == data1[i])
         assert np.all(el[1] == data2[i])
         i += 1
+
+
+def test_numpy_dataset_13():
+    batch_size = 32
+
+    data1 = np.random.random((batch_size, 20))
+    data2 = np.random.random((batch_size, 20))
+
+    dataset = NumpyDataset([(data1, data2)], batch_size=batch_size)
+
+    assert dataset is dataset.batch(batch_size=2)
+
+
+def test_numpy_dataset_14():
+    batch_size = 32
+
+    batch_rows = []
+    for i in range(batch_size):
+        batch_rows.append(np.random.random((20,)))
+
+    dataset = NumpyDataset(batch_rows).batch(batch_size=batch_size)
+
+    assert dataset is dataset.batch(batch_size=batch_size)
