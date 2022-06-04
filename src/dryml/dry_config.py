@@ -215,6 +215,11 @@ class DryMeta(abc.ABCMeta):
         return f
 
     @staticmethod
+    def collect_kwargs(f):
+        f.__dry_collect_kwargs__ = True
+        return f
+
+    @staticmethod
     def mark_compute(f):
         f.__dry_compute_mark__ = True
         return f
@@ -279,11 +284,25 @@ class DryMeta(abc.ABCMeta):
             for i in range(num_args):
                 dry_args.append(args[i])
 
-            # Collect keyword arguments
+            collect_kwargs = False
+            if hasattr(init_func, '__dry_collect_kwargs__'):
+                if init_func.__dry_collect_kwargs__:
+                    collect_kwargs = True
+
+            # Collect keyword arguments and save into dry_kwargs
             used_kwargs = []
             for k, v in init_func.__dry_kwargs__:
+                # Need to use .get since we are passing a default (v).
                 dry_kwargs[k] = kwargs.get(k, v)
                 used_kwargs.append(k)
+
+            # Collect remaining kwargs if needed.
+            dont_collect_kwargs = ['dry_id']
+            if collect_kwargs:
+                for k in kwargs:
+                    if k not in used_kwargs and k not in dont_collect_kwargs:
+                        dry_kwargs[k] = kwargs[k]
+                        used_kwargs.append(k)
 
             # Grab unaltered arguments to pass to super
             super_args = args[num_args:]
