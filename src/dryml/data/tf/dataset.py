@@ -244,7 +244,7 @@ class TFDataset(DryData):
         if cardinality == tf.data.INFINITE_CARDINALITY:
             return np.inf
         if cardinality == tf.data.UNKNOWN_CARDINALITY:
-            return np.NA
+            return np.nan
         return cardinality.numpy()
 
     def numpy(self):
