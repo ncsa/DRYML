@@ -144,4 +144,4 @@ class BestCat(DryTrainable):
 
     def eval(self, data: DryData, *args, **kwargs):
         return data.tf().apply_X(
-                func=lambda image: tf.argmax(image, axis=-1))
+            func=lambda image: tf.argmax(image, axis=-1))
