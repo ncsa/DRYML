@@ -1,6 +1,5 @@
 from dryml.models import DryTrainable
 from dryml.data.dry_data import DryData
-from dryml.data.tf.dataset import TFDataset
 import tensorflow as tf
 import inspect
 
@@ -65,7 +64,7 @@ class FuncXMap(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
-        return data.apply_X(func=self.func)
+        return data.tf().apply_X(func=self.func)
 
 
 class FuncYMap(DryTrainable):
@@ -99,7 +98,7 @@ class FuncYMap(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
-        return data.apply_Y(func=self.func)
+        return data.tf().apply_Y(func=self.func)
 
 
 class FuncMap(DryTrainable):
@@ -133,7 +132,7 @@ class FuncMap(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
-        return data.apply(func=self.func)
+        return data.tf().apply(func=self.func)
 
 
 class BestCat(DryTrainable):
@@ -144,9 +143,5 @@ class BestCat(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
-        if type(data) is not TFDataset:
-            raise TypeError(
-                f"Dataset of type {type(data)} not currently supported.")
-
-        return data.apply_X(
-            func=lambda image: tf.argmax(image, axis=-1))
+        return data.tf().apply_X(
+                func=lambda image: tf.argmax(image, axis=-1))

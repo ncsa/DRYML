@@ -248,6 +248,10 @@ class TFDataset(DryData):
         return cardinality.numpy()
 
     def numpy(self):
+        """
+        Produce NumpyDataset from this TFDataset
+        """
+
         def numpy_transform(el):
             if type(el) is not np.ndarray:
                 return el.numpy()
@@ -270,3 +274,9 @@ class TFDataset(DryData):
             indexed=self.indexed,
             supervised=self.supervised,
             batch_size=self.batch_size)
+
+    def tf(self):
+        """
+        Get a TFDataset, but this is already a TFDataset
+        """
+        return self

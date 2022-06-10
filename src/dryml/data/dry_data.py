@@ -147,7 +147,14 @@ class DryData():
 
     def numpy(self):
         """
-        Create a Numpy Dataset from this dataset.
+        Create a NumpyDataset from this dataset.
+        """
+
+        raise NotImplementedError()
+
+    def tf(self):
+        """
+        Create a TFDataset from this dataset.
         """
 
         raise NotImplementedError()

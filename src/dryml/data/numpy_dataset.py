@@ -320,3 +320,40 @@ class NumpyDataset(DryData):
 
     def numpy(self):
         return self
+
+    def tf(self):
+        from dryml.data.tf import TFDataset
+        import dryml.data.util as util
+        import tensorflow as tf
+
+        # Heuristic to determine output_signature
+        peek_data = self.in_ds.peek()
+
+        def get_numpy_array_spec(e):
+            e_tens = tf.constant(e)
+            e_spec = tf.TensorSpec.from_tensor(e_tens)
+            if self.batched:
+                # We need to remove the first shape number
+                # Since this data is batched
+                list_shape = e_spec.shape
+                list_shape[0] = None
+                e_spec = tf.TensorSpec(list_shape, e_spec.dtype)
+            return e_spec
+        peek_data_signature = util.nested_apply(
+            peek_data, get_numpy_array_spec)
+
+        # Create generator function
+        def _gen(data_gen):
+            for d in data_gen:
+                yield d
+
+        # Create tf dataset
+        dataset = tf.data.Dataset.from_generator(
+            _gen(self.data_gen),
+            output_signature=peek_data_signature)
+
+        return TFDataset(
+            dataset,
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size)
