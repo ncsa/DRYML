@@ -11,7 +11,7 @@ import uuid
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var
-from dryml.context.context_tracker import consolidate_contexts
+from dryml.context.context_tracker import combine_requests
 import tempfile
 
 FileType = Union[str, IO[bytes]]
@@ -297,12 +297,51 @@ class DryObject(metaclass=DryMeta):
     def __hash__(self):
         return hash(self.dry_id)
 
-    def dry_compute_context(self) -> str:
-        contexts = [self.__dry_compute_context__]
+    def dry_context_requirements(self) -> str:
+        context_reqs = {self.__dry_compute_context__: [{}]}
         for obj in self.__dry_obj_container_list__:
-            contexts.append(obj.dry_compute_context())
+            obj_reqs = obj.dry_context_requirements()
+            for ctx_name in obj_reqs:
+                if ctx_name in context_reqs:
+                    context_reqs[ctx_name].append(obj_reqs[ctx_name])
+                else:
+                    context_reqs[ctx_name] = [obj_reqs[ctx_name]]
 
-        return consolidate_contexts(contexts)
+        for ctx_name in context_reqs:
+            context_reqs[ctx_name] = combine_requests(context_reqs[ctx_name])
+
+        return context_reqs
+
+    @staticmethod
+    def graph_label(obj, report_class=True):
+        if report_class:
+            return f"{obj.dry_id} ({type(obj).__name__})"
+        else:
+            return obj.dry_id
+
+    def _dry_obj_graph(self, report_class=True):
+        root = {}
+        if hasattr(self, '__dry_obj_container_list__') and \
+           len(self.__dry_obj_container_list__) > 0:
+            for obj in self.__dry_obj_container_list__:
+                label = DryObject.graph_label(
+                    obj, report_class=report_class)
+                root[label] = obj._dry_obj_graph()
+        return root
+
+    def dry_obj_graph(self, report_class=True):
+        from asciitree import LeftAligned
+        from asciitree.drawing import BoxStyle, BOX_LIGHT
+        label = DryObject.graph_label(
+            self, report_class=report_class)
+        tree = {label: self._dry_obj_graph()}
+        tr = LeftAligned(
+            draw=BoxStyle(
+                gfx=BOX_LIGHT,
+                horiz_len=1
+            )
+        )
+        print(tr(tree))
 
 
 class DryObjectFactory(object):

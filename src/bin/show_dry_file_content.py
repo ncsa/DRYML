@@ -1,3 +1,4 @@
+# Now using asciitree
 # Taking after stackoverflow answer here:
 # https://stackoverflow.com/questions/32151776/
 #     visualize-tree-in-bash-like-the-output-of-unix-tree
@@ -117,6 +118,4 @@ if __name__ == "__main__":
     if not os.path.exists(file_path):
         print(f"File {file_path} doesn't exist.")
 
-    with zipfile.ZipFile(file_path, mode='r') as root_file:
-        full_tree = create_tree_from_dryfile(root_file, 'root')
-        draw_tree([full_tree])
+    dryml.utils.show_object_tree_from_dryfile(file_path)

@@ -3,8 +3,9 @@ Code to run subprocesses with proper contexts
 """
 
 
-from dryml.context.context_tracker import get_context_class, \
-    contexts, WrongContextError, context, consolidate_contexts
+from dryml.context.context_tracker import contexts, WrongContextError, \
+    context, consolidate_contexts, get_context_requirements, \
+    ContextManager
 import copy
 import multiprocessing as mp
 import traceback
@@ -94,14 +95,12 @@ class process_executor(object):
     def __init__(
             self,
             f=None,
-            ctx_name=None,
-            context_kwargs={},
+            ctx_reqs={},
             update_obj_defs=[],
             args=[],
             kwargs={}):
         self.f_ser = dill.dumps(f)
-        self.ctx_name = ctx_name
-        self.context_kwargs = context_kwargs
+        self.ctx_reqs = ctx_reqs
         self.update_obj_defs = update_obj_defs
         self.args_ser = dill.dumps(args)
         self.kwargs_ser = dill.dumps(kwargs)
@@ -113,11 +112,17 @@ class process_executor(object):
             *args,
             **kwargs):
 
+        import resource
+        max_mem = 4*1024*1024*1024
+        resource.setrlimit(
+            resource.RLIMIT_AS,
+            (max_mem, resource.RLIM_INFINITY))
+
         if ctx_ret_q is None:
             raise RuntimeError("A queue is required.")
 
         # Activate context
-        with contexts[self.ctx_name][1](**self.context_kwargs):
+        with ContextManager(resource_requests=self.ctx_reqs):
             # Get list of dry_objects
             dry_objects = get_dry_objects(*args, **kwargs)
             # Activate unactivated objects
@@ -166,15 +171,14 @@ class process_executor(object):
 
 
 def compute_context(
-        ctx_context_type=None,
+        ctx_context_reqs=None,
         ctx_use_existing_context=True,
         ctx_dont_create_context=False,
         ctx_update_objs=False,
-        ctx_verbose=False,
-        **ctx_context_kwargs):
+        ctx_verbose=False):
 
     """
-        ctx_context_type: if None, will try to guess
+        ctx_context_reqs: if None, will try to guess
         ctx_use_existing_context: if True, will try to run in
             the currently active context without a subprocess
         ctx_dont_create_context: if True, will avoid trying to create
@@ -190,19 +194,14 @@ def compute_context(
             if f.__dry_context_wrapped__:
                 return f
 
-        nonlocal ctx_context_kwargs
-        if ctx_context_kwargs is None:
-            ctx_context_kwargs = {}
-
         @functools.wraps(f)
         def wrapped_func(
                 *args,
-                call_context_type=None,
+                call_context_reqs=None,
                 call_use_existing_context=None,
                 call_dont_create_context=None,
                 call_update_objs=None,
                 call_update_skiplist=None,
-                call_context_kwargs=None,
                 call_verbose=None,
                 **kwargs):
             """
@@ -224,25 +223,21 @@ def compute_context(
             if call_verbose is not None:
                 verbose = call_verbose
 
-            ctx_name = ctx_context_type
-            if call_context_type is not None:
-                ctx_name = call_context_type
+            ctx_reqs = ctx_context_reqs
+            if call_context_reqs is not None:
+                ctx_reqs = call_context_reqs
 
-            if ctx_name is None:
-                # Determine context type
-                ctxs = []
-                for obj in get_dry_objects(*args, **kwargs):
-                    ctxs.append(obj.dry_compute_context())
-                ctx_name = consolidate_contexts(ctxs)
+            if ctx_reqs is None:
+                # Determine needed contexts
+                ctx_reqs = get_context_requirements(get_dry_objects(
+                    *args, **kwargs))
 
             if use_existing_context:
-                cur_ctx = context()
-                target_ctx_cls = get_context_class(ctx_name)
-                if cur_ctx is not None:
-                    cur_ctx_type = type(cur_ctx)
-                    if not issubclass(cur_ctx_type, target_ctx_cls):
+                ctx_manager = context()
+                if ctx_manager is not None:
+                    if not ctx_manager.satisfies(ctx_reqs):
                         raise WrongContextError(
-                            "Current context not appropriate")
+                            "Current context is not appropriate")
                 else:
                     # No currently active context, need to create one
                     use_existing_context = False
@@ -297,18 +292,10 @@ def compute_context(
                         lambda o: o.definition(),
                         update_objs_list))
 
-                # Prepare context args
-                if call_context_kwargs is None:
-                    call_context_kwargs = {}
-
-                context_kwargs = copy.copy(ctx_context_kwargs)
-                context_kwargs.update(call_context_kwargs)
-
                 ctx_ret_q = mp_ctx.Queue()
 
                 executor = process_executor(
-                    f=f, ctx_name=ctx_name,
-                    context_kwargs=context_kwargs,
+                    f=f, ctx_reqs=ctx_reqs,
                     update_obj_defs=update_obj_defs,
                     args=args,
                     kwargs=kwargs)

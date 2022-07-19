@@ -315,7 +315,7 @@ class TFBasicTraining(TFLikeTrainFunction):
             data = data.to_TFDataset()
 
         # Check data is supervised.
-        if not data.supervised():
+        if not data.supervised:
             raise RuntimeError(
                 "TFBasicTraining requires supervised data")
 
@@ -401,7 +401,7 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
             data = data.to_TFDataset()
 
         # Check data is supervised.
-        if not data.supervised():
+        if not data.supervised:
             raise RuntimeError(
                 "TFBasicEarlyStoppingTraining requires supervised data")
 

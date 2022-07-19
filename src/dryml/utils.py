@@ -6,7 +6,8 @@ import inspect
 import hashlib
 import importlib
 import pickle
-from typing import Type
+from typing import Type, Union, IO
+import zipfile
 
 
 def is_nonstring_iterable(val):
@@ -144,3 +145,91 @@ def count(get_result):
     if issubclass(type(get_result), DryObject):
         return 1
     return len(get_result)
+
+
+def show_contained_objects(save_file: Union[str, IO[bytes]]):
+    if type(save_file) is str or IO[bytes]:
+        zf = zipfile.ZipFile(save_file, mode='r')
+    else:
+        zf = save_file
+
+    print(zf.namelist())
+
+
+file_blocklist = [
+   'meta_data.pkl',
+   'cls_def.dill',
+   'dry_args.pkl',
+   'dry_kwargs.pkl',
+   'dry_mut.pkl',
+]
+
+
+def create_zip_branch(input_file, tag):
+    with zipfile.ZipFile(input_file, mode='r') as zf:
+        content_names = zf.namelist()
+        content_nodes = {}
+        for name in content_names:
+            if name[-4:] == '.zip':
+                with zf.file.open(name, mode='r') as f:
+                    content_nodes = {
+                        **content_nodes,
+                        **create_zip_branch(f, name)}
+            else:
+                content_nodes[name] = {}
+    return {tag: content_nodes}
+
+
+def create_object_tree_from_dryfile(input_file, tag, report_class=True):
+    import dryml
+    with dryml.DryObjectFile(input_file) as dry_f:
+        obj_def = dry_f.definition()
+        content_names = dry_f.file.namelist()
+        content_nodes = {}
+        for name in content_names:
+            if name[-4:] == '.dry':
+                # this is another dry file.
+                with dry_f.file.open(name, mode='r') as f:
+                    with zipfile.ZipFile(f, mode='r') as sub_zip:
+                        content_nodes = {
+                            **content_nodes,
+                            **create_object_tree_from_dryfile(
+                                sub_zip,
+                                name,
+                                report_class=report_class)}
+            elif name not in file_blocklist:
+                if name[-4:] == '.zip':
+                    with dry_f.file.open(name, mode='r') as f:
+                        content_nodes = {
+                            **content_nodes,
+                            **create_zip_branch(f, name)}
+                else:
+                    content_nodes[name] = {}
+
+        if tag is not None:
+            label = f"{tag}: {obj_def.dry_id}"
+        else:
+            label = f"{obj_def.dry_id}"
+        if report_class:
+            label += f" ({dryml.utils.get_class_str(obj_def.cls)})"
+
+        if len(content_nodes) > 0:
+            return {label: content_nodes}
+        else:
+            return {label: {}}
+
+
+def show_object_tree_from_dryfile(input_file, report_class=True):
+    dry_tree = create_object_tree_from_dryfile(
+        input_file,
+        None,
+        report_class=report_class)
+    from asciitree import LeftAligned
+    from asciitree.drawing import BoxStyle, BOX_LIGHT
+    tr = LeftAligned(
+        draw=BoxStyle(
+            gfx=BOX_LIGHT,
+            horiz_len=1
+        )
+    )
+    print(tr(dry_tree))

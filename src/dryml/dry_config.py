@@ -10,8 +10,8 @@ from typing import Union, IO, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
     init_arg_dict_handler
-from dryml.context.context_tracker import get_context_class, \
-    WrongContextError, context, NoContextError
+from dryml.context.context_tracker import WrongContextError, \
+    context, NoContextError
 from dryml.context.process import compute_context
 
 
@@ -461,16 +461,16 @@ class DryMeta(abc.ABCMeta):
             required_context_name = 'default'
             if hasattr(self, '__dry_compute_context__'):
                 required_context_name = self.__dry_compute_context__
-                required_ctx_cls = get_context_class(required_context_name)
-                current_ctx = context()
+                ctx_manager = context()
 
-                if current_ctx is None:
+                if ctx_manager is None:
                     raise NoContextError("There is no context active.")
                 else:
-                    if not issubclass(type(current_ctx), required_ctx_cls):
+                    ctx_reqs = {required_context_name: {}}
+                    if not ctx_manager.satisfies(ctx_reqs):
                         raise WrongContextError(
-                            f"{current_ctx} doesn't satisfy "
-                            f"requirement {required_ctx_cls}")
+                            f"{ctx_manager} currently doesn't satisfy "
+                            f"requirements {ctx_reqs}")
 
             # Execute user compute prepare method
             if hasattr(self, 'compute_prepare_imp'):
