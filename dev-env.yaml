@@ -4,7 +4,9 @@ channels:
 dependencies:
   - python=3.8
   - ipykernel
-  - numpy=1.19
+#  - numpy
+  - ray-core=1.12
+  - ray-tune=1.12
   - pandas
   - pandas-datareader
   - xarray
@@ -17,3 +19,4 @@ dependencies:
   - pip:
     - file:///ui/ncsa/mkrafcz2/tf_build/tensorflow_products/build_tf2.7.0_py3.8_np1.19/tensorflow-2.7.0-cp38-cp38-linux_x86_64.whl
     - tensorflow_datasets
+    - pytest-cov
