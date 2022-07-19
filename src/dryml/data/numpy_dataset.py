@@ -20,11 +20,15 @@ class NumpyDataset(DryData):
                 batch_size=len(data))
 
             self.data_gen = [data]
-            return
-
-        try:
-            import pandas as pd
-            if type(data) is pd.core.frame.DataFrame:
+        else:
+            df_test = False
+            try:
+                import pandas as pd
+                if type(data) is pd.core.frame.DataFrame:
+                    df_test = True
+            except ImportError:
+                pass
+            if df_test:
                 if indexed is False:
                     super().__init__(
                         indexed=indexed, supervised=supervised,
@@ -35,15 +39,12 @@ class NumpyDataset(DryData):
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
                     self.data_gen = [(data.index.to_numpy(), data.to_numpy())]
-        except ImportError:
-            pass
+            else:
+                super().__init__(
+                    indexed=indexed, supervised=supervised,
+                    batch_size=batch_size)
 
-        else:
-            super().__init__(
-                indexed=indexed, supervised=supervised,
-                batch_size=batch_size)
-
-            self.data_gen = data
+                self.data_gen = data
 
     def index(self):
         """

@@ -10,7 +10,7 @@ class NotSupervisedError():
     pass
 
 
-class DryData():
+class DryData(object):
     """
     A Simple wrapper class to house Dry Level data operations
     """
