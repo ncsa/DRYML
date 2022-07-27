@@ -414,28 +414,68 @@ class ContextContainer(object):
     def __init__(self, resource_requests: Optional[dict] = {'default': {}}):
         self.resource_requests = resource_requests
         self.contexts = {}
+        self.activated_object_map = {}
 
     def acquire_context(self):
+        # Check that there isn't another manager active already
         global _context_manager
         if _context_manager is not None:
             raise ContextAlreadyActiveError()
+
+        # Acquire needed contexts and resources
         for ctx_name in self.resource_requests:
             # Acquire each context in turn
             ctx_cls = get_context_class(ctx_name)
             ctx = ctx_cls(resource_request=self.resource_requests[ctx_name])
             ctx.acquire_context()
             self.contexts[ctx_name] = ctx
+
         # Set the global context
         _context_manager = self
 
+    def deactivate_objects(self, save_cache=None):
+        if save_cache is None:
+            from dryml.save_cache import SaveCache
+            save_cache = SaveCache()
+        while len(self.activated_object_map) > 0:
+            ids = list(self.activated_object_map.keys())
+            obj_id = ids[0]
+            obj = self.activated_object_map[obj_id]
+            obj.compute_deactivate(save_cache=save_cache)
+
     def release_context(self):
+        # Deactivate each tracked object
+        self.deactivate_objects()
+
         # Release each contained context
         for ctx_name in self.contexts:
             ctx = self.contexts[ctx_name]
             ctx.release_context()
+
         global _context_manager
         # Remove current_context
         _context_manager = None
+
+    def add_activated_object(self, obj):
+        from dryml.dry_object import DryObject
+        if type(obj) is not DryObject:
+            TypeError("Can only activate DryObjects for computation.")
+        self.activated_object_map[id(obj)] = obj
+
+    def remove_activated_object(self, obj):
+        from dryml.dry_object import DryObject
+        if type(obj) is not DryObject:
+            TypeError("Can only activate DryObjects for computation.")
+        del self.activated_object_map[id(obj)]
+
+    def contains_activated_object(self, obj):
+        from dryml.dry_object import DryObject
+        if type(obj) is not DryObject:
+            TypeError("Can only activate DryObjects for computation.")
+        if id(obj) in self.activated_object_map:
+            return True
+        else:
+            return False
 
     def satisfies(self, ctx_reqs):
         for ctx_name in ctx_reqs:

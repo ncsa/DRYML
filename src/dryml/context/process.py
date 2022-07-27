@@ -14,6 +14,7 @@ import io
 import zipfile
 import time
 import dill
+from dryml.save_cache import SaveCache
 
 mp_ctx = mp.get_context('spawn')
 
@@ -76,19 +77,8 @@ def get_dry_objects(*args, **kwargs):
 
 # extra methods for activating/deactivating objects
 def activate_objects(obj_list):
-    activated_objects = []
     for obj in obj_list:
-        if not obj.__dry_compute_mode__:
-            obj.compute_prepare()
-            obj.load_compute()
-
-    return activated_objects
-
-
-def deactivate_objects(obj_list):
-    for obj in obj_list:
-        obj.save_compute()
-        obj.compute_cleanup()
+        obj.compute_activate()
 
 
 class process_executor(object):
@@ -108,34 +98,38 @@ class process_executor(object):
     def final_call(
             self,
             f,
+            ctx_send_q,
             ctx_ret_q,
             *args,
             **kwargs):
 
-        import resource
-        max_mem = 4*1024*1024*1024
-        resource.setrlimit(
-            resource.RLIMIT_AS,
-            (max_mem, resource.RLIM_INFINITY))
+        # import resource
+        # max_mem = 4*1024*1024*1024
+        # resource.setrlimit(
+        #     resource.RLIMIT_AS,
+        #     (max_mem, resource.RLIM_INFINITY))
+
+        if ctx_send_q is None:
+            raise RuntimeError("A send queue is required.")
 
         if ctx_ret_q is None:
-            raise RuntimeError("A queue is required.")
+            raise RuntimeError("A return queue is required.")
 
         # Activate context
-        with ContextManager(resource_requests=self.ctx_reqs):
+        with ContextManager(resource_requests=self.ctx_reqs) as ctx_mgr:
             # Get list of dry_objects
             dry_objects = get_dry_objects(*args, **kwargs)
+
             # Activate unactivated objects
-            activated_objects = activate_objects(dry_objects)
+            activate_objects(dry_objects)
 
             # Execute method
             res = f(*args, **kwargs)
 
-            # Deactivate activated objects
-            deactivate_objects(activated_objects)
-
             # Put result in return queue
             ctx_ret_q.put(res)
+
+            save_cache = SaveCache()
 
             # Put object updates in queue
             if len(self.update_obj_defs) > 0:
@@ -144,22 +138,28 @@ class process_executor(object):
                     for obj in dry_objects:
                         if obj_def == obj.definition():
                             res_buf = io.BytesIO()
-                            obj.save_self(res_buf)
+                            obj.save_self(res_buf, save_cache=save_cache)
                             res_buf.seek(0)
                             ctx_ret_q.put(res_buf.read())
                             found = True
                             break
+                    # Close int_files in save_cache
                     if not found:
                         raise RuntimeError(
                             "Couldn't find an object to associate"
                             " a definition to!")
+
+            ctx_mgr.deactivate_objects(save_cache=save_cache)
 
             # Wait until return queue is empty (parent thread has emptied it)
             while not ctx_ret_q.empty():
                 # Sleep a bit
                 time.sleep(0.1)
 
-    def __call__(self, ctx_ret_q):
+        # Delete save cache
+        del save_cache
+
+    def __call__(self, ctx_send_q, ctx_ret_q):
         # Undill function
         f = dill.loads(self.f_ser)
 
@@ -167,7 +167,12 @@ class process_executor(object):
         args = dill.loads(self.args_ser)
         kwargs = dill.loads(self.kwargs_ser)
 
-        self.final_call(f, ctx_ret_q, *args, **kwargs)
+        ph_data = ctx_send_q.get()
+
+        from dryml.dry_object import reconstruct_args_kwargs
+        reconstruct_args_kwargs(args, kwargs, ph_data)
+
+        self.final_call(f, ctx_send_q, ctx_ret_q, *args, **kwargs)
 
 
 def compute_context(
@@ -245,14 +250,11 @@ def compute_context(
             if use_existing_context:
                 # Execute the method in this thread.
                 # Activate objects which don't have a context active.
-                activated_objects = activate_objects(get_dry_objects(
+                activate_objects(get_dry_objects(
                     *args, **kwargs))
 
                 # Execute method
                 res = f(*args, **kwargs)
-
-                # Deactivate those objects again.
-                deactivate_objects(activated_objects)
 
                 # We don't have to wory about any of the
                 # context management stuff
@@ -293,6 +295,13 @@ def compute_context(
                         update_objs_list))
 
                 ctx_ret_q = mp_ctx.Queue()
+                ctx_send_q = mp_ctx.Queue()
+
+                from dryml.dry_object import prep_args_kwargs
+
+                # Replace DryObjects in args/kwargs with placeholders
+                # Get placeholder data
+                (args, kwargs), ph_data = prep_args_kwargs(args, kwargs)
 
                 executor = process_executor(
                     f=f, ctx_reqs=ctx_reqs,
@@ -301,8 +310,11 @@ def compute_context(
                     kwargs=kwargs)
 
                 # run function
-                p = Process(target=executor, args=[ctx_ret_q])
+                p = Process(target=executor, args=[ctx_send_q, ctx_ret_q])
                 p.start()
+
+                # Send placeholder data
+                ctx_send_q.put(ph_data)
 
                 if verbose:
                     print(f"Started context isolation process, pid: {p.pid}")
@@ -367,10 +379,13 @@ def compute_context(
                 retval = queue_results.pop(0)
 
                 # Update dry objects
+                load_issue_list = []
                 for obj in update_objs_list:
                     obj_buf = queue_results.pop(0)
-                    zf = zipfile.ZipFile(io.BytesIO(obj_buf), mode='r')
-                    obj.load_object(zf)
+                    obj_buf = io.BytesIO(obj_buf)
+                    from dryml.dry_object import load_object_content
+                    if not load_object_content(obj, obj_buf):
+                        load_issue_list.append(obj)
 
                 # Close thread
                 p.close()
@@ -378,6 +393,11 @@ def compute_context(
                 # Close and Delete the temporary queue
                 ctx_ret_q.close()
                 del ctx_ret_q
+
+                if len(load_issue_list):
+                    print("There was an issue updating the following objects")
+                    for obj in load_issue_list:
+                        print(obj)
 
                 if verbose:
                     print(f"Ended context isolation process, pid: {p.pid}")
@@ -437,9 +457,6 @@ class tune_process_executor(object):
             raise RuntimeError("A checkpoint return queue is required.")
 
         def cleanup_process(ret_val):
-            # Deactivate activated objects
-            deactivate_objects(self._activated_objects)
-
             # Put result in return queue
             ctx_ret_q.put(ret_val)
 

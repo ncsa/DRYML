@@ -11,8 +11,13 @@ import uuid
 from typing import IO, Union, Optional, Type
 from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var
-from dryml.context.context_tracker import combine_requests
-import tempfile
+from dryml.context.context_tracker import combine_requests, context, \
+    NoContextError
+from dryml.file_intermediary import FileWriteIntermediary
+from dryml.save_cache import SaveCache
+import re
+import numpy as np
+
 
 FileType = Union[str, IO[bytes]]
 
@@ -24,30 +29,64 @@ def file_resolve(file: str, exact_path: bool = False) -> str:
 
 
 class DryObjectFile(object):
-    def __init__(self, file: FileType, exact_path: bool = False,
-                 mode: str = 'r', must_exist: bool = True):
+    contained_dry_file_re = re.compile(r"^dry_objects/([a-f0-9-]*)\.dry$")
 
+    # Supports 'save cached' file writing.
+    def __init__(self, file: FileType, exact_path: bool = False,
+                 mode: str = 'r', must_exist: bool = True,
+                 save_cache=None, save_caching=True):
+
+        if type(file) is zipfile.ZipFile:
+            raise TypeError(
+                "Passing zipfiles directly is currently not supported.")
+
+        self.mode = mode
+
+        # If file is a string, resolve it to a filepath, and save this filepath
         if type(file) is str:
             filepath = file
             filepath = file_resolve(filepath, exact_path=exact_path)
             if must_exist and not os.path.exists(filepath):
                 raise ValueError(f"File {filepath} doesn't exist!")
-            if mode == 'w':
-                # Since we're writing a file, we first need to
-                # Open a temp file. This is because
-                # python zipfile module doesn't support have good support
-                # for updating zipfiles.
-                self.temp_file = tempfile.NamedTemporaryFile()
-                self.filepath = filepath
-                self.file = zipfile.ZipFile(self.temp_file.name, mode=mode)
+            self.filepath = filepath
+
+        if self.mode == 'w':
+            self._z_file = None
+            if hasattr(self, 'filepath'):
+                self.binary_file = open(self.filepath, 'wb')
             else:
-                # Since we're reading the file, we can
-                # Open as zipfile directly
-                self.file = zipfile.ZipFile(filepath, mode=mode)
-        elif type(file) is not zipfile.ZipFile:
-            self.file = zipfile.ZipFile(file, mode=mode)
+                self.binary_file = file
+        elif self.mode == 'r':
+            if hasattr(self, 'filepath'):
+                self.binary_file = open(self.filepath, 'rb')
+                self._z_file = zipfile.ZipFile(self.binary_file, mode=mode)
+            else:
+                if type(file) is zipfile.ZipFile:
+                    self._z_file = file
+                    if self._z_file.mode != mode:
+                        raise ValueError(
+                            "Utilized Zipfile doesn't match requested mode!")
+                else:
+                    self._z_file = zipfile.ZipFile(file, mode=mode)
         else:
-            self.file = file
+            raise ValueError(f"Unsupported mode: {mode}")
+
+    @property
+    def z_file(self):
+        # We need this property to create the zip file on demand
+        # since sometimes We might write directly to the binary file.
+        if self.mode == 'w':
+            # Check if we've already opened a zip file.
+            if self._z_file is not None:
+                return self._z_file
+
+            self.int_file = FileWriteIntermediary()
+            self.close_int_file = True
+
+            self._z_file = zipfile.ZipFile(self.int_file, mode=self.mode)
+            return self._z_file
+        elif self.mode == 'r':
+            return self._z_file
 
     def __enter__(self):
         return self
@@ -55,14 +94,32 @@ class DryObjectFile(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    def int_file_detach(self):
+        if not hasattr(self, 'int_file'):
+            raise RuntimeError(
+                "DryObjectFile doesnt' have an intermediate file to detach.")
+        self.close_int_file = False
+        return self.int_file
+
     def close(self):
-        self.file.close()
-        if hasattr(self, 'temp_file'):
-            # We need to overwrite any existing file
-            with open(self.filepath, 'wb') as f:
-                self.temp_file.seek(0)
-                f.write(self.temp_file.read())
-            self.temp_file.close()
+        # Close the zipfile.
+        self.z_file.close()
+
+        # If we have a binary open, sync any intermediary and close it.
+        if hasattr(self, 'binary_file'):
+            if self.mode == 'w':
+                if hasattr(self, 'int_file'):
+                    # If there's an intermediary file open, write it to the
+                    # binary file.
+                    self.int_file.write_to_file(self.binary_file)
+            if hasattr(self, 'filepath'):
+                # We opened the binary file. we should close it.
+                self.binary_file.close()
+
+        # Close the intermediary if needed.
+        if hasattr(self, 'int_file'):
+            if self.close_int_file:
+                self.int_file.close()
 
     # def update_file(self, obj: DryObject):
     #     self.cache_object_data_obj(obj)
@@ -74,11 +131,11 @@ class DryObjectFile(object):
         }
 
         meta_dump = pickler(meta_data)
-        with self.file.open('meta_data.pkl', mode='w') as f:
+        with self.z_file.open('meta_data.pkl', mode='w') as f:
             f.write(meta_dump)
 
     def load_meta_data(self):
-        with self.file.open('meta_data.pkl', 'r') as meta_file:
+        with self.z_file.open('meta_data.pkl', 'r') as meta_file:
             meta_data = pickle.loads(meta_file.read())
         return meta_data
 
@@ -89,13 +146,13 @@ class DryObjectFile(object):
         if obj_def.cls != mod_cls and not update:
             raise ValueError("Can't save class definition! It's been changed!")
         cls_def = dill.dumps(mod_cls)
-        with self.file.open('cls_def.dill', mode='w') as f:
+        with self.z_file.open('cls_def.dill', mode='w') as f:
             f.write(cls_def)
 
     def load_class_def_v1(self, update: bool = True, reload: bool = False):
         "Helper function for loading a version 1 class definition"
         # Get class definition
-        with self.file.open('cls_def.dill') as cls_def_file:
+        with self.z_file.open('cls_def.dill') as cls_def_file:
             if update:
                 # Get original model definition
                 cls_def_init = dill.loads(cls_def_file.read())
@@ -113,15 +170,15 @@ class DryObjectFile(object):
         self.save_class_def_v1(obj_def, update=update)
 
         # Save args from object def
-        with self.file.open('dry_args.pkl', mode='w') as args_file:
+        with self.z_file.open('dry_args.pkl', mode='w') as args_file:
             args_file.write(pickler(obj_def.args.data))
 
         # Save kwargs from object def
-        with self.file.open('dry_kwargs.pkl', mode='w') as kwargs_file:
+        with self.z_file.open('dry_kwargs.pkl', mode='w') as kwargs_file:
             kwargs_file.write(pickler(obj_def.kwargs.data))
 
         # Save mutability from object def
-        with self.file.open('dry_mut.pkl', mode='w') as mut_file:
+        with self.z_file.open('dry_mut.pkl', mode='w') as mut_file:
             mut_file.write(pickler(obj_def.dry_mut))
 
     def load_definition_v1(self, update: bool = True, reload: bool = False):
@@ -131,15 +188,15 @@ class DryObjectFile(object):
         cls = self.load_class_def_v1(update=update, reload=reload)
 
         # Load args
-        with self.file.open('dry_args.pkl', mode='r') as args_file:
+        with self.z_file.open('dry_args.pkl', mode='r') as args_file:
             args = pickle.loads(args_file.read())
 
         # Load kwargs
-        with self.file.open('dry_kwargs.pkl', mode='r') as kwargs_file:
+        with self.z_file.open('dry_kwargs.pkl', mode='r') as kwargs_file:
             kwargs = pickle.loads(kwargs_file.read())
 
         # Load mutability
-        with self.file.open('dry_mut.pkl', mode='r') as mut_file:
+        with self.z_file.open('dry_mut.pkl', mode='r') as mut_file:
             mut = pickle.loads(mut_file.read())
 
         return DryObjectDef(cls, *args, dry_mut=mut, **kwargs)
@@ -161,14 +218,26 @@ class DryObjectFile(object):
             obj_def.cls = as_cls
 
         # Create object
-        obj = obj_def.build(load_zip=self.file)
+        obj = obj_def.build(load_zip=self.z_file)
 
         # Load object content
-        if not obj.load_object(self.file):
+        if not obj.load_object(self.z_file):
             raise RuntimeError("Error loading object!")
 
         # Build object instance
         return obj
+
+    def load_object_content(self, obj: DryObject) -> bool:
+        file_def = self.definition()
+        obj_def = obj.definition()
+        if file_def != obj_def or file_def.dry_id != obj_def.dry_id:
+            raise ValueError(
+                f"File {self.z_file} doesn't store data for object "
+                f"{obj.dry_id} at the top level.")
+
+        if not obj.load_object(self.z_file):
+            return False
+        return True
 
     def load_object(self, update: bool = False,
                     reload: bool = False,
@@ -182,7 +251,28 @@ class DryObjectFile(object):
             raise RuntimeError(f"DRY version {version} unknown")
 
     def save_object_v1(self, obj: DryObject, update: bool = False,
-                       as_cls: Optional[Type] = None) -> bool:
+                       as_cls: Optional[Type] = None,
+                       save_cache=None) -> bool:
+
+        # First, check the save cache.
+        if save_cache is not None:
+            if id(obj) in save_cache.obj_cache:
+                # We found the object, write the cached file to
+                # The passed binary.
+                saved_int_file = save_cache.obj_cache[id(obj)]
+                saved_int_file.write_to_file(self.binary_file)
+                return True
+
+        # Save subordinate objects.
+        for sub_obj in obj.__dry_obj_container_list__:
+            # Open a file inside the zip to contain the new object.
+            obj_id = sub_obj.dry_id
+            save_path = f'dry_objects/{obj_id}.dry'
+            if save_path not in self.z_file.namelist():
+                with self.z_file.open(save_path, 'w') as f:
+                    if not sub_obj.save_self(f, save_cache=save_cache):
+                        return False
+
         # Save meta data
         self.save_meta_data()
 
@@ -194,7 +284,26 @@ class DryObjectFile(object):
         self.save_definition_v1(obj_def, update=update)
 
         # Save object content
-        return obj.save_object(self.file)
+        ret_val = obj.save_object(self.z_file, save_cache=save_cache)
+
+        if save_cache is not None:
+            save_cache.obj_cache[id(obj)] = self.int_file_detach()
+
+        return ret_val
+
+    def contained_object_ids(self):
+        """
+        enumerates the ids of contained subordinate objects
+        """
+
+        return list(map(
+            lambda m: m.groups(1)[0],
+            filter(lambda m: m is not None,
+                   map(lambda n: DryObjectFile.contained_dry_file_re.match(n),
+                       self.z_file.namelist()))))
+
+    def get_contained_object_file(self, dry_id):
+        return self.z_file.open(f"dry_objects/{dry_id}.dry")
 
 
 @static_var('load_repo', None)
@@ -243,15 +352,67 @@ def load_object(file: FileType, update: bool = False,
     return obj
 
 
+@static_var('load_repo', None)
+def load_object_content(
+        obj: DryObject,
+        file: FileType) -> bool:
+    """
+    A method for loading an object from disk.
+    """
+
+    # We now need the object definition
+    with DryObjectFile(file) as dry_file:
+        file_def = dry_file.definition()
+        obj_def = obj.definition()
+        if file_def != obj_def or file_def.dry_id != obj_def.dry_id:
+            raise ValueError(
+                f"File {file} doesn't store data for object {obj.dry_id} "
+                "at the top level.")
+
+        # Load contained objects
+        file_contained_obj_ids = dry_file.contained_object_ids()
+        for sub_obj in obj.__dry_obj_container_list__:
+            if sub_obj.dry_id not in file_contained_obj_ids:
+                raise ValueError(
+                    f"File {file} doesn't contain subordinate object data for "
+                    f"subordinate object {sub_obj.dry_id}! file contains: "
+                    f"{file_contained_obj_ids} namelist: "
+                    f"{dry_file.z_file.namelist()}")
+            sub_obj_f = dry_file.get_contained_object_file(sub_obj.dry_id)
+            if not load_object_content(sub_obj, sub_obj_f):
+                print(f"Error loading subordinate object {sub_obj.dry_id}")
+                return False
+
+        # Load content of this object
+        if not dry_file.load_object_content(obj):
+            print(f"Error loading self: {obj.dry_id}")
+            return False
+
+    return True
+
+
 def save_object(obj: DryObject, file: FileType, version: int = 1,
                 exact_path: bool = False, update: bool = False,
-                as_cls: Optional[Type] = None) -> bool:
+                as_cls: Optional[Type] = None,
+                save_cache=None) -> bool:
+    # Initialize a save cache by default.
+    close_save_cache = False
+    if save_cache is None:
+        close_save_cache = True
+        save_cache = SaveCache()
     with DryObjectFile(file, exact_path=exact_path, mode='w',
                        must_exist=False) as dry_file:
         if version == 1:
-            return dry_file.save_object_v1(obj, update=update, as_cls=as_cls)
+            ret_val = dry_file.save_object_v1(
+                obj, update=update, as_cls=as_cls, save_cache=save_cache)
         else:
             raise ValueError(f"File version {version} unknown. Can't save!")
+
+    # Close save caches.
+    if save_cache is not None and close_save_cache:
+        del save_cache
+
+    return ret_val
 
 
 def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
@@ -311,6 +472,52 @@ class DryObject(metaclass=DryMeta):
             context_reqs[ctx_name] = combine_requests(context_reqs[ctx_name])
 
         return context_reqs
+
+    def compute_activate(self):
+        ctx_mgr = context()
+        if ctx_mgr is None:
+            raise NoContextError()
+
+        # Activate contained objects first.
+        # We can activate subordinate objects and depend
+        # on them being loaded.
+        if hasattr(self, '__dry_obj_container_list__'):
+            for obj in self.__dry_obj_container_list__:
+                obj.compute_activate()
+
+        # Prepare this object's compute
+        if not ctx_mgr.contains_activated_object(self):
+            self.compute_prepare()
+
+            # Load this object's compute if needed
+            self.load_compute()
+
+            # Add object to manager tracker.
+            ctx_mgr.add_activated_object(self)
+
+    def compute_deactivate(self, save_cache=None):
+        ctx_mgr = context()
+        if ctx_mgr is None:
+            raise NoContextError()
+
+        if save_cache is None:
+            save_cache = SaveCache()
+
+        # Deactivate self first..
+        if ctx_mgr.contains_activated_object(self):
+            # Save this object's compute
+            self.save_compute(save_cache=save_cache)
+
+            # Teardown this objects compute.
+            self.compute_cleanup()
+
+            # Remove self from tracking.
+            ctx_mgr.remove_activated_object(self)
+
+        # Next, deactivate contained objects
+        if hasattr(self, '__dry_obj_container_list__'):
+            for obj in self.__dry_obj_container_list__:
+                obj.compute_deactivate
 
     @staticmethod
     def graph_label(obj, report_class=True):
@@ -417,3 +624,100 @@ def get_contained_objects(obj: DryObject) -> [DryObject]:
         # Add the contained object.
         contained_objs.add(contained_obj)
     return contained_objs
+
+
+class DryObjectPlaceholder(object):
+    def __init__(self, ID, obj_def):
+        self.ID = ID
+        self.obj_def = obj_def
+
+
+class DryObjectPlaceholderData(object):
+    def __init__(self, ID: int, data):
+        self.ID = ID
+        self.data = data
+
+
+def generate_unique_id():
+    ii32 = np.iinfo(np.int32)
+    return np.random.randint(ii32.min, ii32.max)
+
+
+def create_placeholder(obj: DryObject) -> (DryObjectPlaceholder,
+                                           DryObjectPlaceholderData):
+    ID = generate_unique_id()
+    obj_def = obj.definition()
+    ph_def = DryObjectPlaceholder(ID, obj_def)
+    temp_buf = io.BytesIO()
+    obj.save_self(temp_buf)
+    temp_buf.seek(0)
+    ph_data = DryObjectPlaceholderData(ID, temp_buf.read())
+    return (ph_def, ph_data)
+
+
+def rebuild_object(ph_def, ph_data) -> DryObject:
+    obj = ph_def.obj_def.build()
+    buf = io.BytesIO(ph_data.data)
+    if not load_object_content(obj, buf):
+        raise RuntimeError(f"Failed to rebuild object {ph_def.obj_def}")
+    return obj
+
+
+def prep_args_kwargs(args, kwargs):
+    obj_ph_data_map = {}
+    obj_ph_map = {}
+    new_args = []
+    for i in range(len(args)):
+        arg = args[i]
+        assigned = False
+        if issubclass(type(arg), DryObject):
+            if id(arg) in obj_ph_data_map:
+                new_args.append(obj_ph_map[id(arg)])
+            else:
+                ph = create_placeholder(arg)
+                new_args.append(ph[0])
+                obj_ph_map[id(arg)] = ph[0]
+                obj_ph_data_map[id(arg)] = ph[1]
+            assigned = True
+        if not assigned:
+            new_args.append(args[i])
+
+    for key in range(len(kwargs)):
+        arg = kwargs[key]
+        if issubclass(type(arg), DryObject):
+            if id(arg) in obj_ph_data_map:
+                args[i] = obj_ph_map[id(arg)]
+            else:
+                ph = create_placeholder(arg)
+                args[i] = ph[0]
+                obj_ph_map[id(arg)] = ph[0]
+                obj_ph_data_map[id(arg)] = ph[1]
+
+    return (new_args, kwargs), list(obj_ph_data_map.values())
+
+
+def reconstruct_args_kwargs(args, kwargs, ph_data):
+    ph_dict = {}
+    constructed_objs = {}
+    for ph in ph_data:
+        ph_dict[ph.ID] = ph
+
+    for i in range(len(args)):
+        arg = args[i]
+        if type(arg) is DryObjectPlaceholder:
+            if arg.ID in constructed_objs:
+                args[i] = constructed_objs[arg.ID]
+            else:
+                obj = rebuild_object(arg, ph_dict[arg.ID])
+                constructed_objs[arg.ID] = obj
+                args[i] = obj
+
+    for key in kwargs:
+        arg = kwargs[key]
+        if type(arg) is DryObjectPlaceholder:
+            if arg.ID in constructed_objs:
+                kwargs[key] = constructed_objs[arg.ID]
+            else:
+                obj = rebuild_object(arg, ph_dict[arg.ID])
+                constructed_objs[arg.ID] = obj
+                kwargs[key] = obj

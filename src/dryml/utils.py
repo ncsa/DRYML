@@ -184,22 +184,22 @@ def create_object_tree_from_dryfile(input_file, tag, report_class=True):
     import dryml
     with dryml.DryObjectFile(input_file) as dry_f:
         obj_def = dry_f.definition()
-        content_names = dry_f.file.namelist()
+        content_names = dry_f.z_file.namelist()
         content_nodes = {}
         for name in content_names:
             if name[-4:] == '.dry':
                 # this is another dry file.
-                with dry_f.file.open(name, mode='r') as f:
-                    with zipfile.ZipFile(f, mode='r') as sub_zip:
-                        content_nodes = {
-                            **content_nodes,
-                            **create_object_tree_from_dryfile(
-                                sub_zip,
-                                name,
-                                report_class=report_class)}
+                with dry_f.z_file.open(name, mode='r') as f:
+                    content_nodes = {
+                        **content_nodes,
+                        **create_object_tree_from_dryfile(
+                            f,
+                            name,
+                            report_class=report_class)}
+
             elif name not in file_blocklist:
                 if name[-4:] == '.zip':
-                    with dry_f.file.open(name, mode='r') as f:
+                    with dry_f.z_file.open(name, mode='r') as f:
                         content_nodes = {
                             **content_nodes,
                             **create_zip_branch(f, name)}

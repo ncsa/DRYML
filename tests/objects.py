@@ -91,12 +91,28 @@ class TestClassC2(dryml.DryObject):
     def set_val(self, val):
         self.data = val
 
-    def save_imp(self, file: zipfile.ZipFile):
+    def save_object_imp(self, file: zipfile.ZipFile):
         with file.open('data.pkl', 'w') as f:
             f.write(dryml.utils.pickler(self.data))
         return True
 
-    def load_imp(self, file: zipfile.ZipFile):
+    def load_object_imp(self, file: zipfile.ZipFile):
         with file.open('data.pkl', 'r') as f:
             self.data = pickle.loads(f.read())
         return True
+
+
+class TestClassD1(dryml.DryObject):
+    pass
+
+
+class TestClassD2(TestClassD1):
+    pass
+
+
+class TestClassD3(TestClassD2):
+    @dryml.DryMeta.collect_kwargs
+    def __init__(self, A, **kwargs):
+        assert 'dry_id' not in kwargs
+        self.A = A
+        self.mdl_kwargs = kwargs

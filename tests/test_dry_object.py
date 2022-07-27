@@ -21,6 +21,27 @@ class SimpleObject(dryml.DryObject):
 """
 
 
+def test_object_collect_kwargs_1():
+    import objects
+    obj = objects.TestClassD3(1, arg1='a', arg2='b')
+    assert 1 in obj.dry_args
+    assert 'arg1' in obj.dry_kwargs
+    assert 'arg2' in obj.dry_kwargs
+    assert 'dry_id' not in obj.mdl_kwargs
+
+    obj_def = obj.definition()
+    assert 1 in obj_def.args
+    assert 'arg1' in obj_def.kwargs
+    assert 'arg2' in obj_def.kwargs
+    assert 'dry_id' in obj_def.kwargs
+
+    obj2 = obj_def.build()
+    assert 1 in obj2.dry_args
+    assert 'arg1' in obj2.dry_kwargs
+    assert 'arg2' in obj2.dry_kwargs
+    assert 'dry_id' not in obj2.mdl_kwargs
+
+
 def test_save_object_1():
     """
     Test Saving objects through an io buffer
@@ -625,3 +646,47 @@ def test_object_save_restore_3(create_temp_named_file):
     assert obj.A.B.data == obj2.A.B.data
     assert obj.B.A.data == obj2.B.A.data
     assert obj.B.B.data == obj2.B.B.data
+
+
+def test_object_save_restore_4():
+    """
+    Test saving/restoring arguments/kwargs
+    """
+
+    import objects
+
+    # Create the data containing objects
+    data_obj1 = objects.TestClassC2(10)
+    data_obj1.set_val(20)
+
+    data_obj2 = objects.TestClassC2(20)
+    data_obj2.set_val(40)
+
+    data_obj3 = objects.TestClassC2('test')
+    data_obj3.set_val('test')
+
+    data_obj4 = objects.TestClassC2(0.5)
+    data_obj4.set_val(30.5)
+
+    obj1 = objects.TestClassC(data_obj1, B=data_obj2)
+    obj2 = objects.TestClassC(data_obj3, B=data_obj4)
+
+    from dryml.dry_object import DryObjectPlaceholder, \
+        prep_args_kwargs, reconstruct_args_kwargs
+
+    args = (obj1, obj2)
+
+    (args, kwargs), ph = prep_args_kwargs(args, {})
+
+    assert type(args[0]) is DryObjectPlaceholder
+    assert type(args[1]) is DryObjectPlaceholder
+
+    reconstruct_args_kwargs(args, kwargs, ph)
+
+    assert type(args[0]) is objects.TestClassC
+    assert type(args[1]) is objects.TestClassC
+
+    assert obj1.A.data == args[0].A.data
+    assert obj1.B.data == args[0].B.data
+    assert obj2.A.data == args[1].A.data
+    assert obj2.B.data == args[1].B.data

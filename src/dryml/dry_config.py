@@ -13,6 +13,7 @@ from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
 from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context
+from dryml.save_cache import SaveCache
 
 
 class MissingIdError(Exception):
@@ -36,6 +37,10 @@ class ComputeModeNotActiveError(Exception):
 
 
 class ComputeModeSaveError(Exception):
+    pass
+
+
+class ExpectedArgumentError(Exception):
     pass
 
 
@@ -280,7 +285,12 @@ class DryMeta(abc.ABCMeta):
             else:
                 num_args = len(init_func.__dry_args__)
 
-            # Collect arguments
+            if num_args > len(args):
+                raise ExpectedArgumentError(
+                    f"DryObject class {__class__} init expects {num_args} "
+                    f"positional arguments, got {len(args)}. Did you forget "
+                    f"to specify a required positional argument?")
+
             for i in range(num_args):
                 dry_args.append(args[i])
 
@@ -300,9 +310,10 @@ class DryMeta(abc.ABCMeta):
             dont_collect_kwargs = ['dry_id']
             if collect_kwargs:
                 for k in kwargs:
-                    if k not in used_kwargs and k not in dont_collect_kwargs:
-                        dry_kwargs[k] = kwargs[k]
-                        used_kwargs.append(k)
+                    if k not in dont_collect_kwargs:
+                        if k not in used_kwargs:
+                            dry_kwargs[k] = kwargs[k]
+                            used_kwargs.append(k)
 
             # Grab unaltered arguments to pass to super
             super_args = args[num_args:]
@@ -351,6 +362,13 @@ class DryMeta(abc.ABCMeta):
                 sub_kwargs = {
                     k: detect_and_construct(v) for k, v in kwargs.items()
                     if k not in used_kwargs}
+
+            # Remove dry_id from being used in non-base constructors.
+            # Kludge solution.
+            if not base:
+                if 'dry_id' in sub_kwargs:
+                    del sub_kwargs['dry_id']
+
             if no_var_pars:
                 args = args[:num_args]
             # Make sure we process args.
@@ -387,18 +405,24 @@ class DryMeta(abc.ABCMeta):
         """
         def load_object(self, file: zipfile.ZipFile) -> bool:
             if not hasattr(__class__, '__dry_meta_base__'):
-                # If we're not the base, call the super class's load.
-                super().load_object(file)
-            if hasattr(__class__, 'load_imp'):
-                if not __class__.load_imp(self, file):
+                # We're not the base, call the super class's load.
+                if not super().load_object(file):
+                    print("issue with super class load")
                     return False
-            # Load compute data
-            compute_data_path = 'compute_data.zip'
-            if compute_data_path in file.namelist():
-                with file.open(compute_data_path, 'r') as f:
-                    self.__dry_compute_data__ = io.BytesIO(f.read())
             else:
-                self.__dry_compute_data__ = None
+                # Load compute data at the base.
+                compute_data_path = 'compute_data.zip'
+                if compute_data_path in file.namelist():
+                    with file.open(compute_data_path, 'r') as f:
+                        self.__dry_compute_data__ = io.BytesIO(f.read())
+                else:
+                    self.__dry_compute_data__ = None
+
+            # Call this class's load object.
+            if hasattr(__class__, 'load_object_imp'):
+                if not __class__.load_object_imp(self, file):
+                    print("issue with object load implementation")
+                    return False
             return True
         return load_object
 
@@ -407,34 +431,41 @@ class DryMeta(abc.ABCMeta):
         """
         Method for making a save_object function
         """
-        def save_object(self, file: zipfile.ZipFile) -> bool:
-            if hasattr(__class__, 'save_imp'):
-                if not __class__.save_imp(self, file):
-                    return False
-            # Save any compute data from compute components.
-            # If compute mode is active
-            if self.__dry_compute_mode__:
-                self.save_compute()
-            # Save compute data if it's there
-            if self.__dry_compute_data__ is not None:
-                compute_data_path = 'compute_data.zip'
-                data_buff = self.__dry_compute_data__
-                # Seek to beginning of io stream before read
-                data_buff.seek(0)
-                with file.open(compute_data_path, 'w') as f:
-                    f.write(data_buff.read())
+        def save_object(self, file: zipfile.ZipFile, save_cache=None) -> bool:
+            if hasattr(__class__, '__dry_meta_base__'):
+                # We're at the base, so load the compute data.
+                # Save any compute data from compute components.
+                # If compute mode is active
+                if self.__dry_compute_mode__:
+                    self.save_compute(save_cache=save_cache)
 
-            # Save contained dry objects passed as arguments to construct
-            for obj in self.__dry_obj_container_list__:
-                obj_id = obj.dry_id
-                save_path = f'dry_objects/{obj_id}.dry'
-                if save_path not in file.namelist():
-                    with file.open(save_path, 'w') as f:
-                        if not obj.save_self(f):
-                            return False
+                # Save compute data if it's there
+                if self.__dry_compute_data__ is not None:
+                    compute_data_path = 'compute_data.zip'
+                    data_buff = self.__dry_compute_data__
+                    # Seek to beginning of io stream before read
+                    data_buff.seek(0)
+                    with file.open(compute_data_path, 'w') as f:
+                        f.write(data_buff.read())
+
+            # Call this class's save object.
+            if hasattr(__class__, 'save_object_imp'):
+                if not __class__.save_object_imp(self, file):
+                    return False
+
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's save.
                 super().save_object(file)
+
+            # Save contained dry objects passed as arguments to construct
+            # for obj in self.__dry_obj_container_list__:
+            #     obj_id = obj.dry_id
+            #     save_path = f'dry_objects/{obj_id}.dry'
+            #     if save_path not in file.namelist():
+            #         with file.open(save_path, 'w') as f:
+            #             if not obj.save_self(f):
+            #                 return False
+
             return True
         return save_object
 
@@ -444,25 +475,26 @@ class DryMeta(abc.ABCMeta):
         Method for making compute_prepare function
         """
 
-        def compute_prepare(self):
-            if self.__dry_compute_mode__:
-                raise ComputeModeAlreadyActiveError()
+        def compute_prepare(self, _top=True):
+            is_top_call = False
+            if _top:
+                # We know that we're the first call.
+                _top = False
+                is_top_call = True
 
-            # Prepare contained objects
-            for obj in self.__dry_obj_container_list__:
-                obj.compute_prepare()
+                # throw error
+                if self.__dry_compute_mode__:
+                    raise ComputeModeAlreadyActiveError()
 
-            # Prepare self
-            if not hasattr(__class__, '__dry_meta_base__'):
-                # Call the super class's compute_prepare
-                super().compute_prepare()
+                # Check for context ONLY ONCE.
+                # Check required context for this class
+                required_context_name = \
+                    getattr(self, '__dry_compute_context__', 'default')
 
-            # Check required context for this class
-            required_context_name = 'default'
-            if hasattr(self, '__dry_compute_context__'):
-                required_context_name = self.__dry_compute_context__
+                # Get context manager
                 ctx_manager = context()
 
+                # Check requirements against context
                 if ctx_manager is None:
                     raise NoContextError("There is no context active.")
                 else:
@@ -472,11 +504,21 @@ class DryMeta(abc.ABCMeta):
                             f"{ctx_manager} currently doesn't satisfy "
                             f"requirements {ctx_reqs}")
 
+                # Prepare contained objects I would do this only at top.
+                # for obj in self.__dry_obj_container_list__:
+                #     obj.compute_prepare()
+
+            # Prepare self super classes
+            if not hasattr(__class__, '__dry_meta_base__'):
+                # Call the super class's compute_prepare
+                super().compute_prepare(_top=_top)
+
             # Execute user compute prepare method
             if hasattr(self, 'compute_prepare_imp'):
                 self.compute_prepare_imp()
 
-            self.__dry_compute_mode__ = True
+            if is_top_call:
+                self.__dry_compute_mode__ = True
 
         return compute_prepare
 
@@ -490,13 +532,13 @@ class DryMeta(abc.ABCMeta):
             if not self.__dry_compute_mode__:
                 raise ComputeModeNotActiveError()
 
+            # Cleanup contained objects
+            # for obj in self.__dry_obj_container_list__:
+            #     obj.compute_cleanup()
+
             # Cleanup this object
             if hasattr(self, 'compute_cleanup_imp'):
                 self.compute_cleanup_imp()
-
-            # Cleanup contained objects
-            for obj in self.__dry_obj_container_list__:
-                obj.compute_cleanup()
 
             # Cleanup parent classes
             if not hasattr(__class__, '__dry_meta_base__'):
@@ -513,24 +555,41 @@ class DryMeta(abc.ABCMeta):
         Method for making a load_compute function
         """
 
-        def load_compute(self) -> bool:
+        def load_compute(self, f=None) -> bool:
+            if f is None:
+                # Load contained objects
+                # if f is None, we're at the top, so load here.
+                # for obj in self.__dry_obj_container_list__:
+                #     # We call load_compute without f since those objects
+                #     # will have individual saved compute states.
+                #     if not obj.load_compute():
+                #         return False
+
+                if self.__dry_compute_data__ is None:
+                    # There is no data to load.
+                    return True
+                else:
+                    # Set file pointer.
+                    f = self.__dry_compute_data__
+
+            # self.__dry_compute_data__ exists, so we need to load it.
+
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's load.
-                super().load_compute()
-            # Load our contained objects
-            for obj in self.__dry_obj_container_list__:
-                if not obj.load_compute():
-                    return False
+                # So, we're loading from the ground up.
+                super().load_compute(f=f)
+
             # Load this object's compute
             if hasattr(__class__, 'load_compute_imp'):
-                if self.__dry_compute_data__ is not None:
+                if f is not None:
                     # Need to seek the io stream to the beginning
-                    self.__dry_compute_data__.seek(0)
+                    f.seek(0)
                     with zipfile.ZipFile(
-                            self.__dry_compute_data__, mode='r') as zf:
+                            f, mode='r') as zf:
                         if not __class__.load_compute_imp(
                                 self, zf):
                             return False
+            # Finally report success
             return True
         return load_compute
 
@@ -539,21 +598,58 @@ class DryMeta(abc.ABCMeta):
         """
         Method for making a save_compute function
         """
-        def save_compute(self) -> bool:
+        def save_compute(self, f=None, save_cache=None) -> bool:
+            if save_cache is None:
+                save_cache = SaveCache()
+            top_call = False
+            if f is None:
+                top_call = True
+                # We're at the top of the call stack.
+                # Create io bytes stream
+                f = io.BytesIO()
+
+                # Save contained dry objects passed as arguments to construct
+                for obj in self.__dry_obj_container_list__:
+                    if not obj.save_compute(save_cache=save_cache):
+                        return False
+
+            # Now we check if we're in the save cache.
+            if id(self) in save_cache.compute_cache:
+                # We don't have to go any further.
+                return True
+
+            # Call class save implementation
             if hasattr(__class__, 'save_compute_imp'):
-                self.__dry_compute_data__ = io.BytesIO()
                 with zipfile.ZipFile(
-                        self.__dry_compute_data__, mode='w') as zf:
+                        f, mode='w') as zf:
                     if not __class__.save_compute_imp(
                             self, zf):
                         return False
-            # Save contained dry objects passed as arguments to construct
-            for obj in self.__dry_obj_container_list__:
-                if not obj.save_compute():
-                    return False
+
+            # Call super class save
             if not hasattr(__class__, '__dry_meta_base__'):
                 # If we're not the base, call the super class's load.
-                super().save_compute()
+                super().save_compute(f=f, save_cache=save_cache)
+
+            if top_call:
+                # Check if zip is empty.
+                save_empty = True
+                if f.getbuffer().nbytes != 0:
+                    with zipfile.ZipFile(
+                            f, mode='r') as zf:
+                        if len(zf.namelist()) > 0:
+                            save_empty = False
+
+                # Only set the save file if there's data.
+                if not save_empty:
+                    self.__dry_compute_data__ = f
+                else:
+                    # delete the io stream created.
+                    del f
+
+                # Add self to the save cache, so we don't repeat.
+                save_cache.compute_cache.add(id(self))
+
             return True
         return save_compute
 
