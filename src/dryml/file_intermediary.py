@@ -71,18 +71,25 @@ class FileWriteIntermediary(BufferedIOBase):
     def write(self, b):
         return self.tmp_file.write(b)
 
-    def is_empty(self):
+    def size(self):
         old_pos = self.tell()
         self.seek(0)
         self.seek(0, 2)
         size = self.tell()
+        self.seek(old_pos)
+        return size
+
+    def is_empty(self):
+        size = self.size()
         empty = False
         if size != 0:
+            old_pos = self.tell()
+            self.seek(0)
             with zipfile.ZipFile(
                     self, mode='r') as zf:
                 if len(zf.namelist()) == 0:
                     empty = True
-        self.seek(old_pos)
+            self.seek(old_pos)
         return empty
 
     # Implement with statement magic methods
