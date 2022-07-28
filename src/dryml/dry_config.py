@@ -420,7 +420,10 @@ class DryMeta(abc.ABCMeta):
 
             # Call this class's load object.
             if hasattr(__class__, 'load_object_imp'):
-                if not __class__.load_object_imp(self, file):
+                retval = __class__.load_object_imp(self, file)
+                if type(retval) is not bool:
+                    raise TypeError("load_object_imp must return a bool.")
+                if not retval:
                     print("issue with object load implementation")
                     return False
             return True
@@ -450,7 +453,11 @@ class DryMeta(abc.ABCMeta):
 
             # Call this class's save object.
             if hasattr(__class__, 'save_object_imp'):
-                if not __class__.save_object_imp(self, file):
+                retval = __class__.save_object_imp(self, file)
+                if type(retval) is not bool:
+                    raise TypeError(
+                        "save_object_imp must always return a bool.")
+                if not retval:
                     return False
 
             if not hasattr(__class__, '__dry_meta_base__'):
@@ -586,8 +593,12 @@ class DryMeta(abc.ABCMeta):
                     f.seek(0)
                     with zipfile.ZipFile(
                             f, mode='r') as zf:
-                        if not __class__.load_compute_imp(
-                                self, zf):
+                        imp_res = __class__.load_compute_imp(
+                            self, zf)
+                        if type(imp_res) is not bool:
+                            raise TypeError(
+                                "load_compute_imp must return a bool.")
+                        if not imp_res:
                             return False
             # Finally report success
             return True
@@ -622,8 +633,11 @@ class DryMeta(abc.ABCMeta):
             if hasattr(__class__, 'save_compute_imp'):
                 with zipfile.ZipFile(
                         f, mode='w') as zf:
-                    if not __class__.save_compute_imp(
-                            self, zf):
+                    compute_imp_res = __class__.save_compute_imp(
+                        self, zf)
+                    if type(compute_imp_res) is not bool:
+                        raise TypeError("save_compute_imp must return a bool.")
+                    if not compute_imp_res:
                         return False
 
             # Call super class save

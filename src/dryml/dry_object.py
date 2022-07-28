@@ -682,7 +682,7 @@ def prep_args_kwargs(args, kwargs):
         if not assigned:
             new_args.append(args[i])
 
-    for key in range(len(kwargs)):
+    for key in kwargs:
         arg = kwargs[key]
         if issubclass(type(arg), DryObject):
             if id(arg) in obj_ph_data_map:

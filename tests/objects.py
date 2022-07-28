@@ -116,3 +116,23 @@ class TestClassD3(TestClassD2):
         assert 'dry_id' not in kwargs
         self.A = A
         self.mdl_kwargs = kwargs
+
+
+class TestClassE(dryml.DryObject):
+    def __init__(self):
+        pass
+
+    def set_val(self, val):
+        self.data = val
+
+    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        print(f"save_compute_imp called for {__class__}")
+        with file.open('data.pkl', 'w') as f:
+            f.write(dryml.utils.pickler(self.data))
+        return True
+
+    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        print(f"load_compute_imp called for {__class__}")
+        with file.open('data.pkl', 'r') as f:
+            self.data = pickle.loads(f.read())
+        return True
