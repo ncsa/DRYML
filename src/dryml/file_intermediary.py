@@ -1,6 +1,7 @@
 import io
 from io import BufferedIOBase
 import tempfile
+import zipfile
 
 
 class FileWriteIntermediary(BufferedIOBase):
@@ -9,7 +10,7 @@ class FileWriteIntermediary(BufferedIOBase):
         if mem_mode:
             self.tmp_file = io.BytesIO()
         else:
-            self.tmp_file = tempfile.NamedTemporaryFile(mode='wb+')
+            self.tmp_file = tempfile.NamedTemporaryFile(mode='w+b')
 
     # Implement IOBase, and Buffered IOBase members
     def close(self):
@@ -69,6 +70,20 @@ class FileWriteIntermediary(BufferedIOBase):
 
     def write(self, b):
         return self.tmp_file.write(b)
+
+    def is_empty(self):
+        old_pos = self.tell()
+        self.seek(0)
+        self.seek(0, 2)
+        size = self.tell()
+        empty = False
+        if size != 0:
+            with zipfile.ZipFile(
+                    self, mode='r') as zf:
+                if len(zf.namelist()) == 0:
+                    empty = True
+        self.seek(old_pos)
+        return empty
 
     # Implement with statement magic methods
     def __enter__(self):

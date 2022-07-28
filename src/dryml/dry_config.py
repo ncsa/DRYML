@@ -5,7 +5,6 @@ import inspect
 import functools
 import zipfile
 import numpy as np
-import io
 from typing import Union, IO, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
@@ -14,6 +13,7 @@ from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context
 from dryml.save_cache import SaveCache
+from dryml.file_intermediary import FileWriteIntermediary
 
 
 class MissingIdError(Exception):
@@ -412,9 +412,13 @@ class DryMeta(abc.ABCMeta):
             else:
                 # Load compute data at the base.
                 compute_data_path = 'compute_data.zip'
+                if self.__dry_compute_data__ is not None:
+                    del self.__dry_compute_data__
                 if compute_data_path in file.namelist():
                     with file.open(compute_data_path, 'r') as f:
-                        self.__dry_compute_data__ = io.BytesIO(f.read())
+                        new_compute_data = FileWriteIntermediary()
+                        new_compute_data.write(f.read())
+                        self.__dry_compute_data__ = new_compute_data
                 else:
                     self.__dry_compute_data__ = None
 
@@ -446,10 +450,8 @@ class DryMeta(abc.ABCMeta):
                 if self.__dry_compute_data__ is not None:
                     compute_data_path = 'compute_data.zip'
                     data_buff = self.__dry_compute_data__
-                    # Seek to beginning of io stream before read
-                    data_buff.seek(0)
                     with file.open(compute_data_path, 'w') as f:
-                        f.write(data_buff.read())
+                        data_buff.write_to_file(f)
 
             # Call this class's save object.
             if hasattr(__class__, 'save_object_imp'):
@@ -617,7 +619,7 @@ class DryMeta(abc.ABCMeta):
                 top_call = True
                 # We're at the top of the call stack.
                 # Create io bytes stream
-                f = io.BytesIO()
+                f = FileWriteIntermediary()
 
                 # Save contained dry objects passed as arguments to construct
                 for obj in self.__dry_obj_container_list__:
@@ -646,16 +648,8 @@ class DryMeta(abc.ABCMeta):
                 super().save_compute(f=f, save_cache=save_cache)
 
             if top_call:
-                # Check if zip is empty.
-                save_empty = True
-                if f.getbuffer().nbytes != 0:
-                    with zipfile.ZipFile(
-                            f, mode='r') as zf:
-                        if len(zf.namelist()) > 0:
-                            save_empty = False
-
                 # Only set the save file if there's data.
-                if not save_empty:
+                if not f.is_empty():
                     self.__dry_compute_data__ = f
                 else:
                     # delete the io stream created.
