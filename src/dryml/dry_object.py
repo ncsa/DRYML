@@ -13,7 +13,7 @@ from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var
 from dryml.context.context_tracker import combine_requests, context, \
     NoContextError
-from dryml.file_intermediary import FileWriteIntermediary
+from dryml.file_intermediary import FileIntermediary
 from dryml.save_cache import SaveCache
 import re
 import numpy as np
@@ -80,7 +80,7 @@ class DryObjectFile(object):
             if self._z_file is not None:
                 return self._z_file
 
-            self.int_file = FileWriteIntermediary()
+            self.int_file = FileIntermediary()
             self.close_int_file = True
 
             self._z_file = zipfile.ZipFile(self.int_file, mode=self.mode)

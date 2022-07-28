@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 
 
-class FileWriteIntermediary(BufferedIOBase):
+class FileIntermediary(BufferedIOBase):
     def __init__(self, mem_mode=False):
         self.mem_mode = mem_mode
         if mem_mode:

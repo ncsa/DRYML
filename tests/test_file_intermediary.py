@@ -1,4 +1,4 @@
-from dryml.file_intermediary import FileWriteIntermediary
+from dryml.file_intermediary import FileIntermediary
 import zipfile
 import pytest
 import pickle
@@ -8,7 +8,7 @@ from dryml.utils import pickler
 @pytest.mark.usefixtures("create_name")
 def test_file_intermediary_1(create_name):
     # Create intermediary
-    int_file = FileWriteIntermediary()
+    int_file = FileIntermediary()
 
     test_file = 'test.txt'
     test_text = "TEST"
@@ -35,7 +35,7 @@ def test_file_intermediary_1(create_name):
 @pytest.mark.usefixtures("create_name")
 def test_file_intermediary_2(create_name):
     # Create intermediary
-    int_file = FileWriteIntermediary()
+    int_file = FileIntermediary()
 
     test_file = 'test.txt'
     test_text = "TEST"
@@ -61,7 +61,7 @@ def test_file_intermediary_2(create_name):
 @pytest.mark.usefixtures("create_name")
 def test_file_intermediary_3(create_name):
     # Create intermediary
-    int_file = FileWriteIntermediary(mem_mode=True)
+    int_file = FileIntermediary(mem_mode=True)
 
     test_file = 'test.txt'
     test_text = "TEST"
@@ -88,7 +88,7 @@ def test_file_intermediary_3(create_name):
 @pytest.mark.usefixtures("create_name")
 def test_file_intermediary_4(create_name):
     # Create intermediary
-    int_file = FileWriteIntermediary(mem_mode=True)
+    int_file = FileIntermediary(mem_mode=True)
 
     test_file = 'test.txt'
     test_text = "TEST"
@@ -113,7 +113,7 @@ def test_file_intermediary_4(create_name):
 
 @pytest.mark.usefixtures("create_name")
 def test_file_intermediary_5(create_name):
-    int_file = FileWriteIntermediary()
+    int_file = FileIntermediary()
     z_file = zipfile.ZipFile(int_file, mode='w')
 
     # Save meta data analogue

@@ -13,7 +13,7 @@ from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context
 from dryml.save_cache import SaveCache
-from dryml.file_intermediary import FileWriteIntermediary
+from dryml.file_intermediary import FileIntermediary
 
 
 class MissingIdError(Exception):
@@ -416,7 +416,7 @@ class DryMeta(abc.ABCMeta):
                     del self.__dry_compute_data__
                 if compute_data_path in file.namelist():
                     with file.open(compute_data_path, 'r') as f:
-                        new_compute_data = FileWriteIntermediary()
+                        new_compute_data = FileIntermediary()
                         new_compute_data.write(f.read())
                         self.__dry_compute_data__ = new_compute_data
                 else:
@@ -619,7 +619,7 @@ class DryMeta(abc.ABCMeta):
                 top_call = True
                 # We're at the top of the call stack.
                 # Create io bytes stream
-                f = FileWriteIntermediary()
+                f = FileIntermediary()
 
                 # Save contained dry objects passed as arguments to construct
                 for obj in self.__dry_obj_container_list__:
