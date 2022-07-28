@@ -386,6 +386,19 @@ class ContextIncompatibilityError(Exception):
     pass
 
 
+def context_check(ctx_reqs):
+    """
+    Check if there's a context, and its capabilities
+    """
+    ctx_mgr = context()
+    if ctx_mgr is None:
+        raise NoContextError()
+
+    if not ctx_mgr.satisfies(ctx_reqs):
+        raise ContextIncompatibilityError(
+            f"Context doesn't satisfy requirements {ctx_reqs}")
+
+
 class ComputeContext(object):
     def __init__(
             self,

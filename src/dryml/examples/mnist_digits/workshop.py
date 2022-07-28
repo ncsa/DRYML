@@ -1,10 +1,13 @@
 import dryml
 import tensorflow_datasets as tfds
 from dryml.data.tf import TFDataset
+from dryml.context import context_check
 
 
 class MNISTDigitsWorkshop(dryml.Workshop):
     def data_prep(self):
+        context_check({'tf': {}})
+
         (ds_train, ds_test), ds_info = tfds.load(
             'mnist',
             split=['train', 'test'],

@@ -24,3 +24,19 @@ def test_resource_pool_1():
 
     for key in pool_obj.resource_map:
         assert pool_obj.resource_map[key] == 1.
+
+
+def test_context_check_1():
+    with dryml.context.ContextManager(
+            resource_requests={'default': {'num_cpus': 1}}):
+        dryml.context.context_check({'default': {}})
+
+
+def test_context_check_2():
+    with dryml.context.ContextManager(
+            resource_requests={'default': {'num_cpus': 1}}):
+        try:
+            dryml.context.context_check({'tf': {}})
+            assert False
+        except dryml.context.ContextIncompatibilityError:
+            pass
