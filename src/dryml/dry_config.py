@@ -44,9 +44,23 @@ class ExpectedArgumentError(Exception):
     pass
 
 
+class BuildStratTracker(object):
+    def __init__(self):
+        self.tracker = {}
+
+    def __getitem__(self, dry_id):
+        if dry_id not in self.tracker:
+            self.tracker[dry_id] = set()
+        return self.tracker[dry_id]
+
+    def __repr__(self):
+        return f"{self.tracker}"
+
+
 # Create a couple global variables
 build_repo = None
 build_cache = None
+build_strat = None
 
 
 # Detect and Construct dryobjects as we encounter them.
@@ -743,8 +757,6 @@ class DryKwargs(DryConfigInterface, collections.UserDict):
 
 
 class DryObjectDef(collections.UserDict):
-    build_repo = None
-
     @staticmethod
     def from_dict(def_dict: Mapping):
         return DryObjectDef(
@@ -829,10 +841,12 @@ class DryObjectDef(collections.UserDict):
         "Construct an object"
         reset_repo = False
         reset_cache = False
+        reset_strat = False
         construct_object = True
 
         global build_repo
         global build_cache
+        global build_strat
 
         if repo is not None:
             if build_repo is not None:
@@ -846,6 +860,10 @@ class DryObjectDef(collections.UserDict):
         if build_cache is None:
             build_cache = {}
             reset_cache = True
+
+        if build_strat is None:
+            build_strat = BuildStratTracker()
+            reset_strat = True
 
         # Indicates whether we need to construct the object because this
         # definition isn't concrete
@@ -864,25 +882,30 @@ class DryObjectDef(collections.UserDict):
                 pass
 
         # Check the repo
-        if not construction_required and build_repo is not None:
+        if (not construction_required) and (build_repo is not None) \
+                and ('repo' not in build_strat[obj_id]):
             try:
-                obj = build_repo.get_obj(self)
+                build_strat[obj_id].add('repo')
+                obj = build_repo.get_obj(self, load=True)
                 build_cache[obj_id] = obj
                 construct_object = False
+                build_strat[obj_id].remove('repo')
             except KeyError:
                 # Didn't find the object in the repo
                 pass
 
         # Check the zipfile
-        if not construction_required and \
-                construct_object and load_zip is not None:
+        if (not construction_required) and construct_object and \
+                (load_zip is not None) and ('zip' not in build_strat[obj_id]):
             target_filename = f"dry_objects/{obj_id}.dry"
             from dryml import load_object
             if target_filename in load_zip.namelist():
+                build_strat[obj_id].add('zip')
                 with load_zip.open(target_filename) as f:
                     obj = load_object(f)
                     build_cache[obj_id] = obj
                     construct_object = False
+                build_strat[obj_id].remove('zip')
 
         # Finally, actually construct the object
         if construct_object:
@@ -902,6 +925,9 @@ class DryObjectDef(collections.UserDict):
         # Reset the build cache
         if reset_cache:
             build_cache = None
+
+        if reset_strat:
+            build_strat = None
 
         # Return the result
         return obj

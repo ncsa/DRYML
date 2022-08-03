@@ -100,7 +100,8 @@ class DryRepoContainer(object):
 
     def get_obj(self, load=False):
         if load:
-            self.load()
+            if not self.load():
+                raise RuntimeError("There was an issue loading the object!")
         return self.obj
 
     def save(self, directory: Optional[str] = None,
@@ -328,14 +329,19 @@ class DryRepo(object):
 
     def get_obj(
             self,
-            obj_def: DryObjectDef):
+            obj_def: DryObjectDef,
+            load=False):
         ind_id = obj_def.dry_id
-        return self.get_obj_by_id(ind_id)
+        return self.get_obj_by_id(ind_id, load=load)
 
     def get_obj_by_id(
             self,
-            obj_id):
+            obj_id,
+            load=False):
         obj_container = self.obj_dict[obj_id]
+        if load:
+            if not obj_container.load():
+                raise RuntimeError("There was an issue loading the object!")
         return obj_container.obj
 
     def __contains__(

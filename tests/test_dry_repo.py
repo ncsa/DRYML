@@ -538,9 +538,53 @@ def test_object_save_restore_with_repo_1(create_temp_dir):
     # Load the object from the file
     obj2 = obj.definition().build(repo=repo)
 
+    assert dryml.dry_config.build_repo is None
+
     assert obj.definition() == obj2.definition()
     assert obj.A is obj.B
     assert obj2.A is obj2.B
     assert obj.A is obj2.A
     assert obj.B is obj2.B
     assert obj.A is obj2.B
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_object_save_restore_with_repo_2(create_temp_dir):
+    """
+    We test save and restore of nested objects with a repo
+    """
+    import objects
+
+    repo = dryml.DryRepo(create_temp_dir, create=True)
+
+    # Create the data containing objects
+    data_obj1 = objects.TestClassC2(10)
+    data_obj1.set_val(20)
+
+    # Add and save object in repo
+    repo.add_object(data_obj1)
+    repo.save()
+
+    # Enclose them in another object
+    obj = objects.TestClassC(data_obj1, B=data_obj1)
+
+    # Save the enclosing object.
+    repo.add_object(obj)
+    repo.save()
+
+    # There should now be two objects stored.
+    assert len(repo) == 2
+
+    # Get top object definition
+    obj_def = obj.definition()
+
+    repo2 = dryml.DryRepo(create_temp_dir)
+
+    obj2 = obj_def.build(repo=repo2)
+
+    assert obj_def == obj2.definition()
+    assert obj2.A is obj2.B
+    assert obj.A.C == obj2.A.C
+    assert obj.B.C == obj2.B.C
+    assert obj.A.data == obj2.A.data
+    assert obj.B.data == obj2.B.data
