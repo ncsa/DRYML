@@ -129,7 +129,8 @@ def keras_load_checkpoint_from_zip_to_dir(
 
         # Load the weights into the model with the load weights function
         checkpoint_path = os.path.join(
-            temp_checkpoint_dir, checkpoint_name)
+            temp_checkpoint_dir, 'checkpoints', checkpoint_name)
+
         # expect to load partial because we may
         # not have optimizer in place yet.
         tf.train.Checkpoint(mdl) \
@@ -281,9 +282,13 @@ class TFObjectWrapper(DryObject):
 
 
 class TFLikeTrainFunction(DryComponent):
+    def __init__(self):
+        self.train_args = ()
+        self.train_kwargs = {}
+
     def __call__(
-            self, trainable, train_data, *args,
-            train_spec=None, **kwargs):
+            self, trainable, train_data,
+            train_spec=None, train_callbacks=[]):
         raise NotImplementedError("method must be implemented in a subclass")
 
 
@@ -298,9 +303,8 @@ class TFBasicTraining(TFLikeTrainFunction):
         self.num_total = num_total
 
     def __call__(
-            self, trainable, data: DryData, *args, train_spec=None,
-            train_callbacks=[], batch_size=32,
-            callbacks=None, **kwargs):
+            self, trainable, data: DryData, train_spec=None,
+            train_callbacks=[]):
 
         # Pop the epoch to resume from
         start_epoch = 0
@@ -345,6 +349,9 @@ class TFBasicTraining(TFLikeTrainFunction):
         else:
             shuffle_buffer = self.shuffle_buffer
 
+        batch_size = self.train_kwargs.pop('batch_size', 32)
+        callbacks = self.train_kwargs.pop('callbacks', None)
+
         ds_val = ds.take(num_val)
         ds_val = ds_val.batch(batch_size)
         ds_val = ds_val.prefetch(tf.data.AUTOTUNE)
@@ -368,9 +375,9 @@ class TFBasicTraining(TFLikeTrainFunction):
 
         # Fit model
         trainable.model.mdl.fit(
-            ds_train, validation_data=ds_val,
+            ds_train, *self.train_args, validation_data=ds_val,
             callbacks=callbacks, epochs=self.epochs,
-            initial_epoch=start_epoch, **kwargs)
+            initial_epoch=start_epoch, **self.train_kwargs)
 
 
 class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
@@ -385,8 +392,8 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         self.num_total = num_total
 
     def __call__(
-            self, trainable, data, *args, batch_size=32,
-            train_spec=None, train_callbacks=[], callbacks=None, **kwargs):
+            self, trainable, data, train_spec=None,
+            train_callbacks=[]):
 
         # Pop the epoch to resume from
         start_epoch = 0
@@ -404,6 +411,9 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         if not data.supervised:
             raise RuntimeError(
                 "TFBasicEarlyStoppingTraining requires supervised data")
+
+        batch_size = self.train_kwargs.pop('batch_size', 32)
+        callbacks = self.train_kwargs.pop('callbacks', None)
 
         # Make sure data is unbatched. We want the function to control this.
         data = data.unbatch()
@@ -461,8 +471,9 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         # Fit model
         trainable.model.mdl.fit(
             ds_train, validation_data=ds_val,
-            callbacks=callbacks, epochs=self.epochs,
-            initial_epoch=start_epoch, **kwargs)
+            initial_epoch=start_epoch,
+            epochs=self.epochs, callbacks=callbacks,
+            *self.train_args, **self.train_kwargs)
 
 
 class TFLikeModel(DryComponent):
