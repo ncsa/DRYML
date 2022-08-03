@@ -233,3 +233,20 @@ def show_object_tree_from_dryfile(input_file, report_class=True):
         )
     )
     print(tr(dry_tree))
+
+
+def apply_func(
+        obj, func, func_args=None, sel=Optional[Callable],
+        func_kwargs=None):
+    if func_args is None:
+        func_args = ()
+    if func_kwargs is None:
+        func_kwargs = {}
+
+    for sub_obj in obj.__dry_obj_container_list__:
+        apply_func(
+            sub_obj, func, func_args=func_args, sel=sel,
+            func_kwargs=func_kwargs)
+
+    if sel is None or sel(obj):
+        func(obj, *func_args, **func_kwargs)
