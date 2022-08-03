@@ -48,7 +48,7 @@ class TFDataset(DryData):
         else:
             return TFDataset(
                 self.ds.map(
-                    lambda t: t[1],
+                    lambda idx, data: data,
                     num_parallel_calls=tf.data.AUTOTUNE),
                 indexed=False,
                 supervised=self.supervised,
@@ -94,7 +94,10 @@ class TFDataset(DryData):
         Batch this data
         """
         if self.batched:
-            return self
+            if self.batch_size == batch_size:
+                return self
+            else:
+                return self.unbatch().batch(batch_size=batch_size)
         else:
             return TFDataset(
                 self.ds.batch(batch_size=batch_size),
@@ -265,12 +268,13 @@ class TFDataset(DryData):
                     el = next(it)
                 except StopIteration:
                     break
-                yield util.nested_apply(el, numpy_transform)
+                trans_el = util.nested_apply(el, numpy_transform)
+                yield trans_el
 
             return
 
         return NumpyDataset(
-            numpy_transformer(self.ds),
+            lambda: numpy_transformer(self.ds),
             indexed=self.indexed,
             supervised=self.supervised,
             batch_size=self.batch_size)

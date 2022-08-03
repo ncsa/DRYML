@@ -1,6 +1,7 @@
 from dryml.data.dry_data import DryData, NotIndexedError, \
     NotSupervisedError
 from dryml.data.util import nested_batcher, nested_unbatcher
+from dryml.utils import is_iterator
 import numpy as np
 from typing import Callable
 
@@ -14,12 +15,24 @@ class NumpyDataset(DryData):
             self, data, indexed=False,
             supervised=False, batch_size=None):
 
-        if type(data) is np.ndarray:
+        if type(data) is np.ndarray or type(data) is tuple:
             super().__init__(
                 indexed=indexed, supervised=supervised,
                 batch_size=len(data))
 
-            self.data_gen = [data]
+            self.data_gen = lambda: [data]
+        elif callable(data):
+            # We have a method which is supposed to yield
+            # A generator.
+            super().__init__(
+                indexed=indexed, supervised=supervised,
+                batch_size=batch_size)
+            self.data_gen = data
+        elif is_iterator(data):
+            # Can't use consumable iterator
+            raise TypeError(
+                "Can't use a consumable like an iterator or generator. "
+                "Pass a callable which produces it instead.")
         else:
             df_test = False
             try:
@@ -33,18 +46,19 @@ class NumpyDataset(DryData):
                     super().__init__(
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
-                    self.data_gen = [data.to_numpy()]
+                    self.data_gen = lambda: [data.to_numpy()]
                 elif indexed is True:
                     super().__init__(
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
-                    self.data_gen = [(data.index.to_numpy(), data.to_numpy())]
+                    self.data_gen = lambda: [(data.index.to_numpy(),
+                                              data.to_numpy())]
             else:
                 super().__init__(
                     indexed=indexed, supervised=supervised,
                     batch_size=batch_size)
 
-                self.data_gen = data
+                self.data_gen = lambda: data
 
     def index(self):
         """
@@ -53,7 +67,7 @@ class NumpyDataset(DryData):
         if not self.indexed:
             raise NotIndexedError()
 
-        return map(lambda t: t[0], self.data_gen)
+        return map(lambda t: t[0], self.data())
 
     def as_indexed(self, start=0) -> DryData:
         """
@@ -64,9 +78,9 @@ class NumpyDataset(DryData):
             return self
         else:
             if not self.batched:
-                def enumerate_dataset(gen, start=0):
+                def enumerate_dataset(gen_func, start=0):
                     i = start
-                    it = iter(gen)
+                    it = iter(gen_func())
                     while True:
                         try:
                             d = next(it)
@@ -76,13 +90,13 @@ class NumpyDataset(DryData):
                         i += 1
 
                 return NumpyDataset(
-                    enumerate_dataset(self.data_gen, start=start),
+                    lambda: enumerate_dataset(self.data_gen, start=start),
                     indexed=True,
                     supervised=self.supervised,
                     batch_size=self.batch_size)
             else:
-                def enumerate_dataset(gen, start=0):
-                    it = iter(gen)
+                def enumerate_dataset(gen_func, start=0):
+                    it = iter(gen_func())
                     i = start
                     while True:
                         try:
@@ -95,7 +109,7 @@ class NumpyDataset(DryData):
                         yield (idx, d)
 
                 return NumpyDataset(
-                    enumerate_dataset(self.data_gen, start=start),
+                    lambda: enumerate_dataset(self.data_gen, start=start),
                     indexed=True,
                     supervised=self.supervised,
                     batch_size=self.batch_size)
@@ -108,7 +122,7 @@ class NumpyDataset(DryData):
             return self
         else:
             return NumpyDataset(
-                map(lambda t: t[1], self.data_gen),
+                lambda: map(lambda t: t[1], self.data()),
                 indexed=False,
                 supervised=self.supervised,
                 batch_size=self.batch_size)
@@ -123,13 +137,13 @@ class NumpyDataset(DryData):
         else:
             if self.indexed:
                 return NumpyDataset(
-                    map(lambda i, xy: (i, xy[0]), self.data_gen),
+                    map(lambda i, xy: (i, xy[0]), self.data()),
                     indexed=self.indexed,
                     supervised=False,
                     batch_size=self.batch_size)
             else:
                 return NumpyDataset(
-                    map(lambda x, y: x, self.data_gen),
+                    map(lambda x, y: x, self.data()),
                     indexed=self.indexed,
                     supervised=False,
                     batch_size=self.batch_size)
@@ -144,17 +158,20 @@ class NumpyDataset(DryData):
         """
         Get the internal dataset
         """
-        return self.data_gen
+        return self.data_gen()
 
     def batch(self, batch_size=32) -> DryData:
         """
         Batch this data
         """
         if self.batched:
-            return self
+            if self.batch_size != batch_size:
+                return self.unbatch().batch(batch_size=32)
+            else:
+                return self
         else:
             return NumpyDataset(
-                nested_batcher(self.data_gen, batch_size),
+                lambda: nested_batcher(self.data_gen, batch_size),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=batch_size)
@@ -167,7 +184,7 @@ class NumpyDataset(DryData):
             return self
         else:
             return NumpyDataset(
-                nested_unbatcher(self.data_gen),
+                lambda: nested_unbatcher(self.data_gen),
                 indexed=self.indexed,
                 supervised=self.supervised)
 
@@ -179,30 +196,30 @@ class NumpyDataset(DryData):
         if self.indexed:
             if self.supervised:
                 return NumpyDataset(
-                    map(lambda i, xy: (i, (func(xy[0]), xy[1])),
-                        self.data_gen),
+                    lambda: map(lambda t: (t[0], (func(t[1][0]), t[1][1])),
+                                self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
                     batch_size=self.batch_size)
             else:
                 return NumpyDataset(
-                    map(lambda i, x: (i, func(x)),
-                        self.data_gen),
+                    lambda: map(lambda t: (t[0], func(t[1])),
+                                self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
                     batch_size=self.batch_size)
         else:
             if self.supervised:
                 return NumpyDataset(
-                    map(lambda x, y: (func(x), y),
-                        self.data_gen),
+                    lambda: map(lambda t: (func(t[0]), t[1]),
+                                self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
                     batch_size=self.batch_size)
             else:
                 return NumpyDataset(
-                    map(lambda x: func(x),
-                        self.data_gen),
+                    lambda: map(lambda x: func(x),
+                                self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
                     batch_size=self.batch_size)
@@ -219,15 +236,15 @@ class NumpyDataset(DryData):
 
         if self.indexed:
             return NumpyDataset(
-                map(lambda i, xy: (i, (xy[0], func(xy[1]))),
-                    self.data_gen),
+                lambda: map(lambda i, xy: (i, (xy[0], func(xy[1]))),
+                            self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=self.batch_size)
         else:
             return NumpyDataset(
-                map(lambda x, y: (x, func(y)),
-                    self.data_gen),
+                lambda: map(lambda x, y: (x, func(y)),
+                            self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=self.batch_size)
@@ -244,15 +261,15 @@ class NumpyDataset(DryData):
 
         if self.indexed:
             return NumpyDataset(
-                map(lambda i, xy: (i, func(*xy)),
-                    self.data_gen),
+                lambda: map(lambda i, xy: (i, func(*xy)),
+                            self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=self.batch_size)
         else:
             return NumpyDataset(
-                map(lambda x, y: func(x, y),
-                    self.data_gen),
+                lambda: map(lambda x, y: func(x, y),
+                            self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=self.batch_size)
@@ -269,9 +286,9 @@ class NumpyDataset(DryData):
         Take only a specific number of examples
         """
 
-        def taker(gen, n):
+        def taker(gen_func, n):
             i = 0
-            it = iter(gen)
+            it = iter(gen_func())
             while i < n:
                 try:
                     yield next(it)
@@ -281,7 +298,7 @@ class NumpyDataset(DryData):
             return
 
         return NumpyDataset(
-            taker(self.data_gen, n),
+            lambda: taker(self.data_gen, n),
             indexed=self.indexed,
             supervised=self.supervised,
             batch_size=self.batch_size)
@@ -291,9 +308,9 @@ class NumpyDataset(DryData):
         Skip a specific number of examples
         """
 
-        def skiper(gen, n):
+        def skiper(gen_func, n):
             i = 0
-            it = iter(gen)
+            it = iter(gen_func())
             while i < n:
                 try:
                     next(it)
@@ -307,7 +324,7 @@ class NumpyDataset(DryData):
                     return
 
         return NumpyDataset(
-            skiper(self.data_gen, n),
+            lambda: skiper(self.data_gen, n),
             indexed=self.indexed,
             supervised=self.supervised,
             batch_size=self.batch_size)
@@ -328,7 +345,7 @@ class NumpyDataset(DryData):
         import tensorflow as tf
 
         # Heuristic to determine output_signature
-        peek_data = self.in_ds.peek()
+        peek_data = self.peek()
 
         def get_numpy_array_spec(e):
             e_tens = tf.constant(e)
@@ -336,21 +353,18 @@ class NumpyDataset(DryData):
             if self.batched:
                 # We need to remove the first shape number
                 # Since this data is batched
-                list_shape = e_spec.shape
+                list_shape = list(e_spec.shape)
                 list_shape[0] = None
-                e_spec = tf.TensorSpec(list_shape, e_spec.dtype)
+                e_spec = tf.TensorSpec(
+                    tf.TensorShape(list_shape),
+                    e_spec.dtype)
             return e_spec
         peek_data_signature = util.nested_apply(
             peek_data, get_numpy_array_spec)
 
-        # Create generator function
-        def _gen(data_gen):
-            for d in data_gen:
-                yield d
-
         # Create tf dataset
         dataset = tf.data.Dataset.from_generator(
-            _gen(self.data_gen),
+            lambda: self.data_gen(),
             output_signature=peek_data_signature)
 
         return TFDataset(

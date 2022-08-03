@@ -56,8 +56,8 @@ def nested_slice(data, slicer):
     return nested_apply(data, _slicer)
 
 
-def nested_batcher(gen, batch_size):
-    it = iter(gen)
+def nested_batcher(data_gen, batch_size):
+    it = iter(data_gen())
     while True:
         flat_batch_data = None
         flat_batch_shape = None
@@ -94,7 +94,7 @@ def nested_batcher(gen, batch_size):
 
 
 def nested_unbatcher(data_gen):
-    it = iter(data_gen)
+    it = iter(data_gen())
     while True:
         try:
             d = next(it)

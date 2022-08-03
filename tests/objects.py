@@ -136,3 +136,8 @@ class TestClassE(dryml.DryObject):
         with file.open('data.pkl', 'r') as f:
             self.data = pickle.loads(f.read())
         return True
+
+
+class TestClassF1(dryml.DryObject):
+    def __init__(self):
+        self.val = None
