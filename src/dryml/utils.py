@@ -6,7 +6,7 @@ import inspect
 import hashlib
 import importlib
 import pickle
-from typing import Type, Union, IO
+from typing import Type, Union, IO, Optional, Callable
 import zipfile
 
 
@@ -20,6 +20,18 @@ def is_nonstring_iterable(val):
 
 def is_dictlike(val):
     return isinstance(val, collections.abc.Mapping)
+
+
+def is_iterator(val):
+    # Implementation from https://stackoverflow.com/a/36230057
+    if (
+            hasattr(val, '__iter__') and
+            hasattr(val, '__next__') and
+            callable(val.__iter__) and
+            val.__iter__() is val):
+        return True
+    else:
+        return False
 
 
 def init_arg_list_handler(arg_list):
