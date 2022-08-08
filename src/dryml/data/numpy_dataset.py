@@ -1,6 +1,7 @@
 from dryml.data.dry_data import DryData, NotIndexedError, \
     NotSupervisedError
-from dryml.data.util import nested_batcher, nested_unbatcher
+from dryml.data.util import nested_batcher, nested_unbatcher, \
+    nested_flatten
 from dryml.utils import is_iterator
 import numpy as np
 from typing import Callable
@@ -13,14 +14,23 @@ class NumpyDataset(DryData):
 
     def __init__(
             self, data, indexed=False,
-            supervised=False, batch_size=None):
+            supervised=False, batch_size=None, size=None):
 
         if type(data) is np.ndarray or type(data) is tuple:
+            data_size = len(data)
+            if type(data) is tuple:
+                size_set = set(map(lambda d: len(d), nested_flatten(data)))
+                if len(size_set) > 1:
+                    raise ValueError(
+                        "nested elements have different numbers of elements!")
+                data_size = size_set.pop()
             super().__init__(
                 indexed=indexed, supervised=supervised,
-                batch_size=len(data))
+                batch_size=data_size)
 
             self.data_gen = lambda: [data]
+            self.size = data_size
+
         elif callable(data):
             # We have a method which is supposed to yield
             # A generator.
@@ -28,6 +38,11 @@ class NumpyDataset(DryData):
                 indexed=indexed, supervised=supervised,
                 batch_size=batch_size)
             self.data_gen = data
+            if size is None:
+                self.size = np.inf
+            else:
+                self.size = size
+
         elif is_iterator(data):
             # Can't use consumable iterator
             raise TypeError(
@@ -47,18 +62,39 @@ class NumpyDataset(DryData):
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
                     self.data_gen = lambda: [data.to_numpy()]
+                    self.size = len(data)
                 elif indexed is True:
                     super().__init__(
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
                     self.data_gen = lambda: [(data.index.to_numpy(),
                                               data.to_numpy())]
+                    self.size = len(data)
+            elif type(data) is list:
+                data_size = len(data)
+                if batch_size is not None:
+                    data_size = data_size*batch_size
+                super().__init__(
+                    indexed=indexed, supervised=supervised,
+                    batch_size=batch_size)
+
+                self.data_gen = lambda: data
+                if size is None:
+                    self.size = data_size
+                else:
+                    if size != data_size:
+                        ValueError("Detected incorrect dataset size")
+                    self.size = size
             else:
                 super().__init__(
                     indexed=indexed, supervised=supervised,
                     batch_size=batch_size)
 
                 self.data_gen = lambda: data
+                if size is None:
+                    self.size = np.nan
+                else:
+                    self.size = size
 
     def index(self):
         """
@@ -93,7 +129,8 @@ class NumpyDataset(DryData):
                     lambda: enumerate_dataset(self.data_gen, start=start),
                     indexed=True,
                     supervised=self.supervised,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
             else:
                 def enumerate_dataset(gen_func, start=0):
                     it = iter(gen_func())
@@ -112,7 +149,8 @@ class NumpyDataset(DryData):
                     lambda: enumerate_dataset(self.data_gen, start=start),
                     indexed=True,
                     supervised=self.supervised,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
 
     def as_not_indexed(self):
         """
@@ -125,7 +163,8 @@ class NumpyDataset(DryData):
                 lambda: map(lambda t: t[1], self.data()),
                 indexed=False,
                 supervised=self.supervised,
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                size=self.size)
 
     def as_not_supervised(self) -> DryData:
         """
@@ -140,13 +179,15 @@ class NumpyDataset(DryData):
                     map(lambda i, xy: (i, xy[0]), self.data()),
                     indexed=self.indexed,
                     supervised=False,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
             else:
                 return NumpyDataset(
                     map(lambda x, y: x, self.data()),
                     indexed=self.indexed,
                     supervised=False,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
 
     def intersect(self) -> DryData:
         """
@@ -174,7 +215,8 @@ class NumpyDataset(DryData):
                 lambda: nested_batcher(self.data_gen, batch_size),
                 indexed=self.indexed,
                 supervised=self.supervised,
-                batch_size=batch_size)
+                batch_size=batch_size,
+                size=self.size)
 
     def unbatch(self) -> DryData:
         """
@@ -186,7 +228,8 @@ class NumpyDataset(DryData):
             return NumpyDataset(
                 lambda: nested_unbatcher(self.data_gen),
                 indexed=self.indexed,
-                supervised=self.supervised)
+                supervised=self.supervised,
+                size=self.size)
 
     def apply_X(self, func: Callable = None) -> DryData:
         """
@@ -200,14 +243,16 @@ class NumpyDataset(DryData):
                                 self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
             else:
                 return NumpyDataset(
                     lambda: map(lambda t: (t[0], func(t[1])),
                                 self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
         else:
             if self.supervised:
                 return NumpyDataset(
@@ -215,14 +260,16 @@ class NumpyDataset(DryData):
                                 self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
             else:
                 return NumpyDataset(
                     lambda: map(lambda x: func(x),
                                 self.data()),
                     indexed=self.indexed,
                     supervised=self.supervised,
-                    batch_size=self.batch_size)
+                    batch_size=self.batch_size,
+                    size=self.size)
 
     def apply_Y(self, func=None) -> DryData:
         """
@@ -240,14 +287,16 @@ class NumpyDataset(DryData):
                             self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                size=self.size)
         else:
             return NumpyDataset(
                 lambda: map(lambda x, y: (x, func(y)),
                             self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                size=self.size)
 
     def apply(self, func=None) -> DryData:
         """
@@ -265,14 +314,16 @@ class NumpyDataset(DryData):
                             self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                size=self.size)
         else:
             return NumpyDataset(
                 lambda: map(lambda x, y: func(x, y),
                             self.data()),
                 indexed=self.indexed,
                 supervised=self.supervised,
-                batch_size=self.batch_size)
+                batch_size=self.batch_size,
+                size=self.size)
 
     def __iter__(self):
         """
@@ -297,11 +348,22 @@ class NumpyDataset(DryData):
                     return
             return
 
+        new_size = self.size
+        if new_size is np.nan:
+            new_size = n
+        elif new_size is np.inf:
+            new_size = n
+        else:
+            if new_size > n:
+                new_size = n
+
         return NumpyDataset(
             lambda: taker(self.data_gen, n),
             indexed=self.indexed,
             supervised=self.supervised,
-            batch_size=self.batch_size)
+            batch_size=self.batch_size,
+            size=new_size,
+            )
 
     def skip(self, n):
         """
@@ -323,18 +385,26 @@ class NumpyDataset(DryData):
                 except StopIteration:
                     return
 
+        new_size = self.size
+        if new_size is not np.nan and new_size is not np.inf:
+            if n > new_size:
+                new_size = 0
+            else:
+                new_size -= n
+
         return NumpyDataset(
             lambda: skiper(self.data_gen, n),
             indexed=self.indexed,
             supervised=self.supervised,
-            batch_size=self.batch_size)
+            batch_size=self.batch_size,
+            size=new_size)
 
     def __len__(self):
         """
         Get length of dataset. Will return Infinite if infinite,
         and unknown if it can't be determined.
         """
-        raise NotImplementedError()
+        return self.size
 
     def numpy(self):
         return self

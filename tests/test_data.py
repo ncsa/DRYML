@@ -103,6 +103,8 @@ def test_numpy_dataset_1():
 
     dataset = NumpyDataset(data, batch_size=batch_size)
 
+    assert len(dataset) == batch_size
+
     i = 0
     for el in dataset.unbatch():
         assert np.all(el == data[i])
@@ -115,6 +117,8 @@ def test_numpy_dataset_2():
     data = np.random.random((batch_size, 20))
 
     dataset = NumpyDataset(data)
+
+    assert len(dataset) == batch_size
 
     i = 0
     for el in dataset.unbatch():
@@ -129,6 +133,8 @@ def test_numpy_dataset_3():
 
     dataset = NumpyDataset(data, batch_size=batch_size)
 
+    assert len(dataset) == batch_size
+
     v = next(iter(dataset))
 
     assert np.all(v == data)
@@ -140,6 +146,8 @@ def test_numpy_dataset_4():
     data = np.random.random((batch_size, 20))
 
     dataset = NumpyDataset(data)
+
+    assert len(dataset) == batch_size
 
     v = next(iter(dataset))
     assert np.all(v == data)
@@ -153,6 +161,8 @@ def test_numpy_dataset_5():
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
+
+    assert len(dataset) == batch_size
 
     i = 0
     for el in dataset:
@@ -168,6 +178,8 @@ def test_numpy_dataset_6():
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
+
+    assert len(dataset) == batch_size
 
     v = next(iter(dataset.batch(batch_size=batch_size)))
 
@@ -185,10 +197,16 @@ def test_numpy_dataset_7():
 
     dataset = NumpyDataset(batch_rows)
 
+    assert len(dataset) == batch_size
+
     sub_batch_size = batch_size//4
 
+    dataset = dataset.batch(batch_size=sub_batch_size)
+
+    assert len(dataset) == batch_size
+
     i = 0
-    for el in dataset.batch(batch_size=sub_batch_size):
+    for el in dataset:
         sub_batch = np.stack(
             batch_rows[i*sub_batch_size:(i+1)*sub_batch_size], axis=0)
         assert np.all(el == sub_batch)
@@ -204,7 +222,11 @@ def test_numpy_dataset_8():
 
     dataset = NumpyDataset(batch_rows)
 
+    assert len(dataset) == batch_size
+
     dataset2 = dataset.batch(batch_size//4).unbatch()
+
+    assert len(dataset2) == batch_size
 
     for el, el2 in zip(dataset, dataset2):
         assert np.all(el == el2)
@@ -219,8 +241,14 @@ def test_numpy_dataset_9():
 
     dataset = NumpyDataset(batch_rows)
 
+    assert len(dataset) == batch_size
+
+    dataset = dataset.as_indexed()
+
+    assert len(dataset) == batch_size
+
     i = 0
-    for idx, el in dataset.as_indexed():
+    for idx, el in dataset:
         assert idx == i
         assert np.all(el == batch_rows[i])
         i += 1
@@ -233,8 +261,14 @@ def test_numpy_dataset_10():
 
     dataset = NumpyDataset(data)
 
+    assert len(dataset) == batch_size
+
+    dataset = dataset.as_indexed().unbatch()
+
+    assert len(dataset) == batch_size
+
     i = 0
-    for idx, el in dataset.as_indexed().unbatch():
+    for idx, el in dataset:
         assert idx == i
         assert np.all(el == data[i])
         i += 1
@@ -247,8 +281,14 @@ def test_numpy_dataset_11():
 
     dataset = NumpyDataset(data)
 
+    assert len(dataset) == batch_size
+
+    dataset = dataset.as_indexed().as_not_indexed().unbatch()
+
+    assert len(dataset) == batch_size
+
     i = 0
-    for el in dataset.as_indexed().as_not_indexed().unbatch():
+    for el in dataset:
         assert np.all(el == data[i])
         i += 1
 
@@ -261,8 +301,14 @@ def test_numpy_dataset_12():
 
     dataset = NumpyDataset([(data1, data2)], batch_size=batch_size)
 
+    assert len(dataset) == batch_size
+
+    dataset = dataset.as_indexed().unbatch()
+
+    assert len(dataset) == batch_size
+
     i = 0
-    for idx, el in dataset.as_indexed().unbatch():
+    for idx, el in dataset:
         assert idx == i
         assert np.all(el[0] == data1[i])
         assert np.all(el[1] == data2[i])
@@ -277,7 +323,13 @@ def test_numpy_dataset_13():
 
     dataset = NumpyDataset([(data1, data2)], batch_size=batch_size)
 
-    assert dataset is not dataset.batch(batch_size=2)
+    assert len(dataset) == batch_size
+
+    dataset_2 = dataset.batch(batch_size=2)
+
+    assert len(dataset_2) == batch_size
+
+    assert dataset is not dataset_2
 
 
 def test_numpy_dataset_14():
@@ -289,6 +341,8 @@ def test_numpy_dataset_14():
 
     dataset = NumpyDataset(batch_rows).batch(batch_size=batch_size)
 
+    assert len(dataset) == batch_size
+
     assert dataset is dataset.batch(batch_size=batch_size)
 
 
@@ -298,8 +352,12 @@ def test_numpy_dataset_15():
 
     dataset = NumpyDataset(data_block, batch_size=batch_size)
 
+    assert len(dataset) == batch_size
+
     take_num = 10
     dataset = dataset.unbatch().take(take_num)
+
+    assert len(dataset) == take_num
 
     count = 0
     for el in dataset:
@@ -315,6 +373,8 @@ def test_numpy_dataset_16():
 
     dataset = NumpyDataset(data_block, batch_size=batch_size)
 
+    assert len(dataset) == batch_size
+
     el_a = dataset.peek()
     el_b = dataset.peek()
 
@@ -326,6 +386,8 @@ def test_numpy_dataset_17():
     data_block = np.random.random((batch_size, 20))
 
     dataset = NumpyDataset(data_block, batch_size=batch_size)
+
+    assert len(dataset) == batch_size
 
     for el_a, el_b in zip(dataset, dataset):
         assert np.all(el_a == el_b)
@@ -340,6 +402,8 @@ def test_numpy_dataset_18():
         (data_block_x, data_block_y),
         batch_size=batch_size,
         supervised=True)
+
+    assert len(dataset) == batch_size
 
     el_a = dataset.peek()
     el_b = dataset.peek()
