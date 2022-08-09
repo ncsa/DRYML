@@ -156,3 +156,59 @@ def test_train_supervised_model_sklearn_2():
 
     assert train_accuracy == test_accuracy
     assert train_accuracy > random_guessing_accuracy
+
+
+def test_train_supervised_model_tf_1():
+    # Generate data.
+    num_train = 2000
+    num_test = 500
+    train_data = mc.gen_dataset_1(num_examples=num_train)
+    test_data = mc.gen_dataset_1(num_examples=num_test)
+
+    import dryml.models.tf
+    import tensorflow as tf
+
+    # Create model
+    model = dryml.models.tf.TFKerasTrainable(
+        model=dryml.models.tf.KerasSequentialFunctionalModel(
+            input_shape=(1,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 1, 'activation': 'linear'})]),
+        optimizer=dryml.models.tf.TFObjectWrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.TFObjectWrapper(tf.keras.losses.MeanSquaredError),
+        train_fn=dryml.models.tf.TFBasicTraining(epochs=1),
+        metrics=[dryml.models.tf.TFObjectWrapper(tf.keras.metrics.MeanSquaredError)])
+
+    def test_model(test_data, model):
+        import numpy as np
+        import dryml.metrics
+        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
+
+        return dryml.metrics.mean_squared_error(model, test_ds)
+
+    @dryml.compute_context(
+        ctx_use_existing_context=False,
+        ctx_update_objs=True)
+    def train_method(train_data, test_data, model):
+        # Create datasets
+        train_ds = dryml.data.NumpyDataset(
+            train_data,
+            batch_size=num_train,
+            supervised=True)
+
+        # Train model
+        model.prep_train()
+        model.train(train_ds)
+
+        return test_model(test_data, model)
+
+    @dryml.compute_context(ctx_use_existing_context=False)
+    def test_method(test_data, model):
+        return test_model(test_data, model)
+
+    train_loss = train_method(train_data, test_data, model)
+    test_loss = test_method(test_data, model)
+
+    assert train_loss == test_loss
