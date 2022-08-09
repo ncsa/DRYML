@@ -56,7 +56,6 @@ def test_train_supervised_model_sklearn_1():
         train_fn=dryml.models.sklearn.SklearnBasicTraining())
 
     def test_model(test_data, model):
-        import numpy as np
         import dryml.metrics
 
         test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
@@ -179,10 +178,11 @@ def test_train_supervised_model_tf_1():
         optimizer=dryml.models.tf.TFObjectWrapper(tf.keras.optimizers.Adam),
         loss=dryml.models.tf.TFObjectWrapper(tf.keras.losses.MeanSquaredError),
         train_fn=dryml.models.tf.TFBasicTraining(epochs=1),
-        metrics=[dryml.models.tf.TFObjectWrapper(tf.keras.metrics.MeanSquaredError)])
+        metrics=[
+            dryml.models.tf.TFObjectWrapper(tf.keras.metrics.MeanSquaredError)
+        ])
 
     def test_model(test_data, model):
-        import numpy as np
         import dryml.metrics
         test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
 

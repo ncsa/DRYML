@@ -425,7 +425,7 @@ def test_tf_dataset_1():
 
         dataset = TFDataset(tf_ds)
 
-         # assert len(dataset) == batch_size
+        # assert len(dataset) == batch_size
 
         i = 0
         for el in dataset.unbatch():

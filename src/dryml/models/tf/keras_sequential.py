@@ -6,7 +6,7 @@ from dryml.utils import adjust_class_module
 
 class KerasSequentialFunctionalModel(TFKerasModelBase):
     def __init__(
-        self, input_shape=(1,), layer_defs=[]):
+            self, input_shape=(1,), layer_defs=[]):
 
         self.input_shape = input_shape
         self.layer_defs = layer_defs
