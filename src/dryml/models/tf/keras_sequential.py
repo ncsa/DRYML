@@ -4,6 +4,28 @@ import numpy as np
 from dryml.utils import adjust_class_module
 
 
+class KerasSequentialFunctionalModel(TFKerasModelBase):
+    def __init__(
+        self, input_shape=(1,), layer_defs=[]):
+
+        self.input_shape = input_shape
+        self.layer_defs = layer_defs
+
+    def compute_prepare_imp(self):
+        # Build Functional Model
+        inp = tf.keras.layers.Input(self.input_shape)
+        last_layer = inp
+        for layer_name, layer_kwargs in self.layer_defs:
+            last_layer = getattr(
+                tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
+        self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
+
+    def compute_cleanup_imp(self):
+        # Delete the contained model
+        del self.mdl
+        self.mdl = None
+
+
 def keras_sequential_functional_class(
         name, input_shape, output_shape, base_classes=(TFKerasModelBase,)):
 
