@@ -86,7 +86,7 @@ class SklearnBasicTraining(SklearnLikeTrainFunction):
 
         data_examples = total_examples
         if total_examples == -1:
-            data_examples = len(train_data)
+            data_examples = train_data.count()
             if data_examples is np.nan or data_examples is np.inf:
                 raise ValueError(
                     "Dataset has no known length and you must provide "

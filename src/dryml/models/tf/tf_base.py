@@ -326,13 +326,10 @@ class TFBasicTraining(TFLikeTrainFunction):
         # Make sure data is unbatched. We want the function to control this.
         data = data.unbatch()
 
-        # Get tf.data.Dataset backing type
-        ds = data.data()
-
         num_total = self.num_total
         if num_total is None:
             # Attempt to measure dataset size
-            num_total = len(ds)
+            num_total = data.count()
         if self.val_num is not None:
             num_val = self.val_num
             if self.val_split is not None:
@@ -343,6 +340,9 @@ class TFBasicTraining(TFLikeTrainFunction):
             num_val = int(num_total*self.val_split)
 
         num_train = num_total-num_val
+
+        # Get tf.data.Dataset backing type
+        ds = data.data()
 
         if self.shuffle_buffer is None:
             shuffle_buffer = num_train
@@ -418,13 +418,10 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
         # Make sure data is unbatched. We want the function to control this.
         data = data.unbatch()
 
-        # Get tf.data.Dataset backing type
-        ds = data.data()
-
         num_total = self.num_total
         if num_total is None:
             # Attempt to measure dataset size
-            num_total = len(ds)
+            num_total = data.count()
         if self.val_num is not None:
             num_val = self.val_num
             if self.val_split is not None:
@@ -435,6 +432,9 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
             num_val = int(num_total*self.val_split)
 
         num_train = num_total-num_val
+
+        # Get tf.data.Dataset backing type
+        ds = data.data()
 
         if self.shuffle_buffer is None:
             shuffle_buffer = num_train

@@ -8,11 +8,12 @@ import numpy as np
 class TFDataset(DryData):
     def __init__(
             self, in_ds: tf.data.Dataset, indexed=False,
-            supervised=False, batch_size=None):
+            supervised=False, batch_size=None, size=None):
         super().__init__(
             indexed=indexed, supervised=supervised,
             batch_size=batch_size)
         self.ds = in_ds
+        self.size = size
 
     def index(self):
         """
@@ -284,3 +285,19 @@ class TFDataset(DryData):
         Get a TFDataset, but this is already a TFDataset
         """
         return self
+
+    def count(self, limit=-1):
+        number = 0
+        num = 0
+        for e in self:
+            if limit != -1:
+                if num >= limit:
+                    break
+            if self.batched:
+                number += e.shape[0]
+            else:
+                number += 1
+
+            num += 1
+
+        return number

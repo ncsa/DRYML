@@ -29,7 +29,7 @@ class NumpyDataset(DryData):
                 batch_size=data_size)
 
             self.data_gen = lambda: [data]
-            self.size = data_size
+            self.size = 1
 
         elif callable(data):
             # We have a method which is supposed to yield
@@ -39,7 +39,7 @@ class NumpyDataset(DryData):
                 batch_size=batch_size)
             self.data_gen = data
             if size is None:
-                self.size = np.inf
+                self.size = np.nan
             else:
                 self.size = size
 
@@ -62,18 +62,16 @@ class NumpyDataset(DryData):
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
                     self.data_gen = lambda: [data.to_numpy()]
-                    self.size = len(data)
+                    self.size = 1
                 elif indexed is True:
                     super().__init__(
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
                     self.data_gen = lambda: [(data.index.to_numpy(),
                                               data.to_numpy())]
-                    self.size = len(data)
+                    self.size = 1
             elif type(data) is list:
                 data_size = len(data)
-                if batch_size is not None:
-                    data_size = data_size*batch_size
                 super().__init__(
                     indexed=indexed, supervised=supervised,
                     batch_size=batch_size)
@@ -441,4 +439,21 @@ class NumpyDataset(DryData):
             dataset,
             indexed=self.indexed,
             supervised=self.supervised,
-            batch_size=self.batch_size)
+            batch_size=self.batch_size,
+            size=self.size)
+
+    def count(self, limit=-1):
+        number = 0
+        num = 0
+        for e in self:
+            if limit != -1:
+                if num >= limit:
+                    break
+            if self.batched:
+                number += e.shape[0]
+            else:
+                number += 1
+
+            num += 1
+
+        return number

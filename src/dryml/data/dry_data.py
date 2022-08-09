@@ -175,3 +175,10 @@ class DryData(object):
         """
 
         return self.take(1).collect()[0]
+
+    def count(self, limit=-1):
+        """
+        Attempt to count individual elements in Dataset
+        """
+
+        raise NotImplementedError()
