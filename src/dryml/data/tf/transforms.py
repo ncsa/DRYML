@@ -143,5 +143,7 @@ class BestCat(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
+        if data.batched:
+            data = data.batch()
         return data.tf().apply_X(
-            func=lambda image: tf.argmax(image, axis=-1))
+            func=lambda x: tf.argmax(x, axis=-1))
