@@ -1,6 +1,30 @@
 from dryml.data import DryData
 from dryml.models import DryTrainable
 from dryml.context import compute_context
+import numpy as np
+
+
+@compute_context(ctx_dont_create_context=True)
+def mean_squared_error(trainable: DryTrainable, test_data: DryData):
+    if not test_data.supervised:
+        raise ValueError("Dataset is unsupervised!")
+
+    # Prepare input data, expects a dataset
+    data = trainable.eval(test_data) \
+                    .as_not_indexed()
+
+    if not data.batched:
+        data = data.batch()
+
+    eval_data = trainable.eval(data)
+
+    total_loss = 0.
+    num_examples = 0
+    for batch_e_y, batch_y in eval_data:
+        total_loss += np.sum((batch_e_y-batch_y)**2)
+        num_examples += batch_e_y.shape[0]
+
+    return total_loss/num_examples
 
 
 @compute_context(ctx_dont_create_context=True)
