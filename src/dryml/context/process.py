@@ -309,6 +309,13 @@ def compute_context(
                     args=args,
                     kwargs=kwargs)
 
+                try:
+                    from pytest_cov.embed import cleanup_on_sigterm
+                except ImportError:
+                    pass
+                else:
+                    cleanup_on_sigterm()
+
                 # run function
                 p = Process(target=executor, args=[ctx_send_q, ctx_ret_q])
                 p.start()
@@ -640,6 +647,13 @@ def tune_compute_context(
             # Create checkpoint queues
             checkpoint_req_q = mp_ctx.Queue()
             checkpoint_ret_q = mp_ctx.Queue()
+
+            try:
+                from pytest_cov.embed import cleanup_on_sigterm
+            except ImportError:
+                pass
+            else:
+                cleanup_on_sigterm()
 
             # run function
             p = Process(
