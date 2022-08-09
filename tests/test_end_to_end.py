@@ -57,19 +57,11 @@ def test_train_supervised_model_sklearn_1():
 
     def test_model(test_data, model):
         import numpy as np
+        import dryml.metrics
+
         test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
 
-        eval_data = model.eval(test_ds)
-
-        eval_data = eval_data.batch(batch_size=32).numpy()
-
-        total_loss = 0.
-        num_examples = 0
-        for batch_e_y, batch_y in eval_data:
-            total_loss += np.sum((batch_e_y-batch_y)**2)
-            num_examples += batch_e_y.shape[0]
-
-        return total_loss/num_examples
+        return dryml.metrics.mean_squared_error(model, test_ds)
 
     @dryml.compute_context(
         ctx_use_existing_context=False,
@@ -78,7 +70,6 @@ def test_train_supervised_model_sklearn_1():
         # Create datasets
         train_ds = dryml.data.NumpyDataset(
             train_data,
-            batch_size=num_train,
             supervised=True)
 
         # Train model
