@@ -7,11 +7,6 @@ from dryml.data import DryData
 
 
 class SklearnLikeModel(DryComponent):
-    def __call__(self, X, *args, target=True, index=False, **kwargs):
-        return self.mdl.predict_proba(X, *args, **kwargs)
-
-
-class SklearnModel(SklearnLikeModel):
     @DryMeta.collect_kwargs
     def __init__(self, cls, **kwargs):
         # It is subclass's responsibility to fill this
@@ -45,6 +40,19 @@ class SklearnModel(SklearnLikeModel):
                 f.write(pickle.dumps(self.mdl))
 
         return True
+
+    def __call__(self, X, *args, target=True, index=False, **kwargs):
+        raise NotImplementedError()
+
+
+class SklearnClassifierModel(SklearnLikeModel):
+    def __call__(self, X, *args, target=True, index=False, **kwargs):
+        return self.mdl.predict_proba(X, *args, **kwargs)
+
+
+class SklearnRegressionModel(SklearnLikeModel):
+    def __call__(self, X, *args, target=True, index=False, **kwargs):
+        return self.mdl.predict(X, *args, **kwargs)
 
 
 class SklearnLikeTrainFunction(DryComponent):
@@ -97,7 +105,7 @@ class SklearnBasicTraining(SklearnLikeTrainFunction):
         trainable.mdl.fit(x, y, *self.train_args, **self.train_kwargs)
 
 
-class SklearnClassifier(DryTrainable):
+class SklearnTrainable(DryTrainable):
     __dry_compute_context__ = 'default'
 
     def __init__(self, model=None, train_fn=None, **kwargs):

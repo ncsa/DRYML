@@ -20,6 +20,7 @@ jobs:
           pip install pytest
           pip install pytest-cov
           pip install tensorflow
+          pip install scikit-learn
           pip install GPUtil
 
       - name: Install DRYML

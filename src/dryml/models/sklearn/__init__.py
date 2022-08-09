@@ -1,11 +1,13 @@
-from dryml.models.sklearn.sklearn_base import SklearnClassifier, \
-    SklearnLikeModel, SklearnModel, SklearnLikeTrainFunction, \
-    SklearnBasicTraining
+from dryml.models.sklearn.sklearn_base import SklearnLikeModel, \
+    SklearnClassifierModel, SklearnRegressionModel, \
+    SklearnLikeTrainFunction, SklearnBasicTraining, \
+    SklearnTrainable
 
 __all__ = [
-    SklearnClassifier,
     SklearnLikeModel,
-    SklearnModel,
+    SklearnClassifierModel,
+    SklearnRegressionModel,
     SklearnLikeTrainFunction,
     SklearnBasicTraining,
+    SklearnTrainable,
 ]
