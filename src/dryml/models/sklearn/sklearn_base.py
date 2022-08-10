@@ -3,10 +3,11 @@ import zipfile
 import numpy as np
 from dryml.dry_config import DryMeta
 from dryml.models import DryComponent, DryTrainable
+from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import DryData
 
 
-class SklearnLikeModel(DryComponent):
+class Model(DryComponent):
     @DryMeta.collect_kwargs
     def __init__(self, cls, **kwargs):
         # It is subclass's responsibility to fill this
@@ -45,27 +46,17 @@ class SklearnLikeModel(DryComponent):
         raise NotImplementedError()
 
 
-class SklearnClassifierModel(SklearnLikeModel):
+class ClassifierModel(Model):
     def __call__(self, X, *args, target=True, index=False, **kwargs):
         return self.mdl.predict_proba(X, *args, **kwargs)
 
 
-class SklearnRegressionModel(SklearnLikeModel):
+class RegressionModel(Model):
     def __call__(self, X, *args, target=True, index=False, **kwargs):
         return self.mdl.predict(X, *args, **kwargs)
 
 
-class SklearnLikeTrainFunction(DryComponent):
-    def __init__(self):
-        self.train_args = ()
-        self.train_kwargs = {}
-
-    def __call__(
-            self, trainable, train_data, train_spec=None, train_callbacks=[]):
-        raise NotImplementedError("method must be implemented in a subclass")
-
-
-class SklearnBasicTraining(SklearnLikeTrainFunction):
+class BasicTraining(BaseTrainFunction):
     """
     The basic sklearn training method.
     """
@@ -105,7 +96,7 @@ class SklearnBasicTraining(SklearnLikeTrainFunction):
         trainable.mdl.fit(x, y, *self.train_args, **self.train_kwargs)
 
 
-class SklearnTrainable(DryTrainable):
+class Trainable(DryTrainable):
     __dry_compute_context__ = 'default'
 
     def __init__(self, model=None, train_fn=None, **kwargs):

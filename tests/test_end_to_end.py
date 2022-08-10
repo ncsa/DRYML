@@ -47,13 +47,13 @@ def test_train_supervised_model_sklearn_1():
     import sklearn.neighbors
 
     # Create model
-    model = dryml.models.sklearn.SklearnTrainable(
-        model=dryml.models.sklearn.SklearnRegressionModel(
+    model = dryml.models.sklearn.Trainable(
+        model=dryml.models.sklearn.RegressionModel(
             sklearn.neighbors.KNeighborsRegressor,
             n_neighbors=5,
             weights='uniform',
             algorithm='ball_tree'),
-        train_fn=dryml.models.sklearn.SklearnBasicTraining())
+        train_fn=dryml.models.sklearn.BasicTraining())
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -112,12 +112,12 @@ def test_train_supervised_model_sklearn_2():
     import sklearn.neighbors
     import dryml.data.transforms
 
-    model = dryml.models.sklearn.SklearnTrainable(
-        model=dryml.models.sklearn.SklearnClassifierModel(
+    model = dryml.models.sklearn.Trainable(
+        model=dryml.models.sklearn.ClassifierModel(
             sklearn.neighbors.KNeighborsClassifier,
             n_neighbors=5,
             algorithm='ball_tree'),
-        train_fn=dryml.models.sklearn.SklearnBasicTraining())
+        train_fn=dryml.models.sklearn.BasicTraining())
 
     best_cat = dryml.data.transforms.BestCat()
 
