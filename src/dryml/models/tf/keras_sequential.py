@@ -1,10 +1,10 @@
-from dryml.models.tf.tf_base import TFKerasModelBase
+from dryml.models.tf.tf_base import KerasModelBase
 import tensorflow as tf
 import numpy as np
 from dryml.utils import adjust_class_module
 
 
-class KerasSequentialFunctionalModel(TFKerasModelBase):
+class KerasSequentialFunctionalModel(KerasModelBase):
     def __init__(
             self, input_shape=(1,), layer_defs=[]):
 
@@ -27,7 +27,7 @@ class KerasSequentialFunctionalModel(TFKerasModelBase):
 
 
 def keras_sequential_functional_class(
-        name, input_shape, output_shape, base_classes=(TFKerasModelBase,)):
+        name, input_shape, output_shape, base_classes=(KerasModelBase,)):
 
     def __init__(
             self, layer_defs, *args, out_activation='linear',

@@ -168,18 +168,18 @@ def test_train_supervised_model_tf_1():
     import tensorflow as tf
 
     # Create model
-    model = dryml.models.tf.TFKerasTrainable(
+    model = dryml.models.tf.KerasTrainable(
         model=dryml.models.tf.KerasSequentialFunctionalModel(
             input_shape=(1,),
             layer_defs=[
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': 1, 'activation': 'linear'})]),
-        optimizer=dryml.models.tf.TFObjectWrapper(tf.keras.optimizers.Adam),
-        loss=dryml.models.tf.TFObjectWrapper(tf.keras.losses.MeanSquaredError),
-        train_fn=dryml.models.tf.TFBasicTraining(epochs=1),
+        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.ObjectWrapper(tf.keras.losses.MeanSquaredError),
+        train_fn=dryml.models.tf.BasicTraining(epochs=1),
         metrics=[
-            dryml.models.tf.TFObjectWrapper(tf.keras.metrics.MeanSquaredError)
+            dryml.models.tf.ObjectWrapper(tf.keras.metrics.MeanSquaredError)
         ])
 
     def test_model(test_data, model):
@@ -241,7 +241,7 @@ def test_train_supervised_model_tf_2():
     import dryml.data.tf.transforms
     import tensorflow as tf
 
-    model = dryml.models.tf.TFKerasTrainable(
+    model = dryml.models.tf.KerasTrainable(
         model=dryml.models.tf.KerasSequentialFunctionalModel(
             input_shape=(num_dims,),
             layer_defs=[
@@ -249,10 +249,10 @@ def test_train_supervised_model_tf_2():
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': num_classes, 'activation': 'softmax'}),
             ]),
-        optimizer=dryml.models.tf.TFObjectWrapper(tf.keras.optimizers.Adam),
-        loss=dryml.models.tf.TFObjectWrapper(
+        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.ObjectWrapper(
             tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.models.tf.TFBasicTraining(epochs=1))
+        train_fn=dryml.models.tf.BasicTraining(epochs=1))
 
     best_cat = dryml.data.tf.transforms.BestCat()
 

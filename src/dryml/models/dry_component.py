@@ -10,3 +10,14 @@ class DryComponent(DryObject):
 
     def __call__(self, *args, **kwargs):
         raise NotImplementedError()
+
+
+class TrainFunction(DryComponent):
+    def __init__(self):
+        self.train_args = ()
+        self.train_kwargs = {}
+
+    def __call__(
+            self, trainable, train_data,
+            train_spec=None, train_callbacks=[]):
+        raise NotImplementedError("method must be implemented in a subclass")

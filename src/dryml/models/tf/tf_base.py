@@ -2,6 +2,7 @@ import tensorflow as tf
 from dryml import DryObject
 from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir
 from dryml.models import DryTrainable, DryComponent
+from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
 from dryml.models.tf.utils import keras_train_spec_updater, \
@@ -266,7 +267,7 @@ def keras_save_checkpoint_to_zip_from_dir(
     return True
 
 
-class TFObjectWrapper(DryObject):
+class ObjectWrapper(DryObject):
     def __init__(self, obj_cls, obj_args=(), obj_kwargs={}):
         self.obj_args = obj_args
         self.obj_kwargs = obj_kwargs
@@ -281,18 +282,11 @@ class TFObjectWrapper(DryObject):
         self.obj = None
 
 
-class TFLikeTrainFunction(DryComponent):
-    def __init__(self):
-        self.train_args = ()
-        self.train_kwargs = {}
-
-    def __call__(
-            self, trainable, train_data,
-            train_spec=None, train_callbacks=[]):
-        raise NotImplementedError("method must be implemented in a subclass")
+class TrainFunction(BaseTrainFunction):
+    pass
 
 
-class TFBasicTraining(TFLikeTrainFunction):
+class BasicTraining(TrainFunction):
     def __init__(
             self, *args, val_split=0.2, val_num=None, num_total=None,
             shuffle_buffer=None, epochs=10000, **kwargs):
@@ -380,7 +374,7 @@ class TFBasicTraining(TFLikeTrainFunction):
             initial_epoch=start_epoch, **self.train_kwargs)
 
 
-class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
+class BasicEarlyStoppingTraining(TrainFunction):
     def __init__(
             self, *args, val_split=0.2, val_num=None, num_total=None,
             shuffle_buffer=None, patience=3, epochs=10000, **kwargs):
@@ -476,16 +470,16 @@ class TFBasicEarlyStoppingTraining(TFLikeTrainFunction):
             *self.train_args, **self.train_kwargs)
 
 
-class TFLikeModel(DryComponent):
+class Model(DryComponent):
     def __call__(self, X, *args, target=True, index=False, **kwargs):
         return self.mdl(X, *args, **kwargs)
 
 
-class TFKerasModel(TFLikeModel):
+class KerasModel(Model):
     pass
 
 
-class TFLikeTrainable(DryTrainable):
+class Trainable(DryTrainable):
     __dry_compute_context__ = 'tf'
 
     def __init__(self):
@@ -504,15 +498,15 @@ class TFLikeTrainable(DryTrainable):
                        .unbatch()
 
 
-class TFKerasTrainable(TFLikeTrainable):
+class KerasTrainable(Trainable):
     __dry_compute_context__ = 'tf'
 
     def __init__(
-            self, model: TFKerasModel = None,
-            optimizer: TFObjectWrapper = None,
-            loss: TFObjectWrapper = None,
-            metrics: List[TFObjectWrapper] = [],
-            train_fn: TFLikeTrainFunction = None):
+            self, model: KerasModel = None,
+            optimizer: ObjectWrapper = None,
+            loss: ObjectWrapper = None,
+            metrics: List[ObjectWrapper] = [],
+            train_fn: TrainFunction = None):
         if model is None:
             raise ValueError(
                 "You need to set the model component of this trainable!")
@@ -586,7 +580,7 @@ class TFKerasTrainable(TFLikeTrainable):
         pass
 
 
-class TFKerasModelBase(TFLikeModel):
+class KerasModelBase(Model):
     __dry_compute_context__ = 'tf'
 
     def __init__(

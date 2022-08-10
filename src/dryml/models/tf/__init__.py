@@ -1,21 +1,21 @@
-from dryml.models.tf.tf_base import TFKerasModelBase, \
+from dryml.models.tf.tf_base import KerasModelBase, \
     keras_save_checkpoint_to_zip, keras_load_checkpoint_from_zip, \
-    TFLikeTrainFunction, TFLikeModel, TFLikeTrainable, TFKerasTrainable, \
-    TFBasicTraining, TFBasicEarlyStoppingTraining, TFObjectWrapper
+    TrainFunction, Model, Trainable, KerasTrainable, \
+    BasicTraining, BasicEarlyStoppingTraining, ObjectWrapper
 from dryml.models.tf.keras_sequential import \
     keras_sequential_functional_class, KerasSequentialFunctionalModel
 
 import dryml.models.tf.utils as utils
 
 __all__ = [
-    TFKerasModelBase,
-    TFLikeTrainFunction,
-    TFLikeModel,
-    TFLikeTrainable,
-    TFKerasTrainable,
-    TFBasicTraining,
-    TFBasicEarlyStoppingTraining,
-    TFObjectWrapper,
+    KerasModelBase,
+    TrainFunction,
+    Model,
+    Trainable,
+    KerasTrainable,
+    BasicTraining,
+    BasicEarlyStoppingTraining,
+    ObjectWrapper,
     keras_save_checkpoint_to_zip,
     keras_load_checkpoint_from_zip,
     keras_sequential_functional_class,
