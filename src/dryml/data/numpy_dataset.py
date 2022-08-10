@@ -138,7 +138,8 @@ class NumpyDataset(DryData):
                             d = next(it)
                         except StopIteration:
                             return
-                        batch_size = len(d)
+                        from dryml.data.util import get_data_batch_size
+                        batch_size = get_data_batch_size(d)
                         idx = np.array(list(range(i, i+batch_size)))
                         i += batch_size
                         yield (idx, d)

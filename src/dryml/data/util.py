@@ -56,6 +56,20 @@ def nested_slice(data, slicer):
     return nested_apply(data, _slicer)
 
 
+def get_data_batch_size(full_data=None, flat_data=None):
+    if full_data is None and flat_data is None:
+        raise ValueError(
+            "At least one of full_data or flat_data needs not be None.")
+    if full_data is not None and flat_data is not None:
+        raise ValueError("Can't specify both full_data and flat_data.")
+    if full_data is not None:
+        flat_data = nested_flatten(full_data)
+    lengths = set(map(lambda el: len(el), flat_data))
+    if len(lengths) > 1:
+        raise ValueError(f"Inconsistent element sizes: {lengths}")
+    return lengths.pop()
+
+
 def nested_batcher(data_gen, batch_size):
     it = iter(data_gen())
     while True:
@@ -101,11 +115,7 @@ def nested_unbatcher(data_gen):
         except StopIteration:
             return
         flat_d = nested_flatten(d)
-        i = 0
-        while True:
-            try:
-                new_d = list(map(lambda el: el[i], flat_d))
-                yield renest_flat(d, new_d)
-                i += 1
-            except IndexError:
-                break
+        length = get_data_batch_size(flat_data=flat_d)
+        for i in range(length):
+            new_d = list(map(lambda el: el[i], flat_d))
+            yield renest_flat(d, new_d)
