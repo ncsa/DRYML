@@ -16,11 +16,11 @@ def mean_squared_error(trainable: DryTrainable, test_data: DryData):
     if not data.batched:
         data = data.batch()
 
-    eval_data = trainable.eval(data)
+    data = data.numpy()
 
     total_loss = 0.
     num_examples = 0
-    for batch_e_y, batch_y in eval_data:
+    for batch_e_y, batch_y in data:
         total_loss += np.sum((batch_e_y-batch_y)**2)
         num_examples += batch_e_y.shape[0]
 
