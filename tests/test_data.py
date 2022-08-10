@@ -823,3 +823,16 @@ def test_chain_transforms_5():
             assert np.all(el1[1].numpy() == el2[1].numpy())
             i += 1
         i == batch_size
+
+
+def test_chain_transforms_6():
+    with dryml.context.ContextManager({'tf': {}}):
+        batch_size = 32
+        data_block = np.random.random((batch_size, 5))
+
+        dataset = NumpyDataset((data_block, data_block), supervised=True)
+
+        dataset = dataset.tf().unbatch().numpy()
+
+        for e1, e2 in dataset:
+            assert np.all(e1 == e2)
