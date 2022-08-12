@@ -1,10 +1,14 @@
 import tensorflow as tf
-from dryml import DryObject
-from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir
-from dryml.models import DryTrainable, DryComponent
-from dryml.models import TrainFunction as BaseTrainFunction
+import numpy as np
+from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
+    adjust_class_module
 from dryml.data import DryData
 from dryml.data.tf import TFDataset
+from dryml.models.dry_trainable import DryTrainable
+from dryml.models.tf.base import Model as TFModel
+from dryml.models.tf.base import Trainable as TFTrainable
+from dryml.models.tf.base import TrainFunction as TFTrainFunction
+from dryml.models.tf.base import ObjectWrapper
 from dryml.models.tf.utils import keras_train_spec_updater, \
     keras_callback_wrapper
 import tempfile
@@ -267,22 +271,18 @@ def keras_save_checkpoint_to_zip_from_dir(
     return True
 
 
-class ObjectWrapper(DryObject):
-    def __init__(self, obj_cls, obj_args=(), obj_kwargs={}):
-        self.obj_args = obj_args
-        self.obj_kwargs = obj_kwargs
-        self.obj_cls = obj_cls
-        self.obj = None
+class Model(TFModel):
+    def __init__(
+            self, *args, **kwargs):
+        # It is subclass's responsibility to fill this
+        # attribute with an actual keras class
+        self.mdl = None
 
-    def compute_prepare_imp(self):
-        self.obj = self.obj_cls(*self.obj_args, **self.obj_kwargs)
-
-    def compute_cleanup_imp(self):
-        del self.obj
-        self.obj = None
+    def __call__(self, X, *args, target=True, index=False, **kwargs):
+        return self.mdl(X, *args, **kwargs)
 
 
-class TrainFunction(BaseTrainFunction):
+class TrainFunction(TFTrainFunction):
     pass
 
 
@@ -470,39 +470,74 @@ class BasicEarlyStoppingTraining(TrainFunction):
             *self.train_args, **self.train_kwargs)
 
 
-class Model(DryComponent):
-    def __call__(self, X, *args, target=True, index=False, **kwargs):
-        return self.mdl(X, *args, **kwargs)
+class SequentialFunctionalModel(Model):
+    def __init__(
+            self, input_shape=(1,), layer_defs=[]):
+
+        self.input_shape = input_shape
+        self.layer_defs = layer_defs
+
+    def compute_prepare_imp(self):
+        # Build Functional Model
+        inp = tf.keras.layers.Input(self.input_shape)
+        last_layer = inp
+        for layer_name, layer_kwargs in self.layer_defs:
+            last_layer = getattr(
+                tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
+        self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
+
+    def compute_cleanup_imp(self):
+        # Delete the contained model
+        del self.mdl
+        self.mdl = None
 
 
-class KerasModel(Model):
-    pass
-
-
-class Trainable(DryTrainable):
-    __dry_compute_context__ = 'tf'
-
-    def __init__(self):
-        pass
-
-    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
-        if data.batched:
-            # We can execute the method directly on the data
-            return data.apply_X(func=lambda X: self.model(X, *args, **kwargs))
-        else:
-            # We first need to batch the data, then unbatch to leave
-            # The dataset character unchanged.
-            return data.batch(batch_size=eval_batch_size) \
-                       .apply_X(
-                            func=lambda X: self.model(X, *args, **kwargs)) \
-                       .unbatch()
-
-
-class KerasTrainable(Trainable):
-    __dry_compute_context__ = 'tf'
+def keras_sequential_functional_class(
+        name, input_shape, output_shape, base_classes=(Model,)):
 
     def __init__(
-            self, model: KerasModel = None,
+            self, layer_defs, *args, out_activation='linear',
+            **kwargs):
+        self.layer_defs = layer_defs
+        self.out_activation = out_activation
+
+    def compute_prepare_imp(self):
+        # Build Functional Model
+        inp = tf.keras.layers.Input(input_shape)
+        last_layer = inp
+        for layer_name, layer_kwargs in self.layer_defs:
+            last_layer = getattr(
+                tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
+        # Initially flatten result
+        last_layer = tf.keras.layers.Flatten()(last_layer)
+        # Compute number of output units
+        output_units = np.cumprod(output_shape)
+        last_layer = tf.keras.layers.Dense(
+            output_units, activation=self.out_activation)(last_layer)
+        # Respect final shape
+        last_layer = tf.keras.layers.Reshape(output_shape)(last_layer)
+        self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
+
+    def compute_cleanup_imp(self):
+        # Delete the contained model
+        del self.mdl
+        self.mdl = None
+
+    # Create the new class
+    new_cls = type(name, base_classes, {
+        '__init__': __init__,
+        'compute_prepare_imp': compute_prepare_imp,
+        'compute_cleanup_imp': compute_cleanup_imp,
+    })
+
+    adjust_class_module(new_cls)
+
+    return new_cls
+
+
+class Trainable(TFTrainable):
+    def __init__(
+            self, model: Model = None,
             optimizer: ObjectWrapper = None,
             loss: ObjectWrapper = None,
             metrics: List[ObjectWrapper] = [],
@@ -578,13 +613,3 @@ class KerasTrainable(Trainable):
 
     def prep_eval(self):
         pass
-
-
-class KerasModelBase(Model):
-    __dry_compute_context__ = 'tf'
-
-    def __init__(
-            self, *args, **kwargs):
-        # It is subclass's responsibility to fill this
-        # attribute with an actual keras class
-        self.mdl = None

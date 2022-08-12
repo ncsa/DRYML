@@ -1,4 +1,4 @@
-from dryml.models.sklearn.sklearn_base import Model, \
+from dryml.models.sklearn.base import Model, \
     ClassifierModel, RegressionModel, BasicTraining, \
     Trainable
 

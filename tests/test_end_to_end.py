@@ -168,8 +168,8 @@ def test_train_supervised_model_tf_1():
     import tensorflow as tf
 
     # Create model
-    model = dryml.models.tf.KerasTrainable(
-        model=dryml.models.tf.KerasSequentialFunctionalModel(
+    model = dryml.models.tf.keras.Trainable(
+        model=dryml.models.tf.keras.SequentialFunctionalModel(
             input_shape=(1,),
             layer_defs=[
                 ('Dense', {'units': 32, 'activation': 'relu'}),
@@ -177,7 +177,7 @@ def test_train_supervised_model_tf_1():
                 ('Dense', {'units': 1, 'activation': 'linear'})]),
         optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
         loss=dryml.models.tf.ObjectWrapper(tf.keras.losses.MeanSquaredError),
-        train_fn=dryml.models.tf.BasicTraining(epochs=1),
+        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1),
         metrics=[
             dryml.models.tf.ObjectWrapper(tf.keras.metrics.MeanSquaredError)
         ])
@@ -241,8 +241,8 @@ def test_train_supervised_model_tf_2():
     import dryml.data.tf.transforms
     import tensorflow as tf
 
-    model = dryml.models.tf.KerasTrainable(
-        model=dryml.models.tf.KerasSequentialFunctionalModel(
+    model = dryml.models.tf.keras.Trainable(
+        model=dryml.models.tf.keras.SequentialFunctionalModel(
             input_shape=(num_dims,),
             layer_defs=[
                 ('Dense', {'units': 32, 'activation': 'relu'}),
@@ -252,7 +252,7 @@ def test_train_supervised_model_tf_2():
         optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
         loss=dryml.models.tf.ObjectWrapper(
             tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.models.tf.BasicTraining(epochs=1))
+        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
 
     best_cat = dryml.data.tf.transforms.BestCat()
 
