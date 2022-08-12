@@ -281,6 +281,11 @@ class Model(TFModel):
     def __call__(self, X, *args, target=True, index=False, **kwargs):
         return self.mdl(X, *args, **kwargs)
 
+    def compute_cleanup_imp(self):
+        # Delete the contained model
+        del self.mdl
+        self.mdl = None
+
 
 class TrainFunction(TFTrainFunction):
     pass
@@ -486,11 +491,6 @@ class SequentialFunctionalModel(Model):
                 tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
         self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
 
-    def compute_cleanup_imp(self):
-        # Delete the contained model
-        del self.mdl
-        self.mdl = None
-
 
 def keras_sequential_functional_class(
         name, input_shape, output_shape, base_classes=(Model,)):
@@ -518,16 +518,10 @@ def keras_sequential_functional_class(
         last_layer = tf.keras.layers.Reshape(output_shape)(last_layer)
         self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
 
-    def compute_cleanup_imp(self):
-        # Delete the contained model
-        del self.mdl
-        self.mdl = None
-
     # Create the new class
     new_cls = type(name, base_classes, {
         '__init__': __init__,
         'compute_prepare_imp': compute_prepare_imp,
-        'compute_cleanup_imp': compute_cleanup_imp,
     })
 
     adjust_class_module(new_cls)

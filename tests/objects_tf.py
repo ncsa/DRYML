@@ -20,8 +20,3 @@ class TestTF1(dryml.models.tf.keras.Model):
             last_layer = tf.keras.layers.Dense(dim)(last_layer)
 
         self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
-
-    def compute_cleanup_imp(self):
-        # Delete the contained model
-        del self.mdl
-        self.mdl = None
