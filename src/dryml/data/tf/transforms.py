@@ -143,7 +143,24 @@ class BestCat(DryTrainable):
         pass
 
     def eval(self, data: DryData, *args, **kwargs):
-        if data.batched:
+        if not data.batched:
             data = data.batch()
         return data.tf().apply_X(
             func=lambda x: tf.argmax(x, axis=-1))
+
+
+def flattener(x):
+    return tf.reshape(x, [tf.shape(x)[0], -1])
+
+class Flatten(DryTrainable):
+    def __init__(self):
+        self.train_state = DryTrainable.trained
+
+    def train(self, *args, train_spec=None, **kwargs):
+        pass
+
+    def eval(self, data: DryData, *args, **kwargs):
+        if not data.batched:
+            data = data.batch()
+        return data.tf().apply_X(
+            func=flattener)
