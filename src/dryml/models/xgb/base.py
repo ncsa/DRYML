@@ -27,7 +27,8 @@ class Model(DryComponent):
             return True
         else:
             with file.open(save_file_name, 'r') as f:
-                with tempfile.NamedTemporaryFile(mode="w+b", suffix='.text') as temp_f:
+                with tempfile.NamedTemporaryFile(
+                        mode="w+b", suffix='.text') as temp_f:
                     # Write content to temp file
                     temp_f.write(f.read())
                     # Read temp file content
@@ -37,7 +38,8 @@ class Model(DryComponent):
     def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
         # Save Model
         if self.mdl is not None:
-            with tempfile.NamedTemporaryFile(mode="w+b", suffix='.text') as temp_f:
+            with tempfile.NamedTemporaryFile(
+                    mode="w+b", suffix='.text') as temp_f:
                 self.mdl.save_model(temp_f.name)
                 save_file_name = "model.text"
                 with file.open(save_file_name, 'w') as f:

@@ -152,6 +152,7 @@ class BestCat(DryTrainable):
 def flattener(x):
     return tf.reshape(x, [tf.shape(x)[0], -1])
 
+
 class Flatten(DryTrainable):
     def __init__(self):
         self.train_state = DryTrainable.trained
