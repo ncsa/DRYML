@@ -194,6 +194,24 @@ def test_selector_7():
     assert dryml.DrySelector.from_def(obj_def)(real_obj)
 
 
+def test_selector_8():
+    """
+    Test parent/child class selection
+    """
+
+    parent_obj = objects.TestBase()
+
+    assert dryml.DrySelector(objects.TestBase)(parent_obj)
+    assert not dryml.DrySelector(objects.TestClassA)(parent_obj)
+
+    assert dryml.DrySelector.from_def(
+        dryml.DryObjectDef(
+            objects.TestBase))(parent_obj)
+    assert not dryml.DrySelector.from_def(
+        dryml.DryObjectDef(
+            objects.TestClassA))(parent_obj)
+
+
 def test_selector_build_1():
     """
     Test that we can construct DrySelectors from various objects
