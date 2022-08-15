@@ -115,6 +115,26 @@ def test_add_retrieve_objects_3():
         verbosity=2))) is not list
 
 
+def test_add_retrieve_objects_4():
+    """
+    Object hierarchy should work during selection
+    """
+
+    repo = dryml.DryRepo()
+
+    parent_cls_obj = objects.TestBase()
+
+    repo.add_object(parent_cls_obj)
+
+    assert dryml.utils.count(repo.get(
+        selector=dryml.DrySelector(objects.TestBase))) == 1
+    try:
+        repo.get(selector=dryml.DrySelector(objects.TestClassA))
+        assert False
+    except KeyError:
+        pass
+
+
 @pytest.mark.xfail
 def test_try_write():
     repo = dryml.DryRepo()

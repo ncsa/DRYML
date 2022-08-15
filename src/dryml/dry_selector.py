@@ -77,7 +77,7 @@ class DrySelector(object):
     def match_objects(key_object, value_object, verbosity=0):
         if issubclass(type(key_object), type):
             # We have a type object. They match if
-            res = issubclass(key_object, value_object)
+            res = issubclass(value_object, key_object)
             if not res and verbosity > 0:
                 print(f"{value_object} is not a subclass of {key_object}")
             return res
@@ -180,6 +180,8 @@ class DrySelector(object):
             obj: Union[DryObject, DryObjectFile, DryObjectDef, Mapping]):
         if self.verbosity > 0:
             print("====== Selection started ======")
+            if self.verbosity > 1:
+                print(f"self: {self}, obj: {obj}")
         # Get definition
         if isinstance(obj, DryObjectDef):
             obj_def = obj
