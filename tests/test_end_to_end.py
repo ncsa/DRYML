@@ -2,6 +2,8 @@ import dryml
 import objects
 import mc
 import numpy as np
+import pickle
+import pytest
 
 
 def test_compute_context_consistency_1():
@@ -291,3 +293,151 @@ def test_train_supervised_model_tf_2():
 
     assert train_accuracy == test_accuracy
     assert train_accuracy > random_guessing_accuracy
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
+    """
+    Detect a situation, when an object is created accidentally
+    with a 'parent' class.
+    """
+
+    from dryml import Workshop
+    import dryml.data.transforms
+
+    # First, generate problem data
+    # Generate classes
+    num_classes = 10
+    num_dims = 2
+    L = -10.
+    H = 10.
+    Max_W = 5.
+    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
+    widths = np.random.random((num_classes, num_dims))*Max_W
+
+    num_train = 5000
+    train_data = mc.gen_dataset_2(
+        num_examples=num_train,
+        centers=centers,
+        widths=widths)
+
+    num_test = 100
+    test_data = mc.gen_dataset_2(
+        num_examples=num_test,
+        centers=centers,
+        widths=widths)
+
+    # Save dataset to temp file so we can load it in subordinate processes
+    with open(create_temp_named_file, 'wb') as f:
+        f.write(pickle.dumps((train_data, test_data)))
+
+    # Create workshop
+    shop = Workshop(work_dir=create_temp_dir)
+
+    # Create flatten step
+    flattener = dryml.data.transforms.Flatten()
+    shop.repo.add_object(flattener)
+
+    # Define a function to create a model definition
+    def build_model_def_1(
+            shop, n_neighbors=2, algorithm='auto', num_examples=-1):
+        import dryml.models.sklearn
+        import sklearn.neighbors
+
+        flattener = dryml.utils.head(shop.repo.get(
+            selector=dryml.DryObjectDef(dryml.data.transforms.Flatten)))
+
+        mdl_def = dryml.DryObjectDef(
+            dryml.models.sklearn.Model,
+            sklearn.neighbors.KNeighborsClassifier,
+            n_neighbors=n_neighbors,
+            algorithm=algorithm
+            )
+
+        mdl_def = dryml.DryObjectDef(
+            dryml.models.sklearn.Trainable,
+            model=mdl_def,
+            train_fn=dryml.DryObjectDef(
+                dryml.models.sklearn.BasicTraining,
+                num_examples=num_examples))
+
+        mdl_def = dryml.DryObjectDef(
+            dryml.models.DryPipe,
+            flattener,
+            mdl_def,)
+
+        return mdl_def
+
+    # Define a function to create a model definition
+    def build_model_def_2(
+            shop, n_neighbors=2, algorithm='auto', num_examples=-1):
+        import dryml.models.sklearn
+        import sklearn.neighbors
+
+        flattener = dryml.utils.head(shop.repo.get(
+            selector=dryml.DryObjectDef(dryml.data.transforms.Flatten)))
+
+        mdl_def = dryml.DryObjectDef(
+            dryml.models.sklearn.ClassifierModel,
+            sklearn.neighbors.KNeighborsClassifier,
+            n_neighbors=n_neighbors,
+            algorithm=algorithm
+            )
+
+        mdl_def = dryml.DryObjectDef(
+            dryml.models.sklearn.Trainable,
+            model=mdl_def,
+            train_fn=dryml.DryObjectDef(
+                dryml.models.sklearn.BasicTraining,
+                num_examples=num_examples))
+
+        mdl_def = dryml.DryObjectDef(
+            dryml.models.DryPipe,
+            flattener,
+            mdl_def,)
+
+        return mdl_def
+
+    # Create definition
+    model_def = build_model_def_1(shop, n_neighbors=2, algorithm='ball_tree')
+
+    # Define function to train model
+    @dryml.compute_context(ctx_context_reqs={'default': {}})
+    def train_model(model_def, repo_dir, data_filepath):
+        # Load data from file
+        with open(data_filepath, 'rb') as f:
+            (train_data, test_data) = pickle.loads(f.read())
+        train_ds = dryml.data.NumpyDataset(train_data, supervised=True)
+
+        # Create repo
+        shop = Workshop(work_dir=repo_dir)
+
+        # Build the object
+        model_obj = model_def.build(repo=shop.repo)
+
+        # Train model object
+        model_obj.train(train_ds)
+
+        # Save all objects
+        shop.repo.save(model_obj)
+
+    # Train the model
+    train_model(model_def, create_temp_dir, create_temp_named_file)
+
+    # load objects
+    shop.repo.load_objects_from_directory()
+
+    # Check we stored one object in the repo
+    assert dryml.utils.count(
+        shop.repo.get(model_def, build_missing_def=False)) == 1
+
+    # Check we can't see the object in another way.
+    model_def_2 = build_model_def_2(shop, n_neighbors=2, algorithm='ball_tree')
+    try:
+        assert dryml.utils.count(shop.repo.get(
+            model_def_2,
+            sel_kwargs={'verbosity': 10},
+            build_missing_def=False)) == 0
+    except KeyError:
+        pass
