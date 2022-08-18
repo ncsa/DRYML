@@ -28,8 +28,8 @@ Many ML Problems can be tackled by different ML Frameworks. DRYML's API places a
 
 The following ML Frameworks are currently supported, or planned to be supported
 
-* Tensorflow (support being developed)
+* Tensorflow (Initial support complete)
 * Pytorch (support planned)
-* Sklearn (support planned)
-* XGBoost (support planned)
+* Sklearn (Initial support complete)
+* XGBoost (Initial support complete)
 * Statsmodels (support planned)
