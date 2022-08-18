@@ -140,8 +140,7 @@ def keras_load_checkpoint_from_zip_to_dir(
         # not have optimizer in place yet.
         tf.train.Checkpoint(model=mdl) \
                 .restore(checkpoint_path) \
-                .expect_partial() \
-                .assert_consumed()
+                .expect_partial()
     except Exception as e:
         print(f"Issue loading checkpoint! {e}")
         return False
