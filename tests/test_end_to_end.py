@@ -38,7 +38,7 @@ def test_compute_context_consistency_2():
         assert obj.val == 20
 
 
-def test_train_supervised_model_sklearn_1():
+def test_train_supervised_model_sklearn_1_context():
     # Generate data.
     num_train = 2000
     num_test = 500
@@ -290,6 +290,419 @@ def test_train_supervised_model_tf_2():
 
     train_accuracy = train_method(train_data, test_data, pipe)
     test_accuracy = test_method(test_data, pipe)
+
+    assert train_accuracy == test_accuracy
+    assert train_accuracy > random_guessing_accuracy
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_train_supervised_model_tf_3_context(create_temp_dir):
+    # Generate data.
+    num_train = 2000
+    num_test = 500
+    train_data = mc.gen_dataset_1(num_examples=num_train)
+    test_data = mc.gen_dataset_1(num_examples=num_test)
+
+    import dryml.models.tf
+    import tensorflow as tf
+
+    # Create model definition
+    model_def = dryml.DryObjectDef(
+        dryml.models.tf.keras.Trainable,
+        model=dryml.DryObjectDef(
+            dryml.models.tf.keras.SequentialFunctionalModel,
+            input_shape=(1,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 1, 'activation': 'linear'})]),
+        optimizer=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.optimizers.Adam),
+        loss=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.losses.MeanSquaredError),
+        train_fn=dryml.DryObjectDef(
+            dryml.models.tf.keras.BasicTraining,
+            epochs=1),
+        metrics=[
+            dryml.DryObjectDef(
+                dryml.models.tf.ObjectWrapper,
+                tf.keras.metrics.MeanSquaredError)
+        ])
+
+    def test_model(test_data, model):
+        import dryml.metrics
+        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
+
+        return dryml.metrics.mean_squared_error(model, test_ds)
+
+    @dryml.compute_context(
+        ctx_context_reqs={'tf': {}},
+        ctx_use_existing_context=False,
+        ctx_update_objs=True)
+    def train_method(train_data, test_data, model_def, work_dir):
+        # Create repo
+        import dryml
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Create datasets
+        train_ds = dryml.data.NumpyDataset(
+            train_data,
+            batch_size=num_train,
+            supervised=True)
+
+        # Build and fetch model
+        model = model_def.build(repo=repo)
+
+        # Train model
+        model.prep_train()
+        model.train(train_ds)
+
+        # Save model to repo.
+        repo.save(model)
+
+        return test_model(test_data, model)
+
+    @dryml.compute_context(
+        ctx_context_reqs={'tf': {}},
+        ctx_use_existing_context=False)
+    def test_method(test_data, model_def, work_dir):
+        import dryml
+        # Create repo
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Fetch model based on definition
+        model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
+
+        return test_model(test_data, model)
+
+    train_loss = train_method(
+        train_data, test_data, model_def, create_temp_dir)
+    test_loss = test_method(
+        test_data, model_def, create_temp_dir)
+
+    assert train_loss == test_loss
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+@pytest.mark.usefixtures("ray_server")
+def test_train_supervised_model_tf_3_ray(create_temp_dir):
+    import ray
+
+    # Generate data.
+    num_train = 2000
+    num_test = 500
+    train_data = mc.gen_dataset_1(num_examples=num_train)
+    test_data = mc.gen_dataset_1(num_examples=num_test)
+
+    import dryml.models.tf
+    import tensorflow as tf
+
+    # Create model definition
+    model_def = dryml.DryObjectDef(
+        dryml.models.tf.keras.Trainable,
+        model=dryml.DryObjectDef(
+            dryml.models.tf.keras.SequentialFunctionalModel,
+            input_shape=(1,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 1, 'activation': 'linear'})]),
+        optimizer=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.optimizers.Adam),
+        loss=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.losses.MeanSquaredError),
+        train_fn=dryml.DryObjectDef(
+            dryml.models.tf.keras.BasicTraining,
+            epochs=1),
+        metrics=[
+            dryml.DryObjectDef(
+                dryml.models.tf.ObjectWrapper,
+                tf.keras.metrics.MeanSquaredError)
+        ])
+
+    def test_model(test_data, model):
+        import dryml.metrics
+        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
+
+        return dryml.metrics.mean_squared_error(model, test_ds)
+
+    @ray.remote(num_cpus=1, num_gpus=0, max_calls=1)
+    def train_method(train_data, test_data, model_def, work_dir):
+        # Create repo
+        import dryml
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Create datasets
+        train_ds = dryml.data.NumpyDataset(
+            train_data,
+            batch_size=num_train,
+            supervised=True)
+
+        # Build and fetch model
+        model = model_def.build(repo=repo)
+
+        # Create context
+        with dryml.context.ContextManager({'tf': {}}):
+            # Train model
+            model.prep_train()
+            model.train(train_ds)
+
+            acc = test_model(test_data, model)
+
+        # Save model to repo.
+        repo.save(model)
+
+        return acc
+
+    @ray.remote(num_cpus=1, num_gpus=0, max_calls=1)
+    def test_method(test_data, model_def, work_dir):
+        import dryml
+        # Create repo
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Fetch model based on definition
+        model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
+
+        with dryml.context.ContextManager({'tf': {}}):
+            acc = test_model(test_data, model)
+
+        return acc
+
+    train_loss = ray.get(train_method.remote(
+        train_data, test_data, model_def, create_temp_dir))
+    test_loss = ray.get(test_method.remote(
+        test_data, model_def, create_temp_dir))
+
+    assert train_loss == test_loss
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_train_supervised_model_tf_4_context(create_temp_dir):
+    # Generate classes
+    num_classes = 10
+    num_dims = 2
+    L = -10.
+    H = 10.
+    Max_W = 5.
+    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
+    widths = np.random.random((num_classes, num_dims))*Max_W
+
+    num_train = 5000
+    train_data = mc.gen_dataset_2(
+        num_examples=num_train,
+        centers=centers,
+        widths=widths)
+
+    num_test = 100
+    test_data = mc.gen_dataset_2(
+        num_examples=num_test,
+        centers=centers,
+        widths=widths)
+
+    import dryml.models.tf
+    import dryml.data.transforms
+    import dryml.data.tf.transforms
+    import tensorflow as tf
+
+    model_def = dryml.DryObjectDef(
+        dryml.models.tf.keras.Trainable,
+        model=dryml.DryObjectDef(
+            dryml.models.tf.keras.SequentialFunctionalModel,
+            input_shape=(num_dims,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+            ]),
+        optimizer=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.optimizers.Adam),
+        loss=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.losses.SparseCategoricalCrossentropy),
+        train_fn=dryml.DryObjectDef(
+            dryml.models.tf.keras.BasicTraining,
+            epochs=1))
+
+    best_cat = dryml.DryObjectDef(
+        dryml.data.tf.transforms.BestCat)
+
+    model_def = dryml.DryObjectDef(
+        dryml.models.DryPipe,
+        model_def,
+        best_cat)
+
+    def test_model(test_data, model):
+        import dryml.metrics
+        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
+
+        return dryml.metrics.categorical_accuracy(model, test_ds)
+
+    @dryml.compute_context(
+        ctx_context_reqs={'tf': {}},
+        ctx_use_existing_context=False,
+        ctx_update_objs=True)
+    def train_method(train_data, test_data, model_def, work_dir):
+        # Create repo
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Build model from definition
+        model = model_def.build(repo=repo)
+
+        # Create datasets
+        train_ds = dryml.data.NumpyDataset(
+            train_data,
+            batch_size=num_train,
+            supervised=True)
+
+        # Train model
+        model.prep_train()
+        model.train(train_ds)
+
+        # Save model
+        repo.save(model)
+
+        return test_model(test_data, model)
+
+    @dryml.compute_context(
+        ctx_context_reqs={'tf': {}},
+        ctx_use_existing_context=False)
+    def test_method(test_data, model_def, work_dir):
+        # Create repo
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Get model from the repo
+        model = repo.get(model_def, build_missing_def=False)
+
+        # Run test
+        return test_model(test_data, model)
+
+    random_guessing_accuracy = 1./num_classes
+
+    train_accuracy = train_method(
+        train_data, test_data, model_def, create_temp_dir)
+    test_accuracy = test_method(
+        test_data, model_def, create_temp_dir)
+
+    assert train_accuracy == test_accuracy
+    assert train_accuracy > random_guessing_accuracy
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+@pytest.mark.usefixtures("ray_server")
+def test_train_supervised_model_tf_4_ray(create_temp_dir):
+    import ray
+
+    # Generate classes
+    num_classes = 10
+    num_dims = 2
+    L = -10.
+    H = 10.
+    Max_W = 5.
+    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
+    widths = np.random.random((num_classes, num_dims))*Max_W
+
+    num_train = 5000
+    train_data = mc.gen_dataset_2(
+        num_examples=num_train,
+        centers=centers,
+        widths=widths)
+
+    num_test = 100
+    test_data = mc.gen_dataset_2(
+        num_examples=num_test,
+        centers=centers,
+        widths=widths)
+
+    import dryml.models.tf
+    import dryml.data.transforms
+    import dryml.data.tf.transforms
+    import tensorflow as tf
+
+    model_def = dryml.DryObjectDef(
+        dryml.models.tf.keras.Trainable,
+        model=dryml.DryObjectDef(
+            dryml.models.tf.keras.SequentialFunctionalModel,
+            input_shape=(num_dims,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+            ]),
+        optimizer=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.optimizers.Adam),
+        loss=dryml.DryObjectDef(
+            dryml.models.tf.ObjectWrapper,
+            tf.keras.losses.SparseCategoricalCrossentropy),
+        train_fn=dryml.DryObjectDef(
+            dryml.models.tf.keras.BasicTraining,
+            epochs=1))
+
+    best_cat = dryml.DryObjectDef(
+        dryml.data.tf.transforms.BestCat)
+
+    model_def = dryml.DryObjectDef(
+        dryml.models.DryPipe,
+        model_def,
+        best_cat)
+
+    def test_model(test_data, model):
+        import dryml.metrics
+        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
+
+        return dryml.metrics.categorical_accuracy(model, test_ds)
+
+    @ray.remote(num_cpus=1, num_gpus=0, max_calls=1)
+    def train_method(train_data, test_data, model_def, work_dir):
+        # Create repo
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Build model from definition
+        model = model_def.build(repo=repo)
+
+        # Create datasets
+        train_ds = dryml.data.NumpyDataset(
+            train_data,
+            batch_size=num_train,
+            supervised=True)
+
+        with dryml.context.ContextManager({'tf': {}}):
+            # Train model
+            model.prep_train()
+            model.train(train_ds)
+
+            acc = test_model(test_data, model)
+
+        # Save model
+        repo.save(model)
+
+        return acc
+
+    @ray.remote(num_cpus=1, num_gpus=0, max_calls=0)
+    def test_method(test_data, model_def, work_dir):
+        # Create repo
+        repo = dryml.DryRepo(directory=work_dir)
+
+        # Get model from the repo
+        model = repo.get(model_def, build_missing_def=False)
+
+        # Run test
+        with dryml.context.ContextManager({'tf': {}}):
+            acc = test_model(test_data, model)
+
+        return acc
+
+    random_guessing_accuracy = 1./num_classes
+
+    train_accuracy = ray.get(train_method.remote(
+        train_data, test_data, model_def, create_temp_dir))
+    test_accuracy = ray.get(test_method.remote(
+        test_data, model_def, create_temp_dir))
 
     assert train_accuracy == test_accuracy
     assert train_accuracy > random_guessing_accuracy

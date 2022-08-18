@@ -836,3 +836,46 @@ def test_chain_transforms_6():
 
         for e1, e2 in dataset:
             assert np.all(e1 == e2)
+
+
+def test_chain_transforms_7():
+    with dryml.context.ContextManager({'tf': {}}):
+        batch_size = 32
+        data_block = np.random.random((batch_size, 5))
+
+        dataset = NumpyDataset(data_block, supervised=True)
+
+        dataset = dataset.tf().numpy()
+
+        dataset_peek = dataset.peek()
+        assert type(dataset_peek) is np.ndarray
+        assert np.all(data_block == dataset_peek)
+
+
+def test_chain_transforms_8():
+    with dryml.context.ContextManager({'tf': {}}):
+        batch_size = 32
+        data_block = np.random.random((batch_size, 5))
+
+        dataset = NumpyDataset(data_block, supervised=False)
+
+        dataset = dataset.tf().numpy()
+
+        dataset_peek = dataset.peek()
+        assert type(dataset_peek) is np.ndarray
+        assert np.all(data_block == dataset_peek)
+
+
+def test_chain_transforms_9():
+    with dryml.context.ContextManager({'tf': {}}):
+        batch_size = 32
+        data_block = np.random.random((batch_size, 5))
+
+        result = dryml.data.NumpyDataset(data_block) \
+                           .batch() \
+                           .apply_X(func=lambda X: X**2) \
+                           .numpy() \
+                           .peek()
+
+        assert type(result) is np.ndarray
+        assert np.all(data_block**2 == result)

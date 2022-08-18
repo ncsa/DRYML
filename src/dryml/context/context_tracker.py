@@ -447,14 +447,26 @@ class ContextContainer(object):
         _context_manager = self
 
     def deactivate_objects(self, save_cache=None):
+        # First, we'll build a tree of activated objects.
+        from dryml import build_obj_tree
+        obj_tree = build_obj_tree(self.activated_object_map.values())
+
+        # Prepare the save caching function
         if save_cache is None:
             from dryml.save_cache import SaveCache
             save_cache = SaveCache()
-        while len(self.activated_object_map) > 0:
-            ids = list(self.activated_object_map.keys())
-            obj_id = ids[0]
-            obj = self.activated_object_map[obj_id]
-            obj.compute_deactivate(save_cache=save_cache)
+
+        # Save objects in the tree depth-first.
+        obj_tree.apply_df(
+            lambda o: o.save_compute(save_cache=save_cache))
+        # Cleanup compute in the tree depth-first.
+        obj_tree.apply_df(lambda o: o.compute_cleanup())
+
+        def remove_self(o):
+            del self.activated_object_map[id(o)]
+        # Remove all objects in the tree from active tracking
+        # (Should not fail!)
+        obj_tree.apply_df(remove_self)
 
     def release_context(self):
         # Deactivate each tracked object

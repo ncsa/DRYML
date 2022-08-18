@@ -8,7 +8,7 @@ import pickle
 import io
 import zipfile
 import uuid
-from typing import IO, Union, Optional, Type
+from typing import IO, Union, Optional, Type, Callable
 from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var
 from dryml.context.context_tracker import combine_requests, context, \
@@ -495,30 +495,6 @@ class DryObject(metaclass=DryMeta):
             # Add object to manager tracker.
             ctx_mgr.add_activated_object(self)
 
-    def compute_deactivate(self, save_cache=None):
-        ctx_mgr = context()
-        if ctx_mgr is None:
-            raise NoContextError()
-
-        if save_cache is None:
-            save_cache = SaveCache()
-
-        # Deactivate self first..
-        if ctx_mgr.contains_activated_object(self):
-            # Save this object's compute
-            self.save_compute(save_cache=save_cache)
-
-            # Teardown this objects compute.
-            self.compute_cleanup()
-
-            # Remove self from tracking.
-            ctx_mgr.remove_activated_object(self)
-
-        # Next, deactivate contained objects
-        if hasattr(self, '__dry_obj_container_list__'):
-            for obj in self.__dry_obj_container_list__:
-                obj.compute_deactivate
-
     @staticmethod
     def graph_label(obj, report_class=True):
         if report_class:
@@ -721,3 +697,120 @@ def reconstruct_args_kwargs(args, kwargs, ph_data):
                 obj = rebuild_object(arg, ph_dict[arg.ID])
                 constructed_objs[arg.ID] = obj
                 kwargs[key] = obj
+
+
+class ObjectNode(object):
+    """
+    Helper class to Build tree of objects
+    """
+
+    def __init__(self, obj, children):
+        # All nodes have a list of children
+        self.children = children
+        self.obj = obj
+
+    def apply_func(self, func: Callable):
+        if self.obj is not None:
+            func(self.obj)
+
+
+def apply_df_imp(func: Callable, node: ObjectNode, seen_set: set[ObjectNode]):
+    # seen set will be empty when called on the root node.
+    for child_node in node.children:
+        if child_node not in seen_set:
+            # Apply function to child node.
+            apply_df_imp(func, child_node, seen_set)
+    # Apply to this node
+    node.apply_func(func)
+    # Set this node as seen.
+    seen_set.add(node)
+
+
+def apply_bf_imp(
+        func: Callable,
+        visit_list: list[ObjectNode], seen_set: set[ObjectNode]):
+    # the visit list should be populated when called from the root node.
+    while len(visit_list) > 0:
+        # Pop a node from the front of the list.
+        node = visit_list.pop(0)
+        # Apply function first to this node.
+        node.apply(func)
+        # Add this node to the seen set.
+        seen_set.add(node)
+        # add nodes children that haven't already been seen to the visit list.
+        for child_node in node.children:
+            if child_node not in seen_set:
+                visit_list.append(child_node)
+
+
+class ObjectTree(ObjectNode):
+    """
+    Root node object.
+    """
+
+    def __init__(self, children):
+        super().__init__(None, children)
+
+    def apply_func(self, func: Callable):
+        # Don't do anything on the root node.
+        pass
+
+    def apply_df(self, func: Callable):
+        apply_df_imp(func, self, set())
+
+    def apply_bf(self, func: Callable):
+        apply_bf_imp(func, self, self.children, set())
+
+
+def build_obj_tree_imp(obj: DryObject, node_dict):
+    """
+    Returns ObjectNode of passed object.
+    """
+
+    if id(obj) in node_dict:
+        return node_dict[id(obj)]
+
+    # Get unique children list
+    unique_children_map = {}
+    for child_obj in obj.__dry_obj_container_list__:
+        if id(child_obj) not in unique_children_map:
+            unique_children_map[id(child_obj)] = child_obj
+
+    # Build child node list
+    child_nodes = []
+    for child_id in unique_children_map:
+        child_obj = unique_children_map[child_id]
+        child_nodes.append(build_obj_tree_imp(child_obj, node_dict))
+
+    # Create node, and record.
+    res_node = ObjectNode(obj, child_nodes)
+    node_dict[id(obj)] = res_node
+    return res_node
+
+
+def build_obj_tree(obj_or_list: Union[DryObject, list[DryObject]]):
+    """
+    Construct tree
+    """
+    # We construct depth first.
+    node_dict = {}
+
+    if type(obj_or_list) is DryObject:
+        obj_list = [obj_or_list]
+    else:
+        obj_list = obj_or_list
+
+    # Get unique objects
+    obj_dict = {}
+    for obj in obj_list:
+        if id(obj) not in obj_dict:
+            obj_dict[id(obj)] = obj
+
+    obj_list = obj_dict.values()
+
+    root_children = []
+    for obj in obj_list:
+        root_children.append(build_obj_tree_imp(obj, node_dict))
+
+    # Returned finished tree
+    return ObjectTree(root_children)

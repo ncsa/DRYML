@@ -168,6 +168,24 @@ def show_contained_objects(save_file: Union[str, IO[bytes]]):
     print(zf.namelist())
 
 
+def show_contained_objects_md5(save_file: Union[str, IO[bytes]]):
+    close_file = False
+    if type(save_file) is zipfile.ZipFile:
+        zf = save_file
+    else:
+        zf = zipfile.ZipFile(save_file, mode='r')
+        close_file = True
+
+    for name in zf.namelist():
+        with zf.open(name, 'r') as f:
+            m = hashlib.md5()
+            m.update(f.read())
+            print(f"{name}: {m.hexdigest()}")
+
+    if close_file:
+        zf.close()
+
+
 file_blocklist = [
    'meta_data.pkl',
    'cls_def.dill',

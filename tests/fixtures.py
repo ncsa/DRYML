@@ -33,3 +33,17 @@ def create_temp_file():
 def create_temp_dir():
     with tempfile.TemporaryDirectory() as directory:
         yield directory
+
+
+@pytest.fixture
+def ray_server():
+    try:
+        import ray
+    except ImportError:
+        pytest.skip("ray unavailable for this test")
+
+    # Initialize ray
+    ray.init(num_cpus=1, num_gpus=0)
+    yield
+    # Shutdown ray
+    ray.shutdown()

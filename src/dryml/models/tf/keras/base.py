@@ -88,7 +88,7 @@ def keras_load_checkpoint_from_zip_to_dir(
         temp_checkpoint_dir: str,
         zip_checkpoint_dir: str = 'checkpoints') -> bool:
     if mdl is None:
-        raise RuntimeError(
+        raise ValueError(
             "keras model can't be None! "
             "Did you run the object's compute_prepare method?")
 
@@ -138,9 +138,10 @@ def keras_load_checkpoint_from_zip_to_dir(
 
         # expect to load partial because we may
         # not have optimizer in place yet.
-        tf.train.Checkpoint(mdl) \
+        tf.train.Checkpoint(model=mdl) \
                 .restore(checkpoint_path) \
-                .expect_partial()
+                .expect_partial() \
+                .assert_consumed()
     except Exception as e:
         print(f"Issue loading checkpoint! {e}")
         return False
@@ -211,6 +212,10 @@ def keras_save_checkpoint_to_zip_from_dir(
         checkpoint_name: str,
         temp_checkpoint_dir: str,
         zip_checkpoint_dir: str = 'checkpoints') -> bool:
+    if mdl is None:
+        raise ValueError(
+            "keras model can't be None! "
+            "Did you run the object's compute_prepare method?")
     try:
         # Adjust checkpoint directory
         if zip_checkpoint_dir[-1] != '/':
@@ -238,7 +243,7 @@ def keras_save_checkpoint_to_zip_from_dir(
         checkpoint_path = os.path.join(temp_checkpoint_dir, checkpoint_name)
 
         # Create checkpoint object and save
-        checkpoint = tf.train.Checkpoint(mdl)
+        checkpoint = tf.train.Checkpoint(model=mdl)
         checkpoint.save(checkpoint_path)
 
         # Get list of saved files
