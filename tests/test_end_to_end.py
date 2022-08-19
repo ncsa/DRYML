@@ -42,129 +42,182 @@ def test_compute_context_consistency_2():
 
 
 def sklearn_regressor(definition=False):
-    def gen():
-        try:
-            import dryml.models.sklearn
-            import sklearn.neighbors
-        except ImportError:
-            pytest.skip("sklearn not supported")
+    try:
+        import dryml.models.sklearn
+        import sklearn.neighbors
+    except ImportError:
+        pytest.skip("sklearn not supported")
 
-        # Create model
-        model = dryml.models.sklearn.Trainable(
-            model=dryml.models.sklearn.RegressionModel(
-                sklearn.neighbors.KNeighborsRegressor,
-                n_neighbors=5,
-                weights='uniform',
-                algorithm='ball_tree'),
-            train_fn=dryml.models.sklearn.BasicTraining())
+    # Create model
+    model = dryml.models.sklearn.Trainable(
+        model=dryml.models.sklearn.RegressionModel(
+            sklearn.neighbors.KNeighborsRegressor,
+            n_neighbors=5,
+            weights='uniform',
+            algorithm='ball_tree'),
+        train_fn=dryml.models.sklearn.BasicTraining())
 
-        if definition:
-            return model.definition().get_cat_def(recursive=True)
-        else:
-            return model
-    return gen
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
 
 
 def tf_regressor(definition=False):
-    def gen():
-        try:
-            import dryml.models.tf
-            import tensorflow as tf
-        except ImportError:
-            pytest.skip("tensorflow not supported")
+    try:
+        import dryml.models.tf
+        import tensorflow as tf
+    except ImportError:
+        pytest.skip("tensorflow not supported")
 
-        # Create model
-        model = dryml.models.tf.keras.Trainable(
-            model=dryml.models.tf.keras.SequentialFunctionalModel(
-                input_shape=(1,),
-                layer_defs=[
-                    ('Dense', {'units': 32, 'activation': 'relu'}),
-                    ('Dense', {'units': 32, 'activation': 'relu'}),
-                    ('Dense', {'units': 1, 'activation': 'linear'})]),
-            optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
-            loss=dryml.models.tf.ObjectWrapper(
-                tf.keras.losses.MeanSquaredError),
-            train_fn=dryml.models.tf.keras.BasicTraining(epochs=1),
-            metrics=[
-                dryml.models.tf.ObjectWrapper(
-                    tf.keras.metrics.MeanSquaredError)
-            ])
+    # Create model
+    model = dryml.models.tf.keras.Trainable(
+        model=dryml.models.tf.keras.SequentialFunctionalModel(
+            input_shape=(1,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 1, 'activation': 'linear'})]),
+        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.ObjectWrapper(
+            tf.keras.losses.MeanSquaredError),
+        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1),
+        metrics=[
+            dryml.models.tf.ObjectWrapper(
+                tf.keras.metrics.MeanSquaredError)
+        ])
 
-        if definition:
-            return model.definition().get_cat_def(recursive=True)
-        else:
-            return model
-    return gen
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
 
 
-def sklearn_classifier(definition=False):
-    def gen(num_dims, num_classes):
-        try:
-            import dryml.models.sklearn
-            import sklearn.neighbors
-            import dryml.data.transforms
-        except ImportError:
-            pytest.skip("sklearn not available")
+def xgb_regressor(definition=False):
+    try:
+        import dryml.models.sklearn
+        import dryml.models.xgb
+    except ImportError:
+        pytest.skip("xgboost not available")
 
-        model = dryml.models.sklearn.Trainable(
-            model=dryml.models.sklearn.ClassifierModel(
-                sklearn.neighbors.KNeighborsClassifier,
-                n_neighbors=5,
-                algorithm='ball_tree'),
-            train_fn=dryml.models.sklearn.BasicTraining())
+    import dryml.data.transforms
 
-        best_cat = dryml.data.transforms.BestCat()
+    model = dryml.models.sklearn.Trainable(
+        model=dryml.models.xgb.RegressionModel(),
+        train_fn=dryml.models.sklearn.BasicTraining(),
+    )
 
-        model = dryml.models.DryPipe(model, best_cat)
+    flattener = dryml.data.transforms.Flatten()
 
-        if definition:
-            return model.definition().get_cat_def(recursive=True)
-        else:
-            return model
-    return gen
+    model = dryml.models.DryPipe(flattener, model)
+
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
 
 
-def tf_classifier(definition=False):
-    def gen(num_dims, num_classes):
-        try:
-            import dryml.models.tf
-            import dryml.data.transforms
-            import dryml.data.tf.transforms
-            import tensorflow as tf
-        except ImportError:
-            pytest.skip("tf not available")
+regressor_funcs = [
+    sklearn_regressor,
+    tf_regressor,
+    xgb_regressor
+]
 
-        model = dryml.models.tf.keras.Trainable(
-            model=dryml.models.tf.keras.SequentialFunctionalModel(
-                input_shape=(num_dims,),
-                layer_defs=[
-                    ('Dense', {'units': 32, 'activation': 'relu'}),
-                    ('Dense', {'units': 32, 'activation': 'relu'}),
-                    ('Dense', {'units': num_classes, 'activation': 'softmax'}),
-                ]),
-            optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
-            loss=dryml.models.tf.ObjectWrapper(
-                tf.keras.losses.SparseCategoricalCrossentropy),
-            train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
 
-        best_cat = dryml.data.tf.transforms.BestCat()
+def sklearn_classifier(num_dims, num_classes, definition=False):
+    try:
+        import dryml.models.sklearn
+        import sklearn.neighbors
+        import dryml.data.transforms
+    except ImportError:
+        pytest.skip("sklearn not available")
 
-        model = dryml.models.DryPipe(model, best_cat)
+    model = dryml.models.sklearn.Trainable(
+        model=dryml.models.sklearn.ClassifierModel(
+            sklearn.neighbors.KNeighborsClassifier,
+            n_neighbors=5,
+            algorithm='ball_tree'),
+        train_fn=dryml.models.sklearn.BasicTraining())
 
-        if definition:
-            return model.definition().get_cat_def(recursive=True)
-        else:
-            return model
-    return gen
+    best_cat = dryml.data.transforms.BestCat()
+
+    model = dryml.models.DryPipe(model, best_cat)
+
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
+
+
+def tf_classifier(num_dims, num_classes, definition=False):
+    try:
+        import dryml.models.tf
+        import dryml.data.transforms
+        import dryml.data.tf.transforms
+        import tensorflow as tf
+    except ImportError:
+        pytest.skip("tf not available")
+
+    model = dryml.models.tf.keras.Trainable(
+        model=dryml.models.tf.keras.SequentialFunctionalModel(
+            input_shape=(num_dims,),
+            layer_defs=[
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': 32, 'activation': 'relu'}),
+                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+            ]),
+        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.ObjectWrapper(
+            tf.keras.losses.SparseCategoricalCrossentropy),
+        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
+
+    best_cat = dryml.data.tf.transforms.BestCat()
+
+    model = dryml.models.DryPipe(model, best_cat)
+
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
+
+
+def xgb_classifier(num_dims, num_classes, definition=False):
+    try:
+        import dryml.models.sklearn
+        import dryml.models.xgb
+    except ImportError:
+        pytest.skip("xgboost not available")
+
+    import dryml.data.transforms
+
+    model = dryml.models.sklearn.Trainable(
+        model=dryml.models.xgb.ClassifierModel(),
+        train_fn=dryml.models.sklearn.BasicTraining(),
+    )
+
+    flattener = dryml.data.transforms.Flatten()
+    best_cat = dryml.data.transforms.BestCat()
+
+    model = dryml.models.DryPipe(flattener, model, best_cat)
+
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
+
+
+classifier_funcs = [
+    sklearn_classifier,
+    tf_classifier,
+    xgb_classifier,
+]
 
 
 @pytest.mark.parametrize(
-    "model_gen",
-    [sklearn_regressor(definition=False),
-     tf_regressor(definition=False)])
+    "model_gen", regressor_funcs)
 def test_train_supervised_1_context(model_gen):
     # Generate the model
-    model = model_gen()
+    model = model_gen(definition=False)
 
     # Generate data.
     num_train = 2000
@@ -206,9 +259,7 @@ def test_train_supervised_1_context(model_gen):
 
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.parametrize(
-    "model_gen",
-    [sklearn_regressor(definition=True),
-     tf_regressor(definition=True)])
+    "model_gen", regressor_funcs)
 def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
     # Generate data.
     num_train = 2000
@@ -216,7 +267,7 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
     train_data = mc.gen_dataset_1(num_examples=num_train)
     test_data = mc.gen_dataset_1(num_examples=num_test)
 
-    model_def = model_gen()
+    model_def = model_gen(definition=True)
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -277,9 +328,7 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.usefixtures("ray_server")
 @pytest.mark.parametrize(
-    "model_gen",
-    [sklearn_regressor(definition=True),
-     tf_regressor(definition=True)])
+    "model_gen", regressor_funcs)
 def test_train_supervised_1_ray(create_temp_dir, model_gen):
     import ray
 
@@ -289,7 +338,7 @@ def test_train_supervised_1_ray(create_temp_dir, model_gen):
     train_data = mc.gen_dataset_1(num_examples=num_train)
     test_data = mc.gen_dataset_1(num_examples=num_test)
 
-    model_def = model_gen()
+    model_def = model_gen(definition=True)
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -348,15 +397,13 @@ def test_train_supervised_1_ray(create_temp_dir, model_gen):
 
 
 @pytest.mark.parametrize(
-    "model_gen",
-    [sklearn_classifier(definition=False),
-     tf_classifier(definition=False)])
+    "model_gen", classifier_funcs)
 def test_train_supervised_2_context(model_gen):
     num_classes = 10
     num_dims = 2
 
     # generate the model
-    model = model_gen(num_dims, num_classes)
+    model = model_gen(num_dims, num_classes, definition=False)
 
     # Generate classes
     L = -10.
@@ -414,14 +461,12 @@ def test_train_supervised_2_context(model_gen):
 
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.parametrize(
-    "model_gen",
-    [sklearn_classifier(definition=True),
-     tf_classifier(definition=True)])
+    "model_gen", classifier_funcs)
 def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
     num_classes = 10
     num_dims = 2
 
-    model_def = model_gen(num_dims, num_classes)
+    model_def = model_gen(num_dims, num_classes, definition=True)
 
     # Generate classes
     L = -10.
@@ -503,16 +548,14 @@ def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.usefixtures("ray_server")
 @pytest.mark.parametrize(
-    "model_gen",
-    [sklearn_classifier(definition=True),
-     tf_classifier(definition=True)])
+    "model_gen", classifier_funcs)
 def test_train_supervised_2_ray(create_temp_dir, model_gen):
     import ray
 
     num_classes = 10
     num_dims = 2
 
-    model_def = model_gen(num_dims, num_classes)
+    model_def = model_gen(num_dims, num_classes, definition=True)
 
     # Generate classes
     L = -10.
