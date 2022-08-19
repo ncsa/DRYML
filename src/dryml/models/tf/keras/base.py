@@ -316,11 +316,7 @@ class BasicTraining(TrainFunction):
             start_epoch = train_spec.level_step()
 
         # Type checking training data, and converting if necessary
-        if type(data) is not TFDataset:
-            if not hasattr(data, 'tf'):
-                raise TypeError(
-                    f"Type {type(data)} can't be converted to TFDataset!")
-            data = data.tf()
+        data = data.tf()
 
         # Check data is supervised.
         if not data.supervised:

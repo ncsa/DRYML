@@ -316,9 +316,15 @@ def tf_context_loader():
     return TFComputeContext
 
 
+def torch_context_loader():
+    from dryml.context.torch import TorchComputeContext
+    return TorchComputeContext
+
+
 context_loaders = {
     'default': default_context_loader,
     'tf': tf_context_loader,
+    'torch': torch_context_loader,
 }
 
 
@@ -519,8 +525,13 @@ class ContextContainer(object):
 
     def get_num_gpus_tf(self):
         if 'tf' not in self.contexts:
-            raise RuntimeError("No TF Context active.")
+            raise WrongContextError("No TF Context active.")
         return self.contexts['tf'].allocation.num_gpus
+
+    def get_torch_devices(self):
+        if 'torch' not in self.contexts:
+            raise WrongContextError("No Torch Context active.")
+        return self.contexts['torch'].compute_devices()
 
 
 def set_context(ctx_reqs):

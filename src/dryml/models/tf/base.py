@@ -32,9 +32,6 @@ class Model(DryComponent):
 class Trainable(DryTrainable):
     __dry_compute_context__ = 'tf'
 
-    def __init__(self):
-        pass
-
     def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
         if data.batched:
             # We can execute the method directly on the data
