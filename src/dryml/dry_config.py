@@ -756,6 +756,22 @@ class DryKwargs(DryConfigInterface, collections.UserDict):
     pass
 
 
+def strip_dry_id(obj):
+    if is_dictlike(obj):
+        new_dict = {}
+        for k in obj:
+            if k != 'dry_id':
+                new_dict[k] = strip_dry_id(obj[k])
+        return new_dict
+    elif is_nonstring_iterable(obj):
+        if type(obj) is tuple:
+            return tuple([strip_dry_id(o) for o in obj])
+        else:
+            return [strip_dry_id(o) for o in obj]
+    else:
+        return obj
+
+
 class DryObjectDef(collections.UserDict):
     @staticmethod
     def from_dict(def_dict: Mapping):
@@ -829,11 +845,29 @@ class DryObjectDef(collections.UserDict):
             self.data['dry_kwargs'] = DryKwargs(value)
 
     def to_dict(self, cls_str: bool = False):
+        from dryml import DryObject
+
+        # Build dry kwargs/dry args
+        def transform_el(el):
+            if type(el) is DryObjectDef:
+                return el.to_dict(cls_str=cls_str)
+            elif type(el) is DryObject:
+                return el.definition().to_dict(cls_str=cls_str)
+            elif is_dictlike(el):
+                return {k: transform_el(el[k]) for k in el}
+            elif is_nonstring_iterable(el):
+                if type(el) is tuple:
+                    return tuple([transform_el(e) for e in el])
+                else:
+                    return [transform_el(e) for e in el]
+            else:
+                return el
+
         return {
             'cls': self.cls if not cls_str else get_class_str(self.cls),
             'dry_mut': self.dry_mut,
-            'dry_args': self.args.data,
-            'dry_kwargs': self.kwargs.data,
+            'dry_args': transform_el(self.args.data),
+            'dry_kwargs': transform_el(self.kwargs.data),
             'dry_def': True,
         }
 
@@ -932,13 +966,17 @@ class DryObjectDef(collections.UserDict):
         # Return the result
         return obj
 
-    def get_cat_def(self):
+    def get_cat_def(self, recursive=False):
         def_dict = self.to_dict()
-        kwargs_copy = copy.copy(def_dict['dry_kwargs'])
-        if 'dry_id' in kwargs_copy:
-            kwargs_copy.pop('dry_id')
-        def_dict['dry_kwargs'] = kwargs_copy
-        return DryObjectDef.from_dict(def_dict)
+        if recursive:
+            def_dict = strip_dry_id(def_dict)
+            return DryObjectDef.from_dict(def_dict)
+        else:
+            kwargs_copy = copy.copy(def_dict['dry_kwargs'])
+            if 'dry_id' in kwargs_copy:
+                kwargs_copy.pop('dry_id')
+            def_dict['dry_kwargs'] = kwargs_copy
+            return DryObjectDef.from_dict(def_dict)
 
     def get_hash_str(self, no_id: bool = False):
         class_hash_str = get_class_str(self.cls)

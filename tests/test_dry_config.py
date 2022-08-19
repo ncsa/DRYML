@@ -142,6 +142,59 @@ def test_def_4():
     assert obj.definition().is_concrete()
 
 
+def test_def_5():
+    """
+    A case which looks at stripping id methods
+    """
+
+    obj = objects.TestNest(
+        objects.TestNest2(
+            A=objects.TestNest(5)))
+
+    obj_def_manual = dryml.DryObjectDef(
+        objects.TestNest,
+        dryml.DryObjectDef(
+            objects.TestNest2,
+            A=dryml.DryObjectDef(
+                objects.TestNest,
+                5)
+            )
+        )
+
+    obj_def = obj.definition()
+
+    assert obj_def != obj_def_manual
+    assert 'dry_id' in obj_def.kwargs
+
+    assert 'dry_id' not in obj_def_manual.kwargs
+    obj_class_def = obj_def.get_cat_def(recursive=True)
+    assert obj_class_def == obj_def_manual
+
+    obj_class_def = obj_def.get_cat_def()
+    del obj_def.kwargs['dry_id']
+    assert obj_class_def == obj_def
+
+
+def test_def_6():
+    """
+    A case which looks at stripping id methods
+    """
+
+    obj = objects.TestNest(('test', 'test'))
+    obj_def = obj.definition().get_cat_def(recursive=True)
+
+    assert type(obj_def.args[0]) is tuple
+    assert obj_def.args[0][0] == 'test'
+    assert obj_def.args[0][1] == 'test'
+
+    obj = objects.TestNest(['test', 'test'])
+    obj_def = obj.definition().get_cat_def(recursive=True)
+
+    assert type(obj_def.args[0]) is list
+    assert obj_def.args[0][0] == 'test'
+    assert obj_def.args[0][1] == 'test'
+
+
 def test_detect_and_construct_1():
     """
     Test detect_and_construct method checking

@@ -458,7 +458,7 @@ class DryObject(metaclass=DryMeta):
     def __hash__(self):
         return hash(self.dry_id)
 
-    def dry_context_requirements(self) -> str:
+    def dry_context_requirements(self):
         context_reqs = {self.__dry_compute_context__: [{}]}
         for obj in self.__dry_obj_container_list__:
             obj_reqs = obj.dry_context_requirements()

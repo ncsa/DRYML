@@ -38,24 +38,139 @@ def test_compute_context_consistency_2():
         assert obj.val == 20
 
 
-def test_train_supervised_model_sklearn_1_context():
+# Model and definition generators
+
+
+def sklearn_regressor(definition=False):
+    def gen():
+        try:
+            import dryml.models.sklearn
+            import sklearn.neighbors
+        except ImportError:
+            pytest.skip("sklearn not supported")
+
+        # Create model
+        model = dryml.models.sklearn.Trainable(
+            model=dryml.models.sklearn.RegressionModel(
+                sklearn.neighbors.KNeighborsRegressor,
+                n_neighbors=5,
+                weights='uniform',
+                algorithm='ball_tree'),
+            train_fn=dryml.models.sklearn.BasicTraining())
+
+        if definition:
+            return model.definition().get_cat_def(recursive=True)
+        else:
+            return model
+    return gen
+
+
+def tf_regressor(definition=False):
+    def gen():
+        try:
+            import dryml.models.tf
+            import tensorflow as tf
+        except ImportError:
+            pytest.skip("tensorflow not supported")
+
+        # Create model
+        model = dryml.models.tf.keras.Trainable(
+            model=dryml.models.tf.keras.SequentialFunctionalModel(
+                input_shape=(1,),
+                layer_defs=[
+                    ('Dense', {'units': 32, 'activation': 'relu'}),
+                    ('Dense', {'units': 32, 'activation': 'relu'}),
+                    ('Dense', {'units': 1, 'activation': 'linear'})]),
+            optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
+            loss=dryml.models.tf.ObjectWrapper(
+                tf.keras.losses.MeanSquaredError),
+            train_fn=dryml.models.tf.keras.BasicTraining(epochs=1),
+            metrics=[
+                dryml.models.tf.ObjectWrapper(
+                    tf.keras.metrics.MeanSquaredError)
+            ])
+
+        if definition:
+            return model.definition().get_cat_def(recursive=True)
+        else:
+            return model
+    return gen
+
+
+def sklearn_classifier(definition=False):
+    def gen(num_dims, num_classes):
+        try:
+            import dryml.models.sklearn
+            import sklearn.neighbors
+            import dryml.data.transforms
+        except ImportError:
+            pytest.skip("sklearn not available")
+
+        model = dryml.models.sklearn.Trainable(
+            model=dryml.models.sklearn.ClassifierModel(
+                sklearn.neighbors.KNeighborsClassifier,
+                n_neighbors=5,
+                algorithm='ball_tree'),
+            train_fn=dryml.models.sklearn.BasicTraining())
+
+        best_cat = dryml.data.transforms.BestCat()
+
+        model = dryml.models.DryPipe(model, best_cat)
+
+        if definition:
+            return model.definition().get_cat_def(recursive=True)
+        else:
+            return model
+    return gen
+
+
+def tf_classifier(definition=False):
+    def gen(num_dims, num_classes):
+        try:
+            import dryml.models.tf
+            import dryml.data.transforms
+            import dryml.data.tf.transforms
+            import tensorflow as tf
+        except ImportError:
+            pytest.skip("tf not available")
+
+        model = dryml.models.tf.keras.Trainable(
+            model=dryml.models.tf.keras.SequentialFunctionalModel(
+                input_shape=(num_dims,),
+                layer_defs=[
+                    ('Dense', {'units': 32, 'activation': 'relu'}),
+                    ('Dense', {'units': 32, 'activation': 'relu'}),
+                    ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+                ]),
+            optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
+            loss=dryml.models.tf.ObjectWrapper(
+                tf.keras.losses.SparseCategoricalCrossentropy),
+            train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
+
+        best_cat = dryml.data.tf.transforms.BestCat()
+
+        model = dryml.models.DryPipe(model, best_cat)
+
+        if definition:
+            return model.definition().get_cat_def(recursive=True)
+        else:
+            return model
+    return gen
+
+
+@pytest.mark.parametrize(
+    "model_gen",
+    [sklearn_regressor(definition=False),
+     tf_regressor(definition=False)])
+def test_train_supervised_1_context(model_gen):
+    # Generate the model
+    model = model_gen()
+
     # Generate data.
     num_train = 2000
     num_test = 500
     train_data = mc.gen_dataset_1(num_examples=num_train)
     test_data = mc.gen_dataset_1(num_examples=num_test)
-
-    import dryml.models.sklearn
-    import sklearn.neighbors
-
-    # Create model
-    model = dryml.models.sklearn.Trainable(
-        model=dryml.models.sklearn.RegressionModel(
-            sklearn.neighbors.KNeighborsRegressor,
-            n_neighbors=5,
-            weights='uniform',
-            algorithm='ball_tree'),
-        train_fn=dryml.models.sklearn.BasicTraining())
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -74,133 +189,6 @@ def test_train_supervised_model_sklearn_1_context():
             supervised=True)
 
         # Train model
-        model.train(train_ds)
-
-        return test_model(test_data, model)
-
-    @dryml.compute_context(ctx_use_existing_context=False)
-    def test_method(test_data, model):
-        return test_model(test_data, model)
-
-    train_loss = train_method(train_data, test_data, model)
-    test_loss = test_method(test_data, model)
-
-    assert train_loss == test_loss
-
-
-def test_train_supervised_model_sklearn_2():
-    # Generate classes
-    num_classes = 10
-    num_dims = 2
-    L = -10.
-    H = 10.
-    Max_W = 5.
-    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
-    widths = np.random.random((num_classes, num_dims))*Max_W
-
-    num_train = 5000
-    train_data = mc.gen_dataset_2(
-        num_examples=num_train,
-        centers=centers,
-        widths=widths)
-
-    num_test = 100
-    test_data = mc.gen_dataset_2(
-        num_examples=num_test,
-        centers=centers,
-        widths=widths)
-
-    import dryml.models.sklearn
-    import sklearn.neighbors
-    import dryml.data.transforms
-
-    model = dryml.models.sklearn.Trainable(
-        model=dryml.models.sklearn.ClassifierModel(
-            sklearn.neighbors.KNeighborsClassifier,
-            n_neighbors=5,
-            algorithm='ball_tree'),
-        train_fn=dryml.models.sklearn.BasicTraining())
-
-    best_cat = dryml.data.transforms.BestCat()
-
-    pipe = dryml.models.DryPipe(model, best_cat)
-
-    def test_model(test_data, model):
-        import dryml.metrics
-        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
-
-        return dryml.metrics.categorical_accuracy(model, test_ds)
-
-    @dryml.compute_context(
-        ctx_use_existing_context=False,
-        ctx_update_objs=True)
-    def train_method(train_data, test_data, model):
-        # Create datasets
-        train_ds = dryml.data.NumpyDataset(
-            train_data,
-            batch_size=num_train,
-            supervised=True)
-
-        # Train model
-        model.train(train_ds)
-
-        return test_model(test_data, model)
-
-    @dryml.compute_context(ctx_use_existing_context=False)
-    def test_method(test_data, model):
-        return test_model(test_data, model)
-
-    random_guessing_accuracy = 1./num_classes
-
-    train_accuracy = train_method(train_data, test_data, pipe)
-    test_accuracy = test_method(test_data, pipe)
-
-    assert train_accuracy == test_accuracy
-    assert train_accuracy > random_guessing_accuracy
-
-
-def test_train_supervised_model_tf_1():
-    # Generate data.
-    num_train = 2000
-    num_test = 500
-    train_data = mc.gen_dataset_1(num_examples=num_train)
-    test_data = mc.gen_dataset_1(num_examples=num_test)
-
-    import dryml.models.tf
-    import tensorflow as tf
-
-    # Create model
-    model = dryml.models.tf.keras.Trainable(
-        model=dryml.models.tf.keras.SequentialFunctionalModel(
-            input_shape=(1,),
-            layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 1, 'activation': 'linear'})]),
-        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
-        loss=dryml.models.tf.ObjectWrapper(tf.keras.losses.MeanSquaredError),
-        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1),
-        metrics=[
-            dryml.models.tf.ObjectWrapper(tf.keras.metrics.MeanSquaredError)
-        ])
-
-    def test_model(test_data, model):
-        import dryml.metrics
-        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
-
-        return dryml.metrics.mean_squared_error(model, test_ds)
-
-    @dryml.compute_context(
-        ctx_use_existing_context=False,
-        ctx_update_objs=True)
-    def train_method(train_data, test_data, model):
-        # Create datasets
-        train_ds = dryml.data.NumpyDataset(
-            train_data,
-            batch_size=num_train,
-            supervised=True)
-
-        # Train model
         model.prep_train()
         model.train(train_ds)
 
@@ -214,122 +202,21 @@ def test_train_supervised_model_tf_1():
     test_loss = test_method(test_data, model)
 
     assert train_loss == test_loss
-
-
-def test_train_supervised_model_tf_2():
-    # Generate classes
-    num_classes = 10
-    num_dims = 2
-    L = -10.
-    H = 10.
-    Max_W = 5.
-    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
-    widths = np.random.random((num_classes, num_dims))*Max_W
-
-    num_train = 5000
-    train_data = mc.gen_dataset_2(
-        num_examples=num_train,
-        centers=centers,
-        widths=widths)
-
-    num_test = 100
-    test_data = mc.gen_dataset_2(
-        num_examples=num_test,
-        centers=centers,
-        widths=widths)
-
-    import dryml.models.tf
-    import dryml.data.transforms
-    import dryml.data.tf.transforms
-    import tensorflow as tf
-
-    model = dryml.models.tf.keras.Trainable(
-        model=dryml.models.tf.keras.SequentialFunctionalModel(
-            input_shape=(num_dims,),
-            layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
-            ]),
-        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
-        loss=dryml.models.tf.ObjectWrapper(
-            tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
-
-    best_cat = dryml.data.tf.transforms.BestCat()
-
-    pipe = dryml.models.DryPipe(model, best_cat)
-
-    def test_model(test_data, model):
-        import dryml.metrics
-        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
-
-        return dryml.metrics.categorical_accuracy(model, test_ds)
-
-    @dryml.compute_context(
-        ctx_use_existing_context=False,
-        ctx_update_objs=True)
-    def train_method(train_data, test_data, model):
-        # Create datasets
-        train_ds = dryml.data.NumpyDataset(
-            train_data,
-            batch_size=num_train,
-            supervised=True)
-
-        # Train model
-        model.prep_train()
-        model.train(train_ds)
-
-        return test_model(test_data, model)
-
-    @dryml.compute_context(ctx_use_existing_context=False)
-    def test_method(test_data, model):
-        return test_model(test_data, model)
-
-    random_guessing_accuracy = 1./num_classes
-
-    train_accuracy = train_method(train_data, test_data, pipe)
-    test_accuracy = test_method(test_data, pipe)
-
-    assert train_accuracy == test_accuracy
-    assert train_accuracy > random_guessing_accuracy
 
 
 @pytest.mark.usefixtures("create_temp_dir")
-def test_train_supervised_model_tf_3_context(create_temp_dir):
+@pytest.mark.parametrize(
+    "model_gen",
+    [sklearn_regressor(definition=True),
+     tf_regressor(definition=True)])
+def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
     # Generate data.
     num_train = 2000
     num_test = 500
     train_data = mc.gen_dataset_1(num_examples=num_train)
     test_data = mc.gen_dataset_1(num_examples=num_test)
 
-    import dryml.models.tf
-    import tensorflow as tf
-
-    # Create model definition
-    model_def = dryml.DryObjectDef(
-        dryml.models.tf.keras.Trainable,
-        model=dryml.DryObjectDef(
-            dryml.models.tf.keras.SequentialFunctionalModel,
-            input_shape=(1,),
-            layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 1, 'activation': 'linear'})]),
-        optimizer=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.optimizers.Adam),
-        loss=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.losses.MeanSquaredError),
-        train_fn=dryml.DryObjectDef(
-            dryml.models.tf.keras.BasicTraining,
-            epochs=1),
-        metrics=[
-            dryml.DryObjectDef(
-                dryml.models.tf.ObjectWrapper,
-                tf.keras.metrics.MeanSquaredError)
-        ])
+    model_def = model_gen()
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -337,8 +224,10 @@ def test_train_supervised_model_tf_3_context(create_temp_dir):
 
         return dryml.metrics.mean_squared_error(model, test_ds)
 
+    model_reqs = model_def.build().dry_context_requirements()
+
     @dryml.compute_context(
-        ctx_context_reqs={'tf': {}},
+        ctx_context_reqs=model_reqs,
         ctx_use_existing_context=False,
         ctx_update_objs=True)
     def train_method(train_data, test_data, model_def, work_dir):
@@ -365,7 +254,7 @@ def test_train_supervised_model_tf_3_context(create_temp_dir):
         return test_model(test_data, model)
 
     @dryml.compute_context(
-        ctx_context_reqs={'tf': {}},
+        ctx_context_reqs=model_reqs,
         ctx_use_existing_context=False)
     def test_method(test_data, model_def, work_dir):
         import dryml
@@ -387,7 +276,11 @@ def test_train_supervised_model_tf_3_context(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.usefixtures("ray_server")
-def test_train_supervised_model_tf_3_ray(create_temp_dir):
+@pytest.mark.parametrize(
+    "model_gen",
+    [sklearn_regressor(definition=True),
+     tf_regressor(definition=True)])
+def test_train_supervised_1_ray(create_temp_dir, model_gen):
     import ray
 
     # Generate data.
@@ -396,33 +289,7 @@ def test_train_supervised_model_tf_3_ray(create_temp_dir):
     train_data = mc.gen_dataset_1(num_examples=num_train)
     test_data = mc.gen_dataset_1(num_examples=num_test)
 
-    import dryml.models.tf
-    import tensorflow as tf
-
-    # Create model definition
-    model_def = dryml.DryObjectDef(
-        dryml.models.tf.keras.Trainable,
-        model=dryml.DryObjectDef(
-            dryml.models.tf.keras.SequentialFunctionalModel,
-            input_shape=(1,),
-            layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 1, 'activation': 'linear'})]),
-        optimizer=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.optimizers.Adam),
-        loss=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.losses.MeanSquaredError),
-        train_fn=dryml.DryObjectDef(
-            dryml.models.tf.keras.BasicTraining,
-            epochs=1),
-        metrics=[
-            dryml.DryObjectDef(
-                dryml.models.tf.ObjectWrapper,
-                tf.keras.metrics.MeanSquaredError)
-        ])
+    model_def = model_gen()
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -446,7 +313,7 @@ def test_train_supervised_model_tf_3_ray(create_temp_dir):
         model = model_def.build(repo=repo)
 
         # Create context
-        with dryml.context.ContextManager({'tf': {}}):
+        with dryml.context.ContextManager(model.dry_context_requirements()):
             # Train model
             model.prep_train()
             model.train(train_ds)
@@ -467,7 +334,7 @@ def test_train_supervised_model_tf_3_ray(create_temp_dir):
         # Fetch model based on definition
         model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
 
-        with dryml.context.ContextManager({'tf': {}}):
+        with dryml.context.ContextManager(model.dry_context_requirements()):
             acc = test_model(test_data, model)
 
         return acc
@@ -480,11 +347,18 @@ def test_train_supervised_model_tf_3_ray(create_temp_dir):
     assert train_loss == test_loss
 
 
-@pytest.mark.usefixtures("create_temp_dir")
-def test_train_supervised_model_tf_4_context(create_temp_dir):
-    # Generate classes
+@pytest.mark.parametrize(
+    "model_gen",
+    [sklearn_classifier(definition=False),
+     tf_classifier(definition=False)])
+def test_train_supervised_2_context(model_gen):
     num_classes = 10
     num_dims = 2
+
+    # generate the model
+    model = model_gen(num_dims, num_classes)
+
+    # Generate classes
     L = -10.
     H = 10.
     Max_W = 5.
@@ -503,39 +377,6 @@ def test_train_supervised_model_tf_4_context(create_temp_dir):
         centers=centers,
         widths=widths)
 
-    import dryml.models.tf
-    import dryml.data.transforms
-    import dryml.data.tf.transforms
-    import tensorflow as tf
-
-    model_def = dryml.DryObjectDef(
-        dryml.models.tf.keras.Trainable,
-        model=dryml.DryObjectDef(
-            dryml.models.tf.keras.SequentialFunctionalModel,
-            input_shape=(num_dims,),
-            layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
-            ]),
-        optimizer=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.optimizers.Adam),
-        loss=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.DryObjectDef(
-            dryml.models.tf.keras.BasicTraining,
-            epochs=1))
-
-    best_cat = dryml.DryObjectDef(
-        dryml.data.tf.transforms.BestCat)
-
-    model_def = dryml.DryObjectDef(
-        dryml.models.DryPipe,
-        model_def,
-        best_cat)
-
     def test_model(test_data, model):
         import dryml.metrics
         test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
@@ -543,7 +384,74 @@ def test_train_supervised_model_tf_4_context(create_temp_dir):
         return dryml.metrics.categorical_accuracy(model, test_ds)
 
     @dryml.compute_context(
-        ctx_context_reqs={'tf': {}},
+        ctx_use_existing_context=False,
+        ctx_update_objs=True)
+    def train_method(train_data, test_data, model):
+        # Create datasets
+        train_ds = dryml.data.NumpyDataset(
+            train_data,
+            batch_size=num_train,
+            supervised=True)
+
+        # Train model
+        model.prep_train()
+        model.train(train_ds)
+
+        return test_model(test_data, model)
+
+    @dryml.compute_context(ctx_use_existing_context=False)
+    def test_method(test_data, model):
+        return test_model(test_data, model)
+
+    random_guessing_accuracy = 1./num_classes
+
+    train_accuracy = train_method(train_data, test_data, model)
+    test_accuracy = test_method(test_data, model)
+
+    assert train_accuracy == test_accuracy
+    assert train_accuracy > random_guessing_accuracy
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+@pytest.mark.parametrize(
+    "model_gen",
+    [sklearn_classifier(definition=True),
+     tf_classifier(definition=True)])
+def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
+    num_classes = 10
+    num_dims = 2
+
+    model_def = model_gen(num_dims, num_classes)
+
+    # Generate classes
+    L = -10.
+    H = 10.
+    Max_W = 5.
+    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
+    widths = np.random.random((num_classes, num_dims))*Max_W
+
+    num_train = 5000
+    train_data = mc.gen_dataset_2(
+        num_examples=num_train,
+        centers=centers,
+        widths=widths)
+
+    num_test = 100
+    test_data = mc.gen_dataset_2(
+        num_examples=num_test,
+        centers=centers,
+        widths=widths)
+
+    def test_model(test_data, model):
+        import dryml.metrics
+        test_ds = dryml.data.NumpyDataset(test_data, supervised=True)
+
+        return dryml.metrics.categorical_accuracy(model, test_ds)
+
+    model_reqs = model_def.build().dry_context_requirements()
+
+    @dryml.compute_context(
+        ctx_context_reqs=model_reqs,
         ctx_use_existing_context=False,
         ctx_update_objs=True)
     def train_method(train_data, test_data, model_def, work_dir):
@@ -569,7 +477,7 @@ def test_train_supervised_model_tf_4_context(create_temp_dir):
         return test_model(test_data, model)
 
     @dryml.compute_context(
-        ctx_context_reqs={'tf': {}},
+        ctx_context_reqs=model_reqs,
         ctx_use_existing_context=False)
     def test_method(test_data, model_def, work_dir):
         # Create repo
@@ -594,12 +502,19 @@ def test_train_supervised_model_tf_4_context(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.usefixtures("ray_server")
-def test_train_supervised_model_tf_4_ray(create_temp_dir):
+@pytest.mark.parametrize(
+    "model_gen",
+    [sklearn_classifier(definition=True),
+     tf_classifier(definition=True)])
+def test_train_supervised_2_ray(create_temp_dir, model_gen):
     import ray
 
-    # Generate classes
     num_classes = 10
     num_dims = 2
+
+    model_def = model_gen(num_dims, num_classes)
+
+    # Generate classes
     L = -10.
     H = 10.
     Max_W = 5.
@@ -617,39 +532,6 @@ def test_train_supervised_model_tf_4_ray(create_temp_dir):
         num_examples=num_test,
         centers=centers,
         widths=widths)
-
-    import dryml.models.tf
-    import dryml.data.transforms
-    import dryml.data.tf.transforms
-    import tensorflow as tf
-
-    model_def = dryml.DryObjectDef(
-        dryml.models.tf.keras.Trainable,
-        model=dryml.DryObjectDef(
-            dryml.models.tf.keras.SequentialFunctionalModel,
-            input_shape=(num_dims,),
-            layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
-            ]),
-        optimizer=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.optimizers.Adam),
-        loss=dryml.DryObjectDef(
-            dryml.models.tf.ObjectWrapper,
-            tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.DryObjectDef(
-            dryml.models.tf.keras.BasicTraining,
-            epochs=1))
-
-    best_cat = dryml.DryObjectDef(
-        dryml.data.tf.transforms.BestCat)
-
-    model_def = dryml.DryObjectDef(
-        dryml.models.DryPipe,
-        model_def,
-        best_cat)
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -671,7 +553,7 @@ def test_train_supervised_model_tf_4_ray(create_temp_dir):
             batch_size=num_train,
             supervised=True)
 
-        with dryml.context.ContextManager({'tf': {}}):
+        with dryml.context.ContextManager(model.dry_context_requirements()):
             # Train model
             model.prep_train()
             model.train(train_ds)
@@ -692,7 +574,7 @@ def test_train_supervised_model_tf_4_ray(create_temp_dir):
         model = repo.get(model_def, build_missing_def=False)
 
         # Run test
-        with dryml.context.ContextManager({'tf': {}}):
+        with dryml.context.ContextManager(model.dry_context_requirements()):
             acc = test_model(test_data, model)
 
         return acc
