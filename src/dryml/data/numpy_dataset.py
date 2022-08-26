@@ -1,8 +1,8 @@
-from dryml.data.dry_data import DryData, NotIndexedError, \
-    NotSupervisedError
+from dryml.data.dry_data import DryData
 from dryml.data.util import nested_batcher, nested_unbatcher, \
     nested_flatten
 from dryml.utils import is_iterator
+from dryml.data.util import taker, skiper
 import numpy as np
 from typing import Callable
 
@@ -28,7 +28,7 @@ class NumpyDataset(DryData):
                 indexed=indexed, supervised=supervised,
                 batch_size=data_size)
 
-            self.data_gen = lambda: [data]
+            self._data_gen = lambda: [data]
             self.size = 1
 
         elif callable(data):
@@ -37,7 +37,7 @@ class NumpyDataset(DryData):
             super().__init__(
                 indexed=indexed, supervised=supervised,
                 batch_size=batch_size)
-            self.data_gen = data
+            self._data_gen = data
             if size is None:
                 self.size = np.nan
             else:
@@ -61,13 +61,13 @@ class NumpyDataset(DryData):
                     super().__init__(
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
-                    self.data_gen = lambda: [data.to_numpy()]
+                    self._data_gen = lambda: [data.to_numpy()]
                     self.size = 1
                 elif indexed is True:
                     super().__init__(
                         indexed=indexed, supervised=supervised,
                         batch_size=len(data))
-                    self.data_gen = lambda: [(data.index.to_numpy(),
+                    self._data_gen = lambda: [(data.index.to_numpy(),
                                               data.to_numpy())]
                     self.size = 1
             elif type(data) is list:
@@ -76,7 +76,7 @@ class NumpyDataset(DryData):
                     indexed=indexed, supervised=supervised,
                     batch_size=batch_size)
 
-                self.data_gen = lambda: data
+                self._data_gen = lambda: data
                 if size is None:
                     self.size = data_size
                 else:
@@ -88,20 +88,11 @@ class NumpyDataset(DryData):
                     indexed=indexed, supervised=supervised,
                     batch_size=batch_size)
 
-                self.data_gen = lambda: data
+                self._data_gen = lambda: data
                 if size is None:
                     self.size = np.nan
                 else:
                     self.size = size
-
-    def index(self):
-        """
-        If indexed, return the index of this dataset
-        """
-        if not self.indexed:
-            raise NotIndexedError()
-
-        return map(lambda t: t[0], self.data())
 
     def as_indexed(self, start=0) -> DryData:
         """
@@ -151,48 +142,12 @@ class NumpyDataset(DryData):
                     batch_size=self.batch_size,
                     size=self.size)
 
-    def as_not_indexed(self):
+    @property
+    def data_gen(self):
         """
-        Strip index from dataset
+        Get a function which returns a generator which yields the dataset
         """
-        if not self.indexed:
-            return self
-        else:
-            return NumpyDataset(
-                lambda: map(lambda t: t[1], self.data()),
-                indexed=False,
-                supervised=self.supervised,
-                batch_size=self.batch_size,
-                size=self.size)
-
-    def as_not_supervised(self) -> DryData:
-        """
-        Strip supervised targets
-        """
-
-        if not self.supervised:
-            return self
-        else:
-            if self.indexed:
-                return NumpyDataset(
-                    map(lambda i, xy: (i, xy[0]), self.data()),
-                    indexed=self.indexed,
-                    supervised=False,
-                    batch_size=self.batch_size,
-                    size=self.size)
-            else:
-                return NumpyDataset(
-                    map(lambda x, y: x, self.data()),
-                    indexed=self.indexed,
-                    supervised=False,
-                    batch_size=self.batch_size,
-                    size=self.size)
-
-    def intersect(self) -> DryData:
-        """
-        Intersect this dataset with another
-        """
-        raise NotImplementedError()
+        return self._data_gen
 
     def data(self):
         """
@@ -200,18 +155,22 @@ class NumpyDataset(DryData):
         """
         return self.data_gen()
 
-    def batch(self, batch_size=32) -> DryData:
+    def batch(self, batch_size=32, drop_remainder=True) -> DryData:
         """
         Batch this data
         """
         if self.batched:
             if self.batch_size != batch_size:
-                return self.unbatch().batch(batch_size=32)
+                return self.unbatch().batch(batch_size=batch_size)
             else:
                 return self
         else:
             return NumpyDataset(
-                lambda: nested_batcher(self.data_gen, batch_size),
+                lambda: nested_batcher(
+                     self.data_gen,
+                     batch_size,
+                     lambda e: np.stack(e, axis=0),
+                     drop_remainder=drop_remainder),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=batch_size,
@@ -230,122 +189,22 @@ class NumpyDataset(DryData):
                 supervised=self.supervised,
                 size=self.size)
 
-    def apply_X(self, func: Callable = None) -> DryData:
+    def map(self, func: Callable = None) -> DryData:
         """
-        Apply a function to the X component of DryData
-        """
-
-        if self.indexed:
-            if self.supervised:
-                return NumpyDataset(
-                    lambda: map(lambda t: (t[0], (func(t[1][0]), t[1][1])),
-                                self.data()),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size,
-                    size=self.size)
-            else:
-                return NumpyDataset(
-                    lambda: map(lambda t: (t[0], func(t[1])),
-                                self.data()),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size,
-                    size=self.size)
-        else:
-            if self.supervised:
-                return NumpyDataset(
-                    lambda: map(lambda t: (func(t[0]), t[1]),
-                                self.data()),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size,
-                    size=self.size)
-            else:
-                return NumpyDataset(
-                    lambda: map(lambda x: func(x),
-                                self.data()),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size,
-                    size=self.size)
-
-    def apply_Y(self, func=None) -> DryData:
-        """
-        Apply a function to the Y component of DryData
+        Map a function across all elements of a dataset
         """
 
-        if not self.supervised:
-            raise NotSupervisedError(
-                "Can't apply a function to the Y component of "
-                "non supervised dataset")
-
-        if self.indexed:
-            return NumpyDataset(
-                lambda: map(lambda i, xy: (i, (xy[0], func(xy[1]))),
-                            self.data()),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size,
-                size=self.size)
-        else:
-            return NumpyDataset(
-                lambda: map(lambda x, y: (x, func(y)),
-                            self.data()),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size,
-                size=self.size)
-
-    def apply(self, func=None) -> DryData:
-        """
-        Apply a function to (X, Y)
-        """
-
-        if not self.supervised:
-            raise NotSupervisedError(
-                "Can't apply a function to the Y component of "
-                "non supervised dataset")
-
-        if self.indexed:
-            return NumpyDataset(
-                lambda: map(lambda i, xy: (i, func(*xy)),
-                            self.data()),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size,
-                size=self.size)
-        else:
-            return NumpyDataset(
-                lambda: map(lambda x, y: func(x, y),
-                            self.data()),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size,
-                size=self.size)
-
-    def __iter__(self):
-        """
-        Create iterator
-        """
-
-        return iter(self.data())
+        return NumpyDataset(
+            lambda: map(func, self),
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size,
+            size=self.size)
 
     def take(self, n):
         """
         Take only a specific number of examples
         """
-
-        def taker(gen_func, n):
-            i = 0
-            it = iter(gen_func())
-            while i < n:
-                try:
-                    yield next(it)
-                    i += 1
-                except StopIteration:
-                    return
-            return
 
         new_size = self.size
         if new_size is np.nan:
@@ -368,21 +227,6 @@ class NumpyDataset(DryData):
         """
         Skip a specific number of examples
         """
-
-        def skiper(gen_func, n):
-            i = 0
-            it = iter(gen_func())
-            while i < n:
-                try:
-                    next(it)
-                    i += 1
-                except StopIteration:
-                    return
-            while True:
-                try:
-                    yield next(it)
-                except StopIteration:
-                    return
 
         new_size = self.size
         if new_size is not np.nan and new_size is not np.inf:
@@ -443,18 +287,19 @@ class NumpyDataset(DryData):
             batch_size=self.batch_size,
             size=self.size)
 
-    def count(self, limit=-1):
-        number = 0
-        num = 0
-        for e in self:
-            if limit != -1:
-                if num >= limit:
-                    break
-            if self.batched:
-                number += e.shape[0]
-            else:
-                number += 1
+    def torch(self):
+        from dryml.data.torch import TorchIterableDatasetWrapper, TorchDataset
+        import torch
 
-            num += 1
+        dataset = self.map_el(lambda el: torch.tensor(el))
 
-        return number
+        # Create torch dataset
+        ds = TorchIterableDatasetWrapper(
+            dataset.data_gen)
+
+        return TorchDataset(
+            ds,
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size,
+            size=self.size)

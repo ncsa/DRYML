@@ -25,12 +25,11 @@ def test_tfbase_2(create_temp_named_file):
     test_obj.save_self(create_temp_named_file)
 
 
-@pytest.mark.usefixtures("ray_server")
 def test_context_object_compute_check_tf_1():
     """
     Checks whether Eval behaves correctly when transformed to numpy
     """
-    import ray
+    ray = pytest.importorskip('ray')
     import numpy as np
     import dryml.models.tf
     import tensorflow as tf
@@ -59,7 +58,8 @@ def test_context_object_compute_check_tf_1():
             epochs=1))
 
     # Create data for eval
-    data = np.random.random((20, num_dims))
+    batch_size = 20
+    data = np.random.random((batch_size, num_dims))
 
     @ray.remote(num_cpus=1, num_gpus=0, max_calls=1)
     def test_method(model_def, data):
@@ -69,7 +69,7 @@ def test_context_object_compute_check_tf_1():
         ds = dryml.data.NumpyDataset(data)
 
         with dryml.context.ContextManager({'tf': {}}):
-            result = model.eval(ds.batch()).numpy().peek()
+            result = model.eval(ds.batch(batch_size=batch_size)).numpy().peek()
             assert type(result) is np.ndarray
 
     ray.get(test_method.remote(model_def, data))
@@ -78,7 +78,7 @@ def test_context_object_compute_check_tf_1():
 @pytest.mark.usefixtures("ray_server")
 @pytest.mark.usefixtures("create_name")
 def test_context_object_compute_check_tf_2(create_name):
-    import ray
+    ray = pytest.importorskip('ray')
     import numpy as np
     import dryml.models.tf
     import tensorflow as tf
@@ -107,7 +107,8 @@ def test_context_object_compute_check_tf_2(create_name):
             epochs=1))
 
     # Create data for eval
-    data = np.random.random((20, num_dims))
+    batch_size = 20
+    data = np.random.random((batch_size, num_dims))
 
     @ray.remote(num_cpus=1, num_gpus=0, max_calls=1)
     def test_method_1(model_def, data, dest_name):
@@ -119,8 +120,13 @@ def test_context_object_compute_check_tf_2(create_name):
         import dryml.data
         ds = dryml.data.NumpyDataset(data)
 
+        print("test_method_1 info")
+        print(f"ds batch size: {ds.batch_size}")
+        print(f"batch_size: {batch_size}")
+        print(f"peek: {ds.peek()}")
+
         with dryml.context.ContextManager({'tf': {}}):
-            result = model.eval(ds.batch()).numpy().peek()
+            result = model.eval(ds.batch(batch_size=batch_size)).numpy().peek()
 
             assert model.model.mdl is not None
             assert model.__dry_compute_data__ is None
@@ -150,7 +156,7 @@ def test_context_object_compute_check_tf_2(create_name):
         ds = dryml.data.NumpyDataset(data)
 
         with dryml.context.ContextManager({'tf': {}}):
-            result = model.eval(ds.batch()).numpy().peek()
+            result = model.eval(ds.batch(batch_size=batch_size)).numpy().peek()
 
             assert model.model.mdl is not None
             # We loaded the model into memory the

@@ -1,4 +1,3 @@
-import torch
 from typing import Optional, Union
 from dryml.context import ComputeContext
 from dryml.context.context_tracker import ResourceRequest
@@ -25,7 +24,8 @@ class TorchComputeContext(ComputeContext):
                 break
 
         if need_mem_limit:
-            print("WARNING, currently there is no way to limit memory used by torch.")
+            print("WARNING, currently there is no way to "
+                  "limit memory used by torch.")
 
     def compute_devices(self):
         device_list = list(map(

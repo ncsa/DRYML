@@ -33,14 +33,18 @@ class Trainable(DryTrainable):
     __dry_compute_context__ = 'tf'
 
     def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
+        def eval_func(X):
+            return self.model(X, *args, **kwargs)
         if data.batched:
+            print("eval1")
             # We can execute the method directly on the data
-            return data.tf().apply_X(
-                func=lambda X: self.model(X, *args, **kwargs))
+            return data.tf() \
+                       .apply_X(func=eval_func)
         else:
+            print("eval2")
             # We first need to batch the data, then unbatch to leave
             # The dataset character unchanged.
-            return data.tf().batch(batch_size=eval_batch_size) \
-                       .apply_X(
-                            func=lambda X: self.model(X, *args, **kwargs)) \
+            return data.tf() \
+                       .batch(batch_size=eval_batch_size) \
+                       .apply_X(func=eval_func) \
                        .unbatch()

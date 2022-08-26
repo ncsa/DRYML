@@ -1,4 +1,4 @@
-from dryml.data import DryData, NotIndexedError, NotSupervisedError, \
+from dryml.data import DryData, \
     NumpyDataset, util
 from typing import Callable
 import tensorflow as tf
@@ -15,17 +15,6 @@ class TFDataset(DryData):
         self.ds = in_ds
         self.size = size
 
-    def index(self):
-        """
-        If indexed, return the index of this dataset
-        """
-        if not self.indexed:
-            raise NotIndexedError()
-
-        return self.ds.map(
-            lambda t: t[0],
-            num_parallel_calls=tf.data.AUTOTUNE)
-
     def as_indexed(self, start=0) -> DryData:
         """
         If not already indexed, return a version of this dataset
@@ -40,49 +29,9 @@ class TFDataset(DryData):
                 supervised=self.supervised,
                 batch_size=self.batch_size)
 
-    def as_not_indexed(self):
-        """
-        Strip index from dataset
-        """
-        if not self.indexed:
-            return self
-        else:
-            return TFDataset(
-                self.ds.map(
-                    lambda idx, data: data,
-                    num_parallel_calls=tf.data.AUTOTUNE),
-                indexed=False,
-                supervised=self.supervised,
-                batch_size=self.batch_size)
-
-    def as_not_supervised(self) -> DryData:
-        """
-        Strip supervised targets
-        """
-
-        if not self.supervised:
-            return self
-        else:
-            if self.indexed:
-                return TFDataset(self.ds.map(
-                        lambda i, xy: (i, xy[0]),
-                        num_parallel_calls=tf.data.AUTOTUNE),
-                    indexed=self.indexed,
-                    supervised=False,
-                    batch_size=self.batch_size)
-            else:
-                return TFDataset(self.ds.map(
-                        lambda x, y: x,
-                        num_parallel_calls=tf.data.AUTOTUNE),
-                    indexed=self.indexed,
-                    supervised=False,
-                    batch_size=self.batch_size)
-
-    def intersect(self) -> DryData:
-        """
-        Intersect this dataset with another
-        """
-        raise NotImplementedError()
+    @property
+    def data_gen(self):
+        return lambda: self.ds
 
     def data(self):
         """
@@ -90,7 +39,7 @@ class TFDataset(DryData):
         """
         return self.ds
 
-    def batch(self, batch_size=32) -> DryData:
+    def batch(self, batch_size=32, drop_remainder=True) -> DryData:
         """
         Batch this data
         """
@@ -101,7 +50,9 @@ class TFDataset(DryData):
                 return self.unbatch().batch(batch_size=batch_size)
         else:
             return TFDataset(
-                self.ds.batch(batch_size=batch_size),
+                self.ds.batch(
+                    batch_size=batch_size,
+                    drop_remainder=drop_remainder),
                 indexed=self.indexed,
                 supervised=self.supervised,
                 batch_size=batch_size)
@@ -118,106 +69,19 @@ class TFDataset(DryData):
                 indexed=self.indexed,
                 supervised=self.supervised)
 
-    def apply_X(self, func: Callable = None) -> DryData:
+    def map(self, func: Callable = None) -> DryData:
         """
         Apply a function to the X component of DryData
         """
 
-        if self.indexed:
-            if self.supervised:
-                return TFDataset(
-                    self.ds.map(
-                        lambda i, xy: (i, (func(xy[0]), xy[1])),
-                        num_parallel_calls=tf.data.AUTOTUNE),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size)
-            else:
-                return TFDataset(
-                    self.ds.map(
-                        lambda i, x: (i, func(x)),
-                        num_parallel_calls=tf.data.AUTOTUNE),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size)
-        else:
-            if self.supervised:
-                return TFDataset(
-                    self.ds.map(
-                        lambda x, y: (func(x), y),
-                        num_parallel_calls=tf.data.AUTOTUNE),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size)
-            else:
-                return TFDataset(
-                    self.ds.map(
-                        lambda x: func(x),
-                        num_parallel_calls=tf.data.AUTOTUNE),
-                    indexed=self.indexed,
-                    supervised=self.supervised,
-                    batch_size=self.batch_size)
-
-    def apply_Y(self, func=None) -> DryData:
-        """
-        Apply a function to the Y component of DryData
-        """
-
-        if not self.supervised:
-            raise NotSupervisedError(
-                "Can't apply a function to the Y component of "
-                "non supervised dataset")
-
-        if self.indexed:
-            return TFDataset(
-                self.ds.map(
-                    lambda i, xy: (i, (xy[0], func(xy[1]))),
-                    num_parallel_calls=tf.data.AUTOTUNE),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size)
-        else:
-            return TFDataset(
-                self.ds.map(
-                    lambda x, y: (x, func(y)),
-                    num_parallel_calls=tf.data.AUTOTUNE),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size)
-
-    def apply(self, func=None) -> DryData:
-        """
-        Apply a function to (X, Y)
-        """
-
-        if not self.supervised:
-            raise NotSupervisedError(
-                "Can't apply a function to the Y component of "
-                "non supervised dataset")
-
-        if self.indexed:
-            return TFDataset(
-                self.ds.map(
-                    lambda i, xy: (i, func(*xy)),
-                    num_parallel_calls=tf.data.AUTOTUNE),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size)
-        else:
-            return TFDataset(
-                self.ds.map(
-                    lambda x, y: func(x, y),
-                    num_parallel_calls=tf.data.AUTOTUNE),
-                indexed=self.indexed,
-                supervised=self.supervised,
-                batch_size=self.batch_size)
-
-    def __iter__(self):
-        """
-        Create iterator
-        """
-
-        return iter(self.data())
+        return TFDataset(
+            self.ds.map(
+                lambda *t: func(t),
+                num_parallel_calls=tf.data.AUTOTUNE),
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size,
+            size=self.size)
 
     def take(self, n):
         """
@@ -262,20 +126,13 @@ class TFDataset(DryData):
             else:
                 return el
 
-        def numpy_transformer(gen):
-            it = iter(gen)
-            while True:
-                try:
-                    el = next(it)
-                except StopIteration:
-                    break
-                trans_el = util.nested_apply(el, numpy_transform)
-                yield trans_el
-
-            return
+        def numpy_generator():
+            return map(
+                util.nestize(numpy_transform),
+                self.data_gen())
 
         return NumpyDataset(
-            lambda: numpy_transformer(self.ds),
+            numpy_generator,
             indexed=self.indexed,
             supervised=self.supervised,
             batch_size=self.batch_size)
@@ -286,18 +143,23 @@ class TFDataset(DryData):
         """
         return self
 
-    def count(self, limit=-1):
-        number = 0
-        num = 0
-        for e in self:
-            if limit != -1:
-                if num >= limit:
-                    break
-            if self.batched:
-                number += e.shape[0]
-            else:
-                number += 1
+    def torch(self):
+        """
+        Create TorchDataset from this dataset
+        """
 
-            num += 1
+        import torch
+        from dryml.data.torch import TorchDataset, TorchIterableDatasetWrapper
 
-        return number
+        def tf_to_torch(el):
+            return torch.tensor(el.numpy())
+
+        obj = TorchIterableDatasetWrapper(
+            lambda: map(util.nestize(tf_to_torch), self.data_gen()))
+
+        return TorchDataset(
+            obj,
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size,
+            size=self.size)

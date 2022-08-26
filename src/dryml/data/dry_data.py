@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Callable
+from dryml.data.util import nestize
 
 
 class NotIndexedError():
@@ -32,7 +33,10 @@ class DryData(object):
         """
         If indexed, return the index of this dataset
         """
-        raise NotImplementedError()
+        if not self.indexed:
+            raise NotIndexedError()
+
+        return self.map(lambda t: t[0])
 
     def as_indexed(self, start=0) -> DryData:
         """
@@ -41,11 +45,14 @@ class DryData(object):
         """
         raise NotImplementedError()
 
-    def as_not_indexed(self) -> DryData:
+    def as_not_indexed(self):
         """
         Strip index from dataset
         """
-        raise NotImplementedError()
+        if not self.indexed:
+            return self
+        else:
+            return self.map(lambda t: t[1])
 
     @property
     def supervised(self) -> bool:
@@ -58,11 +65,25 @@ class DryData(object):
         """
         Strip supervised targets
         """
-        raise NotImplementedError()
+
+        if not self.supervised:
+            return self
+        else:
+            if self.indexed:
+                return self.map(lambda t: (t[0], t[1][0]))
+            else:
+                return self.map(lambda t: t[0])
 
     def intersect(self) -> DryData:
         """
         Intersect this dataset with another
+        """
+        raise NotImplementedError()
+
+    @property
+    def data_gen(self):
+        """
+        Gives a function where calling it returns a generator of the dataset.
         """
         raise NotImplementedError()
 
@@ -102,29 +123,71 @@ class DryData(object):
         """
         raise NotImplementedError()
 
+    def map(self, func: Callable = None) -> DryData:
+        """
+        Apply a function to the data of DryData
+        """
+        raise NotImplementedError()
+
+    def map_el(self, func: Callable = None) -> DryData:
+        """
+        Apply a function to every element in DryData, even nesting in
+        """
+
+        return self.map(nestize(func))
+
     def apply_X(self, func: Callable = None) -> DryData:
         """
         Apply a function to the X component of DryData
         """
-        raise NotImplementedError()
 
-    def apply_Y(self, func: Callable = None) -> DryData:
+        if self.indexed:
+            if self.supervised:
+                return self.map(lambda t: (t[0], (func(t[1][0]), t[1][1])))
+            else:
+                return self.map(lambda t: (t[0], func(t[1])))
+        else:
+            if self.supervised:
+                return self.map(lambda t: (func(t[0]), t[1]))
+            else:
+                return self.map(lambda x: func(x))
+
+    def apply_Y(self, func=None) -> DryData:
         """
         Apply a function to the Y component of DryData
         """
-        raise NotImplementedError()
 
-    def apply(self, func: Callable = None) -> DryData:
+        if not self.supervised:
+            raise NotSupervisedError(
+                "Can't apply a function to the Y component of "
+                "non supervised dataset")
+
+        if self.indexed:
+            return self.map(lambda i, xy: (i, (xy[0], func(xy[1]))))
+        else:
+            return self.map(lambda x, y: (x, func(y)))
+
+    def apply(self, func=None) -> DryData:
         """
         Apply a function to (X, Y)
         """
-        raise NotImplementedError()
+
+        if not self.supervised:
+            raise NotSupervisedError(
+                "Can't apply a function to the Y component of "
+                "non supervised dataset")
+
+        if self.indexed:
+            return self.map(lambda i, xy: (i, func(*xy)))
+        else:
+            return self.map(lambda x, y: func(x, y))
 
     def __iter__(self):
         """
-        Create an iterator
+        Create iterator
         """
-        raise NotImplementedError()
+
+        return iter(self.data())
 
     def take(self, n):
         """
@@ -174,11 +237,25 @@ class DryData(object):
         Get the first element to have a look
         """
 
-        return self.take(1).collect()[0]
+        item_list = self.take(1).collect()
+
+        if len(item_list) == 0:
+            raise RuntimeError(
+                "Can't peek, no data in dataset. If you expect data, "
+                "double check there isn't a batch function called "
+                "with drop_remainder=True.")
+
+        return item_list[0]
 
     def count(self, limit=-1):
         """
-        Attempt to count individual elements in Dataset
+        Attempt to count 'elements' in the Dataset
         """
 
-        raise NotImplementedError()
+        number = 0
+        for e in self:
+            number += 1
+            if limit > 0:
+                if number > limit:
+                    break
+        return number

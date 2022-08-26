@@ -28,7 +28,7 @@ class TorchObject(DryObject):
             with file.open('state.pth', 'r') as f:
                 self.obj.load_state_dict(torch.load(f))
             return True
-        except:
+        except Exception:
             return False
 
     def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
@@ -36,7 +36,7 @@ class TorchObject(DryObject):
             with file.open('state.pth', 'w') as f:
                 torch.save(self.obj.state_dict(), f)
             return True
-        except:
+        except Exception:
             return False
 
     def compute_cleanup_imp(self):
