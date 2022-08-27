@@ -433,12 +433,15 @@ class DryObject(metaclass=DryMeta):
     def __init__(self, *args, dry_id=None, **kwargs):
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())
+        self._definition = None
 
     def definition(self):
-        return DryObjectDef(
-            type(self),
-            *self.dry_args,
-            **self.dry_kwargs)
+        if self._definition is None:
+            self._definition = DryObjectDef(
+                type(self),
+                *self.dry_args,
+                **self.dry_kwargs)
+        return self._definition
 
     def save_self(self, file: FileType, version: int = 1, **kwargs) -> bool:
         return save_object(self, file, version=version, **kwargs)

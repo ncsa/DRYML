@@ -60,6 +60,7 @@ class BuildStratTracker(object):
 # Create a couple global variables
 build_repo = None
 build_cache = None
+def_cache = None
 build_strat = None
 
 
@@ -703,7 +704,15 @@ def adapt_val(val):
         return val.definition().to_dict()
     if issubclass(type(val), DryObjectDef):
         # Handle DryObjectDef, otherwise it'll get mangled
-        return val.to_dict()
+        if val.is_concrete():
+            # We should render to dictionary in this case
+            # because the definition is concrete. Otherwise
+            # we run into problems matching definitions
+            # with definition objects which may
+            # already exist.
+            return val.to_dict()
+        else:
+            return val
     if issubclass(type(val), abc.ABCMeta):
         # This is another type of class we need to catch
         return val
@@ -773,6 +782,8 @@ def strip_dry_id(obj):
 
 
 class DryObjectDef(collections.UserDict):
+    tracking_id_counter = 0
+
     @staticmethod
     def from_dict(def_dict: Mapping):
         return DryObjectDef(
@@ -788,6 +799,30 @@ class DryObjectDef(collections.UserDict):
         self.data['dry_mut'] = dry_mut
         self.args = args
         self.kwargs = kwargs
+
+        # 'global' variable to track 'unique' instances of
+        # DryObjectDef.
+        self._tracking_id = DryObjectDef.tracking_id_counter
+        DryObjectDef.tracking_id_counter += 1
+
+    def __eq__(self, other):
+        if isinstance(other, type(self)):
+            # We have two of the same object
+            return other.data == self.data
+        elif is_dictlike(other):
+            # We have a dictlike we're matching to.
+            # We should check that 'dry_def' is in the
+            # other dict.
+            if 'dry_def' not in other:
+                return False
+            # Okay, we have another matching Def.
+            # Remove the dry_def key.
+            other_temp = other.copy()
+            del other_temp['dry_def']
+            return self.data == other_temp
+        else:
+            # Not same type. Give False.
+            return False
 
     @property
     def cls(self):
@@ -822,6 +857,10 @@ class DryObjectDef(collections.UserDict):
         if 'dry_id' not in self['dry_kwargs']:
             raise MissingIdError()
         return self['dry_kwargs']['dry_id']
+
+    @property
+    def tracking_id(self):
+        return self._tracking_id
 
     def __setitem__(self, key, value):
         if key not in ['cls', 'dry_args', 'dry_kwargs']:
@@ -880,6 +919,7 @@ class DryObjectDef(collections.UserDict):
 
         global build_repo
         global build_cache
+        global def_cache
         global build_strat
 
         if repo is not None:
@@ -893,22 +933,32 @@ class DryObjectDef(collections.UserDict):
 
         if build_cache is None:
             build_cache = {}
+            def_cache = {}
             reset_cache = True
 
         if build_strat is None:
             build_strat = BuildStratTracker()
             reset_strat = True
 
+        obj = None
+        construction_required = True
+        construct_object = True
+        # Check whether this SPECIFIC definition has been built yet.
+        if self.tracking_id in def_cache:
+            obj = def_cache[self.tracking_id]
+            construction_required = False
+            construct_object = False
+
         # Indicates whether we need to construct the object because this
         # definition isn't concrete
-        construction_required = True
-        if self.is_concrete():
+        if obj is None and self.is_concrete():
             # This is a concrete object and we can get an id.
             obj_id = self.dry_id
             construction_required = False
 
         # Check the cache
-        if not construction_required and build_cache is not None:
+        if obj is None and not construction_required and \
+                build_cache is not None:
             try:
                 obj = build_cache[obj_id]
                 construct_object = False
@@ -916,12 +966,14 @@ class DryObjectDef(collections.UserDict):
                 pass
 
         # Check the repo
-        if (not construction_required) and (build_repo is not None) \
-                and ('repo' not in build_strat[obj_id]):
+        if obj is None and (not construction_required) and \
+                (build_repo is not None) and \
+                ('repo' not in build_strat[obj_id]):
             try:
                 build_strat[obj_id].add('repo')
                 obj = build_repo.get_obj(self, load=True)
                 build_cache[obj_id] = obj
+                def_cache[self.tracking_id] = obj
                 construct_object = False
                 build_strat[obj_id].remove('repo')
             except KeyError:
@@ -929,8 +981,9 @@ class DryObjectDef(collections.UserDict):
                 pass
 
         # Check the zipfile
-        if (not construction_required) and construct_object and \
-                (load_zip is not None) and ('zip' not in build_strat[obj_id]):
+        if obj is None and (not construction_required) \
+                and construct_object and (load_zip is not None) \
+                and ('zip' not in build_strat[obj_id]):
             target_filename = f"dry_objects/{obj_id}.dry"
             from dryml import load_object
             if target_filename in load_zip.namelist():
@@ -938,11 +991,12 @@ class DryObjectDef(collections.UserDict):
                 with load_zip.open(target_filename) as f:
                     obj = load_object(f)
                     build_cache[obj_id] = obj
+                    def_cache[self.tracking_id] = obj
                     construct_object = False
                 build_strat[obj_id].remove('zip')
 
         # Finally, actually construct the object
-        if construct_object:
+        if obj is None and construct_object:
             args = detect_and_construct(self.args, load_zip=load_zip)
             kwargs = detect_and_construct(self.kwargs, load_zip=load_zip)
 
@@ -951,6 +1005,12 @@ class DryObjectDef(collections.UserDict):
             # Save object in the build cache.
             obj_id = obj.dry_id
             build_cache[obj_id] = obj
+            def_cache[self.tracking_id] = obj
+
+        elif obj is None and not construct_object:
+            raise RuntimeError(
+                "Unexpected condition encountered when "
+                "building from definition")
 
         # Reset the repo for this function
         if reset_repo:
@@ -959,6 +1019,7 @@ class DryObjectDef(collections.UserDict):
         # Reset the build cache
         if reset_cache:
             build_cache = None
+            def_cache = None
 
         if reset_strat:
             build_strat = None

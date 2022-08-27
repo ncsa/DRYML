@@ -576,7 +576,6 @@ def test_object_save_restore_1(create_temp_named_file):
 
     assert obj.save_self(create_temp_named_file)
 
-    # Load the object from the file
     obj2 = dryml.load_object(create_temp_named_file)
 
     assert obj.definition() == obj2.definition()
@@ -690,3 +689,32 @@ def test_object_save_restore_4():
     assert obj1.B.data == args[0].B.data
     assert obj2.A.data == args[1].A.data
     assert obj2.B.data == args[1].B.data
+
+
+def test_nested_def_build_1():
+    """
+    Test nested definitions build appropriately.
+    """
+
+    import objects
+
+    data_def1 = dryml.DryObjectDef(objects.TestNest2, A=1)
+    data_def2 = dryml.DryObjectDef(objects.TestNest2, A=2)
+
+    data_def = dryml.DryObjectDef(objects.TestClassC, data_def1, B=data_def1)
+    obj = data_def.build()
+    assert obj.A.A == 1
+    assert obj.B.A == 1
+    assert obj.A is obj.B
+
+    data_def = dryml.DryObjectDef(objects.TestClassC, data_def2, B=data_def2)
+    obj = data_def.build()
+    assert obj.A.A == 2
+    assert obj.B.A == 2
+    assert obj.A is obj.B
+
+    data_def = dryml.DryObjectDef(objects.TestClassC, data_def1, B=data_def2)
+    obj = data_def.build()
+    assert obj.A.A == 1
+    assert obj.B.A == 2
+    assert obj.A is not obj.B
