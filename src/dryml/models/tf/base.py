@@ -36,12 +36,10 @@ class Trainable(DryTrainable):
         def eval_func(X):
             return self.model(X, *args, **kwargs)
         if data.batched:
-            print("eval1")
             # We can execute the method directly on the data
             return data.tf() \
                        .apply_X(func=eval_func)
         else:
-            print("eval2")
             # We first need to batch the data, then unbatch to leave
             # The dataset character unchanged.
             return data.tf() \
