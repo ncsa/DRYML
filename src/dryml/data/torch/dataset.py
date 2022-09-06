@@ -24,6 +24,8 @@ class TorchDataset(DryData):
             indexed=indexed, supervised=supervised,
             batch_size=batch_size)
         self.ds = in_ds
+        if size is None:
+            size = np.nan
         self.size = size
 
     def as_indexed(self, start=0) -> DryData:

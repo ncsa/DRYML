@@ -39,9 +39,8 @@ class NumpyDataset(DryData):
                 batch_size=batch_size)
             self._data_gen = data
             if size is None:
-                self.size = np.nan
-            else:
-                self.size = size
+                size = np.nan
+            self.size = size
 
         elif is_iterator(data):
             # Can't use consumable iterator
