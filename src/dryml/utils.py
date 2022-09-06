@@ -8,6 +8,84 @@ import importlib
 import pickle
 from typing import Type, Union, IO, Optional, Callable
 import zipfile
+import io
+import numpy as np
+
+
+def is_in_typelist(val, typelist):
+    for t in typelist:
+        if isinstance(val, t):
+            return True
+    return False
+
+
+supported_scalar_types = (
+    str, bytes, int, float, bool, np.float, np.float32,
+    np.float64, np.int, np.int64, np.int32, np.int16, np.int8,
+    np.bool, np.short, np.ushort, np.uint, np.uint64, np.uint32,
+    np.uint16, np.uint8, np.byte, np.ubyte, np.single, np.double,
+    np.longdouble, type)
+
+
+def is_supported_scalar_type(val):
+    if val is None:
+        return True
+    return is_in_typelist(val, supported_scalar_types)
+
+
+supported_listlike_types = (
+    tuple, list)
+
+
+def is_supported_listlike(val):
+    return is_in_typelist(val, supported_listlike_types)
+
+
+def map_listlike(func, val):
+    the_type = type(val)
+    return the_type(map(func, val))
+
+
+supported_dictlike_types = (
+    dict,)
+
+
+def is_supported_dictlike(val):
+    return is_in_typelist(val, supported_dictlike_types)
+
+
+def map_dictlike(func, val):
+    the_type = type(val)
+    return the_type({
+        k: func(val[k]) for k in val})
+
+
+def equal_listlike(equal_func, list_a, list_b):
+    if len(list_a) != len(list_b):
+        return False
+
+    for i in range(len(list_a)):
+        el_a = list_a[i]
+        el_b = list_b[i]
+        if not equal_func(el_a, el_b):
+            return False
+
+    return True
+
+
+def equal_dictlike(equal_func, dict_a, dict_b):
+    keys_a = set(dict_a.keys())
+    keys_b = set(dict_b.keys())
+    if keys_a != keys_b:
+        return False
+
+    for key in keys_a:
+        val_a = dict_a[key]
+        val_b = dict_b[key]
+        if not equal_func(val_a, val_b):
+            return False
+
+    return True
 
 
 def is_nonstring_iterable(val):
@@ -154,7 +232,10 @@ def tail(get_result):
 
 def count(get_result):
     from dryml import DryObject
-    if issubclass(type(get_result), DryObject):
+    from dryml.dry_repo import DryRepoContainer
+    if isinstance(get_result, DryObject):
+        return 1
+    elif isinstance(get_result, DryRepoContainer):
         return 1
     return len(get_result)
 
@@ -196,60 +277,120 @@ file_blocklist = [
 
 
 def create_zip_branch(input_file, tag):
-    with zipfile.ZipFile(input_file, mode='r') as zf:
-        content_names = zf.namelist()
-        content_nodes = {}
-        for name in content_names:
-            if name[-4:] == '.zip':
-                with zf.file.open(name, mode='r') as f:
-                    content_nodes = {
-                        **content_nodes,
-                        **create_zip_branch(f, name)}
-            else:
-                content_nodes[name] = {}
-    return {tag: content_nodes}
-
-
-def create_object_tree_from_dryfile(input_file, tag, report_class=True):
-    import dryml
-    with dryml.DryObjectFile(input_file) as dry_f:
-        obj_def = dry_f.definition()
-        content_names = dry_f.z_file.namelist()
-        content_nodes = {}
-        for name in content_names:
-            if name[-4:] == '.dry':
-                # this is another dry file.
-                with dry_f.z_file.open(name, mode='r') as f:
-                    content_nodes = {
-                        **content_nodes,
-                        **create_object_tree_from_dryfile(
-                            f,
-                            name,
-                            report_class=report_class)}
-
-            elif name not in file_blocklist:
+    content_nodes = {}
+    try:
+        with zipfile.ZipFile(input_file, mode='r') as zf:
+            content_names = zf.namelist()
+            for name in content_names:
                 if name[-4:] == '.zip':
-                    with dry_f.z_file.open(name, mode='r') as f:
+                    with zf.open(name, mode='r') as f:
                         content_nodes = {
                             **content_nodes,
                             **create_zip_branch(f, name)}
                 else:
                     content_nodes[name] = {}
+    except zipfile.BadZipFile:
+        tag = f"{tag} - Bad Zipfile"
+    return {tag: content_nodes}
 
-        if tag is not None:
+
+def create_object_tree_from_dryfile(input_file, tag, report_class=True):
+    obj_def = None
+    content_nodes = {}
+    try:
+        import dryml
+        with dryml.DryObjectFile(input_file) as dry_f:
+            def_problem = False
+            try:
+                obj_def = dry_f.definition()
+            except KeyError as e:
+                def_problem = True
+                tag = f"{tag} - Issue reading object definition ({e})"
+
+            if not def_problem:
+                content_names = dry_f.z_file.namelist()
+                for name in content_names:
+                    if name[-4:] == '.dry':
+                        # this is another dry file.
+                        with dry_f.z_file.open(name, mode='r') as f:
+                            content_nodes = {
+                                **content_nodes,
+                                **create_object_tree_from_dryfile(
+                                    f,
+                                    name,
+                                    report_class=report_class)}
+
+                    elif name not in file_blocklist:
+                        if name[-4:] == '.zip':
+                            with dry_f.z_file.open(name, mode='r') as f:
+                                content_nodes = {
+                                    **content_nodes,
+                                    **create_zip_branch(f, name)}
+                        else:
+                            content_nodes[name] = {}
+    except zipfile.BadZipFile:
+        tag = f"{tag} - Bad Zip File"
+
+    if tag is not None:
+        if obj_def is not None:
             label = f"{tag}: {obj_def.dry_id}"
         else:
+            label = f"{tag}"
+    else:
+        if obj_def is not None:
             label = f"{obj_def.dry_id}"
-        if report_class:
-            label += f" ({dryml.utils.get_class_str(obj_def.cls)})"
-
-        if len(content_nodes) > 0:
-            return {label: content_nodes}
         else:
-            return {label: {}}
+            label = "None"
+
+    if report_class and obj_def is not None:
+        label += f" ({dryml.utils.get_class_str(obj_def.cls)})"
+
+    if len(content_nodes) > 0:
+        return {label: content_nodes}
+    else:
+        return {label: {}}
+
+
+def create_file_tree_from_zipfile(input_file, tag):
+    content_nodes = {}
+    try:
+        with zipfile.ZipFile(input_file) as zf:
+            content_names = zf.namelist()
+            for name in content_names:
+                if name[-4:] == '.dry' or name[-4:] == '.zip':
+                    # this is another zip file.
+                    with zf.open(name, mode='r') as f:
+                        content_nodes = {
+                            **content_nodes,
+                            **create_zip_branch(
+                                f,
+                                name)}
+
+                else:
+                    content_nodes[name] = {}
+    except zipfile.BadZipFile:
+        tag = f"{tag} - Bad Zip File"
+
+    label = f"{tag}"
+
+    if len(content_nodes) > 0:
+        return {label: content_nodes}
+    else:
+        return {label: {}}
 
 
 def show_object_tree_from_dryfile(input_file, report_class=True):
+    cur_pos = None
+    if isinstance(input_file, io.IOBase):
+        try:
+            # Get current file's position, and rewind to beginning
+            cur_pos = input_file.tell()
+            input_file.seek(0)
+        except io.UnsupportedOperation:
+            print(
+                "Can't show file content of file of type "
+                f"{type(input_file)}. seeking not supported.")
+            return
     dry_tree = create_object_tree_from_dryfile(
         input_file,
         None,
@@ -263,6 +404,38 @@ def show_object_tree_from_dryfile(input_file, report_class=True):
         )
     )
     print(tr(dry_tree))
+    if isinstance(input_file, io.IOBase):
+        # Go back to where we were in the file.
+        input_file.seek(cur_pos)
+
+
+def show_files_from_zipfile(input_file):
+    cur_pos = None
+    if isinstance(input_file, io.IOBase):
+        try:
+            # Save current file position and go to beginning of file
+            cur_pos = input_file.tell()
+            input_file.seek(0)
+        except io.UnsupportedOperation:
+            print(
+                f"Can't show content of file {input_file}. "
+                "seeking not supported.")
+            return
+    zip_tree = create_file_tree_from_zipfile(
+        input_file,
+        None)
+    from asciitree import LeftAligned
+    from asciitree.drawing import BoxStyle, BOX_LIGHT
+    tr = LeftAligned(
+        draw=BoxStyle(
+            gfx=BOX_LIGHT,
+            horiz_len=1
+        )
+    )
+    print(tr(zip_tree))
+    if isinstance(input_file, io.IOBase):
+        # Return file to original position
+        input_file.seek(cur_pos)
 
 
 def apply_func(
