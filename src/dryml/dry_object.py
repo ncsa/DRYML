@@ -103,7 +103,11 @@ class DryObjectFile(object):
 
     def close(self):
         # Close the zipfile.
-        self.z_file.close()
+        if self._z_file is not None:
+            # Avoid accessing z_file property if it doesn't already exist.
+            # Accessing the property triggers the int_file to be created,
+            # And an empty file to be written out.
+            self.z_file.close()
 
         # If we have a binary open, sync any intermediary and close it.
         if hasattr(self, 'binary_file'):
@@ -135,8 +139,14 @@ class DryObjectFile(object):
             f.write(meta_dump)
 
     def load_meta_data(self):
-        with self.z_file.open('meta_data.pkl', 'r') as meta_file:
-            meta_data = pickle.loads(meta_file.read())
+        try:
+            with self.z_file.open('meta_data.pkl', 'r') as meta_file:
+                meta_data = pickle.loads(meta_file.read())
+        except KeyError as e:
+            print(f"Issue getting MetaData! Zipfile contains the "
+                  f"following files: {self.z_file.namelist()}")
+            print(f"Zipfile: {self.z_file}")
+            raise e
         return meta_data
 
     def save_class_def_v1(self, obj_def: DryObjectDef, update: bool = False):
