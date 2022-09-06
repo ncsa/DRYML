@@ -3,14 +3,6 @@ import objects
 import copy
 
 
-def test_adapt_val_1():
-    test_val = [[('test', 0)]]
-
-    adapted_val = dryml.dry_config.adapt_val(test_val)
-
-    assert test_val == adapted_val
-
-
 def test_def_1():
     """
     Test conditions under which a definition is concrete
