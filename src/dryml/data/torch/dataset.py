@@ -195,7 +195,7 @@ class TorchDataset(DryData):
         return self.size
 
     def numpy(self):
-        dataset = self.map_el(lambda el: el.numpy())
+        dataset = self.map_el(lambda el: el.detach().numpy())
         return NumpyDataset(
             dataset.data_gen,
             indexed=dataset.indexed,
