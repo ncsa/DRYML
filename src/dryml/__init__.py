@@ -1,4 +1,4 @@
-from dryml.dry_config import DryArgs, DryKwargs, DryObjectDef, DryMeta, \
+from dryml.dry_config import DryObjectDef, DryMeta, \
     IncompleteDefinitionError, ComputeModeAlreadyActiveError, \
     ComputeModeLoadError, ComputeModeNotActiveError, \
     ComputeModeSaveError, MissingIdError
@@ -16,8 +16,6 @@ import dryml.context as context
 __version__ = "0.0.0"
 
 __all__ = [
-    DryArgs,
-    DryKwargs,
     DryObject,
     DryObjectFile,
     DryObjectDef,

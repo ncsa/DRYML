@@ -117,10 +117,51 @@ def xgb_regressor(definition=False):
         return model
 
 
+def torch_regressor(definition=False):
+    try:
+        import dryml.models.torch
+        import dryml.data.torch
+        import torch
+    except ImportError:
+        pytest.skip("torch not supported")
+
+    # Create model
+    model = dryml.models.torch.generic.Sequential(
+        layer_defs=[
+            (torch.nn.LazyLinear, (32,), {}),
+            (torch.nn.ReLU, (), {}),
+            (torch.nn.LazyLinear, (32,), {}),
+            (torch.nn.ReLU, (), {}),
+            (torch.nn.LazyLinear, (1,), {})]
+        )
+
+    model = dryml.models.torch.generic.Trainable(
+        model=model,
+        train_fn=dryml.models.torch.generic.BasicTraining(
+            epochs=1,
+            optimizer=dryml.models.torch.generic.TorchOptimizer(
+                torch.optim.Adam, model),
+            loss=dryml.models.torch.base.TorchObject(
+                torch.nn.CrossEntropyLoss)
+            ),
+        )
+
+    pipe = dryml.models.DryPipe(
+        dryml.data.transforms.Cast(mode='X', dtype='float32'),
+        model,
+        dryml.data.torch.transforms.TorchDevice())
+
+    if definition:
+        return pipe.definition().get_cat_def(recursive=True)
+    else:
+        return pipe
+
+
 regressor_funcs = [
     sklearn_regressor,
     tf_regressor,
-    xgb_regressor
+    xgb_regressor,
+    torch_regressor,
 ]
 
 
@@ -153,7 +194,6 @@ def tf_classifier(num_dims, num_classes, definition=False):
     try:
         import dryml.models.tf
         import dryml.data.transforms
-        import dryml.data.tf.transforms
         import tensorflow as tf
     except ImportError:
         pytest.skip("tf not available")
@@ -171,12 +211,13 @@ def tf_classifier(num_dims, num_classes, definition=False):
             tf.keras.losses.SparseCategoricalCrossentropy),
         train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
 
-    best_cat = dryml.data.tf.transforms.BestCat()
+    best_cat = dryml.data.transforms.BestCat()
 
     model = dryml.models.DryPipe(model, best_cat)
 
     if definition:
-        return model.definition().get_cat_def(recursive=True)
+        model_def = model.definition().get_cat_def(recursive=True)
+        return model_def
     else:
         return model
 
@@ -206,11 +247,72 @@ def xgb_classifier(num_dims, num_classes, definition=False):
         return model
 
 
+def torch_classifier(num_dims, num_classes, definition=False):
+    try:
+        import dryml.models.torch
+        import dryml.data.transforms
+        import dryml.data.torch.transforms
+        import torch
+    except ImportError:
+        pytest.skip("torch not available")
+
+    model_obj = dryml.models.torch.generic.Sequential(
+        layer_defs=[
+            (torch.nn.LazyLinear, (32,), {}),
+            (torch.nn.ReLU, (), {}),
+            (torch.nn.LazyLinear, (32,), {}),
+            (torch.nn.ReLU, (), {}),
+            (torch.nn.LazyLinear, (num_classes,), {}),
+        ])
+
+    model = dryml.models.torch.generic.Trainable(
+        model=model_obj,
+        train_fn=dryml.models.torch.generic.BasicTraining(
+            epochs=1,
+            optimizer=dryml.models.torch.generic.TorchOptimizer(
+                torch.optim.Adam,
+                model_obj),
+            loss=dryml.models.torch.base.TorchObject(
+                torch.nn.CrossEntropyLoss),
+            )
+        )
+
+    best_cat = dryml.data.transforms.BestCat()
+
+    model = dryml.models.DryPipe(
+        dryml.data.transforms.Cast(mode='X', dtype='float32'),
+        model,
+        dryml.data.torch.transforms.TorchDevice(),
+        best_cat)
+
+    if definition:
+        return model.definition().get_cat_def(recursive=True)
+    else:
+        return model
+
+
 classifier_funcs = [
     sklearn_classifier,
     tf_classifier,
     xgb_classifier,
+    torch_classifier,
 ]
+
+
+def gen_dataset_1():
+    num_train = 2000
+    train_data = mc.gen_dataset_1(num_examples=num_train)
+    num_test = 500
+    test_data = mc.gen_dataset_1(num_examples=num_test)
+
+    return {
+        'train': (num_train, train_data),
+        'test': (num_test, test_data),
+    }
+
+
+# Generate dataset 1
+dataset_1 = gen_dataset_1()
 
 
 @pytest.mark.parametrize(
@@ -219,11 +321,9 @@ def test_train_supervised_1_context(model_gen):
     # Generate the model
     model = model_gen(definition=False)
 
-    # Generate data.
-    num_train = 2000
-    num_test = 500
-    train_data = mc.gen_dataset_1(num_examples=num_train)
-    test_data = mc.gen_dataset_1(num_examples=num_test)
+    # Fetch data.
+    (num_train, train_data) = dataset_1['train']
+    (num_test, test_data) = dataset_1['test']
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -261,11 +361,9 @@ def test_train_supervised_1_context(model_gen):
 @pytest.mark.parametrize(
     "model_gen", regressor_funcs)
 def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
-    # Generate data.
-    num_train = 2000
-    num_test = 500
-    train_data = mc.gen_dataset_1(num_examples=num_train)
-    test_data = mc.gen_dataset_1(num_examples=num_test)
+    # Fetch data.
+    (num_train, train_data) = dataset_1['train']
+    (num_test, test_data) = dataset_1['test']
 
     model_def = model_gen(definition=True)
 
@@ -332,11 +430,9 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
 def test_train_supervised_1_ray(create_temp_dir, model_gen):
     import ray
 
-    # Generate data.
-    num_train = 2000
-    num_test = 500
-    train_data = mc.gen_dataset_1(num_examples=num_train)
-    test_data = mc.gen_dataset_1(num_examples=num_test)
+    # Fetch data.
+    (num_train, train_data) = dataset_1['train']
+    (num_test, test_data) = dataset_1['test']
 
     model_def = model_gen(definition=True)
 
@@ -396,14 +492,9 @@ def test_train_supervised_1_ray(create_temp_dir, model_gen):
     assert train_loss == test_loss
 
 
-@pytest.mark.parametrize(
-    "model_gen", classifier_funcs)
-def test_train_supervised_2_context(model_gen):
+def gen_dataset_2():
     num_classes = 10
     num_dims = 2
-
-    # generate the model
-    model = model_gen(num_dims, num_classes, definition=False)
 
     # Generate classes
     L = -10.
@@ -423,6 +514,29 @@ def test_train_supervised_2_context(model_gen):
         num_examples=num_test,
         centers=centers,
         widths=widths)
+
+    return {
+        'num_classes': num_classes,
+        'num_dims': num_dims,
+        'train': (num_train, train_data),
+        'test': (num_test, test_data)
+    }
+
+
+dataset_2 = gen_dataset_2()
+
+
+@pytest.mark.parametrize(
+    "model_gen", classifier_funcs)
+def test_train_supervised_2_context(model_gen):
+    # Fetch data
+    num_classes = dataset_2['num_classes']
+    num_dims = dataset_2['num_dims']
+    (num_train, train_data) = dataset_2['train']
+    (num_test, test_data) = dataset_2['test']
+
+    # generate the model
+    model = model_gen(num_dims, num_classes, definition=False)
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -444,7 +558,9 @@ def test_train_supervised_2_context(model_gen):
         model.prep_train()
         model.train(train_ds)
 
-        return test_model(test_data, model)
+        acc = test_model(test_data, model)
+
+        return acc
 
     @dryml.compute_context(ctx_use_existing_context=False)
     def test_method(test_data, model):
@@ -456,36 +572,20 @@ def test_train_supervised_2_context(model_gen):
     test_accuracy = test_method(test_data, model)
 
     assert train_accuracy == test_accuracy
-    assert train_accuracy > random_guessing_accuracy
+    assert train_accuracy > 3*random_guessing_accuracy
 
 
 @pytest.mark.usefixtures("create_temp_dir")
 @pytest.mark.parametrize(
     "model_gen", classifier_funcs)
 def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
-    num_classes = 10
-    num_dims = 2
+    # Fetch data
+    num_classes = dataset_2['num_classes']
+    num_dims = dataset_2['num_dims']
+    (num_train, train_data) = dataset_2['train']
+    (num_test, test_data) = dataset_2['test']
 
     model_def = model_gen(num_dims, num_classes, definition=True)
-
-    # Generate classes
-    L = -10.
-    H = 10.
-    Max_W = 5.
-    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
-    widths = np.random.random((num_classes, num_dims))*Max_W
-
-    num_train = 5000
-    train_data = mc.gen_dataset_2(
-        num_examples=num_train,
-        centers=centers,
-        widths=widths)
-
-    num_test = 100
-    test_data = mc.gen_dataset_2(
-        num_examples=num_test,
-        centers=centers,
-        widths=widths)
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -542,7 +642,7 @@ def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
         test_data, model_def, create_temp_dir)
 
     assert train_accuracy == test_accuracy
-    assert train_accuracy > random_guessing_accuracy
+    assert train_accuracy > 3*random_guessing_accuracy
 
 
 @pytest.mark.usefixtures("create_temp_dir")
@@ -552,29 +652,13 @@ def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
 def test_train_supervised_2_ray(create_temp_dir, model_gen):
     import ray
 
-    num_classes = 10
-    num_dims = 2
+    # Fetch data
+    num_classes = dataset_2['num_classes']
+    num_dims = dataset_2['num_dims']
+    (num_train, train_data) = dataset_2['train']
+    (num_test, test_data) = dataset_2['test']
 
     model_def = model_gen(num_dims, num_classes, definition=True)
-
-    # Generate classes
-    L = -10.
-    H = 10.
-    Max_W = 5.
-    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
-    widths = np.random.random((num_classes, num_dims))*Max_W
-
-    num_train = 5000
-    train_data = mc.gen_dataset_2(
-        num_examples=num_train,
-        centers=centers,
-        widths=widths)
-
-    num_test = 100
-    test_data = mc.gen_dataset_2(
-        num_examples=num_test,
-        centers=centers,
-        widths=widths)
 
     def test_model(test_data, model):
         import dryml.metrics
@@ -630,7 +714,7 @@ def test_train_supervised_2_ray(create_temp_dir, model_gen):
         test_data, model_def, create_temp_dir))
 
     assert train_accuracy == test_accuracy
-    assert train_accuracy > random_guessing_accuracy
+    assert train_accuracy > 3*random_guessing_accuracy
 
 
 @pytest.mark.usefixtures("create_temp_dir")
@@ -644,27 +728,9 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
     from dryml import Workshop
     import dryml.data.transforms
 
-    # First, generate problem data
-    # Generate classes
-    num_classes = 10
-    num_dims = 2
-    L = -10.
-    H = 10.
-    Max_W = 5.
-    centers = (np.random.random((num_classes, num_dims))*(H-L))+L
-    widths = np.random.random((num_classes, num_dims))*Max_W
-
-    num_train = 5000
-    train_data = mc.gen_dataset_2(
-        num_examples=num_train,
-        centers=centers,
-        widths=widths)
-
-    num_test = 100
-    test_data = mc.gen_dataset_2(
-        num_examples=num_test,
-        centers=centers,
-        widths=widths)
+    # Fetch problem data
+    (num_train, train_data) = dataset_2['train']
+    (num_test, test_data) = dataset_2['test']
 
     # Save dataset to temp file so we can load it in subordinate processes
     with open(create_temp_named_file, 'wb') as f:
@@ -768,7 +834,10 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
 
     # Check we stored one object in the repo
     assert dryml.utils.count(
-        shop.repo.get(model_def, build_missing_def=False)) == 1
+        shop.repo.get(
+            model_def,
+            build_missing_def=False,
+            sel_kwargs={'verbosity': 10})) == 1
 
     # Check we can't see the object in another way.
     model_def_2 = build_model_def_2(shop, n_neighbors=2, algorithm='ball_tree')

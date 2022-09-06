@@ -50,7 +50,8 @@ def test_trainable_def_2():
     assert test_obj.definition() == test_obj2.definition()
     assert type(test_obj.A) is objects.HelloStr
     assert type(test_obj2.A) is objects.HelloStr
-    assert test_obj.dry_args[0] == test_obj2.dry_args[0]
+    assert test_obj.dry_args[0].str_message == \
+        test_obj2.dry_args[0].str_message
     assert test_obj.A.definition() == test_obj2.A.definition()
     assert test_obj.A.str_message == test_obj2.A.str_message
 
@@ -82,6 +83,7 @@ def test_trainable_def_4():
     assert test_obj.definition() == test_obj2.definition()
     assert type(test_obj.A) is objects.HelloStr
     assert type(test_obj2.A) is objects.HelloStr
-    assert test_obj.dry_kwargs['A'] == test_obj2.dry_kwargs['A']
+    assert test_obj.dry_kwargs['A'].str_message == \
+        test_obj2.dry_kwargs['A'].str_message
     assert test_obj.A.definition() == test_obj2.A.definition()
     assert test_obj.A.str_message == test_obj2.A.str_message

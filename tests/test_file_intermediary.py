@@ -2,6 +2,7 @@ from dryml.file_intermediary import FileIntermediary
 import zipfile
 import pytest
 import pickle
+import os
 from dryml.utils import pickler
 
 
@@ -29,7 +30,7 @@ def test_file_intermediary_1(create_name):
         z_file = zipfile.ZipFile(f, mode='r')
         assert test_file in z_file.namelist()
         with z_file.open(test_file, 'r') as f2:
-            f2.read().decode('utf-8') == test_text
+            assert f2.read().decode('utf-8') == test_text
 
 
 @pytest.mark.usefixtures("create_name")
@@ -135,3 +136,45 @@ def test_file_intermediary_5(create_name):
 
         with z_file.open('meta_data.pkl', 'r') as meta_file:
             assert pickle.loads(meta_file.read()) == meta_data
+
+
+@pytest.mark.usefixtures("create_name")
+def test_file_intermediary_6(create_name):
+    # Create intermediary
+    int_file = FileIntermediary()
+
+    test_file = 'test.txt'
+    test_text = "TEST"
+
+    # Create test zip as usual
+    z_file = zipfile.ZipFile(int_file, mode='w')
+    with z_file.open("test.txt", 'w') as f:
+        f.write(test_text.encode('utf-8'))
+    z_file.close()
+
+    # Write to the temp location
+    with open(create_name, 'wb') as f:
+        int_file.write_to_file(f)
+
+    # Read temp file into zipfile.
+    with open(create_name, 'rb') as f:
+        z_file = zipfile.ZipFile(f, mode='r')
+        assert test_file in z_file.namelist()
+        with z_file.open(test_file, 'r') as f2:
+            assert f2.read().decode('utf-8') == test_text
+
+    # Remove file
+    os.remove(create_name)
+
+    # Write to temp location again.
+    with open(create_name, 'wb') as f:
+        int_file.write_to_file(f)
+
+    # Read temp file into zipfile.
+    with open(create_name, 'rb') as f:
+        z_file = zipfile.ZipFile(f, mode='r')
+        assert test_file in z_file.namelist()
+        with z_file.open(test_file, 'r') as f2:
+            assert f2.read().decode('utf-8') == test_text
+
+    int_file.close()

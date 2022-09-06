@@ -1,56 +1,6 @@
-import pytest
 import dryml
-import io
-import pickle
 import objects
 import copy
-
-
-def test_dry_kwargs_add_items_1():
-    test_val = {'a': 1, 1.0: 'test', 5: {'A': 'C', 'B': 20},
-                (1, 'a'): 'test2', 'nest': {'Z': {'Y': {'X': 5}}}}
-
-    # Val shouldn't raise error here
-    stored_val = dryml.DryKwargs(test_val)
-
-    buffer = io.BytesIO()
-
-    stored_val.save(buffer)
-    buffer.seek(0)
-    new_val = pickle.loads(buffer.read())
-
-    assert new_val == test_val
-    assert dryml.DryKwargs(new_val) == stored_val
-
-
-@pytest.mark.xfail
-def test_dry_kwargs_add_items_2():
-    test_val = {'a': lambda x: x}
-
-    dryml.DryKwargs(test_val)
-
-
-def test_dry_args_add_items_1():
-    test_val = [1, 1.0, {'A': 'C', 'B': 20}, (1, 'a'), {'Z': {'Y': {'X': 5}}}]
-
-    # Val shouldn't raise error here
-    stored_val = dryml.DryArgs(test_val)
-
-    buffer = io.BytesIO()
-
-    stored_val.save(buffer)
-    buffer.seek(0)
-    new_val = pickle.loads(buffer.read())
-
-    assert new_val == test_val
-    assert dryml.DryArgs(new_val) == stored_val
-
-
-@pytest.mark.xfail
-def test_dry_args_add_items_2():
-    test_val = [lambda x: x]
-
-    dryml.DryArgs(test_val)
 
 
 def test_adapt_val_1():
@@ -59,19 +9,6 @@ def test_adapt_val_1():
     adapted_val = dryml.dry_config.adapt_val(test_val)
 
     assert test_val == adapted_val
-
-
-def test_adapt_val_2():
-    """
-    Test that adapt_val and detect_and_construct leave certain arguments
-    Unchanged.
-    """
-    test_val = [[('test', 0)]]
-
-    test_val_2 = dryml.dry_config.detect_and_construct(
-        dryml.dry_config.adapt_val(test_val))
-
-    assert test_val == test_val_2
 
 
 def test_def_1():
@@ -167,10 +104,10 @@ def test_def_5():
     assert 'dry_id' in obj_def.kwargs
 
     assert 'dry_id' not in obj_def_manual.kwargs
-    obj_class_def = obj_def.get_cat_def(recursive=True)
+    obj_class_def = obj_def.get_cat_def()
     assert obj_class_def == obj_def_manual
 
-    obj_class_def = obj_def.get_cat_def()
+    obj_class_def = obj_def.get_cat_def(recursive=False)
     del obj_def.kwargs['dry_id']
     assert obj_class_def == obj_def
 
@@ -181,60 +118,84 @@ def test_def_6():
     """
 
     obj = objects.TestNest(('test', 'test'))
-    obj_def = obj.definition().get_cat_def(recursive=True)
+    obj_def = obj.definition().get_cat_def()
 
     assert type(obj_def.args[0]) is tuple
     assert obj_def.args[0][0] == 'test'
     assert obj_def.args[0][1] == 'test'
 
     obj = objects.TestNest(['test', 'test'])
-    obj_def = obj.definition().get_cat_def(recursive=True)
+    obj_def = obj.definition().get_cat_def()
 
     assert type(obj_def.args[0]) is list
     assert obj_def.args[0][0] == 'test'
     assert obj_def.args[0][1] == 'test'
 
 
-def test_detect_and_construct_1():
+def test_def_7():
     """
-    Test detect_and_construct method checking
-    """
-
-    val = 5
-
-    res_obj = dryml.dry_config.detect_and_construct(
-        dryml.DryObjectDef(objects.HelloInt, msg=val))
-
-    assert type(res_obj) is objects.HelloInt
-
-    assert res_obj.int_msg == val
-
-
-def test_detect_and_construct_2():
-    """
-    Test detect_and_construct method checking
+    A case which looks at nested definition
+    building indifferent situations
     """
 
-    val = 5
+    # Create the data containing objects
+    model_obj = objects.TestNest(10)
+    opt_obj = objects.TestNest3(20, model=model_obj)
+    loss_obj = objects.TestNest2(A='func')
+    train_fn_obj = objects.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
 
-    res_obj = dryml.dry_config.detect_and_construct([
-        dryml.DryObjectDef(objects.HelloInt, msg=val)])
+    trainable_obj = objects.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
 
-    assert type(res_obj) is list
-    assert type(res_obj[0]) is objects.HelloInt
-    assert res_obj[0].int_msg == val
+    obj_def = trainable_obj.definition()
+
+    assert obj_def.kwargs['model'] is \
+        obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
 
 
-def test_detect_and_construct_3():
+def test_def_8():
     """
-    Test detect_and_construct method checking
+    A case which looks at nested definition
+    building indifferent situations
     """
 
-    val = 5
+    # Create the data containing objects
+    model_obj = objects.TestNest(10)
+    opt_obj = objects.TestNest3(20, model=model_obj)
+    loss_obj = objects.TestNest2(A='func')
+    train_fn_obj = objects.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
 
-    res_obj = dryml.dry_config.detect_and_construct((
-        dryml.DryObjectDef(objects.HelloInt, msg=val),))
+    trainable_obj = objects.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
 
-    assert type(res_obj) is tuple
-    assert type(res_obj[0]) is objects.HelloInt
-    assert res_obj[0].int_msg == val
+    obj_def = trainable_obj.definition()
+
+    # Building from plain definition
+    trainable_obj_built = obj_def.build()
+
+    assert trainable_obj_built['model'] is \
+        trainable_obj_built['train_fn']['optimizer']['model']
+    assert trainable_obj_built['model'].A == model_obj.A
+    assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
+    assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
+    assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
+
+    # Building from 'class' definition
+    trainable_obj_built = obj_def.get_cat_def(recursive=True).build()
+
+    assert trainable_obj_built['model'] is \
+        trainable_obj_built['train_fn']['optimizer']['model']
+    assert trainable_obj_built['model'].A == model_obj.A
+    assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
+    assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
+    assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A

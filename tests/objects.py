@@ -67,6 +67,22 @@ class HelloTrainableD(dryml.models.DryTrainable):
         self.A = A
 
 
+class HelloTrainableE(dryml.models.DryTrainable):
+    @dryml.DryMeta.collect_args
+    @dryml.DryMeta.collect_kwargs
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, key):
+        if type(key) is str:
+            return self.kwargs[key]
+        elif type(key) is int:
+            return self.args[key]
+        else:
+            raise KeyError(f"{key}")
+
+
 class TestNest(dryml.DryObject):
     def __init__(self, A):
         self.A = A
@@ -75,6 +91,22 @@ class TestNest(dryml.DryObject):
 class TestNest2(dryml.DryObject):
     def __init__(self, A=None):
         self.A = A
+
+
+class TestNest3(dryml.DryObject):
+    @dryml.DryMeta.collect_args
+    @dryml.DryMeta.collect_kwargs
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def __getitem__(self, key):
+        if type(key) is str:
+            return self.kwargs[key]
+        elif type(key) is int:
+            return self.args[key]
+        else:
+            raise KeyError()
 
 
 class TestClassC(dryml.DryObject):
@@ -126,13 +158,11 @@ class TestClassE(dryml.DryObject):
         self.data = val
 
     def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        print(f"save_compute_imp called for {__class__}")
         with file.open('data.pkl', 'w') as f:
             f.write(dryml.utils.pickler(self.data))
         return True
 
     def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        print(f"load_compute_imp called for {__class__}")
         with file.open('data.pkl', 'r') as f:
             self.data = pickle.loads(f.read())
         return True

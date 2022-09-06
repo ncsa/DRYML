@@ -10,7 +10,9 @@ import zipfile
 import uuid
 from typing import IO, Union, Optional, Type, Callable
 from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
-from dryml.utils import get_current_cls, pickler, static_var
+from dryml.utils import get_current_cls, pickler, static_var, \
+    is_supported_scalar_type, is_supported_listlike, is_supported_dictlike, \
+    map_dictlike, map_listlike, get_class_from_str, get_class_str
 from dryml.context.context_tracker import combine_requests, context, \
     NoContextError
 from dryml.file_intermediary import FileIntermediary
@@ -181,11 +183,11 @@ class DryObjectFile(object):
 
         # Save args from object def
         with self.z_file.open('dry_args.pkl', mode='w') as args_file:
-            args_file.write(pickler(obj_def.args.data))
+            args_file.write(pickler(obj_def.args))
 
         # Save kwargs from object def
         with self.z_file.open('dry_kwargs.pkl', mode='w') as kwargs_file:
-            kwargs_file.write(pickler(obj_def.kwargs.data))
+            kwargs_file.write(pickler(obj_def.kwargs))
 
         # Save mutability from object def
         with self.z_file.open('dry_mut.pkl', mode='w') as mut_file:
@@ -266,6 +268,9 @@ class DryObjectFile(object):
 
         # First, check the save cache.
         if save_cache is not None:
+            # WARNING, the id of an object is only unique for its lifetime.
+            # We must assume objects aren't going out of scope
+            # or being deleted for this to work.
             if id(obj) in save_cache.obj_cache:
                 # We found the object, write the cached file to
                 # The passed binary.
@@ -346,6 +351,8 @@ def load_object(file: FileType, update: bool = False,
             try:
                 # Load the object from the repo
                 obj = load_object.load_repo.get_obj(obj_def)
+                if obj.definition() != obj_def:
+                    raise RuntimeError("Found issue!")
                 load_obj = False
             except Exception:
                 pass
@@ -354,6 +361,25 @@ def load_object(file: FileType, update: bool = False,
             obj = dry_file.load_object(update=update,
                                        reload=reload,
                                        as_cls=as_cls)
+            cls_str_compare = False
+            if as_cls is not None or reload:
+                if as_cls is not None:
+                    cls = as_cls
+                elif reload:
+                    cls = get_class_from_str(get_class_str(obj_def.cls))
+                cls_str_compare = True
+                new_def = DryObjectDef(
+                    cls,
+                    *obj_def.args,
+                    dry_mut=obj_def.dry_mut,
+                    **obj_def.kwargs)
+            else:
+                new_def = obj_def
+            if not obj.definition().equal(
+                    new_def, cls_str_compare=cls_str_compare):
+                raise RuntimeError(
+                    f"Loaded object doesn't have expected definition! "
+                    f"expected {new_def} got: {obj.definition()}")
 
     # Reset the repo for this function
     if reset_repo:
@@ -434,6 +460,22 @@ def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
                        as_cls=cls)
 
 
+def obj_to_def(val):
+    if is_supported_scalar_type(val):
+        return val
+    if isinstance(val, DryObject):
+        definition = val.definition()
+        return definition
+    elif is_supported_listlike(val):
+        return map_listlike(obj_to_def, val)
+    elif is_supported_dictlike(val):
+        return map_dictlike(obj_to_def, val)
+    else:
+        raise TypeError(
+            f"Unsupported value {val} of type "
+            f"{type(val)} encountered!")
+
+
 # Define a base Dry Object
 class DryObject(metaclass=DryMeta):
     # Only ever set for this class.
@@ -446,11 +488,19 @@ class DryObject(metaclass=DryMeta):
         self._definition = None
 
     def definition(self):
-        if self._definition is None:
-            self._definition = DryObjectDef(
-                type(self),
-                *self.dry_args,
-                **self.dry_kwargs)
+        # Return if we have a definition created already
+        if self._definition is not None:
+            return self._definition
+
+        # recursively build the definitions
+        new_args = obj_to_def(self.dry_args)
+        new_kwargs = obj_to_def(self.dry_kwargs)
+
+        self._definition = DryObjectDef(
+            type(self),
+            *new_args,
+            **new_kwargs)
+
         return self._definition
 
     def save_self(self, file: FileType, version: int = 1, **kwargs) -> bool:
@@ -638,13 +688,18 @@ def create_placeholder(obj: DryObject) -> (DryObjectPlaceholder,
     obj_def = obj.definition()
     ph_def = DryObjectPlaceholder(ID, obj_def)
     temp_buf = io.BytesIO()
-    obj.save_self(temp_buf)
+    if not obj.save_self(temp_buf):
+        raise RuntimeError(
+            "Couldn't save object {obj.definition()} to temp buffer!")
+
     temp_buf.seek(0)
     ph_data = DryObjectPlaceholderData(ID, temp_buf.read())
     return (ph_def, ph_data)
 
 
-def rebuild_object(ph_def, ph_data) -> DryObject:
+def rebuild_object(ph_def, ph_data, verbose=False) -> DryObject:
+    if verbose:
+        print(f"Rebuilding object {ph_def} with data {ph_data}")
     obj = ph_def.obj_def.build()
     buf = io.BytesIO(ph_data.data)
     if not load_object_content(obj, buf):
@@ -685,7 +740,7 @@ def prep_args_kwargs(args, kwargs):
     return (new_args, kwargs), list(obj_ph_data_map.values())
 
 
-def reconstruct_args_kwargs(args, kwargs, ph_data):
+def reconstruct_args_kwargs(args, kwargs, ph_data, verbose=False):
     ph_dict = {}
     constructed_objs = {}
     for ph in ph_data:
@@ -697,7 +752,7 @@ def reconstruct_args_kwargs(args, kwargs, ph_data):
             if arg.ID in constructed_objs:
                 args[i] = constructed_objs[arg.ID]
             else:
-                obj = rebuild_object(arg, ph_dict[arg.ID])
+                obj = rebuild_object(arg, ph_dict[arg.ID], verbose=verbose)
                 constructed_objs[arg.ID] = obj
                 args[i] = obj
 
@@ -707,7 +762,7 @@ def reconstruct_args_kwargs(args, kwargs, ph_data):
             if arg.ID in constructed_objs:
                 kwargs[key] = constructed_objs[arg.ID]
             else:
-                obj = rebuild_object(arg, ph_dict[arg.ID])
+                obj = rebuild_object(arg, ph_dict[arg.ID], verbose=verbose)
                 constructed_objs[arg.ID] = obj
                 kwargs[key] = obj
 

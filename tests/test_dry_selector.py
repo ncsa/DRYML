@@ -81,47 +81,124 @@ def test_selector_4():
     obj8 = objects.HelloStr(msg='2test')
 
     sel = dryml.DrySelector(
-        cls=objects.TestBase,
+        cls=objects.TestBase)
+
+    assert sel(
+        obj1,
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj1.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj2,
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj2.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj3,
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj3.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj4,
+        cls_str_compare=False,
+        verbosity=2)
+    assert sel(
+        obj4.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj5,
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj5.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj6,
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj6.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj7,
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj7.definition(),
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj8,
+        cls_str_compare=False,
+        verbosity=2)
+    assert not sel(
+        obj8.definition(),
         cls_str_compare=False,
         verbosity=2)
 
-    assert sel(obj1)
-    assert sel(obj1.definition())
-    assert sel(obj2)
-    assert sel(obj2.definition())
-    assert sel(obj3)
-    assert sel(obj3.definition())
-    assert sel(obj4)
-    assert sel(obj4.definition())
-    assert not sel(obj5)
-    assert not sel(obj5.definition())
-    assert not sel(obj6)
-    assert not sel(obj6.definition())
-    assert not sel(obj7)
-    assert not sel(obj7.definition())
-    assert not sel(obj8)
-    assert not sel(obj8.definition())
-
     sel = dryml.DrySelector(
-        cls=objects.HelloObject,
-        cls_str_compare=False)
+        cls=objects.HelloObject)
 
-    assert not sel(obj1)
-    assert not sel(obj1.definition())
-    assert not sel(obj2)
-    assert not sel(obj2.definition())
-    assert not sel(obj3)
-    assert not sel(obj3.definition())
-    assert not sel(obj4)
-    assert not sel(obj4.definition())
-    assert sel(obj5)
-    assert sel(obj5.definition())
-    assert sel(obj6)
-    assert sel(obj6.definition())
-    assert sel(obj7)
-    assert sel(obj7.definition())
-    assert sel(obj8)
-    assert sel(obj8.definition())
+    assert not sel(
+        obj1,
+        cls_str_compare=False)
+    assert not sel(
+        obj1.definition(),
+        cls_str_compare=False)
+    assert not sel(
+        obj2,
+        cls_str_compare=False)
+    assert not sel(
+        obj2.definition(),
+        cls_str_compare=False)
+    assert not sel(
+        obj3,
+        cls_str_compare=False)
+    assert not sel(
+        obj3.definition(),
+        cls_str_compare=False)
+    assert not sel(
+        obj4,
+        cls_str_compare=False)
+    assert not sel(
+        obj4.definition(),
+        cls_str_compare=False)
+    assert sel(
+        obj5,
+        cls_str_compare=False)
+    assert sel(
+        obj5.definition(),
+        cls_str_compare=False)
+    assert sel(
+        obj6,
+        cls_str_compare=False)
+    assert sel(
+        obj6.definition(),
+        cls_str_compare=False)
+    assert sel(
+        obj7,
+        cls_str_compare=False)
+    assert sel(
+        obj7.definition(),
+        cls_str_compare=False)
+    assert sel(
+        obj8,
+        cls_str_compare=False)
+    assert sel(
+        obj8.definition(),
+        cls_str_compare=False)
 
 
 def test_selector_5():
@@ -270,41 +347,57 @@ def test_selector_build_2():
     assert sel(obj)
 
 
-def test_selector_build_3():
+def test_selector_build_5():
     """
-    Test that we can construct DrySelectors from various objects
-    """
-
-    obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
-
-    sel = dryml.DrySelector.from_dict({
-        'cls': objects.TestNest,
-        'dry_args': [{'cls': objects.HelloTrainableD,
-                      'dry_kwargs': {'A': {'cls': objects.TestNest}}}]
-    })
-
-    assert sel(obj)
-
-
-def test_selector_build_4():
-    """
-    Test that we can construct DrySelectors from various objects
+    Test that we can construct DrySelectors from nested objects
     """
 
-    obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
+    obj1 = objects.TestNest2(A=1)
 
-    sel = dryml.DrySelector.build(obj)
+    obj_def = dryml.DryObjectDef(
+        objects.TestNest3,
+        obj1,
+        dryml.DryObjectDef(
+            objects.TestNest2,
+            A=2),
+        dryml.DryObjectDef(
+            objects.TestNest,
+            dryml.DryObjectDef(
+                objects.TestNest2,
+                A=5,)
+            )
+        )
 
-    assert sel(obj)
+    obj = obj_def.build()
 
-    sel = dryml.DrySelector.build(obj.definition())
+    sel = dryml.DrySelector.build(obj_def)
 
-    assert sel(obj)
+    assert sel(obj, verbosity=2)
 
-    sel = dryml.DrySelector.build({
-        'cls': objects.TestNest,
-        'dry_args': [{'cls': objects.HelloTrainableD,
-                      'dry_kwargs': {'A': {'cls': objects.TestNest}}}]
-    })
 
-    assert sel(obj)
+def test_selector_build_6():
+    """
+    Test that we can construct DrySelectors from nested objects
+    """
+
+    obj1 = objects.TestNest2(A=1)
+
+    obj_def = dryml.DryObjectDef(
+        objects.TestNest3,
+        obj1,
+        dryml.DryObjectDef(
+            objects.TestNest2,
+            A=2),
+        dryml.DryObjectDef(
+            objects.TestNest,
+            dryml.DryObjectDef(
+                objects.TestNest2,
+                A=5,)
+            )
+        )
+
+    obj = obj_def.build()
+
+    sel = dryml.DrySelector.build(obj_def)
+
+    assert sel(obj, verbosity=2)

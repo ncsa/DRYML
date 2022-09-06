@@ -258,10 +258,10 @@ def test_object_build_from_def_1():
     """
 
     import objects
-    obj = dryml.DryObjectDef.from_dict({
-        'cls': objects.TestClassB,
-        'dry_args': [1],
-        'dry_kwargs': {'base_msg': 'Test'}}).build()
+    obj = dryml.DryObjectDef(
+        objects.TestClassB,
+        1,
+        base_msg='Test').build()
 
     assert 'dry_id' in obj.dry_kwargs
 
@@ -271,7 +271,7 @@ def test_object_args_passing_1():
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    assert obj.dry_args == [1]
+    assert obj.dry_args == (1,)
 
 
 @pytest.mark.usefixtures("create_name")
@@ -284,7 +284,7 @@ def test_object_args_passing_2(create_name):
 
     obj_loaded = dryml.load_object(create_name)
 
-    assert obj_loaded.dry_args == [1]
+    assert obj_loaded.dry_args == (1,)
 
 
 def test_object_args_passing_3():
@@ -299,12 +299,16 @@ def test_object_args_passing_3():
 
     obj3 = objs.TestNest(obj2)
 
-    obj1_cpy = obj1.definition().build()
+    obj1_def = obj1.definition()
+
+    obj1_cpy = obj1_def.build()
 
     assert obj1.definition() == obj1_cpy.definition()
     assert obj1 is not obj1_cpy
 
-    obj2_cpy = obj2.definition().build()
+    obj2_def = obj2.definition()
+
+    obj2_cpy = obj2_def.build()
 
     assert obj2.definition() == obj2_cpy.definition()
     assert obj2 is not obj2_cpy
@@ -525,10 +529,9 @@ def test_change_obj_cls_1():
 def test_object_def_1():
     import objects
     obj_def = dryml.DryObjectDef(objects.HelloInt, msg=10)
-    other_def = dryml.DryObjectDef.from_dict({
-        'cls': 'objects.HelloInt',
-        'dry_kwargs': {'msg': 10}
-    })
+    other_def = dryml.DryObjectDef(
+        objects.HelloInt,
+        msg=10)
 
     assert obj_def['cls'] is other_def['cls']
     assert obj_def['dry_args'] == obj_def['dry_args']
@@ -689,6 +692,48 @@ def test_object_save_restore_4():
     assert obj1.B.data == args[0].B.data
     assert obj2.A.data == args[1].A.data
     assert obj2.B.data == args[1].B.data
+
+
+def test_object_save_restore_5():
+    """
+    Test saving/restoring arguments/kwargs
+    """
+
+    import objects
+
+    # Create the data containing objects
+    model_obj = objects.TestNest(10)
+    opt_obj = objects.TestNest3(20, model=model_obj)
+    loss_obj = objects.TestNest2(A='func')
+    train_fn_obj = objects.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
+
+    trainable_obj = objects.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
+
+    from dryml.dry_object import DryObjectPlaceholder, \
+        prep_args_kwargs, reconstruct_args_kwargs
+
+    args = (trainable_obj,)
+
+    (args, kwargs), ph = prep_args_kwargs(args, {})
+
+    assert type(args[0]) is DryObjectPlaceholder
+
+    reconstruct_args_kwargs(args, kwargs, ph)
+
+    recon_trainable_obj = args[0]
+    assert type(recon_trainable_obj) is objects.TestNest3
+
+    assert recon_trainable_obj['model'] is \
+        recon_trainable_obj['train_fn']['optimizer']['model']
+    assert recon_trainable_obj['train_fn']['epochs'] == 10
+    assert recon_trainable_obj['model'].A == 10
+    assert recon_trainable_obj['train_fn']['optimizer'][0] == 20
 
 
 def test_nested_def_build_1():

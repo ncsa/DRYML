@@ -18,7 +18,7 @@ def gen_dataset_1(
 def gen_dataset_2(
         num_examples=5000,
         centers: np.ndarray = np.array([[-0.5, 5.], [2., 2.], [-3., -1.]]),
-        widths: np.ndarray = np.array([[4, 4], [2, 2], [3, 3]]),
+        widths: np.ndarray = np.array([[1, 1], [1, 1], [1, 1]]),
         supervised=True):
 
     # Check that centers and widths shapes are equal

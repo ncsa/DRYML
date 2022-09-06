@@ -310,7 +310,7 @@ class DryRepo(object):
 
         if type(selector) is DryObjectDef:
             # Wrap automatically for convenience
-            selector = DrySelector.build(selector, *sel_args, **sel_kwargs)
+            selector = DrySelector.build(selector)
 
         def filter_func(obj_cont):
             if only_loaded:
@@ -318,7 +318,7 @@ class DryRepo(object):
                     return False
 
             if selector is not None:
-                if selector(obj_cont.definition()):
+                if selector(obj_cont.definition(), *sel_args, **sel_kwargs):
                     return True
                 else:
                     return False
@@ -380,21 +380,27 @@ class DryRepo(object):
         # First, handle all cases where the selector refers to a specific
         # object
         obj_id = None
-        if (issubclass(type(selector), DryObject) or
-           type(selector) is DryObjectFile) and \
-           selector is not None:
+        if selector is not None and \
+                (isinstance(selector, DryObject) or
+                 isinstance(selector, DryObjectFile)):
             obj_id = selector.definition().dry_id
-        elif type(selector) is DryObjectDef and selector is not None:
+        elif selector is not None and \
+                isinstance(selector, DryObjectDef):
             try:
                 obj_id = selector.dry_id
             except MissingIdError:
-                obj_id = None
-        elif issubclass(type(selector), dict) and selector is not None:
+                pass
+        elif selector is not None and \
+                isinstance(selector, DrySelector):
+            pass
+        elif selector is not None and \
+                issubclass(type(selector), dict):
             try:
                 obj_id = DryObjectDef.from_dict(selector).dry_id
             except MissingIdError:
-                obj_id = None
-        elif type(selector) is str and selector is not None:
+                pass
+        elif selector is not None and \
+                type(selector) is str:
             obj_id = selector
 
         # Build container handler
@@ -482,7 +488,7 @@ class DryRepo(object):
 
         results = list(map(container_handler, obj_list))
         if len(results) == 0:
-            if type(selector) is DryObjectDef and build_missing_def:
+            if isinstance(selector, DryObjectDef) and build_missing_def:
                 return def_builder(selector)
             raise KeyError(f"Key {selector} didn't match any object!")
         elif len(results) == 1:
@@ -622,7 +628,8 @@ class DryRepo(object):
                             sub_obj_cont = self.get(obj, open_container=False)
                             save_func(sub_obj_cont)
                         else:
-                            obj.save_self(os.path.join())
+                            obj.save_self(os.path.join(
+                                directory, f"{obj.dry_id}.dry"))
 
                 # Save object
                 obj_or_cont.save(directory=directory, save_cache=save_cache)
@@ -734,10 +741,13 @@ class DryRepo(object):
             sel_args=None, sel_kwargs=None,
             only_loaded=False):
         "List unique object definitions yielded by a selector"
-
         obj_containers = self.get(
             selector=selector, sel_args=sel_args, sel_kwargs=sel_kwargs,
             open_container=False, load_objects=False)
+
+        from dryml.utils import count
+        if count(obj_containers) == 1:
+            obj_containers = [obj_containers]
 
         results = {}
 

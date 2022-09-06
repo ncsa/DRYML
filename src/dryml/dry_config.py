@@ -5,15 +5,18 @@ import inspect
 import functools
 import zipfile
 import numpy as np
-from typing import Union, IO, Type, Mapping
-from dryml.utils import is_nonstring_iterable, is_dictlike, pickler, \
+from typing import Union, Type, Mapping
+from dryml.utils import is_nonstring_iterable, is_dictlike, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
-    init_arg_dict_handler
+    init_arg_dict_handler, is_supported_scalar_type, is_supported_listlike, \
+    is_supported_dictlike, map_dictlike, map_listlike, equal_listlike, \
+    equal_dictlike
 from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context
 from dryml.save_cache import SaveCache
 from dryml.file_intermediary import FileIntermediary
+import uuid
 
 
 class MissingIdError(Exception):
@@ -62,44 +65,6 @@ build_repo = None
 build_cache = None
 def_cache = None
 build_strat = None
-
-
-# Detect and Construct dryobjects as we encounter them.
-def detect_and_construct(val, load_zip=None):
-    from dryml.dry_object import DryObject
-    if isinstance(val, DryObject):
-        # If we already have a DryObject, do nothing
-        return val
-    elif isinstance(val, DryObjectDef):
-        # We have an object definition. Build the object.
-        return val.build(load_zip=load_zip)
-    if is_dictlike(val):
-        # We might have an object definition
-        if 'dry_def' in val:
-            if val['dry_def']:
-                # We have a dry object definition.
-                val_def = DryObjectDef.from_dict(val)
-                return val_def.build(load_zip=load_zip)
-        # Otherwise, we have a mapping, and need to build its content
-        dict_val = {k: detect_and_construct(v, load_zip=load_zip)
-                    for k, v in val.items()}
-        return dict_val
-    elif is_nonstring_iterable(val):
-        if type(val) is tuple:
-            # We have a list-like item, and must build its contents
-            return tuple(map(
-                lambda v: detect_and_construct(v, load_zip=load_zip), val))
-        elif type(val) is list or type(val) is DryArgs:
-            # We have a list-like item, and must build its contents
-            return list(map(
-                lambda v: detect_and_construct(v, load_zip=load_zip), val))
-        else:
-            raise ValueError(
-                f"Unsupported iterable type {type(val)}!")
-    else:
-        # We have some other value, and assume it can be passed directly.
-        # Such as 'int, float, etc...'
-        return val
 
 
 def is_concrete_val(input_object):
@@ -338,11 +303,13 @@ class DryMeta(abc.ABCMeta):
             }
 
             if base:
-                # At the base, we need to set dry_args/dry_kwargs finally
-                # Use DryKwargs/DryArgs object to coerse args/kwargs to proper
-                # json serializable form.
-                self.dry_args = DryArgs(dry_args)
-                self.dry_kwargs = DryKwargs(dry_kwargs)
+                # At the base, we need to validate the dry args
+                # and dry kwargs
+                validate_val_obj(dry_args)
+                validate_val_obj(dry_kwargs)
+
+                self.dry_args = tuple(dry_args)
+                self.dry_kwargs = dry_kwargs
 
                 # Construct parents
                 try:
@@ -371,12 +338,10 @@ class DryMeta(abc.ABCMeta):
                     lambda t: t[0],
                     init_func.__dry_kwargs__))
                 sub_kwargs = {
-                    k: detect_and_construct(v) for k, v in kwargs.items()
-                    if k in known_kwargs}
+                    k: v for k, v in kwargs.items() if k in known_kwargs}
             else:
                 sub_kwargs = {
-                    k: detect_and_construct(v) for k, v in kwargs.items()
-                    if k not in used_kwargs}
+                    k: v for k, v in kwargs.items() if k not in used_kwargs}
 
             # Remove dry_id from being used in non-base constructors.
             # Kludge solution.
@@ -386,8 +351,6 @@ class DryMeta(abc.ABCMeta):
 
             if no_var_pars:
                 args = args[:num_args]
-            # Make sure we process args.
-            args = list(map(detect_and_construct, args))
 
             # Store list of DryObjects we need to later save.
             if not hasattr(self, '__dry_obj_container_list__'):
@@ -677,149 +640,246 @@ class DryMeta(abc.ABCMeta):
         return save_compute
 
 
-def adapt_key(val):
-    if type(val) in (str, bytes, int, float):
-        return val
-    if type(val) is tuple:
-        return tuple(map(adapt_key, val))
-    raise ValueError(f"Key {val} not supported by Dry Configuration")
+def validate_key(key):
+    if type(key) in (str, bytes, int, float):
+        return
+    if type(key) is tuple:
+        return
+    raise TypeError(f"Unsupported key ({key}) of type {type(key)}")
 
 
-def adapt_val(val):
-    if type(val) in (
-            str, bytes, int, float, bool, np.float, np.float32,
-            np.float64, np.int, np.int64, np.int32, np.int16, np.int8,
-            np.bool, np.short, np.ushort, np.uint, np.uint64, np.uint32,
-            np.uint16, np.uint8, np.byte, np.ubyte, np.single, np.double,
-            np.longdouble):
-        return val
-    if type(val) is type:
-        return val
-    if val is None:
-        return val
-    if type(val) is DryMeta:
-        return val
+# Assumption, for DryObjects, definitions are not valid values.
+# All definitions should be resolved into objects.
+def validate_val_obj(val):
+    if is_supported_scalar_type(val):
+        return
     from dryml import DryObject
-    if issubclass(type(val), DryObject):
-        return val.definition().to_dict()
-    if issubclass(type(val), DryObjectDef):
-        # Handle DryObjectDef, otherwise it'll get mangled
-        if val.is_concrete():
-            # We should render to dictionary in this case
-            # because the definition is concrete. Otherwise
-            # we run into problems matching definitions
-            # with definition objects which may
-            # already exist.
-            return val.to_dict()
-        else:
-            return val
-    if issubclass(type(val), abc.ABCMeta):
-        # This is another type of class we need to catch
-        return val
-    if type(val) is tuple:
-        adjusted_value = list(map(adapt_val, val))
-        return tuple(adjusted_value)
-    if is_dictlike(val):
-        adjusted_value = {adapt_key(k): adapt_val(v) for k, v in val.items()}
-        return adjusted_value
-    if is_nonstring_iterable(val):
-        adjusted_value = list(map(adapt_val, val))
-        return adjusted_value
+    if isinstance(val, DryObject):
+        # Assumption: DryObjects have already validated their values
+        return
+    if isinstance(val, DryObjectDef):
+        raise TypeError(
+            "Object Definitions not valid for use within DryObject")
+    if is_supported_listlike(val):
+        for el in val:
+            validate_val_obj(el)
+        return
+    if is_supported_dictlike(val):
+        for k in val:
+            validate_val_obj(val[k])
+        return
     raise ValueError(
-        f"value {val} (type {type(val)}) not supported by Dry Configuration")
+        f"value ({val}) of type {type(val)} not supported")
 
 
-class DryConfigInterface(object):
-    def __init__(self, *args, **kwargs):
-        # Initialize object
-        adapted_args = adapt_val(args)
-        adapted_kwargs = adapt_val(kwargs)
-        super().__init__(*adapted_args, **adapted_kwargs)
-
-    def __setitem__(self, key, value):
-        adapted_key = adapt_key(key)
-        adapted_val = adapt_val(value)
-        # Call parent class functions
-        super().__setitem__(adapted_key, adapted_val)
-
-    def save(self, file: Union[str, IO[bytes]]) -> bool:
-        if type(file) is str:
-            with open(file, 'w') as f:
-                f.write(pickler(self.data))
-        else:
-            file.write(pickler(self.data))
-        return True
-
-
-class DryArgs(DryConfigInterface, collections.UserList):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        for i in range(len(self.data)):
-            self.data[i] = adapt_val(self.data[i])
-
-    def append(self, val):
-        super().append(adapt_val(val))
+def validate_val_def(val):
+    if is_supported_scalar_type(val):
+        return
+    from dryml import DryObject
+    if isinstance(val, DryObject):
+        # Assumption: DryObjects have already validated their values
+        return
+    if isinstance(val, DryObjectDef):
+        return
+    if is_supported_listlike(val):
+        for el in val:
+            validate_val_def(el)
+        return
+    if is_supported_dictlike(val):
+        for k in val:
+            validate_val_def(val[k])
+        return
+    raise ValueError(
+        f"value ({val}) of type {type(val)} not supported")
 
 
-class DryKwargs(DryConfigInterface, collections.UserDict):
-    pass
+def strip_dry_id(obj, render_cache=None):
+    # Create render cache
+    if render_cache is None:
+        render_cache = {}
 
+    # Check render cache if this obj has been seen before
+    obj_id = id(obj)
+    if obj_id in render_cache:
+        return render_cache[obj_id]
 
-def strip_dry_id(obj):
+    # Construct new object
     if is_dictlike(obj):
         new_dict = {}
         for k in obj:
             if k != 'dry_id':
-                new_dict[k] = strip_dry_id(obj[k])
+                new_dict[k] = strip_dry_id(obj[k], render_cache=render_cache)
+        render_cache[obj_id] = new_dict
         return new_dict
     elif is_nonstring_iterable(obj):
+        new_list = [strip_dry_id(o) for o in obj]
         if type(obj) is tuple:
-            return tuple([strip_dry_id(o) for o in obj])
+            return tuple(new_list)
         else:
-            return [strip_dry_id(o) for o in obj]
+            return new_list
     else:
         return obj
 
 
-class DryObjectDef(collections.UserDict):
-    tracking_id_counter = 0
+class RenderCache(object):
+    def __init__(self):
+        self.unique_cache = {}
+        self.nonunique_cache = {}
 
+
+def def_to_obj(val, repo=None, load_zip=None):
+    def applier(val):
+        return def_to_obj(val, repo=repo, load_zip=load_zip)
+    from dryml import DryObject
+    if is_supported_scalar_type(val):
+        return val
+    elif isinstance(val, DryObjectDef):
+        return val.build(repo=repo, load_zip=load_zip)
+    elif isinstance(val, DryObject):
+        return val
+    elif is_supported_listlike(val):
+        return map_listlike(applier, val)
+    elif is_supported_dictlike(val):
+        return map_dictlike(applier, val)
+    else:
+        raise TypeError(
+            f"Unsupported value {val} of type {type(val)} encountered!")
+
+
+def def_to_cat_def(val, cache=None):
+    def applier(val):
+        return def_to_cat_def(val, cache=cache)
+    from dryml import DryObject
+    if is_supported_scalar_type(val):
+        return val
+    elif isinstance(val, DryObjectDef):
+        return val.get_cat_def(recursive=True, cache=cache)
+    elif isinstance(val, DryObject):
+        return val.definition().get_cat_def(recursive=True, cache=cache)
+    elif is_supported_listlike(val):
+        return map_listlike(applier, val)
+    elif is_supported_dictlike(val):
+        return map_dictlike(applier, val)
+    else:
+        raise TypeError(
+            f"Unsupported value {val} of type {type(val)} encountered!")
+
+
+class DryObjectDef(collections.UserDict):
     @staticmethod
-    def from_dict(def_dict: Mapping):
-        return DryObjectDef(
-            def_dict['cls'],
-            *def_dict.get('dry_args', DryArgs()),
+    def from_dict(def_dict: Mapping, render_cache=None):
+        raise RuntimeError("Functionality Questionable")
+        # Construct cache object if needed
+        if render_cache is None:
+            render_cache = RenderCache()
+
+        # Check render cache
+        if 'dry_id' in def_dict['dry_kwargs']:
+            # Check for unique
+            dry_id = def_dict['dry_kwargs']['dry_id']
+            if dry_id in render_cache.unique_cache:
+                return render_cache.unique_cache[dry_id]
+        else:
+            # Check for nonunique
+            dict_id = id(def_dict)
+            if dict_id in render_cache.nonunique_cache:
+                return render_cache.nonunique_cache[dict_id]
+
+        # We have to construct a new definition.
+        def transform_el(el):
+            if type(el) is dict:
+                if 'dry_def' in el:
+                    # Detect dry def.
+                    return DryObjectDef.from_dict(
+                        el, render_cache=render_cache)
+            if is_dictlike(el):
+                # We have just a normal dictionary.
+                return {k: transform_el(el[k]) for k in el}
+            elif is_nonstring_iterable(el):
+                new_list = [transform_el(v) for v in el]
+                if type(el) is tuple:
+                    return tuple(new_list)
+                else:
+                    return new_list
+            else:
+                return el
+
+        cls = def_dict['cls']
+        args = transform_el(def_dict.get('dry_args', ()))
+        kwargs = transform_el(def_dict.get('dry_kwargs', {}))
+
+        # construct new definition
+        new_def = DryObjectDef(
+            cls,
+            *args,
             dry_mut=def_dict.get('dry_mut', False),
-            **def_dict.get('dry_kwargs', DryKwargs()))
+            **kwargs)
+
+        # Save our result in the cache.
+        if 'dry_id' in def_dict['dry_kwargs']:
+            dry_id = def_dict['dry_kwargs']['dry_id']
+            render_cache.unique_cache[dry_id] = new_def
+        else:
+            def_id = id(def_dict)
+            render_cache.nonunique_cache[def_id] = new_def
+
+        # Return the result.
+        return new_def
 
     def __init__(self, cls: Union[Type, str],
                  *args, dry_mut: bool = False, **kwargs):
+        self._tracking_id = uuid.uuid4()
+
         super().__init__()
+        if cls is None:
+            raise ValueError(
+                "Can't construct an object Definition with None type.")
         self.cls = cls
         self.data['dry_mut'] = dry_mut
-        self.args = args
-        self.kwargs = kwargs
-
-        # 'global' variable to track 'unique' instances of
-        # DryObjectDef.
-        self._tracking_id = DryObjectDef.tracking_id_counter
-        DryObjectDef.tracking_id_counter += 1
+        # Validate arguments
+        validate_val_def(args)
+        self.data['dry_args'] = args
+        validate_val_def(kwargs)
+        self.data['dry_kwargs'] = kwargs
 
     def __eq__(self, other):
+        return self.equal(other)
+
+    @staticmethod
+    def equal_func(val_a, val_b, cls_str_compare=False):
+        if isinstance(val_a, DryObjectDef) and \
+                not isinstance(val_b, DryObjectDef):
+            return False
+        if not isinstance(val_a, DryObjectDef) and \
+                isinstance(val_b, DryObjectDef):
+            return False
+        if isinstance(val_a, DryObjectDef):
+            return val_a.equal(val_b, cls_str_compare=cls_str_compare)
+        else:
+            return (val_a == val_b)
+
+    def equal(self, other, cls_str_compare=True):
+        def eq_func(val_a, val_b):
+            return DryObjectDef.equal_func(
+                val_a, val_b, cls_str_compare=cls_str_compare)
+
         if isinstance(other, type(self)):
-            # We have two of the same object
-            return other.data == self.data
-        elif is_dictlike(other):
-            # We have a dictlike we're matching to.
-            # We should check that 'dry_def' is in the
-            # other dict.
-            if 'dry_def' not in other:
+            if cls_str_compare:
+                self_cls = get_class_str(self['cls'])
+                other_cls = get_class_str(other['cls'])
+                if self_cls != other_cls:
+                    return False
+            else:
+                if self['cls'] != other['cls']:
+                    return False
+            if not equal_listlike(eq_func, self.args, other.args):
                 return False
-            # Okay, we have another matching Def.
-            # Remove the dry_def key.
-            other_temp = other.copy()
-            del other_temp['dry_def']
-            return self.data == other_temp
+            if not equal_dictlike(eq_func, self.kwargs, other.kwargs):
+                return False
+            return True
+        elif is_dictlike(other):
+            # We don't support comparison directly with dictionaries for now.
+            return False
         else:
             # Not same type. Give False.
             return False
@@ -840,17 +900,9 @@ class DryObjectDef(collections.UserDict):
     def args(self):
         return self['dry_args']
 
-    @args.setter
-    def args(self, value):
-        self['dry_args'] = value
-
     @property
     def kwargs(self):
         return self['dry_kwargs']
-
-    @kwargs.setter
-    def kwargs(self, value):
-        self['dry_kwargs'] = value
 
     @property
     def dry_id(self):
@@ -863,7 +915,7 @@ class DryObjectDef(collections.UserDict):
         return self._tracking_id
 
     def __setitem__(self, key, value):
-        if key not in ['cls', 'dry_args', 'dry_kwargs']:
+        if key not in ['cls', 'dry_mut', 'dry_args', 'dry_kwargs']:
             raise ValueError(
                 f"Setting Key {key} not supported by DryObjectDef")
 
@@ -876,39 +928,67 @@ class DryObjectDef(collections.UserDict):
                 raise TypeError(
                     f"Value of type {type(value)} not supported "
                     "for class assignment!")
+        else:
+            self.data[key] = value
 
-        if key == 'dry_args':
-            self.data['dry_args'] = DryArgs(value)
-
-        if key == 'dry_kwargs':
-            self.data['dry_kwargs'] = DryKwargs(value)
-
-    def to_dict(self, cls_str: bool = False):
+    def to_dict(self, cls_str: bool = False, render_cache=None):
+        raise RuntimeError("Functionality Questionable")
         from dryml import DryObject
 
-        # Build dry kwargs/dry args
+        # Create cache if it doesn't yet exist.
+        if render_cache is None:
+            render_cache = RenderCache()
+
+        # Search for a rendered version of this definition first.
+        if self.is_concrete():
+            dry_id = self.dry_id
+            if dry_id in render_cache.unique_cache:
+                return render_cache.unique_cache[dry_id]
+        else:
+            def_id = id(self)
+            if def_id in render_cache.nonunique_cache:
+                return render_cache.nonunique_cache[def_id]
+
+        # Create recursive helper function
         def transform_el(el):
             if type(el) is DryObjectDef:
-                return el.to_dict(cls_str=cls_str)
+                return el.to_dict(
+                    cls_str=cls_str, render_cache=render_cache)
             elif type(el) is DryObject:
-                return el.definition().to_dict(cls_str=cls_str)
+                the_def = el.definition()
+                return the_def.to_dict(
+                    cls_str=cls_str, render_cache=render_cache)
             elif is_dictlike(el):
+                # May cause a problem if we have a dict version
+                # of a DryObjectDef within another DryObjectDef
                 return {k: transform_el(el[k]) for k in el}
             elif is_nonstring_iterable(el):
+                new_list = [transform_el(e) for e in el]
                 if type(el) is tuple:
-                    return tuple([transform_el(e) for e in el])
+                    return tuple(new_list)
                 else:
-                    return [transform_el(e) for e in el]
+                    return new_list
             else:
                 return el
 
-        return {
+        # Create the new dictionary
+        new_dict = {
             'cls': self.cls if not cls_str else get_class_str(self.cls),
             'dry_mut': self.dry_mut,
-            'dry_args': transform_el(self.args.data),
-            'dry_kwargs': transform_el(self.kwargs.data),
+            'dry_args': transform_el(self.args),
+            'dry_kwargs': transform_el(self.kwargs),
             'dry_def': True,
         }
+
+        # Save result to cache
+        if self.is_concrete():
+            render_cache.unique_cache[self.dry_id] = new_dict
+        else:
+            def_id = id(self)
+            render_cache.nonunique_cache[def_id] = new_dict
+
+        # Return result
+        return new_dict
 
     def build(self, repo=None, load_zip=None):
         "Construct an object"
@@ -924,8 +1004,9 @@ class DryObjectDef(collections.UserDict):
 
         if repo is not None:
             if build_repo is not None:
-                raise RuntimeError(
-                    "different repos not currently supported")
+                if repo is not build_repo:
+                    raise RuntimeError(
+                        "different repos not currently supported")
             else:
                 # Set the call_repo
                 build_repo = repo
@@ -997,10 +1078,10 @@ class DryObjectDef(collections.UserDict):
 
         # Finally, actually construct the object
         if obj is None and construct_object:
-            args = detect_and_construct(self.args, load_zip=load_zip)
-            kwargs = detect_and_construct(self.kwargs, load_zip=load_zip)
+            new_args = def_to_obj(self.args, repo=repo, load_zip=load_zip)
+            new_kwargs = def_to_obj(self.kwargs, repo=repo, load_zip=load_zip)
 
-            obj = self.cls(*args, **kwargs)
+            obj = self.cls(*new_args, **new_kwargs)
 
             # Save object in the build cache.
             obj_id = obj.dry_id
@@ -1027,29 +1108,50 @@ class DryObjectDef(collections.UserDict):
         # Return the result
         return obj
 
-    def get_cat_def(self, recursive=False):
-        def_dict = self.to_dict()
+    def get_cat_def(self, recursive=True, cache=None):
         if recursive:
-            def_dict = strip_dry_id(def_dict)
-            return DryObjectDef.from_dict(def_dict)
+            # Create cache if needed
+            if cache is None:
+                cache = {}
+
+            # check the cache for whether this definition has been rendered yet
+            if id(self) in cache:
+                return cache[id(self)]
+
+            # Recursively apply get_cat_def to args, kwargs
+            new_args = def_to_cat_def(self.args, cache=cache)
+            new_kwargs = def_to_cat_def(self.kwargs, cache=cache)
+            if 'dry_id' in new_kwargs:
+                del new_kwargs['dry_id']
+
+            # Create new definition
+            cat_def = DryObjectDef(
+                self.cls, *new_args, dry_mut=self.dry_mut, **new_kwargs)
+
+            # Store the result
+            cache[id(self)] = cat_def
+
+            # return the result
+            return cat_def
+
         else:
-            kwargs_copy = copy.copy(def_dict['dry_kwargs'])
-            if 'dry_id' in kwargs_copy:
-                kwargs_copy.pop('dry_id')
-            def_dict['dry_kwargs'] = kwargs_copy
-            return DryObjectDef.from_dict(def_dict)
+            # Remove only the top level dry_id.
+            new_def = DryObjectDef(
+                self.cls, *self.args, dry_mut=self.dry_mut, **self.kwargs)
+            del new_def.kwargs['dry_id']
+            return new_def
 
     def get_hash_str(self, no_id: bool = False):
         class_hash_str = get_class_str(self.cls)
-        args_hash_str = str(self.args.data)
+        args_hash_str = str(self.args)
         # Remove dry_id so we can test for object 'class'
         if no_id:
-            kwargs_copy = copy.copy(self.kwargs.data)
+            kwargs_copy = copy.copy(self.kwargs)
             if 'dry_id' in kwargs_copy:
                 kwargs_copy.pop('dry_id')
             kwargs_hash_str = str(kwargs_copy)
         else:
-            kwargs_hash_str = str(self.kwargs.data)
+            kwargs_hash_str = str(self.kwargs)
         return class_hash_str+args_hash_str+kwargs_hash_str
 
     def is_concrete(self):

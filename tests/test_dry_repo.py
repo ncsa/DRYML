@@ -109,10 +109,12 @@ def test_add_retrieve_objects_3():
         cls=objects.TestNest, args=(10,)))) is not list
     assert type(repo.get(selector=dryml.DrySelector(
         cls=objects.HelloTrainableD))) is not list
-    assert type(repo.get(selector=dryml.DrySelector(
-        cls=objects.TestNest, args=(
-            dryml.DrySelector(objects.HelloTrainableD),),
-        verbosity=2))) is not list
+    obj = repo.get(
+        selector=dryml.DrySelector(
+            cls=objects.TestNest,
+            args=(dryml.DrySelector(objects.HelloTrainableD),),),
+        sel_kwargs={'verbosity': 2})
+    assert type(obj) is not list
 
 
 def test_add_retrieve_objects_4():
@@ -608,3 +610,56 @@ def test_object_save_restore_with_repo_2(create_temp_dir):
     assert obj.B.C == obj2.B.C
     assert obj.A.data == obj2.A.data
     assert obj.B.data == obj2.B.data
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_object_save_restore_with_repo_3(create_temp_dir):
+    """
+    We test save and restore of nested objects with a repo
+    """
+    import objects
+
+    # Create workshop
+    repo = dryml.DryRepo(directory=create_temp_dir)
+
+    obj_a = objects.TestNest(10)
+    repo.add_object(obj_a)
+
+    def build_def(repo):
+        # Create the data containing objects
+        obj_a = dryml.utils.head(repo.get(
+            selector=dryml.DryObjectDef(objects.TestNest, 10)))
+
+        mdl_def = dryml.DryObjectDef(
+            objects.TestNest2,
+            A=10)
+
+        mdl_def = dryml.DryObjectDef(
+            objects.TestNest3,
+            model=mdl_def)
+
+        mdl_def = dryml.DryObjectDef(
+            objects.TestNest3,
+            obj_a,
+            mdl_def)
+
+        return mdl_def
+
+    model_def = build_def(repo)
+
+    @dryml.compute_context(ctx_context_reqs={'default': {}})
+    def test_method(model_def, location):
+        # Create repo
+        repo = dryml.DryRepo(directory=location)
+
+        # Build the object
+        model_obj = model_def.build(repo=repo)
+
+        # Save all objects
+        repo.save(model_obj)
+
+    test_method(model_def, create_temp_dir)
+
+    repo.load_objects_from_directory()
+
+    repo.get(model_def, sel_kwargs={'verbosity': 2})

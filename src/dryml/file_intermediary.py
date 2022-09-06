@@ -115,6 +115,7 @@ class FileIntermediary(BufferedIOBase):
         if type(file) is str:
             file = open(file, 'wb')
 
+        self.seek(0)
         file.write(self.read())
 
         # Restore position
