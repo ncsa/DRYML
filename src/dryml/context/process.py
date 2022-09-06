@@ -87,11 +87,13 @@ class process_executor(object):
             f=None,
             ctx_reqs={},
             update_obj_defs=[],
+            verbose=False,
             args=[],
             kwargs={}):
         self.f_ser = dill.dumps(f)
         self.ctx_reqs = ctx_reqs
         self.update_obj_defs = update_obj_defs
+        self.verbose = verbose
         self.args_ser = dill.dumps(args)
         self.kwargs_ser = dill.dumps(kwargs)
 
@@ -160,6 +162,10 @@ class process_executor(object):
         del save_cache
 
     def __call__(self, ctx_send_q, ctx_ret_q):
+        if self.verbose:
+            print(
+                f"{mp.current_process().pid}: New process "
+                f"started pid:{mp.current_process().pid}")
         # Undill function
         f = dill.loads(self.f_ser)
 
@@ -170,7 +176,12 @@ class process_executor(object):
         ph_data = ctx_send_q.get()
 
         from dryml.dry_object import reconstruct_args_kwargs
-        reconstruct_args_kwargs(args, kwargs, ph_data)
+        if self.verbose:
+            print(
+                f"{mp.current_process().pid}: Reconstructing arguments: "
+                f"args: {args} kwargs {kwargs}")
+        reconstruct_args_kwargs(
+            args, kwargs, ph_data, verbose=self.verbose)
 
         self.final_call(f, ctx_send_q, ctx_ret_q, *args, **kwargs)
 
@@ -306,6 +317,7 @@ def compute_context(
                 executor = process_executor(
                     f=f, ctx_reqs=ctx_reqs,
                     update_obj_defs=update_obj_defs,
+                    verbose=verbose,
                     args=args,
                     kwargs=kwargs)
 
@@ -323,8 +335,10 @@ def compute_context(
                 # Send placeholder data
                 ctx_send_q.put(ph_data)
 
+                sub_pid = p.pid
+
                 if verbose:
-                    print(f"Started context isolation process, pid: {p.pid}")
+                    print(f"Started context isolation process, pid: {sub_pid}")
 
                 # Check loop
                 queue_results = []
@@ -407,7 +421,7 @@ def compute_context(
                         print(obj)
 
                 if verbose:
-                    print(f"Ended context isolation process, pid: {p.pid}")
+                    print(f"Ended context isolation process, pid: {sub_pid}")
 
                 return retval
 
