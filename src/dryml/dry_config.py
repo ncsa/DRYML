@@ -4,7 +4,6 @@ import abc
 import inspect
 import functools
 import zipfile
-import numpy as np
 from typing import Union, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
