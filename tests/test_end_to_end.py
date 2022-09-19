@@ -109,7 +109,7 @@ def xgb_regressor(definition=False):
 
     flattener = dryml.data.transforms.Flatten()
 
-    model = dryml.models.DryPipe(flattener, model)
+    model = dryml.models.Pipe(flattener, model)
 
     if definition:
         return model.definition().get_cat_def(recursive=True)
@@ -146,7 +146,7 @@ def torch_regressor(definition=False):
             ),
         )
 
-    pipe = dryml.models.DryPipe(
+    pipe = dryml.models.Pipe(
         dryml.data.transforms.Cast(mode='X', dtype='float32'),
         model,
         dryml.data.torch.transforms.TorchDevice())
@@ -182,7 +182,7 @@ def sklearn_classifier(num_dims, num_classes, definition=False):
 
     best_cat = dryml.data.transforms.BestCat()
 
-    model = dryml.models.DryPipe(model, best_cat)
+    model = dryml.models.Pipe(model, best_cat)
 
     if definition:
         return model.definition().get_cat_def(recursive=True)
@@ -213,7 +213,7 @@ def tf_classifier(num_dims, num_classes, definition=False):
 
     best_cat = dryml.data.transforms.BestCat()
 
-    model = dryml.models.DryPipe(model, best_cat)
+    model = dryml.models.Pipe(model, best_cat)
 
     if definition:
         model_def = model.definition().get_cat_def(recursive=True)
@@ -239,7 +239,7 @@ def xgb_classifier(num_dims, num_classes, definition=False):
     flattener = dryml.data.transforms.Flatten()
     best_cat = dryml.data.transforms.BestCat()
 
-    model = dryml.models.DryPipe(flattener, model, best_cat)
+    model = dryml.models.Pipe(flattener, model, best_cat)
 
     if definition:
         return model.definition().get_cat_def(recursive=True)
@@ -279,7 +279,7 @@ def torch_classifier(num_dims, num_classes, definition=False):
 
     best_cat = dryml.data.transforms.BestCat()
 
-    model = dryml.models.DryPipe(
+    model = dryml.models.Pipe(
         dryml.data.transforms.Cast(mode='X', dtype='float32'),
         model,
         dryml.data.torch.transforms.TorchDevice(),
@@ -767,7 +767,7 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
                 num_examples=num_examples))
 
         mdl_def = dryml.ObjectDef(
-            dryml.models.DryPipe,
+            dryml.models.Pipe,
             flattener,
             mdl_def,)
 
@@ -797,7 +797,7 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
                 num_examples=num_examples))
 
         mdl_def = dryml.ObjectDef(
-            dryml.models.DryPipe,
+            dryml.models.Pipe,
             flattener,
             mdl_def,)
 
