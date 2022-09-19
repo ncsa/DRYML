@@ -1,4 +1,4 @@
-from dryml.models import DryTrainable
+from dryml.models import Trainable
 from dryml.data.dataset import Dataset
 from dryml.data.util import nestize
 from dryml.data.numpy_dataset import NumpyDataset
@@ -6,9 +6,9 @@ import numpy as np
 from typing import Callable
 
 
-class StaticTransform(DryTrainable):
+class StaticTransform(Trainable):
     def __init__(self, mode='X'):
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
         if mode not in ['all', 'X', 'Y']:
             raise ValueError(f"mode '{mode}' not supported.")
         self.mode = mode
@@ -110,7 +110,7 @@ class Flatten(StaticTransform):
 
 class Transpose(StaticTransform):
     def __init__(self, axes=None):
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
         self.axes = axes
 
     def numpy_eval(self, data, *args, **kwargs):

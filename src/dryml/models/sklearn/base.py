@@ -2,7 +2,7 @@ import pickle
 import zipfile
 import numpy as np
 from dryml.config import Meta
-from dryml.models import DryComponent, DryTrainable
+from dryml.models import DryComponent, Trainable
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
 
@@ -96,7 +96,7 @@ class BasicTraining(BaseTrainFunction):
         trainable.mdl.fit(x, y, *self.train_args, **self.train_kwargs)
 
 
-class Trainable(DryTrainable):
+class Trainable(Trainable):
     __dry_compute_context__ = 'default'
 
     def __init__(self, model=None, train_fn=None, **kwargs):

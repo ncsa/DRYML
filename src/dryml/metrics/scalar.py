@@ -1,11 +1,11 @@
 from dryml.data import Dataset
-from dryml.models import DryTrainable
+from dryml.models import Trainable
 from dryml.context import compute_context
 import numpy as np
 
 
 @compute_context(ctx_dont_create_context=True)
-def mean_squared_error(trainable: DryTrainable, test_data: Dataset):
+def mean_squared_error(trainable: Trainable, test_data: Dataset):
     if not test_data.supervised:
         raise ValueError("Dataset is unsupervised!")
 
@@ -28,7 +28,7 @@ def mean_squared_error(trainable: DryTrainable, test_data: Dataset):
 
 
 @compute_context(ctx_dont_create_context=True)
-def categorical_accuracy(trainable: DryTrainable, test_data: Dataset):
+def categorical_accuracy(trainable: Trainable, test_data: Dataset):
     if not test_data.supervised:
         raise ValueError("Dataset is unsupervised!")
 

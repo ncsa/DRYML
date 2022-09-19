@@ -1,13 +1,13 @@
 from dryml.config import Meta
-from dryml.models import DryTrainable
+from dryml.models import Trainable
 from dryml.data import Dataset
 from dryml.data.torch import TorchDataset
 
 
-class TorchDevice(DryTrainable):
+class TorchDevice(Trainable):
     def __init__(self, device='cpu'):
         self.device = device
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         pass
@@ -20,7 +20,7 @@ class TorchDevice(DryTrainable):
             lambda el: el.to(self.device))
 
 
-class TorchActivation(DryTrainable):
+class TorchActivation(Trainable):
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
@@ -29,7 +29,7 @@ class TorchActivation(DryTrainable):
         self.kwargs = kwargs
         self.act = None
 
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         pass

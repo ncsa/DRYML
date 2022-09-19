@@ -1,7 +1,7 @@
 from dryml.config import Meta
 from dryml.object import Object
 from dryml.data import Dataset
-from dryml.models import DryTrainable
+from dryml.models import Trainable
 from dryml.models.torch.base import TorchObject
 from dryml.models.torch.base import Model as BaseModel
 from dryml.models.torch.base import TrainFunction as BaseTrainFunction
@@ -142,7 +142,7 @@ class Trainable(BaseTrainable):
         self.train_fn(
             self, data, train_spec=train_spec,
             train_callbacks=train_callbacks)
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def prep_train(self):
         self.model.prep_train()

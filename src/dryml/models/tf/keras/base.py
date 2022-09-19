@@ -4,7 +4,7 @@ from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
     adjust_class_module
 from dryml.data import Dataset
 from dryml.data.tf import TFDataset
-from dryml.models.dry_trainable import DryTrainable
+from dryml.models.trainable import Trainable
 from dryml.models.tf.base import Model as TFModel
 from dryml.models.tf.base import Trainable as TFTrainable
 from dryml.models.tf.base import TrainFunction as TFTrainFunction
@@ -594,7 +594,7 @@ class Trainable(TFTrainable):
         self.train_fn(
             self, data, *args, train_spec=train_spec,
             train_callbacks=train_callbacks, **kwargs)
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def prep_train(self):
         metric_list = []

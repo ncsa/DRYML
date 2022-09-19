@@ -1,9 +1,9 @@
 from dryml.data.dataset import Dataset
-from dryml.models.dry_trainable import DryTrainable
+from dryml.models.trainable import Trainable
 from dryml.collections import Tuple
 
 
-class Pipe(DryTrainable, Tuple):
+class Pipe(Trainable, Tuple):
     """A Sequential processing pipeline modelled after sklearn pipe"""
     def __init__(self, *args, **kwargs):
         # May need to test that elements of the pipes are trainable too
@@ -23,7 +23,7 @@ class Pipe(DryTrainable, Tuple):
             # Get pipe step
             step = self[i]
 
-            if start_epoch > i or step.train_state == DryTrainable.trained:
+            if start_epoch > i or step.train_state == Trainable.trained:
                 # This part of the training has already been completed.
                 pass
             else:
@@ -49,7 +49,7 @@ class Pipe(DryTrainable, Tuple):
             if train_spec is not None and i >= start_epoch:
                 train_spec.advance()
 
-        # Call DryTrainable Train
+        # Call Trainable Train
         super().train(data, *args, **kwargs)
 
     def eval(self, X: Dataset, *args, **kwargs):

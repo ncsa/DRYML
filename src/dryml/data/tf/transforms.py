@@ -1,4 +1,4 @@
-from dryml.models import DryTrainable
+from dryml.models import Trainable
 from dryml.data.dataset import Dataset
 import tensorflow as tf
 import inspect
@@ -33,7 +33,7 @@ def func_source_extract(func):
     return '\n'.join(code_lines)
 
 
-class FuncXMap(DryTrainable):
+class FuncXMap(Trainable):
     @staticmethod
     def from_function(func, *args, **kwargs):
         return FuncXMap(func_source_extract(func), *args, **kwargs)
@@ -57,7 +57,7 @@ class FuncXMap(DryTrainable):
                 "Function code doesn't contain a function definition!")
 
         self.func = func
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         # We can't train a plain function
@@ -67,7 +67,7 @@ class FuncXMap(DryTrainable):
         return data.tf().apply_X(func=self.func)
 
 
-class FuncYMap(DryTrainable):
+class FuncYMap(Trainable):
     @staticmethod
     def from_function(func, *args, **kwargs):
         return FuncYMap(func_source_extract(func), *args, **kwargs)
@@ -91,7 +91,7 @@ class FuncYMap(DryTrainable):
                 "Function code doesn't contain a function definition!")
 
         self.func = func
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         # We can't train a plain function
@@ -101,7 +101,7 @@ class FuncYMap(DryTrainable):
         return data.tf().apply_Y(func=self.func)
 
 
-class FuncMap(DryTrainable):
+class FuncMap(Trainable):
     @staticmethod
     def from_function(func, *args, **kwargs):
         return FuncMap(inspect.getsource(func), *args, **kwargs)
@@ -125,7 +125,7 @@ class FuncMap(DryTrainable):
                 "Function code doesn't contain a function definition!")
 
         self.func = func
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         # We can't train a plain function
@@ -135,9 +135,9 @@ class FuncMap(DryTrainable):
         return data.tf().apply(func=self.func)
 
 
-class BestCat(DryTrainable):
+class BestCat(Trainable):
     def __init__(self):
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         pass
@@ -153,9 +153,9 @@ def flattener(x):
     return tf.reshape(x, [tf.shape(x)[0], -1])
 
 
-class Flatten(DryTrainable):
+class Flatten(Trainable):
     def __init__(self):
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
 
     def train(self, *args, train_spec=None, **kwargs):
         pass

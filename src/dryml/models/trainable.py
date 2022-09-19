@@ -8,12 +8,12 @@ from dryml.context import cls_method_compute
 @cls_method_compute('eval')
 @cls_method_compute('prep_train', ctx_use_existing_context=True)
 @cls_method_compute('prep_eval', ctx_use_existing_context=True)
-class DryTrainable(Object):
+class Trainable(Object):
     untrained = 0
     trained = 2
 
     def __init__(self, *args, description="", **kwargs):
-        self.train_state = DryTrainable.untrained
+        self.train_state = Trainable.untrained
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:
         # Load parent components first
@@ -37,8 +37,8 @@ class DryTrainable(Object):
 
     def train(self, *args, train_spec=None, train_callbacks=[], **kwargs):
         # Handle the setting of the train state flag
-        self.train_state = DryTrainable.trained
+        self.train_state = Trainable.trained
         # This should be the last step in training so no more super is needed
 
     def eval(self, data, *args, **kwargs):
-        raise NotImplementedError("Method not defined for a base DryTrainable")
+        raise NotImplementedError("Method not defined for a base Trainable")

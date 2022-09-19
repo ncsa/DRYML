@@ -47,27 +47,27 @@ class TestClassB(TestBase):
         pass
 
 
-class HelloTrainable(dryml.models.DryTrainable):
+class HelloTrainable(dryml.models.Trainable):
     def __init__(self, *args, msg="test", **kwargs):
         pass
 
 
-class HelloTrainableB(dryml.models.DryTrainable):
+class HelloTrainableB(dryml.models.Trainable):
     def __init__(self, *args, msg="test", **kwargs):
         pass
 
 
-class HelloTrainableC(dryml.models.DryTrainable):
+class HelloTrainableC(dryml.models.Trainable):
     def __init__(self, A):
         self.A = A
 
 
-class HelloTrainableD(dryml.models.DryTrainable):
+class HelloTrainableD(dryml.models.Trainable):
     def __init__(self, A=None):
         self.A = A
 
 
-class HelloTrainableE(dryml.models.DryTrainable):
+class HelloTrainableE(dryml.models.Trainable):
     @dryml.Meta.collect_args
     @dryml.Meta.collect_kwargs
     def __init__(self, *args, **kwargs):
