@@ -1,4 +1,4 @@
-from dryml.dry_config import DryMeta
+from dryml.config import Meta
 from dryml.models import DryTrainable
 from dryml.data import DryData
 from dryml.data.torch import TorchDataset
@@ -21,8 +21,8 @@ class TorchDevice(DryTrainable):
 
 
 class TorchActivation(DryTrainable):
-    @DryMeta.collect_args
-    @DryMeta.collect_kwargs
+    @Meta.collect_args
+    @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
         self.cls = cls
         self.args = args

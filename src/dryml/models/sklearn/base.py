@@ -1,14 +1,14 @@
 import pickle
 import zipfile
 import numpy as np
-from dryml.dry_config import DryMeta
+from dryml.config import Meta
 from dryml.models import DryComponent, DryTrainable
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import DryData
 
 
 class Model(DryComponent):
-    @DryMeta.collect_kwargs
+    @Meta.collect_kwargs
     def __init__(self, cls, **kwargs):
         # It is subclass's responsibility to fill this
         # attribute with an actual keras class

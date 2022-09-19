@@ -750,23 +750,23 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
         import sklearn.neighbors
 
         flattener = dryml.utils.head(shop.repo.get(
-            selector=dryml.DryObjectDef(dryml.data.transforms.Flatten)))
+            selector=dryml.ObjectDef(dryml.data.transforms.Flatten)))
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             dryml.models.sklearn.Model,
             sklearn.neighbors.KNeighborsClassifier,
             n_neighbors=n_neighbors,
             algorithm=algorithm
             )
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             dryml.models.sklearn.Trainable,
             model=mdl_def,
-            train_fn=dryml.DryObjectDef(
+            train_fn=dryml.ObjectDef(
                 dryml.models.sklearn.BasicTraining,
                 num_examples=num_examples))
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             dryml.models.DryPipe,
             flattener,
             mdl_def,)
@@ -780,23 +780,23 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
         import sklearn.neighbors
 
         flattener = dryml.utils.head(shop.repo.get(
-            selector=dryml.DryObjectDef(dryml.data.transforms.Flatten)))
+            selector=dryml.ObjectDef(dryml.data.transforms.Flatten)))
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             dryml.models.sklearn.ClassifierModel,
             sklearn.neighbors.KNeighborsClassifier,
             n_neighbors=n_neighbors,
             algorithm=algorithm
             )
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             dryml.models.sklearn.Trainable,
             model=mdl_def,
-            train_fn=dryml.DryObjectDef(
+            train_fn=dryml.ObjectDef(
                 dryml.models.sklearn.BasicTraining,
                 num_examples=num_examples))
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             dryml.models.DryPipe,
             flattener,
             mdl_def,)

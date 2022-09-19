@@ -1,7 +1,7 @@
 import os
-from dryml.dry_object import DryObject, DryObjectFactory, DryObjectFile, \
-    DryObjectDef, change_object_cls, load_object, get_contained_objects
-from dryml.dry_config import MissingIdError
+from dryml.object import Object, ObjectFactory, ObjectFile, \
+    ObjectDef, change_object_cls, load_object, get_contained_objects
+from dryml.config import MissingIdError
 from dryml.dry_selector import DrySelector
 from dryml.utils import get_current_cls
 from typing import Optional, Callable, Union, Mapping
@@ -9,7 +9,7 @@ import tqdm
 from pprint import pprint
 
 
-RepoKey = Union[DryObject, DryObjectDef, dict, DryObjectFile, DrySelector, str]
+RepoKey = Union[Object, ObjectDef, dict, ObjectFile, DrySelector, str]
 
 
 class DryRepoContainer(object):
@@ -20,7 +20,7 @@ class DryRepoContainer(object):
         return new_container
 
     @staticmethod
-    def from_object(obj: DryObject, filename: Optional[str] = None,
+    def from_object(obj: Object, filename: Optional[str] = None,
                     directory: Optional[str] = None):
         new_container = DryRepoContainer(directory=directory)
         new_container._obj = obj
@@ -95,7 +95,7 @@ class DryRepoContainer(object):
                 "Container has not loaded the object yet")
         return self._obj
 
-    def set_obj(self, obj: DryObject):
+    def set_obj(self, obj: Object):
         self._obj = obj
 
     def get_obj(self, load=False):
@@ -153,13 +153,13 @@ class DryRepoContainer(object):
     def definition(self):
         if self._obj is None:
             # We need to load the file from disk
-            with DryObjectFile(self.filepath) as f:
+            with ObjectFile(self.filepath) as f:
                 return f.definition()
         else:
             return self._obj.definition()
 
 
-# This type will act as a fascade for the various DryObject* types.
+# This type will act as a fascade for the various Object* types.
 class DryRepo(object):
     def __init__(self, directory: Optional[str] = None, create: bool = False,
                  load_objects: bool = True, **kwargs):
@@ -246,7 +246,7 @@ class DryRepo(object):
         if verbose:
             print(f"Loaded {num_loaded} objects")
 
-    def add_object(self, obj: DryObject, filepath: Optional[str] = None,
+    def add_object(self, obj: Object, filepath: Optional[str] = None,
                    add_nested: bool = True):
         # Add a single object
         if filepath is not None:
@@ -271,7 +271,7 @@ class DryRepo(object):
             obj, directory=directory, filename=filename)
         self.add_obj_cont(obj_cont)
 
-    def add_objects(self, obj_factory: DryObjectFactory, num=1):
+    def add_objects(self, obj_factory: ObjectFactory, num=1):
         # Create numerous objects from a factory function
         for i in range(num):
             obj = obj_factory(repo=self)
@@ -299,8 +299,8 @@ class DryRepo(object):
 
     def make_filter_func(
             self,
-            selector: Optional[Union[Callable, DryObjectDef,
-                                     Mapping, DryObject]] = None,
+            selector: Optional[Union[Callable, ObjectDef,
+                                     Mapping, Object]] = None,
             sel_args=None, sel_kwargs=None,
             only_loaded: bool = False):
         if sel_args is None:
@@ -308,7 +308,7 @@ class DryRepo(object):
         if sel_kwargs is None:
             sel_kwargs = {}
 
-        if type(selector) is DryObjectDef:
+        if type(selector) is ObjectDef:
             # Wrap automatically for convenience
             selector = DrySelector.build(selector)
 
@@ -329,7 +329,7 @@ class DryRepo(object):
 
     def get_obj(
             self,
-            obj_def: DryObjectDef,
+            obj_def: ObjectDef,
             load=False):
         ind_id = obj_def.dry_id
         return self.get_obj_by_id(ind_id, load=load)
@@ -345,14 +345,14 @@ class DryRepo(object):
         return obj_container.obj
 
     def __contains__(
-            self, item: Union[DryObject, DryObjectDef, dict, DryObjectFile]):
-        if issubclass(type(item), DryObject) or \
-           type(item) is DryObjectFile:
+            self, item: Union[Object, ObjectDef, dict, ObjectFile]):
+        if issubclass(type(item), Object) or \
+           type(item) is ObjectFile:
             obj_id = item.definition().dry_id
-        elif issubclass(type(item), DryObjectDef):
+        elif issubclass(type(item), ObjectDef):
             obj_id = item.dry_id
         elif issubclass(type(item), dict):
-            obj_id = DryObjectDef.from_dict(item).dry_id
+            obj_id = ObjectDef.from_dict(item).dry_id
         else:
             raise TypeError(
                 f"Unsupported type {type(item)} for repo.contains!")
@@ -381,11 +381,11 @@ class DryRepo(object):
         # object
         obj_id = None
         if selector is not None and \
-                (isinstance(selector, DryObject) or
-                 isinstance(selector, DryObjectFile)):
+                (isinstance(selector, Object) or
+                 isinstance(selector, ObjectFile)):
             obj_id = selector.definition().dry_id
         elif selector is not None and \
-                isinstance(selector, DryObjectDef):
+                isinstance(selector, ObjectDef):
             try:
                 obj_id = selector.dry_id
             except MissingIdError:
@@ -396,7 +396,7 @@ class DryRepo(object):
         elif selector is not None and \
                 issubclass(type(selector), dict):
             try:
-                obj_id = DryObjectDef.from_dict(selector).dry_id
+                obj_id = ObjectDef.from_dict(selector).dry_id
             except MissingIdError:
                 pass
         elif selector is not None and \
@@ -418,7 +418,7 @@ class DryRepo(object):
         if obj_id is not None:
             # We have a single object request
             if obj_id not in self.obj_dict:
-                if type(selector) is DryObjectDef and build_missing_def:
+                if type(selector) is ObjectDef and build_missing_def:
                     return def_builder(selector)
                 raise KeyError(
                     f"Object {selector} (type: {type(selector)}) "
@@ -488,7 +488,7 @@ class DryRepo(object):
 
         results = list(map(container_handler, obj_list))
         if len(results) == 0:
-            if isinstance(selector, DryObjectDef) and build_missing_def:
+            if isinstance(selector, ObjectDef) and build_missing_def:
                 return def_builder(selector)
             raise KeyError(f"Key {selector} didn't match any object!")
         elif len(results) == 1:
@@ -543,7 +543,7 @@ class DryRepo(object):
 
         def reload_func(obj_cont):
             if not obj_cont.is_loaded():
-                raise RuntimeError("Can only reload already loaded DryObjects")
+                raise RuntimeError("Can only reload already loaded Objects")
 
             # Get the object
             obj = obj_cont.obj
@@ -585,7 +585,7 @@ class DryRepo(object):
         save_cache = set()
 
         def save_func(obj_or_cont):
-            if type(obj_or_cont) is DryObject:
+            if type(obj_or_cont) is Object:
                 # we have a plain dry object
 
                 if obj_or_cont in save_cache:
@@ -613,7 +613,7 @@ class DryRepo(object):
                 # We have an object container.
                 if not obj_or_cont.is_loaded():
                     raise RuntimeError(
-                        "Can only save currently loaded DryObject")
+                        "Can only save currently loaded Object")
 
                 if obj_or_cont.obj in save_cache:
                     # don't need to save, it's already done.
@@ -636,7 +636,7 @@ class DryRepo(object):
                 save_cache.add(obj_or_cont.obj)
 
         # If we haven't added the object to the repo yet, add it now.
-        if issubclass(type(selector), DryObject):
+        if issubclass(type(selector), Object):
             if selector not in self:
                 self.add_object(selector)
 
@@ -663,7 +663,7 @@ class DryRepo(object):
 
         def save_func(obj_cont):
             if not obj_cont.is_loaded():
-                raise RuntimeError("Can only save currently loaded DryObject")
+                raise RuntimeError("Can only save currently loaded Object")
 
             # Save object
             obj_cont.save()
@@ -675,7 +675,7 @@ class DryRepo(object):
             open_container=False, only_loaded=True, load_objects=False)
 
     def update(self,
-               obj: DryObject):
+               obj: Object):
         """
         Update existing object entry with new object.
         if object doesn't exist, create entry for it.

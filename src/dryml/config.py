@@ -67,12 +67,12 @@ build_strat = None
 
 
 def is_concrete_val(input_object):
-    from dryml import DryObject
+    from dryml import Object
     # Is this object a dry definition?
-    if isinstance(input_object, DryObject):
-        # A DryObject itself is a concrete value
+    if isinstance(input_object, Object):
+        # A Object itself is a concrete value
         return True
-    elif isinstance(input_object, DryObjectDef) or \
+    elif isinstance(input_object, ObjectDef) or \
             is_dictlike(input_object) and 'dry_def' in input_object:
         # Check that there's a Dry ID here.
         if 'dry_id' not in input_object['dry_kwargs']:
@@ -105,13 +105,13 @@ def is_concrete_val(input_object):
     return True
 
 
-class DryMeta(abc.ABCMeta):
+class Meta(abc.ABCMeta):
     def __new__(cls, clsname, bases, attrs):
         # Set default init function as python's default
         # init tries to use super which shouldn't be done
         # here.
         if '__init__' not in attrs:
-            attrs['__init__'] = DryMeta.default_init
+            attrs['__init__'] = Meta.default_init
 
         # Create class
         new_cls = super().__new__(cls, clsname, bases, attrs)
@@ -120,7 +120,7 @@ class DryMeta(abc.ABCMeta):
         init_func = new_cls.__init__
 
         # Run check for self
-        DryMeta.check_for_self(init_func, clsname)
+        Meta.check_for_self(init_func, clsname)
 
         # Detect if we have the base class.
         base = False
@@ -129,13 +129,13 @@ class DryMeta(abc.ABCMeta):
 
         # Set new methods which need the class object
         # to be set properly
-        new_cls.__init__ = DryMeta.make_dry_init(new_cls, init_func, base=base)
-        new_cls.load_object = DryMeta.make_load_object(new_cls)
-        new_cls.save_object = DryMeta.make_save_object(new_cls)
-        new_cls.load_compute = DryMeta.make_load_compute(new_cls)
-        new_cls.save_compute = DryMeta.make_save_compute(new_cls)
-        new_cls.compute_prepare = DryMeta.make_compute_prepare(new_cls)
-        new_cls.compute_cleanup = DryMeta.make_compute_cleanup(new_cls)
+        new_cls.__init__ = Meta.make_dry_init(new_cls, init_func, base=base)
+        new_cls.load_object = Meta.make_load_object(new_cls)
+        new_cls.save_object = Meta.make_save_object(new_cls)
+        new_cls.load_compute = Meta.make_load_compute(new_cls)
+        new_cls.save_compute = Meta.make_save_compute(new_cls)
+        new_cls.compute_prepare = Meta.make_compute_prepare(new_cls)
+        new_cls.compute_cleanup = Meta.make_compute_cleanup(new_cls)
 
         # Wrap marked compute methods
         if hasattr(new_cls, '__dry_compute_methods__'):
@@ -157,7 +157,7 @@ class DryMeta(abc.ABCMeta):
         first_par = sig.parameters[keys[0]]
         if first_par.name != 'self':
             raise RuntimeError(
-                "__init__ signature of DryMeta Objects must have a first "
+                "__init__ signature of Meta Objects must have a first "
                 f"argument named self. Found when initializing type {clsname}")
 
     @staticmethod
@@ -218,7 +218,7 @@ class DryMeta(abc.ABCMeta):
     @staticmethod
     def make_dry_init(__class__, init_func, base=False):
         # Track arguments
-        init_func = DryMeta.track_args(init_func)
+        init_func = Meta.track_args(init_func)
         sig = inspect.signature(init_func)
 
         # Detect var signature components
@@ -266,7 +266,7 @@ class DryMeta(abc.ABCMeta):
 
             if num_args > len(args):
                 raise ExpectedArgumentError(
-                    f"DryObject class {__class__} init expects {num_args} "
+                    f"Object class {__class__} init expects {num_args} "
                     f"positional arguments, got {len(args)}. Did you forget "
                     f"to specify a required positional argument?")
 
@@ -351,13 +351,13 @@ class DryMeta(abc.ABCMeta):
             if no_var_pars:
                 args = args[:num_args]
 
-            # Store list of DryObjects we need to later save.
+            # Store list of Objects we need to later save.
             if not hasattr(self, '__dry_obj_container_list__'):
                 self.__dry_obj_container_list__ = []
 
             def _add_dry_objs(el):
-                from dryml import DryObject
-                if isinstance(el, DryObject):
+                from dryml import Object
+                if isinstance(el, Object):
                     self.__dry_obj_container_list__.append(el)
                 if is_nonstring_iterable(el):
                     for elm in el:
@@ -647,18 +647,18 @@ def validate_key(key):
     raise TypeError(f"Unsupported key ({key}) of type {type(key)}")
 
 
-# Assumption, for DryObjects, definitions are not valid values.
+# Assumption, for Objects, definitions are not valid values.
 # All definitions should be resolved into objects.
 def validate_val_obj(val):
     if is_supported_scalar_type(val):
         return
-    from dryml import DryObject
-    if isinstance(val, DryObject):
-        # Assumption: DryObjects have already validated their values
+    from dryml import Object
+    if isinstance(val, Object):
+        # Assumption: Objects have already validated their values
         return
-    if isinstance(val, DryObjectDef):
+    if isinstance(val, ObjectDef):
         raise TypeError(
-            "Object Definitions not valid for use within DryObject")
+            "Object Definitions not valid for use within Object")
     if is_supported_listlike(val):
         for el in val:
             validate_val_obj(el)
@@ -674,11 +674,11 @@ def validate_val_obj(val):
 def validate_val_def(val):
     if is_supported_scalar_type(val):
         return
-    from dryml import DryObject
-    if isinstance(val, DryObject):
-        # Assumption: DryObjects have already validated their values
+    from dryml import Object
+    if isinstance(val, Object):
+        # Assumption: Objects have already validated their values
         return
-    if isinstance(val, DryObjectDef):
+    if isinstance(val, ObjectDef):
         return
     if is_supported_listlike(val):
         for el in val:
@@ -729,12 +729,12 @@ class RenderCache(object):
 def def_to_obj(val, repo=None, load_zip=None):
     def applier(val):
         return def_to_obj(val, repo=repo, load_zip=load_zip)
-    from dryml import DryObject
+    from dryml import Object
     if is_supported_scalar_type(val):
         return val
-    elif isinstance(val, DryObjectDef):
+    elif isinstance(val, ObjectDef):
         return val.build(repo=repo, load_zip=load_zip)
-    elif isinstance(val, DryObject):
+    elif isinstance(val, Object):
         return val
     elif is_supported_listlike(val):
         return map_listlike(applier, val)
@@ -748,12 +748,12 @@ def def_to_obj(val, repo=None, load_zip=None):
 def def_to_cat_def(val, cache=None):
     def applier(val):
         return def_to_cat_def(val, cache=cache)
-    from dryml import DryObject
+    from dryml import Object
     if is_supported_scalar_type(val):
         return val
-    elif isinstance(val, DryObjectDef):
+    elif isinstance(val, ObjectDef):
         return val.get_cat_def(recursive=True, cache=cache)
-    elif isinstance(val, DryObject):
+    elif isinstance(val, Object):
         return val.definition().get_cat_def(recursive=True, cache=cache)
     elif is_supported_listlike(val):
         return map_listlike(applier, val)
@@ -764,7 +764,7 @@ def def_to_cat_def(val, cache=None):
             f"Unsupported value {val} of type {type(val)} encountered!")
 
 
-class DryObjectDef(collections.UserDict):
+class ObjectDef(collections.UserDict):
     @staticmethod
     def from_dict(def_dict: Mapping, render_cache=None):
         raise RuntimeError("Functionality Questionable")
@@ -789,7 +789,7 @@ class DryObjectDef(collections.UserDict):
             if type(el) is dict:
                 if 'dry_def' in el:
                     # Detect dry def.
-                    return DryObjectDef.from_dict(
+                    return ObjectDef.from_dict(
                         el, render_cache=render_cache)
             if is_dictlike(el):
                 # We have just a normal dictionary.
@@ -808,7 +808,7 @@ class DryObjectDef(collections.UserDict):
         kwargs = transform_el(def_dict.get('dry_kwargs', {}))
 
         # construct new definition
-        new_def = DryObjectDef(
+        new_def = ObjectDef(
             cls,
             *args,
             dry_mut=def_dict.get('dry_mut', False),
@@ -846,20 +846,20 @@ class DryObjectDef(collections.UserDict):
 
     @staticmethod
     def equal_func(val_a, val_b, cls_str_compare=False):
-        if isinstance(val_a, DryObjectDef) and \
-                not isinstance(val_b, DryObjectDef):
+        if isinstance(val_a, ObjectDef) and \
+                not isinstance(val_b, ObjectDef):
             return False
-        if not isinstance(val_a, DryObjectDef) and \
-                isinstance(val_b, DryObjectDef):
+        if not isinstance(val_a, ObjectDef) and \
+                isinstance(val_b, ObjectDef):
             return False
-        if isinstance(val_a, DryObjectDef):
+        if isinstance(val_a, ObjectDef):
             return val_a.equal(val_b, cls_str_compare=cls_str_compare)
         else:
             return (val_a == val_b)
 
     def equal(self, other, cls_str_compare=True):
         def eq_func(val_a, val_b):
-            return DryObjectDef.equal_func(
+            return ObjectDef.equal_func(
                 val_a, val_b, cls_str_compare=cls_str_compare)
 
         if isinstance(other, type(self)):
@@ -916,7 +916,7 @@ class DryObjectDef(collections.UserDict):
     def __setitem__(self, key, value):
         if key not in ['cls', 'dry_mut', 'dry_args', 'dry_kwargs']:
             raise ValueError(
-                f"Setting Key {key} not supported by DryObjectDef")
+                f"Setting Key {key} not supported by ObjectDef")
 
         if key == 'cls':
             if type(value) is type or issubclass(type(value), abc.ABCMeta):
@@ -932,7 +932,7 @@ class DryObjectDef(collections.UserDict):
 
     def to_dict(self, cls_str: bool = False, render_cache=None):
         raise RuntimeError("Functionality Questionable")
-        from dryml import DryObject
+        from dryml import Object
 
         # Create cache if it doesn't yet exist.
         if render_cache is None:
@@ -950,16 +950,16 @@ class DryObjectDef(collections.UserDict):
 
         # Create recursive helper function
         def transform_el(el):
-            if type(el) is DryObjectDef:
+            if type(el) is ObjectDef:
                 return el.to_dict(
                     cls_str=cls_str, render_cache=render_cache)
-            elif type(el) is DryObject:
+            elif type(el) is Object:
                 the_def = el.definition()
                 return the_def.to_dict(
                     cls_str=cls_str, render_cache=render_cache)
             elif is_dictlike(el):
                 # May cause a problem if we have a dict version
-                # of a DryObjectDef within another DryObjectDef
+                # of a ObjectDef within another ObjectDef
                 return {k: transform_el(el[k]) for k in el}
             elif is_nonstring_iterable(el):
                 new_list = [transform_el(e) for e in el]
@@ -1124,7 +1124,7 @@ class DryObjectDef(collections.UserDict):
                 del new_kwargs['dry_id']
 
             # Create new definition
-            cat_def = DryObjectDef(
+            cat_def = ObjectDef(
                 self.cls, *new_args, dry_mut=self.dry_mut, **new_kwargs)
 
             # Store the result
@@ -1135,7 +1135,7 @@ class DryObjectDef(collections.UserDict):
 
         else:
             # Remove only the top level dry_id.
-            new_def = DryObjectDef(
+            new_def = ObjectDef(
                 self.cls, *self.args, dry_mut=self.dry_mut, **self.kwargs)
             del new_def.kwargs['dry_id']
             return new_def

@@ -217,23 +217,23 @@ def cleanup_checkpoint_dir(checkpoint_dir):
 
 
 def head(get_result):
-    from dryml import DryObject
-    if issubclass(type(get_result), DryObject):
+    from dryml import Object
+    if issubclass(type(get_result), Object):
         return get_result
     return get_result[0]
 
 
 def tail(get_result):
-    from dryml import DryObject
-    if issubclass(type(get_result), DryObject):
+    from dryml import Object
+    if issubclass(type(get_result), Object):
         return get_result
     return get_result[-1]
 
 
 def count(get_result):
-    from dryml import DryObject
+    from dryml import Object
     from dryml.dry_repo import DryRepoContainer
-    if isinstance(get_result, DryObject):
+    if isinstance(get_result, Object):
         return 1
     elif isinstance(get_result, DryRepoContainer):
         return 1
@@ -299,7 +299,7 @@ def create_object_tree_from_dryfile(input_file, tag, report_class=True):
     content_nodes = {}
     try:
         import dryml
-        with dryml.DryObjectFile(input_file) as dry_f:
+        with dryml.ObjectFile(input_file) as dry_f:
             def_problem = False
             try:
                 obj_def = dry_f.definition()

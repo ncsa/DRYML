@@ -1,4 +1,4 @@
-from dryml.dry_object import DryObject, DryObjectFile, DryObjectDef
+from dryml.object import Object, ObjectFile, ObjectDef
 from dryml.utils import is_nonstring_iterable, is_dictlike, get_class_str, \
     is_supported_scalar_type, is_supported_dictlike, is_supported_listlike, \
     map_dictlike, map_listlike
@@ -11,9 +11,9 @@ def def_to_sel(val, cache=None):
         return def_to_sel(val, cache=cache)
     if is_supported_scalar_type(val):
         return val
-    elif isinstance(val, DryObject):
+    elif isinstance(val, Object):
         return DrySelector.from_def(val.definition(), cache=cache)
-    elif isinstance(val, DryObjectDef):
+    elif isinstance(val, ObjectDef):
         return DrySelector.from_def(val, cache=cache)
     elif is_supported_listlike(val):
         return map_listlike(applier, val)
@@ -29,7 +29,7 @@ class DrySelector(object):
 
     @staticmethod
     def from_def(
-            obj_def: DryObjectDef,
+            obj_def: ObjectDef,
             cache=None):
 
         # Create the cache if needed
@@ -71,16 +71,16 @@ class DrySelector(object):
 
     @staticmethod
     def from_obj(
-            obj: DryObject):
+            obj: Object):
         return DrySelector.from_def(
             obj.definition())
 
     @staticmethod
     def build(
             obj):
-        if isinstance(obj, DryObject):
+        if isinstance(obj, Object):
             return DrySelector.from_obj(obj)
-        elif isinstance(obj, DryObjectDef):
+        elif isinstance(obj, ObjectDef):
             return DrySelector.from_def(obj)
         elif isinstance(obj, Mapping):
             return DrySelector.from_dict(obj)
@@ -115,10 +115,10 @@ class DrySelector(object):
             if not res and verbosity > 1:
                 print(f"callable on {value_object} failed.")
             return res
-        elif isinstance(key_object, DryObjectDef):
+        elif isinstance(key_object, ObjectDef):
             return key_object.equal(
                 value_object, cls_str_compare=cls_str_compare)
-        elif isinstance(value_object, DryObjectDef):
+        elif isinstance(value_object, ObjectDef):
             return value_object.equal(
                 key_object, cls_str_compare=cls_str_compare)
         elif is_dictlike(key_object):
@@ -217,7 +217,7 @@ class DrySelector(object):
 
     def __call__(
             self,
-            obj: Union[DryObject, DryObjectFile, DryObjectDef, Mapping],
+            obj: Union[Object, ObjectFile, ObjectDef, Mapping],
             verbosity=0,
             cls_str_compare=True):
         if verbosity > 0:
@@ -225,9 +225,9 @@ class DrySelector(object):
             if verbosity > 1:
                 print(f"matching obj: {obj}")
         # Get definition
-        if isinstance(obj, DryObjectDef):
+        if isinstance(obj, ObjectDef):
             obj_def = obj
-        elif isinstance(obj, DryObject) or isinstance(obj, DryObjectFile):
+        elif isinstance(obj, Object) or isinstance(obj, ObjectFile):
             obj_def = obj.definition()
         elif isinstance(obj, Mapping):
             raise RuntimeError("Not currently supported")

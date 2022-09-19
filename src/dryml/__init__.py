@@ -1,8 +1,8 @@
-from dryml.dry_config import DryObjectDef, DryMeta, \
+from dryml.config import ObjectDef, Meta, \
     IncompleteDefinitionError, ComputeModeAlreadyActiveError, \
     ComputeModeLoadError, ComputeModeNotActiveError, \
     ComputeModeSaveError, MissingIdError
-from dryml.dry_object import DryObject, DryObjectFile, DryObjectFactory, \
+from dryml.object import Object, ObjectFile, ObjectFactory, \
     load_object, save_object, change_object_cls, \
     ObjectWrapper, CallableWrapper, get_contained_objects, \
     build_obj_tree
@@ -16,11 +16,11 @@ import dryml.context as context
 __version__ = "0.0.0"
 
 __all__ = [
-    DryObject,
-    DryObjectFile,
-    DryObjectDef,
-    DryMeta,
-    DryObjectFactory,
+    Object,
+    ObjectFile,
+    ObjectDef,
+    Meta,
+    ObjectFactory,
     DrySelector,
     DryRepo,
     DryList,

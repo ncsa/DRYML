@@ -62,15 +62,15 @@ def cls_method_compute(fn_name, **ctx_kwargs):
 # Get list of dry objects because we need to find a good
 # context to use.
 def get_dry_objects(*args, **kwargs):
-    from dryml import DryObject
+    from dryml import Object
 
     dry_objects = []
     for arg in args:
-        if isinstance(arg, DryObject):
+        if isinstance(arg, Object):
             dry_objects.append(arg)
     for name in kwargs:
         arg = kwargs[name]
-        if isinstance(arg, DryObject):
+        if isinstance(arg, Object):
             dry_objects.append(arg)
     return dry_objects
 
@@ -175,7 +175,7 @@ class process_executor(object):
 
         ph_data = ctx_send_q.get()
 
-        from dryml.dry_object import reconstruct_args_kwargs
+        from dryml.object import reconstruct_args_kwargs
         if self.verbose:
             print(
                 f"{mp.current_process().pid}: Reconstructing arguments: "
@@ -308,9 +308,9 @@ def compute_context(
                 ctx_ret_q = mp_ctx.Queue()
                 ctx_send_q = mp_ctx.Queue()
 
-                from dryml.dry_object import prep_args_kwargs
+                from dryml.object import prep_args_kwargs
 
-                # Replace DryObjects in args/kwargs with placeholders
+                # Replace Objects in args/kwargs with placeholders
                 # Get placeholder data
                 (args, kwargs), ph_data = prep_args_kwargs(args, kwargs)
 
@@ -404,7 +404,7 @@ def compute_context(
                 for obj in update_objs_list:
                     obj_buf = queue_results.pop(0)
                     obj_buf = io.BytesIO(obj_buf)
-                    from dryml.dry_object import load_object_content
+                    from dryml.object import load_object_content
                     if not load_object_content(obj, obj_buf):
                         load_issue_list.append(obj)
 

@@ -1,10 +1,10 @@
-from dryml import DryObject
+from dryml import Object
 from dryml.models import DryTrainable, DryComponent
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import DryData
 
 
-class ObjectWrapper(DryObject):
+class ObjectWrapper(Object):
     __dry_compute_context__ = 'tf'
 
     def __init__(self, obj_cls, obj_args=(), obj_kwargs={}):

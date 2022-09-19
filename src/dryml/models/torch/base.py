@@ -1,5 +1,5 @@
-from dryml.dry_config import DryMeta
-from dryml.dry_object import DryObject
+from dryml.config import Meta
+from dryml.object import Object
 from dryml.models import DryComponent
 from dryml.models import DryTrainable
 from dryml.models import TrainFunction as BaseTrainFunction
@@ -7,11 +7,11 @@ import zipfile
 import torch
 
 
-class TorchObject(DryObject):
+class TorchObject(Object):
     __dry_compute_context__ = "torch"
 
-    @DryMeta.collect_args
-    @DryMeta.collect_kwargs
+    @Meta.collect_args
+    @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
         if type(cls) is not type:
             raise TypeError("first argument must be a class!")

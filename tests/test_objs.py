@@ -1,7 +1,7 @@
 import dryml
 
 
-class SimpleObject(dryml.DryObject):
+class SimpleObject(dryml.Object):
     def __init__(self, i, **kwargs):
         self.i = i
 

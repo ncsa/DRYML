@@ -9,7 +9,7 @@ import importlib
 test_objs_text = """import dryml
 
 
-class SimpleObject(dryml.DryObject):
+class SimpleObject(dryml.Object):
     def __init__(self, i, **kwargs):
         self.i = i
 
@@ -258,7 +258,7 @@ def test_object_build_from_def_1():
     """
 
     import objects
-    obj = dryml.DryObjectDef(
+    obj = dryml.ObjectDef(
         objects.TestClassB,
         1,
         base_msg='Test').build()
@@ -485,7 +485,7 @@ def test_object_file_hash_1(create_name):
     obj1 = objs.HelloStr(msg="Test")
     assert obj1.save_self(create_name)
 
-    with dryml.DryObjectFile(create_name) as dry_file:
+    with dryml.ObjectFile(create_name) as dry_file:
         assert obj1.definition().get_category_id() == \
             dry_file.definition().get_category_id()
 
@@ -497,7 +497,7 @@ def test_object_file_hash_2(create_name):
     obj1 = objs.HelloStr(msg="Test")
     assert obj1.save_self(create_name)
 
-    with dryml.DryObjectFile(create_name) as dry_file:
+    with dryml.ObjectFile(create_name) as dry_file:
         assert obj1.definition().get_individual_id() == \
             dry_file.definition().get_individual_id()
 
@@ -509,7 +509,7 @@ def test_object_file_hash_3(create_name):
     obj1 = objs.HelloStr(msg="Test")
     assert obj1.save_self(create_name)
 
-    f = dryml.DryObjectFactory(dryml.DryObjectDef(
+    f = dryml.ObjectFactory(dryml.ObjectDef(
         objs.HelloStr, msg="Test"))
 
     assert obj1.definition().get_category_id() == \
@@ -528,8 +528,8 @@ def test_change_obj_cls_1():
 
 def test_object_def_1():
     import objects
-    obj_def = dryml.DryObjectDef(objects.HelloInt, msg=10)
-    other_def = dryml.DryObjectDef(
+    obj_def = dryml.ObjectDef(objects.HelloInt, msg=10)
+    other_def = dryml.ObjectDef(
         objects.HelloInt,
         msg=10)
 
@@ -540,7 +540,7 @@ def test_object_def_1():
 
 def test_object_def_2():
     import objects
-    obj_def = dryml.DryObjectDef(objects.HelloInt, msg=10)
+    obj_def = dryml.ObjectDef(objects.HelloInt, msg=10)
 
     new_obj = obj_def.build()
 
@@ -551,8 +551,8 @@ def test_object_def_2():
 def test_object_fac_1():
     import objects
 
-    obj_fac = dryml.DryObjectFactory(
-        dryml.DryObjectDef(objects.HelloInt, msg=10))
+    obj_fac = dryml.ObjectFactory(
+        dryml.ObjectDef(objects.HelloInt, msg=10))
 
     obj = obj_fac()
 
@@ -673,7 +673,7 @@ def test_object_save_restore_4():
     obj1 = objects.TestClassC(data_obj1, B=data_obj2)
     obj2 = objects.TestClassC(data_obj3, B=data_obj4)
 
-    from dryml.dry_object import DryObjectPlaceholder, \
+    from dryml.object import DryObjectPlaceholder, \
         prep_args_kwargs, reconstruct_args_kwargs
 
     args = (obj1, obj2)
@@ -715,7 +715,7 @@ def test_object_save_restore_5():
         train_fn=train_fn_obj
     )
 
-    from dryml.dry_object import DryObjectPlaceholder, \
+    from dryml.object import DryObjectPlaceholder, \
         prep_args_kwargs, reconstruct_args_kwargs
 
     args = (trainable_obj,)
@@ -743,22 +743,22 @@ def test_nested_def_build_1():
 
     import objects
 
-    data_def1 = dryml.DryObjectDef(objects.TestNest2, A=1)
-    data_def2 = dryml.DryObjectDef(objects.TestNest2, A=2)
+    data_def1 = dryml.ObjectDef(objects.TestNest2, A=1)
+    data_def2 = dryml.ObjectDef(objects.TestNest2, A=2)
 
-    data_def = dryml.DryObjectDef(objects.TestClassC, data_def1, B=data_def1)
+    data_def = dryml.ObjectDef(objects.TestClassC, data_def1, B=data_def1)
     obj = data_def.build()
     assert obj.A.A == 1
     assert obj.B.A == 1
     assert obj.A is obj.B
 
-    data_def = dryml.DryObjectDef(objects.TestClassC, data_def2, B=data_def2)
+    data_def = dryml.ObjectDef(objects.TestClassC, data_def2, B=data_def2)
     obj = data_def.build()
     assert obj.A.A == 2
     assert obj.B.A == 2
     assert obj.A is obj.B
 
-    data_def = dryml.DryObjectDef(objects.TestClassC, data_def1, B=data_def2)
+    data_def = dryml.ObjectDef(objects.TestClassC, data_def1, B=data_def2)
     obj = data_def.build()
     assert obj.A.A == 1
     assert obj.B.A == 2

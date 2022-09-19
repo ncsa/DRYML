@@ -236,11 +236,11 @@ def test_selector_6():
 
     obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
 
-    obj_def = dryml.DryObjectDef(
+    obj_def = dryml.ObjectDef(
         objects.TestNest,
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.HelloTrainableD,
-            A=dryml.DryObjectDef(
+            A=dryml.ObjectDef(
                 objects.TestNest,
                 10)
         )
@@ -264,7 +264,7 @@ def test_selector_7():
 
     real_obj = dryml.data.tf.transforms.FuncXMap.from_function(test_func)
 
-    obj_def = dryml.DryObjectDef(
+    obj_def = dryml.ObjectDef(
         dryml.data.tf.transforms.FuncXMap,
         real_obj.dry_args[0])
 
@@ -282,10 +282,10 @@ def test_selector_8():
     assert not dryml.DrySelector(objects.TestClassA)(parent_obj)
 
     assert dryml.DrySelector.from_def(
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestBase))(parent_obj)
     assert not dryml.DrySelector.from_def(
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestClassA))(parent_obj)
 
 
@@ -297,11 +297,11 @@ def test_selector_9():
     parent_obj = objects.TestNest(objects.TestBase)
 
     assert dryml.DrySelector.from_def(
-       dryml.DryObjectDef(
+       dryml.ObjectDef(
            objects.TestNest,
            objects.TestBase))(parent_obj)
     assert not dryml.DrySelector.from_def(
-       dryml.DryObjectDef(
+       dryml.ObjectDef(
            objects.TestNest,
            objects.TestClassA))(parent_obj)
 
@@ -314,11 +314,11 @@ def test_selector_10():
     parent_obj = objects.TestNest2(A=objects.TestBase)
 
     assert dryml.DrySelector.from_def(
-       dryml.DryObjectDef(
+       dryml.ObjectDef(
            objects.TestNest2,
            A=objects.TestBase))(parent_obj)
     assert not dryml.DrySelector.from_def(
-       dryml.DryObjectDef(
+       dryml.ObjectDef(
            objects.TestNest2,
            A=objects.TestClassA))(parent_obj)
 
@@ -354,15 +354,15 @@ def test_selector_build_5():
 
     obj1 = objects.TestNest2(A=1)
 
-    obj_def = dryml.DryObjectDef(
+    obj_def = dryml.ObjectDef(
         objects.TestNest3,
         obj1,
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest2,
             A=2),
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest,
-            dryml.DryObjectDef(
+            dryml.ObjectDef(
                 objects.TestNest2,
                 A=5,)
             )
@@ -382,15 +382,15 @@ def test_selector_build_6():
 
     obj1 = objects.TestNest2(A=1)
 
-    obj_def = dryml.DryObjectDef(
+    obj_def = dryml.ObjectDef(
         objects.TestNest3,
         obj1,
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest2,
             A=2),
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest,
-            dryml.DryObjectDef(
+            dryml.ObjectDef(
                 objects.TestNest2,
                 A=5,)
             )

@@ -1,9 +1,9 @@
-from dryml.dry_object import DryObject
+from dryml.object import Object
 from dryml.data.dry_data import DryData
 from dryml.context import cls_method_compute
 
 
 @cls_method_compute('eval')
-class DryModel(DryObject):
+class DryModel(Object):
     def eval(self, X: DryData, *args, **kwargs):
         raise NotImplementedError()

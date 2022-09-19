@@ -3,7 +3,7 @@ import zipfile
 import pickle
 
 
-class HelloObject(dryml.DryObject):
+class HelloObject(dryml.Object):
     def __init__(self, **kwargs):
         pass
 
@@ -27,7 +27,7 @@ class HelloInt(HelloObject):
         return f"Hello! {self.int_msg}"
 
 
-class TestBase(dryml.DryObject):
+class TestBase(dryml.Object):
     def __init__(self, *args, base_msg: str = "base", **kwargs):
         self.base_msg = base_msg
 
@@ -68,8 +68,8 @@ class HelloTrainableD(dryml.models.DryTrainable):
 
 
 class HelloTrainableE(dryml.models.DryTrainable):
-    @dryml.DryMeta.collect_args
-    @dryml.DryMeta.collect_kwargs
+    @dryml.Meta.collect_args
+    @dryml.Meta.collect_kwargs
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
@@ -83,19 +83,19 @@ class HelloTrainableE(dryml.models.DryTrainable):
             raise KeyError(f"{key}")
 
 
-class TestNest(dryml.DryObject):
+class TestNest(dryml.Object):
     def __init__(self, A):
         self.A = A
 
 
-class TestNest2(dryml.DryObject):
+class TestNest2(dryml.Object):
     def __init__(self, A=None):
         self.A = A
 
 
-class TestNest3(dryml.DryObject):
-    @dryml.DryMeta.collect_args
-    @dryml.DryMeta.collect_kwargs
+class TestNest3(dryml.Object):
+    @dryml.Meta.collect_args
+    @dryml.Meta.collect_kwargs
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
@@ -109,13 +109,13 @@ class TestNest3(dryml.DryObject):
             raise KeyError()
 
 
-class TestClassC(dryml.DryObject):
+class TestClassC(dryml.Object):
     def __init__(self, A, B=None):
         self.A = A
         self.B = B
 
 
-class TestClassC2(dryml.DryObject):
+class TestClassC2(dryml.Object):
     def __init__(self, C):
         self.C = C
         self.data = 0
@@ -134,7 +134,7 @@ class TestClassC2(dryml.DryObject):
         return True
 
 
-class TestClassD1(dryml.DryObject):
+class TestClassD1(dryml.Object):
     pass
 
 
@@ -143,14 +143,14 @@ class TestClassD2(TestClassD1):
 
 
 class TestClassD3(TestClassD2):
-    @dryml.DryMeta.collect_kwargs
+    @dryml.Meta.collect_kwargs
     def __init__(self, A, **kwargs):
         assert 'dry_id' not in kwargs
         self.A = A
         self.mdl_kwargs = kwargs
 
 
-class TestClassE(dryml.DryObject):
+class TestClassE(dryml.Object):
     def __init__(self):
         pass
 
@@ -168,6 +168,6 @@ class TestClassE(dryml.DryObject):
         return True
 
 
-class TestClassF1(dryml.DryObject):
+class TestClassF1(dryml.Object):
     def __init__(self):
         self.val = None

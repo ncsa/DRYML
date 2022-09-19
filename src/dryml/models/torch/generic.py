@@ -1,5 +1,5 @@
-from dryml.dry_config import DryMeta
-from dryml.dry_object import DryObject
+from dryml.config import Meta
+from dryml.object import Object
 from dryml.data import DryData
 from dryml.models import DryTrainable
 from dryml.models.torch.base import TorchObject
@@ -71,9 +71,9 @@ class Sequential(Model):
         self.mdl.train(True)
 
 
-class TorchOptimizer(DryObject):
-    @DryMeta.collect_args
-    @DryMeta.collect_kwargs
+class TorchOptimizer(Object):
+    @Meta.collect_args
+    @Meta.collect_kwargs
     def __init__(self, cls, model: Model, *args, **kwargs):
         if type(cls) is not type:
             raise TypeError("first argument must be a class!")

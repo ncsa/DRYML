@@ -37,9 +37,9 @@ def test_context_object_compute_check_tf_1():
     num_classes = 5
     num_dims = 10
 
-    model_def = dryml.DryObjectDef(
+    model_def = dryml.ObjectDef(
         dryml.models.tf.keras.Trainable,
-        model=dryml.DryObjectDef(
+        model=dryml.ObjectDef(
             dryml.models.tf.keras.SequentialFunctionalModel,
             input_shape=(num_dims,),
             layer_defs=[
@@ -47,13 +47,13 @@ def test_context_object_compute_check_tf_1():
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': num_classes, 'activation': 'softmax'}),
             ]),
-        optimizer=dryml.DryObjectDef(
+        optimizer=dryml.ObjectDef(
             dryml.models.tf.ObjectWrapper,
             tf.keras.optimizers.Adam),
-        loss=dryml.DryObjectDef(
+        loss=dryml.ObjectDef(
             dryml.models.tf.ObjectWrapper,
             tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.DryObjectDef(
+        train_fn=dryml.ObjectDef(
             dryml.models.tf.keras.BasicTraining,
             epochs=1))
 
@@ -86,9 +86,9 @@ def test_context_object_compute_check_tf_2(create_name):
     num_classes = 5
     num_dims = 10
 
-    model_def = dryml.DryObjectDef(
+    model_def = dryml.ObjectDef(
         dryml.models.tf.keras.Trainable,
-        model=dryml.DryObjectDef(
+        model=dryml.ObjectDef(
             dryml.models.tf.keras.SequentialFunctionalModel,
             input_shape=(num_dims,),
             layer_defs=[
@@ -96,13 +96,13 @@ def test_context_object_compute_check_tf_2(create_name):
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': num_classes, 'activation': 'softmax'}),
             ]),
-        optimizer=dryml.DryObjectDef(
+        optimizer=dryml.ObjectDef(
             dryml.models.tf.ObjectWrapper,
             tf.keras.optimizers.Adam),
-        loss=dryml.DryObjectDef(
+        loss=dryml.ObjectDef(
             dryml.models.tf.ObjectWrapper,
             tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.DryObjectDef(
+        train_fn=dryml.ObjectDef(
             dryml.models.tf.keras.BasicTraining,
             epochs=1))
 

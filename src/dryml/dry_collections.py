@@ -1,15 +1,15 @@
 from collections import UserList, UserDict
-from dryml.dry_object import DryObject, DryObjectDef
-from dryml.dry_config import DryMeta
+from dryml.object import Object, ObjectDef
+from dryml.config import Meta
 from typing import Mapping
 
 
-class DryList(DryObject, UserList):
-    @DryMeta.collect_args
+class DryList(Object, UserList):
+    @Meta.collect_args
     def __init__(self, *args, **kwargs):
         objs = []
         for arg in args:
-            if not isinstance(arg, DryObject):
+            if not isinstance(arg, Object):
                 raise ValueError(
                     "Dry List does not support elements of type"
                     f" {type(arg)}.")
@@ -25,19 +25,19 @@ class DryList(DryObject, UserList):
         dry_args = []
         for obj in self:
             dry_args.append(obj.definition())
-        return DryObjectDef(
+        return ObjectDef(
             type(self),
             *dry_args,
             dry_mut=True,
             **self.dry_kwargs)
 
 
-class DryTuple(DryObject):
-    @DryMeta.collect_args
+class DryTuple(Object):
+    @Meta.collect_args
     def __init__(self, *args, **kwargs):
         objs = []
         for obj in args:
-            if not isinstance(obj, DryObject):
+            if not isinstance(obj, Object):
                 raise ValueError(f"Unsupported element of type: {type(obj)}")
             else:
                 objs.append(obj)
@@ -61,14 +61,14 @@ class DryTuple(DryObject):
             if obj_def.dry_mut:
                 is_mutable = True
             dry_args.append(obj_def)
-        return DryObjectDef(
+        return ObjectDef(
             type(self),
             *dry_args,
             dry_mut=is_mutable,
             **self.dry_kwargs)
 
 
-class DryDict(DryObject, UserDict):
+class DryDict(Object, UserDict):
     def __init__(
             self, in_dict: Mapping, **kwargs):
         for key in in_dict:
@@ -83,7 +83,7 @@ class DryDict(DryObject, UserDict):
         for key in self:
             obj = self[key]
             dry_arg[key] = obj.definition()
-        return DryObjectDef(
+        return ObjectDef(
             type(self),
             dry_arg,
             dry_mut=True,

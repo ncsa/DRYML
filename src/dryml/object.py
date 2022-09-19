@@ -9,7 +9,7 @@ import io
 import zipfile
 import uuid
 from typing import IO, Union, Optional, Type, Callable
-from dryml.dry_config import DryObjectDef, DryMeta, MissingIdError
+from dryml.config import ObjectDef, Meta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var, \
     is_supported_scalar_type, is_supported_listlike, is_supported_dictlike, \
     map_dictlike, map_listlike, get_class_from_str, get_class_str
@@ -30,7 +30,7 @@ def file_resolve(file: str, exact_path: bool = False) -> str:
     return file
 
 
-class DryObjectFile(object):
+class ObjectFile(object):
     contained_dry_file_re = re.compile(r"^dry_objects/([a-f0-9-]*)\.dry$")
 
     # Supports 'save cached' file writing.
@@ -99,7 +99,7 @@ class DryObjectFile(object):
     def int_file_detach(self):
         if not hasattr(self, 'int_file'):
             raise RuntimeError(
-                "DryObjectFile doesnt' have an intermediate file to detach.")
+                "ObjectFile doesnt' have an intermediate file to detach.")
         self.close_int_file = False
         return self.int_file
 
@@ -127,7 +127,7 @@ class DryObjectFile(object):
             if self.close_int_file:
                 self.int_file.close()
 
-    # def update_file(self, obj: DryObject):
+    # def update_file(self, obj: Object):
     #     self.cache_object_data_obj(obj)
 
     def save_meta_data(self):
@@ -151,7 +151,7 @@ class DryObjectFile(object):
             raise e
         return meta_data
 
-    def save_class_def_v1(self, obj_def: DryObjectDef, update: bool = False):
+    def save_class_def_v1(self, obj_def: ObjectDef, update: bool = False):
         # We need to pickle the class definition.
         # By default, error out if class has changed. Check this.
         mod_cls = get_current_cls(obj_def.cls)
@@ -176,7 +176,7 @@ class DryObjectFile(object):
                 cls_def = dill.loads(cls_def_file.read())
         return cls_def
 
-    def save_definition_v1(self, obj_def: DryObjectDef, update: bool = False):
+    def save_definition_v1(self, obj_def: ObjectDef, update: bool = False):
         "Save object def"
         # Save obj def
         self.save_class_def_v1(obj_def, update=update)
@@ -211,7 +211,7 @@ class DryObjectFile(object):
         with self.z_file.open('dry_mut.pkl', mode='r') as mut_file:
             mut = pickle.loads(mut_file.read())
 
-        return DryObjectDef(cls, *args, dry_mut=mut, **kwargs)
+        return ObjectDef(cls, *args, dry_mut=mut, **kwargs)
 
     def definition(self, update: bool = True, reload: bool = False):
         meta_data = self.load_meta_data()
@@ -223,7 +223,7 @@ class DryObjectFile(object):
 
     def load_object_v1(self, update: bool = True,
                        reload: bool = False,
-                       as_cls: Optional[Type] = None) -> DryObject:
+                       as_cls: Optional[Type] = None) -> Object:
         # Load object
         obj_def = self.load_definition_v1(update=update, reload=reload)
         if as_cls is not None:
@@ -239,7 +239,7 @@ class DryObjectFile(object):
         # Build object instance
         return obj
 
-    def load_object_content(self, obj: DryObject) -> bool:
+    def load_object_content(self, obj: Object) -> bool:
         file_def = self.definition()
         obj_def = obj.definition()
         if file_def != obj_def or file_def.dry_id != obj_def.dry_id:
@@ -253,7 +253,7 @@ class DryObjectFile(object):
 
     def load_object(self, update: bool = False,
                     reload: bool = False,
-                    as_cls: Optional[Type] = None) -> DryObject:
+                    as_cls: Optional[Type] = None) -> Object:
         meta_data = self.load_meta_data()
         version = meta_data['version']
         if version == 1:
@@ -262,7 +262,7 @@ class DryObjectFile(object):
         else:
             raise RuntimeError(f"DRY version {version} unknown")
 
-    def save_object_v1(self, obj: DryObject, update: bool = False,
+    def save_object_v1(self, obj: Object, update: bool = False,
                        as_cls: Optional[Type] = None,
                        save_cache=None) -> bool:
 
@@ -314,7 +314,7 @@ class DryObjectFile(object):
         return list(map(
             lambda m: m.groups(1)[0],
             filter(lambda m: m is not None,
-                   map(lambda n: DryObjectFile.contained_dry_file_re.match(n),
+                   map(lambda n: ObjectFile.contained_dry_file_re.match(n),
                        self.z_file.namelist()))))
 
     def get_contained_object_file(self, dry_id):
@@ -326,7 +326,7 @@ def load_object(file: FileType, update: bool = False,
                 exact_path: bool = False,
                 reload: bool = False,
                 as_cls: Optional[Type] = None,
-                repo=None) -> DryObject:
+                repo=None) -> Object:
     """
     A method for loading an object from disk.
     """
@@ -344,7 +344,7 @@ def load_object(file: FileType, update: bool = False,
             reset_repo = True
 
     # We now need the object definition
-    with DryObjectFile(file, exact_path=exact_path) as dry_file:
+    with ObjectFile(file, exact_path=exact_path) as dry_file:
         obj_def = dry_file.definition()
         # Check whether a repo was given in a prior call
         if load_object.load_repo is not None:
@@ -368,7 +368,7 @@ def load_object(file: FileType, update: bool = False,
                 elif reload:
                     cls = get_class_from_str(get_class_str(obj_def.cls))
                 cls_str_compare = True
-                new_def = DryObjectDef(
+                new_def = ObjectDef(
                     cls,
                     *obj_def.args,
                     dry_mut=obj_def.dry_mut,
@@ -390,14 +390,14 @@ def load_object(file: FileType, update: bool = False,
 
 @static_var('load_repo', None)
 def load_object_content(
-        obj: DryObject,
+        obj: Object,
         file: FileType) -> bool:
     """
     A method for loading an object from disk.
     """
 
     # We now need the object definition
-    with DryObjectFile(file) as dry_file:
+    with ObjectFile(file) as dry_file:
         file_def = dry_file.definition()
         obj_def = obj.definition()
         if file_def != obj_def or file_def.dry_id != obj_def.dry_id:
@@ -427,7 +427,7 @@ def load_object_content(
     return True
 
 
-def save_object(obj: DryObject, file: FileType, version: int = 1,
+def save_object(obj: Object, file: FileType, version: int = 1,
                 exact_path: bool = False, update: bool = False,
                 as_cls: Optional[Type] = None,
                 save_cache=None) -> bool:
@@ -436,8 +436,8 @@ def save_object(obj: DryObject, file: FileType, version: int = 1,
     if save_cache is None:
         close_save_cache = True
         save_cache = SaveCache()
-    with DryObjectFile(file, exact_path=exact_path, mode='w',
-                       must_exist=False) as dry_file:
+    with ObjectFile(file, exact_path=exact_path, mode='w',
+                    must_exist=False) as dry_file:
         if version == 1:
             ret_val = dry_file.save_object_v1(
                 obj, update=update, as_cls=as_cls, save_cache=save_cache)
@@ -451,8 +451,8 @@ def save_object(obj: DryObject, file: FileType, version: int = 1,
     return ret_val
 
 
-def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
-                      reload: bool = False) -> DryObject:
+def change_object_cls(obj: Object, cls: Type, update: bool = False,
+                      reload: bool = False) -> Object:
     buffer = io.BytesIO()
     if not save_object(obj, buffer):
         raise RuntimeError("Error saving object!")
@@ -463,7 +463,7 @@ def change_object_cls(obj: DryObject, cls: Type, update: bool = False,
 def obj_to_def(val):
     if is_supported_scalar_type(val):
         return val
-    if isinstance(val, DryObject):
+    if isinstance(val, Object):
         definition = val.definition()
         return definition
     elif is_supported_listlike(val):
@@ -476,8 +476,8 @@ def obj_to_def(val):
             f"{type(val)} encountered!")
 
 
-# Define a base Dry Object
-class DryObject(metaclass=DryMeta):
+# Define a base  Object
+class Object(metaclass=Meta):
     # Only ever set for this class.
     __dry_meta_base__ = True
 
@@ -496,7 +496,7 @@ class DryObject(metaclass=DryMeta):
         new_args = obj_to_def(self.dry_args)
         new_kwargs = obj_to_def(self.dry_kwargs)
 
-        self._definition = DryObjectDef(
+        self._definition = ObjectDef(
             type(self),
             *new_args,
             **new_kwargs)
@@ -570,7 +570,7 @@ class DryObject(metaclass=DryMeta):
         if hasattr(self, '__dry_obj_container_list__') and \
            len(self.__dry_obj_container_list__) > 0:
             for obj in self.__dry_obj_container_list__:
-                label = DryObject.graph_label(
+                label = Object.graph_label(
                     obj, report_class=report_class)
                 root[label] = obj._dry_obj_graph()
         return root
@@ -578,7 +578,7 @@ class DryObject(metaclass=DryMeta):
     def dry_obj_graph(self, report_class=True):
         from asciitree import LeftAligned
         from asciitree.drawing import BoxStyle, BOX_LIGHT
-        label = DryObject.graph_label(
+        label = Object.graph_label(
             self, report_class=report_class)
         tree = {label: self._dry_obj_graph()}
         tr = LeftAligned(
@@ -590,8 +590,8 @@ class DryObject(metaclass=DryMeta):
         print(tr(tree))
 
 
-class DryObjectFactory(object):
-    def __init__(self, obj_def: DryObjectDef, callbacks=[]):
+class ObjectFactory(object):
+    def __init__(self, obj_def: ObjectDef, callbacks=[]):
         if 'dry_id' in obj_def:
             raise ValueError(
                 "An Object factory can't use a definition with a dry_id")
@@ -609,7 +609,7 @@ class DryObjectFactory(object):
         return obj
 
 
-class ObjectWrapper(DryObject):
+class ObjectWrapper(Object):
     """
     An object wrapper for simple python objects
     """
@@ -624,7 +624,7 @@ class ObjectWrapper(DryObject):
         self.obj = cls(*obj_args, **obj_kwargs)
 
 
-class CallableWrapper(DryObject):
+class CallableWrapper(Object):
     """
     A wrapper for a callable object to cement some arguments
     """
@@ -654,7 +654,7 @@ class CallableWrapper(DryObject):
             **{**self.call_kwargs, **kwargs})
 
 
-def get_contained_objects(obj: DryObject) -> [DryObject]:
+def get_contained_objects(obj: Object) -> [Object]:
     contained_objs = set()
     for contained_obj in obj.__dry_obj_container_list__:
         sub_set = get_contained_objects(contained_obj)
@@ -682,8 +682,8 @@ def generate_unique_id():
     return np.random.randint(ii32.min, ii32.max)
 
 
-def create_placeholder(obj: DryObject) -> (DryObjectPlaceholder,
-                                           DryObjectPlaceholderData):
+def create_placeholder(obj: Object) -> (DryObjectPlaceholder,
+                                        DryObjectPlaceholderData):
     ID = generate_unique_id()
     obj_def = obj.definition()
     ph_def = DryObjectPlaceholder(ID, obj_def)
@@ -697,7 +697,7 @@ def create_placeholder(obj: DryObject) -> (DryObjectPlaceholder,
     return (ph_def, ph_data)
 
 
-def rebuild_object(ph_def, ph_data, verbose=False) -> DryObject:
+def rebuild_object(ph_def, ph_data, verbose=False) -> Object:
     if verbose:
         print(f"Rebuilding object {ph_def} with data {ph_data}")
     obj = ph_def.obj_def.build()
@@ -714,7 +714,7 @@ def prep_args_kwargs(args, kwargs):
     for i in range(len(args)):
         arg = args[i]
         assigned = False
-        if issubclass(type(arg), DryObject):
+        if issubclass(type(arg), Object):
             if id(arg) in obj_ph_data_map:
                 new_args.append(obj_ph_map[id(arg)])
             else:
@@ -728,7 +728,7 @@ def prep_args_kwargs(args, kwargs):
 
     for key in kwargs:
         arg = kwargs[key]
-        if issubclass(type(arg), DryObject):
+        if issubclass(type(arg), Object):
             if id(arg) in obj_ph_data_map:
                 args[i] = obj_ph_map[id(arg)]
             else:
@@ -830,7 +830,7 @@ class ObjectTree(ObjectNode):
         apply_bf_imp(func, self, self.children, set())
 
 
-def build_obj_tree_imp(obj: DryObject, node_dict):
+def build_obj_tree_imp(obj: Object, node_dict):
     """
     Returns ObjectNode of passed object.
     """
@@ -856,14 +856,14 @@ def build_obj_tree_imp(obj: DryObject, node_dict):
     return res_node
 
 
-def build_obj_tree(obj_or_list: Union[DryObject, list[DryObject]]):
+def build_obj_tree(obj_or_list: Union[Object, list[Object]]):
     """
     Construct tree
     """
     # We construct depth first.
     node_dict = {}
 
-    if type(obj_or_list) is DryObject:
+    if type(obj_or_list) is Object:
         obj_list = [obj_or_list]
     else:
         obj_list = obj_or_list

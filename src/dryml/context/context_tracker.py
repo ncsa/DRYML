@@ -488,21 +488,21 @@ class ContextContainer(object):
         _context_manager = None
 
     def add_activated_object(self, obj):
-        from dryml.dry_object import DryObject
-        if type(obj) is not DryObject:
-            TypeError("Can only activate DryObjects for computation.")
+        from dryml.object import Object
+        if type(obj) is not Object:
+            TypeError("Can only activate Objects for computation.")
         self.activated_object_map[id(obj)] = obj
 
     def remove_activated_object(self, obj):
-        from dryml.dry_object import DryObject
-        if type(obj) is not DryObject:
-            TypeError("Can only activate DryObjects for computation.")
+        from dryml.object import Object
+        if type(obj) is not Object:
+            TypeError("Can only activate Objects for computation.")
         del self.activated_object_map[id(obj)]
 
     def contains_activated_object(self, obj):
-        from dryml.dry_object import DryObject
-        if type(obj) is not DryObject:
-            TypeError("Can only activate DryObjects for computation.")
+        from dryml.object import Object
+        if type(obj) is not Object:
+            TypeError("Can only activate Objects for computation.")
         if id(obj) in self.activated_object_map:
             return True
         else:
@@ -616,15 +616,15 @@ def get_context_requirements(objs):
     """
     Set a context appropriate for the object or set of objects
     """
-    from dryml import DryObject
+    from dryml import Object
 
-    if issubclass(type(objs), DryObject):
+    if issubclass(type(objs), Object):
         objs = [objs]
 
     if not is_nonstring_iterable(objs):
         raise ValueError(
             "set_appropriate_context only supports single "
-            "DryObjects or an iterable of DryObjects.")
+            "Objects or an iterable of Objects.")
 
     ctx_reqs = {}
 

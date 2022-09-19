@@ -183,7 +183,7 @@ def test_get_api_2():
 def test_get_api_3(create_temp_dir):
     repo = dryml.DryRepo()
 
-    test_obj_def = dryml.DryObjectDef(
+    test_obj_def = dryml.ObjectDef(
         objects.HelloStr,
         msg='test')
 
@@ -203,7 +203,7 @@ def test_get_api_3(create_temp_dir):
 def test_get_api_4(create_temp_dir):
     repo = dryml.DryRepo()
 
-    test_obj_def = dryml.DryObjectDef(
+    test_obj_def = dryml.ObjectDef(
         objects.HelloStr,
         msg='test')
 
@@ -220,9 +220,9 @@ def test_get_api_4(create_temp_dir):
 def test_get_api_5(create_temp_dir):
     repo = dryml.DryRepo()
 
-    test_obj_def = dryml.DryObjectDef(
+    test_obj_def = dryml.ObjectDef(
         objects.TestNest,
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest2,
             A=5)
         )
@@ -560,7 +560,7 @@ def test_object_save_restore_with_repo_1(create_temp_dir):
     # Load the object from the file
     obj2 = obj.definition().build(repo=repo)
 
-    assert dryml.dry_config.build_repo is None
+    assert dryml.config.build_repo is None
 
     assert obj.definition() == obj2.definition()
     assert obj.A is obj.B
@@ -628,17 +628,17 @@ def test_object_save_restore_with_repo_3(create_temp_dir):
     def build_def(repo):
         # Create the data containing objects
         obj_a = dryml.utils.head(repo.get(
-            selector=dryml.DryObjectDef(objects.TestNest, 10)))
+            selector=dryml.ObjectDef(objects.TestNest, 10)))
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             objects.TestNest2,
             A=10)
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             objects.TestNest3,
             model=mdl_def)
 
-        mdl_def = dryml.DryObjectDef(
+        mdl_def = dryml.ObjectDef(
             objects.TestNest3,
             obj_a,
             mdl_def)

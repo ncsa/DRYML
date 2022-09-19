@@ -7,9 +7,9 @@ import objects
 @pytest.mark.usefixtures("create_temp_dir")
 def test_compound_object_save_restore_1(create_temp_dir):
     # First create a definition object
-    obj_def = dryml.DryObjectDef(
+    obj_def = dryml.ObjectDef(
         objects.TestNest,
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest2,
             A=3
         )

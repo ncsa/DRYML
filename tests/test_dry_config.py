@@ -8,7 +8,7 @@ def test_def_1():
     Test conditions under which a definition is concrete
     """
 
-    obj_def = dryml.DryObjectDef(objects.HelloStr)
+    obj_def = dryml.ObjectDef(objects.HelloStr)
 
     assert not obj_def.is_concrete()
 
@@ -80,11 +80,11 @@ def test_def_5():
         objects.TestNest2(
             A=objects.TestNest(5)))
 
-    obj_def_manual = dryml.DryObjectDef(
+    obj_def_manual = dryml.ObjectDef(
         objects.TestNest,
-        dryml.DryObjectDef(
+        dryml.ObjectDef(
             objects.TestNest2,
-            A=dryml.DryObjectDef(
+            A=dryml.ObjectDef(
                 objects.TestNest,
                 5)
             )
