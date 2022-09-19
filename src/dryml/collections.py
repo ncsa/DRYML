@@ -4,14 +4,14 @@ from dryml.config import Meta
 from typing import Mapping
 
 
-class DryList(Object, UserList):
+class List(Object, UserList):
     @Meta.collect_args
     def __init__(self, *args, **kwargs):
         objs = []
         for arg in args:
             if not isinstance(arg, Object):
                 raise ValueError(
-                    "Dry List does not support elements of type"
+                    "List does not support elements of type"
                     f" {type(arg)}.")
             else:
                 objs.append(arg)
@@ -32,7 +32,7 @@ class DryList(Object, UserList):
             **self.dry_kwargs)
 
 
-class DryTuple(Object):
+class Tuple(Object):
     @Meta.collect_args
     def __init__(self, *args, **kwargs):
         objs = []
@@ -68,7 +68,7 @@ class DryTuple(Object):
             **self.dry_kwargs)
 
 
-class DryDict(Object, UserDict):
+class Dict(Object, UserDict):
     def __init__(
             self, in_dict: Mapping, **kwargs):
         for key in in_dict:

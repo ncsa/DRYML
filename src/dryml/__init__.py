@@ -8,7 +8,7 @@ from dryml.object import Object, ObjectFile, ObjectFactory, \
     build_obj_tree
 from dryml.selector import Selector
 from dryml.repo import Repo
-from dryml.dry_collections import DryList, DryTuple, DryDict
+from dryml.collections import List, Tuple, Dict
 from dryml.workshop import Workshop
 from dryml.context import compute_context, compute
 import dryml.context as context
@@ -23,9 +23,9 @@ __all__ = [
     ObjectFactory,
     Selector,
     Repo,
-    DryList,
-    DryTuple,
-    DryDict,
+    List,
+    Tuple,
+    Dict,
     ObjectWrapper,
     CallableWrapper,
     Workshop,

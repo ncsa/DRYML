@@ -1,13 +1,13 @@
 import pytest
 import os
-from dryml import DryList, DryTuple, DryDict, Repo, load_object
+from dryml import List, Tuple, Dict, Repo, load_object
 import objects
 
 
 def test_dry_list_1():
     obj1 = objects.HelloInt(msg=5)
     obj2 = objects.HelloStr(msg="a test")
-    the_list = DryList(obj1, obj2)
+    the_list = List(obj1, obj2)
 
     new_list = the_list.definition().build()
 
@@ -32,7 +32,7 @@ def test_dry_list_2():
     repo.add_object(obj2)
 
     # Create a list object
-    the_list = DryList(obj1, obj2)
+    the_list = List(obj1, obj2)
 
     # Create a new list object from a definition, but use a repo
     new_list = the_list.definition().build(repo=repo)
@@ -59,7 +59,7 @@ def test_dry_list_3():
     repo.add_object(obj2)
 
     # Create a list object
-    the_list = DryList(obj1, obj2)
+    the_list = List(obj1, obj2)
 
     # Add that to the repo
     repo.add_object(the_list)
@@ -85,7 +85,7 @@ def test_dry_list_4(create_temp_dir):
     obj2.save_self(os.path.join(create_temp_dir, 'obj2.dry'))
 
     # Create a list object
-    the_list = DryList(obj1, obj2)
+    the_list = List(obj1, obj2)
 
     # Save the list object
     the_list.save_self(os.path.join(create_temp_dir, 'obj_list.dry'))
@@ -114,7 +114,7 @@ def test_dry_list_5(create_temp_dir):
     repo.add_object(obj2)
 
     # Create a list object
-    the_list = DryList(obj1, obj2)
+    the_list = List(obj1, obj2)
 
     # Add the list to the repo
     repo.add_object(the_list, filepath="obj_list.dry")
@@ -134,8 +134,8 @@ def test_dry_list_6(create_temp_dir):
     obj1 = objects.HelloInt(msg=5)
     obj2 = objects.HelloStr(msg='a test')
 
-    list_1 = DryList(obj1)
-    list_2 = DryList(obj2, list_1)
+    list_1 = List(obj1)
+    list_2 = List(obj2, list_1)
 
     list_2.save_self(os.path.join(create_temp_dir, 'list.dry'))
 
@@ -158,13 +158,13 @@ def test_dry_list_7(create_temp_dir):
     repo.add_object(obj2)
 
     # Create lists
-    list_1 = DryList(obj1)
+    list_1 = List(obj1)
 
     # Add list to repo
     repo.add_object(list_1)
 
     # Create second list, and save it
-    list_2 = DryList(obj2, list_1)
+    list_2 = List(obj2, list_1)
     list_2.save_self(os.path.join(create_temp_dir, 'list.dry'))
 
     loaded_list = load_object(os.path.join(create_temp_dir, 'list.dry'),
@@ -179,7 +179,7 @@ def test_dry_list_7(create_temp_dir):
 def test_dry_tuple_1():
     obj1 = objects.HelloInt(msg=5)
     obj2 = objects.HelloStr(msg="a test")
-    the_tuple = DryTuple(obj1, obj2)
+    the_tuple = Tuple(obj1, obj2)
 
     new_tuple = the_tuple.definition().build()
     assert new_tuple[0].definition() == obj1.definition()
@@ -204,13 +204,13 @@ def test_dry_tuple_2(create_temp_dir):
     repo.add_object(obj2)
 
     # Create lists
-    tuple_1 = DryTuple(obj1)
+    tuple_1 = Tuple(obj1)
 
     # Add list to repo
     repo.add_object(tuple_1)
 
     # Create second list, and save it
-    tuple_2 = DryTuple(obj2, tuple_1)
+    tuple_2 = Tuple(obj2, tuple_1)
     tuple_2.save_self(os.path.join(create_temp_dir, 'tuple.dry'))
 
     new_tuple = tuple_2.definition().build(repo=repo)
@@ -235,13 +235,13 @@ def test_dry_tuple_3(create_temp_dir):
     repo.add_object(obj2)
 
     # Create lists
-    tuple_1 = DryTuple(obj1)
+    tuple_1 = Tuple(obj1)
 
     # Add list to repo
     repo.add_object(tuple_1)
 
     # Create second list, and save it
-    tuple_2 = DryTuple(obj2, tuple_1)
+    tuple_2 = Tuple(obj2, tuple_1)
     tuple_2.save_self(os.path.join(create_temp_dir, 'tuple.dry'))
 
     loaded_tuple = load_object(os.path.join(create_temp_dir, 'tuple.dry'),
@@ -258,7 +258,7 @@ def test_dry_tuple_4():
     obj2 = objects.TestNest2(A=obj1)
     obj3 = objects.HelloInt(msg=10)
     obj4 = objects.TestNest2(A=obj3)
-    tuple_1 = DryTuple(obj2, obj4)
+    tuple_1 = Tuple(obj2, obj4)
     tuple_def = tuple_1.definition()
     tuple_2 = tuple_def.build()
     assert tuple_1[0].A.int_msg == tuple_2[0].A.int_msg
@@ -268,7 +268,7 @@ def test_dry_tuple_4():
 def test_dry_dict_1():
     obj1 = objects.HelloInt(msg=5)
     obj2 = objects.HelloStr(msg="a test")
-    the_dict = DryDict({'a': obj1, 2: obj2})
+    the_dict = Dict({'a': obj1, 2: obj2})
 
     # Assert storage works properly
     assert the_dict['a'] is obj1
@@ -298,13 +298,13 @@ def test_dry_dict_2(create_temp_dir):
     repo.add_object(obj2)
 
     # Create dicts
-    dict_1 = DryDict({'a': obj1})
+    dict_1 = Dict({'a': obj1})
 
     # Add list to repo
     repo.add_object(dict_1)
 
     # Create second list, and save it
-    dict_2 = DryDict({'b': obj2, 1.0: dict_1})
+    dict_2 = Dict({'b': obj2, 1.0: dict_1})
     dict_2.save_self(os.path.join(create_temp_dir, 'dict.dry'))
 
     new_dict = dict_2.definition().build(repo=repo)
@@ -329,13 +329,13 @@ def test_dry_dict_3(create_temp_dir):
     repo.add_object(obj2)
 
     # Create lists
-    dict_1 = DryDict({'a': obj1})
+    dict_1 = Dict({'a': obj1})
 
     # Add list to repo
     repo.add_object(dict_1)
 
     # Create second list, and save it
-    dict_2 = DryDict({'b': obj2, 2.0: dict_1})
+    dict_2 = Dict({'b': obj2, 2.0: dict_1})
     dict_2.save_self(os.path.join(create_temp_dir, 'dict.dry'))
 
     loaded_dict = load_object(os.path.join(create_temp_dir, 'dict.dry'),

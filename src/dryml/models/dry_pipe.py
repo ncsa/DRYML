@@ -1,9 +1,9 @@
 from dryml.data.dry_data import DryData
 from dryml.models.dry_trainable import DryTrainable
-from dryml.dry_collections import DryTuple
+from dryml.collections import Tuple
 
 
-class DryPipe(DryTrainable, DryTuple):
+class DryPipe(DryTrainable, Tuple):
     """A Sequential processing pipeline modelled after sklearn pipe"""
     def __init__(self, *args, **kwargs):
         # May need to test that elements of the pipes are trainable too
