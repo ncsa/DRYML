@@ -1,11 +1,11 @@
-from dryml.data import DryData, \
+from dryml.data import Dataset, \
     NumpyDataset, util
 from typing import Callable
 import tensorflow as tf
 import numpy as np
 
 
-class TFDataset(DryData):
+class TFDataset(Dataset):
     def __init__(
             self, in_ds: tf.data.Dataset, indexed=False,
             supervised=False, batch_size=None, size=None):
@@ -17,7 +17,7 @@ class TFDataset(DryData):
             size = np.nan
         self.size = size
 
-    def as_indexed(self, start=0) -> DryData:
+    def as_indexed(self, start=0) -> Dataset:
         """
         If not already indexed, return a version of this dataset
         which is indexed.
@@ -41,7 +41,7 @@ class TFDataset(DryData):
         """
         return self.ds
 
-    def batch(self, batch_size=32, drop_remainder=True) -> DryData:
+    def batch(self, batch_size=32, drop_remainder=True) -> Dataset:
         """
         Batch this data
         """
@@ -59,7 +59,7 @@ class TFDataset(DryData):
                 supervised=self.supervised,
                 batch_size=batch_size)
 
-    def unbatch(self) -> DryData:
+    def unbatch(self) -> Dataset:
         """
         Unbatch this data
         """
@@ -71,9 +71,9 @@ class TFDataset(DryData):
                 indexed=self.indexed,
                 supervised=self.supervised)
 
-    def map(self, func: Callable = None) -> DryData:
+    def map(self, func: Callable = None) -> Dataset:
         """
-        Apply a function to the X component of DryData
+        Apply a function to the X component of Dataset
         """
 
         return TFDataset(

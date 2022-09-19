@@ -1,4 +1,4 @@
-from dryml.data import DryData, \
+from dryml.data import Dataset, \
     NumpyDataset, util
 from typing import Callable
 import torch
@@ -15,7 +15,7 @@ class TorchIterableDatasetWrapper(torch.utils.data.IterableDataset):
         return iter(self.iterable_gen())
 
 
-class TorchDataset(DryData):
+class TorchDataset(Dataset):
     def __init__(
             self, in_ds: torch.utils.data.Dataset, indexed=False,
             supervised=False, batch_size=None, size=None):
@@ -28,7 +28,7 @@ class TorchDataset(DryData):
             size = np.nan
         self.size = size
 
-    def as_indexed(self, start=0) -> DryData:
+    def as_indexed(self, start=0) -> Dataset:
         """
         If not already indexed, return a version of this dataset
         which is indexed.
@@ -91,7 +91,7 @@ class TorchDataset(DryData):
         """
         return self.data_gen()
 
-    def batch(self, batch_size=32, drop_remainder=True) -> DryData:
+    def batch(self, batch_size=32, drop_remainder=True) -> Dataset:
         """
         Batch this data
         """
@@ -115,7 +115,7 @@ class TorchDataset(DryData):
                 batch_size=batch_size,
                 size=self.size)
 
-    def unbatch(self) -> DryData:
+    def unbatch(self) -> Dataset:
         """
         Unbatch this data
         """

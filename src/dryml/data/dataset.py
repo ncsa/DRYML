@@ -11,9 +11,9 @@ class NotSupervisedError():
     pass
 
 
-class DryData(object):
+class Dataset(object):
     """
-    A Simple wrapper class to house Dry Level data operations
+    A Simple wrapper class to house data operations
     """
 
     def __init__(self, indexed=False, supervised=False,
@@ -38,7 +38,7 @@ class DryData(object):
 
         return self.map(lambda t: t[0])
 
-    def as_indexed(self, start=0) -> DryData:
+    def as_indexed(self, start=0) -> Dataset:
         """
         If not already indexed, return a version of this dataset
         which is indexed.
@@ -61,7 +61,7 @@ class DryData(object):
         """
         return self._supervised
 
-    def as_not_supervised(self) -> DryData:
+    def as_not_supervised(self) -> Dataset:
         """
         Strip supervised targets
         """
@@ -74,7 +74,7 @@ class DryData(object):
             else:
                 return self.map(lambda t: t[0])
 
-    def intersect(self) -> DryData:
+    def intersect(self) -> Dataset:
         """
         Intersect this dataset with another
         """
@@ -111,34 +111,34 @@ class DryData(object):
 
         return self._batch_size
 
-    def batch(self, batch_size=32) -> DryData:
+    def batch(self, batch_size=32) -> Dataset:
         """
         Batch this data
         """
         raise NotImplementedError()
 
-    def unbatch(self) -> DryData:
+    def unbatch(self) -> Dataset:
         """
         Unbatch this data
         """
         raise NotImplementedError()
 
-    def map(self, func: Callable = None) -> DryData:
+    def map(self, func: Callable = None) -> Dataset:
         """
-        Apply a function to the data of DryData
+        Apply a function to the data of Dataset
         """
         raise NotImplementedError()
 
-    def map_el(self, func: Callable = None) -> DryData:
+    def map_el(self, func: Callable = None) -> Dataset:
         """
-        Apply a function to every element in DryData, even nesting in
+        Apply a function to every element in Dataset, even nesting in
         """
 
         return self.map(nestize(func))
 
-    def apply_X(self, func: Callable = None) -> DryData:
+    def apply_X(self, func: Callable = None) -> Dataset:
         """
-        Apply a function to the X component of DryData
+        Apply a function to the X component of Dataset
         """
 
         if self.indexed:
@@ -152,9 +152,9 @@ class DryData(object):
             else:
                 return self.map(lambda x: func(x))
 
-    def apply_Y(self, func=None) -> DryData:
+    def apply_Y(self, func=None) -> Dataset:
         """
-        Apply a function to the Y component of DryData
+        Apply a function to the Y component of Dataset
         """
 
         if not self.supervised:
@@ -167,7 +167,7 @@ class DryData(object):
         else:
             return self.map(lambda x, y: (x, func(y)))
 
-    def apply(self, func=None) -> DryData:
+    def apply(self, func=None) -> Dataset:
         """
         Apply a function to (X, Y)
         """

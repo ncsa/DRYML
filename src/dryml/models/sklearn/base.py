@@ -4,7 +4,7 @@ import numpy as np
 from dryml.config import Meta
 from dryml.models import DryComponent, DryTrainable
 from dryml.models import TrainFunction as BaseTrainFunction
-from dryml.data import DryData
+from dryml.data import Dataset
 
 
 class Model(DryComponent):
@@ -109,7 +109,7 @@ class Trainable(DryTrainable):
             raise ValueError("Must give a train_fn object")
         self.train_fn = train_fn
 
-    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
+    def eval(self, data: Dataset, *args, eval_batch_size=32, **kwargs):
         if data.batched:
             # We can execute the method directly on the data
             return data.numpy().apply_X(

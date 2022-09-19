@@ -1,6 +1,6 @@
 from dryml.config import Meta
 from dryml.models import DryTrainable
-from dryml.data import DryData
+from dryml.data import Dataset
 from dryml.data.torch import TorchDataset
 
 
@@ -12,7 +12,7 @@ class TorchDevice(DryTrainable):
     def train(self, *args, train_spec=None, **kwargs):
         pass
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         if type(data) is not TorchDataset:
             raise TypeError("This trainable can only accept torch datasets.")
 
@@ -41,5 +41,5 @@ class TorchActivation(DryTrainable):
         del self.act
         self.act = None
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         return data.apply_X(lambda X: self.act.forward(X))

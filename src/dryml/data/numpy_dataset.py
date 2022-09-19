@@ -1,4 +1,4 @@
-from dryml.data.dry_data import DryData
+from dryml.data.dataset import Dataset
 from dryml.data.util import nested_batcher, nested_unbatcher, \
     nested_flatten
 from dryml.utils import is_iterator
@@ -7,7 +7,7 @@ import numpy as np
 from typing import Callable
 
 
-class NumpyDataset(DryData):
+class NumpyDataset(Dataset):
     """
     A Numpy based dataset based on a list of numpy elements
     """
@@ -93,7 +93,7 @@ class NumpyDataset(DryData):
                 else:
                     self.size = size
 
-    def as_indexed(self, start=0) -> DryData:
+    def as_indexed(self, start=0) -> Dataset:
         """
         If not already indexed, return a version of this dataset
         which is indexed.
@@ -154,7 +154,7 @@ class NumpyDataset(DryData):
         """
         return self.data_gen()
 
-    def batch(self, batch_size=32, drop_remainder=True) -> DryData:
+    def batch(self, batch_size=32, drop_remainder=True) -> Dataset:
         """
         Batch this data
         """
@@ -175,7 +175,7 @@ class NumpyDataset(DryData):
                 batch_size=batch_size,
                 size=self.size)
 
-    def unbatch(self) -> DryData:
+    def unbatch(self) -> Dataset:
         """
         Unbatch this data
         """
@@ -188,7 +188,7 @@ class NumpyDataset(DryData):
                 supervised=self.supervised,
                 size=self.size)
 
-    def map(self, func: Callable = None) -> DryData:
+    def map(self, func: Callable = None) -> Dataset:
         """
         Map a function across all elements of a dataset
         """

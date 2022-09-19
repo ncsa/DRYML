@@ -1,5 +1,5 @@
 from dryml.models import DryTrainable
-from dryml.data.dry_data import DryData
+from dryml.data.dataset import Dataset
 import tensorflow as tf
 import inspect
 
@@ -63,7 +63,7 @@ class FuncXMap(DryTrainable):
         # We can't train a plain function
         pass
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         return data.tf().apply_X(func=self.func)
 
 
@@ -97,7 +97,7 @@ class FuncYMap(DryTrainable):
         # We can't train a plain function
         pass
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         return data.tf().apply_Y(func=self.func)
 
 
@@ -131,7 +131,7 @@ class FuncMap(DryTrainable):
         # We can't train a plain function
         pass
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         return data.tf().apply(func=self.func)
 
 
@@ -142,7 +142,7 @@ class BestCat(DryTrainable):
     def train(self, *args, train_spec=None, **kwargs):
         pass
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         if not data.batched:
             data = data.batch()
         return data.tf().apply_X(
@@ -160,7 +160,7 @@ class Flatten(DryTrainable):
     def train(self, *args, train_spec=None, **kwargs):
         pass
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         if not data.batched:
             data = data.batch()
         return data.tf().apply_X(

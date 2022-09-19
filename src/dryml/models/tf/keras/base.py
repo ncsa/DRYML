@@ -2,7 +2,7 @@ import tensorflow as tf
 import numpy as np
 from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
     adjust_class_module
-from dryml.data import DryData
+from dryml.data import Dataset
 from dryml.data.tf import TFDataset
 from dryml.models.dry_trainable import DryTrainable
 from dryml.models.tf.base import Model as TFModel
@@ -307,7 +307,7 @@ class BasicTraining(TrainFunction):
         self.num_total = num_total
 
     def __call__(
-            self, trainable, data: DryData, train_spec=None,
+            self, trainable, data: Dataset, train_spec=None,
             train_callbacks=[]):
 
         # Pop the epoch to resume from

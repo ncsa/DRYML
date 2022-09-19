@@ -1,4 +1,4 @@
-from dryml.data.dry_data import DryData
+from dryml.data.dataset import Dataset
 from dryml.models.dry_trainable import DryTrainable
 from dryml.collections import Tuple
 
@@ -52,7 +52,7 @@ class DryPipe(DryTrainable, Tuple):
         # Call DryTrainable Train
         super().train(data, *args, **kwargs)
 
-    def eval(self, X: DryData, *args, **kwargs):
+    def eval(self, X: Dataset, *args, **kwargs):
         last_val = X
         for step in self:
             last_val = step.eval(last_val, *args, **kwargs)

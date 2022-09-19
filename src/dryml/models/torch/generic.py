@@ -1,6 +1,6 @@
 from dryml.config import Meta
 from dryml.object import Object
-from dryml.data import DryData
+from dryml.data import Dataset
 from dryml.models import DryTrainable
 from dryml.models.torch.base import TorchObject
 from dryml.models.torch.base import Model as BaseModel
@@ -150,7 +150,7 @@ class Trainable(BaseTrainable):
     def prep_eval(self):
         self.model.prep_eval()
 
-    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
+    def eval(self, data: Dataset, *args, eval_batch_size=32, **kwargs):
         # Move variables to same device as model
         devs = context().get_torch_devices()
         if data.batched:
@@ -181,7 +181,7 @@ class BasicTraining(TrainFunction):
         self.epochs = epochs
 
     def __call__(
-            self, trainable: Model, data: DryData, train_spec=None,
+            self, trainable: Model, data: Dataset, train_spec=None,
             train_callbacks=[]):
 
         # Pop the epoch to resume from

@@ -1,5 +1,5 @@
 from dryml.models import DryTrainable
-from dryml.data.dry_data import DryData
+from dryml.data.dataset import Dataset
 from dryml.data.util import nestize
 from dryml.data.numpy_dataset import NumpyDataset
 import numpy as np
@@ -16,7 +16,7 @@ class StaticTransform(DryTrainable):
     def train(self, *args, train_spec=None, **kwargs):
         pass
 
-    def applier(self, data: DryData, func: Callable):
+    def applier(self, data: Dataset, func: Callable):
         if self.mode == 'all':
             return data.apply(func)
         elif self.mode == 'X':
@@ -29,7 +29,7 @@ class StaticTransform(DryTrainable):
     def numpy_eval(self, data: NumpyDataset):
         raise NotImplementedError()
 
-    def eval(self, data: DryData, *args, **kwargs):
+    def eval(self, data: Dataset, *args, **kwargs):
         # Special case for Tensorflow datasets
         try:
             import dryml.data.tf

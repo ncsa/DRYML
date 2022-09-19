@@ -1,7 +1,7 @@
 from dryml import Object
 from dryml.models import DryTrainable, DryComponent
 from dryml.models import TrainFunction as BaseTrainFunction
-from dryml.data import DryData
+from dryml.data import Dataset
 
 
 class ObjectWrapper(Object):
@@ -32,7 +32,7 @@ class Model(DryComponent):
 class Trainable(DryTrainable):
     __dry_compute_context__ = 'tf'
 
-    def eval(self, data: DryData, *args, eval_batch_size=32, **kwargs):
+    def eval(self, data: Dataset, *args, eval_batch_size=32, **kwargs):
         def eval_func(X):
             return self.model(X, *args, **kwargs)
         if data.batched:
