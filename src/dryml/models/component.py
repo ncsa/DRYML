@@ -3,7 +3,7 @@ from dryml.context import cls_method_compute
 
 
 @cls_method_compute('__call__')
-class DryComponent(Object):
+class Component(Object):
     """
     A Type for an ML component
     """
@@ -12,7 +12,7 @@ class DryComponent(Object):
         raise NotImplementedError()
 
 
-class TrainFunction(DryComponent):
+class TrainFunction(Component):
     def __init__(self):
         self.train_args = ()
         self.train_kwargs = {}

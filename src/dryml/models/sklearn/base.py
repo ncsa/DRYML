@@ -2,12 +2,12 @@ import pickle
 import zipfile
 import numpy as np
 from dryml.config import Meta
-from dryml.models import DryComponent, Trainable
+from dryml.models import Component, Trainable
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
 
 
-class Model(DryComponent):
+class Model(Component):
     @Meta.collect_kwargs
     def __init__(self, cls, **kwargs):
         # It is subclass's responsibility to fill this

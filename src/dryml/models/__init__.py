@@ -1,5 +1,5 @@
 from dryml.models.trainable import Trainable
-from dryml.models.dry_component import DryComponent, \
+from dryml.models.component import Component, \
     TrainFunction
 from dryml.models.model import Model
 from dryml.models.pipe import Pipe
@@ -8,7 +8,7 @@ import dryml.models.utils as utils
 
 __all__ = [
     Trainable,
-    DryComponent,
+    Component,
     TrainFunction,
     Model,
     Pipe,

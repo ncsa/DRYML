@@ -1,11 +1,11 @@
 from dryml.config import Meta
-from dryml.models.dry_component import DryComponent
+from dryml.models.component import Component
 import xgboost
 import tempfile
 import zipfile
 
 
-class Model(DryComponent):
+class Model(Component):
     @Meta.collect_kwargs
     def __init__(self, **kwargs):
         # It is subclass's responsibility to fill this

@@ -1,5 +1,5 @@
 from dryml import Object
-from dryml.models import Trainable, DryComponent
+from dryml.models import Trainable, Component
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
 
@@ -25,7 +25,7 @@ class TrainFunction(BaseTrainFunction):
     __dry_compute_context__ = 'tf'
 
 
-class Model(DryComponent):
+class Model(Component):
     __dry_compute_context__ = 'tf'
 
 

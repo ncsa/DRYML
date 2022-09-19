@@ -1,6 +1,6 @@
 from dryml.config import Meta
 from dryml.object import Object
-from dryml.models import DryComponent
+from dryml.models import Component
 from dryml.models import Trainable
 from dryml.models import TrainFunction as BaseTrainFunction
 import zipfile
@@ -48,7 +48,7 @@ class TrainFunction(BaseTrainFunction):
     __dry_compute_context__ = 'torch'
 
 
-class Model(DryComponent):
+class Model(Component):
     __dry_compute_context__ = 'torch'
 
     def prep_eval(self):
