@@ -1,11 +1,11 @@
-from dryml.dry_repo import DryRepo
+from dryml.repo import Repo
 from dryml.models.dry_trainable import DryTrainable
 
 
 class Workshop(object):
     def __init__(self, *args, work_dir=None, create_work_dir=True, **kwargs):
         super().__init__(**kwargs)
-        self.repo = DryRepo(directory=work_dir, create=create_work_dir)
+        self.repo = Repo(directory=work_dir, create=create_work_dir)
 
     def data_prep(self):
         raise RuntimeError("Not implemented for base workshop")

@@ -19,7 +19,7 @@ def test_compound_object_save_restore_1(create_temp_dir):
     obj = obj_def.build()
 
     # Create object repo
-    repo = dryml.DryRepo(directory=create_temp_dir)
+    repo = dryml.Repo(directory=create_temp_dir)
 
     # Add object to the repo
     repo.add_object(obj)
@@ -34,7 +34,7 @@ def test_compound_object_save_restore_1(create_temp_dir):
     del repo
 
     # Recreate repo object
-    repo = dryml.DryRepo(directory=create_temp_dir)
+    repo = dryml.Repo(directory=create_temp_dir)
 
     # Check there are still two objects
     assert len(repo) == 2

@@ -7,7 +7,7 @@ from dryml.object import Object, ObjectFile, ObjectFactory, \
     ObjectWrapper, CallableWrapper, get_contained_objects, \
     build_obj_tree
 from dryml.selector import Selector
-from dryml.dry_repo import DryRepo
+from dryml.repo import Repo
 from dryml.dry_collections import DryList, DryTuple, DryDict
 from dryml.workshop import Workshop
 from dryml.context import compute_context, compute
@@ -22,7 +22,7 @@ __all__ = [
     Meta,
     ObjectFactory,
     Selector,
-    DryRepo,
+    Repo,
     DryList,
     DryTuple,
     DryDict,

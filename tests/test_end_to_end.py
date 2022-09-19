@@ -382,7 +382,7 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
     def train_method(train_data, test_data, model_def, work_dir):
         # Create repo
         import dryml
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Create datasets
         train_ds = dryml.data.NumpyDataset(
@@ -408,7 +408,7 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
     def test_method(test_data, model_def, work_dir):
         import dryml
         # Create repo
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Fetch model based on definition
         model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
@@ -446,7 +446,7 @@ def test_train_supervised_1_ray(create_temp_dir, model_gen):
     def train_method(train_data, test_data, model_def, work_dir):
         # Create repo
         import dryml
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Create datasets
         train_ds = dryml.data.NumpyDataset(
@@ -474,7 +474,7 @@ def test_train_supervised_1_ray(create_temp_dir, model_gen):
     def test_method(test_data, model_def, work_dir):
         import dryml
         # Create repo
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Fetch model based on definition
         model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
@@ -601,7 +601,7 @@ def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
         ctx_update_objs=True)
     def train_method(train_data, test_data, model_def, work_dir):
         # Create repo
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Build model from definition
         model = model_def.build(repo=repo)
@@ -626,7 +626,7 @@ def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
         ctx_use_existing_context=False)
     def test_method(test_data, model_def, work_dir):
         # Create repo
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Get model from the repo
         model = repo.get(model_def, build_missing_def=False)
@@ -669,7 +669,7 @@ def test_train_supervised_2_ray(create_temp_dir, model_gen):
     @ray.remote(num_cpus=1, num_gpus=0, max_calls=1)
     def train_method(train_data, test_data, model_def, work_dir):
         # Create repo
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Build model from definition
         model = model_def.build(repo=repo)
@@ -695,7 +695,7 @@ def test_train_supervised_2_ray(create_temp_dir, model_gen):
     @ray.remote(num_cpus=1, num_gpus=0, max_calls=0)
     def test_method(test_data, model_def, work_dir):
         # Create repo
-        repo = dryml.DryRepo(directory=work_dir)
+        repo = dryml.Repo(directory=work_dir)
 
         # Get model from the repo
         model = repo.get(model_def, build_missing_def=False)

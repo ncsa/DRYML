@@ -1,6 +1,6 @@
 import pytest
 import os
-from dryml import DryList, DryTuple, DryDict, DryRepo, load_object
+from dryml import DryList, DryTuple, DryDict, Repo, load_object
 import objects
 
 
@@ -21,7 +21,7 @@ def test_dry_list_1():
 
 def test_dry_list_2():
     # Create a repo
-    repo = DryRepo()
+    repo = Repo()
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -48,7 +48,7 @@ def test_dry_list_2():
 
 def test_dry_list_3():
     # Create a repo
-    repo = DryRepo()
+    repo = Repo()
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -103,7 +103,7 @@ def test_dry_list_4(create_temp_dir):
 @pytest.mark.usefixtures("create_temp_dir")
 def test_dry_list_5(create_temp_dir):
     # Create repo
-    repo = DryRepo(create_temp_dir)
+    repo = Repo(create_temp_dir)
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -147,7 +147,7 @@ def test_dry_list_6(create_temp_dir):
 @pytest.mark.usefixtures("create_temp_dir")
 def test_dry_list_7(create_temp_dir):
     # Create Repo
-    repo = DryRepo(create_temp_dir)
+    repo = Repo(create_temp_dir)
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -193,7 +193,7 @@ def test_dry_tuple_1():
 @pytest.mark.usefixtures("create_temp_dir")
 def test_dry_tuple_2(create_temp_dir):
     # Create Repo
-    repo = DryRepo(create_temp_dir)
+    repo = Repo(create_temp_dir)
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -224,7 +224,7 @@ def test_dry_tuple_2(create_temp_dir):
 @pytest.mark.usefixtures("create_temp_dir")
 def test_dry_tuple_3(create_temp_dir):
     # Create Repo
-    repo = DryRepo(create_temp_dir)
+    repo = Repo(create_temp_dir)
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -287,7 +287,7 @@ def test_dry_dict_1():
 @pytest.mark.usefixtures("create_temp_dir")
 def test_dry_dict_2(create_temp_dir):
     # Create Repo
-    repo = DryRepo(create_temp_dir)
+    repo = Repo(create_temp_dir)
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)
@@ -318,7 +318,7 @@ def test_dry_dict_2(create_temp_dir):
 @pytest.mark.usefixtures("create_temp_dir")
 def test_dry_dict_3(create_temp_dir):
     # Create Repo
-    repo = DryRepo(create_temp_dir)
+    repo = Repo(create_temp_dir)
 
     # Create objects
     obj1 = objects.HelloInt(msg=5)

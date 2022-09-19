@@ -12,17 +12,17 @@ from pprint import pprint
 RepoKey = Union[Object, ObjectDef, dict, ObjectFile, Selector, str]
 
 
-class DryRepoContainer(object):
+class RepoContainer(object):
     @staticmethod
     def from_filepath(filename: str, directory: Optional[str] = None):
-        new_container = DryRepoContainer(directory=directory)
+        new_container = RepoContainer(directory=directory)
         new_container._filename = filename
         return new_container
 
     @staticmethod
     def from_object(obj: Object, filename: Optional[str] = None,
                     directory: Optional[str] = None):
-        new_container = DryRepoContainer(directory=directory)
+        new_container = RepoContainer(directory=directory)
         new_container._obj = obj
         if filename is not None:
             new_container._filename = filename
@@ -50,7 +50,7 @@ class DryRepoContainer(object):
 
         def_part = str(self.definition())
 
-        return f"DryRepoContainer: {obj_part} {def_part} at {path_part}"
+        return f"RepoContainer: {obj_part} {def_part} at {path_part}"
 
     @property
     def filepath(self):
@@ -160,7 +160,7 @@ class DryRepoContainer(object):
 
 
 # This type will act as a fascade for the various Object* types.
-class DryRepo(object):
+class Repo(object):
     def __init__(self, directory: Optional[str] = None, create: bool = False,
                  load_objects: bool = True, **kwargs):
         super().__init__(**kwargs)
@@ -205,7 +205,7 @@ class DryRepo(object):
     def __len__(self):
         return len(self.obj_dict)
 
-    def add_obj_cont(self, cont: DryRepoContainer):
+    def add_obj_cont(self, cont: RepoContainer):
         obj_id = cont.definition().dry_id
         if obj_id in self.obj_dict:
             raise ValueError(
@@ -229,7 +229,7 @@ class DryRepo(object):
         for filename in files:
             try:
                 # Load container object
-                obj_cont = DryRepoContainer.from_filepath(
+                obj_cont = RepoContainer.from_filepath(
                     filename, directory=directory
                 )
                 # Run selector
@@ -267,7 +267,7 @@ class DryRepo(object):
                     if o not in self:
                         self.add_object(o, add_nested=add_nested)
 
-        obj_cont = DryRepoContainer.from_object(
+        obj_cont = RepoContainer.from_object(
             obj, directory=directory, filename=filename)
         self.add_obj_cont(obj_cont)
 

@@ -232,10 +232,10 @@ def tail(get_result):
 
 def count(get_result):
     from dryml import Object
-    from dryml.dry_repo import DryRepoContainer
+    from dryml.repo import RepoContainer
     if isinstance(get_result, Object):
         return 1
-    elif isinstance(get_result, DryRepoContainer):
+    elif isinstance(get_result, RepoContainer):
         return 1
     return len(get_result)
 

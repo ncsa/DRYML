@@ -13,9 +13,9 @@ def test_container_selector_1(create_temp_dir):
     obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
 
     # Create containers for these objects
-    obj1_cont = dryml.dry_repo.DryRepoContainer.from_object(
+    obj1_cont = dryml.repo.RepoContainer.from_object(
         obj1, directory=create_temp_dir)
-    obj2_cont = dryml.dry_repo.DryRepoContainer.from_object(
+    obj2_cont = dryml.repo.RepoContainer.from_object(
         obj2, directory=create_temp_dir)
 
     # Create selector
@@ -33,9 +33,9 @@ def test_container_selector_2(create_temp_dir):
     obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
 
     # Create containers for these objects
-    obj1_cont = dryml.dry_repo.DryRepoContainer.from_object(
+    obj1_cont = dryml.repo.RepoContainer.from_object(
         obj1, directory=create_temp_dir)
-    obj2_cont = dryml.dry_repo.DryRepoContainer.from_object(
+    obj2_cont = dryml.repo.RepoContainer.from_object(
         obj2, directory=create_temp_dir)
 
     # Save to disk, and unload these objects
@@ -56,7 +56,7 @@ def test_container_selector_2(create_temp_dir):
 def test_add_retrieve_object_1(create_temp_dir):
     obj = objects.HelloStr(msg='test')
 
-    repo = dryml.DryRepo(create_temp_dir)
+    repo = dryml.Repo(create_temp_dir)
 
     repo.add_object(obj)
 
@@ -71,7 +71,7 @@ def test_add_retrieve_object_1(create_temp_dir):
 
 
 def test_add_retrieve_objects_2():
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     objs = []
     objs.append(objects.HelloStr(msg='test'))
@@ -98,7 +98,7 @@ def test_add_retrieve_objects_3():
     Should be able to add all objects within an object at once.
     """
 
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
 
@@ -122,7 +122,7 @@ def test_add_retrieve_objects_4():
     Object hierarchy should work during selection
     """
 
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     parent_cls_obj = objects.TestBase()
 
@@ -139,7 +139,7 @@ def test_add_retrieve_objects_4():
 
 @pytest.mark.xfail
 def test_try_write():
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -147,7 +147,7 @@ def test_try_write():
 
 
 def test_get_api_1():
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -155,7 +155,7 @@ def test_get_api_1():
 
 
 def test_get_api_2():
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     obj1 = objects.TestNest(1)
     obj2 = objects.TestNest(2)
@@ -181,7 +181,7 @@ def test_get_api_2():
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_get_api_3(create_temp_dir):
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     test_obj_def = dryml.ObjectDef(
         objects.HelloStr,
@@ -201,7 +201,7 @@ def test_get_api_3(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_get_api_4(create_temp_dir):
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     test_obj_def = dryml.ObjectDef(
         objects.HelloStr,
@@ -218,7 +218,7 @@ def test_get_api_4(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_get_api_5(create_temp_dir):
-    repo = dryml.DryRepo()
+    repo = dryml.Repo()
 
     test_obj_def = dryml.ObjectDef(
         objects.TestNest,
@@ -238,7 +238,7 @@ def test_get_api_5(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_write_1(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     objs = []
 
@@ -256,7 +256,7 @@ def test_write_1(create_temp_dir):
     # Delete repo
     del repo
 
-    repo = dryml.DryRepo(create_temp_dir)
+    repo = dryml.Repo(create_temp_dir)
 
     assert len(repo) == 5
 
@@ -289,7 +289,7 @@ def test_write_1(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_reload_1(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     objs = []
 
@@ -318,7 +318,7 @@ def test_reload_1(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_1(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -329,7 +329,7 @@ def test_save_1(create_temp_dir):
     del repo
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.DryRepo(create_temp_dir)
+    repo = dryml.Repo(create_temp_dir)
 
     try:
         repo.get(only_loaded=True)
@@ -344,7 +344,7 @@ def test_save_1(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_2(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
@@ -355,7 +355,7 @@ def test_save_2(create_temp_dir):
     del repo
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.DryRepo(create_temp_dir)
+    repo = dryml.Repo(create_temp_dir)
 
     try:
         repo.get(only_loaded=True)
@@ -377,7 +377,7 @@ def prep_and_clean_test_dir2():
 
 def test_save_3(prep_and_clean_test_dir2):
     dir1, dir2 = prep_and_clean_test_dir2
-    repo = dryml.DryRepo(dir1, create=True)
+    repo = dryml.Repo(dir1, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'),
                     filepath='test_file')
@@ -394,7 +394,7 @@ def test_save_3(prep_and_clean_test_dir2):
     assert len(os.listdir(dir2)) == 1
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.DryRepo(dir1)
+    repo = dryml.Repo(dir1)
 
     try:
         repo.get(only_loaded=True)
@@ -404,7 +404,7 @@ def test_save_3(prep_and_clean_test_dir2):
 
     del repo
 
-    repo = dryml.DryRepo(dir2)
+    repo = dryml.Repo(dir2)
 
     try:
         repo.get(only_loaded=True)
@@ -415,7 +415,7 @@ def test_save_3(prep_and_clean_test_dir2):
 
 def test_save_4(prep_and_clean_test_dir2):
     dir1, dir2 = prep_and_clean_test_dir2
-    repo = dryml.DryRepo(dir1, create=True)
+    repo = dryml.Repo(dir1, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
     repo.add_object(objects.HelloInt(msg=5))
@@ -432,7 +432,7 @@ def test_save_4(prep_and_clean_test_dir2):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_5(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
@@ -446,7 +446,7 @@ def test_save_5(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_6(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'), filepath='test_file')
 
@@ -462,7 +462,7 @@ def test_save_6(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_7(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     obj1 = objects.TestNest2(A=5)
     obj2 = objects.TestNest(obj1)
@@ -482,7 +482,7 @@ def test_save_7(create_temp_dir):
 
     del repo
 
-    repo = dryml.DryRepo(create_temp_dir)
+    repo = dryml.Repo(create_temp_dir)
 
     assert len(repo) == 2
 
@@ -492,7 +492,7 @@ def test_save_7(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_8(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     obj1 = objects.TestNest2(A=5)
     obj2 = objects.TestNest(obj1)
@@ -506,7 +506,7 @@ def test_save_8(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_delete_1(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -526,7 +526,7 @@ def test_delete_1(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_delete_2(create_temp_dir):
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     repo.add_object(objects.HelloStr(msg='test'))
 
@@ -544,7 +544,7 @@ def test_object_save_restore_with_repo_1(create_temp_dir):
     """
     import objects
 
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     # Create the data containing objects
     data_obj1 = objects.TestClassC2(10)
@@ -577,7 +577,7 @@ def test_object_save_restore_with_repo_2(create_temp_dir):
     """
     import objects
 
-    repo = dryml.DryRepo(create_temp_dir, create=True)
+    repo = dryml.Repo(create_temp_dir, create=True)
 
     # Create the data containing objects
     data_obj1 = objects.TestClassC2(10)
@@ -600,7 +600,7 @@ def test_object_save_restore_with_repo_2(create_temp_dir):
     # Get top object definition
     obj_def = obj.definition()
 
-    repo2 = dryml.DryRepo(create_temp_dir)
+    repo2 = dryml.Repo(create_temp_dir)
 
     obj2 = obj_def.build(repo=repo2)
 
@@ -620,7 +620,7 @@ def test_object_save_restore_with_repo_3(create_temp_dir):
     import objects
 
     # Create workshop
-    repo = dryml.DryRepo(directory=create_temp_dir)
+    repo = dryml.Repo(directory=create_temp_dir)
 
     obj_a = objects.TestNest(10)
     repo.add_object(obj_a)
@@ -650,7 +650,7 @@ def test_object_save_restore_with_repo_3(create_temp_dir):
     @dryml.compute_context(ctx_context_reqs={'default': {}})
     def test_method(model_def, location):
         # Create repo
-        repo = dryml.DryRepo(directory=location)
+        repo = dryml.Repo(directory=location)
 
         # Build the object
         model_obj = model_def.build(repo=repo)
