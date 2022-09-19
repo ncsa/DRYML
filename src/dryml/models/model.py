@@ -4,6 +4,6 @@ from dryml.context import cls_method_compute
 
 
 @cls_method_compute('eval')
-class DryModel(Object):
+class Model(Object):
     def eval(self, X: Dataset, *args, **kwargs):
         raise NotImplementedError()
