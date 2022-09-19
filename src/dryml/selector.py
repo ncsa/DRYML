@@ -12,9 +12,9 @@ def def_to_sel(val, cache=None):
     if is_supported_scalar_type(val):
         return val
     elif isinstance(val, Object):
-        return DrySelector.from_def(val.definition(), cache=cache)
+        return Selector.from_def(val.definition(), cache=cache)
     elif isinstance(val, ObjectDef):
-        return DrySelector.from_def(val, cache=cache)
+        return Selector.from_def(val, cache=cache)
     elif is_supported_listlike(val):
         return map_listlike(applier, val)
     elif is_supported_dictlike(val):
@@ -24,7 +24,7 @@ def def_to_sel(val, cache=None):
             f"Encountered unsupported value {val} of type {type(val)}")
 
 
-class DrySelector(object):
+class Selector(object):
     "Utility object for selecting for specific dry objects"
 
     @staticmethod
@@ -49,7 +49,7 @@ class DrySelector(object):
             obj_def['dry_kwargs'],
             cache=cache)
 
-        sel = DrySelector(
+        sel = Selector(
             obj_def['cls'],
             args=new_args,
             kwargs=new_kwargs)
@@ -64,7 +64,7 @@ class DrySelector(object):
         raise RuntimeError("Functionality Questionable")
         args = obj_dict.get('dry_args', ())
         kwargs = obj_dict.get('dry_kwargs', {})
-        return DrySelector(
+        return Selector(
             obj_dict['cls'],
             args=args,
             kwargs=kwargs)
@@ -72,21 +72,21 @@ class DrySelector(object):
     @staticmethod
     def from_obj(
             obj: Object):
-        return DrySelector.from_def(
+        return Selector.from_def(
             obj.definition())
 
     @staticmethod
     def build(
             obj):
         if isinstance(obj, Object):
-            return DrySelector.from_obj(obj)
+            return Selector.from_obj(obj)
         elif isinstance(obj, ObjectDef):
-            return DrySelector.from_def(obj)
+            return Selector.from_def(obj)
         elif isinstance(obj, Mapping):
-            return DrySelector.from_dict(obj)
+            return Selector.from_dict(obj)
         else:
             raise TypeError(
-                f"Can't construct DrySelector from type {type(obj)}")
+                f"Can't construct Selector from type {type(obj)}")
 
     def __init__(self, cls: Type, args=None, kwargs=None):
         self.cls = cls
@@ -102,7 +102,7 @@ class DrySelector(object):
             if not res and verbosity > 1:
                 print(f"{value_object} is not a subclass of {key_object}")
             return res
-        elif isinstance(key_object, DrySelector):
+        elif isinstance(key_object, Selector):
             res = key_object(
                 value_object,
                 verbosity=verbosity,
@@ -136,7 +136,7 @@ class DrySelector(object):
                               f"{value_object}")
                     return False
                 print(f"// dictlike key: {key}")
-                if not DrySelector.match_objects(
+                if not Selector.match_objects(
                         key_object[key],
                         value_object[key],
                         verbosity=verbosity,
@@ -156,7 +156,7 @@ class DrySelector(object):
                 return False
             for i in range(len(key_object)):
                 # Each object must match
-                if not DrySelector.match_objects(
+                if not Selector.match_objects(
                         key_object[i],
                         value_object[i],
                         verbosity=verbosity,
@@ -194,7 +194,7 @@ class DrySelector(object):
             return True
 
     def args_compare(self, matcher, args, verbosity=0):
-        if DrySelector.match_objects(matcher, args,
+        if Selector.match_objects(matcher, args,
                                      verbosity=verbosity):
             return True
         else:
@@ -205,7 +205,7 @@ class DrySelector(object):
             return False
 
     def kwargs_compare(self, matcher, kwargs, verbosity=0):
-        if DrySelector.match_objects(matcher, kwargs,
+        if Selector.match_objects(matcher, kwargs,
                                      verbosity=verbosity):
             return True
         else:
@@ -278,7 +278,7 @@ class DrySelector(object):
         return True
 
     def __str__(self):
-        return f"DrySelector({self.cls}, {self.args}, {self.kwargs})"
+        return f"Selector({self.cls}, {self.args}, {self.kwargs})"
 
     def repr(self):
         return f"{self}"

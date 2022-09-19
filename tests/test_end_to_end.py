@@ -122,7 +122,7 @@ def torch_regressor(definition=False):
         import dryml.models.torch
         import dryml.data.torch
         import torch
-    except ImportError:
+    except ImportError as e:
         pytest.skip("torch not supported")
 
     # Create model

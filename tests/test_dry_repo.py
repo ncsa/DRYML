@@ -19,7 +19,7 @@ def test_container_selector_1(create_temp_dir):
         obj2, directory=create_temp_dir)
 
     # Create selector
-    sel = dryml.DrySelector(cls=objects.TestClassA)
+    sel = dryml.Selector(cls=objects.TestClassA)
 
     # Test selectors work with built classes
     assert sel(obj1_cont.definition())
@@ -45,7 +45,7 @@ def test_container_selector_2(create_temp_dir):
     obj2_cont.unload()
 
     # Create selector
-    sel = dryml.DrySelector(cls=objects.TestClassA)
+    sel = dryml.Selector(cls=objects.TestClassA)
 
     # Test selectors work with built classes
     assert sel(obj1_cont.definition())
@@ -83,13 +83,13 @@ def test_add_retrieve_objects_2():
     for obj in objs:
         repo.add_object(obj)
 
-    assert type(repo.get(selector=dryml.DrySelector(
+    assert type(repo.get(selector=dryml.Selector(
         cls=objects.HelloStr, kwargs={'msg': 'test'}))) is not list
-    assert len(repo.get(selector=dryml.DrySelector(
+    assert len(repo.get(selector=dryml.Selector(
         cls=objects.HelloInt, kwargs={'msg': 10}))) == 2
-    assert type(repo.get(selector=dryml.DrySelector(
+    assert type(repo.get(selector=dryml.Selector(
         cls=objects.TestClassA, kwargs={'item': [10, 10]}))) is not list
-    assert type(repo.get(selector=dryml.DrySelector(
+    assert type(repo.get(selector=dryml.Selector(
         cls=objects.TestClassB, args=['test']))) is not list
 
 
@@ -105,14 +105,14 @@ def test_add_retrieve_objects_3():
     repo.add_object(obj)
 
     assert len(repo.get()) == 3
-    assert type(repo.get(selector=dryml.DrySelector(
+    assert type(repo.get(selector=dryml.Selector(
         cls=objects.TestNest, args=(10,)))) is not list
-    assert type(repo.get(selector=dryml.DrySelector(
+    assert type(repo.get(selector=dryml.Selector(
         cls=objects.HelloTrainableD))) is not list
     obj = repo.get(
-        selector=dryml.DrySelector(
+        selector=dryml.Selector(
             cls=objects.TestNest,
-            args=(dryml.DrySelector(objects.HelloTrainableD),),),
+            args=(dryml.Selector(objects.HelloTrainableD),),),
         sel_kwargs={'verbosity': 2})
     assert type(obj) is not list
 
@@ -129,9 +129,9 @@ def test_add_retrieve_objects_4():
     repo.add_object(parent_cls_obj)
 
     assert dryml.utils.count(repo.get(
-        selector=dryml.DrySelector(objects.TestBase))) == 1
+        selector=dryml.Selector(objects.TestBase))) == 1
     try:
-        repo.get(selector=dryml.DrySelector(objects.TestClassA))
+        repo.get(selector=dryml.Selector(objects.TestClassA))
         assert False
     except KeyError:
         pass
@@ -196,7 +196,7 @@ def test_get_api_3(create_temp_dir):
     test_obj = repo.get(test_obj_def, build_missing_def=True)
 
     assert len(repo) == 1
-    assert dryml.DrySelector.build(test_obj_def)(test_obj)
+    assert dryml.Selector.build(test_obj_def)(test_obj)
 
 
 @pytest.mark.usefixtures("create_temp_dir")
@@ -260,13 +260,13 @@ def test_write_1(create_temp_dir):
 
     assert len(repo) == 5
 
-    obj = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.Selector(
         cls=objects.HelloStr, kwargs={'msg': 'test'}))
     assert type(obj) is not list
     assert objs[0].definition().get_individual_id() == \
         obj.definition().get_individual_id()
 
-    obj_list = repo.get(selector=dryml.DrySelector(
+    obj_list = repo.get(selector=dryml.Selector(
         cls=objects.HelloInt, kwargs={'msg': 10}))
     assert len(obj_list) == 2
     assert objs[1].definition().get_category_id() == \
@@ -274,13 +274,13 @@ def test_write_1(create_temp_dir):
     assert objs[1].definition().get_category_id() == \
         obj_list[1].definition().get_category_id()
 
-    obj = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.Selector(
         cls=objects.TestClassA, kwargs={'item': [10, 10]}))
     assert type(obj) is not list
     assert objs[3].definition().get_individual_id() == \
         obj.definition().get_individual_id()
 
-    obj = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.Selector(
         cls=objects.TestClassB, args=['test']))
     assert type(obj) is not list
     assert objs[4].definition().get_individual_id() == \
@@ -300,18 +300,18 @@ def test_reload_1(create_temp_dir):
     for obj in objs:
         repo.add_object(obj)
 
-    repo.reload_objs(selector=dryml.DrySelector(cls=objects.TestClassA),
+    repo.reload_objs(selector=dryml.Selector(cls=objects.TestClassA),
                      as_cls=objects.TestClassA2)
 
-    obj = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.Selector(
         cls=objects.TestClassA2, kwargs={'item': [10]}))
     assert objs[0].dry_kwargs['item'] == obj.dry_kwargs['item']
 
-    obj = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.Selector(
         cls=objects.TestClassA2, kwargs={'item': [10, 10]}))
     assert objs[1].dry_kwargs['item'] == obj.dry_kwargs['item']
 
-    obj = repo.get(selector=dryml.DrySelector(
+    obj = repo.get(selector=dryml.Selector(
         cls=objects.TestClassA2, kwargs={'item': 'a'}))
     assert objs[2].dry_kwargs['item'] == obj.dry_kwargs['item']
 

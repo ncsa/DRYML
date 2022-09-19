@@ -2,14 +2,14 @@ import os
 from dryml.object import Object, ObjectFactory, ObjectFile, \
     ObjectDef, change_object_cls, load_object, get_contained_objects
 from dryml.config import MissingIdError
-from dryml.dry_selector import DrySelector
+from dryml.selector import Selector
 from dryml.utils import get_current_cls
 from typing import Optional, Callable, Union, Mapping
 import tqdm
 from pprint import pprint
 
 
-RepoKey = Union[Object, ObjectDef, dict, ObjectFile, DrySelector, str]
+RepoKey = Union[Object, ObjectDef, dict, ObjectFile, Selector, str]
 
 
 class DryRepoContainer(object):
@@ -310,7 +310,7 @@ class DryRepo(object):
 
         if type(selector) is ObjectDef:
             # Wrap automatically for convenience
-            selector = DrySelector.build(selector)
+            selector = Selector.build(selector)
 
         def filter_func(obj_cont):
             if only_loaded:
@@ -391,7 +391,7 @@ class DryRepo(object):
             except MissingIdError:
                 pass
         elif selector is not None and \
-                isinstance(selector, DrySelector):
+                isinstance(selector, Selector):
             pass
         elif selector is not None and \
                 issubclass(type(selector), dict):
@@ -504,7 +504,7 @@ class DryRepo(object):
               **kwargs):
         """
         Apply a function to all objects tracked by the repo.
-        We can also use a DrySelector to apply only to specific models
+        We can also use a Selector to apply only to specific models
         **kwargs is passed to self.get
         """
         if func_args is None:

@@ -6,7 +6,7 @@ from dryml.object import Object, ObjectFile, ObjectFactory, \
     load_object, save_object, change_object_cls, \
     ObjectWrapper, CallableWrapper, get_contained_objects, \
     build_obj_tree
-from dryml.dry_selector import DrySelector
+from dryml.selector import Selector
 from dryml.dry_repo import DryRepo
 from dryml.dry_collections import DryList, DryTuple, DryDict
 from dryml.workshop import Workshop
@@ -21,7 +21,7 @@ __all__ = [
     ObjectDef,
     Meta,
     ObjectFactory,
-    DrySelector,
+    Selector,
     DryRepo,
     DryList,
     DryTuple,

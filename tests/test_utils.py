@@ -1,6 +1,6 @@
 from dryml.utils import get_class_str, get_class_from_str, \
     apply_func
-from dryml import DrySelector
+from dryml import Selector
 import objects
 
 
@@ -29,7 +29,7 @@ def test_apply_func_1():
 
     def f(o):
         o.val = 20
-    apply_func(obj1, f, sel=DrySelector(objects.TestClassF1))
+    apply_func(obj1, f, sel=Selector(objects.TestClassF1))
 
     assert obj1.A.val == 20
 
@@ -44,7 +44,7 @@ def test_apply_func_2():
     def f(o):
         o.val = 20
 
-    apply_func(obj1, f, sel=DrySelector(objects.TestClassF1))
+    apply_func(obj1, f, sel=Selector(objects.TestClassF1))
 
     assert obj1.A.val == 20
     assert obj1.B.A.val == 20
