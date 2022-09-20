@@ -1,7 +1,7 @@
 from dryml.config import Meta
 from dryml.object import Object
 from dryml.models import Component
-from dryml.models import Trainable
+from dryml.models import Trainable as BaseTrainable
 from dryml.models import TrainFunction as BaseTrainFunction
 import zipfile
 import torch
@@ -58,5 +58,5 @@ class Model(Component):
         pass
 
 
-class Trainable(Trainable):
+class Trainable(BaseTrainable):
     __dry_compute_context__ = 'torch'

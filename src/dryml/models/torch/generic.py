@@ -1,22 +1,22 @@
 from dryml.config import Meta
 from dryml.object import Object
 from dryml.data import Dataset
-from dryml.models import Trainable
+from dryml.models.trainable import Trainable as BaseTrainable
 from dryml.models.torch.base import TorchObject
-from dryml.models.torch.base import Model as BaseModel
-from dryml.models.torch.base import TrainFunction as BaseTrainFunction
-from dryml.models.torch.base import Trainable as BaseTrainable
+from dryml.models.torch.base import Model as TorchModel
+from dryml.models.torch.base import TrainFunction as TorchTrainFunction
+from dryml.models.torch.base import Trainable as TorchTrainable
 from dryml.context import context
 import zipfile
 import torch
 import tqdm
 
 
-class Model(BaseModel):
+class Model(TorchModel):
     pass
 
 
-class TrainFunction(BaseTrainFunction):
+class TrainFunction(TorchTrainFunction):
     pass
 
 
@@ -128,7 +128,7 @@ class ModuleModel(Model):
         self.mdl.obj.train(True)
 
 
-class Trainable(BaseTrainable):
+class Trainable(TorchTrainable):
     def __init__(
             self,
             model: Model = None,
@@ -142,7 +142,7 @@ class Trainable(BaseTrainable):
         self.train_fn(
             self, data, train_spec=train_spec,
             train_callbacks=train_callbacks)
-        self.train_state = Trainable.trained
+        self.train_state = BaseTrainable.trained
 
     def prep_train(self):
         self.model.prep_train()

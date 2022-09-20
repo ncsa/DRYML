@@ -42,11 +42,9 @@ def test_compute_context_consistency_2():
 
 
 def sklearn_regressor(definition=False):
-    try:
-        import dryml.models.sklearn
-        import sklearn.neighbors
-    except ImportError:
-        pytest.skip("sklearn not supported")
+    sklearn = pytest.importorskip('sklearn')
+    import dryml.models.sklearn
+    import sklearn.neighbors
 
     # Create model
     model = dryml.models.sklearn.Trainable(
@@ -64,11 +62,9 @@ def sklearn_regressor(definition=False):
 
 
 def tf_regressor(definition=False):
-    try:
-        import dryml.models.tf
-        import tensorflow as tf
-    except ImportError:
-        pytest.skip("tensorflow not supported")
+    tf = pytest.importorskip('tensorflow')
+    import dryml.models.tf
+    import tensorflow as tf
 
     # Create model
     model = dryml.models.tf.keras.Trainable(
@@ -94,12 +90,10 @@ def tf_regressor(definition=False):
 
 
 def xgb_regressor(definition=False):
-    try:
-        import dryml.models.sklearn
-        import dryml.models.xgb
-    except ImportError:
-        pytest.skip("xgboost not available")
-
+    xgboost = pytest.importorskip('xgboost')
+    print(xgboost.__version__)
+    import dryml.models.sklearn
+    import dryml.models.xgb
     import dryml.data.transforms
 
     model = dryml.models.sklearn.Trainable(
@@ -118,12 +112,9 @@ def xgb_regressor(definition=False):
 
 
 def torch_regressor(definition=False):
-    try:
-        import dryml.models.torch
-        import dryml.data.torch
-        import torch
-    except ImportError as e:
-        pytest.skip("torch not supported")
+    torch = pytest.importorskip('torch')
+    import dryml.models.torch
+    import dryml.data.torch
 
     # Create model
     model = dryml.models.torch.generic.Sequential(
@@ -166,12 +157,10 @@ regressor_funcs = [
 
 
 def sklearn_classifier(num_dims, num_classes, definition=False):
-    try:
-        import dryml.models.sklearn
-        import sklearn.neighbors
-        import dryml.data.transforms
-    except ImportError:
-        pytest.skip("sklearn not available")
+    sklearn = pytest.importorskip('sklearn')
+    import dryml.models.sklearn
+    import sklearn.neighbors
+    import dryml.data.transforms
 
     model = dryml.models.sklearn.Trainable(
         model=dryml.models.sklearn.ClassifierModel(
@@ -191,12 +180,9 @@ def sklearn_classifier(num_dims, num_classes, definition=False):
 
 
 def tf_classifier(num_dims, num_classes, definition=False):
-    try:
-        import dryml.models.tf
-        import dryml.data.transforms
-        import tensorflow as tf
-    except ImportError:
-        pytest.skip("tf not available")
+    tf = pytest.importorskip('tensorflow')
+    import dryml.models.tf
+    import dryml.data.transforms
 
     model = dryml.models.tf.keras.Trainable(
         model=dryml.models.tf.keras.SequentialFunctionalModel(
@@ -223,12 +209,10 @@ def tf_classifier(num_dims, num_classes, definition=False):
 
 
 def xgb_classifier(num_dims, num_classes, definition=False):
-    try:
-        import dryml.models.sklearn
-        import dryml.models.xgb
-    except ImportError:
-        pytest.skip("xgboost not available")
-
+    xgboost = pytest.importorskip('xgboost')
+    print(xgboost.__version__)
+    import dryml.models.sklearn
+    import dryml.models.xgb
     import dryml.data.transforms
 
     model = dryml.models.sklearn.Trainable(
@@ -248,13 +232,11 @@ def xgb_classifier(num_dims, num_classes, definition=False):
 
 
 def torch_classifier(num_dims, num_classes, definition=False):
-    try:
-        import dryml.models.torch
-        import dryml.data.transforms
-        import dryml.data.torch.transforms
-        import torch
-    except ImportError:
-        pytest.skip("torch not available")
+    torch = pytest.importorskip('torch')
+    import dryml.models.torch
+    import dryml.data.torch
+    import dryml.data.transforms
+    import dryml.data.torch.transforms
 
     model_obj = dryml.models.torch.generic.Sequential(
         layer_defs=[

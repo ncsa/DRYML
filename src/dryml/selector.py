@@ -195,7 +195,7 @@ class Selector(object):
 
     def args_compare(self, matcher, args, verbosity=0):
         if Selector.match_objects(matcher, args,
-                                     verbosity=verbosity):
+                                  verbosity=verbosity):
             return True
         else:
             if verbosity > 0:
@@ -206,7 +206,7 @@ class Selector(object):
 
     def kwargs_compare(self, matcher, kwargs, verbosity=0):
         if Selector.match_objects(matcher, kwargs,
-                                     verbosity=verbosity):
+                                  verbosity=verbosity):
             return True
         else:
             if verbosity > 0:
