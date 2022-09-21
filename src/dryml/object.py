@@ -157,24 +157,46 @@ class ObjectFile(object):
         mod_cls = get_current_cls(obj_def.cls)
         if obj_def.cls != mod_cls and not update:
             raise ValueError("Can't save class definition! It's been changed!")
-        cls_def = dill.dumps(mod_cls)
-        with self.z_file.open('cls_def.dill', mode='w') as f:
-            f.write(cls_def)
+        try:
+            cls_def = dill.dumps(mod_cls)
+            with self.z_file.open('cls_def.dill', mode='w') as f:
+                f.write(cls_def)
+        except TypeError as e:
+            if '_abc_data' in str(e):
+                # Fallback to pickling the class name.
+                # In some cases, the class's _abc_impl
+                # attribute seems wrongly constructed?
+                # https://github.com/uqfoundation/dill/issues/332
+                cls_str = get_class_str(mod_cls)
+                with self.z_file.open('cls_str.txt', mode='w') as f:
+                    f.write(cls_str.encode('utf-8'))
+            else:
+                raise e
+
 
     def load_class_def_v1(self, update: bool = True, reload: bool = False):
         "Helper function for loading a version 1 class definition"
+        namelist = self.z_file.namelist()
         # Get class definition
-        with self.z_file.open('cls_def.dill') as cls_def_file:
-            if update:
-                # Get original model definition
-                cls_def_init = dill.loads(cls_def_file.read())
-                try:
-                    cls_def = get_current_cls(cls_def_init, reload=reload)
-                except Exception as e:
-                    raise RuntimeError(f"Failed to update module class {e}")
-            else:
-                cls_def = dill.loads(cls_def_file.read())
-        return cls_def
+        if 'cls_def.dill' in namelist:
+            with self.z_file.open('cls_def.dill') as cls_def_file:
+                if update:
+                    # Get original model definition
+                    cls_def_init = dill.loads(cls_def_file.read())
+                    try:
+                        cls_def = get_current_cls(cls_def_init, reload=reload)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed to update module class {e}")
+                else:
+                    cls_def = dill.loads(cls_def_file.read())
+            return cls_def
+        elif 'cls_str.txt' in namelist:
+            with self.z_file.open('cls_str.txt') as cls_str_file:
+                cls_str = cls_str_file.read().decode('utf-8')
+                cls_def = get_class_from_str(cls_str, reload=reload)
+            return cls_def
+        else:
+            raise RuntimeError("No stored class data!")
 
     def save_definition_v1(self, obj_def: ObjectDef, update: bool = False):
         "Save object def"
