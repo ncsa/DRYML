@@ -35,7 +35,7 @@ class Trainable(Object):
         # Configure the model for evaluation
         pass
 
-    def train(self, *args, train_spec=None, train_callbacks=[], **kwargs):
+    def train(self, *args, train_spec=None, train_callbacks=[]):
         # Handle the setting of the train state flag
         self.train_state = Trainable.trained
         # This should be the last step in training so no more super is needed

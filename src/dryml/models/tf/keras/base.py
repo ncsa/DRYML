@@ -590,10 +590,10 @@ class Trainable(TFTrainable):
 
     def train(
             self, data, train_spec=None, train_callbacks=[],
-            metrics=[], *args, **kwargs):
+            metrics=[]):
         self.train_fn(
-            self, data, *args, train_spec=train_spec,
-            train_callbacks=train_callbacks, **kwargs)
+            self, data, train_spec=train_spec,
+            train_callbacks=train_callbacks)
         self.train_state = BaseTrainable.trained
 
     def prep_train(self):

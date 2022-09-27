@@ -123,6 +123,6 @@ class Trainable(Trainable):
                        .unbatch()
 
     def train(
-            self, data, *args, train_spec=None, train_callbacks=[], **kwargs):
+            self, data, train_spec=None, train_callbacks=[]):
 
-        self.train_fn(self.model, data, train_spec=train_spec, **kwargs)
+        self.train_fn(self.model, data, train_spec=train_spec)
