@@ -18,11 +18,15 @@ All DRYML Objects can be uniquely identified, and serialized to disk. Once saved
 
 ### Reuse Model Components
 
-DRYML borrows from the Entity Component System programming pattern, and many Model types are composed of components which are attached to the model, and can be reused. These can include training procedure, optimization algorithm, loss function, and the underlying NN model itself. This compartmentalization allows us to enable hyperparameter searches over nearly any parameter of your ML algorithm from the NN topology, from the optimizer learning rate, to the training procedure. It also allows the user to define a complex training procedure once, and then reuse it for multiple related problems in the future. DRYML also has defined training procedures for some common ML frameworks.
+DRYML borrows from the Entity Component System programming pattern, and many Model types are created from components which are attached to the model, and can be reused. These can include training procedure, optimization algorithm, loss function, and the underlying NN model itself. This compartmentalization allows us to enable hyperparameter searches over nearly any parameter of your ML algorithm from the NN topology, from the optimizer learning rate, to the training procedure. It also allows the user to define a complex training procedure once, and then reuse it for multiple related problems in the future. DRYML also has defined training procedures for some common ML frameworks.
 
 ### Compare Models Between Frameworks
 
 Many ML Problems can be tackled by different ML Frameworks. DRYML's API places all supported Frameworks on equal footing. All models output data in the form of DRYML Datasets. This means metrics on Datasets can be reused for models in different frameworks and models from different frameworks can be compared directly, allowing the ML practictioner to make decisions about which method is best for their problem.
+
+### Allow Frameworks to work together
+
+Modern ML frameworks such as tensorflow and pytorch are greedy about GPU use. DRYML implements a context system to enforce constraints on these frameworks when possible. The context system also provides a resource request API to allow the user to request the types of resources each framework is allowed to use. This allows elements from multiple frameworks to co-exist within the same data pipeline. For example, we can use a pytorch dataset and preprocessing with a tensorflow machine learning model.
 
 ## Bringing ML Frameworks together
 
@@ -33,3 +37,17 @@ The following ML Frameworks are currently supported, or planned to be supported
 * Sklearn (Initial support complete)
 * XGBoost (Initial support complete)
 * Statsmodels (support planned)
+
+## DRYML Major Components
+
+### DRYML Object
+
+The DRYML API provides the `Object` class which automatically implements all basic machinery for automatic object serialization. Any class you create which you want to serialize must inherit from the `Object` class.
+
+### DRYML Dataset
+
+The DRYML API provides the `Dataset` class which represents a machine learning dataset. This dataset 
+
+### DRYML Context
+
+The DRYML API provides a context system to manage the allocation of compute devices like GPUs.
