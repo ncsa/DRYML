@@ -173,7 +173,6 @@ class ObjectFile(object):
             else:
                 raise e
 
-
     def load_class_def_v1(self, update: bool = True, reload: bool = False):
         "Helper function for loading a version 1 class definition"
         namelist = self.z_file.namelist()
@@ -186,7 +185,8 @@ class ObjectFile(object):
                     try:
                         cls_def = get_current_cls(cls_def_init, reload=reload)
                     except Exception as e:
-                        raise RuntimeError(f"Failed to update module class {e}")
+                        raise RuntimeError(
+                            f"Failed to update module class {e}")
                 else:
                     cls_def = dill.loads(cls_def_file.read())
             return cls_def
