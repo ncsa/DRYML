@@ -5,7 +5,7 @@ Code to run subprocesses with proper contexts
 
 from dryml.context.context_tracker import contexts, WrongContextError, \
     context, consolidate_contexts, get_context_requirements, \
-    ContextManager
+    ContextManager, NoContextError
 import copy
 import multiprocessing as mp
 import traceback
@@ -273,7 +273,7 @@ def compute_context(
                 return res
             else:
                 if dont_create_context:
-                    raise RuntimeError("Instructed to not create a context!")
+                    raise NoContextError("Instructed to not create a context!")
 
                 # Execute the method in another thread.
                 # get a list of objects we will need to update.
