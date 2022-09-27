@@ -135,7 +135,6 @@ class Selector(object):
                         print(f"didn't find expected key {key} in "
                               f"{value_object}")
                     return False
-                print(f"// dictlike key: {key}")
                 if not Selector.match_objects(
                         key_object[key],
                         value_object[key],
