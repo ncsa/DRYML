@@ -544,6 +544,39 @@ def np_tf_dataset_3():
     return ds, tf_eq
 
 
+@append_dataset_gen
+def torch_dataset_1():
+    torch = pytest.importorskip('torch')
+    data = np.random.random((50, 50))
+    from dryml.data.torch import TorchDataset, TorchIterableDatasetWrapper
+    torch_ds = TorchIterableDatasetWrapper(
+        lambda: map(lambda x: torch.tensor(x), iter(data)))
+    dataset = TorchDataset(torch_ds)
+    return dataset, torch_eq
+
+
+@append_dataset_gen
+def torch_dataset_2():
+    torch = pytest.importorskip('torch')
+    data = np.random.random((50, 50))
+    from dryml.data.torch import TorchDataset, TorchIterableDatasetWrapper
+    torch_ds = TorchIterableDatasetWrapper(
+         lambda: map(lambda x: torch.tensor(x), iter(data)))
+    dataset = TorchDataset(torch_ds).unbatch()
+    return dataset, torch_eq
+
+
+@append_dataset_gen
+def torch_dataset_3():
+    torch = pytest.importorskip('torch')
+    data = np.random.random((50, 50))
+    from dryml.data.torch import TorchDataset, TorchIterableDatasetWrapper
+    torch_ds = TorchIterableDatasetWrapper(
+         lambda: map(lambda x: torch.tensor(x), iter(data)))
+    dataset = TorchDataset(torch_ds).apply_X(lambda x: torch.multiply(x, x))
+    return dataset, torch_eq
+
+
 @pytest.mark.parametrize(
     'dataset_gen', datasets_to_test)
 def test_double_collect_1(dataset_gen):
@@ -568,3 +601,18 @@ def test_double_collect_2(dataset_gen):
     assert len(collect_elements) == len(collect_elements_2)
     for el1, el2 in zip(collect_elements, collect_elements_2):
         assert eq_func(el1, el2)
+
+
+@pytest.mark.parametrize(
+    'dataset_gen', datasets_to_test)
+def test_shuffle_check_1(dataset_gen):
+    dataset, _ = dataset_gen()
+    orig_count = dataset.count()
+    if dataset.batched:
+        print("batched branch")
+        batch_size = dataset.batch_size
+        new_count = dataset.shuffle(10000).batch(batch_size=batch_size).count()
+    else:
+        print("unbatched branch")
+        new_count = dataset.shuffle(10000).count()
+    assert orig_count == new_count

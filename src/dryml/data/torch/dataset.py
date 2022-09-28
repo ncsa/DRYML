@@ -72,10 +72,13 @@ class TorchDataset(Dataset):
                         i += batch_size
                         yield (idx, d)
 
-                return TorchDataset(
+                torch_ds = TorchIterableDatasetWrapper(
                     lambda: enumerate_dataset(
                         lambda: iter(self.ds),
-                        start=start),
+                        start=start))
+
+                return TorchDataset(
+                    torch_ds,
                     indexed=True,
                     supervised=self.supervised,
                     batch_size=self.batch_size,
@@ -89,7 +92,7 @@ class TorchDataset(Dataset):
         """
         Get the internal dataset
         """
-        return self.data_gen()
+        return self.ds
 
     def batch(self, batch_size=32, drop_remainder=True) -> Dataset:
         """
@@ -208,3 +211,50 @@ class TorchDataset(Dataset):
 
     def torch(self):
         return self
+
+    def shuffle(self, buffer_size, seed=None):
+        # create generator of data
+        def shuffler():
+            # Create new generator
+            rng = np.random.default_rng(seed=seed)
+
+            # create iterator on unbatched data
+            ds_iter = iter(self.unbatch())
+
+            # create buffer and fill it
+            el_buffer = []
+
+            # Fill the buffer
+            for idx in range(buffer_size):
+                try:
+                    el_buffer.append(next(ds_iter))
+                except StopIteration:
+                    break
+
+            while True:
+                # Compute size of buffer, and break out if nothing left
+                num_in_buffer = len(el_buffer)
+                if num_in_buffer == 0:
+                    break
+
+                if num_in_buffer > 1:
+                    idx = rng.integers(low=0, high=num_in_buffer-1)
+                else:
+                    idx = 0
+
+                yield el_buffer.pop(idx)
+
+                # Try to refill the buffer here
+                try:
+                    el_buffer.append(next(ds_iter))
+                except StopIteration:
+                    pass
+
+        ds = TorchIterableDatasetWrapper(
+            shuffler)
+
+        return TorchDataset(
+            ds,
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=None)

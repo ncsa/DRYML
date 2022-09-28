@@ -259,3 +259,10 @@ class Dataset(object):
                 if number > limit:
                     break
         return number
+
+    def shuffle(self, buffer_size, seed=None):
+        """
+        Shuffle elements of dataset.
+        """
+
+        raise NotImplementedError()

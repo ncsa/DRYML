@@ -165,3 +165,10 @@ class TFDataset(Dataset):
             supervised=self.supervised,
             batch_size=self.batch_size,
             size=self.size)
+
+    def shuffle(self, buffer_size, seed=None):
+        return TFDataset(
+            self.ds.shuffle(buffer_size, seed=seed),
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=self.batch_size)

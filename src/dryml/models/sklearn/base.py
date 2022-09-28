@@ -62,8 +62,12 @@ class BasicTraining(BaseTrainFunction):
     """
 
     def __init__(
-            self, num_examples=-1):
+            self, num_examples=-1, shuffle=False,
+            shuffle_seed=None, shuffle_buffer_size=None):
         self.num_examples = num_examples
+        self.shuffle = shuffle
+        self.shuffle_seed = shuffle_seed
+        self.shuffle_buffer_size = shuffle_buffer_size
         self.train_args = ()
         self.train_kwargs = {}
 
@@ -75,6 +79,10 @@ class BasicTraining(BaseTrainFunction):
 
         total_examples = self.num_examples
 
+        if not train_data.supervised:
+            raise ValueError(
+                "Dataset must be supervised for basic sklearn training")
+
         data_examples = total_examples
         if total_examples == -1:
             data_examples = train_data.count()
@@ -83,13 +91,14 @@ class BasicTraining(BaseTrainFunction):
                     "Dataset has no known length and you must provide "
                     "an explicit number of examples for training.")
 
+        if self.shuffle:
+            train_data = train_data.shuffle(
+                self.shuffle_buffer_size,
+                seed=self.shuffle_seed)
+
         train_data = train_data.batch(batch_size=data_examples) \
                                .as_not_indexed() \
                                .numpy()
-
-        if not train_data.supervised:
-            raise ValueError(
-                "Dataset must be supervised for basic sklearn training")
 
         x, y = train_data.peek()
 

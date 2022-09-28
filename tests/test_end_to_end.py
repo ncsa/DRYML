@@ -53,7 +53,10 @@ def sklearn_regressor(definition=False):
             n_neighbors=5,
             weights='uniform',
             algorithm='ball_tree'),
-        train_fn=dryml.models.sklearn.BasicTraining())
+        train_fn=dryml.models.sklearn.BasicTraining(
+            shuffle=True,
+            shuffle_buffer_size=1000,
+            ))
 
     if definition:
         return model.definition().get_cat_def(recursive=True)
@@ -98,7 +101,9 @@ def xgb_regressor(definition=False):
 
     model = dryml.models.sklearn.Trainable(
         model=dryml.models.xgb.RegressionModel(),
-        train_fn=dryml.models.sklearn.BasicTraining(),
+        train_fn=dryml.models.sklearn.BasicTraining(
+            shuffle=True,
+            shuffle_buffer_size=1000,),
     )
 
     flattener = dryml.data.transforms.Flatten()
@@ -167,7 +172,10 @@ def sklearn_classifier(num_dims, num_classes, definition=False):
             sklearn.neighbors.KNeighborsClassifier,
             n_neighbors=5,
             algorithm='ball_tree'),
-        train_fn=dryml.models.sklearn.BasicTraining())
+        train_fn=dryml.models.sklearn.BasicTraining(
+            shuffle=True,
+            shuffle_buffer_size=1000,)
+        )
 
     best_cat = dryml.data.transforms.BestCat()
 
@@ -217,7 +225,9 @@ def xgb_classifier(num_dims, num_classes, definition=False):
 
     model = dryml.models.sklearn.Trainable(
         model=dryml.models.xgb.ClassifierModel(),
-        train_fn=dryml.models.sklearn.BasicTraining(),
+        train_fn=dryml.models.sklearn.BasicTraining(
+            shuffle=True,
+            shuffle_buffer_size=1000),
     )
 
     flattener = dryml.data.transforms.Flatten()

@@ -302,3 +302,47 @@ class NumpyDataset(Dataset):
             supervised=self.supervised,
             batch_size=self.batch_size,
             size=self.size)
+
+    def shuffle(self, buffer_size, seed=None):
+        # create generator of data
+        def shuffler():
+            # Create new generator
+            rng = np.random.default_rng(seed=seed)
+
+            # create iterator on unbatched data
+            ds_iter = iter(self.unbatch())
+
+            # create buffer and fill it
+            el_buffer = []
+
+            # Fill the buffer
+            for idx in range(buffer_size):
+                try:
+                    el_buffer.append(next(ds_iter))
+                except StopIteration:
+                    break
+
+            while True:
+                # Compute size of buffer, and break out if nothing left
+                num_in_buffer = len(el_buffer)
+                if num_in_buffer == 0:
+                    break
+
+                if num_in_buffer > 1:
+                    idx = rng.integers(low=0, high=num_in_buffer-1)
+                else:
+                    idx = 0
+
+                yield el_buffer.pop(idx)
+
+                # Try to refill the buffer here
+                try:
+                    el_buffer.append(next(ds_iter))
+                except StopIteration:
+                    pass
+
+        return NumpyDataset(
+            shuffler,
+            indexed=self.indexed,
+            supervised=self.supervised,
+            batch_size=None)
