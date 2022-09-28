@@ -62,6 +62,7 @@ class BuildStratTracker(object):
 # Create a couple global variables
 build_repo = None
 build_cache = None
+build_verbose = None
 def_cache = None
 build_strat = None
 
@@ -989,18 +990,38 @@ class ObjectDef(collections.UserDict):
         # Return result
         return new_dict
 
-    def build(self, repo=None, load_zip=None):
+    def build(self, repo=None, load_zip=None, verbose=None):
         "Construct an object"
         reset_repo = False
         reset_cache = False
         reset_strat = False
+        reset_verbose = False
         construct_object = True
 
         global build_repo
         global build_cache
         global def_cache
         global build_strat
+        global build_verbose
 
+        # Handle setting of build_verbose
+        if build_verbose is None:
+            if verbose is None:
+                build_verbose = False
+            else:
+                if type(verbose) is not bool:
+                    raise TypeError("verbose must be a bool!")
+                build_verbose = verbose
+            reset_verbose = True
+        else:
+            if verbose is not None:
+                if type(verbose) is not bool:
+                    raise TypeError("verbose must be a bool!")
+                if verbose != build_verbose:
+                    raise ValueError(
+                        "Can't change verbose once set by a superior call.")
+
+        # Handle creation of build repo
         if repo is not None:
             if build_repo is not None:
                 if repo is not build_repo:
@@ -1011,21 +1032,30 @@ class ObjectDef(collections.UserDict):
                 build_repo = repo
                 reset_repo = True
 
+        # Handle creation of build cache
         if build_cache is None:
             build_cache = {}
             def_cache = {}
             reset_cache = True
 
+        # Handle creation of build strat cache
         if build_strat is None:
             build_strat = BuildStratTracker()
             reset_strat = True
 
+        # Create some book-keeping variables
         obj = None
         construction_required = True
         construct_object = True
+
         # Check whether this SPECIFIC definition has been built yet.
         if self.tracking_id in def_cache:
             obj = def_cache[self.tracking_id]
+            if build_verbose:
+                print(
+                    "Object with id {obj.dry_id} built for definition "
+                    f"with tracking id {self.tracking_id} was found "
+                    "in the definition cache.")
             construction_required = False
             construct_object = False
 
@@ -1041,6 +1071,9 @@ class ObjectDef(collections.UserDict):
                 build_cache is not None:
             try:
                 obj = build_cache[obj_id]
+                if build_verbose:
+                    print(f"Found object with id {obj_id} in "
+                          "the build cache.")
                 construct_object = False
             except KeyError:
                 pass
@@ -1056,6 +1089,9 @@ class ObjectDef(collections.UserDict):
                 def_cache[self.tracking_id] = obj
                 construct_object = False
                 build_strat[obj_id].remove('repo')
+                if build_verbose:
+                    print(f"Found object with id {obj_id} in the "
+                          "repository.")
             except KeyError:
                 # Didn't find the object in the repo
                 pass
@@ -1074,6 +1110,9 @@ class ObjectDef(collections.UserDict):
                     def_cache[self.tracking_id] = obj
                     construct_object = False
                 build_strat[obj_id].remove('zip')
+                if build_verbose:
+                    print(f"Found object with id {obj_id} in the "
+                          "zip file.")
 
         # Finally, actually construct the object
         if obj is None and construct_object:
@@ -1086,6 +1125,8 @@ class ObjectDef(collections.UserDict):
             obj_id = obj.dry_id
             build_cache[obj_id] = obj
             def_cache[self.tracking_id] = obj
+            if build_verbose:
+                print(f"Explicitly constructed new object. id: {obj_id}")
 
         elif obj is None and not construct_object:
             raise RuntimeError(
@@ -1101,8 +1142,13 @@ class ObjectDef(collections.UserDict):
             build_cache = None
             def_cache = None
 
+        # Reset the build strat cache
         if reset_strat:
             build_strat = None
+
+        # Reset the verbose indicator
+        if reset_verbose:
+            build_verbose = None
 
         # Return the result
         return obj
