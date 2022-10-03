@@ -337,7 +337,7 @@ class Repo(object):
     def get_obj_by_id(
             self,
             obj_id,
-            load=False):
+            load=True):
         obj_container = self.obj_dict[obj_id]
         if load:
             if not obj_container.load():
