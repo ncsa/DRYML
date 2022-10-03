@@ -4,7 +4,7 @@ from dryml.context.context_tracker import context, set_context, \
     NoContextError, ContextAlreadyActiveError, get_context_requirements, \
     ResourcePool, ResourceRequest, ResourceAllocation, \
     InsufficientResourcesError, ContextManager, ContextContainer, \
-    ContextIncompatibilityError
+    ContextIncompatibilityError, combine_requests, combine_reqs
 from dryml.context.process import Process, compute_context, compute, \
     cls_method_compute, tune_compute_context
 
@@ -17,6 +17,8 @@ __all__ = [
     get_context_requirements,
     context_check,
     contexts,
+    combine_requests,
+    combine_reqs,
     ComputeContext,
     ContextManager,
     ContextContainer,
