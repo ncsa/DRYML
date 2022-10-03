@@ -168,13 +168,13 @@ class Repo(object):
         # A dictionary of objects
         self.obj_dict = {}
 
+        self._save_objs_on_deletion = False
+
         if directory is not None:
             self.link_to_directory(directory, create=create,
                                    load_objects=load_objects)
         else:
             self.directory = None
-
-        self._save_objs_on_deletion = False
 
     @property
     def save_objs_on_deletion(self):
