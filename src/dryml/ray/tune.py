@@ -134,11 +134,12 @@ class Trainer(object):
                 ctx_reqs = model.dry_context_requirements()
 
         # Get data pipeline reqs
-        data_ctx_reqs = prep_dict['data_ctx']()
+        if 'data_ctx' in prep_dict:
+            data_ctx_reqs = prep_dict['data_ctx']()
 
-        # Combine data and model contexts
-        ctx_reqs = dryml.context.combine_reqs(
-            ctx_reqs, data_ctx_reqs)
+            # Combine data and model contexts
+            ctx_reqs = dryml.context.combine_reqs(
+                ctx_reqs, data_ctx_reqs)
 
         # Acquire context
         dryml.context.set_context(ctx_reqs)
