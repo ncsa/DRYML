@@ -763,3 +763,26 @@ def test_nested_def_build_1():
     assert obj.A.A == 1
     assert obj.B.A == 2
     assert obj.A is not obj.B
+
+
+def test_build_crash_1():
+    import objects
+
+    # First wrong definition
+    test_def_1 = dryml.ObjectDef(objects.TestClassG1, 1, tmp='5')
+
+    try:
+        test_def_1.build()
+    except TypeError:
+        # This definition will throw a TypeError.
+        pass
+
+    print(dryml.config.build_cache)
+
+    # Second corrected definition
+    test_def_2 = dryml.ObjectDef(objects.TestClassG1, 1)
+
+    obj1 = test_def_2.build()
+    obj2 = test_def_2.build()
+
+    assert obj1.dry_id != obj2.dry_id

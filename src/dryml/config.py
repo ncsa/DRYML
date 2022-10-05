@@ -1043,6 +1043,32 @@ class ObjectDef(collections.UserDict):
             build_strat = BuildStratTracker()
             reset_strat = True
 
+        # Define a cleanup function to call in the event of error
+        # and at the end of the function.
+        def cleanup():
+            global build_repo
+            global build_cache
+            global def_cache
+            global build_strat
+            global build_verbose
+
+            # Reset the repo for this function
+            if reset_repo:
+                build_repo = None
+
+            # Reset the build cache
+            if reset_cache:
+                build_cache = None
+                def_cache = None
+
+            # Reset the build strat cache
+            if reset_strat:
+                build_strat = None
+
+            # Reset the verbose indicator
+            if reset_verbose:
+                build_verbose = None
+
         # Create some book-keeping variables
         obj = None
         construction_required = True
@@ -1096,59 +1122,52 @@ class ObjectDef(collections.UserDict):
                 # Didn't find the object in the repo
                 pass
 
-        # Check the zipfile
-        if obj is None and (not construction_required) \
-                and construct_object and (load_zip is not None) \
-                and ('zip' not in build_strat[obj_id]):
-            target_filename = f"dry_objects/{obj_id}.dry"
-            from dryml import load_object
-            if target_filename in load_zip.namelist():
-                build_strat[obj_id].add('zip')
-                with load_zip.open(target_filename) as f:
-                    obj = load_object(f)
-                    build_cache[obj_id] = obj
-                    def_cache[self.tracking_id] = obj
-                    construct_object = False
-                build_strat[obj_id].remove('zip')
+        try:
+            # Check the zipfile
+            if obj is None and (not construction_required) \
+                    and construct_object and (load_zip is not None) \
+                    and ('zip' not in build_strat[obj_id]):
+                target_filename = f"dry_objects/{obj_id}.dry"
+                from dryml import load_object
+                if target_filename in load_zip.namelist():
+                    build_strat[obj_id].add('zip')
+                    with load_zip.open(target_filename) as f:
+                        obj = load_object(f)
+                        build_cache[obj_id] = obj
+                        def_cache[self.tracking_id] = obj
+                        construct_object = False
+                    build_strat[obj_id].remove('zip')
+                    if build_verbose:
+                        print(f"Found object with id {obj_id} in the "
+                              "zip file.")
+
+            # Finally, actually construct the object
+            if obj is None and construct_object:
+                new_args = def_to_obj(self.args, repo=repo, load_zip=load_zip)
+                new_kwargs = def_to_obj(
+                    self.kwargs,
+                    repo=repo,
+                    load_zip=load_zip)
+
+                obj = self.cls(*new_args, **new_kwargs)
+
+                # Save object in the build cache.
+                obj_id = obj.dry_id
+                build_cache[obj_id] = obj
+                def_cache[self.tracking_id] = obj
                 if build_verbose:
-                    print(f"Found object with id {obj_id} in the "
-                          "zip file.")
+                    print(f"Explicitly constructed new object. id: {obj_id}")
 
-        # Finally, actually construct the object
-        if obj is None and construct_object:
-            new_args = def_to_obj(self.args, repo=repo, load_zip=load_zip)
-            new_kwargs = def_to_obj(self.kwargs, repo=repo, load_zip=load_zip)
+            elif obj is None and not construct_object:
+                raise RuntimeError(
+                    "Unexpected condition encountered when "
+                    "building from definition")
 
-            obj = self.cls(*new_args, **new_kwargs)
+        except Exception as e:
+            cleanup()
+            raise e
 
-            # Save object in the build cache.
-            obj_id = obj.dry_id
-            build_cache[obj_id] = obj
-            def_cache[self.tracking_id] = obj
-            if build_verbose:
-                print(f"Explicitly constructed new object. id: {obj_id}")
-
-        elif obj is None and not construct_object:
-            raise RuntimeError(
-                "Unexpected condition encountered when "
-                "building from definition")
-
-        # Reset the repo for this function
-        if reset_repo:
-            build_repo = None
-
-        # Reset the build cache
-        if reset_cache:
-            build_cache = None
-            def_cache = None
-
-        # Reset the build strat cache
-        if reset_strat:
-            build_strat = None
-
-        # Reset the verbose indicator
-        if reset_verbose:
-            build_verbose = None
+        cleanup()
 
         # Return the result
         return obj

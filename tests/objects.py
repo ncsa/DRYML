@@ -171,3 +171,8 @@ class TestClassE(dryml.Object):
 class TestClassF1(dryml.Object):
     def __init__(self):
         self.val = None
+
+
+class TestClassG1(dryml.Object):
+    def __init__(self, val):
+        pass
