@@ -179,9 +179,13 @@ class ResourcePool(object):
 
         if not _test:
             import GPUtil
-            total_num_gpus = len(GPUtil.getGPUs())
+            try:
+                total_num_gpus = len(GPUtil.getGPUs())
+            except ValueError:
+                # There was an issue retrieving gpus!
+                total_num_gpus = 0
             if num_gpus is None:
-                num_gpus = len(GPUtil.getGPUs())
+                num_gpus = total_num_gpus
             elif num_gpus > total_num_gpus:
                 raise InsufficientResourcesError("There are not enough gpus!")
         else:
