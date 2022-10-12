@@ -346,4 +346,4 @@ class Tune1Trainer(object):
         final_metrics.update(dry_id=model.dry_id, done=True)
 
         # Report metrics
-        tune.report(done=True, **final_metrics)
+        tune.report(**final_metrics)
