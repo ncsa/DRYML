@@ -69,7 +69,6 @@ def combine_requests(requests: [ResourceRequest]):
 def combine_reqs(*requests):
     result_request = {}
     for req in requests:
-        print(req.keys())
         for framework in req:
             if framework not in result_request:
                 result_request[framework] = [req[framework]]
