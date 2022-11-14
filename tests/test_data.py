@@ -616,3 +616,84 @@ def test_shuffle_check_1(dataset_gen):
         print("unbatched branch")
         new_count = dataset.shuffle(10000).count()
     assert orig_count == new_count
+
+
+datasets_to_test = []
+
+
+@append_dataset_gen
+def np_ds_1():
+    X = np.random.random((50, 50))
+    Y = np.random.random((50, 40))
+    ds = NumpyDataset((X, Y), supervised=True)
+    return ds, (X, Y)
+
+
+@append_dataset_gen
+def np_ds_2():
+    ds, true_data = np_ds_1()
+    return ds.unbatch(), true_data
+
+
+@append_dataset_gen
+def np_ds_3():
+    ds, true_data = np_ds_1()
+    return ds.as_indexed(), true_data
+
+
+@pytest.mark.parametrize(
+    'dataset_gen', datasets_to_test)
+def test_apply_1(dataset_gen):
+    ds, (X, Y) = dataset_gen()
+
+    def double_func(x, y):
+        return x*x, y*y
+
+    ds = ds.apply(double_func)
+    if ds.indexed:
+        if ds.batched:
+            I, (x, y) = ds.peek()
+            assert np.all(x == X*X)
+            assert np.all(y == Y*Y)
+        else:
+            for i, (I, (x, y)) in enumerate(ds):
+                assert np.all(x == X[i]*X[i])
+                assert np.all(y == Y[i]*Y[i])
+    else:
+        if ds.batched:
+            x, y = ds.peek()
+            assert np.all(x == X*X)
+            assert np.all(y == Y*Y)
+        else:
+            for i, (x, y) in enumerate(ds):
+                assert np.all(x == X[i]*X[i])
+                assert np.all(y == Y[i]*Y[i])
+
+
+@pytest.mark.parametrize(
+    'dataset_gen', datasets_to_test)
+def test_apply_2(dataset_gen):
+    ds, (X, Y) = dataset_gen()
+
+    def y_func(y):
+        return y*y
+
+    ds = ds.apply_Y(y_func)
+    if ds.indexed:
+        if ds.batched:
+            I, (x, y) = ds.peek()
+            assert np.all(x == X)
+            assert np.all(y == Y*Y)
+        else:
+            for i, (I, (x, y)) in enumerate(ds):
+                assert np.all(x == X[i])
+                assert np.all(y == Y[i]*Y[i])
+    else:
+        if ds.batched:
+            x, y = ds.peek()
+            assert np.all(x == X)
+            assert np.all(y == Y*Y)
+        else:
+            for i, (x, y) in enumerate(ds):
+                assert np.all(x == X[i])
+                assert np.all(y == Y[i]*Y[i])

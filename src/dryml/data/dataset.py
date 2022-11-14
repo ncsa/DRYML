@@ -163,9 +163,9 @@ class Dataset(object):
                 "non supervised dataset")
 
         if self.indexed:
-            return self.map(lambda i, xy: (i, (xy[0], func(xy[1]))))
+            return self.map(lambda t: (t[0], (t[1][0], func(t[1][1]))))
         else:
-            return self.map(lambda x, y: (x, func(y)))
+            return self.map(lambda t: (t[0], func(t[1])))
 
     def apply(self, func=None) -> Dataset:
         """
@@ -178,9 +178,9 @@ class Dataset(object):
                 "non supervised dataset")
 
         if self.indexed:
-            return self.map(lambda i, xy: (i, func(*xy)))
+            return self.map(lambda t: (t[0], func(*t[1])))
         else:
-            return self.map(lambda x, y: func(x, y))
+            return self.map(lambda t: func(*t))
 
     def __iter__(self):
         """
