@@ -2,13 +2,14 @@ import tensorflow as tf
 import numpy as np
 from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
     adjust_class_module
+from dryml import Meta
 from dryml.data import Dataset
 from dryml.data.tf import TFDataset
 from dryml.models.trainable import Trainable as BaseTrainable
 from dryml.models.tf.base import Model as TFModel
 from dryml.models.tf.base import Trainable as TFTrainable
 from dryml.models.tf.base import TrainFunction as TFTrainFunction
-from dryml.models.tf.base import ObjectWrapper
+from dryml.models.tf.base import Wrapper
 from dryml.models.tf.utils import keras_train_spec_updater, \
     keras_callback_wrapper
 import tempfile
@@ -292,6 +293,21 @@ class Model(TFModel):
         self.mdl = None
 
 
+class ModelWrapper(Model):
+    @Meta.collect_args
+    @Meta.collect_kwargs
+    def __init__(self, cls, *args, **kwargs):
+        if type(cls) is not type:
+            raise TypeError(
+                f"Expected first argument to be type. Got {type(cls)}")
+        self.cls = cls
+        self.args = args
+        self.kwargs = kwargs
+
+    def compute_prepare_imp(self):
+        self.mdl = self.cls(*self.args, **self.kwargs)
+
+
 class TrainFunction(TFTrainFunction):
     pass
 
@@ -533,9 +549,9 @@ def keras_sequential_functional_class(
 class Trainable(TFTrainable):
     def __init__(
             self, model: Model = None,
-            optimizer: ObjectWrapper = None,
-            loss: ObjectWrapper = None,
-            metrics: List[ObjectWrapper] = [],
+            optimizer: Wrapper = None,
+            loss: Wrapper = None,
+            metrics: List[Wrapper] = [],
             train_fn: TrainFunction = None):
         if model is None:
             raise ValueError(
