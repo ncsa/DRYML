@@ -13,11 +13,55 @@ import tqdm
 
 
 class Model(TorchModel):
-    pass
+    def __call__(self, *args, **kwargs):
+        return self.mdl.forward(*args, **kwargs)
+
+    def compute_cleanup_imp(self):
+        del self.mdl
+        self.mdl = None
+
+    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        try:
+            with file.open('state.pth', 'r') as f:
+                self.mdl.load_state_dict(torch.load(f))
+            return True
+        except Exception:
+            return False
+
+    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        try:
+            with file.open('state.pth', 'w') as f:
+                torch.save(self.mdl.state_dict(), f)
+            return True
+        except Exception:
+            return False
+
+    def prep_eval(self):
+        devs = context().get_torch_devices()
+        self.mdl.to(devs[0])
+        self.mdl.train(False)
+
+    def prep_train(self):
+        devs = context().get_torch_devices()
+        self.mdl.to(devs[0])
+        self.mdl.train(True)
 
 
 class TrainFunction(TorchTrainFunction):
     pass
+
+
+class ModelWrapper(Model):
+    @Meta.collect_args
+    @Meta.collect_kwargs
+    def __init__(self, cls, *args, **kwargs):
+        self.cls = cls
+        self.args = args
+        self.kwargs = kwargs
+        self.mdl = None
+
+    def compute_prepare_imp(self):
+        self.mdl = self.cls(*self.args, *self.kwargs)
 
 
 class Sequential(Model):
@@ -36,39 +80,6 @@ class Sequential(Model):
 
         self.mdl = torch.nn.Sequential(
             *layers)
-
-    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        try:
-            with file.open('state.pth', 'r') as f:
-                self.mdl.load_state_dict(torch.load(f))
-            return True
-        except Exception:
-            return False
-
-    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        try:
-            with file.open('state.pth', 'w') as f:
-                torch.save(self.mdl.state_dict(), f)
-            return True
-        except Exception:
-            return False
-
-    def __call__(self, *args, **kwargs):
-        return self.mdl.forward(*args, **kwargs)
-
-    def compute_cleanup_imp(self):
-        del self.mdl
-        self.mdl = None
-
-    def prep_eval(self):
-        devs = context().get_torch_devices()
-        self.mdl.to(devs[0])
-        self.mdl.train(False)
-
-    def prep_train(self):
-        devs = context().get_torch_devices()
-        self.mdl.to(devs[0])
-        self.mdl.train(True)
 
 
 class TorchOptimizer(Object):
@@ -108,24 +119,6 @@ class TorchOptimizer(Object):
     def compute_cleanup_imp(self):
         del self.opt
         self.opt = None
-
-
-class ModuleModel(Model):
-    def __init__(self, model_obj: TorchObject):
-        self.mdl = model_obj
-
-    def __call__(self, *args, **kwargs):
-        return self.mdl.obj.forward(*args, **kwargs)
-
-    def prep_eval(self):
-        devs = context().get_torch_devices()
-        self.mdl.to(devs[0])
-        self.mdl.obj.train(False)
-
-    def prep_train(self):
-        devs = context().get_torch_devices()
-        self.mdl.to(devs[0])
-        self.mdl.obj.train(True)
 
 
 class Trainable(TorchTrainable):

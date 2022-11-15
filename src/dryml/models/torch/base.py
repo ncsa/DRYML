@@ -7,14 +7,15 @@ import zipfile
 import torch
 
 
-class TorchObject(Object):
+class Wrapper(Object):
     __dry_compute_context__ = "torch"
 
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
         if type(cls) is not type:
-            raise TypeError("first argument must be a class!")
+            raise TypeError(
+                f"Expected first argument to be type. Got {type(cls)}")
         self.cls = cls
         self.args = args
         self.kwargs = kwargs

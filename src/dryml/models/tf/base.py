@@ -1,20 +1,25 @@
-from dryml import Object
+from dryml import Object, Meta
 from dryml.models import Trainable, Component
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
 
 
-class ObjectWrapper(Object):
+class Wrapper(Object):
     __dry_compute_context__ = 'tf'
 
-    def __init__(self, obj_cls, obj_args=(), obj_kwargs={}):
-        self.obj_args = obj_args
-        self.obj_kwargs = obj_kwargs
-        self.obj_cls = obj_cls
+    @Meta.collect_args
+    @Meta.collect_kwargs
+    def __init__(self, cls, *args, **kwargs):
+        if type(cls) is not type:
+            raise TypeError(
+                f"Expected first argument to be type. Got {type(cls)}")
+        self.cls = cls
+        self.args = args
+        self.kwargs = kwargs
         self.obj = None
 
     def compute_prepare_imp(self):
-        self.obj = self.obj_cls(*self.obj_args, **self.obj_kwargs)
+        self.obj = self.cls(*self.args, **self.kwargs)
 
     def compute_cleanup_imp(self):
         del self.obj
