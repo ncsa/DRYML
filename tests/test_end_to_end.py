@@ -77,12 +77,12 @@ def tf_regressor(definition=False):
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': 1, 'activation': 'linear'})]),
-        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
-        loss=dryml.models.tf.ObjectWrapper(
+        optimizer=dryml.models.tf.Wrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.Wrapper(
             tf.keras.losses.MeanSquaredError),
         train_fn=dryml.models.tf.keras.BasicTraining(epochs=1),
         metrics=[
-            dryml.models.tf.ObjectWrapper(
+            dryml.models.tf.Wrapper(
                 tf.keras.metrics.MeanSquaredError)
         ])
 
@@ -137,7 +137,7 @@ def torch_regressor(definition=False):
             epochs=1,
             optimizer=dryml.models.torch.generic.TorchOptimizer(
                 torch.optim.Adam, model),
-            loss=dryml.models.torch.base.TorchObject(
+            loss=dryml.models.torch.Wrapper(
                 torch.nn.CrossEntropyLoss)
             ),
         )
@@ -200,8 +200,8 @@ def tf_classifier(num_dims, num_classes, definition=False):
                 ('Dense', {'units': 32, 'activation': 'relu'}),
                 ('Dense', {'units': num_classes, 'activation': 'softmax'}),
             ]),
-        optimizer=dryml.models.tf.ObjectWrapper(tf.keras.optimizers.Adam),
-        loss=dryml.models.tf.ObjectWrapper(
+        optimizer=dryml.models.tf.Wrapper(tf.keras.optimizers.Adam),
+        loss=dryml.models.tf.Wrapper(
             tf.keras.losses.SparseCategoricalCrossentropy),
         train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
 
@@ -264,7 +264,7 @@ def torch_classifier(num_dims, num_classes, definition=False):
             optimizer=dryml.models.torch.generic.TorchOptimizer(
                 torch.optim.Adam,
                 model_obj),
-            loss=dryml.models.torch.base.TorchObject(
+            loss=dryml.models.torch.Wrapper(
                 torch.nn.CrossEntropyLoss),
             )
         )

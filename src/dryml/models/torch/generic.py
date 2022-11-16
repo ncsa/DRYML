@@ -2,7 +2,7 @@ from dryml.config import Meta
 from dryml.object import Object
 from dryml.data import Dataset
 from dryml.models.trainable import Trainable as BaseTrainable
-from dryml.models.torch.base import TorchObject
+from dryml.models.torch.base import Wrapper
 from dryml.models.torch.base import Model as TorchModel
 from dryml.models.torch.base import TrainFunction as TorchTrainFunction
 from dryml.models.torch.base import Trainable as TorchTrainable
@@ -166,8 +166,8 @@ class Trainable(TorchTrainable):
 class BasicTraining(TrainFunction):
     def __init__(
             self,
-            optimizer: TorchObject = None,
-            loss: TorchObject = None,
+            optimizer: Wrapper = None,
+            loss: Wrapper = None,
             epochs=1):
         self.optimizer = optimizer
         self.loss = loss

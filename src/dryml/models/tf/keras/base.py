@@ -297,7 +297,7 @@ class ModelWrapper(Model):
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
-        if type(cls) is not type:
+        if not isinstance(type(cls), type):
             raise TypeError(
                 f"Expected first argument to be type. Got {type(cls)}")
         self.cls = cls
