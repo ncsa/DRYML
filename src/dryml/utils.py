@@ -10,6 +10,7 @@ from typing import Type, Union, IO, Optional, Callable
 import zipfile
 import io
 import numpy as np
+import sys
 
 
 def is_in_typelist(val, typelist):
@@ -453,3 +454,85 @@ def apply_func(
 
     if sel is None or sel(obj):
         func(obj, *func_args, **func_kwargs)
+
+
+# Implementation from
+# https://stackoverflow.com/questions/51566497/
+# getting-the-source-of-an-object-defined-in-a-jupyter-notebook
+def new_getfile(obj, _old_getfile=inspect.getfile):
+    if not inspect.isclass(obj):
+        return _old_getfile(obj)
+
+    # Lookup by parent module (as in current inspect)
+    if hasattr(obj, '__module__'):
+        obj_ = sys.modules.get(obj.__module__)
+        if hasattr(obj_, '__file__'):
+            return obj_.__file__
+
+    # If parent module is __main__, lookup by new method
+    for name, member in inspect.getmembers(obj):
+        if inspect.isfunction(member) and \
+                '.'.join(obj.__qualname__,
+                         member.__name__) == member.__qualname__:
+            return inspect.getfile(member)
+        else:
+            raise TypeError(f"Source for {obj} not found.")
+
+
+def get_obj_sourcecode(obj):
+    import inspect
+    # First, try the normal way.
+    try:
+        return inspect.getsource(obj)
+    except TypeError as e:
+        if 'built-in class' in e.args[0]:
+            # Okay, we should try and get code through an alternate route.
+            from IPython.core.magics.code import extract_symbols
+            # try to get cell code
+            cell_code = "".join(inspect.linecache.getlines(
+                new_getfile(obj)))
+            class_code = extract_symbols(
+                cell_code, obj.__name__)[0][0]
+            return class_code
+        else:
+            # Re-raise the error
+            raise e
+
+
+def write_objs_to_temp_module(
+        *objs,
+        imports=None,
+        filepath=None):
+    """
+    Write objects to a temporary module file.
+
+    Object source code must be retrievable with `inspect.getsource`.
+    You can also specify needed imports with the `imports` argument.
+
+    Arguments:
+    *objs: Objects to dump source code.
+    imports: A list of lines containing needed import statements
+    name: A name to use for the module (optional)
+    filepath: A full filepath to write the file to.
+    """
+
+    if objs is None:
+        raise ValueError("You must pass a list of objects to write!")
+
+    if filepath is None:
+        raise ValueError("filepath must be defined.")
+
+    if '/' not in filepath and filepath[-3:] != '.py':
+        # We have a base filename to use. turn this into a filepath.
+        filepath = f'./{filepath}.py'
+
+    lines = []
+    if imports is not None:
+        lines += imports
+
+    for obj in objs:
+        lines += get_obj_sourcecode(obj)
+        lines.append("")
+
+    with open(filepath, 'w') as f:
+        f.writelines(lines)
