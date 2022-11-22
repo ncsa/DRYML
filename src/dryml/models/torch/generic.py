@@ -166,7 +166,7 @@ class Trainable(TorchTrainable):
 class BasicTraining(TrainFunction):
     def __init__(
             self,
-            optimizer: Wrapper = None,
+            optimizer: TorchOptimizer = None,
             loss: Wrapper = None,
             epochs=1):
         self.optimizer = optimizer
