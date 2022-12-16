@@ -40,12 +40,11 @@ def test_context_object_compute_check_tf_1():
     model_def = dryml.ObjectDef(
         dryml.models.tf.keras.Trainable,
         model=dryml.ObjectDef(
-            dryml.models.tf.keras.SequentialFunctionalModel,
-            input_shape=(num_dims,),
+            dryml.models.tf.keras.Sequential,
             layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+                ('Dense', (), {'units': 32, 'activation': 'relu', 'input_shape': (num_dims,)}),
+                ('Dense', (), {'units': 32, 'activation': 'relu'}),
+                ('Dense', (), {'units': num_classes, 'activation': 'softmax'}),
             ]),
         optimizer=dryml.ObjectDef(
             dryml.models.tf.Wrapper,
@@ -89,12 +88,11 @@ def test_context_object_compute_check_tf_2(create_name):
     model_def = dryml.ObjectDef(
         dryml.models.tf.keras.Trainable,
         model=dryml.ObjectDef(
-            dryml.models.tf.keras.SequentialFunctionalModel,
-            input_shape=(num_dims,),
+            dryml.models.tf.keras.Sequential,
             layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+                ('Dense', (), {'units': 32, 'activation': 'relu', 'input_shape': (num_dims,)}),
+                ('Dense', (), {'units': 32, 'activation': 'relu'}),
+                ('Dense', (), {'units': num_classes, 'activation': 'softmax'}),
             ]),
         optimizer=dryml.ObjectDef(
             dryml.models.tf.Wrapper,

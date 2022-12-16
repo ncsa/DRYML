@@ -71,12 +71,11 @@ def tf_regressor(definition=False):
 
     # Create model
     model = dryml.models.tf.keras.Trainable(
-        model=dryml.models.tf.keras.SequentialFunctionalModel(
-            input_shape=(1,),
+        model=dryml.models.tf.keras.Sequential(
             layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 1, 'activation': 'linear'})]),
+                ('Dense', (), {'units': 32, 'activation': 'relu', 'input_shape': (1,)}),
+                ('Dense', (), {'units': 32, 'activation': 'relu'}),
+                ('Dense', (), {'units': 1, 'activation': 'linear'})]),
         optimizer=dryml.models.tf.Wrapper(tf.keras.optimizers.Adam),
         loss=dryml.models.tf.Wrapper(
             tf.keras.losses.MeanSquaredError),
@@ -193,12 +192,11 @@ def tf_classifier(num_dims, num_classes, definition=False):
     import dryml.data.transforms
 
     model = dryml.models.tf.keras.Trainable(
-        model=dryml.models.tf.keras.SequentialFunctionalModel(
-            input_shape=(num_dims,),
+        model=dryml.models.tf.keras.Sequential(
             layer_defs=[
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': 32, 'activation': 'relu'}),
-                ('Dense', {'units': num_classes, 'activation': 'softmax'}),
+                ('Dense', (), {'units': 32, 'activation': 'relu', 'input_shape': (num_dims,)}),
+                ('Dense', (), {'units': 32, 'activation': 'relu'}),
+                ('Dense', (), {'units': num_classes, 'activation': 'softmax'}),
             ]),
         optimizer=dryml.models.tf.Wrapper(tf.keras.optimizers.Adam),
         loss=dryml.models.tf.Wrapper(

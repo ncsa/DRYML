@@ -406,24 +406,22 @@ class BasicTraining(TrainFunction):
             initial_epoch=start_epoch, **self.train_kwargs)
 
 
-class SequentialFunctionalModel(Model):
+class Sequential(Model):
     def __init__(
-            self, input_shape=(1,), layer_defs=[]):
+            self, layer_defs=[]):
 
-        self.input_shape = input_shape
         self.layer_defs = layer_defs
 
     def compute_prepare_imp(self):
         # Build Functional Model
-        inp = tf.keras.layers.Input(self.input_shape)
-        last_layer = inp
-        for layer_name, layer_kwargs in self.layer_defs:
-            last_layer = getattr(
-                tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
-        self.mdl = tf.keras.Model(inputs=inp, outputs=last_layer)
+        layers = []
+        for layer_name, layer_args, layer_kwargs in self.layer_defs:
+            layers.append(getattr(
+                tf.keras.layers, layer_name)(*layer_args, **layer_kwargs))
+        self.mdl = tf.keras.Sequential(layers)
 
 
-def keras_sequential_functional_class(
+def keras_sequential_class(
         name, input_shape, output_shape, base_classes=(Model,)):
 
     def __init__(
