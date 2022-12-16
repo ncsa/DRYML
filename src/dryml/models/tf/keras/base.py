@@ -4,7 +4,6 @@ from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
     adjust_class_module
 from dryml import Meta
 from dryml.data import Dataset
-from dryml.data.tf import TFDataset
 from dryml.models.trainable import Trainable as BaseTrainable
 from dryml.models.tf.base import Model as TFModel
 from dryml.models.tf.base import Trainable as TFTrainable

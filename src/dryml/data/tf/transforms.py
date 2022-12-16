@@ -27,7 +27,7 @@ def func_source_extract(func):
 
     if len(init_strip) > 0:
         code_lines = list(map(
-            lambda l: l[len(init_strip):],
+            lambda line: line[len(init_strip):],
             code_lines))
 
     return '\n'.join(code_lines)
