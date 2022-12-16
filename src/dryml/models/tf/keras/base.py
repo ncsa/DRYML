@@ -315,12 +315,17 @@ class TrainFunction(TFTrainFunction):
 class BasicTraining(TrainFunction):
     def __init__(
             self, *args, val_split=0.2, val_num=None, num_total=None,
-            shuffle_buffer=None, epochs=10000, **kwargs):
+            shuffle_buffer=None, epochs=10000, batch_size=32, callbacks=None,
+            train_transform=None, val_transform=None):
         self.val_split = val_split
         self.val_num = val_num
         self.shuffle_buffer = shuffle_buffer
         self.epochs = epochs
         self.num_total = num_total
+        self.batch_size = batch_size
+        self.callbacks = callbacks
+        self.train_transform = train_transform
+        self.val_transform = val_transform
 
     def __call__(
             self, trainable, data: Dataset, train_spec=None,
@@ -365,21 +370,26 @@ class BasicTraining(TrainFunction):
         else:
             shuffle_buffer = self.shuffle_buffer
 
-        batch_size = self.train_kwargs.pop('batch_size', 32)
-        callbacks = self.train_kwargs.pop('callbacks', None)
-
         ds_val = ds.take(num_val)
-        ds_val = ds_val.batch(batch_size)
+        ds_val = ds_val.batch(self.batch_size)
+        if self.val_transform is not None:
+            ds_val = self.val_transform.eval(ds_val)
         ds_val = ds_val.prefetch(tf.data.AUTOTUNE)
 
         ds_train = ds.skip(num_val)
         ds_train = ds_train.cache()
         ds_train = ds_train.shuffle(shuffle_buffer)
-        ds_train = ds_train.batch(batch_size)
+        ds_train = ds_train.batch(self.batch_size)
+        if self.train_transform is not None:
+            ds_train = self.train_transform.eval(ds_train)
         ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
 
-        if callbacks is None:
+        if self.callbacks is None:
             callbacks = []
+        else:
+            callbacks = []
+            for callback_wrapper in callbacks:
+                callbacks.append(callback_wrapper.obj)
 
         if train_spec is not None:
             callbacks.append(
@@ -394,102 +404,6 @@ class BasicTraining(TrainFunction):
             ds_train, *self.train_args, validation_data=ds_val,
             callbacks=callbacks, epochs=self.epochs,
             initial_epoch=start_epoch, **self.train_kwargs)
-
-
-class BasicEarlyStoppingTraining(TrainFunction):
-    def __init__(
-            self, *args, val_split=0.2, val_num=None, num_total=None,
-            shuffle_buffer=None, patience=3, epochs=10000, **kwargs):
-        self.val_split = val_split
-        self.val_num = val_num
-        self.shuffle_buffer = shuffle_buffer
-        self.patience = patience
-        self.epochs = epochs
-        self.num_total = num_total
-
-    def __call__(
-            self, trainable, data, train_spec=None,
-            train_callbacks=[]):
-
-        # Pop the epoch to resume from
-        start_epoch = 0
-        if train_spec is not None:
-            start_epoch = train_spec.level_step()
-
-        # Type checking training data, and converting if necessary
-        if type(data) is not TFDataset:
-            if not hasattr(data, 'to_TFDataset'):
-                raise TypeError(
-                    f"Type {type(data)} can't be converted to TFDataset!")
-            data = data.to_TFDataset()
-
-        # Check data is supervised.
-        if not data.supervised:
-            raise RuntimeError(
-                "TFBasicEarlyStoppingTraining requires supervised data")
-
-        batch_size = self.train_kwargs.pop('batch_size', 32)
-        callbacks = self.train_kwargs.pop('callbacks', None)
-
-        # Make sure data is unbatched. We want the function to control this.
-        data = data.unbatch()
-
-        num_total = self.num_total
-        if num_total is None:
-            # Attempt to measure dataset size
-            num_total = data.count()
-        if self.val_num is not None:
-            num_val = self.val_num
-            if self.val_split is not None:
-                print("Overridding val_split with val_num.")
-            if self.val_num > num_total:
-                raise ValueError("val_num cannot be larger than num_total!")
-        else:
-            num_val = int(num_total*self.val_split)
-
-        num_train = num_total-num_val
-
-        # Get tf.data.Dataset backing type
-        ds = data.data()
-
-        if self.shuffle_buffer is None:
-            shuffle_buffer = num_train
-        else:
-            shuffle_buffer = self.shuffle_buffer
-
-        ds_val = ds.take(num_val)
-        ds_val = ds_val.batch(batch_size)
-        ds_val = ds_val.prefetch(tf.data.AUTOTUNE)
-
-        ds_train = ds.skip(num_val)
-        ds_train = ds_train.cache()
-        ds_train = ds_train.shuffle(shuffle_buffer)
-        ds_train = ds_train.batch(batch_size)
-        ds_train = ds_train.prefetch(tf.data.AUTOTUNE)
-
-        if callbacks is None:
-            callbacks = []
-
-        # Add Early Stopping Callback
-        callbacks.append(tf.keras.callbacks.EarlyStopping(
-            patience=self.patience,
-            monitor='val_loss',
-            restore_best_weights=True))
-
-        if train_spec is not None:
-            callbacks.append(
-                keras_train_spec_updater(train_spec))
-
-        for callback in train_callbacks:
-            new_callback = keras_callback_wrapper(callback)
-            callbacks.append(new_callback)
-
-        # Fit model
-        trainable.model.mdl.fit(
-            ds_train, validation_data=ds_val,
-            initial_epoch=start_epoch,
-            epochs=self.epochs, callbacks=callbacks,
-            *self.train_args, **self.train_kwargs)
 
 
 class SequentialFunctionalModel(Model):

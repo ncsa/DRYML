@@ -1,5 +1,5 @@
 from dryml.models.tf.keras.base import Model, Trainable, \
-    BasicTraining, BasicEarlyStoppingTraining, ModelWrapper, \
+    BasicTraining, ModelWrapper, \
     keras_sequential_functional_class, SequentialFunctionalModel
 
 __all__ = [
@@ -7,7 +7,6 @@ __all__ = [
     ModelWrapper,
     Trainable,
     BasicTraining,
-    BasicEarlyStoppingTraining,
     keras_sequential_functional_class,
     SequentialFunctionalModel,
 ]
