@@ -422,10 +422,10 @@ def load_object_content(
     with ObjectFile(file) as dry_file:
         file_def = dry_file.definition()
         obj_def = obj.definition()
-        if file_def != obj_def or file_def.dry_id != obj_def.dry_id:
+        if file_def != obj_def:
             raise ValueError(
-                f"File {file} doesn't store data for object {obj.dry_id} "
-                "at the top level.")
+                f"File {file} doesn't store data for object {obj_def} "
+                "at the top level. Got object {file_def}")
 
         # Load contained objects
         file_contained_obj_ids = dry_file.contained_object_ids()
