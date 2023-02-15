@@ -20,11 +20,8 @@ def is_in_typelist(val, typelist):
 
 
 supported_scalar_types = (
-    str, bytes, int, float, bool, np.float, np.float32,
-    np.float64, np.int, np.int64, np.int32, np.int16, np.int8,
-    np.bool, np.short, np.ushort, np.uint, np.uint64, np.uint32,
-    np.uint16, np.uint8, np.byte, np.ubyte, np.single, np.double,
-    np.longdouble, type)
+    str, bytes, int, float, bool, type,
+    np.number, np.bool_)
 
 
 def is_supported_scalar_type(val):
