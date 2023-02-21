@@ -1,4 +1,5 @@
 import os
+import traceback
 from dryml.object import Object, ObjectFactory, ObjectFile, \
     ObjectDef, change_object_cls, load_object, get_contained_objects
 from dryml.config import MissingIdError
@@ -243,6 +244,8 @@ class Repo(object):
             except Exception as e:
                 print(f"WARNING! Malformed file found! {obj_cont.filepath} "
                       f"skipping load. Error was: {e}")
+                if verbose:
+                    print(traceback.format_exc())
         if verbose:
             print(f"Loaded {num_loaded} objects")
 

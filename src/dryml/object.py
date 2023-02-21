@@ -519,6 +519,7 @@ class Object(metaclass=Meta):
             dry_metadata['description'] = ""
         if 'creation_time' not in dry_metadata:
             dry_metadata['creation_time'] = time.time()
+        self.dry_kwargs['dry_metadata'] = dry_metadata
 
         self._definition = None
 
