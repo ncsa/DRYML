@@ -8,6 +8,10 @@ import pickle
 import io
 import zipfile
 import uuid
+import re
+import numpy as np
+import time
+
 from typing import IO, Union, Optional, Type, Callable
 from dryml.config import ObjectDef, Meta, MissingIdError
 from dryml.utils import get_current_cls, pickler, static_var, \
@@ -17,8 +21,6 @@ from dryml.context.context_tracker import combine_requests, context, \
     NoContextError
 from dryml.file_intermediary import FileIntermediary
 from dryml.save_cache import SaveCache
-import re
-import numpy as np
 
 
 FileType = Union[str, IO[bytes]]
@@ -504,9 +506,20 @@ class Object(metaclass=Meta):
     __dry_meta_base__ = True
 
     # Define the dry_id
-    def __init__(self, *args, dry_id=None, **kwargs):
+    def __init__(self, *args, dry_id=None, dry_metadata=None, **kwargs):
+        # Dry ID
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())
+
+        # Handle Metadata
+        if dry_metadata is None:
+            # Create a default empty dry_metadata
+            dry_metadata = {}
+        if 'description' not in dry_metadata:
+            dry_metadata['description'] = ""
+        if 'creation_time' not in dry_metadata:
+            dry_metadata['creation_time'] = time.time()
+
         self._definition = None
 
     def definition(self):
@@ -539,6 +552,12 @@ class Object(metaclass=Meta):
         if 'dry_id' not in self.dry_kwargs:
             raise MissingIdError()
         return self.dry_kwargs['dry_id']
+
+    @property
+    def dry_metadata(self):
+        if 'dry_metadata' not in self.dry_kwargs:
+            raise MissingMetadataError()
+        return self.dry_kwargs['dry_metadata']
 
     def __hash__(self):
         return hash(self.dry_id)

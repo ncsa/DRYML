@@ -32,7 +32,7 @@ def test_basic_trainable_2():
 def test_trainable_def_1():
     import objects
 
-    test_obj = objects.HelloTrainableC('test1', description='test obj')
+    test_obj = objects.HelloTrainableC('test1')
 
     test_obj2 = test_obj.definition().build()
 

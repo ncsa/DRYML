@@ -22,6 +22,10 @@ class MissingIdError(Exception):
     pass
 
 
+class MissingMetadataError(Exception):
+    pass
+
+
 class IncompleteDefinitionError(Exception):
     pass
 
@@ -287,7 +291,7 @@ class Meta(abc.ABCMeta):
                 used_kwargs.append(k)
 
             # Collect remaining kwargs if needed.
-            dont_collect_kwargs = ['dry_id']
+            dont_collect_kwargs = ['dry_id', 'dry_metadata']
             if collect_kwargs:
                 for k in kwargs:
                     if k not in dont_collect_kwargs:
@@ -348,6 +352,8 @@ class Meta(abc.ABCMeta):
             if not base:
                 if 'dry_id' in sub_kwargs:
                     del sub_kwargs['dry_id']
+                if 'dry_metadata' in sub_kwargs:
+                    del sub_kwargs['dry_metadata']
 
             if no_var_pars:
                 args = args[:num_args]
@@ -1187,6 +1193,8 @@ class ObjectDef(collections.UserDict):
             new_kwargs = def_to_cat_def(self.kwargs, cache=cache)
             if 'dry_id' in new_kwargs:
                 del new_kwargs['dry_id']
+            if 'dry_metadata' in new_kwargs:
+                del new_kwargs['dry_metadata']
 
             # Create new definition
             cat_def = ObjectDef(
@@ -1205,14 +1213,18 @@ class ObjectDef(collections.UserDict):
             del new_def.kwargs['dry_id']
             return new_def
 
-    def get_hash_str(self, no_id: bool = False):
+    def get_hash_str(self, no_id: bool = False, no_metadata: bool = False):
         class_hash_str = get_class_str(self.cls)
         args_hash_str = str(self.args)
         # Remove dry_id so we can test for object 'class'
-        if no_id:
+        if no_id or no_metadata:
             kwargs_copy = copy.copy(self.kwargs)
-            if 'dry_id' in kwargs_copy:
-                kwargs_copy.pop('dry_id')
+            if no_id:
+                if 'dry_id' in kwargs_copy:
+                    kwargs_copy.pop('dry_id')
+            if no_metadata:
+                if 'dry_metadata' in kwargs_copy:
+                    kwargs_copy.pop('dry_metadata')
             kwargs_hash_str = str(kwargs_copy)
         else:
             kwargs_hash_str = str(self.kwargs)
@@ -1231,7 +1243,7 @@ class ObjectDef(collections.UserDict):
         if not self.is_concrete():
             raise IncompleteDefinitionError(
                 "Definition {self} has no dry_id!")
-        return get_hashed_id(self.get_hash_str(no_id=False))
+        return get_hashed_id(self.get_hash_str())
 
     def get_category_id(self):
-        return get_hashed_id(self.get_hash_str(no_id=True))
+        return get_hashed_id(self.get_hash_str(no_id=True, no_metadata=True))

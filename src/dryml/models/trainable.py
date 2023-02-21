@@ -12,7 +12,7 @@ class Trainable(Object):
     untrained = 0
     trained = 2
 
-    def __init__(self, *args, description="", **kwargs):
+    def __init__(self, *args, **kwargs):
         self.train_state = Trainable.untrained
 
     def load_object_imp(self, file: zipfile.ZipFile) -> bool:

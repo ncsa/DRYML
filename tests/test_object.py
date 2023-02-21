@@ -180,6 +180,34 @@ def test_save_object_5(create_temp_file):
     assert obj2.version() == 1
 
 
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_save_object_6(create_temp_named_file):
+    """
+    Test object default metadata saving
+    """
+    with open('./tests/test_objs.py', 'w') as f:
+        f.write(test_objs_text.format(version=1))
+
+    import test_objs
+    importlib.reload(test_objs)
+
+    desc_str = 'Test Description'
+    obj = test_objs.SimpleObject(10, dry_metadata={'description': desc_str })
+    orig_creation_time = obj.dry_metadata['creation_time']
+
+    assert obj.save_self(create_temp_named_file)
+
+    obj2 = dryml.load_object(create_temp_named_file)
+
+    assert obj == obj2
+
+    assert obj.version() == 1
+    assert obj2.version() == 1
+
+    assert orig_creation_time == obj2.dry_metadata['creation_time']
+    assert desc_str == obj2.dry_metadata['description']
+
+
 def test_basic_object_def_update_1():
     def build_and_save_obj_1():
         time.sleep(1.1)
