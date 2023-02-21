@@ -48,10 +48,10 @@ def test_context_object_compute_check_tf_1():
                 ('Dense', {'units': num_classes, 'activation': 'softmax'}),
             ]),
         optimizer=dryml.ObjectDef(
-            dryml.models.tf.ObjectWrapper,
+            dryml.models.tf.Wrapper,
             tf.keras.optimizers.Adam),
         loss=dryml.ObjectDef(
-            dryml.models.tf.ObjectWrapper,
+            dryml.models.tf.Wrapper,
             tf.keras.losses.SparseCategoricalCrossentropy),
         train_fn=dryml.ObjectDef(
             dryml.models.tf.keras.BasicTraining,
@@ -97,10 +97,10 @@ def test_context_object_compute_check_tf_2(create_name):
                 ('Dense', {'units': num_classes, 'activation': 'softmax'}),
             ]),
         optimizer=dryml.ObjectDef(
-            dryml.models.tf.ObjectWrapper,
+            dryml.models.tf.Wrapper,
             tf.keras.optimizers.Adam),
         loss=dryml.ObjectDef(
-            dryml.models.tf.ObjectWrapper,
+            dryml.models.tf.Wrapper,
             tf.keras.losses.SparseCategoricalCrossentropy),
         train_fn=dryml.ObjectDef(
             dryml.models.tf.keras.BasicTraining,
