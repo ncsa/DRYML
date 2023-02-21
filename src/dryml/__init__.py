@@ -13,7 +13,7 @@ from dryml.workshop import Workshop
 from dryml.context import compute_context, compute
 import dryml.context as context
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 __all__ = [
     Object,
