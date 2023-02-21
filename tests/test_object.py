@@ -192,7 +192,7 @@ def test_save_object_6(create_temp_named_file):
     importlib.reload(test_objs)
 
     desc_str = 'Test Description'
-    obj = test_objs.SimpleObject(10, dry_metadata={'description': desc_str })
+    obj = test_objs.SimpleObject(10, dry_metadata={'description': desc_str})
     orig_creation_time = obj.dry_metadata['creation_time']
 
     assert obj.save_self(create_temp_named_file)

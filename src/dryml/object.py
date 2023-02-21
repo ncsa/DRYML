@@ -13,7 +13,7 @@ import numpy as np
 import time
 
 from typing import IO, Union, Optional, Type, Callable
-from dryml.config import ObjectDef, Meta, MissingIdError
+from dryml.config import ObjectDef, Meta, MissingIdError, MissingMetadataError
 from dryml.utils import get_current_cls, pickler, static_var, \
     is_supported_scalar_type, is_supported_listlike, is_supported_dictlike, \
     map_dictlike, map_listlike, get_class_from_str, get_class_str
