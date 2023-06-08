@@ -6,8 +6,8 @@ from dryml.context import cls_method_compute
 
 @cls_method_compute('train')
 @cls_method_compute('eval')
-@cls_method_compute('prep_train', ctx_use_existing_context=True)
-@cls_method_compute('prep_eval', ctx_use_existing_context=True)
+@cls_method_compute('prep_train')
+@cls_method_compute('prep_eval')
 class Trainable(Object):
     untrained = 0
     trained = 2

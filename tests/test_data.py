@@ -173,7 +173,7 @@ def test_numpy_dataset_6():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
@@ -216,7 +216,7 @@ def test_numpy_dataset_8():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
@@ -235,7 +235,7 @@ def test_numpy_dataset_9():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
@@ -335,7 +335,7 @@ def test_numpy_dataset_14():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows).batch(batch_size=batch_size)
@@ -426,6 +426,48 @@ def test_chain_transforms_9():
 
     assert type(result) is np.ndarray
     assert np.all(data_block**2 == result)
+
+
+def test_cast_transform_1():
+    with dryml.context.ContextManager(
+            resource_requests={'default': {'num_cpus': 1}}):
+        batch_size = 32
+        X_block = np.random.random((batch_size, 5)).astype(np.float64)
+        Y_block = np.random.random((batch_size, 10)).astype(np.float64)
+
+        init_dataset = dryml.data.NumpyDataset(
+            (X_block, Y_block),
+            supervised=True)
+
+        x, y = init_dataset.peek()
+        assert x.dtype == np.float64
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float64
+        assert y.shape == (batch_size, 10)
+
+        dtype_cast = dryml.data.transforms.Cast(dtype="float32", mode='X')
+
+        x, y = dtype_cast.eval(init_dataset).peek()
+        assert x.dtype == np.float32
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float64
+        assert y.shape == (batch_size, 10)
+
+        dtype_cast = dryml.data.transforms.Cast(dtype="float32", mode='Y')
+
+        x, y = dtype_cast.eval(init_dataset).peek()
+        assert x.dtype == np.float64
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float32
+        assert y.shape == (batch_size, 10)
+
+        dtype_cast = dryml.data.transforms.Cast(dtype="float32", mode='all')
+
+        x, y = dtype_cast.eval(init_dataset).peek()
+        assert x.dtype == np.float32
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float32
+        assert y.shape == (batch_size, 10)
 
 
 # Define equality functions which will be needed
@@ -609,10 +651,8 @@ def test_shuffle_check_1(dataset_gen):
     dataset, _ = dataset_gen()
     orig_count = dataset.count()
     if dataset.batched:
-        print("batched branch")
         batch_size = dataset.batch_size
         new_count = dataset.shuffle(10000).batch(batch_size=batch_size).count()
     else:
-        print("unbatched branch")
         new_count = dataset.shuffle(10000).count()
     assert orig_count == new_count
