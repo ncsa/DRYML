@@ -173,7 +173,7 @@ def test_numpy_dataset_6():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
@@ -216,7 +216,7 @@ def test_numpy_dataset_8():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
@@ -235,7 +235,7 @@ def test_numpy_dataset_9():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows)
@@ -335,7 +335,7 @@ def test_numpy_dataset_14():
     batch_size = 32
 
     batch_rows = []
-    for i in range(batch_size):
+    for _ in range(batch_size):
         batch_rows.append(np.random.random((20,)))
 
     dataset = NumpyDataset(batch_rows).batch(batch_size=batch_size)
@@ -649,10 +649,8 @@ def test_shuffle_check_1(dataset_gen):
     dataset, _ = dataset_gen()
     orig_count = dataset.count()
     if dataset.batched:
-        print("batched branch")
         batch_size = dataset.batch_size
         new_count = dataset.shuffle(10000).batch(batch_size=batch_size).count()
     else:
-        print("unbatched branch")
         new_count = dataset.shuffle(10000).count()
     assert orig_count == new_count
