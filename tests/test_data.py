@@ -428,6 +428,46 @@ def test_chain_transforms_9():
     assert np.all(data_block**2 == result)
 
 
+def test_cast_transform_1():
+    with dryml.context.ContextManager(
+            resource_requests={'default': {'num_cpus': 1}}):
+        batch_size = 32
+        X_block = np.random.random((batch_size, 5)).astype(np.float64)
+        Y_block = np.random.random((batch_size, 10)).astype(np.float64)
+
+        init_dataset = dryml.data.NumpyDataset((X_block, Y_block), supervised=True)
+
+        x, y = init_dataset.peek()
+        assert x.dtype == np.float64
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float64
+        assert y.shape == (batch_size, 10)
+
+        dtype_cast = dryml.data.transforms.Cast(dtype="float32", mode='X')
+
+        x, y = dtype_cast.eval(init_dataset).peek()
+        assert x.dtype == np.float32
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float64
+        assert y.shape == (batch_size, 10)
+
+        dtype_cast = dryml.data.transforms.Cast(dtype="float32", mode='Y')
+
+        x, y = dtype_cast.eval(init_dataset).peek()
+        assert x.dtype == np.float64
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float32
+        assert y.shape == (batch_size, 10)
+
+        dtype_cast = dryml.data.transforms.Cast(dtype="float32", mode='all')
+
+        x, y = dtype_cast.eval(init_dataset).peek()
+        assert x.dtype == np.float32
+        assert x.shape == (batch_size, 5)
+        assert y.dtype == np.float32
+        assert y.shape == (batch_size, 10)
+
+
 # Define equality functions which will be needed
 def np_eq(el1, el2):
     return np.all(el1 == el2)

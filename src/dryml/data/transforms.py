@@ -18,7 +18,9 @@ class StaticTransform(Trainable):
 
     def applier(self, data: Dataset, func: Callable):
         if self.mode == 'all':
-            return data.apply(func)
+            def apply_wrapper(x, y):
+                return func(x), func(y)
+            return data.apply(apply_wrapper)
         elif self.mode == 'X':
             return data.apply_X(func)
         elif self.mode == 'Y':
