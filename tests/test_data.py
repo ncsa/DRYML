@@ -435,7 +435,9 @@ def test_cast_transform_1():
         X_block = np.random.random((batch_size, 5)).astype(np.float64)
         Y_block = np.random.random((batch_size, 10)).astype(np.float64)
 
-        init_dataset = dryml.data.NumpyDataset((X_block, Y_block), supervised=True)
+        init_dataset = dryml.data.NumpyDataset(
+            (X_block, Y_block),
+            supervised=True)
 
         x, y = init_dataset.peek()
         assert x.dtype == np.float64
