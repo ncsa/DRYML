@@ -1,6 +1,7 @@
 from dryml.models import Trainable
 from dryml.data.dataset import Dataset
-from dryml.data.util import nestize
+from dryml.data.util import nestize, function_inspection, \
+    promote_function, func_source_extract
 from dryml.data.numpy_dataset import NumpyDataset
 import numpy as np
 from typing import Callable
@@ -16,20 +17,70 @@ class StaticTransform(Trainable):
     def train(self, *args, train_spec=None, **kwargs):
         pass
 
-    def applier(self, data: Dataset, func: Callable):
+    def applier(
+            self,
+            data: Dataset,
+            func: Callable,
+            func_args=(),
+            func_kwargs={}):
+        # Apply function to data
+        #
+        # Args:
+        #  data: Dataset to apply function to.
+        #  func: Function to apply.
+        #  func_args: Additional arguments to pass to func.
+        #  func_kwargs: Additional keyword arguments to pass to func.
+
+        func_inspect = function_inspection(func)
+
+        if func_inspect["n_args"] == 0:
+            raise ValueError(
+                "Function must take at least one explicit argument! "
+                "function signature: " + func_inspect["signature"])
+
         if self.mode == 'all':
-            def apply_wrapper(x, y):
-                return func(x), func(y)
-            return data.apply(apply_wrapper)
+            if func_inspect["n_args"] == 1:
+                # promote to two arguments
+                func = promote_function(func)
+            elif func_inspect["n_args"] > 2:
+                raise ValueError(
+                    "Function must take at most two explicit arguments! "
+                    "function signature: " + func_inspect["signature"])
+            return data.apply(
+                func,
+                func_args=func_args,
+                func_kwargs=func_kwargs)
         elif self.mode == 'X':
-            return data.apply_X(func)
+            if func_inspect["n_args"] > 1:
+                raise ValueError(
+                    "Function must take at most one explicit argument! "
+                    "function signature: " + func_inspect["signature"])
+            return data.apply_X(
+                func,
+                func_args=func_args,
+                func_kwargs=func_kwargs)
         elif self.mode == 'Y':
-            return data.apply_Y(func)
+            if func_inspect["n_args"] > 1:
+                raise ValueError(
+                    "Function must take at most one explicit argument! "
+                    "function signature: " + func_inspect["signature"])
+            return data.apply_Y(
+                func,
+                func_args=func_args,
+                func_kwargs=func_kwargs)
         else:
             raise RuntimeError("Unknown mode!")
 
-    def numpy_eval(self, data: NumpyDataset):
+    def numpy_eval(self, data, *args, **kwargs):
         raise NotImplementedError()
+
+    def eval(self, data: Dataset, *args, **kwargs):
+        raise NotImplementedError()
+
+
+class FrameworkTransform(StaticTransform):
+    # A version of StaticTransform with different function
+    # definitions for each framework.
 
     def eval(self, data: Dataset, *args, **kwargs):
         # Special case for Tensorflow datasets
@@ -53,11 +104,11 @@ class StaticTransform(Trainable):
         # Fallback, try to cast first to numpy then apply.
         if type(data) is not NumpyDataset:
             data = data.numpy()
-        if type(data) is NumpyDataset:
-            return self.numpy_eval(data, *args, **kwargs)
+
+        return self.numpy_eval(data, *args, **kwargs)
 
 
-class BestCat(StaticTransform):
+class BestCat(FrameworkTransform):
     def numpy_eval(self, data, *args, **kwargs):
         return self.applier(
             data,
@@ -76,7 +127,7 @@ class BestCat(StaticTransform):
             lambda x: torch.argmax(x, dim=-1))
 
 
-class Flatten(StaticTransform):
+class Flatten(FrameworkTransform):
     def numpy_eval(self, data, *args, **kwargs):
         if data.batched:
             return self.applier(
@@ -110,7 +161,7 @@ class Flatten(StaticTransform):
                 lambda x: torch.reshape(x, (-1,)))
 
 
-class Transpose(StaticTransform):
+class Transpose(FrameworkTransform):
     def __init__(self, axes=None):
         self.train_state = Trainable.trained
         self.axes = axes
@@ -161,7 +212,7 @@ class Transpose(StaticTransform):
                 lambda x: x.permute(*self.axes))
 
 
-class Cast(StaticTransform):
+class Cast(FrameworkTransform):
     def __init__(self, dtype='float32'):
         self.dtype = dtype
 
@@ -196,3 +247,70 @@ class Cast(StaticTransform):
         return self.applier(
             data,
             nestize(caster))
+
+
+class FuncTransform(StaticTransform):
+    @classmethod
+    def from_function(
+            cls,
+            func,
+            func_args=(),
+            func_kwargs={},
+            framework=None,
+            **kwargs):
+        return FuncTransform(
+            func_source_extract(func),
+            func_args=func_args,
+            func_kwargs=func_kwargs,
+            framework=framework,
+            **kwargs)
+
+    def __init__(
+            self,
+            func_code,
+            func_args=(),
+            func_kwargs={},
+            framework=None):
+        # Save any arguments which will be passed after the
+        # data to the function
+        self.args = func_args
+        self.kwargs = func_kwargs
+        if framework is not None:
+            if framework not in ['tf', 'torch', 'numpy']:
+                raise ValueError(
+                    "Framework must be one of 'tf', 'torch', 'numpy' or None!")
+        self.framework = framework
+
+        # Evaluate passed function code
+        lcls = {}
+        exec(func_code, globals(), lcls)
+
+        # Check for function definition
+        if len(lcls) == 0:
+            raise ValueError("Code defines no objects!")
+        if len(lcls) > 1:
+            raise ValueError("Code defines more than one object!")
+
+        # Get newly defined object
+        func = list(lcls.values())[0]
+
+        if not callable(func):
+            raise ValueError(
+                "Function code doesn't contain a function definition!")
+
+        self.func = func
+        self.train_state = Trainable.trained
+
+    def eval(self, data: Dataset, *args, **kwargs):
+        if self.framework is not None:
+            if self.framework == 'tf':
+                data = data.tf()
+            elif self.framework == 'torch':
+                data = data.torch()
+            elif self.framework == 'numpy':
+                data = data.numpy()
+        return self.applier(
+            data,
+            self.func,
+            func_args=self.args,
+            func_kwargs=self.kwargs)

@@ -256,16 +256,17 @@ def test_selector_7():
     Test real life example
     """
 
-    import dryml.data.tf
+    import dryml.data
 
     # Create transform object
     def test_func(x):
         return x*2
 
-    real_obj = dryml.data.tf.transforms.FuncXMap.from_function(test_func)
+    real_obj = dryml.data.transforms.FuncTransform.from_function(
+        test_func, framework='tf')
 
     obj_def = dryml.ObjectDef(
-        dryml.data.tf.transforms.FuncXMap,
+        dryml.data.transforms.FuncTransform,
         real_obj.dry_args[0])
 
     assert dryml.Selector.from_def(obj_def)(real_obj)
