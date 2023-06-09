@@ -136,25 +136,61 @@ class Dataset(object):
 
         return self.map(nestize(func))
 
-    def apply_X(self, func: Callable = None) -> Dataset:
+    def apply_X(
+            self,
+            func: Callable = None,
+            func_args=(),
+            func_kwargs={}) -> Dataset:
         """
         Apply a function to the X component of Dataset
+
+        Args:
+            func: The function to apply
+            func_args: Arguments to pass to the function
+            func_kwargs: Keyword arguments to pass to the function
         """
 
         if self.indexed:
             if self.supervised:
-                return self.map(lambda t: (t[0], (func(t[1][0]), t[1][1])))
+                return self.map(
+                    lambda t: (
+                        t[0],
+                        (func(t[1][0], *func_args, **func_kwargs),
+                         t[1][1])
+                    )
+                )
             else:
-                return self.map(lambda t: (t[0], func(t[1])))
+                return self.map(
+                    lambda t: (
+                        t[0],
+                        func(t[1], *func_args, **func_kwargs)
+                    )
+                )
         else:
             if self.supervised:
-                return self.map(lambda t: (func(t[0]), t[1]))
+                return self.map(
+                    lambda t: (
+                        func(t[0], *func_args, **func_kwargs),
+                        t[1]
+                    )
+                )
             else:
-                return self.map(lambda x: func(x))
+                return self.map(
+                    lambda x: func(x, *func_args, **func_kwargs)
+                )
 
-    def apply_Y(self, func=None) -> Dataset:
+    def apply_Y(
+            self,
+            func: Callable = None,
+            func_args=(),
+            func_kwargs={}) -> Dataset:
         """
         Apply a function to the Y component of Dataset
+
+        Args:
+            func: The function to apply
+            func_args: Arguments to pass to the function
+            func_kwargs: Keyword arguments to pass to the function
         """
 
         if not self.supervised:
@@ -163,13 +199,33 @@ class Dataset(object):
                 "non supervised dataset")
 
         if self.indexed:
-            return self.map(lambda t: (t[0], (t[1][0], func(t[1][1]))))
+            return self.map(
+                lambda t: (
+                    t[0],
+                    (t[1][0],
+                     func(t[1][1], *func_args, **func_kwargs))
+                )
+            )
         else:
-            return self.map(lambda t: (t[0], func(t[1])))
+            return self.map(
+                lambda t: (
+                    t[0],
+                    func(t[1], *func_args, **func_kwargs)
+                )
+            )
 
-    def apply(self, func=None) -> Dataset:
+    def apply(
+            self,
+            func: Callable = None,
+            func_args=(),
+            func_kwargs={}) -> Dataset:
         """
         Apply a function to (X, Y)
+
+        Args:
+            func: The function to apply
+            func_args: Arguments to pass to the function
+            func_kwargs: Keyword arguments to pass to the function
         """
 
         if not self.supervised:
@@ -178,9 +234,16 @@ class Dataset(object):
                 "non supervised dataset")
 
         if self.indexed:
-            return self.map(lambda t: (t[0], func(*t[1])))
+            return self.map(
+                lambda t: (
+                    t[0],
+                    func(*t[1], *func_args, **func_kwargs)
+                )
+            )
         else:
-            return self.map(lambda t: func(*t))
+            return self.map(
+                lambda t: func(*t, *func_args, **func_kwargs)
+            )
 
     def __iter__(self):
         """

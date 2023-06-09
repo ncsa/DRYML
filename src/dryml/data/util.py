@@ -2,6 +2,9 @@
 Utility functions for data methods
 """
 
+import inspect
+from typing import Callable
+
 
 def nested_flatten(data):
     flatten_data = []
@@ -152,3 +155,78 @@ def skiper(gen_func, n):
             yield next(it)
         except StopIteration:
             return
+
+
+def function_inspection(func: Callable):
+    if not callable(func):
+        raise ValueError("Argument should be a function.")
+
+    sig = inspect.signature(func)
+    params = sig.parameters
+
+    explicit_args = 0
+    var_args = False
+    keyword_args = 0
+    var_kwargs = False
+
+    for _, param in params.items():
+        if param.kind == param.POSITIONAL_OR_KEYWORD:
+            if param.default == inspect.Parameter.empty:
+                explicit_args += 1
+            else:
+                keyword_args += 1
+        elif param.kind == param.VAR_POSITIONAL:
+            var_args = True
+        elif param.kind == param.VAR_KEYWORD:
+            var_kwargs = True
+
+    return {
+        'signature': sig,
+        'n_args': explicit_args,
+        'var_args': var_args,
+        'n_kwargs': keyword_args,
+        'var_kwargs': var_kwargs,
+    }
+
+
+def promote_function(func):
+    def promoted_func(x, y, *args, **kwargs):
+        return func(x, *args, **kwargs), \
+               func(y, *args, **kwargs)
+    return promoted_func
+
+
+def func_source_extract(func):
+    # Get source code for a given function,
+    # and format it in a consistent way for
+    # building custom transformations.
+    #
+    # Args:
+    #   func: The function whose source to extract.
+
+    # Get the source code
+    code_string = inspect.getsource(func)
+
+    # Possibly strip leading spaces
+    code_lines = code_string.split('\n')
+
+    init_strip = code_lines[0]
+
+    for line in code_lines[1:]:
+        i = 0
+        while i < len(init_strip) and \
+                i < len(line) and \
+                init_strip[i] == line[i]:
+            i += 1
+        if i == len(init_strip) or \
+                i == len(line):
+            continue
+
+        init_strip = init_strip[:i]
+
+    if len(init_strip) > 0:
+        code_lines = list(map(
+            lambda l: l[len(init_strip):],
+            code_lines))
+
+    return '\n'.join(code_lines)
