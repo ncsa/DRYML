@@ -256,12 +256,14 @@ class FuncTransform(StaticTransform):
             func,
             func_args=(),
             func_kwargs={},
-            framework=None):
+            framework=None,
+            **kwargs):
         return FuncTransform(
             func_source_extract(func),
             func_args=func_args,
             func_kwargs=func_kwargs,
-            framework=framework)
+            framework=framework,
+            **kwargs)
 
     def __init__(
             self,
