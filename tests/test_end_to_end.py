@@ -416,12 +416,10 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
 
 
 @pytest.mark.usefixtures("create_temp_dir")
-@pytest.mark.usefixtures("ray_server")
+@pytest.mark.usefixtures("get_ray")
 @pytest.mark.parametrize(
     "model_gen", regressor_funcs)
-def test_train_supervised_1_ray(create_temp_dir, model_gen):
-    import ray
-
+def test_train_supervised_1_ray(create_temp_dir, ray, model_gen):
     # Fetch data.
     (num_train, train_data) = dataset_1['train']
     (num_test, test_data) = dataset_1['test']
@@ -638,12 +636,10 @@ def test_train_supervised_2_context_repo(create_temp_dir, model_gen):
 
 
 @pytest.mark.usefixtures("create_temp_dir")
-@pytest.mark.usefixtures("ray_server")
+@pytest.mark.usefixtures("get_ray")
 @pytest.mark.parametrize(
     "model_gen", classifier_funcs)
-def test_train_supervised_2_ray(create_temp_dir, model_gen):
-    import ray
-
+def test_train_supervised_2_ray(create_temp_dir, ray, model_gen):
     # Fetch data
     num_classes = dataset_2['num_classes']
     num_dims = dataset_2['num_dims']

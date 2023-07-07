@@ -35,16 +35,24 @@ def create_temp_dir():
         yield directory
 
 
+@pytest.fixture
+def get_ray():
+    try:
+        import ray
+    except ImportError:
+        pytest.skip("Ray is not installed")
+    else:
+        yield ray
+
+
 @pytest.fixture(scope="session", autouse=True)
 def ray_server(request):
     try:
         import ray
+        ray.init(num_cpus=1, num_gpus=0)
+
+        def shutdown_ray():
+            ray.shutdown()
+        request.addfinalizer(shutdown_ray)
     except ImportError:
         pass
-
-    ray.init(num_cpus=1, num_gpus=0)
-
-    def shutdown_ray():
-        ray.shutdown()
-
-    request.addfinalizer(shutdown_ray)
