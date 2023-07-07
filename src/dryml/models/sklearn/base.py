@@ -5,6 +5,7 @@ from dryml.config import Meta
 from dryml.models import Component, Trainable
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
+from dryml.utils import validate_class
 
 
 class Model(Component):
@@ -13,7 +14,7 @@ class Model(Component):
         # It is subclass's responsibility to fill this
         # attribute with an actual keras class
         self.mdl = None
-        self.cls = cls
+        self.cls = validate_class(cls)
         self.mdl_kwargs = kwargs
 
     def compute_prepare_imp(self):

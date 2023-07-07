@@ -10,6 +10,7 @@ from dryml.context import context
 import zipfile
 import torch
 import tqdm
+from dryml.utils import validate_class
 
 
 class Model(TorchModel):
@@ -55,7 +56,7 @@ class ModelWrapper(Model):
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
-        self.cls = cls
+        self.cls = validate_class(cls)
         self.args = args
         self.kwargs = kwargs
         self.mdl = None

@@ -10,6 +10,7 @@ from typing import Type, Union, IO, Optional, Callable
 import zipfile
 import io
 import numpy as np
+from inspect import isclass
 
 
 def is_in_typelist(val, typelist):
@@ -151,6 +152,16 @@ def get_current_cls(cls: Type, reload: bool = False):
     return get_class_by_name(
         inspect.getmodule(cls).__name__,
         cls.__name__, reload=reload)
+
+
+def validate_class(cls):
+    if not isclass(cls):
+        raise TypeError(
+            f"Expected argument to be a class. Got {cls}.\n"
+            "Make sure the argument wasn't an ObjectDef which "
+            "can be replaced with an Object at build time, and not a "
+            "class.")
+    return cls
 
 
 def get_hashed_id(hashstr: str):
