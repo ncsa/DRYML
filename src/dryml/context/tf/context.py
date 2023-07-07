@@ -68,7 +68,7 @@ class TFComputeContext(ComputeContext):
         logical_devices = tf.config.list_logical_devices('GPU')
         if len(logical_devices) > 1:
             # Get visible logical device names
-            gpu_names = list(map(lambda l: l.name, logical_devices))
+            gpu_names = list(map(lambda device: device.name, logical_devices))
 
             # Create
             self.strategy = tf.distribute.MirroredStrategy(gpu_names)
