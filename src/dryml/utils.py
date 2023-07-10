@@ -380,13 +380,8 @@ def diff_recursive(obj1, obj2, path="", check_class=False):
                 diff_recursive(obj1[i], obj2[i], path=f"{path}/list[{i}]")
 
     elif isclass(obj1) and isclass(obj2):
-        if obj1 != obj2:
+        if are_equivalent_classes(obj1, obj2):
             print(f"Classes are different at {path}: {obj1} != {obj2}")
-        obj1_cls_name = get_class_str(obj1)
-        obj2_cls_name = get_class_str(obj2)
-        if obj1_cls_name != obj2_cls_name:
-            print(f"Class names are different at {path}: "
-                  "{obj1_cls_name} 1= {obj2_cls_name}")
 
     elif obj1 != obj2:
         print(f"Value mismatch at {path}: {obj1} != {obj2}")
