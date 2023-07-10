@@ -62,7 +62,7 @@ class ModelWrapper(Model):
         self.mdl = None
 
     def compute_prepare_imp(self):
-        self.mdl = self.cls(*self.args, *self.kwargs)
+        self.mdl = self.cls(*self.args, **self.kwargs)
 
 
 class Sequential(Model):
