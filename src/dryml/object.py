@@ -654,43 +654,27 @@ class ObjectFactory(object):
         return obj
 
 
-class ObjectWrapper(Object):
+class Wrapper(Object):
     """
     An object wrapper for simple python objects
     """
-    def __init__(self, cls: Type, obj_args=None, obj_kwargs=None):
-        if obj_args is None:
-            obj_args = []
-            self.dry_kwargs['obj_args'] = obj_args
-        if obj_kwargs is None:
-            obj_kwargs = {}
-            self.dry_kwargs['obj_kwargs'] = obj_kwargs
-
-        self.obj = cls(*obj_args, **obj_kwargs)
+    @Meta.collect_args
+    @Meta.collect_kwargs
+    def __init__(self, cls: Type, *args, **kwargs):
+        self.obj = cls(*args, **kwargs)
 
 
-class CallableWrapper(Object):
+class Callable(Object):
     """
     A wrapper for a callable object to cement some arguments
     """
 
+    @Meta.collect_args
+    @Meta.collect_kwargs
     def __init__(
-            self, obj: ObjectWrapper, obj_args=None, obj_kwargs=None,
-            call_args=None, call_kwargs=None):
-        if obj_args is None:
-            obj_args = []
-            self.dry_kwargs['obj_args'] = obj_args
-        if obj_kwargs is None:
-            obj_kwargs = {}
-            self.dry_kwargs['obj_kwargs'] = obj_kwargs
-        if call_args is None:
-            call_args = []
-            self.dry_kwargs['call_args'] = call_args
-        self.call_args = call_args
-        if call_kwargs is None:
-            call_kwargs = {}
-            self.dry_kwargs['call_kwargs'] = call_kwargs
-        self.call_kwargs = call_kwargs
+            self, obj: Wrapper, *args, **kwargs):
+        self.call_args = args
+        self.call_kwargs = kwargs
         self.obj = obj
 
     def __call__(self, *args, **kwargs):
