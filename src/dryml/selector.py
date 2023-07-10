@@ -1,7 +1,7 @@
 from dryml.object import Object, ObjectFile, ObjectDef
 from dryml.utils import is_nonstring_iterable, is_dictlike, get_class_str, \
     is_supported_scalar_type, is_supported_dictlike, is_supported_listlike, \
-    map_dictlike, map_listlike
+    map_dictlike, map_listlike, is_equivalent_subclass
 from typing import Union, Callable, Type, Mapping
 
 
@@ -97,8 +97,9 @@ class Selector(object):
     def match_objects(
             key_object, value_object, verbosity=0, cls_str_compare=True):
         if issubclass(type(key_object), type):
-            # We have a type object. They match if
-            res = issubclass(value_object, key_object)
+            # We have a type object. They match if the value object
+            # is a subclass of the key object
+            res = is_equivalent_subclass(value_object, key_object)
             if not res and verbosity > 1:
                 print(f"{value_object} is not a subclass of {key_object}")
             return res
@@ -115,12 +116,10 @@ class Selector(object):
             if not res and verbosity > 1:
                 print(f"callable on {value_object} failed.")
             return res
-        elif isinstance(key_object, ObjectDef):
-            return key_object.equal(
-                value_object, cls_str_compare=cls_str_compare)
+        elif isinstance(key_object, ObjectDef): # why are there two cases here??
+            return key_object == value_object
         elif isinstance(value_object, ObjectDef):
-            return value_object.equal(
-                key_object, cls_str_compare=cls_str_compare)
+            return value_object == key_object
         elif is_dictlike(key_object):
             # dictlike branch is first because dictlike objects
             # are also iterable objects

@@ -16,7 +16,7 @@ from typing import IO, Union, Optional, Type, Callable
 from dryml.config import ObjectDef, Meta, MissingIdError, MissingMetadataError
 from dryml.utils import get_current_cls, pickler, static_var, \
     is_supported_scalar_type, is_supported_listlike, is_supported_dictlike, \
-    map_dictlike, map_listlike, get_class_from_str, get_class_str
+    map_dictlike, map_listlike, get_class_from_str, get_class_str, diff_recursive
 from dryml.context.context_tracker import combine_requests, context, \
     NoContextError
 from dryml.file_intermediary import FileIntermediary
@@ -385,13 +385,11 @@ def load_object(file: FileType, update: bool = False,
             obj = dry_file.load_object(update=update,
                                        reload=reload,
                                        as_cls=as_cls)
-            cls_str_compare = False
             if as_cls is not None or reload:
                 if as_cls is not None:
                     cls = as_cls
                 elif reload:
                     cls = get_class_from_str(get_class_str(obj_def.cls))
-                cls_str_compare = True
                 new_def = ObjectDef(
                     cls,
                     *obj_def.args,
@@ -399,11 +397,10 @@ def load_object(file: FileType, update: bool = False,
                     **obj_def.kwargs)
             else:
                 new_def = obj_def
-            if not obj.definition().equal(
-                    new_def, cls_str_compare=cls_str_compare):
+            if not obj.definition() == new_def:
                 raise RuntimeError(
-                    f"Loaded object doesn't have expected definition! "
-                    f"expected {new_def} got: {obj.definition()}")
+                    f"Loaded object doesn't have expected definition!\n"
+                    f"expected: {new_def}\ngot: {obj.definition()}")
 
     # Reset the repo for this function
     if reset_repo:
@@ -424,10 +421,15 @@ def load_object_content(
     with ObjectFile(file) as dry_file:
         file_def = dry_file.definition()
         obj_def = obj.definition()
-        if file_def != obj_def or file_def.dry_id != obj_def.dry_id:
+        if file_def != obj_def:
+            file_contained_obj_ids = dry_file.contained_object_ids()
+            diff_recursive(file_def, obj_def)
             raise ValueError(
                 f"File {file} doesn't store data for object {obj.dry_id} "
-                "at the top level.")
+                "at the top level.\n"
+                f"file_def: {file_def}\n"
+                f"obj_def: {obj_def}\n"
+                f"Contained Subordinate Objects: {file_contained_obj_ids}")
 
         # Load contained objects
         file_contained_obj_ids = dry_file.contained_object_ids()
