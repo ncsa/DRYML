@@ -66,7 +66,7 @@ def test_def_4():
     A case where a fully specified definition wasn't marked as concrete
     """
 
-    obj = dryml.ObjectWrapper(objects.HelloTrainableD, obj_kwargs={'A': 5})
+    obj = dryml.Wrapper(objects.HelloTrainableD, A=5)
 
     assert obj.definition().is_concrete()
 

@@ -4,7 +4,7 @@ from dryml.config import ObjectDef, Meta, \
     ComputeModeSaveError, MissingIdError
 from dryml.object import Object, ObjectFile, ObjectFactory, \
     load_object, save_object, change_object_cls, \
-    ObjectWrapper, CallableWrapper, get_contained_objects, \
+    Wrapper, Callable, get_contained_objects, \
     build_obj_tree
 from dryml.selector import Selector
 from dryml.repo import Repo
@@ -26,8 +26,8 @@ __all__ = [
     List,
     Tuple,
     Dict,
-    ObjectWrapper,
-    CallableWrapper,
+    Wrapper,
+    Callable,
     Workshop,
     load_object,
     save_object,
