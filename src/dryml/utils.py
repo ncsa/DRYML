@@ -5,11 +5,12 @@ import collections
 import inspect
 import hashlib
 import importlib
-import pickle
+import dill
 from typing import Type, Union, IO, Optional, Callable
 import zipfile
 import io
 import numpy as np
+from inspect import isclass
 
 
 def is_in_typelist(val, typelist):
@@ -123,6 +124,25 @@ def init_arg_dict_handler(arg_dict):
         return arg_dict
 
 
+def get_fully_qualified_name(obj):
+    return f"{obj.__module__}.{obj.__name__}"
+
+
+def are_equivalent_classes(cls1, cls2):
+    return get_fully_qualified_name(cls1) == get_fully_qualified_name(cls2)
+
+
+def is_equivalent_subclass(subclass, superclass):
+    # May need a superclass/subclass isclass check?? (or not)
+    superclass_fqn = get_fully_qualified_name(superclass)
+    subclass_fqn = get_fully_qualified_name(subclass)
+    subclass_bases_fqns = [
+        get_fully_qualified_name(base) for base in subclass.__bases__
+    ]
+    subclass_bases_fqns.insert(0, subclass_fqn)
+    return superclass_fqn in subclass_bases_fqns
+
+
 def get_class_str(obj):
     if isinstance(obj, type):
         return '.'.join([inspect.getmodule(obj).__name__,
@@ -153,6 +173,16 @@ def get_current_cls(cls: Type, reload: bool = False):
         cls.__name__, reload=reload)
 
 
+def validate_class(cls):
+    if not isclass(cls):
+        raise TypeError(
+            f"Expected argument to be a class. Got {cls}.\n"
+            "Make sure the argument wasn't an ObjectDef which "
+            "can be replaced with an Object at build time, and not a "
+            "class.")
+    return cls
+
+
 def get_hashed_id(hashstr: str):
     return hashlib.md5(hashstr.encode('utf-8')).hexdigest()
 
@@ -172,7 +202,7 @@ def path_needs_directory(path):
 def pickler(obj):
     "Method to ensure all objects are pickled in the same way"
     # Consider updating to protocol=5 when python 3.7 is deprecated
-    return pickle.dumps(obj, protocol=4)
+    return dill.dumps(obj, protocol=4)
 
 
 def static_var(varname, value):
@@ -262,6 +292,104 @@ def show_contained_objects_md5(save_file: Union[str, IO[bytes]]):
 
     if close_file:
         zf.close()
+
+
+def equal_recursive(obj1, obj2, path="", check_class=True, verbose=False):
+    if check_class:
+        if type(obj1) != type(obj2):
+            if verbose:
+                print(f"Class mismatch at {path}")
+            return False
+
+    if is_dictlike(obj1) and is_dictlike(obj2):
+        for key in obj1:
+            if key not in obj2:
+                if verbose:
+                    print(f"Key {path}/{key} not found in second object.")
+                return False
+            else:
+                if not equal_recursive(
+                        obj1[key], obj2[key],
+                        path=path+f"/{key}",
+                        check_class=check_class,
+                        verbose=verbose):
+                    return False
+
+        for key in obj2:
+            if key not in obj1:
+                if verbose:
+                    print(f"Key {path}/{key} not found in first object.")
+                return False
+
+    elif is_nonstring_iterable(obj1) and is_nonstring_iterable(obj2):
+        if len(obj1) != len(obj2):
+            if verbose:
+                print(
+                    f"List-like objects at path {path} "
+                    "are of different lengths.")
+            return False
+        else:
+            for i in range(len(obj1)):
+                if not equal_recursive(
+                        obj1[i], obj2[i],
+                        path=f"{path}/list[{i}]",
+                        check_class=check_class,
+                        verbose=verbose):
+                    return False
+
+    elif isclass(obj1) and isclass(obj2):
+        if not are_equivalent_classes(obj1, obj2):
+            if verbose:
+                print(
+                    f"Classes are not equivalent at {path}: "
+                    "{obj1} != {obj2}")
+            return False
+
+    elif obj1 != obj2:
+        if verbose:
+            print(f"Value mismatch at {path}: {obj1} != {obj2}")
+        return False
+
+    # Final result
+    return True
+
+
+def diff_recursive(obj1, obj2, path="", check_class=False):
+    if check_class:
+        if type(obj1) != type(obj2):
+            print(f"Class mismatch at {path}")
+
+    if is_dictlike(obj1) and is_dictlike(obj2):
+        for key in obj1:
+            if key not in obj2:
+                print(f"Key {path}/{key} not found in second object.")
+            else:
+                diff_recursive(obj1[key], obj2[key], path=path+f"/{key}")
+
+        for key in obj2:
+            if key not in obj1:
+                print(f"Key {path}/{key} not found in first object.")
+
+    elif is_nonstring_iterable(obj1) and is_nonstring_iterable(obj2):
+        if len(obj1) != len(obj2):
+            print(
+                f"List-like objects at path {path} "
+                "are of different lengths.")
+        else:
+            for i in range(len(obj1)):
+                diff_recursive(obj1[i], obj2[i], path=f"{path}/list[{i}]")
+
+    elif isclass(obj1) and isclass(obj2):
+        if obj1 != obj2:
+            print(f"Classes are different at {path}: {obj1} != {obj2}")
+        obj1_cls_name = get_class_str(obj1)
+        obj2_cls_name = get_class_str(obj2)
+        if obj1_cls_name != obj2_cls_name:
+            print(f"Class names are different at {path}: "
+                  "{obj1_cls_name} 1= {obj2_cls_name}")
+
+    elif obj1 != obj2:
+        print(f"Value mismatch at {path}: {obj1} != {obj2}")
 
 
 file_blocklist = [

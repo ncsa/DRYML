@@ -2,6 +2,7 @@ from dryml import Object, Meta
 from dryml.models import Trainable, Component
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
+from dryml.utils import validate_class
 
 
 class Wrapper(Object):
@@ -10,10 +11,7 @@ class Wrapper(Object):
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
-        if not isinstance(cls, type):
-            raise TypeError(
-                f"Expected first argument to be type. Got {type(cls)}")
-        self.cls = cls
+        self.cls = validate_class(cls)
         self.args = args
         self.kwargs = kwargs
         self.obj = None

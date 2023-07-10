@@ -294,7 +294,9 @@ class Repo(object):
         def container_handler(obj_cont):
             if not obj_cont.is_loaded():
                 if load_objects:
-                    obj_cont.load(update=update)
+                    if not obj_cont.load(update=update):
+                        raise RuntimeError(
+                            f"Could not load object {obj_cont.filepath}!")
 
             return container_opener(obj_cont, open_container=open_container)
 
@@ -480,6 +482,7 @@ class Repo(object):
 
         # Now we do the 'vector' methods
 
+        # TODO: consider adding code to set verbosity of the Selector
         # Filter the internal object list
         filter_func = \
             self.make_filter_func(

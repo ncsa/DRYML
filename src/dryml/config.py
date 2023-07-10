@@ -8,8 +8,7 @@ from typing import Union, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
     init_arg_dict_handler, is_supported_scalar_type, is_supported_listlike, \
-    is_supported_dictlike, map_dictlike, map_listlike, equal_listlike, \
-    equal_dictlike
+    is_supported_dictlike, map_dictlike, map_listlike, equal_recursive
 from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context
@@ -849,46 +848,7 @@ class ObjectDef(collections.UserDict):
         self.data['dry_kwargs'] = kwargs
 
     def __eq__(self, other):
-        return self.equal(other)
-
-    @staticmethod
-    def equal_func(val_a, val_b, cls_str_compare=False):
-        if isinstance(val_a, ObjectDef) and \
-                not isinstance(val_b, ObjectDef):
-            return False
-        if not isinstance(val_a, ObjectDef) and \
-                isinstance(val_b, ObjectDef):
-            return False
-        if isinstance(val_a, ObjectDef):
-            return val_a.equal(val_b, cls_str_compare=cls_str_compare)
-        else:
-            return (val_a == val_b)
-
-    def equal(self, other, cls_str_compare=True):
-        def eq_func(val_a, val_b):
-            return ObjectDef.equal_func(
-                val_a, val_b, cls_str_compare=cls_str_compare)
-
-        if isinstance(other, type(self)):
-            if cls_str_compare:
-                self_cls = get_class_str(self['cls'])
-                other_cls = get_class_str(other['cls'])
-                if self_cls != other_cls:
-                    return False
-            else:
-                if self['cls'] != other['cls']:
-                    return False
-            if not equal_listlike(eq_func, self.args, other.args):
-                return False
-            if not equal_dictlike(eq_func, self.kwargs, other.kwargs):
-                return False
-            return True
-        elif is_dictlike(other):
-            # We don't support comparison directly with dictionaries for now.
-            return False
-        else:
-            # Not same type. Give False.
-            return False
+        return equal_recursive(self, other)
 
     @property
     def cls(self):

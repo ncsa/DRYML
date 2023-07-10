@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ -z "$@" ]; then
+if [ -z "$1" ]; then
     dirs=./tests
 else
     dirs=$@
