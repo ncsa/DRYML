@@ -116,7 +116,8 @@ class Selector(object):
             if not res and verbosity > 1:
                 print(f"callable on {value_object} failed.")
             return res
-        elif isinstance(key_object, ObjectDef): # why are there two cases here??
+        elif isinstance(key_object, ObjectDef):
+            # why are there two cases here??
             return key_object == value_object
         elif isinstance(value_object, ObjectDef):
             return value_object == key_object

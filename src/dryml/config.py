@@ -8,8 +8,7 @@ from typing import Union, Type, Mapping
 from dryml.utils import is_nonstring_iterable, is_dictlike, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
     init_arg_dict_handler, is_supported_scalar_type, is_supported_listlike, \
-    is_supported_dictlike, map_dictlike, map_listlike, equal_listlike, \
-    equal_dictlike, equal_recursive
+    is_supported_dictlike, map_dictlike, map_listlike, equal_recursive
 from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context

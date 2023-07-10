@@ -136,7 +136,9 @@ def is_equivalent_subclass(subclass, superclass):
     # May need a superclass/subclass isclass check?? (or not)
     superclass_fqn = get_fully_qualified_name(superclass)
     subclass_fqn = get_fully_qualified_name(subclass)
-    subclass_bases_fqns = [get_fully_qualified_name(base) for base in subclass.__bases__]
+    subclass_bases_fqns = [
+        get_fully_qualified_name(base) for base in subclass.__bases__
+    ]
     subclass_bases_fqns.insert(0, subclass_fqn)
     return superclass_fqn in subclass_bases_fqns
 
@@ -306,7 +308,11 @@ def equal_recursive(obj1, obj2, path="", check_class=True, verbose=False):
                     print(f"Key {path}/{key} not found in second object.")
                 return False
             else:
-                if not equal_recursive(obj1[key], obj2[key], path=path+f"/{key}", check_class=check_class, verbose=verbose):
+                if not equal_recursive(
+                        obj1[key], obj2[key],
+                        path=path+f"/{key}",
+                        check_class=check_class,
+                        verbose=verbose):
                     return False
 
         for key in obj2:
@@ -318,25 +324,26 @@ def equal_recursive(obj1, obj2, path="", check_class=True, verbose=False):
     elif is_nonstring_iterable(obj1) and is_nonstring_iterable(obj2):
         if len(obj1) != len(obj2):
             if verbose:
-                print(f"List-like objects at path {path} are of different lengths.")
+                print(
+                    f"List-like objects at path {path} "
+                    "are of different lengths.")
             return False
         else:
             for i in range(len(obj1)):
-                if not equal_recursive(obj1[i], obj2[i], path=f"{path}/list[{i}]", check_class=check_class, verbose=verbose):
+                if not equal_recursive(
+                        obj1[i], obj2[i],
+                        path=f"{path}/list[{i}]",
+                        check_class=check_class,
+                        verbose=verbose):
                     return False
 
     elif isclass(obj1) and isclass(obj2):
         if not are_equivalent_classes(obj1, obj2):
             if verbose:
-                print(f"Classes are not equivalent at {path}: {obj1} != {obj2}")
+                print(
+                    f"Classes are not equivalent at {path}: "
+                    "{obj1} != {obj2}")
             return False
-
-
-        #if obj1 != obj2:
-        #    print(f"Classes are different at {path}: {obj1} != {obj2}")
-        #obj1_cls_name = get_class_str(obj1)
-        #obj2_cls_name = get_class_str(obj2)
-        #if obj1_cls_name != obj2_cls_name:
 
     elif obj1 != obj2:
         if verbose:
@@ -365,7 +372,9 @@ def diff_recursive(obj1, obj2, path="", check_class=False):
 
     elif is_nonstring_iterable(obj1) and is_nonstring_iterable(obj2):
         if len(obj1) != len(obj2):
-            print(f"List-like objects at path {path} are of different lengths.")
+            print(
+                f"List-like objects at path {path} "
+                "are of different lengths.")
         else:
             for i in range(len(obj1)):
                 diff_recursive(obj1[i], obj2[i], path=f"{path}/list[{i}]")
@@ -376,7 +385,8 @@ def diff_recursive(obj1, obj2, path="", check_class=False):
         obj1_cls_name = get_class_str(obj1)
         obj2_cls_name = get_class_str(obj2)
         if obj1_cls_name != obj2_cls_name:
-            print(f"Class names are different at {path}: {obj1_cls_name} 1= {obj2_cls_name}")
+            print(f"Class names are different at {path}: "
+                  "{obj1_cls_name} 1= {obj2_cls_name}")
 
     elif obj1 != obj2:
         print(f"Value mismatch at {path}: {obj1} != {obj2}")
