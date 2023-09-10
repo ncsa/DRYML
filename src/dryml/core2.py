@@ -152,6 +152,35 @@ def build_definition(obj):
 
     if is_dictlike(obj) or is_collection(obj):
         return remap(obj, visit=build_definition_visit)
+    
+    # Do nothing
+    return obj
 
 def build_definition_visit(_, key, value):
     return key, build_definition(value)
+
+
+def is_definition(obj):
+    if is_dictlike(obj):
+        keys = set(obj.keys())
+        if keys == set(['cls', 'args', 'kwargs']):
+            return True
+    return False
+
+
+def build_from_definition(obj):
+    # First, detect a definition
+    if is_definition(obj):
+        args = build_from_definition(obj['args'])
+        kwargs = build_from_definition(obj['kwargs'])
+        return obj['cls'](*args, **kwargs)
+
+    if is_dictlike(obj) or is_collection(obj):
+        return remap(obj, visit=build_from_definition_visit)
+
+    # Do nothing with value
+    return obj
+
+
+def build_from_definition_visit(_, key, value):
+    return key, build_from_definition(value)
