@@ -1,5 +1,6 @@
 import uuid
 import time
+from inspect import signature, Parameter
 
 
 def collide_attributes(obj, attr_list):
@@ -39,6 +40,17 @@ class Object(metaclass=CreationControl):
         pass
 
 
+def get_kwarg_defaults(cls):
+    kwarg_defaults = {}
+    for current_class in reversed(cls.mro()):
+        if hasattr(current_class, '__init__'):
+            init_signature = signature(current_class.__init__)
+            for name, param in init_signature.parameters.items():
+                if param.default != Parameter.empty:
+                    kwarg_defaults[name] = param.default
+    return kwarg_defaults
+
+
 class Remember(Object):
     # Support class which remembers the arguments used when creating it.
     def __pre_init__(self, *args, **kwargs):
@@ -46,8 +58,11 @@ class Remember(Object):
         collide_attributes(self, [
             '__args__',
             '__kwargs__',])
+        default_kwargs = get_kwarg_defaults(type(self))
         self.__args__ = args
-        self.__kwargs__ = kwargs
+        # We merge the default kwargs with the kwargs passed in.
+        # Defaults are first so they can be overwritten.
+        self.__kwargs__ = { **default_kwargs, **kwargs }
 
     @property
     def definition(self):
