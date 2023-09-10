@@ -1,6 +1,8 @@
 import uuid
 import time
 from inspect import signature, Parameter
+from dryml.utils import is_dictlike
+from boltons.iterutils import remap, is_collection
 
 
 def collide_attributes(obj, attr_list):
@@ -63,13 +65,6 @@ class Remember(Object):
         # We merge the default kwargs with the kwargs passed in.
         # Defaults are first so they can be overwritten.
         self.__kwargs__ = { **default_kwargs, **kwargs }
-
-    @property
-    def definition(self):
-        return {
-            'cls': type(self),
-            'args': self.__args__,
-            'kwargs': self.__kwargs__, }
 
 
 class Defer(Remember):
@@ -143,3 +138,20 @@ class Metadata(Object):
     def __init__(self, *args, metadata=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.metadata = metadata
+
+
+def build_definition(obj):
+    # Copy the object's args and kwargs
+
+    # If the object has Remember as a subclass
+    if issubclass(type(obj), Remember):
+        return {
+            'cls': type(obj),
+            'args': build_definition(obj.__args__),
+            'kwargs': build_definition(obj.__kwargs__) }
+
+    if is_dictlike(obj) or is_collection(obj):
+        return remap(obj, visit=build_definition_visit)
+
+def build_definition_visit(_, key, value):
+    return key, build_definition(value)
