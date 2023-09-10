@@ -1,6 +1,6 @@
 import uuid
 import time
-from inspect import signature, Parameter
+from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike
 from boltons.iterutils import remap, is_collection
 
@@ -140,15 +140,37 @@ class Metadata(Object):
         self.metadata = metadata
 
 
+class Definition(dict):
+    allowed_keys = ['cls', 'args', 'kwargs']
+    def __init__(self, *args, **kwargs):
+        init = False
+        if len(args) > 0:
+            if isclass(args[0]):
+                super().__init__(
+                    cls=args[0],
+                    args=args[1:],
+                    kwargs=kwargs)
+                init = True
+        if not init:
+            super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        if key not in self.allowed_keys:
+            raise KeyError(f"Key {key} not allowed in Definition. Allowed keys are {self.allowed_keys}")
+        super().__setitem__(key, value)
+
+
 def build_definition(obj):
     # Copy the object's args and kwargs
 
     # If the object has Remember as a subclass
     if issubclass(type(obj), Remember):
-        return {
-            'cls': type(obj),
-            'args': build_definition(obj.__args__),
-            'kwargs': build_definition(obj.__kwargs__) }
+        args = build_definition(obj.__args__)
+        kwargs = build_definition(obj.__kwargs__)
+        return Definition(
+            type(obj),
+            *args,
+            **kwargs)
 
     if is_dictlike(obj) or is_collection(obj):
         return remap(obj, visit=build_definition_visit)
@@ -161,7 +183,9 @@ def build_definition_visit(_, key, value):
 
 
 def is_definition(obj):
-    if is_dictlike(obj):
+    if type(obj) is Definition:
+        return True
+    elif is_dictlike(obj):
         keys = set(obj.keys())
         if keys == set(['cls', 'args', 'kwargs']):
             return True
