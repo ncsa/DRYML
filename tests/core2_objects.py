@@ -1,0 +1,7 @@
+from dryml.core2 import Remember, Defer, UniqueID, Metadata
+
+class TestClass1(Remember):
+    def __init__(self, x, *args, test=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.x = x
+        self.test = test
