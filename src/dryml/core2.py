@@ -251,19 +251,19 @@ def is_definition(obj):
         return False
 
 
-def build_from_definition(obj):
-    # First, detect a definition
-    if is_definition(obj):
-        args = build_from_definition(obj['args'])
-        kwargs = build_from_definition(obj['kwargs'])
-        return obj['cls'](*args, **kwargs)
-
-    if is_dictlike(obj) or is_collection(obj):
-        return remap(obj, visit=build_from_definition_visit)
-
-    # Do nothing with value
-    return obj
+def build_from_definition(definition):
+    if isinstance(definition, Definition):
+        return remap([definition], visit=build_from_definition_visit)[0]
+    else:
+        return remap(definition, visit=build_from_definition_visit)
 
 
 def build_from_definition_visit(_, key, value):
-    return key, build_from_definition(value)
+    if isinstance(value, Definition):
+        args = build_from_definition(value.args)
+        kwargs = build_from_definition(value.kwargs)
+        print("Building object from definition")
+        obj = value.cls(*args, **kwargs)
+        return key, obj
+    else:
+        return key, value
