@@ -211,7 +211,7 @@ def hash_exit(path, key, old_parent, new_parent, new_items):
     hasher = hashlib.sha256()
     # Add a string representation of the old parent type
     hasher.update(str(type(old_parent)).encode())
-    for k, v in new_items:
+    for _, v in new_items:
         hasher.update(v.encode())
     new_hash = hasher.hexdigest()
 
