@@ -1,5 +1,6 @@
 import uuid
 import time
+import hashlib
 from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike
 from boltons.iterutils import remap, is_collection
@@ -160,6 +161,57 @@ class Definition(dict):
         super().__setitem__(key, value)
 
 
+# Definition hash support
+class HashHelper(object):
+    def __init__(self, the_hash):
+        self.hash = the_hash
+
+
+def hash_value(value):
+    # Hashes for supported values here
+    if isclass(value):
+        return hashlib.sha256(str(value).encode()).hexdigest()
+    elif hasattr(value, '__hash__'):
+        hash_val = hash(value)
+        # Suggestion from gpt-4
+        return hex(hash_val & ((1 << 64) - 1))[2:]
+    else:
+        raise TypeError(f"Value of type {type(value)} not supported for hashing.")
+
+
+def hash_visit(path, key, value):
+    # Skip if it's a hashlib hasher
+    if isinstance(value, HashHelper):
+        return key, value.hash
+    elif is_dictlike(value) or is_collection(value):
+        return key, value
+    
+    return key, hash_value(value)
+
+
+def hash_exit(path, key, old_parent, new_parent, new_items):
+    # At this point, all items should be hashes
+
+    # sort the items. format is [(key, value)]
+    new_items = sorted(new_items, key=lambda x: x[0])
+
+    # Combine the hashes
+    hasher = hashlib.sha256()
+    # Add a string representation of the old parent type
+    hasher.update(str(type(old_parent)).encode())
+    for k, v in new_items:
+        hasher.update(v.encode())
+    new_hash = hasher.hexdigest()
+
+    return HashHelper(new_hash)
+
+
+def hash_function(structure):
+    result = remap(structure, visit=hash_visit, exit=hash_exit)
+    return result.hash
+
+
+# Creating definitions from objects
 def build_definition(obj):
     # Copy the object's args and kwargs
 
@@ -174,22 +226,21 @@ def build_definition(obj):
 
     if is_dictlike(obj) or is_collection(obj):
         return remap(obj, visit=build_definition_visit)
-    
+
     # Do nothing
     return obj
+
 
 def build_definition_visit(_, key, value):
     return key, build_definition(value)
 
 
+# Creating objects from definitions
 def is_definition(obj):
     if type(obj) is Definition:
         return True
-    elif is_dictlike(obj):
-        keys = set(obj.keys())
-        if keys == set(['cls', 'args', 'kwargs']):
-            return True
-    return False
+    else:
+        return False
 
 
 def build_from_definition(obj):
