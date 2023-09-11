@@ -225,26 +225,22 @@ def hash_function(structure):
 
 # Creating definitions from objects
 def build_definition(obj):
-    # Copy the object's args and kwargs
-
-    # If the object has Remember as a subclass
-    if issubclass(type(obj), Remember):
-        args = build_definition(obj.__args__)
-        kwargs = build_definition(obj.__kwargs__)
-        return Definition(
-            type(obj),
-            *args,
-            **kwargs)
-
-    if is_dictlike(obj) or is_collection(obj):
+    if isinstance(obj, Remember):
+        return remap([obj], visit=build_definition_visit)[0]
+    else:
         return remap(obj, visit=build_definition_visit)
-
-    # Do nothing
-    return obj
 
 
 def build_definition_visit(_, key, value):
-    return key, build_definition(value)
+    if isinstance(value, Remember):
+        args = build_definition(value.__args__)
+        kwargs = build_definition(value.__kwargs__)
+        return key, Definition(
+            type(value),
+            *args,
+            **kwargs)
+    else:
+        return key, value
 
 
 # Creating objects from definitions
