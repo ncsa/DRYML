@@ -5,3 +5,8 @@ class TestClass1(Remember):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
+
+class TestClass2(Remember):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.kwargs = kwargs

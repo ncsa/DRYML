@@ -4,6 +4,7 @@ import hashlib
 from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike
 from boltons.iterutils import remap, is_collection
+import numpy as np
 
 
 def collide_attributes(obj, attr_list):
@@ -183,6 +184,9 @@ def hash_value(value):
     # Hashes for supported values here
     if isclass(value):
         return hashlib.sha256(str(value).encode()).hexdigest()
+    elif isinstance(value, np.ndarray):
+        # Hash for numpy arrays
+        return hashlib.sha256(value.tobytes()).hexdigest()
     elif hasattr(value, '__hash__'):
         hash_val = hash(value)
         # Suggestion from gpt-4
@@ -195,7 +199,7 @@ def hash_visit(path, key, value):
     # Skip if it's a hashlib hasher
     if isinstance(value, HashHelper):
         return key, value.hash
-    elif is_dictlike(value) or is_collection(value):
+    elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
         return key, value
     
     return key, hash_value(value)
@@ -219,8 +223,7 @@ def hash_exit(path, key, old_parent, new_parent, new_items):
 
 
 def hash_function(structure):
-    result = remap(structure, visit=hash_visit, exit=hash_exit)
-    return result.hash
+    return remap(structure, visit=hash_visit, exit=hash_exit).hash
 
 
 # Creating definitions from objects
