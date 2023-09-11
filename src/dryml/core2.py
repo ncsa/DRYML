@@ -265,7 +265,6 @@ def build_from_definition_visit(_, key, value):
     if isinstance(value, Definition):
         args = build_from_definition(value.args)
         kwargs = build_from_definition(value.kwargs)
-        print("Building object from definition")
         obj = value.cls(*args, **kwargs)
         return key, obj
     else:
