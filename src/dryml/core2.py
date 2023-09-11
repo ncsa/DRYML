@@ -160,6 +160,18 @@ class Definition(dict):
             raise KeyError(f"Key {key} not allowed in Definition. Allowed keys are {self.allowed_keys}")
         super().__setitem__(key, value)
 
+    @property
+    def cls(self):
+        return self['cls']
+
+    @property
+    def args(self):
+        return self['args']
+
+    @property
+    def kwargs(self):
+        return self['kwargs']
+
 
 # Definition hash support
 class HashHelper(object):
