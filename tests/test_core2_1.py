@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import core2_objects as objects
-from dryml.core2 import Definition, build_definition, build_from_definition
+from dryml.core2 import Definition, build_definition, build_from_definition, hash_function
 
 
 def test_create_definition_1():
@@ -121,6 +121,7 @@ def test_build_from_definition_3():
     assert np.all(obj.x == arr)
     assert obj.test == 'a'
 
+
 def test_build_from_definition_4():
     arr1 = np.random.random((2,2)).astype(np.float32)
     arr2 = np.random.random((2,2)).astype(np.float32)
@@ -137,3 +138,168 @@ def test_build_from_definition_4():
     assert type(obj.x) == objects.TestClass1
     assert np.all(obj.x.x == arr2)
     assert obj.x.test == 'b'
+
+
+def test_definition_hash_1():
+    definition1 = Definition(
+        objects.TestClass1,
+        10, test='a')
+
+    def_hash1 = hash_function(definition1)
+
+    definition2 = Definition(
+        objects.TestClass1,
+        10, test='a')
+
+    def_hash_2 = hash_function(definition2)
+
+    assert def_hash1 == def_hash_2
+
+
+def test_definition_hash_2():
+    definition1 = Definition(
+        objects.TestClass2,
+        var1='a',
+        var2='b',
+        var3='c',
+        var4='d')
+
+    def_hash1 = hash_function(definition1)
+
+    definition2 = Definition(
+        objects.TestClass2,
+        var4='d',
+        var3='c',
+        var2='b',
+        var1='a')
+
+    def_hash2 = hash_function(definition2)
+
+    assert def_hash1 == def_hash2
+
+
+def test_definition_hash_4():
+    definition1 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            10,
+            test='A'),
+        var1='a',
+        var2='b',
+        var3='c',
+        var4='d')
+
+    def_hash1 = hash_function(definition1)
+
+    definition2 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            10,
+            test='A'),
+        var4='d',
+        var3='c',
+        var2='b',
+        var1='a')
+
+    def_hash2 = hash_function(definition2)
+
+    assert def_hash1 == def_hash2
+
+
+def test_definition_hash_5():
+    definition1 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            10,
+            test='A'),
+        var1='a',
+        var2='b',
+        var3='c',
+        var4='d')
+
+    def_hash1 = hash_function(definition1)
+
+    definition2 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            10,
+            test='B'),
+        var4='d',
+        var3='c',
+        var2='b',
+        var1='a')
+
+    def_hash2 = hash_function(definition2)
+
+    assert def_hash1 != def_hash2
+
+
+def test_definition_hash_6():
+    arr = np.random.random((10,10)).astype(np.float32)
+    arr2 = np.copy(arr)
+
+    definition1 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            arr,
+            test='A'),
+        var1='a',
+        var2='b',
+        var3='c',
+        var4='d')
+
+    def_hash1 = hash_function(definition1)
+
+    definition2 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            arr2,
+            test='A'),
+        var4='d',
+        var3='c',
+        var2='b',
+        var1='a')
+
+    def_hash2 = hash_function(definition2)
+
+    assert def_hash1 == def_hash2
+
+
+def test_definition_hash_7():
+    arr = np.random.random((10,10)).astype(np.float32)
+    arr2 = np.copy(arr)
+    arr2[0,0] = 5.
+
+    definition1 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            arr,
+            test='A'),
+        var1='a',
+        var2='b',
+        var3='c',
+        var4='d')
+
+    def_hash1 = hash_function(definition1)
+
+    definition2 = Definition(
+        objects.TestClass2,
+        Definition(
+            objects.TestClass1,
+            arr2,
+            test='A'),
+        var4='d',
+        var3='c',
+        var2='b',
+        var1='a')
+
+    def_hash2 = hash_function(definition2)
+
+    assert def_hash1 != def_hash2
