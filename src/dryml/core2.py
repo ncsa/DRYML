@@ -3,7 +3,7 @@ import time
 import hashlib
 from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike
-from boltons.iterutils import remap, is_collection
+from boltons.iterutils import remap, is_collection, get_path, PathAccessError
 import numpy as np
 
 
@@ -147,7 +147,7 @@ class Definition(dict):
     def __init__(self, *args, **kwargs):
         init = False
         if len(args) > 0:
-            if isclass(args[0]):
+            if callable(args[0]):
                 super().__init__(
                     cls=args[0],
                     args=args[1:],
@@ -268,3 +268,94 @@ def build_from_definition_visit(_, key, value):
         return key, obj
     else:
         return key, value
+
+        raise TypeError(f"Definition must be of type Definition. Got {type(definition)} instead.")
+
+
+def is_nonclass_callable(obj):
+    return callable(obj) and not isclass(obj)
+
+
+## Selecting objects
+def selector_match(selector, definition):
+    def selector_match_visit(path, key, value):
+        print(f"selector_match_visit: path: {path}, key: {key}, value: {value}")
+        # Try to get the value at the right path from the definition
+        try:
+            def_val = get_path(definition, path)[key]
+        except PathAccessError:
+            print("selector_match_visit: definition doesn't have path")
+            return key, False
+
+        print(f"selector_match_visit: def_val: {def_val}")
+
+        if isclass(def_val):
+            # We have a class in the definition.
+            # If the selector value is a class, then the definition value must be a subclass.
+            # This must also work for objects with metaclasses which aren't type
+            if isclass(value):
+                print("selector_match_visit: class 1")
+                return key, issubclass(value, def_val)
+            elif callable(value):
+                print("selector_match_visit: class 2")
+                # We use the callable to determine if we match
+                return key, value(def_val)
+            else:
+                print("selector_match_visit: class 3")
+                # we don't have the right type in the selector
+                return key, False
+        elif (is_collection(def_val) or is_dictlike(def_val)) and not isinstance(def_val, np.ndarray):
+            print("selector_match_visit: collection 1")
+            # We do nothing for these collections. Wait for their elements to be matched
+            return key, value
+        elif isinstance(def_val, np.ndarray):
+            if isinstance(value, np.ndarray):
+                print("selector_match_visit: array 1")
+                return key, np.all(def_val == value)
+            elif is_nonclass_callable(value):
+                print("selector_match_visit: array 2")
+                return key, value(def_val)
+            else:
+                # type doesn't match.
+                print("selector_match_visit: array 3")
+                return key, False
+        else:
+            # Plain matching branch
+            if is_nonclass_callable(value):
+                print("selector_match_visit: plain 1")
+                return key, value(def_val)
+            elif type(value) != type(value):
+                print("selector_match_visit: plain 2")
+                return key, False
+            else:
+                print("selector_match_visit: plain 3")
+                return key, value == def_val
+            
+
+    def selector_match_exit(path, key, old_parent, new_parent, new_items):
+        print(f"selector_match_exit: path: {path}, key: {key}, old_parent: {old_parent}, new_parent: {new_parent}, new_items: {new_items}")
+        if type(old_parent) != type(new_parent):
+            print(f"selector_match_exit: type check")
+            return False
+        else:
+            if is_collection(old_parent) and not is_dictlike(old_parent):
+                print(f"collection check definition: {definition}")
+                # For tuples and list arguments, the lengths must match.
+                if key is None:
+                    def_values = get_path(definition, path)
+                else:
+                    def_values = get_path(definition, path)[key]
+                print(f"def_values: {def_values}")
+                if len(def_values) != len(new_items):
+                    return False
+            print(f"selector_match_exit: catchall check")
+            final = True
+            for val in map(lambda t: t[1], new_items):
+                final = final & val
+            return final
+
+    # We reduce across the selector because we are only checking the values supplied
+    # In the selector.
+    return remap(selector, visit=selector_match_visit, exit=selector_match_exit)
+
+
