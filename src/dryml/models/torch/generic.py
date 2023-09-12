@@ -10,7 +10,6 @@ from dryml.context import context
 import zipfile
 import torch
 import tqdm
-from dryml.utils import validate_class
 
 
 class Model(TorchModel):
@@ -56,13 +55,13 @@ class ModelWrapper(Model):
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
-        self.cls = validate_class(cls)
+        self.cls = cls
         self.args = args
         self.kwargs = kwargs
         self.mdl = None
 
     def compute_prepare_imp(self):
-        self.mdl = self.cls(*self.args, **self.kwargs)
+        self.mdl = self.cls(*self.args, *self.kwargs)
 
 
 class Sequential(Model):
@@ -121,7 +120,7 @@ class TorchOptimizer(Object):
         del self.opt
         self.opt = None
 
-#Similar to TorchOptimizer replace model with optimizer        
+
 class TorchScheduler(Object):
     @Meta.collect_args
     @Meta.collect_kwargs
@@ -159,6 +158,7 @@ class TorchScheduler(Object):
     def compute_cleanup_imp(self):
         del self.sched
         self.sched = None
+
 
 class Trainable(TorchTrainable):
     def __init__(
@@ -220,16 +220,13 @@ class BasicTraining(TrainFunction):
         start_epoch = 0
         if train_spec is not None:
             start_epoch = train_spec.level_step()
-
         # Type checking training data, and converting if necessary
         batch_size = 32
         data = data.torch().batch(batch_size=batch_size)
         total_batches = data.count()
-
         # Move variables to same device as model
         devs = context().get_torch_devices()
         data = data.map_el(lambda el: el.to(devs[0]))
-
         # Check data is supervised.
         if not data.supervised:
             raise RuntimeError(
@@ -238,29 +235,23 @@ class BasicTraining(TrainFunction):
         optimizer = self.optimizer.opt
         loss = self.loss.obj
         model = trainable.model
-
         for i in range(start_epoch, self.epochs):
-
             running_loss = 0.
             num_batches = 0
             t_data = tqdm.tqdm(data, total=total_batches)
             for X, Y in t_data:
                 optimizer.zero_grad()
-
                 outputs = model(X)
                 loss_val = loss(outputs, Y)
                 loss_val.backward()
                 optimizer.step()
-
                 running_loss += loss_val.item()
                 num_batches += 1
                 av_loss = running_loss/(num_batches*batch_size)
                 t_data.set_postfix(loss=av_loss)
-
             print(f"Epoch {i+1} - Average Loss: {av_loss}")
 
 
-# Added scheduler functionality
 class LRBasicTraining(TrainFunction):
     def __init__(
             self,
@@ -282,47 +273,38 @@ class LRBasicTraining(TrainFunction):
         start_epoch = 0
         if train_spec is not None:
             start_epoch = train_spec.level_step()
-
         # Type checking training data, and converting if necessary
-        batch_size = 32      #changed
+        batch_size = 32
         data = data.torch().batch(batch_size=batch_size)
         total_batches = data.count()
-        
         # Move variables to same device as model
         devs = context().get_torch_devices()
         data = data.map_el(lambda el: el.to(devs[0]))
-
         # Check data is supervised.
         if not data.supervised:
             raise RuntimeError(
                 f"{__class__} requires supervised data")
-
         optimizer = self.optimizer.opt
         loss = self.loss.obj
         scheduler = self.scheduler.sched
         model = trainable.model
-        
         for i in range(start_epoch, self.epochs):
             running_loss = 0.
             num_batches = 0
             t_data = tqdm.tqdm(data, total=total_batches)
             for X, Y in t_data:
                 optimizer.zero_grad()
-                
                 outputs = model(X)
                 loss_val = loss(outputs, Y)
                 loss_val.backward()
                 optimizer.step()
-
                 running_loss += loss_val.item()
                 num_batches += 1
                 av_loss = running_loss/(num_batches*batch_size)
                 t_data.set_postfix(loss=av_loss)
-                
             scheduler.step(av_loss)
-            
-            self.training_loss.append(av_loss)          #To access the training losses to plot a loss curve
-            
+            self.training_loss.append(av_loss)
             print(f"Epoch {i+1} - Average Loss: {av_loss}")
+
         
         
