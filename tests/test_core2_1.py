@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import core2_objects as objects
-from dryml.core2 import Definition, build_definition, build_from_definition, hash_function
+from dryml.core2 import Definition, build_definition, build_from_definition, hash_function, selector_match
 
 
 def test_create_definition_1():
@@ -303,3 +303,58 @@ def test_definition_hash_7():
     def_hash2 = hash_function(definition2)
 
     assert def_hash1 != def_hash2
+
+
+def test_selector_1():
+    selector = [objects.TestClass1]
+    definition = [objects.TestClass1]
+    assert selector_match(selector, definition)
+
+
+def test_selector_2():
+    selector = Definition(
+        objects.TestClass1,
+        10,
+        test='a')
+    definition = selector
+
+    assert selector_match(selector, definition)
+
+
+def test_selector_3():
+    selector = Definition(
+        objects.TestClass1,
+        10)
+
+    definition = Definition(
+        objects.TestClass1,
+        10,
+        test='a')
+
+    assert selector_match(selector, definition)
+
+
+def test_selector_4():
+    selector = Definition(
+        lambda x: x == objects.TestClass1,
+        10)
+
+    definition = Definition(
+        objects.TestClass1,
+        10,
+        test='a')
+
+    assert selector_match(selector, definition)
+
+
+def test_selector_5():
+    # Definitions with different numbers of arguments should be considered different.
+    selector = Definition(
+        objects.TestClass3,
+        1, 2)
+
+    definition = Definition(
+        objects.TestClass3,
+        1, 2, 3)
+
+    assert not selector_match(selector, definition)
