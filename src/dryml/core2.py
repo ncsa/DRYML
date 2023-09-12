@@ -174,55 +174,54 @@ class Definition(dict):
         return self['kwargs']
 
 
-# Definition hash support
-class HashHelper(object):
-    def __init__(self, the_hash):
-        self.hash = the_hash
-
-
-def hash_value(value):
-    # Hashes for supported values here
-    if isclass(value):
-        return hashlib.sha256(str(value).encode()).hexdigest()
-    elif isinstance(value, np.ndarray):
-        # Hash for numpy arrays
-        return hashlib.sha256(value.tobytes()).hexdigest()
-    elif hasattr(value, '__hash__'):
-        hash_val = hash(value)
-        # Suggestion from gpt-4
-        return hex(hash_val & ((1 << 64) - 1))[2:]
-    else:
-        raise TypeError(f"Value of type {type(value)} not supported for hashing.")
-
-
-def hash_visit(path, key, value):
-    # Skip if it's a hashlib hasher
-    if isinstance(value, HashHelper):
-        return key, value.hash
-    elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
-        return key, value
-    
-    return key, hash_value(value)
-
-
-def hash_exit(path, key, old_parent, new_parent, new_items):
-    # At this point, all items should be hashes
-
-    # sort the items. format is [(key, value)]
-    new_items = sorted(new_items, key=lambda x: x[0])
-
-    # Combine the hashes
-    hasher = hashlib.sha256()
-    # Add a string representation of the old parent type
-    hasher.update(str(type(old_parent)).encode())
-    for _, v in new_items:
-        hasher.update(v.encode())
-    new_hash = hasher.hexdigest()
-
-    return HashHelper(new_hash)
-
-
 def hash_function(structure):
+    # Definition hash support
+    class HashHelper(object):
+        def __init__(self, the_hash):
+            self.hash = the_hash
+
+
+    def hash_value(value):
+        # Hashes for supported values here
+        if isclass(value):
+            return hashlib.sha256(str(value).encode()).hexdigest()
+        elif isinstance(value, np.ndarray):
+            # Hash for numpy arrays
+            return hashlib.sha256(value.tobytes()).hexdigest()
+        elif hasattr(value, '__hash__'):
+            hash_val = hash(value)
+            # Suggestion from gpt-4
+            return hex(hash_val & ((1 << 64) - 1))[2:]
+        else:
+            raise TypeError(f"Value of type {type(value)} not supported for hashing.")
+
+
+    def hash_visit(path, key, value):
+        # Skip if it's a hashlib hasher
+        if isinstance(value, HashHelper):
+            return key, value.hash
+        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
+            return key, value
+    
+        return key, hash_value(value)
+
+
+    def hash_exit(path, key, old_parent, new_parent, new_items):
+        # At this point, all items should be hashes
+
+        # sort the items. format is [(key, value)]
+        new_items = sorted(new_items, key=lambda x: x[0])
+
+        # Combine the hashes
+        hasher = hashlib.sha256()
+        # Add a string representation of the old parent type
+        hasher.update(str(type(old_parent)).encode())
+        for _, v in new_items:
+            hasher.update(v.encode())
+        new_hash = hasher.hexdigest()
+
+        return HashHelper(new_hash)
+
     return remap(structure, visit=hash_visit, exit=hash_exit).hash
 
 
