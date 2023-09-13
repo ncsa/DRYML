@@ -4,6 +4,7 @@ import hashlib
 from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike
 from boltons.iterutils import remap, is_collection, get_path, PathAccessError
+from functools import lru_cache
 import numpy as np
 
 
@@ -166,6 +167,11 @@ class Definition(dict):
         super().__setitem__(key, value)
 
     @property
+    @lru_cache(maxsize=1)
+    def __hash__(self):
+        return digest_to_hashval(hash_function(self))
+
+    @property
     def cls(self):
         return self['cls']
 
@@ -178,27 +184,36 @@ class Definition(dict):
         return self['kwargs']
 
 
+def hashval_to_digest(val):
+    # Suggestion from gpt-4
+    return hex(val & ((1 << 64) - 1))[2:]
+
+
+def digest_to_hashval(digest):
+    return int(digest, 16)
+
+
 def hash_function(structure):
     # Definition hash support
     class HashHelper(object):
         def __init__(self, the_hash):
             self.hash = the_hash
 
-
     def hash_value(value):
         # Hashes for supported values here
+        try:
+            hash_val = hash(value)
+            return hashval_to_digest(hash_val)
+        except TypeError:
+            pass
+
         if isclass(value):
-            return hashlib.sha256(str(value).encode()).hexdigest()
+            return str(value.__qualname__)
         elif isinstance(value, np.ndarray):
             # Hash for numpy arrays
             return hashlib.sha256(value.tobytes()).hexdigest()
-        elif hasattr(value, '__hash__'):
-            hash_val = hash(value)
-            # Suggestion from gpt-4
-            return hex(hash_val & ((1 << 64) - 1))[2:]
         else:
             raise TypeError(f"Value of type {type(value)} not supported for hashing.")
-
 
     def hash_visit(path, key, value):
         # Skip if it's a hashlib hasher
@@ -209,7 +224,6 @@ def hash_function(structure):
     
         return key, hash_value(value)
 
-
     def hash_exit(path, key, old_parent, new_parent, new_items):
         # At this point, all items should be hashes
 
@@ -219,7 +233,7 @@ def hash_function(structure):
         # Combine the hashes
         hasher = hashlib.sha256()
         # Add a string representation of the old parent type
-        hasher.update(str(type(old_parent)).encode())
+        hasher.update(type(old_parent).__qualname__.encode())
         for _, v in new_items:
             hasher.update(v.encode())
         new_hash = hasher.hexdigest()
