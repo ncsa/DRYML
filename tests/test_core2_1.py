@@ -358,3 +358,32 @@ def test_selector_5():
         1, 2, 3)
 
     assert not selector_match(selector, definition)
+
+
+def test_definition_1():
+    # Test changing args directly on a Definition
+    # Shouldn't affect the original object
+
+    obj = objects.TestClass1(10, test='a')
+
+    definition = build_definition(obj)
+
+    # We shouldn't be allowed to change a definition
+    definition.kwargs['test'] = 'b'
+    assert obj.__kwargs__['test'] == 'a'
+
+
+def test_definition_2():
+    # Test changing kwargs directly on a Definition
+    # Shouldn't affect the original object
+    # This time we'll edit a collection argument
+
+    obj = objects.TestClass1([10], test=['a'])
+
+    definition = build_definition(obj)
+
+    # We shouldn't be allowed to change a definition
+    definition.args[0][0] = 20
+    definition.kwargs['test'][0] = 'b'
+    assert obj.__args__[0][0] == 10
+    assert obj.__kwargs__['test'][0] == 'a'

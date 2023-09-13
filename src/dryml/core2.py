@@ -63,10 +63,10 @@ class Remember(Object):
             '__args__',
             '__kwargs__',])
         default_kwargs = get_kwarg_defaults(type(self))
-        self.__args__ = args
+        self.__args__ = deepcopy(args)
         # We merge the default kwargs with the kwargs passed in.
         # Defaults are first so they can be overwritten.
-        self.__kwargs__ = { **default_kwargs, **kwargs }
+        self.__kwargs__ = deepcopy({ **default_kwargs, **kwargs })
 
 
 class Defer(Remember):
@@ -95,7 +95,7 @@ class Defer(Remember):
                 super().__getattribute__('__initialize__')()
         # Then check again
         return super().__getattribute__(name)
-    
+
     def __initialize__(self):
         if self.__locked__:
             raise RuntimeError("Cannot initialize object. Object is locked.")
@@ -145,6 +145,10 @@ class Metadata(Object):
 class Definition(dict):
     allowed_keys = ['cls', 'args', 'kwargs']
     def __init__(self, *args, **kwargs):
+        # We want to copy the arguments so we don't
+        # mutate them
+        args = deepcopy(args)
+        kwargs = deepcopy(kwargs)
         init = False
         if len(args) > 0:
             if callable(args[0]):
