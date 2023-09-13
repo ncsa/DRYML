@@ -170,6 +170,9 @@ class Definition(dict):
             raise KeyError(f"Key {key} not allowed in Definition. Allowed keys are {self.allowed_keys}")
         super().__setitem__(key, value)
 
+    def copy(self):
+        return deepcopy(self)
+
     def __hash__(self):
         return digest_to_hashval(hash_function(self))
 
