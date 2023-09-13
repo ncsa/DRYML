@@ -387,3 +387,20 @@ def test_definition_2():
     definition.kwargs['test'][0] = 'b'
     assert obj.__args__[0][0] == 10
     assert obj.__kwargs__['test'][0] == 'a'
+
+
+def test_definition_3():
+    # Test that definition is hashable
+    definition = Definition(objects.TestClass1, 10, test='a')
+    print(f"definition: {definition}")
+    print(f"hash: {hash}")
+    hash(definition)
+
+
+def test_definition_4():
+    # Test that we can build a definition from a Remember object
+    # and that it caches properly
+    obj = objects.TestClass1(10, test='a')
+
+    definition = obj.definition
+    assert id(definition) == id(obj.definition)
