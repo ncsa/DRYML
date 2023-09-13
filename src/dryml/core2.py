@@ -4,7 +4,7 @@ import hashlib
 from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike
 from boltons.iterutils import remap, is_collection, get_path, PathAccessError
-from functools import lru_cache
+from functools import cached_property
 import numpy as np
 
 
@@ -68,6 +68,10 @@ class Remember(Object):
         # We merge the default kwargs with the kwargs passed in.
         # Defaults are first so they can be overwritten.
         self.__kwargs__ = deepcopy({ **default_kwargs, **kwargs })
+
+    @cached_property
+    def definition(self):
+        return build_definition(self)
 
 
 class Defer(Remember):
@@ -166,10 +170,11 @@ class Definition(dict):
             raise KeyError(f"Key {key} not allowed in Definition. Allowed keys are {self.allowed_keys}")
         super().__setitem__(key, value)
 
-    @property
-    @lru_cache(maxsize=1)
     def __hash__(self):
         return digest_to_hashval(hash_function(self))
+
+    def __eq__(self, rhs):
+        return selector_match(self, rhs)
 
     @property
     def cls(self):
