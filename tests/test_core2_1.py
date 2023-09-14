@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 import core2_objects as objects
 from dryml.core2 import Definition, build_definition, build_from_definition, hash_function, selector_match, Repo
+from pprint import pprint
 
 
 def test_create_definition_1():
@@ -430,3 +431,17 @@ def test_definition_4():
 
     definition = obj.definition
     assert id(definition) == id(obj.definition)
+
+
+def test_definition_concrete_1():
+    definition = Definition(
+        objects.TestClass1,
+        10,
+        test='a')
+
+    pprint(definition)
+
+    new_def = definition.copy()
+    new_def.concretize()
+    pprint(new_def)
+    assert definition == new_def

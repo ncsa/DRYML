@@ -250,6 +250,7 @@ class Definition(dict):
                 init = True
         if not init:
             super().__init__(*args, **kwargs)
+        self._concrete = False
 
     def __setitem__(self, key, value):
         if key not in self.allowed_keys:
@@ -258,6 +259,20 @@ class Definition(dict):
 
     def copy(self):
         return deepcopy(self)
+
+    @property
+    def is_concrete(self):
+        return self._concrete
+
+    def concretize(self):
+        if self.is_concrete:
+            return
+        args, kwargs = cls_super(self.cls).__arg_manipulation__(
+            self.args,
+            self.kwargs)
+        self['args'] = args
+        self['kwargs'] = kwargs
+        self._concrete = True
 
     def __hash__(self):
         return digest_to_hashval(hash_function(self))
