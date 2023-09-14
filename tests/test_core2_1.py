@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import core2_objects as objects
-from dryml.core2 import Definition, build_definition, build_from_definition, hash_function, selector_match
+from dryml.core2 import Definition, build_definition, build_from_definition, hash_function, selector_match, Repo
 
 
 def test_create_definition_1():
@@ -138,6 +138,34 @@ def test_build_from_definition_4():
     assert type(obj.x) == objects.TestClass1
     assert np.all(obj.x.x == arr2)
     assert obj.x.test == 'b'
+
+
+def test_build_from_definition_5():
+    # Test we can build one object
+    definition = Definition(
+        objects.TestClass1,
+        10, test='a')
+
+    repo = Repo() 
+    obj = build_from_definition(definition, repo=repo)
+    assert repo._num_constructions == 1
+    assert selector_match(definition, obj.definition)
+
+
+def test_build_from_definition_6():
+    # Test we can build a nested object
+    definition = Definition(
+        objects.TestClass1,
+        Definition(
+            objects.TestClass1,
+            10,
+            test='b'),
+        test='a')
+
+    repo = Repo() 
+    obj = build_from_definition(definition, repo=repo)
+    assert repo._num_constructions == 2
+    assert selector_match(definition, obj.definition)
 
 
 def test_definition_hash_1():
@@ -392,8 +420,6 @@ def test_definition_2():
 def test_definition_3():
     # Test that definition is hashable
     definition = Definition(objects.TestClass1, 10, test='a')
-    print(f"definition: {definition}")
-    print(f"hash: {hash}")
     hash(definition)
 
 

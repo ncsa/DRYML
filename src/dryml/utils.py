@@ -6,6 +6,7 @@ import inspect
 import hashlib
 import importlib
 import dill
+import pickle
 from typing import Type, Union, IO, Optional, Callable
 import zipfile
 import io
@@ -199,7 +200,7 @@ def path_needs_directory(path):
         return False
 
 
-def pickler(obj):
+def diller(obj):
     "Method to ensure all objects are pickled in the same way"
     return dill.dumps(obj, protocol=5)
 
@@ -207,6 +208,17 @@ def pickler(obj):
 def unpickler(stream):
     "Method to ensure all objects are unpickled in the same way"
     return dill.loads(stream)
+
+
+def pickler(obj):
+    "Method to ensure all objects are pickled in the same way"
+    # Consider updating to protocol=5 when python 3.7 is deprecated
+    return pickle.dumps(obj, protocol=4)
+
+
+def pickle_to_file(obj, path):
+    with open(path, 'wb') as f:
+        f.write(pickler(obj))
 
 
 def static_var(varname, value):
