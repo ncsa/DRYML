@@ -13,6 +13,7 @@ import zipfile
 from typing import Union, List
 from copy import deepcopy
 from contextlib import contextmanager
+from inspect import currentframe
 
 
 def collide_attributes(obj, attr_list):
@@ -25,6 +26,46 @@ def collide_attributes(obj, attr_list):
         raise AttributeError(f"Attributes {colliding_attrs} already exist on object. Cannot create object.")
 
 
+def cls_super(cls=None):
+    if cls is None:
+         # We must detect the class ourselves
+         frame = currentframe().f_back
+         cls = frame.f_locals.get('self', None).__class__
+    return ClsSuperManager(0, cls.mro())
+
+
+class ClsSuperManager:
+    # A class to mimic `super()` but without an actual instance
+    def __init__(self, mro_i, mro):
+        self.mro = mro
+        self.mro_i = mro_i
+
+    def __call__(self, *args, **kwargs):
+        # Create a new object which will reset the advance counter
+        return self
+
+    def __getattribute__(self, name):
+        if name in super().__getattribute__('__dict__'):
+            # If its a plain attribute just return it
+            return super().__getattribute__(name)
+        else:
+            # We have a method
+            # We must advance through the mro until we find a class with the method
+            for i in range(self.mro_i, len(self.mro)):
+                cls = self.mro[i]
+                if name in cls.__dict__:
+                    # We found a class with the method
+                    # Advance the counter
+                    self.mro_i = i
+                    # Get the method
+                    method = cls.__dict__[name]
+                    def exec_method(*args, **kwargs):
+                        return method(self, *args, **kwargs)
+                    return exec_method
+            # We didn't find anymore classes with this method
+            return None
+
+
 class CreationControl(type):
     # Support metaclass to allow more complex metaclass behavior
     def __create_instance__(cls):
@@ -32,14 +73,15 @@ class CreationControl(type):
 
     def __call__(cls, *args, **kwargs):
         obj = cls.__create_instance__()
-        args, kwargs = obj.__arg_manipulation__(*args, **kwargs)
+        args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
         obj.__pre_init__(*args, **kwargs)
         obj.__initialize_instance__(*args, **kwargs)
         return obj
 
 
 class Object(metaclass=CreationControl):
-    def __arg_manipulation__(self, *args, **kwargs):
+    @staticmethod
+    def __arg_manipulation__(cls_super, *args, **kwargs):
         return args, kwargs
 
     def __pre_init__(self, *args, **kwargs):
@@ -125,8 +167,9 @@ class Defer(Remember):
 
 
 class UniqueID(Object):
-    def __arg_manipulation__(self, *args, **kwargs):
-        args, kwargs = super().__arg_manipulation__(*args, **kwargs)
+    @staticmethod
+    def __arg_manipulation__(cls_super, *args, **kwargs):
+        args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
         if 'uid' not in kwargs:
             kwargs['uid'] = str(uuid.uuid4())
         return args, kwargs
@@ -138,8 +181,9 @@ class UniqueID(Object):
 
 
 class Metadata(Object):
-    def __arg_manipulation__(self, *args, **kwargs):
-        args, kwargs = super().__arg_manipulation__(*args, **kwargs)
+    @staticmethod
+    def __arg_manipulation__(cls_super, *args, **kwargs):
+        args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
         if 'metadata' not in kwargs:
             kwargs['metadata'] = {
             }
