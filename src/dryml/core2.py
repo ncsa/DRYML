@@ -2,10 +2,17 @@ import uuid
 import time
 import hashlib
 from inspect import signature, Parameter, isclass
-from dryml.utils import is_dictlike
+from dryml.utils import is_dictlike, pickle_to_file
 from boltons.iterutils import remap, is_collection, get_path, PathAccessError
 from functools import cached_property
 import numpy as np
+import pickle
+import os
+import tempfile
+import zipfile
+from typing import Union, List
+from copy import deepcopy
+from contextlib import contextmanager
 
 
 def collide_attributes(obj, attr_list):
@@ -147,6 +154,41 @@ class Metadata(Object):
         self.metadata = metadata
 
 
+class Serializable(Remember):
+    def _save_to_dir(self, dir: str):
+        # Directory into which the model should save its 'heavy' content
+        # Full save procedure handled elsewhere
+        # We expect the directory to exist. Caller should handle this
+        if not os.path.exists(dir):
+            raise ValueError(f"Path {dir} does not exist. Can't save")
+
+        # Save the definition
+        def_file = os.path.join(dir, 'def.pkl')
+        pickle_to_file(self.definition, def_file)
+
+        output_file = os.path.join(dir, 'object.pkl')
+        with open(output_file, 'wb') as f:
+            f.write(pickle.dumps(self))
+
+    def _load_from_dir(self, dir: str):
+        # Load 'heavy' content from directory
+        # Again directory should exist. Caller will handle it.
+        if not os.path.exists(dir):
+            raise ValueError(f"Path {dir} does not exist. Can't load")
+
+        def_file = os.path.join(dir, 'def.pkl')
+        with open(def_file, 'rb') as f:
+            definition = pickle.loads(f.read())
+
+        if definition != self.definition:
+            raise ValueError("Definition for data in directory {dir} doesn't match this object. Can't load")
+
+        input_file = os.path.join(dir, 'object.pkl')
+        with open(input_file, 'rb') as f:
+            obj = pickle.loads(f.read())
+        self.__dict__.update(obj.__dict__)
+
+
 class Definition(dict):
     allowed_keys = ['cls', 'args', 'kwargs']
     def __init__(self, *args, **kwargs):
@@ -272,30 +314,20 @@ def build_definition_visit(_, key, value):
 
 
 # Creating objects from definitions
-def is_definition(obj):
-    if type(obj) is Definition:
-        return True
-    else:
-        return False
+def build_from_definition(definition, path=None, repo=None):
+    with manage_repo(path=path, repo=repo) as repo:
+        def build_from_definition_visit(_, key, value):
+            if isinstance(value, Definition):
+                # Delegate to a repo to do the loading
+                obj = repo.load_object(value)
+                return key, obj
+            else:
+                return key, value
 
-
-def build_from_definition(definition):
-    if isinstance(definition, Definition):
-        return remap([definition], visit=build_from_definition_visit)[0]
-    else:
-        return remap(definition, visit=build_from_definition_visit)
-
-
-def build_from_definition_visit(_, key, value):
-    if isinstance(value, Definition):
-        args = build_from_definition(value.args)
-        kwargs = build_from_definition(value.kwargs)
-        obj = value.cls(*args, **kwargs)
-        return key, obj
-    else:
-        return key, value
-
-        raise TypeError(f"Definition must be of type Definition. Got {type(definition)} instead.")
+        if isinstance(definition, Definition):
+            return remap([definition], visit=build_from_definition_visit)[0]
+        else:
+            return remap(definition, visit=build_from_definition_visit)
 
 
 def is_nonclass_callable(obj):
@@ -385,3 +417,151 @@ def selector_match(selector, definition):
     return remap(selector, visit=selector_match_visit, exit=selector_match_exit)
 
 
+def zip_directory(folder_path, zip_path):
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        # Ignoring dirs for now. May need to edit this in the future.
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                abs_path = os.path.join(root, file)
+                rel_path = os.path.relpath(abs_path, folder_path)
+                zipf.write(abs_path, rel_path)
+
+
+class BaseRepo:
+    # Helper class for saving objects
+    def __init__(self):
+        self.objs = {}
+        # Some helper variables for monitoring
+        self._num_saves = 0
+        self._num_constructions = 0
+
+    def save_object(self, obj: Serializable):
+        def_hash = hash(obj.definition)
+        if def_hash not in self.objs:
+            # store the object
+            self.objs[def_hash] = obj
+            self._num_saves += 1
+            return def_hash
+        else:
+            return None
+
+    def load_object(self, obj_def: Definition):
+        def_hash = hash(obj_def)
+        if def_hash in self.objs:
+            return None, self.objs[def_hash]
+        else:
+            # We don't have the object. We must construct it
+            args = build_from_definition(obj_def.args, repo=self)
+            kwargs = build_from_definition(obj_def.kwargs, repo=self)
+            obj = obj_def.cls(*args, **kwargs)
+            self.objs[def_hash] = obj
+            self._num_constructions += 1
+            return def_hash, obj
+
+    def close(self):
+        pass
+
+
+class Repo(BaseRepo):
+    def __init__(self):
+        super().__init__()
+
+    def save_object(self, obj: Serializable):
+        super().save_object(obj)
+
+    def load_object(self, obj_def: Definition):
+        _, obj = super().load_object(obj_def)
+        return obj
+
+
+class DirRepo(BaseRepo):
+    # A class to manage saving objects to a directory.
+    def __init__(self, dir):
+        # We expect the directory to exist.
+        if not os.path.exists(dir):
+            raise ValueError(f"Directory {dir} doesn't exist.")
+        self.dir = dir
+        self.obj_dir = os.path.join(self.dir, "objects")
+        # List the directory and find all the hashes
+        try:
+            self.saved_objs = set(os.listdir(self.obj_dir))
+        except FileNotFoundError:
+            # The directory doesn't exist
+            os.mkdir(self.obj_dir)
+        super().__init__()
+
+    def save_object(self, obj: Serializable):
+        def_hash = super().save_object(obj)
+        if def_hash is not None:
+            # Create directory for object
+            def_hash_digest = hashval_to_digest(def_hash)
+            object_path = os.mkdir(os.path.join(self.dir, "objects", def_hash_digest))
+            # Save the object
+            obj._save_to_dir(object_path)
+
+    def load_object(self, obj_def):
+        def_hash, obj = super().load_object(obj_def)
+        if def_hash is None:
+            # We don't have to load any data
+            return obj
+        else:
+            def_hash_digest = hashval_to_digest(def_hash)
+            object_path = os.path.join(self.dir, "objects", def_hash_digest)
+            if not os.path.exists(object_path):
+                raise IndexError(f"Object with hash {def_hash} not found.")
+            # confirm we have the same definition
+            def_file = os.path.join(object_path, "def.pkl")
+            with open(def_file, 'rb') as f:
+                definition = pickle.loads(f.read())
+                check_hash = hash(definition)
+            if check_hash != def_hash:
+                raise ValueError(f"Hashes don't match. {check_hash} != {def_hash}")
+            # Load the data from the directory
+            obj._load_from_dir(object_path)
+            return obj
+
+
+class ZipRepo(DirRepo):
+    # A class meant to zip files 'directly' to a zipfile.
+    def __init__(self, path):
+        # We load the zip file to a temporary directory
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.path = path
+        super().__init__(self.temp_dir)
+
+    def close(self):
+        # Zip up the temp directory
+        zip_directory(self.temp_dir, self.path)
+        # Close the temp directory
+        self.temp_dir.__exit__(None, None, None)
+
+
+@contextmanager
+def manage_repo(path=None, repo=None):
+    close_repo = False
+    if repo is None:
+        if path is None:
+            repo = Repo()
+        else:
+            # detect if the path is a zip file
+            if os.path.splitext(path)[-1] == ".zip":
+                repo = ZipRepo(path)
+            else:
+                repo = DirRepo(path)
+        close_repo = True
+    yield repo
+    if close_repo:
+        repo.close()
+
+
+# Saving and Loading
+def save_object(obj: Union[Serializable,List[Serializable]], path=None, repo=None):
+    with manage_repo(path=path, repo=repo) as repo:
+        # Save the object
+        repo.save_object(obj)
+
+
+def load_object(obj_def: Definition, path=None, repo=None):
+    with manage_repo(path=path, repo=repo) as repo:
+        # Save the object
+        repo.load_object(obj_def)
