@@ -268,8 +268,8 @@ class Definition(dict):
         if self.is_concrete:
             return
         args, kwargs = cls_super(self.cls).__arg_manipulation__(
-            self.args,
-            self.kwargs)
+            *self.args,
+            **self.kwargs)
         self['args'] = args
         self['kwargs'] = kwargs
         self._concrete = True
