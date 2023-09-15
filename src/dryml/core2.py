@@ -279,7 +279,12 @@ class Definition(dict):
         return digest_to_hashval(hash_function(self))
 
     def __eq__(self, rhs):
-        return selector_match(self, rhs)
+        # We actually need to check in both directions.
+        if not selector_match(self, rhs, strict=True):
+            return False
+        if not selector_match(rhs, self, strict=True):
+            return False
+        return True
 
     @property
     def cls(self):
@@ -395,7 +400,9 @@ def is_nonclass_callable(obj):
 
 
 ## Selecting objects
-def selector_match(selector, definition):
+def selector_match(selector, definition, strict=False):
+    # Method for testing if a selector matches a definition
+    # if strict is set, it must match exactly, and callables arent' allowed.
     def selector_match_visit(path, key, value):
         print(f"selector_match_visit: path: {path}, key: {key}, value: {value}")
         # Try to get the value at the right path from the definition
@@ -414,7 +421,7 @@ def selector_match(selector, definition):
             if isclass(value):
                 print("selector_match_visit: class 1")
                 return key, issubclass(value, def_val)
-            elif callable(value):
+            elif callable(value) and not strict:
                 print("selector_match_visit: class 2")
                 # We use the callable to determine if we match
                 return key, value(def_val)
@@ -430,7 +437,7 @@ def selector_match(selector, definition):
             if isinstance(value, np.ndarray):
                 print("selector_match_visit: array 1")
                 return key, np.all(def_val == value)
-            elif is_nonclass_callable(value):
+            elif is_nonclass_callable(value) and not strict:
                 print("selector_match_visit: array 2")
                 return key, value(def_val)
             else:
@@ -439,7 +446,7 @@ def selector_match(selector, definition):
                 return key, False
         else:
             # Plain matching branch
-            if is_nonclass_callable(value):
+            if is_nonclass_callable(value) and not strict:
                 print("selector_match_visit: plain 1")
                 return key, value(def_val)
             elif type(value) != type(value):
