@@ -18,3 +18,9 @@ class TestClass3(Remember):
     def __init__(self, *args):
         super().__init__()
         self.args = args
+
+class TestClass4(Remember, UniqueID, Metadata):
+    def __init__(self, x, *args, test=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.x = x
+        self.test = test
