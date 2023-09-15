@@ -389,6 +389,22 @@ def test_selector_5():
     assert not selector_match(selector, definition)
 
 
+def test_selector_6():
+    sel_1 = Definition(
+        objects.TestClass1, lambda x: x == 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1, 10, test='a')
+    assert selector_match(sel_1, def_2)
+
+
+def test_selector_7():
+    sel_1 = Definition(
+        objects.TestClass1, 10, test=lambda x: x == 'a')
+    def_2 = Definition(
+        objects.TestClass1, 10, test='a')
+    assert selector_match(sel_1, def_2)
+
+
 def test_definition_1():
     # Test changing args directly on a Definition
     # Shouldn't affect the original object
@@ -431,6 +447,40 @@ def test_definition_4():
 
     definition = obj.definition
     assert id(definition) == id(obj.definition)
+
+
+def test_definition_eq_1():
+    def_1 = Definition(
+        objects.TestClass1, 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1, 10, test='a')
+    assert def_1 == def_2
+
+
+def test_definition_eq_2():
+    def_1 = Definition(
+        objects.TestClass1, 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1, 20, test='a')
+    assert def_1 != def_2
+
+
+def test_definition_eq_3():
+    sel_1 = Definition(
+        objects.TestClass1, lambda x: x == 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1, 10, test='a')
+    assert sel_1 != def_2
+    assert def_2 != sel_1
+
+
+def test_definition_eq_4():
+    sel_1 = Definition(
+        objects.TestClass1, 10, test=lambda x: x == 'a')
+    def_2 = Definition(
+        objects.TestClass1, 10, test='a')
+    assert sel_1 != def_2
+    assert def_2 != sel_1
 
 
 def test_definition_concrete_1():
