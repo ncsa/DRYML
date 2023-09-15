@@ -439,9 +439,20 @@ def test_definition_concrete_1():
         10,
         test='a')
 
-    pprint(definition)
+    new_def = definition.copy()
+    new_def.concretize()
+    assert definition == new_def
+
+
+def test_definition_concrete_2():
+    definition = Definition(
+        objects.TestClass4,
+        10,
+        test='a')
 
     new_def = definition.copy()
     new_def.concretize()
-    pprint(new_def)
-    assert definition == new_def
+    assert selector_match(definition, new_def)
+    assert definition != new_def
+    assert 'uid' in new_def.kwargs
+    assert 'metadata' in new_def.kwargs

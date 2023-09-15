@@ -42,6 +42,7 @@ class ClsSuperManager:
 
     def __call__(self, *args, **kwargs):
         # Create a new object which will reset the advance counter
+        self.mro_i += 1
         return self
 
     def __getattribute__(self, name):
