@@ -518,7 +518,9 @@ def build_from_definition(definition, path=None, repo=None):
 
     with manage_repo(path=path, repo=repo) as repo:
         def build_from_definition_visit(_, key, value):
-            if isinstance(value, Definition):
+            if type(value) is Definition:
+                raise TypeError("Definitions should've been turned into ConcreteDefinitions at this point")
+            elif type(value) is ConcreteDefinition:
                 # Delegate to a repo to do the loading
                 obj = repo.load_object(value)
                 return key, obj
