@@ -256,10 +256,22 @@ def definition_exit(path, key, value, new_parent, new_items):
         return default_exit(path, key, value, new_parent, new_items)
 
 
-def deepcopy_definition(defn):
+def deepcopy_skip_definition_object(defn):
+    def _deepcopy_enter(path, key, value):
+        if isinstance(value, Object):
+            return key, False
+        elif isinstance(value, Definition):
+            return key, False
+        else:
+            return default_enter(path, key, value)
+
     def _deepcopy_visit(path, key, value):
-        if issubclass(value, Object):
+        if isinstance(value, Object):
             # We have an already realized class instance. We shouldn't deep copy it.
+            return key, value
+        elif isinstance(value, Definition):
+            # unique definitions are supposed to refer to specific objects during 'rendering'
+            # We shouldn't copy Definitions
             return key, value
         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
             return key, value
@@ -267,18 +279,14 @@ def deepcopy_definition(defn):
             return key, deepcopy(value)
 
     if type(defn) is Definition:
-        return remap([defn], enter=definition_enter, visit=_deepcopy_visit, exit=definition_exit)[0]
+        return remap([defn], enter=_deepcopy_enter, visit=_deepcopy_visit, exit=definition_exit)[0]
     else:
-        return remap(defn, enter=definition_enter, visit=_deepcopy_visit, exit=definition_exit)
+        return remap(defn, enter=_deepcopy_enter, visit=_deepcopy_visit, exit=definition_exit)
 
 
 class Definition(dict):
     allowed_keys = ['cls', 'args', 'kwargs']
     def __init__(self, *args, **kwargs):
-        # We want to copy the arguments so we don't
-        # mutate them
-        args = deepcopy(args)
-        kwargs = deepcopy(kwargs)
         init = False
         if len(args) > 0:
             if callable(args[0]):
@@ -289,7 +297,6 @@ class Definition(dict):
                 init = True
         if not init:
             super().__init__(*args, **kwargs)
-        self._concrete = False
 
     def __setitem__(self, key, value):
         if key not in self.allowed_keys:
@@ -297,7 +304,8 @@ class Definition(dict):
         super().__setitem__(key, value)
 
     def copy(self):
-        return deepcopy_definition(self)
+        # A true deepcopy
+        return deepcopy(self)
 
     def __eq__(self, rhs):
         print(f"Definition.__eq__")
@@ -337,18 +345,27 @@ class Definition(dict):
 
 
 def concretize_definition(defn: Definition):
+    # Cache for completed results. All duplicate ConcreteDefinitions should refer to the SAME object and so the same definition
+    # Key for this cache will be the ConcreteDefinition hash.
+    definition_cache = {}
+
     def _concretize_definition_enter(path, key, value):
-        if type(value) is ConcreteDefinition:
+        id_value = id(value)
+        if id_value in definition_cache:
+            return key, False
+        elif type(value) is ConcreteDefinition:
             # The definition is already concrete. don't enter it.
             return key, False
         else:
             return definition_enter(path, key, value)
 
     def _concretize_definition_visit(path, key, value):
-        if type(value) is ConcreteDefinition:
+        if id(value) in definition_cache: 
+            return key, definition_cache[id(value)]
+        elif type(value) is ConcreteDefinition:
             # Value is already Concrete
             return key, value
-        if isinstance(value, Object):
+        elif isinstance(value, Object):
             # We have an already realized class instance. We shouldn't deep copy it.
             return key, value
         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
@@ -358,6 +375,7 @@ def concretize_definition(defn: Definition):
 
     def _concretize_definition_exit(path, key, values, new_parent, new_items):
         if isinstance(values, Definition):
+            id_values = id(values)
             for k, v in new_items:
                 new_parent[k] = v
             args = new_parent['args']
@@ -365,8 +383,15 @@ def concretize_definition(defn: Definition):
             cls = new_parent['cls']
             # Do argument manipulations
             args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
+            # Copy args so modifications to this ConcreteDefinition doesn't change the original
+            # Values in the original Definitions
+            args = deepcopy_skip_definition_object(args)
+            kwargs = deepcopy_skip_definition_object(kwargs)
             # Create the now concrete definition
-            return ConcreteDefinition(cls, *args, **kwargs)
+            new_def = ConcreteDefinition(cls, *args, **kwargs) 
+            # Check if we've encountered this definition before
+            definition_cache[id_values] = new_def
+            return new_def
         else:
             return default_exit(path, key, values, new_parent, new_items)
 
@@ -461,22 +486,29 @@ def hash_function(structure):
 
 # Creating definitions from objects
 def build_definition(obj):
+    #TODO: Implement 'instance caching' for building definitions
+    def build_definition_visit(_, key, value):
+        if isinstance(value, Remember):
+            args = build_definition(value.__args__)
+            kwargs = build_definition(value.__kwargs__)
+            # We want to copy the arguments so we don't
+            # mutate them unless they're definitions or Objects
+            args = deepcopy_skip_definition_object(args)
+            kwargs = deepcopy_skip_definition_object(kwargs)
+
+            return key, Definition(
+                type(value),
+                *args,
+                **kwargs)
+        else:
+            return key, value
+
     if isinstance(obj, Remember):
         return remap([obj], visit=build_definition_visit)[0]
     else:
         return remap(obj, visit=build_definition_visit)
 
 
-def build_definition_visit(_, key, value):
-    if isinstance(value, Remember):
-        args = build_definition(value.__args__)
-        kwargs = build_definition(value.__kwargs__)
-        return key, Definition(
-            type(value),
-            *args,
-            **kwargs)
-    else:
-        return key, value
 
 
 # Creating objects from definitions
