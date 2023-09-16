@@ -660,7 +660,9 @@ class BaseRepo:
         else:
             return None
 
-    def load_object(self, obj_def: Definition):
+    def load_object(self, obj_def: ConcreteDefinition):
+        if type(obj_def) is not ConcreteDefinition:
+            raise TypeError("Only ConcreteDefinition is supported")
         def_hash = hash(obj_def)
         if def_hash in self.objs:
             return None, self.objs[def_hash]
