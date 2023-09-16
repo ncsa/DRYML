@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import core2_objects as objects
-from dryml.core2 import Definition, build_definition, build_from_definition, hash_function, selector_match, Repo
+from dryml.core2 import Definition, ConcreteDefinition, build_definition, build_from_definition, hash_function, selector_match, Repo
 from pprint import pprint
 
 
@@ -434,12 +434,6 @@ def test_definition_2():
     assert obj.__kwargs__['test'][0] == 'a'
 
 
-def test_definition_3():
-    # Test that definition is hashable
-    definition = Definition(objects.TestClass1, 10, test='a')
-    hash(definition)
-
-
 def test_definition_4():
     # Test that we can build a definition from a Remember object
     # and that it caches properly
@@ -489,9 +483,9 @@ def test_definition_concrete_1():
         10,
         test='a')
 
-    new_def = definition.copy()
-    new_def.concretize()
-    assert definition == new_def
+    new_def = definition.concretize()
+    assert definition != new_def
+    assert type(new_def) is ConcreteDefinition
 
 
 def test_definition_concrete_2():
@@ -500,9 +494,15 @@ def test_definition_concrete_2():
         10,
         test='a')
 
-    new_def = definition.copy()
-    new_def.concretize()
+    new_def = definition.concretize()
     assert selector_match(definition, new_def)
     assert definition != new_def
+    assert type(new_def) is ConcreteDefinition
     assert 'uid' in new_def.kwargs
     assert 'metadata' in new_def.kwargs
+
+
+def test_definition_concrete_3():
+    # Test that concrete definition is hashable
+    definition = Definition(objects.TestClass1, 10, test='a').concretize()
+    hash(definition)

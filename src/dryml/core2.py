@@ -3,7 +3,7 @@ import time
 import hashlib
 from inspect import signature, Parameter, isclass
 from dryml.utils import is_dictlike, pickle_to_file
-from boltons.iterutils import remap, is_collection, get_path, PathAccessError
+from boltons.iterutils import remap, is_collection, get_path, PathAccessError, default_enter, default_exit
 from functools import cached_property
 import numpy as np
 import pickle
@@ -14,6 +14,7 @@ from typing import Union, List
 from copy import deepcopy
 from contextlib import contextmanager
 from inspect import currentframe
+from collections.abc import ItemsView
 
 
 def collide_attributes(obj, attr_list):
@@ -83,6 +84,7 @@ class CreationControl(type):
 class Object(metaclass=CreationControl):
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
+        # __arg_manipulation__ should be an idempotent function
         return args, kwargs
 
     def __pre_init__(self, *args, **kwargs):
@@ -234,6 +236,42 @@ class Serializable(Remember):
         self.__dict__.update(obj.__dict__)
 
 
+def definition_enter(path, key, value):
+    if isinstance(value, Definition):
+        return {}, ItemsView(value)
+    else:
+        return default_enter(path, key, value)
+
+
+def definition_exit(path, key, value, new_parent, new_items):
+    if isinstance(value, Definition):
+        # We have a definition. we have to be careful how we construct it.
+        for k, v in new_items:
+            new_parent[k] = v
+        args = new_parent['args']
+        kwargs = new_parent['kwargs']
+        cls = new_parent['cls']
+        return type(value)(cls, *args, **kwargs)
+    else:
+        return default_exit(path, key, value, new_parent, new_items)
+
+
+def deepcopy_definition(defn):
+    def _deepcopy_visit(path, key, value):
+        if issubclass(value, Object):
+            # We have an already realized class instance. We shouldn't deep copy it.
+            return key, value
+        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
+            return key, value
+        else:
+            return key, deepcopy(value)
+
+    if type(defn) is Definition:
+        return remap([defn], enter=definition_enter, visit=_deepcopy_visit, exit=definition_exit)[0]
+    else:
+        return remap(defn, enter=definition_enter, visit=_deepcopy_visit, exit=definition_exit)
+
+
 class Definition(dict):
     allowed_keys = ['cls', 'args', 'kwargs']
     def __init__(self, *args, **kwargs):
@@ -259,32 +297,31 @@ class Definition(dict):
         super().__setitem__(key, value)
 
     def copy(self):
-        return deepcopy(self)
-
-    @property
-    def is_concrete(self):
-        return self._concrete
-
-    def concretize(self):
-        if self.is_concrete:
-            return
-        args, kwargs = cls_super(self.cls).__arg_manipulation__(
-            *self.args,
-            **self.kwargs)
-        self['args'] = args
-        self['kwargs'] = kwargs
-        self._concrete = True
-
-    def __hash__(self):
-        return digest_to_hashval(hash_function(self))
+        return deepcopy_definition(self)
 
     def __eq__(self, rhs):
+        print(f"Definition.__eq__")
+        if type(self) != type(rhs):
+            print(f"Definition.__eq__ 1")
+            return False
         # We actually need to check in both directions.
         if not selector_match(self, rhs, strict=True):
+            print(f"Definition.__eq__ 2")
             return False
         if not selector_match(rhs, self, strict=True):
+            print(f"Definition.__eq__ 3")
             return False
+        print(f"Definition.__eq__ 4")
         return True
+
+    def __ne__(self, rhs):
+        return not self.__eq__(rhs)
+
+    def concretize(self):
+        return concretize_definition(self)
+
+    def __str__(self):
+        return f"{type(self).__name__}{super().__str__()}"
 
     @property
     def cls(self):
@@ -297,6 +334,70 @@ class Definition(dict):
     @property
     def kwargs(self):
         return self['kwargs']
+
+
+def concretize_definition(defn: Definition):
+    def _concretize_definition_enter(path, key, value):
+        if type(value) is ConcreteDefinition:
+            # The definition is already concrete. don't enter it.
+            return key, False
+        else:
+            return definition_enter(path, key, value)
+
+    def _concretize_definition_visit(path, key, value):
+        if type(value) is ConcreteDefinition:
+            # Value is already Concrete
+            return key, value
+        if isinstance(value, Object):
+            # We have an already realized class instance. We shouldn't deep copy it.
+            return key, value
+        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
+            return key, value
+        else:
+            return key, deepcopy(value)
+
+    def _concretize_definition_exit(path, key, values, new_parent, new_items):
+        if isinstance(values, Definition):
+            for k, v in new_items:
+                new_parent[k] = v
+            args = new_parent['args']
+            kwargs = new_parent['kwargs']
+            cls = new_parent['cls']
+            # Do argument manipulations
+            args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
+            # Create the now concrete definition
+            return ConcreteDefinition(cls, *args, **kwargs)
+        else:
+            return default_exit(path, key, values, new_parent, new_items)
+
+    if isinstance(defn, Definition):
+        return remap(
+            [defn],
+            enter=_concretize_definition_enter,
+            visit=_concretize_definition_visit,
+            exit=_concretize_definition_exit)[0]
+    else:
+        return remap(
+            defn,
+            enter=_concretize_definition_enter,
+            visit=_concretize_definition_visit,
+            exit=_concretize_definition_exit)
+
+
+class ConcreteDefinition(Definition):
+    def __init__(self, *args, **kwargs):
+        if len(args) == 0:
+            raise ValueError("ConcreteDefinition must be created with arguments")
+        if len(args) > 0:
+            if not isclass(args[0]):
+                raise TypeError("ConcreteDefinition's first argument must be a class")
+        super().__init__(*args, **kwargs)
+
+    def concretize(self):
+        return self
+
+    def __hash__(self):
+        return digest_to_hashval(hash_function(self))
 
 
 def hashval_to_digest(val):
@@ -355,7 +456,7 @@ def hash_function(structure):
 
         return HashHelper(new_hash)
 
-    return remap(structure, visit=hash_visit, exit=hash_exit).hash
+    return remap(structure, enter=definition_enter, visit=hash_visit, exit=hash_exit).hash
 
 
 # Creating definitions from objects
@@ -380,6 +481,9 @@ def build_definition_visit(_, key, value):
 
 # Creating objects from definitions
 def build_from_definition(definition, path=None, repo=None):
+    # First, concretize the definition
+    concrete_definition = concretize_definition(definition)
+
     with manage_repo(path=path, repo=repo) as repo:
         def build_from_definition_visit(_, key, value):
             if isinstance(value, Definition):
@@ -390,9 +494,9 @@ def build_from_definition(definition, path=None, repo=None):
                 return key, value
 
         if isinstance(definition, Definition):
-            return remap([definition], visit=build_from_definition_visit)[0]
+            return remap([concrete_definition], enter=definition_enter, visit=build_from_definition_visit, exit=definition_exit)[0]
         else:
-            return remap(definition, visit=build_from_definition_visit)
+            return remap(concrete_definition, enter=definition_enter, visit=build_from_definition_visit, exit=definition_exit)
 
 
 def is_nonclass_callable(obj):
@@ -459,29 +563,39 @@ def selector_match(selector, definition, strict=False):
 
     def selector_match_exit(path, key, old_parent, new_parent, new_items):
         print(f"selector_match_exit: path: {path}, key: {key}, old_parent: {old_parent}, new_parent: {new_parent}, new_items: {new_items}")
+        # Type check
         if type(old_parent) != type(new_parent):
-            print(f"selector_match_exit: type check")
-            return False
+            if issubclass(type(old_parent), Definition):
+                if type(new_parent) is not dict:
+                    # The one case we know about should have new_parent be a dict.
+                    return False
+            else:
+                return False
+
+        if key is None:
+            def_values = get_path(definition, path)
+        else:
+            def_values = get_path(definition, path)[key]
+
+        if strict:
+            if len(def_values) != len(new_items):
+                return False
         else:
             if is_collection(old_parent) and not is_dictlike(old_parent):
                 print(f"collection check definition: {definition}")
                 # For tuples and list arguments, the lengths must match.
-                if key is None:
-                    def_values = get_path(definition, path)
-                else:
-                    def_values = get_path(definition, path)[key]
                 print(f"def_values: {def_values}")
                 if len(def_values) != len(new_items):
                     return False
-            print(f"selector_match_exit: catchall check")
-            final = True
-            for val in map(lambda t: t[1], new_items):
-                final = final & val
-            return final
+        print(f"selector_match_exit: catchall check")
+        final = True
+        for val in map(lambda t: t[1], new_items):
+            final = final & val
+        return final
 
     # We reduce across the selector because we are only checking the values supplied
     # In the selector.
-    return remap(selector, visit=selector_match_visit, exit=selector_match_exit)
+    return remap(selector, enter=definition_enter, visit=selector_match_visit, exit=selector_match_exit)
 
 
 def zip_directory(folder_path, zip_path):
