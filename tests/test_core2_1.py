@@ -24,6 +24,16 @@ def test_create_definition_3():
     assert definition.kwargs['test'] == 'a'
 
 
+def test_create_definition_4():
+    # nesting definitions shouldn't change the nested Definition objects
+    def_1 = Definition(objects.TestClass1, 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1,
+        def_1,
+        test='b')
+    assert def_2.args[0] is def_1
+
+
 def test_build_definition_1():
     # Plain single level object
     obj = objects.TestClass1(10, test='a')
@@ -434,7 +444,7 @@ def test_definition_2():
     assert obj.__kwargs__['test'][0] == 'a'
 
 
-def test_definition_4():
+def test_definition_3():
     # Test that we can build a definition from a Remember object
     # and that it caches properly
     obj = objects.TestClass1(10, test='a')
@@ -506,3 +516,35 @@ def test_definition_concrete_3():
     # Test that concrete definition is hashable
     definition = Definition(objects.TestClass1, 10, test='a').concretize()
     hash(definition)
+
+
+def test_definition_concrete_4():
+    # Test that the same Definition objects product identical ConcreteDefinition objects after concretization
+    def_1 = Definition(objects.TestClass1, 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1,
+        def_1,
+        test=def_1)
+
+    concrete_def = def_2.concretize()
+
+    conc_def_1 = concrete_def.kwargs['test']
+
+    assert concrete_def.args[0] is conc_def_1
+
+
+def test_definition_concrete_5():
+    # Test that the same Definition objects produce identical ConcreteDefinition objects after concretization even after the original Definition has been deepcopied
+    def_1 = Definition(objects.TestClass1, 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1,
+        def_1,
+        test=def_1)
+
+    def_3 = def_2.copy()
+
+    conc_def = def_3.concretize()
+
+    conc_def_1 = conc_def.kwargs['test']
+
+    assert conc_def.args[0] is conc_def_1
