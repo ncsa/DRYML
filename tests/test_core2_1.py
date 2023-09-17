@@ -105,7 +105,7 @@ def test_build_definition_5():
 
 
 def test_build_definition_6():
-    # Another instance caching test
+    # Another instance caching test with deeper nesting
     obj1 = objects.TestClass1(10, test='a')
     obj2 = objects.TestClass1(20, test='b')
     obj3 = objects.TestClass1(obj1, test=obj2)
@@ -224,6 +224,35 @@ def test_build_from_definition_7():
     obj = build_from_definition(def_2, repo=repo)
     assert obj.x is obj.test
     assert repo._num_constructions == 2
+
+
+def test_build_from_definition_8():
+    # Test instance caching with deeper nesting
+    def_1 = Definition(
+        objects.TestClass1,
+        10,
+        test='a')
+    def_2 = Definition(
+        objects.TestClass1,
+        20,
+        test='b')
+    def_3 = Definition(
+        objects.TestClass1,
+        def_1,
+        test=def_2)
+    def_4 = Definition(
+        objects.TestClass1,
+        def_3,
+        test=def_2)
+    assert def_3 is def_4.args[0]
+    assert def_2 is def_4.kwargs['test']
+    assert def_1 is def_3.args[0]
+    assert def_2 is def_3.kwargs['test']
+    obj4 = build_from_definition(def_4)
+    obj3 = obj4.x
+    obj2 = obj3.test
+    assert obj4.test is obj2
+
 
 def test_definition_hash_1():
     definition1 = Definition(
