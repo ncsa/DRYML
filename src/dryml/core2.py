@@ -568,6 +568,8 @@ def build_from_definition(definition, path=None, repo=None):
     # First, concretize the definition
     concrete_definition = concretize_definition(definition)
 
+    # concrete definitions refer to specific objects
+
     with manage_repo(path=path, repo=repo) as repo:
         def build_from_definition_visit(_, key, value):
             if type(value) is Definition:
