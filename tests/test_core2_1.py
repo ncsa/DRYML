@@ -94,6 +94,34 @@ def test_build_definition_4():
     assert sub_def.kwargs['test'] == 'b'
 
 
+def test_build_definition_5():
+    # Test that definitions are properly instance cached
+    obj1 = objects.TestClass1(10, test='a')
+    obj2 = objects.TestClass1(obj1, test=obj1)
+    assert obj2.x is obj1
+    assert obj2.test is obj1
+    def_2 = obj2.definition
+    assert def_2.args[0] is def_2.kwargs['test']
+
+
+def test_build_definition_6():
+    # Another instance caching test
+    obj1 = objects.TestClass1(10, test='a')
+    obj2 = objects.TestClass1(20, test='b')
+    obj3 = objects.TestClass1(obj1, test=obj2)
+    obj4 = objects.TestClass1(obj3, test=obj2)
+    assert obj3.x is obj1
+    assert obj3.test is obj2
+    assert obj4.test is obj2
+    assert obj4.x is obj3
+    def_4 = obj4.definition
+    def_3 = def_4.args[0]
+    def_2 = def_4.kwargs['test']
+    def_1 = def_3.args[0]
+    assert def_3.kwargs['test'] is def_2
+    assert def_3.args[0] is def_1
+
+
 def test_build_from_definition_1():
     # 1 nest object
     definition = Definition(objects.TestClass1, 10, test='a')
@@ -178,6 +206,24 @@ def test_build_from_definition_6():
     assert repo._num_constructions == 2
     assert selector_match(definition, obj.definition)
 
+
+def test_build_from_definition_7():
+    # Test instance caching
+    def_1 = Definition(
+        objects.TestClass1,
+        10,
+        test='a')
+
+    def_2 = Definition(
+        objects.TestClass1,
+        def_1,
+        test=def_1)
+
+    repo = Repo()
+
+    obj = build_from_definition(def_2, repo=repo)
+    assert obj.x is obj.test
+    assert repo._num_constructions == 2
 
 def test_definition_hash_1():
     definition1 = Definition(
