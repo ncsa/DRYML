@@ -116,14 +116,19 @@ class Remember(Object):
             '__args__',
             '__kwargs__',])
         default_kwargs = get_kwarg_defaults(type(self))
-        self.__args__ = deepcopy(args)
+        # TODO investigate whether we should include a check to make sure the user isn't passing
+        # any Definition objects. I think we should probably disallow that.
+        self.__args__ = deepcopy_skip_definition_object(args)
         # We merge the default kwargs with the kwargs passed in.
         # Defaults are first so they can be overwritten.
-        self.__kwargs__ = deepcopy({ **default_kwargs, **kwargs })
+        self.__kwargs__ = deepcopy_skip_definition_object({ **default_kwargs, **kwargs })
 
     @cached_property
     def definition(self):
         return build_definition(self)
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} at {hex(id(self))}>(args={self.__args__}, kwargs={self.__kwargs__})"
 
 
 class Defer(Remember):
@@ -259,9 +264,9 @@ def definition_exit(path, key, value, new_parent, new_items):
 def deepcopy_skip_definition_object(defn):
     def _deepcopy_enter(path, key, value):
         if isinstance(value, Object):
-            return key, False
+            return value, False
         elif isinstance(value, Definition):
-            return key, False
+            return value, False
         else:
             return default_enter(path, key, value)
 
@@ -308,18 +313,13 @@ class Definition(dict):
         return deepcopy(self)
 
     def __eq__(self, rhs):
-        print(f"Definition.__eq__")
         if type(self) != type(rhs):
-            print(f"Definition.__eq__ 1")
             return False
         # We actually need to check in both directions.
         if not selector_match(self, rhs, strict=True):
-            print(f"Definition.__eq__ 2")
             return False
         if not selector_match(rhs, self, strict=True):
-            print(f"Definition.__eq__ 3")
             return False
-        print(f"Definition.__eq__ 4")
         return True
 
     def __ne__(self, rhs):
@@ -328,8 +328,8 @@ class Definition(dict):
     def concretize(self):
         return concretize_definition(self)
 
-    def __str__(self):
-        return f"{type(self).__name__}{super().__str__()}"
+    def __repr__(self):
+        return f"{type(self).__name__}({super().__repr__()})"
 
     @property
     def cls(self):
@@ -350,12 +350,11 @@ def concretize_definition(defn: Definition):
     definition_cache = {}
 
     def _concretize_definition_enter(path, key, value):
-        id_value = id(value)
-        if id_value in definition_cache:
-            return key, False
+        if id(value) in definition_cache:
+            return value, False
         elif type(value) is ConcreteDefinition:
             # The definition is already concrete. don't enter it.
-            return key, False
+            return value, False
         else:
             return definition_enter(path, key, value)
 
@@ -375,7 +374,6 @@ def concretize_definition(defn: Definition):
 
     def _concretize_definition_exit(path, key, values, new_parent, new_items):
         if isinstance(values, Definition):
-            id_values = id(values)
             for k, v in new_items:
                 new_parent[k] = v
             args = new_parent['args']
@@ -390,7 +388,7 @@ def concretize_definition(defn: Definition):
             # Create the now concrete definition
             new_def = ConcreteDefinition(cls, *args, **kwargs) 
             # Check if we've encountered this definition before
-            definition_cache[id_values] = new_def
+            definition_cache[id(values)] = new_def
             return new_def
         else:
             return default_exit(path, key, values, new_parent, new_items)
@@ -486,28 +484,82 @@ def hash_function(structure):
 
 # Creating definitions from objects
 def build_definition(obj):
-    #TODO: Implement 'instance caching' for building definitions
-    def build_definition_visit(_, key, value):
-        if isinstance(value, Remember):
-            args = build_definition(value.__args__)
-            kwargs = build_definition(value.__kwargs__)
+    instance_cache = {}
+
+    def _build_definition_enter(path, key, value):
+        id_value = id(value)
+        if id_value in instance_cache:
+            return value, False
+        elif isinstance(value, Remember):
+            return {}, ItemsView({'cls': type(value), 'args': value.__args__, 'kwargs': value.__kwargs__})
+        elif isinstance(value, Definition):
+            # We can encounter definitions we have already created
+            found_def = False
+            for _, v in instance_cache.items():
+                if id(v) == id(value):
+                    found_def = True
+                    break
+            if not found_def:
+                raise ValueError("We should have built this defintion ourselves")
+            else:
+                # We don't want to enter already built definitions
+                value, False
+        else:
+            return default_enter(path, key, value)
+
+    def _build_definition_visit(_, key, value):
+        id_value = id(value)
+        if id_value in instance_cache:
+            # First return any instance we have already cached
+            return key, instance_cache[id_value]
+        elif isinstance(value, Remember):
+            raise TypeError("Unexpected type!")
+        elif isinstance(value, Definition):
+            # We should've stored this definition in the cache already
+            found_def = False
+            for _, v in instance_cache.items():
+                if id(v) == id(value):
+                    found_def = True
+                    break
+            if not found_def:
+                raise TypeError("We should have constructed this Definition!")
+            else:
+                return key, value
+        elif is_collection(value) or is_dictlike(value):
+            # Don't do anything to the collections
+            return key, value
+        else:
+            # This is a regular value. We need to deepcopy it.
+            return key, deepcopy(value)
+
+    def _build_definition_exit(path, key, values, new_parent, new_items):
+        if isinstance(values, Remember) and type(new_parent) is dict:
+            new_values = {}
+            for k, v in new_items:
+                new_values[k] = v
+            args = new_values['args']
+            kwargs = new_values['kwargs']
             # We want to copy the arguments so we don't
             # mutate them unless they're definitions or Objects
             args = deepcopy_skip_definition_object(args)
             kwargs = deepcopy_skip_definition_object(kwargs)
 
-            return key, Definition(
-                type(value),
+            new_def = Definition(
+                type(values),
                 *args,
                 **kwargs)
+
+            # Cache the instance result
+            instance_cache[id(values)] = new_def
+
+            return new_def
         else:
-            return key, value
+            return default_exit(path, key, values, new_parent, new_items)
 
     if isinstance(obj, Remember):
-        return remap([obj], visit=build_definition_visit)[0]
+        return remap([obj], enter=_build_definition_enter, visit=_build_definition_visit, exit=_build_definition_exit)[0]
     else:
-        return remap(obj, visit=build_definition_visit)
-
+        return remap(obj, enter=_build_definition_enter, visit=_build_definition_visit, exit=_build_definition_exit)
 
 
 
@@ -542,61 +594,46 @@ def selector_match(selector, definition, strict=False):
     # Method for testing if a selector matches a definition
     # if strict is set, it must match exactly, and callables arent' allowed.
     def selector_match_visit(path, key, value):
-        print(f"selector_match_visit: path: {path}, key: {key}, value: {value}")
         # Try to get the value at the right path from the definition
         try:
             def_val = get_path(definition, path)[key]
         except PathAccessError:
-            print("selector_match_visit: definition doesn't have path")
             return key, False
-
-        print(f"selector_match_visit: def_val: {def_val}")
 
         if isclass(def_val):
             # We have a class in the definition.
             # If the selector value is a class, then the definition value must be a subclass.
             # This must also work for objects with metaclasses which aren't type
             if isclass(value):
-                print("selector_match_visit: class 1")
                 return key, issubclass(value, def_val)
             elif callable(value) and not strict:
-                print("selector_match_visit: class 2")
                 # We use the callable to determine if we match
                 return key, value(def_val)
             else:
-                print("selector_match_visit: class 3")
                 # we don't have the right type in the selector
                 return key, False
         elif (is_collection(def_val) or is_dictlike(def_val)) and not isinstance(def_val, np.ndarray):
-            print("selector_match_visit: collection 1")
             # We do nothing for these collections. Wait for their elements to be matched
             return key, value
         elif isinstance(def_val, np.ndarray):
             if isinstance(value, np.ndarray):
-                print("selector_match_visit: array 1")
                 return key, np.all(def_val == value)
             elif is_nonclass_callable(value) and not strict:
-                print("selector_match_visit: array 2")
                 return key, value(def_val)
             else:
                 # type doesn't match.
-                print("selector_match_visit: array 3")
                 return key, False
         else:
             # Plain matching branch
             if is_nonclass_callable(value) and not strict:
-                print("selector_match_visit: plain 1")
                 return key, value(def_val)
             elif type(value) != type(value):
-                print("selector_match_visit: plain 2")
                 return key, False
             else:
-                print("selector_match_visit: plain 3")
                 return key, value == def_val
             
 
     def selector_match_exit(path, key, old_parent, new_parent, new_items):
-        print(f"selector_match_exit: path: {path}, key: {key}, old_parent: {old_parent}, new_parent: {new_parent}, new_items: {new_items}")
         # Type check
         if type(old_parent) != type(new_parent):
             if issubclass(type(old_parent), Definition):
@@ -616,12 +653,9 @@ def selector_match(selector, definition, strict=False):
                 return False
         else:
             if is_collection(old_parent) and not is_dictlike(old_parent):
-                print(f"collection check definition: {definition}")
                 # For tuples and list arguments, the lengths must match.
-                print(f"def_values: {def_values}")
                 if len(def_values) != len(new_items):
                     return False
-        print(f"selector_match_exit: catchall check")
         final = True
         for val in map(lambda t: t[1], new_items):
             final = final & val
