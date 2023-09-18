@@ -1,8 +1,9 @@
 import pytest
 import numpy as np
 import core2_objects as objects
-from dryml.core2 import Definition, ConcreteDefinition, build_definition, build_from_definition, hash_function, selector_match, Repo
+from dryml.core2 import Definition, ConcreteDefinition, build_definition, build_from_definition, hash_function, selector_match, Repo, DirRepo, save_object, load_object
 from pprint import pprint
+import os
 
 
 def test_create_definition_1():
@@ -623,3 +624,78 @@ def test_definition_concrete_5():
     conc_def_1 = conc_def.kwargs['test']
 
     assert conc_def.args[0] is conc_def_1
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_load_1(create_temp_dir):
+    # Test save/load to/from a directory
+    obj1 = objects.TestClass5(10, test='a')
+
+    save_object(obj1, path=create_temp_dir)
+
+    assert len(os.listdir(create_temp_dir)) == 2
+    assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 1
+
+    obj1_2 = load_object(obj1.definition, path=create_temp_dir)
+    assert obj1_2.x == 10
+    assert obj1_2.test == 'a'
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_load_2(create_temp_dir):
+    # Test save/load to/from a directory
+    obj1 = objects.TestClass5(10, test='a')
+    obj2 = objects.TestClass5(20, test='b')
+    obj3 = objects.TestClass5(obj1, test=obj2)
+    obj4 = objects.TestClass5(obj3, test=obj2)
+    assert obj3.x is obj1
+    assert obj3.test is obj2
+    assert obj4.test is obj2
+    assert obj4.x is obj3
+
+    save_object(obj4, path=create_temp_dir)
+
+    assert len(os.listdir(create_temp_dir)) == 2
+    assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 4
+
+    obj4_2 = load_object(obj4.definition, path=create_temp_dir)
+    assert obj4_2 is not obj4
+    obj3_2 = obj4_2.x
+    obj2_2 = obj4_2.test
+    assert obj3_2.test is obj2_2
+    assert obj4
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_save_load_3(create_temp_dir):
+    # Test save/load to/from a directory another nested object
+    obj1 = objects.TestClass5(10, test='a')
+    obj2 = objects.TestClass5(20, test='b')
+    obj3 = objects.TestClass5(30, test='c')
+    obj4 = objects.TestClass5(40, test='d')
+
+    obj5 = objects.TestClass5(obj1, test=obj2)
+    obj6 = objects.TestClass5(obj2, test=obj3)
+    obj7 = objects.TestClass5(obj3, test=obj4)
+
+    obj8 = objects.TestClass5(obj5, test=obj6)
+    obj9 = objects.TestClass5(obj6, test=obj7)
+
+    obj10 = objects.TestClass5(obj8, test=obj9)
+
+    obj11 = objects.TestClass5(obj10, test=obj10)
+
+    save_object(obj11, path=create_temp_dir)
+
+    assert len(os.listdir(create_temp_dir)) == 2
+    assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 11
+
+    obj11_2 = load_object(obj11.definition, path=create_temp_dir)
+    obj10_2 = obj11_2.x
+    assert obj11_2.test is obj10_2
+    obj6_2 = obj10_2.x.test
+    assert obj6_2 is obj10_2.test.x
+    obj2_2 = obj6_2.x
+    assert obj2_2 is obj10_2.x.x.test
+    obj3_2 = obj6_2.test
+    assert obj3_2 is obj10_2.test.test.x

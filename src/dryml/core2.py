@@ -240,6 +240,13 @@ class Serializable(Remember):
             obj = pickle.loads(f.read())
         self.__dict__.update(obj.__dict__)
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # We shouldn't pickle the __args__ and __kwargs__. This is handled by another part of the saving process
+        del state['__args__']
+        del state['__kwargs__']
+        return state
+
 
 def definition_enter(path, key, value):
     if isinstance(value, Definition):
@@ -687,29 +694,109 @@ class BaseRepo:
         self._num_constructions = 0
 
     def save_object(self, obj: Serializable):
-        def_hash = hash(obj.definition)
-        if def_hash not in self.objs:
-            # store the object
-            self.objs[def_hash] = obj
-            self._num_saves += 1
-            return def_hash
+        saved_objs = {}
+        def _save_object_enter(path, key, value):
+            if isinstance(value, Serializable):
+                result = {'args': value.__args__, 'kwargs': value.__kwargs__}
+                return {}, ItemsView(result)
+            else:
+                return default_enter(path, key, value)
+
+        def _save_object_visit(path, key, value):
+            return key, value
+
+        def _save_object_exit(path, key, value, new_parent, new_items):
+            if isinstance(value, Serializable):
+                obj_def = value.definition.concretize()
+                if obj_def not in saved_objs:
+                    self.save_object_imp(value)
+                    saved_objs[obj_def] = value
+                    self._num_saves += 1
+                return value
+
+            else:
+                return default_exit(path, key, value, new_parent, new_items)
+
+        # Save the object
+        if isinstance(obj, Serializable):
+            remap(
+                [obj],
+                enter=_save_object_enter,
+                visit=_save_object_visit,
+                exit=_save_object_exit)
         else:
-            return None
+            remap(
+                obj,
+                enter=_save_object_enter,
+                visit=_save_object_visit,
+                exit=_save_object_exit)
+
+    def save_object_imp(self, obj: Serializable):
+        obj_def = obj.definition.concretize()
+        if obj_def in self.objs:
+            # Check that this was the same object
+            if obj is not self.objs[obj_def]:
+                raise ValueError("We already have a different object with definition: {obj_def}")
+        else:
+            self.objs[obj_def] = obj
+        # We return the obj_def to prevent having to recalculate it in other functions
+        return obj_def
 
     def load_object(self, obj_def: ConcreteDefinition):
+        def _load_object_enter(path, key, value):
+            if type(value) is Definition:
+                raise TypeError("Definition not allowed here!")
+            elif type(value) is ConcreteDefinition:
+                if value in self.objs:
+                    return value, False
+                else:
+                    return {}, ItemsView({'args': value['args'], 'kwargs': value['kwargs']})
+            else:
+                return default_enter(path, key, value)
+
+        def _load_object_visit(path, key, value):
+            # We do nothing here.
+            if type(value) is ConcreteDefinition:
+                return key, self.objs[value]
+            else:
+                return key, value
+
+        def _load_object_exit(path, key, value, new_parent, new_items):
+            if isinstance(value, ConcreteDefinition):
+                # We need to create this object.
+                new_values = {}
+                for k, v in new_items:
+                    new_values[k] = v
+                args = new_values['args']
+                kwargs = new_values['kwargs']
+                obj = value.cls(*args, **kwargs)
+                self.objs[value] = obj
+                # Trigger loading of data for this object
+                self.load_object_imp(value)
+                self._num_constructions += 1
+                return obj
+            else:
+                return default_exit(path, key, value, new_parent, new_items)
+
+        if isinstance(obj_def, ConcreteDefinition):
+            return remap(
+                [obj_def],
+                enter=_load_object_enter,
+                visit=_load_object_visit,
+                exit=_load_object_exit)[0]
+        else:
+            return remap(
+                obj_def,
+                enter=_load_object_enter,
+                visit=_load_object_visit,
+                exit=_load_object_exit)
+
+    def load_object_imp(self, obj_def: ConcreteDefinition):
+        # Perform the actual load from a directory
         if type(obj_def) is not ConcreteDefinition:
             raise TypeError("Only ConcreteDefinition is supported")
-        def_hash = hash(obj_def)
-        if def_hash in self.objs:
-            return None, self.objs[def_hash]
-        else:
-            # We don't have the object. We must construct it
-            args = build_from_definition(obj_def.args, repo=self)
-            kwargs = build_from_definition(obj_def.kwargs, repo=self)
-            obj = obj_def.cls(*args, **kwargs)
-            self.objs[def_hash] = obj
-            self._num_constructions += 1
-            return def_hash, obj
+        # `load_object` should already have created the object if it doesn't exist in the cache yet.
+        return self.objs[obj_def]
 
     def close(self):
         pass
@@ -719,17 +806,17 @@ class Repo(BaseRepo):
     def __init__(self):
         super().__init__()
 
-    def save_object(self, obj: Serializable):
-        super().save_object(obj)
+    def save_object_imp(self, obj: Serializable):
+        super().save_object_imp(obj)
 
-    def load_object(self, obj_def: Definition):
-        _, obj = super().load_object(obj_def)
-        return obj
+    def load_object_imp(self, obj_def: Definition):
+        return super().load_object_imp(obj_def)
 
 
 class DirRepo(BaseRepo):
     # A class to manage saving objects to a directory.
     def __init__(self, dir):
+        super().__init__()
         # We expect the directory to exist.
         if not os.path.exists(dir):
             raise ValueError(f"Directory {dir} doesn't exist.")
@@ -737,41 +824,52 @@ class DirRepo(BaseRepo):
         self.obj_dir = os.path.join(self.dir, "objects")
         # List the directory and find all the hashes
         try:
-            self.saved_objs = set(os.listdir(self.obj_dir))
+            obj_dirs = os.listdir(self.obj_dir)
         except FileNotFoundError:
-            # The directory doesn't exist
+            # The objects directory doesn't exist
             os.mkdir(self.obj_dir)
-        super().__init__()
+            obj_dirs = os.listdir(self.obj_dir)
+
+        for obj_dir in obj_dirs:
+            obj_dir = os.path.join(self.obj_dir, obj_dir)
+            def_file = os.path.join(obj_dir, 'def.pkl')
+            with open(def_file, 'rb') as f:
+                obj_def = pickle.loads(f.read())
+            self.load_object(obj_def.concretize())
 
     def save_object(self, obj: Serializable):
-        def_hash = super().save_object(obj)
-        if def_hash is not None:
-            # Create directory for object
-            def_hash_digest = hashval_to_digest(def_hash)
-            object_path = os.mkdir(os.path.join(self.dir, "objects", def_hash_digest))
-            # Save the object
-            obj._save_to_dir(object_path)
+        super().save_object(obj)
+        if isinstance(obj, Serializable):
+            # Save the definition to the main repo directory
+            def_file = os.path.join(self.dir, "def.pkl")
+            pickle_to_file(obj.definition, def_file)
 
-    def load_object(self, obj_def):
-        def_hash, obj = super().load_object(obj_def)
-        if def_hash is None:
-            # We don't have to load any data
-            return obj
-        else:
-            def_hash_digest = hashval_to_digest(def_hash)
-            object_path = os.path.join(self.dir, "objects", def_hash_digest)
-            if not os.path.exists(object_path):
-                raise IndexError(f"Object with hash {def_hash} not found.")
-            # confirm we have the same definition
-            def_file = os.path.join(object_path, "def.pkl")
-            with open(def_file, 'rb') as f:
-                definition = pickle.loads(f.read())
-                check_hash = hash(definition)
-            if check_hash != def_hash:
-                raise ValueError(f"Hashes don't match. {check_hash} != {def_hash}")
-            # Load the data from the directory
-            obj._load_from_dir(object_path)
-            return obj
+    def save_object_imp(self, obj: Serializable):
+        obj_def = super().save_object_imp(obj)
+        # Create directory for object
+        def_hash_digest = hashval_to_digest(hash(obj_def))
+        object_path = os.path.join(self.dir, "objects", def_hash_digest)
+        os.mkdir(object_path)
+        # Save the object
+        obj._save_to_dir(object_path)
+
+    def load_object_imp(self, obj_def):
+        obj = super().load_object_imp(obj_def)
+        def_hash = hash(obj_def)
+        def_hash_digest = hashval_to_digest(def_hash)
+        object_path = os.path.join(self.dir, "objects", def_hash_digest)
+        if not os.path.exists(object_path):
+            raise IndexError(f"Object with hash {def_hash} not found.")
+        # confirm we have the same definition
+        def_file = os.path.join(object_path, "def.pkl")
+        with open(def_file, 'rb') as f:
+            definition = pickle.loads(f.read())
+            check_hash = hash(definition.concretize())
+        if check_hash != def_hash:
+            raise ValueError(f"Hashes don't match. {check_hash} != {def_hash}")
+        # Load the data from the directory
+        obj._load_from_dir(object_path)
+        return obj
 
 
 class ZipRepo(DirRepo):
@@ -810,11 +908,11 @@ def manage_repo(path=None, repo=None):
 # Saving and Loading
 def save_object(obj: Union[Serializable,List[Serializable]], path=None, repo=None):
     with manage_repo(path=path, repo=repo) as repo:
-        # Save the object
         repo.save_object(obj)
 
 
 def load_object(obj_def: Definition, path=None, repo=None):
+    if type(obj_def) is Definition:
+        obj_def = obj_def.concretize()
     with manage_repo(path=path, repo=repo) as repo:
-        # Save the object
-        repo.load_object(obj_def)
+        return repo.load_object(obj_def)
