@@ -1,0 +1,10 @@
+flake8
+pytest
+pytest-cov
+tensorflow
+ray
+scikit-learn
+pytorch
+torch
+xgboost
+GPUtil
