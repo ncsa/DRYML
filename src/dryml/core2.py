@@ -319,6 +319,9 @@ class Definition(dict):
         # A true deepcopy
         return deepcopy(self)
 
+    def build(self, repo=None, path=None):
+        return build_from_definition(self, repo=repo, path=path)
+
     def __eq__(self, rhs):
         if type(self) != type(rhs):
             return False
@@ -573,7 +576,7 @@ def build_definition(obj):
 # Creating objects from definitions
 def build_from_definition(definition, path=None, repo=None):
     # First, concretize the definition
-    concrete_definition = concretize_definition(definition)
+    concrete_definition = definition.concretize()
 
     # concrete definitions refer to specific objects
 
