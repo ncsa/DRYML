@@ -12,12 +12,13 @@ import re
 import numpy as np
 import time
 
-from typing import IO, Union, Optional, Type, Callable
+from typing import Callable as CallableType
+from typing import IO, Union, Optional, Type
 from dryml.config import ObjectDef, Meta, MissingIdError, MissingMetadataError
 from dryml.utils import get_current_cls, pickler, static_var, \
     is_supported_scalar_type, is_supported_listlike, is_supported_dictlike, \
     map_dictlike, map_listlike, get_class_from_str, get_class_str, \
-    diff_recursive
+    diff_recursive, unpickler
 from dryml.context.context_tracker import combine_requests, context, \
     NoContextError
 from dryml.file_intermediary import FileIntermediary
@@ -146,7 +147,7 @@ class ObjectFile(object):
     def load_meta_data(self):
         try:
             with self.z_file.open('meta_data.pkl', 'r') as meta_file:
-                meta_data = pickle.loads(meta_file.read())
+                meta_data = unpickler(meta_file.read())
         except KeyError as e:
             print(f"Issue getting MetaData! Zipfile contains the "
                   f"following files: {self.z_file.namelist()}")
@@ -226,15 +227,15 @@ class ObjectFile(object):
 
         # Load args
         with self.z_file.open('dry_args.pkl', mode='r') as args_file:
-            args = pickle.loads(args_file.read())
+            args = unpickler(args_file.read())
 
         # Load kwargs
         with self.z_file.open('dry_kwargs.pkl', mode='r') as kwargs_file:
-            kwargs = pickle.loads(kwargs_file.read())
+            kwargs = unpickler(kwargs_file.read())
 
         # Load mutability
         with self.z_file.open('dry_mut.pkl', mode='r') as mut_file:
-            mut = pickle.loads(mut_file.read())
+            mut = unpickler(mut_file.read())
 
         return ObjectDef(cls, *args, dry_mut=mut, **kwargs)
 
@@ -806,12 +807,15 @@ class ObjectNode(object):
         self.children = children
         self.obj = obj
 
-    def apply_func(self, func: Callable):
+    def apply_func(self, func: CallableType):
         if self.obj is not None:
             func(self.obj)
 
 
-def apply_df_imp(func: Callable, node: ObjectNode, seen_set: set[ObjectNode]):
+def apply_df_imp(
+        func: CallableType,
+        node: ObjectNode,
+        seen_set: set[ObjectNode]):
     # seen set will be empty when called on the root node.
     for child_node in node.children:
         if child_node not in seen_set:
@@ -824,7 +828,7 @@ def apply_df_imp(func: Callable, node: ObjectNode, seen_set: set[ObjectNode]):
 
 
 def apply_bf_imp(
-        func: Callable,
+        func: CallableType,
         visit_list: list[ObjectNode], seen_set: set[ObjectNode]):
     # the visit list should be populated when called from the root node.
     while len(visit_list) > 0:
@@ -848,14 +852,14 @@ class ObjectTree(ObjectNode):
     def __init__(self, children):
         super().__init__(None, children)
 
-    def apply_func(self, func: Callable):
+    def apply_func(self, func: CallableType):
         # Don't do anything on the root node.
         pass
 
-    def apply_df(self, func: Callable):
+    def apply_df(self, func: CallableType):
         apply_df_imp(func, self, set())
 
-    def apply_bf(self, func: Callable):
+    def apply_bf(self, func: CallableType):
         apply_bf_imp(func, self, self.children, set())
 
 
