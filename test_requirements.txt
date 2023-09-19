@@ -4,7 +4,6 @@ pytest-cov
 tensorflow
 ray
 scikit-learn
-pytorch
 torch
 xgboost
 GPUtil
