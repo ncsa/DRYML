@@ -205,6 +205,11 @@ def pickler(obj):
     return dill.dumps(obj, protocol=4)
 
 
+def unpickler(stream):
+    "Method to ensure all objects are unpickled in the same way"
+    return dill.loads(stream)
+
+
 def static_var(varname, value):
     def decorate(func):
         setattr(func, varname, value)
@@ -296,7 +301,7 @@ def show_contained_objects_md5(save_file: Union[str, IO[bytes]]):
 
 def equal_recursive(obj1, obj2, path="", check_class=True, verbose=False):
     if check_class:
-        if type(obj1) != type(obj2):
+        if type(obj1) is not type(obj2):
             if verbose:
                 print(f"Class mismatch at {path}")
             return False
@@ -356,7 +361,7 @@ def equal_recursive(obj1, obj2, path="", check_class=True, verbose=False):
 
 def diff_recursive(obj1, obj2, path="", check_class=False):
     if check_class:
-        if type(obj1) != type(obj2):
+        if type(obj1) is not type(obj2):
             print(f"Class mismatch at {path}")
 
     if is_dictlike(obj1) and is_dictlike(obj2):
