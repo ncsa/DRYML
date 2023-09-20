@@ -6,4 +6,4 @@ else
     dirs=$@
 fi;
 
-pytest --cov=dryml ${dirs}
+pytest --cov=dryml --ignore=./tests/old ${dirs}
