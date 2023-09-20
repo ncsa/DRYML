@@ -203,7 +203,7 @@ def tf_classifier(num_dims, num_classes, definition=False):
         optimizer=dryml.models.tf.Wrapper(tf.keras.optimizers.Adam),
         loss=dryml.models.tf.Wrapper(
             tf.keras.losses.SparseCategoricalCrossentropy),
-        train_fn=dryml.models.tf.keras.BasicTraining(epochs=1))
+        train_fn=dryml.models.tf.keras.BasicTraining(epochs=2))
 
     best_cat = dryml.data.transforms.BestCat()
 
