@@ -201,8 +201,7 @@ def path_needs_directory(path):
 
 def pickler(obj):
     "Method to ensure all objects are pickled in the same way"
-    # Consider updating to protocol=5 when python 3.7 is deprecated
-    return dill.dumps(obj, protocol=4)
+    return dill.dumps(obj, protocol=5)
 
 
 def unpickler(stream):
