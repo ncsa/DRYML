@@ -1,9 +1,9 @@
-from dryml.file_intermediary import FileIntermediary
+from dryml.core.file_intermediary import FileIntermediary
 import zipfile
 import pytest
 import pickle
 import os
-from dryml.utils import pickler
+from dryml.core.utils import pickler
 
 
 @pytest.mark.usefixtures("create_name")

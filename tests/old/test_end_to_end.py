@@ -403,7 +403,7 @@ def test_train_supervised_1_context_repo(create_temp_dir, model_gen):
         repo = dryml.Repo(directory=work_dir)
 
         # Fetch model based on definition
-        model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
+        model = dryml.core.utils.head(repo.get(model_def, build_missing_def=False))
 
         return test_model(test_data, model)
 
@@ -469,7 +469,7 @@ def test_train_supervised_1_ray(create_temp_dir, get_ray, model_gen):
         repo = dryml.Repo(directory=work_dir)
 
         # Fetch model based on definition
-        model = dryml.utils.head(repo.get(model_def, build_missing_def=False))
+        model = dryml.core.utils.head(repo.get(model_def, build_missing_def=False))
 
         with dryml.context.ContextManager(model.dry_context_requirements()):
             acc = test_model(test_data, model)
@@ -741,7 +741,7 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
         import dryml.models.sklearn
         import sklearn.neighbors
 
-        flattener = dryml.utils.head(shop.repo.get(
+        flattener = dryml.core.utils.head(shop.repo.get(
             selector=dryml.ObjectDef(dryml.data.transforms.Flatten)))
 
         mdl_def = dryml.ObjectDef(
@@ -771,7 +771,7 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
         import dryml.models.sklearn
         import sklearn.neighbors
 
-        flattener = dryml.utils.head(shop.repo.get(
+        flattener = dryml.core.utils.head(shop.repo.get(
             selector=dryml.ObjectDef(dryml.data.transforms.Flatten)))
 
         mdl_def = dryml.ObjectDef(
@@ -825,7 +825,7 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
     shop.repo.load_objects_from_directory()
 
     # Check we stored one object in the repo
-    assert dryml.utils.count(
+    assert dryml.core.utils.count(
         shop.repo.get(
             model_def,
             build_missing_def=False,
@@ -834,7 +834,7 @@ def test_train_test_pattern_1(create_temp_dir, create_temp_named_file):
     # Check we can't see the object in another way.
     model_def_2 = build_model_def_2(shop, n_neighbors=2, algorithm='ball_tree')
     try:
-        assert dryml.utils.count(shop.repo.get(
+        assert dryml.core.utils.count(shop.repo.get(
             model_def_2,
             sel_kwargs={'verbosity': 10},
             build_missing_def=False)) == 0

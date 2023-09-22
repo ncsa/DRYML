@@ -1,11 +1,11 @@
-from dryml.config import Meta
-from dryml.object import Object
+from dryml.core.config import Meta
+from dryml.core.object import Object
 from dryml.models import Component
 from dryml.models import Trainable as BaseTrainable
 from dryml.models import TrainFunction as BaseTrainFunction
 import zipfile
 import torch
-from dryml.utils import validate_class
+from dryml.core.utils import validate_class
 
 
 class Wrapper(Object):

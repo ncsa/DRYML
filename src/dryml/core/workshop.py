@@ -1,4 +1,4 @@
-from dryml.repo import Repo
+from dryml.core.repo import Repo
 from dryml.models.trainable import Trainable
 
 

@@ -200,11 +200,6 @@ def path_needs_directory(path):
         return False
 
 
-def diller(obj):
-    "Method to ensure all objects are pickled in the same way"
-    return dill.dumps(obj, protocol=5)
-
-
 def unpickler(stream):
     "Method to ensure all objects are unpickled in the same way"
     return dill.loads(stream)
@@ -212,8 +207,7 @@ def unpickler(stream):
 
 def pickler(obj):
     "Method to ensure all objects are pickled in the same way"
-    # Consider updating to protocol=5 when python 3.7 is deprecated
-    return pickle.dumps(obj, protocol=4)
+    return dill.dumps(obj, protocol=5)
 
 
 def pickle_to_file(obj, path):
@@ -275,7 +269,7 @@ def tail(get_result):
 
 def count(get_result):
     from dryml import Object
-    from dryml.repo import RepoContainer
+    from dryml.core.repo import RepoContainer
     if isinstance(get_result, Object):
         return 1
     elif isinstance(get_result, RepoContainer):

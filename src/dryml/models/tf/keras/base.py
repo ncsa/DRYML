@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-from dryml.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
+from dryml.core.utils import get_temp_checkpoint_dir, cleanup_checkpoint_dir, \
     adjust_class_module
 from dryml import Meta
 from dryml.data import Dataset

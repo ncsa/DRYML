@@ -1,4 +1,4 @@
-from dryml.utils import get_class_str, get_class_from_str, \
+from dryml.core.utils import get_class_str, get_class_from_str, \
     apply_func
 from dryml import Selector
 import objects

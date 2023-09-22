@@ -1,4 +1,4 @@
-from dryml.object import Object
+from dryml.core.object import Object
 from dryml.data.dataset import Dataset
 from dryml.context import cls_method_compute
 

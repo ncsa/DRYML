@@ -2,7 +2,7 @@ from dryml import Object, Meta
 from dryml.models import Trainable, Component
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
-from dryml.utils import validate_class
+from dryml.core.utils import validate_class
 
 
 class Wrapper(Object):

@@ -1,6 +1,6 @@
 from dryml.data.dataset import Dataset
 from dryml.models.trainable import Trainable
-from dryml.collections import Tuple
+from dryml.core.collections import Tuple
 
 
 class Pipe(Trainable, Tuple):

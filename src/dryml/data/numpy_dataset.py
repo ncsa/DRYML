@@ -1,7 +1,7 @@
 from dryml.data.dataset import Dataset
 from dryml.data.util import nested_batcher, nested_unbatcher, \
     nested_flatten
-from dryml.utils import is_iterator
+from dryml.core.utils import is_iterator
 from dryml.data.util import taker, skiper
 import numpy as np
 from typing import Callable

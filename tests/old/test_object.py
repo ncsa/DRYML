@@ -46,7 +46,7 @@ def test_save_object_1():
     """
     Test Saving objects through an io buffer
     """
-    with open('./tests/test_objs.py', 'w') as f:
+    with open('./tests/old/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
     import test_objs
@@ -73,7 +73,7 @@ def test_save_object_2(create_name):
     """
     Test Saving objects to a file which doesn't yet exist
     """
-    with open('./tests/test_objs.py', 'w') as f:
+    with open('./tests/old/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
     import test_objs
@@ -96,7 +96,7 @@ def test_save_object_3(create_temp_named_file):
     """
     Test Saving objects to a file using file which was already created
     """
-    with open('./tests/test_objs.py', 'w') as f:
+    with open('./tests/old/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
     import test_objs
@@ -119,7 +119,7 @@ def test_save_object_4(create_temp_file):
     """
     Test Saving objects to a file using bytes-like file object
     """
-    with open('./tests/test_objs.py', 'w') as f:
+    with open('./tests/old/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
     import test_objs
@@ -149,7 +149,7 @@ def test_save_object_5(create_temp_file):
     # This is currently not possible, or annoyingly difficult:
     # https://github.com/uqfoundation/dill/issues/128
     # Write test objects module, and load it.
-    with open('./tests/test_objs.py', 'w') as f:
+    with open('./tests/old/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
     import test_objs
@@ -161,8 +161,8 @@ def test_save_object_5(create_temp_file):
     assert obj.save_self(create_temp_file)
 
     # Delete test_objs source and module from sys
-    if os.path.exists('./tests/test_objs.py'):
-        os.remove('./tests/test_objs.py')
+    if os.path.exists('./tests/old/test_objs.py'):
+        os.remove('./tests/old/test_objs.py')
 
     del test_objs
     if 'test_objs' in sys.modules:
@@ -185,7 +185,7 @@ def test_save_object_6(create_temp_named_file):
     """
     Test object default metadata saving
     """
-    with open('./tests/test_objs.py', 'w') as f:
+    with open('./tests/old/test_objs.py', 'w') as f:
         f.write(test_objs_text.format(version=1))
 
     import test_objs
@@ -211,7 +211,7 @@ def test_save_object_6(create_temp_named_file):
 def test_basic_object_def_update_1():
     def build_and_save_obj_1():
         time.sleep(1.1)
-        with open('tests/test_objs.py', 'w') as f:
+        with open('tests/old/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=1))
 
         import test_objs
@@ -229,7 +229,7 @@ def test_basic_object_def_update_1():
 
     def build_obj_2(buffer):
         time.sleep(1.1)
-        with open('tests/test_objs.py', 'w') as f:
+        with open('tests/old/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=2))
         # Sleep to invalidate the cache.
 
@@ -249,7 +249,7 @@ def test_basic_object_def_update_1():
 def test_basic_object_def_update_2(create_name):
     def build_and_save_obj_1():
         time.sleep(1.1)
-        with open('tests/test_objs.py', 'w') as f:
+        with open('tests/old/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=1))
         import test_objs
         importlib.reload(test_objs)
@@ -265,7 +265,7 @@ def test_basic_object_def_update_2(create_name):
     def build_obj_2():
         # Sleep to invalidate the cache.
         time.sleep(1.1)
-        with open('tests/test_objs.py', 'w') as f:
+        with open('tests/old/test_objs.py', 'w') as f:
             f.write(test_objs_text.format(version=2))
 
         obj2 = dryml.load_object(create_name, update=True, reload=True)
@@ -701,7 +701,7 @@ def test_object_save_restore_4():
     obj1 = objects.TestClassC(data_obj1, B=data_obj2)
     obj2 = objects.TestClassC(data_obj3, B=data_obj4)
 
-    from dryml.object import DryObjectPlaceholder, \
+    from dryml.core.object import DryObjectPlaceholder, \
         prep_args_kwargs, reconstruct_args_kwargs
 
     args = (obj1, obj2)
@@ -743,7 +743,7 @@ def test_object_save_restore_5():
         train_fn=train_fn_obj
     )
 
-    from dryml.object import DryObjectPlaceholder, \
+    from dryml.core.object import DryObjectPlaceholder, \
         prep_args_kwargs, reconstruct_args_kwargs
 
     args = (trainable_obj,)
@@ -805,7 +805,7 @@ def test_build_crash_1():
         # This definition will throw a TypeError.
         pass
 
-    print(dryml.config.build_cache)
+    print(dryml.core.config.build_cache)
 
     # Second corrected definition
     test_def_2 = dryml.ObjectDef(objects.TestClassG1, 1)

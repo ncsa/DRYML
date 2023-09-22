@@ -14,7 +14,8 @@ import io
 import zipfile
 import time
 import dill
-from dryml.save_cache import SaveCache
+from dryml.core.save_cache import SaveCache
+from dryml.core.utils import pickler, unpickler
 
 mp_ctx = mp.get_context('spawn')
 
@@ -90,12 +91,12 @@ class process_executor(object):
             verbose=False,
             args=[],
             kwargs={}):
-        self.f_ser = dill.dumps(f)
+        self.f_ser = pickler(f)
         self.ctx_reqs = ctx_reqs
         self.update_obj_defs = update_obj_defs
         self.verbose = verbose
-        self.args_ser = dill.dumps(args)
-        self.kwargs_ser = dill.dumps(kwargs)
+        self.args_ser = pickler(args)
+        self.kwargs_ser = pickler(kwargs)
 
     def final_call(
             self,
@@ -167,15 +168,15 @@ class process_executor(object):
                 f"{mp.current_process().pid}: New process "
                 f"started pid:{mp.current_process().pid}")
         # Undill function
-        f = dill.loads(self.f_ser)
+        f = unpickler(self.f_ser)
 
         # Undill args/kwargs
-        args = dill.loads(self.args_ser)
-        kwargs = dill.loads(self.kwargs_ser)
+        args = unpickler(self.args_ser)
+        kwargs = unpickler(self.kwargs_ser)
 
         ph_data = ctx_send_q.get()
 
-        from dryml.object import reconstruct_args_kwargs
+        from dryml.core.object import reconstruct_args_kwargs
         if self.verbose:
             print(
                 f"{mp.current_process().pid}: Reconstructing arguments: "
@@ -308,7 +309,7 @@ def compute_context(
                 ctx_ret_q = mp_ctx.Queue()
                 ctx_send_q = mp_ctx.Queue()
 
-                from dryml.object import prep_args_kwargs
+                from dryml.core.object import prep_args_kwargs
 
                 # Replace Objects in args/kwargs with placeholders
                 # Get placeholder data
@@ -404,7 +405,7 @@ def compute_context(
                 for obj in update_objs_list:
                     obj_buf = queue_results.pop(0)
                     obj_buf = io.BytesIO(obj_buf)
-                    from dryml.object import load_object_content
+                    from dryml.core.object import load_object_content
                     if not load_object_content(obj, obj_buf):
                         load_issue_list.append(obj)
 
@@ -446,12 +447,12 @@ class tune_process_executor(object):
             update_obj_defs=[],
             args=[],
             kwargs={}):
-        self.f_ser = dill.dumps(f)
+        self.f_ser = pickler(f)
         self.ctx_name = ctx_name
         self.context_kwargs = context_kwargs
         self.update_obj_defs = update_obj_defs
-        self.args_ser = dill.dumps(args)
-        self.kwargs_ser = dill.dumps(kwargs)
+        self.args_ser = pickler(args)
+        self.kwargs_ser = pickler(kwargs)
         self._dry_objects = None
         self._activated_objects = None
 
@@ -534,11 +535,11 @@ class tune_process_executor(object):
             self, ctx_ret_q, tune_report_q=None,
             checkpoint_ret_q=None, checkpoint_req_q=None):
         # Undill function
-        f = dill.loads(self.f_ser)
+        f = unpickler(self.f_ser)
 
         # Undill args/kwargs
-        args = dill.loads(self.args_ser)
-        kwargs = dill.loads(self.kwargs_ser)
+        args = unpickler(self.args_ser)
+        kwargs = unpickler(self.kwargs_ser)
 
         self.final_call(
             f, ctx_ret_q, tune_report_q, checkpoint_req_q,

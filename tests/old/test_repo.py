@@ -13,9 +13,9 @@ def test_container_selector_1(create_temp_dir):
     obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
 
     # Create containers for these objects
-    obj1_cont = dryml.repo.RepoContainer.from_object(
+    obj1_cont = dryml.core.repo.RepoContainer.from_object(
         obj1, directory=create_temp_dir)
-    obj2_cont = dryml.repo.RepoContainer.from_object(
+    obj2_cont = dryml.core.repo.RepoContainer.from_object(
         obj2, directory=create_temp_dir)
 
     # Create selector
@@ -33,9 +33,9 @@ def test_container_selector_2(create_temp_dir):
     obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
 
     # Create containers for these objects
-    obj1_cont = dryml.repo.RepoContainer.from_object(
+    obj1_cont = dryml.core.repo.RepoContainer.from_object(
         obj1, directory=create_temp_dir)
-    obj2_cont = dryml.repo.RepoContainer.from_object(
+    obj2_cont = dryml.core.repo.RepoContainer.from_object(
         obj2, directory=create_temp_dir)
 
     # Save to disk, and unload these objects
@@ -128,7 +128,7 @@ def test_add_retrieve_objects_4():
 
     repo.add_object(parent_cls_obj)
 
-    assert dryml.utils.count(repo.get(
+    assert dryml.core.utils.count(repo.get(
         selector=dryml.Selector(objects.TestBase))) == 1
     try:
         repo.get(selector=dryml.Selector(objects.TestClassA))
@@ -560,7 +560,7 @@ def test_object_save_restore_with_repo_1(create_temp_dir):
     # Load the object from the file
     obj2 = obj.definition().build(repo=repo)
 
-    assert dryml.config.build_repo is None
+    assert dryml.core.config.build_repo is None
 
     assert obj.definition() == obj2.definition()
     assert obj.A is obj.B
@@ -627,7 +627,7 @@ def test_object_save_restore_with_repo_3(create_temp_dir):
 
     def build_def(repo):
         # Create the data containing objects
-        obj_a = dryml.utils.head(repo.get(
+        obj_a = dryml.core.utils.head(repo.get(
             selector=dryml.ObjectDef(objects.TestNest, 10)))
 
         mdl_def = dryml.ObjectDef(

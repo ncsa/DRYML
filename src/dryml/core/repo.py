@@ -1,10 +1,10 @@
 import os
 import traceback
-from dryml.object import Object, ObjectFactory, ObjectFile, \
+from dryml.core.object import Object, ObjectFactory, ObjectFile, \
     ObjectDef, change_object_cls, load_object, get_contained_objects
-from dryml.config import MissingIdError
-from dryml.selector import Selector
-from dryml.utils import get_current_cls
+from dryml.core.config import MissingIdError
+from dryml.core.selector import Selector
+from dryml.core.utils import get_current_cls
 from typing import Optional, Callable, Union, Mapping
 import tqdm
 from pprint import pprint

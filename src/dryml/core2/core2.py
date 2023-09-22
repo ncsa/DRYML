@@ -2,7 +2,7 @@ import uuid
 import time
 import hashlib
 from inspect import signature, Parameter, isclass
-from dryml.utils import is_dictlike, pickle_to_file
+from dryml.core.utils import is_dictlike, pickle_to_file
 from boltons.iterutils import remap, is_collection, get_path, PathAccessError, default_enter, default_exit
 from functools import cached_property
 import numpy as np

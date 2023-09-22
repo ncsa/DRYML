@@ -1,5 +1,5 @@
-from dryml.object import Object, ObjectFile, ObjectDef
-from dryml.utils import is_nonstring_iterable, is_dictlike, get_class_str, \
+from dryml.core.object import Object, ObjectFile, ObjectDef
+from dryml.core.utils import is_nonstring_iterable, is_dictlike, get_class_str, \
     is_supported_scalar_type, is_supported_dictlike, is_supported_listlike, \
     map_dictlike, map_listlike, is_equivalent_subclass
 from typing import Union, Callable, Type, Mapping
