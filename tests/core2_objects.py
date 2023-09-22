@@ -1,4 +1,4 @@
-from dryml.core2.core2 import Remember, Defer, UniqueID, Metadata, Serializable
+from dryml.core2.object import Remember, UniqueID, Metadata, Serializable
 
 
 class TestClass1(Remember):
