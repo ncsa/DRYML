@@ -5,15 +5,15 @@ import inspect
 import functools
 import zipfile
 from typing import Union, Type, Mapping
-from dryml.utils import is_nonstring_iterable, is_dictlike, \
+from dryml.core.utils import is_nonstring_iterable, is_dictlike, \
     get_class_from_str, get_class_str, get_hashed_id, init_arg_list_handler, \
     init_arg_dict_handler, is_supported_scalar_type, is_supported_listlike, \
     is_supported_dictlike, map_dictlike, map_listlike, equal_recursive
 from dryml.context.context_tracker import WrongContextError, \
     context, NoContextError
 from dryml.context.process import compute_context
-from dryml.save_cache import SaveCache
-from dryml.file_intermediary import FileIntermediary
+from dryml.core.save_cache import SaveCache
+from dryml.core.file_intermediary import FileIntermediary
 import uuid
 
 

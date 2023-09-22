@@ -5,7 +5,7 @@ A module for tracking the currently available computing context
 
 from contextlib import contextmanager
 from typing import Type, Union, Optional
-from dryml.utils import is_nonstring_iterable
+from dryml.core.utils import is_nonstring_iterable
 from collections import UserDict
 import multiprocessing
 import re
@@ -478,7 +478,7 @@ class ContextContainer(object):
 
         # Prepare the save caching function
         if save_cache is None:
-            from dryml.save_cache import SaveCache
+            from dryml.core.save_cache import SaveCache
             save_cache = SaveCache()
 
         # Save objects in the tree depth-first.
@@ -507,19 +507,19 @@ class ContextContainer(object):
         _context_manager = None
 
     def add_activated_object(self, obj):
-        from dryml.object import Object
+        from dryml.core.object import Object
         if type(obj) is not Object:
             TypeError("Can only activate Objects for computation.")
         self.activated_object_map[id(obj)] = obj
 
     def remove_activated_object(self, obj):
-        from dryml.object import Object
+        from dryml.core.object import Object
         if type(obj) is not Object:
             TypeError("Can only activate Objects for computation.")
         del self.activated_object_map[id(obj)]
 
     def contains_activated_object(self, obj):
-        from dryml.object import Object
+        from dryml.core.object import Object
         if type(obj) is not Object:
             TypeError("Can only activate Objects for computation.")
         if id(obj) in self.activated_object_map:

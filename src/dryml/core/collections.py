@@ -1,6 +1,6 @@
 from collections import UserList, UserDict
-from dryml.object import Object, ObjectDef
-from dryml.config import Meta
+from dryml.core.object import Object, ObjectDef
+from dryml.core.config import Meta
 from typing import Mapping
 
 

@@ -1,4 +1,5 @@
 import dryml
+import dryml.models
 import zipfile
 import pickle
 
@@ -125,12 +126,12 @@ class TestClassC2(dryml.Object):
 
     def save_object_imp(self, file: zipfile.ZipFile):
         with file.open('data.pkl', 'w') as f:
-            f.write(dryml.utils.pickler(self.data))
+            f.write(dryml.core.utils.pickler(self.data))
         return True
 
     def load_object_imp(self, file: zipfile.ZipFile):
         with file.open('data.pkl', 'r') as f:
-            self.data = pickle.loads(f.read())
+            self.data = dryml.core.utils.unpickler(f.read())
         return True
 
 
@@ -159,12 +160,12 @@ class TestClassE(dryml.Object):
 
     def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
         with file.open('data.pkl', 'w') as f:
-            f.write(dryml.utils.pickler(self.data))
+            f.write(dryml.core.utils.pickler(self.data))
         return True
 
     def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
         with file.open('data.pkl', 'r') as f:
-            self.data = pickle.loads(f.read())
+            self.data = dryml.core.utils.unpickler(f.read())
         return True
 
 

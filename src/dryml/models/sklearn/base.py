@@ -1,11 +1,11 @@
 import pickle
 import zipfile
 import numpy as np
-from dryml.config import Meta
+from dryml.core.config import Meta
 from dryml.models import Component, Trainable
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.data import Dataset
-from dryml.utils import validate_class
+from dryml.core.utils import validate_class
 
 
 class Model(Component):

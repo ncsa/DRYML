@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import core2_objects as objects
-from dryml.core2 import Definition, ConcreteDefinition, build_definition, build_from_definition, hash_function, selector_match, Repo, DirRepo, save_object, load_object
+from dryml.core2.core2 import Definition, ConcreteDefinition, build_definition, build_from_definition, hash_function, selector_match, Repo, DirRepo, save_object, load_object
 from pprint import pprint
 import os
 

@@ -1,5 +1,5 @@
-from dryml.config import Meta
-from dryml.object import Object
+from dryml.core.config import Meta
+from dryml.core.object import Object
 from dryml.data import Dataset
 from dryml.models.trainable import Trainable as BaseTrainable
 from dryml.models.torch.base import Wrapper
@@ -10,7 +10,7 @@ from dryml.context import context
 import zipfile
 import torch
 import tqdm
-from dryml.utils import validate_class
+from dryml.core.utils import validate_class
 
 
 class Model(TorchModel):
