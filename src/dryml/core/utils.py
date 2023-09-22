@@ -473,7 +473,7 @@ def create_object_tree_from_dryfile(input_file, tag, report_class=True):
             label = "None"
 
     if report_class and obj_def is not None:
-        label += f" ({dryml.utils.get_class_str(obj_def.cls)})"
+        label += f" ({dryml.core.utils.get_class_str(obj_def.cls)})"
 
     if len(content_nodes) > 0:
         return {label: content_nodes}
