@@ -1,9 +1,12 @@
 import dill
 import os
 import zipfile
-from collections.abc import Mapping
+import importlib
+from typing import Optional, Callable
+from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
     Parameter, signature
+from boltons.iterutils import remap, is_collection, PathAccessError, default_enter, default_exit
 
 
 def collide_attributes(obj, attr_list):
@@ -66,6 +69,21 @@ def get_class_str(obj):
                          obj.__class__.__name__])
 
 
+def get_class_by_name(module: str, cls: str, reload: bool = False):
+    module = importlib.import_module(module)
+    # If indicated, reload the module.
+    if reload:
+        module = importlib.reload(module)
+    return getattr(module, cls)
+
+
+def get_class_from_str(cls_str: str, reload: bool = False):
+    cls_split = cls_str.split('.')
+    module_string = '.'.join(cls_split[:-1])
+    cls_name = cls_split[-1]
+    return get_class_by_name(module_string, cls_name, reload=reload)
+
+
 def is_nonclass_callable(obj):
     return callable(obj) and not isclass(obj)
 
@@ -117,3 +135,68 @@ def pickler(obj):
 def pickle_to_file(obj, path):
     with open(path, 'wb') as f:
         f.write(pickler(obj))
+
+
+def get_remember_view(obj):
+    return ItemsView({'cls': type(obj), 'args': obj.__args__, 'kwargs': obj.__kwargs__})
+
+
+def get_unique_objects(obj):
+    from dryml.core2.object import Remember
+
+    unique_objs = {}
+
+    def _get_unique_objects_enter(path, key, value):
+        if isinstance(value, Remember):
+            # Check if we've visited this one already
+            def_val = value.definition.concretize()
+
+            if def_val in unique_objs:
+                return value, False
+            else:
+                return {}, get_remember_view(value)
+        else:
+            return default_enter(path, key, value)
+
+    def _get_unique_objects_visit(path, key, value):
+        # We aren't processing anything
+        return key, value
+
+    def _get_unique_objects_exit(path, key, value, new_parent, new_items):
+        if isinstance(value, Remember):
+            # We're exiting a Remember object
+            def_val = value.definition.concretize()
+
+            unique_objs[def_val] = value
+
+        return default_exit(path, key, value, new_parent, new_items)
+
+    if isinstance(obj, Remember):
+        remap(
+            [obj],
+            enter=_get_unique_objects_enter,
+            visit=_get_unique_objects_visit,
+            exit=_get_unique_objects_exit)[0]
+        return list(unique_objs.values())
+    else:
+        remap(
+            obj,
+            enter=_get_unique_objects_enter,
+            visit=_get_unique_objects_visit,
+            exit=_get_unique_objects_exit)
+        return list(unique_objs.values())
+
+
+def apply_func(
+        obj, func, func_args=None, sel=Optional[Callable],
+        func_kwargs=None):
+    if func_args is None:
+        func_args = ()
+    if func_kwargs is None:
+        func_kwargs = {}
+
+    obj_list = get_unique_objects(obj)
+
+    for obj in obj_list:
+        if sel is None or sel(obj):
+            func(obj, *func_args, **func_kwargs)

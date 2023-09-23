@@ -2,8 +2,8 @@ import pytest
 import numpy as np
 import core2_objects as objects
 from dryml.core2.definition import Definition, \
-    ConcreteDefinition, build_from_definition, hash_function, \
-    selector_match, build_definition
+    ConcreteDefinition, hash_function, selector_match, \
+    SKIP_ARGS
 from dryml.core2.repo import Repo, save_object, load_object
 import os
 
@@ -13,10 +13,6 @@ def test_create_definition_1():
 
 
 def test_create_definition_2():
-    Definition({'cls': objects.TestClass1, 'args': [10], 'kwargs': {'test': 'a'}})
-
-
-def test_create_definition_3():
     # Plain single level definition
     definition = Definition(objects.TestClass1, 10, test='a')
     assert definition.cls == objects.TestClass1
@@ -27,7 +23,7 @@ def test_create_definition_3():
     assert definition.kwargs['test'] == 'a'
 
 
-def test_create_definition_4():
+def test_create_definition_3():
     # nesting definitions shouldn't change the nested Definition objects
     def_1 = Definition(objects.TestClass1, 10, test='a')
     def_2 = Definition(
@@ -40,7 +36,7 @@ def test_create_definition_4():
 def test_build_definition_1():
     # Plain single level object
     obj = objects.TestClass1(10, test='a')
-    definition = build_definition(obj)
+    definition = obj.definition
     assert definition.cls == objects.TestClass1
     assert definition['cls'] == objects.TestClass1
     assert len(definition.args) == 1
@@ -52,7 +48,7 @@ def test_build_definition_1():
 def test_build_definition_2():
     # 1 nest object
     obj = objects.TestClass1(objects.TestClass1(10, test='b'), test='a')
-    definition = build_definition(obj)
+    definition = obj.definition
     assert definition.cls == objects.TestClass1
     assert len(definition.args) == 1
     assert len(definition.kwargs.keys()) == 1
@@ -70,7 +66,7 @@ def test_build_definition_3():
     # with numpy array argument. algorithm should avoid it
     arr = np.random.random((2,2)).astype(np.float32)
     obj = objects.TestClass1(arr, test='a')
-    definition = build_definition(obj)
+    definition = obj.definition
     assert definition.cls == objects.TestClass1
     assert len(definition.args) == 1
     assert len(definition.kwargs.keys()) == 1
@@ -84,7 +80,7 @@ def test_build_definition_4():
     arr1 = np.random.random((2,2)).astype(np.float32)
     arr2 = np.random.random((2,2)).astype(np.float32)
     obj = objects.TestClass1(objects.TestClass1(arr2, test='b'), test=arr1)
-    definition = build_definition(obj)
+    definition = obj.definition
     assert definition.cls == objects.TestClass1
     assert len(definition.args) == 1
     assert len(definition.kwargs.keys()) == 1
@@ -128,7 +124,7 @@ def test_build_definition_6():
 def test_build_from_definition_1():
     # 1 nest object
     definition = Definition(objects.TestClass1, 10, test='a')
-    obj = build_from_definition(definition)
+    obj = definition.build()
     assert type(obj) == objects.TestClass1
     assert obj.test == 'a'
     assert obj.x == 10
@@ -143,7 +139,7 @@ def test_build_from_definition_2():
             test='b'),
         test='a')
 
-    obj = build_from_definition(definition)
+    obj = definition.build()
     assert type(obj) == objects.TestClass1
     assert obj.test == 'a'
     assert type(obj.x) == objects.TestClass1
@@ -158,7 +154,7 @@ def test_build_from_definition_3():
         objects.TestClass1,
         arr, test='a')
 
-    obj = build_from_definition(definition)
+    obj = definition.build()
     assert type(obj) == objects.TestClass1
     assert np.all(obj.x == arr)
     assert obj.test == 'a'
@@ -174,7 +170,7 @@ def test_build_from_definition_4():
             arr2,
             test='b'),
         test=arr1)
-    obj = build_from_definition(definition)
+    obj = definition.build()
     assert type(obj) == objects.TestClass1
     assert np.all(obj.test == arr1)
     assert type(obj.x) == objects.TestClass1
@@ -189,9 +185,10 @@ def test_build_from_definition_5():
         10, test='a')
 
     repo = Repo() 
-    obj = build_from_definition(definition, repo=repo)
+    obj = definition.build(repo=repo)
     assert repo._num_constructions == 1
-    assert selector_match(definition, obj.definition)
+    assert definition(obj.definition)
+    assert definition(obj)
 
 
 def test_build_from_definition_6():
@@ -205,9 +202,10 @@ def test_build_from_definition_6():
         test='a')
 
     repo = Repo() 
-    obj = build_from_definition(definition, repo=repo)
+    obj = definition.build(repo=repo)
     assert repo._num_constructions == 2
-    assert selector_match(definition, obj.definition)
+    assert definition(obj.definition)
+    assert definition(obj)
 
 
 def test_build_from_definition_7():
@@ -224,7 +222,7 @@ def test_build_from_definition_7():
 
     repo = Repo()
 
-    obj = build_from_definition(def_2, repo=repo)
+    obj = def_2.build(repo=repo)
     assert obj.x is obj.test
     assert repo._num_constructions == 2
 
@@ -251,7 +249,8 @@ def test_build_from_definition_8():
     assert def_2 is def_4.kwargs['test']
     assert def_1 is def_3.args[0]
     assert def_2 is def_3.kwargs['test']
-    obj4 = build_from_definition(def_4)
+    obj4 = def_4.build()
+    assert def_4(obj4)
     obj3 = obj4.x
     obj2 = obj3.test
     assert obj4.test is obj2
@@ -434,8 +433,10 @@ def test_selector_2():
         10,
         test='a')
     definition = selector
+    obj = definition.build()
 
-    assert selector_match(selector, definition)
+    assert selector(definition)
+    assert selector(obj)
 
 
 def test_selector_3():
@@ -448,7 +449,8 @@ def test_selector_3():
         10,
         test='a')
 
-    assert selector_match(selector, definition)
+    assert selector(definition)
+    assert selector(definition)
 
 
 def test_selector_4():
@@ -461,7 +463,7 @@ def test_selector_4():
         10,
         test='a')
 
-    assert selector_match(selector, definition)
+    assert selector(definition)
 
 
 def test_selector_5():
@@ -474,7 +476,7 @@ def test_selector_5():
         objects.TestClass3,
         1, 2, 3)
 
-    assert not selector_match(selector, definition)
+    assert not selector(definition)
 
 
 def test_selector_6():
@@ -482,7 +484,7 @@ def test_selector_6():
         objects.TestClass1, lambda x: x == 10, test='a')
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
-    assert selector_match(sel_1, def_2)
+    assert sel_1(def_2)
 
 
 def test_selector_7():
@@ -490,7 +492,19 @@ def test_selector_7():
         objects.TestClass1, 10, test=lambda x: x == 'a')
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
-    assert selector_match(sel_1, def_2)
+    assert sel_1(def_2)
+
+
+def test_selector_8():
+    def_1 = Definition(
+        objects.TestClass1, 10, test='a')
+    def_2 = Definition(
+        objects.TestClass1, 20, test='a')
+    sel_1 = Definition(
+        objects.TestClass1, SKIP_ARGS, test='a')
+
+    assert sel_1(def_1)
+    assert sel_1(def_2)
 
 
 def test_definition_1():
@@ -499,7 +513,7 @@ def test_definition_1():
 
     obj = objects.TestClass1(10, test='a')
 
-    definition = build_definition(obj)
+    definition = obj.definition
 
     # We shouldn't be allowed to change a definition
     definition.kwargs['test'] = 'b'
@@ -513,7 +527,7 @@ def test_definition_2():
 
     obj = objects.TestClass1([10], test=['a'])
 
-    definition = build_definition(obj)
+    definition = obj.definition
 
     # We shouldn't be allowed to change a definition
     definition.args[0][0] = 20
@@ -626,6 +640,19 @@ def test_definition_concrete_5():
     conc_def_1 = conc_def.kwargs['test']
 
     assert conc_def.args[0] is conc_def_1
+
+
+def test_definition_concrete_6():
+    def_1 = Definition(objects.TestClass1, SKIP_ARGS, test='a')
+
+    flag = True
+    try:
+        conc_def = def_1.concretize()
+        flag = False
+    except ValueError:
+        pass
+
+    assert flag
 
 
 @pytest.mark.usefixtures("create_temp_dir")

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from typing import Union, List
 
 from dryml.core2.util import zip_directory, hashval_to_digest, \
-    unpickler, pickle_to_file
+    unpickler, pickle_to_file, get_remember_view
 
 
 class BaseRepo:
