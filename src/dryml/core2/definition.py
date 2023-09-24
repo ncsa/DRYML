@@ -4,7 +4,7 @@ from boltons.iterutils import remap, is_collection, PathAccessError, default_ent
 import hashlib
 from inspect import isclass
 import numpy as np
-from pprint import pprint
+import sys
 
 from dryml.core2.util import is_dictlike, cls_super, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
@@ -415,54 +415,82 @@ def get_path(obj_or_def, path):
         raise PathAccessError(f"Can't access key path {path}")
 
 
+def render_path(path, key):
+    path = ("root",) + path
+    if key is not None:
+        path = path + (key,)
+
+    return "/".join(map(str, path))
+
+
 ## Selecting objects
-def selector_match(selector, definition, strict=False):
+def selector_match(selector, definition, strict=False, verbose=False, output_stream=sys.stderr):
     # Method for testing if a selector matches a definition
     # if strict is set, it must match exactly, and callables arent' allowed.
     # Additionally, Definitions which skip args also aren't allowed
     from dryml.core2.object import Remember
 
-    print(f"selector_match: selector:")
-    pprint(selector)
-    print(f"selector_match: definition:")
-    pprint(definition)
-
     def _selector_match_enter(path, key, value):
-        print(f"_selector_match_enter: 1 path: {path} key: {key} value: {value}")
         if isinstance(value, Definition):
-            print(f"_selector_match_enter: 2 definition branch")
             if strict and value.skip_args:
                 raise TypeError("Definitions which skip args aren't allowed in strict mode")
             return {}, ItemsView(value)
         elif isinstance(value, Remember):
-            print(f"_selector_match_enter: 3 remember branch")
             return {}, get_remember_view(value)
         else:
-            print(f"_selector_match_enter: 4 default branch")
             return default_enter(path, key, value)
 
     def _selector_match_visit(path, key, value):
         # Try to get the value at the right path from the definition
-        print(f"_selector_match_visit: 1 path: {path} key: {key} value: {value}")
         try:
             def_val = get_path(definition, path+(key,))
         except PathAccessError:
+            if verbose:
+                print(
+                    f"[{render_path(path, key)}]: Doesn't exist in target\n",
+                    file=output_stream)
             return key, False
-        print(f"_selector_match_visit: 2 def_val: {def_val}")
 
         if isclass(def_val):
             # We have a class in the definition.
             # If the selector value is a class, then the definition value must be a subclass.
             # This must also work for objects with metaclasses which aren't type
             if isclass(value):
-                return key, issubclass(value, def_val)
+                if strict:
+                    condition = value is def_val
+                    if not condition and verbose:
+                        print(
+                            f"[{render_path(path, key)}]: Classes differ\n",
+                            file=output_stream)
+                    return key, condition
+                else:
+                    condition = issubclass(value, def_val)
+                    if not condition and verbose:
+                        print(
+                            f"[{render_path(path, key)}]: {get_class_str(def_val)} is not a subclass of {get_class_str(value)}\n",
+                            file=output_stream)
+                    return key, condition
             elif callable(value) and not strict:
                 # We use the callable to determine if we match
-                return key, value(def_val)
+                condition = value(def_val)
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Callable test failed\n",
+                        file=output_stream)
+                return key, condition
             elif isinstance(value, str):
                 # We can do a class string comparison
-                return key, value == get_class_str(def_val)
+                condition = (value == get_class_str(def_val))
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: {value} failed string based class comparison\n",
+                        file=output_stream)
+                return key, condition
             else:
+                if verbose:
+                    print(
+                        f"[{render_path(path, key)}]: type {type(value)} unsupported for class comparison\n",
+                        file=output_stream)
                 # we don't have the right type in the selector
                 return key, False
         elif (is_collection(def_val) or is_dictlike(def_val)) and not isinstance(def_val, np.ndarray):
@@ -470,10 +498,31 @@ def selector_match(selector, definition, strict=False):
             return key, value
         elif isinstance(def_val, np.ndarray):
             if isinstance(value, np.ndarray):
-                return key, np.all(def_val == value)
+                condition = (value.shape == def_val.shape)
+                if not condition:
+                    if verbose:
+                        print(
+                            f"[{render_path(path, key)}]: Mismatched array shapes {values.shape} != {def_val.shape}\n",
+                            file=output_stream)
+                    return key, condition
+                condition = np.all(def_val == value)
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Unequal Arrays\n",
+                        file=output_stream)
+                return key, condition
             elif is_nonclass_callable(value) and not strict:
-                return key, value(def_val)
+                condition = value(def_val)
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Callable test failed\n",
+                        file=output_stream)
+                return key, condition
             else:
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Selector value type {type(value)} wrong for array comparison\n",
+                        file=output_stream)
                 # type doesn't match.
                 return key, False
         elif (type(value) is bool) and isinstance(def_val, Remember):
@@ -482,15 +531,28 @@ def selector_match(selector, definition, strict=False):
         else:
             # Plain matching branch
             if is_nonclass_callable(value) and not strict:
-                return key, value(def_val)
-            elif type(value) != type(value):
+                condition = value(def_val)
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Callable test failed\n",
+                        file=output_stream)
+                return key, condition
+            elif type(value) is not type(def_val):
+                if verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Type mismatch\n",
+                        file=output_stream)
                 return key, False
             else:
-                return key, value == def_val
+                condition = (value == def_val)
+                if not condition and verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Values differ\n",
+                        file=output_stream)
+                return key, condition
             
 
     def _selector_match_exit(path, key, old_parent, new_parent, new_items):
-        print(f"_selector_match_exit: 1 path: {path} key: {key} old_parent: {old_parent} new_parent: {new_parent} new_items: {new_items}")
         # Type check
         if type(old_parent) != type(new_parent):
             if isinstance(old_parent, Definition) or isinstance(old_parent, Remember):
