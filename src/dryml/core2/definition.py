@@ -502,7 +502,7 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
                 if not condition:
                     if verbose:
                         print(
-                            f"[{render_path(path, key)}]: Mismatched array shapes {values.shape} != {def_val.shape}\n",
+                            f"[{render_path(path, key)}]: Mismatched array shapes {value.shape} != {def_val.shape}\n",
                             file=output_stream)
                     return key, condition
                 condition = np.all(def_val == value)
