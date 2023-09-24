@@ -6,6 +6,7 @@ from dryml.core2.definition import Definition, \
     SKIP_ARGS
 from dryml.core2.repo import Repo, save_object, load_object
 import os
+from io import StringIO
 
 
 def test_create_definition_1():
@@ -507,6 +508,69 @@ def test_selector_8():
     assert sel_1(def_2)
 
 
+def test_selector_9():
+    obj_1 = objects.TestClass1(10, test='a')
+    def_1 = Definition(
+        objects.TestClass1, 20, test='b')
+    temp_stream = StringIO()
+    assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
+    temp_stream.seek(0)
+    stream_text = temp_stream.read()
+    assert "[root/args/0]: Values differ" in stream_text
+    assert "[root/kwargs/test]: Values differ" in stream_text
+
+
+def test_selector_10():
+    def_2 = Definition(objects.TestClass1, 10, test='a')
+    def_1 = Definition(
+        objects.TestClass1, 20, test='b')
+    temp_stream = StringIO()
+    assert not def_1(def_2, verbose=True, output_stream=temp_stream)
+    temp_stream.seek(0)
+    stream_text = temp_stream.read()
+    assert "[root/args/0]: Values differ" in stream_text
+    assert "[root/kwargs/test]: Values differ" in stream_text
+
+
+def test_selector_11():
+    obj_1 = objects.TestClass1(10, test='a')
+    def_1 = Definition(
+        objects.TestClass2,
+        test='a')
+
+    temp_stream = StringIO()
+    assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
+    temp_stream.seek(0)
+    stream_text = temp_stream.read()
+    assert "[root/cls]: core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
+
+
+def test_selector_12():
+    obj_1 = objects.TestClass1(
+        10,
+        test=objects.TestClass1(
+            20,
+            test=objects.TestClass1(30, test='c')))
+    def_1 = Definition(
+        objects.TestClass2,
+        10,
+        test=Definition(
+            objects.TestClass1,
+            30,
+            test=Definition(
+                objects.TestClass2,
+                30,
+                test=lambda x: x != 'c')))
+    temp_stream = StringIO()
+    assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
+    temp_stream.seek(0)
+    stream_text = temp_stream.read()
+    assert "[root/cls]: core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
+    assert "[root/kwargs/test/args/0]: Values differ" in stream_text
+    assert "[root/kwargs/test/kwargs/test/cls]: core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
+    assert "[root/kwargs/test/kwargs/test/kwargs/test]: Callable test failed" in stream_text
+
+
 def test_definition_1():
     # Test changing args directly on a Definition
     # Shouldn't affect the original object
@@ -647,7 +711,7 @@ def test_definition_concrete_6():
 
     flag = True
     try:
-        conc_def = def_1.concretize()
+        def_1.concretize()
         flag = False
     except ValueError:
         pass
