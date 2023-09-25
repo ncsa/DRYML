@@ -99,8 +99,8 @@ class Definition(dict):
         # A true deepcopy
         return deepcopy(self)
 
-    def build(self, repo=None, path=None):
-        return build_from_definition(self, repo=repo, path=path)
+    def build(self, **kwargs):
+        return build_from_definition(self, **kwargs)
 
     def __call__(self, other_def, **kwargs):
         from dryml.core2.object import Remember
@@ -364,13 +364,13 @@ def build_definition(obj):
 
 
 # Creating objects from definitions
-def build_from_definition(definition, path=None, repo=None):
+def build_from_definition(definition, **kwargs):
     # First, concretize the definition
     concrete_definition = definition.concretize()
 
     # concrete definitions refer to specific objects
 
-    with manage_repo(path=path, repo=repo) as repo:
+    with manage_repo(**kwargs) as repo:
         def build_from_definition_visit(_, key, value):
             if type(value) is Definition:
                 raise TypeError("Definitions should've been turned into ConcreteDefinitions at this point")

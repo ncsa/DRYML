@@ -137,6 +137,10 @@ class Metadata(Object):
 
 
 class Serializable(Remember):
+    def save(self, dest, **kwargs):
+        from dryml.core2.repo import save_object
+        return save_object(self, dest, **kwargs)
+
     def _save_to_dir(self, dir: str):
         # Directory into which the model should save its 'heavy' content
         # Full save procedure handled elsewhere
@@ -150,6 +154,8 @@ class Serializable(Remember):
 
         output_file = os.path.join(dir, 'object.pkl')
         pickle_to_file(self, output_file)
+
+        return True
 
     def _load_from_dir(self, dir: str):
         # Load 'heavy' content from directory
