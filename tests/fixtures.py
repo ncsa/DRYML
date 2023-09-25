@@ -18,6 +18,9 @@ def create_name():
     fullpath = f"{tempf}.dry"
     if os.path.exists(fullpath):
         os.remove(fullpath)
+    fullpath = f"{tempf}.zip"
+    if os.path.exists(fullpath):
+        os.remove(fullpath)
     if os.path.exists(tempf):
         os.remove(tempf)
 
