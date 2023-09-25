@@ -2,6 +2,7 @@ import dill
 import os
 import zipfile
 import importlib
+import tempfile
 from typing import Optional, Callable
 from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
@@ -103,8 +104,8 @@ def is_dictlike(val):
     return isinstance(val, Mapping)
 
 
-def zip_directory(folder_path, zip_path):
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+def zip_directory(folder_path, zip_dest):
+    with zipfile.ZipFile(zip_dest, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Ignoring dirs for now. May need to edit this in the future.
         for root, _, files in os.walk(folder_path):
             for file in files:
@@ -200,3 +201,7 @@ def apply_func(
     for obj in obj_list:
         if sel is None or sel(obj):
             func(obj, *func_args, **func_kwargs)
+
+
+def get_temp_directory():
+    return tempfile.TemporaryDirectory()

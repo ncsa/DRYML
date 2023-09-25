@@ -1,12 +1,15 @@
 import tempfile
 import os
+import zipfile
 from boltons.iterutils import remap, default_enter, default_exit
 from collections.abc import ItemsView
 from contextlib import contextmanager
 from typing import Union, List
+from io import IOBase
 
 from dryml.core2.util import zip_directory, hashval_to_digest, \
-    unpickler, pickle_to_file, get_remember_view
+    unpickler, pickle_to_file, get_remember_view, \
+    get_temp_directory
 
 
 class BaseRepo:
@@ -55,6 +58,8 @@ class BaseRepo:
                 enter=_save_object_enter,
                 visit=_save_object_visit,
                 exit=_save_object_exit)
+
+        return True
 
     def save_object_imp(self, obj):
         obj_def = obj.definition.concretize()
@@ -166,13 +171,19 @@ class DirRepo(BaseRepo):
                 obj_def = unpickler(f.read())
             self.load_object(obj_def.concretize())
 
-    def save_object(self, obj):
+        def_file = os.path.join(self.dir, "def.pkl")
+        if os.path.exists(def_file):
+            with open(def_file, "rb") as f:
+                self.main_def = unpickler(f.read())
+        else:
+            self.main_def = None
+
+    def save_object(self, obj, main=False):
         from dryml.core2.object import Serializable
         super().save_object(obj)
-        if isinstance(obj, Serializable):
-            # Save the definition to the main repo directory
-            def_file = os.path.join(self.dir, "def.pkl")
-            pickle_to_file(obj.definition, def_file)
+        if main:
+            self.main_def = obj.definition.concretize()
+        return True
 
     def save_object_imp(self, obj):
         obj_def = super().save_object_imp(obj)
@@ -201,34 +212,70 @@ class DirRepo(BaseRepo):
         obj._load_from_dir(object_path)
         return obj
 
+    def close(self):
+        super().close()
+        if self.main_def is not None:
+            def_file = os.path.join(self.dir, "def.pkl")
+            pickle_to_file(self.main_def, def_file)
+
 
 class ZipRepo(DirRepo):
     # A class meant to zip files 'directly' to a zipfile.
-    def __init__(self, path):
+    def __init__(self, zip_dest):
         # We load the zip file to a temporary directory
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.path = path
-        super().__init__(self.temp_dir)
+        self.temp_dir = get_temp_directory()
+
+        def _load_data():
+            with zipfile.ZipFile(zip_dest, 'r') as zf:
+                zf.extractall(self.temp_dir.name)
+
+        # Input validation
+        if isinstance(zip_dest, IOBase):
+            # handles file-like objects
+            # Check if the buffer has content, if so load it.
+            zip_dest.seek(0)
+            if zip_dest.read(1):
+                zip_dest.seek(0)
+                _load_data()
+                zip_dest.seek(0)
+        else:
+            # detect whether the path exists, and is a zip file
+            try:
+                os.fspath(zip_dest)
+            except TypeError:
+                raise TypeError("zip_dest must be a path or a file-like object.")
+            if os.path.exists(zip_dest):
+                # Load the data if it exists
+                _load_data()
+
+        # Save destination
+        self.zip_dest = zip_dest
+
+        super().__init__(self.temp_dir.name)
 
     def close(self):
+        super().close()
         # Zip up the temp directory
-        zip_directory(self.temp_dir, self.path)
+        zip_directory(self.temp_dir.name, self.zip_dest)
         # Close the temp directory
         self.temp_dir.__exit__(None, None, None)
 
 
 @contextmanager
-def manage_repo(path=None, repo=None):
+def manage_repo(dest=None, repo=None):
     close_repo = False
     if repo is None:
-        if path is None:
+        if dest is None:
             repo = Repo()
+        elif isinstance(dest, IOBase):
+            # This is a file-like object
+            repo = ZipRepo(dest)
         else:
             # detect if the path is a zip file
-            if os.path.splitext(path)[-1] == ".zip":
-                repo = ZipRepo(path)
+            if os.path.splitext(dest)[-1] == ".zip":
+                repo = ZipRepo(dest)
             else:
-                repo = DirRepo(path)
+                repo = DirRepo(dest)
         close_repo = True
     yield repo
     if close_repo:
@@ -236,14 +283,16 @@ def manage_repo(path=None, repo=None):
 
 
 # Saving and Loading
-def save_object(obj, path=None, repo=None):
-    with manage_repo(path=path, repo=repo) as repo:
-        repo.save_object(obj)
+def save_object(obj, dest=None, repo=None):
+    main = repo is None
+    with manage_repo(dest=dest, repo=repo) as repo:
+        repo.save_object(obj, main=main)
+        return True
 
 
-def load_object(obj_def, path=None, repo=None):
+def load_object(obj_def=None, dest=None, repo=None):
     from dryml.core2.definition import Definition
-    if type(obj_def) is Definition:
-        obj_def = obj_def.concretize()
-    with manage_repo(path=path, repo=repo) as repo:
-        return repo.load_object(obj_def)
+    with manage_repo(dest=dest, repo=repo) as repo:
+        if obj_def is None:
+            obj_def = repo.main_def
+        return repo.load_object(obj_def.concretize())
