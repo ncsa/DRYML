@@ -272,7 +272,8 @@ def manage_repo(dest=None, repo=None):
             repo = ZipRepo(dest)
         else:
             # detect if the path is a zip file
-            if os.path.splitext(dest)[-1] == ".zip":
+            extension = os.path.splitext(dest)[-1]
+            if extension == ".zip" or extension == ".dry":
                 repo = ZipRepo(dest)
             else:
                 repo = DirRepo(dest)
