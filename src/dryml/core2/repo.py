@@ -246,7 +246,12 @@ class ZipRepo(DirRepo):
                 raise TypeError("zip_dest must be a path or a file-like object.")
             if os.path.exists(zip_dest):
                 # Load the data if it exists
-                _load_data()
+                empty = False
+                with open(zip_dest, 'rb') as f:
+                    if not f.read(1):
+                        empty = True
+                if not empty:
+                    _load_data()
 
         # Save destination
         self.zip_dest = zip_dest
@@ -274,9 +279,14 @@ def manage_repo(dest=None, repo=None):
             # detect if the path is a zip file
             extension = os.path.splitext(dest)[-1]
             if extension == ".zip" or extension == ".dry":
+                # We have a single file repo
                 repo = ZipRepo(dest)
-            else:
+            elif os.path.exists(dest) and os.path.isdir(dest):
+                # We have a directory repo
                 repo = DirRepo(dest)
+            else:
+                # We will treat this as a zip repo
+                repo = ZipRepo(dest)
         close_repo = True
     yield repo
     if close_repo:
