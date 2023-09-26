@@ -72,27 +72,27 @@ def test_save_object_2(create_name):
     assert obj2.version() == 1
 
 
-# @pytest.mark.usefixtures("create_temp_named_file")
-# def test_save_object_3(create_temp_named_file):
-#     """
-#     Test Saving objects to a file using file which was already created
-#     """
-#     with open('./tests/old/test_objs.py', 'w') as f:
-#         f.write(test_objs_text.format(version=1))
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_save_object_3(create_temp_named_file):
+    """
+    Test Saving objects to a file using file which was already created
+    """
+    with open('./tests/objs.py', 'w') as f:
+        f.write(test_objs_text.format(version=1))
 
-#     import test_objs
-#     importlib.reload(test_objs)
+    import objs
+    importlib.reload(objs)
 
-#     obj = test_objs.SimpleObject(10)
+    obj = objs.SimpleObject(10)
 
-#     assert obj.save_self(create_temp_named_file)
+    assert obj.save(create_temp_named_file)
 
-#     obj2 = dryml.load_object(create_temp_named_file)
+    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
 
-#     assert obj == obj2
+    assert obj == obj2
 
-#     assert obj.version() == 1
-#     assert obj2.version() == 1
+    assert obj.version() == 1
+    assert obj2.version() == 1
 
 
 # @pytest.mark.usefixtures("create_temp_file")
