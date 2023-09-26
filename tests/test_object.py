@@ -120,45 +120,45 @@ def test_save_object_4(create_temp_file):
     assert obj2.version() == 1
 
 
-# @pytest.mark.xfail
-# @pytest.mark.usefixtures("create_temp_file")
-# def test_save_object_5(create_temp_file):
-#     """
-#     Test Saving objects to a file, then loading in an environment
-#     without class definition
-#     """
-#     # This is currently not possible, or annoyingly difficult:
-#     # https://github.com/uqfoundation/dill/issues/128
-#     # Write test objects module, and load it.
-#     with open('./tests/old/test_objs.py', 'w') as f:
-#         f.write(test_objs_text.format(version=1))
+@pytest.mark.xfail
+@pytest.mark.usefixtures("create_temp_file")
+def test_save_object_5(create_temp_file):
+    """
+    Test Saving objects to a file, then loading in an environment
+    without class definition
+    """
+    # This is currently not possible, or annoyingly difficult:
+    # https://github.com/uqfoundation/dill/issues/128
+    # Write test objects module, and load it.
+    with open('./tests/objs.py', 'w') as f:
+        f.write(test_objs_text.format(version=1))
 
-#     import test_objs
-#     importlib.reload(test_objs)
+    import objs
+    importlib.reload(objs)
 
-#     # Create object and save
-#     obj = test_objs.SimpleObject(10)
+    # Create object and save
+    obj = objs.SimpleObject(10)
 
-#     assert obj.save_self(create_temp_file)
+    assert obj.save(create_temp_file)
 
-#     # Delete test_objs source and module from sys
-#     if os.path.exists('./tests/old/test_objs.py'):
-#         os.remove('./tests/old/test_objs.py')
+    # Delete test_objs source and module from sys
+    if os.path.exists('./tests/objs.py'):
+        os.remove('./tests/objs.py')
 
-#     del test_objs
-#     if 'test_objs' in sys.modules:
-#         del sys.modules['test_objs']
+    del objs
+    if 'objs' in sys.modules:
+        del sys.modules['objs']
 
-#     # Rewind file
-#     create_temp_file.flush()
-#     create_temp_file.seek(0)
+    # Rewind file
+    create_temp_file.flush()
+    create_temp_file.seek(0)
 
-#     obj2 = dryml.load_object(create_temp_file)
+    obj2 = dryml.core2.load_object(dest=create_temp_file)
 
-#     assert obj == obj2
+    assert obj == obj2
 
-#     assert obj.version() == 1
-#     assert obj2.version() == 1
+    assert obj.version() == 1
+    assert obj2.version() == 1
 
 
 # @pytest.mark.usefixtures("create_temp_named_file")
