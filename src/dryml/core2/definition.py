@@ -231,29 +231,31 @@ class ConcreteDefinition(Definition):
         return digest_to_hashval(hash_function(self))
 
 
+def hash_value(value):
+    # Hashes for supported values here
+    if isclass(value):
+        return str(get_class_str(value))
+
+    try:
+        hash_val = hash(value)
+        return hashval_to_digest(hash_val)
+    except TypeError:
+        pass
+
+    if isinstance(value, np.ndarray):
+        # Hash for numpy arrays
+        return hashlib.sha256(value.tobytes()).hexdigest()
+    else:
+        raise TypeError(f"Value of type {type(value)} not supported for hashing.")
+
+
 def hash_function(structure):
     # Definition hash support
     class HashHelper(object):
         def __init__(self, the_hash):
             self.hash = the_hash
 
-    def hash_value(value):
-        # Hashes for supported values here
-        try:
-            hash_val = hash(value)
-            return hashval_to_digest(hash_val)
-        except TypeError:
-            pass
-
-        if isclass(value):
-            return str(value.__qualname__)
-        elif isinstance(value, np.ndarray):
-            # Hash for numpy arrays
-            return hashlib.sha256(value.tobytes()).hexdigest()
-        else:
-            raise TypeError(f"Value of type {type(value)} not supported for hashing.")
-
-    def hash_visit(path, key, value):
+    def _hash_visit(path, key, value):
         # Skip if it's a hashlib hasher
         if isinstance(value, HashHelper):
             return key, value.hash
@@ -262,7 +264,7 @@ def hash_function(structure):
     
         return key, hash_value(value)
 
-    def hash_exit(path, key, old_parent, new_parent, new_items):
+    def _hash_exit(path, key, old_parent, new_parent, new_items):
         # At this point, all items should be hashes
 
         # sort the items. format is [(key, value)]
@@ -278,7 +280,7 @@ def hash_function(structure):
 
         return HashHelper(new_hash)
 
-    return remap(structure, enter=definition_enter, visit=hash_visit, exit=hash_exit).hash
+    return remap(structure, enter=definition_enter, visit=_hash_visit, exit=_hash_exit).hash
 
 
 # Creating definitions from objects
