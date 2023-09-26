@@ -7,11 +7,13 @@ import sys
 import time
 import importlib
 
-test_objs_text = """from dryml.core2 import Serializable
+test_objs_text = """from dryml.core2 import Serializable, \
+    Metadata, UniqueID
 
 
-class SimpleObject(Serializable):
+class SimpleObject(Serializable, Metadata, UniqueID):
     def __init__(self, i, **kwargs):
+        super().__init__(**kwargs)
         self.i = i
 
     def version(self):
@@ -161,69 +163,79 @@ def test_save_object_5(create_temp_file):
     assert obj2.version() == 1
 
 
-# @pytest.mark.usefixtures("create_temp_named_file")
-# def test_save_object_6(create_temp_named_file):
-#     """
-#     Test object default metadata saving
-#     """
-#     with open('./tests/old/test_objs.py', 'w') as f:
-#         f.write(test_objs_text.format(version=1))
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_save_object_6(create_temp_named_file):
+    """
+    Test object default metadata saving
+    """
+    with open('./tests/objs.py', 'w') as f:
+        f.write(test_objs_text.format(version=1))
 
-#     import test_objs
-#     importlib.reload(test_objs)
+    import objs
+    importlib.reload(objs)
 
-#     desc_str = 'Test Description'
-#     obj = test_objs.SimpleObject(10, dry_metadata={'description': desc_str})
-#     orig_creation_time = obj.dry_metadata['creation_time']
+    desc_str = 'Test Description'
+    obj = objs.SimpleObject(10, metadata={'description': desc_str})
+    orig_creation_time = obj.__kwargs__['metadata']['creation_time']
 
-#     assert obj.save_self(create_temp_named_file)
+    assert obj.save(create_temp_named_file)
 
-#     obj2 = dryml.load_object(create_temp_named_file)
+    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
 
-#     assert obj == obj2
+    assert obj == obj2
 
-#     assert obj.version() == 1
-#     assert obj2.version() == 1
+    assert obj.version() == 1
+    assert obj2.version() == 1
 
-#     assert orig_creation_time == obj2.dry_metadata['creation_time']
-#     assert desc_str == obj2.dry_metadata['description']
+    assert orig_creation_time == obj2.__kwargs__['metadata']['creation_time']
+    assert desc_str == obj2.__kwargs__['metadata']['description']
 
 
-# def test_basic_object_def_update_1():
-#     def build_and_save_obj_1():
-#         time.sleep(1.1)
-#         with open('tests/old/test_objs.py', 'w') as f:
-#             f.write(test_objs_text.format(version=1))
+def test_basic_object_def_update_1():
+    def build_and_save_obj_1():
+        time.sleep(1.1)
+        with open('tests/objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=1))
 
-#         import test_objs
-#         importlib.reload(test_objs)
+        import objs
+        importlib.reload(objs)
 
-#         obj = test_objs.SimpleObject(10)
+        obj = objs.SimpleObject(10)
 
-#         buffer = io.BytesIO()
+        from dryml.core2.definition import hash_value
+        print(f"type hash: {hash_value(type(obj))}")
 
-#         assert obj.save_self(buffer)
+        buffer = io.BytesIO()
 
-#         return obj, buffer
+        assert obj.save(buffer)
 
-#     obj1, buffer = build_and_save_obj_1()
+        return obj, buffer
 
-#     def build_obj_2(buffer):
-#         time.sleep(1.1)
-#         with open('tests/old/test_objs.py', 'w') as f:
-#             f.write(test_objs_text.format(version=2))
-#         # Sleep to invalidate the cache.
+    obj1, buffer = build_and_save_obj_1()
 
-#         obj2 = dryml.load_object(buffer, update=True, reload=True)
+    buffer.seek(0)
 
-#         return obj2
+    def build_obj_2(buffer):
+        time.sleep(1.1)
+        with open('tests/objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=2))
+        # Sleep to invalidate the cache.
+        import objs
+        importlib.reload(objs)
 
-#     obj2 = build_obj_2(buffer)
+        from dryml.core2.definition import hash_value
+        print(f"type hash: {hash_value(objs.SimpleObject)}")
 
-#     assert obj1 == obj2
+        obj2 = dryml.core2.load_object(dest=buffer)
 
-#     assert obj1.version() == 1
-#     assert obj2.version() == 2
+        return obj2
+
+    obj2 = build_obj_2(buffer)
+
+    assert obj1 == obj2
+
+    assert obj1.version() == 1
+    assert obj2.version() == 2
 
 
 # @pytest.mark.usefixtures("create_name")
