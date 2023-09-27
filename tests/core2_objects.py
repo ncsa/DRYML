@@ -1,7 +1,7 @@
 from dryml.core2.object import Remember, UniqueID, Metadata, Serializable
 
 
-class HelloObject(Remember):
+class HelloObject(Serializable, UniqueID):
     def __init__(self, **kwargs):
         pass
 

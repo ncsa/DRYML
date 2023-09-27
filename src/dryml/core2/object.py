@@ -28,6 +28,11 @@ class Object(metaclass=CreationControl):
         # __arg_manipulation__ should be an idempotent function
         return args, kwargs
 
+    @staticmethod
+    def __strip_unique_args__(cls_super, *args, **kwargs):
+        # __strip_unique_args__ should be an idempotent function
+        return args, kwargs
+
     def __pre_init__(self, *args, **kwargs):
         pass
 
@@ -112,6 +117,13 @@ class UniqueID(Object):
             kwargs['uid'] = str(uuid.uuid4())
         return args, kwargs
 
+    @staticmethod
+    def __strip_unique__(cls_super, *args, **kwargs):
+        kwargs = kwargs.copy()
+        if 'uid' in kwargs:
+            del kwargs['uid']
+        return args, kwargs
+
     def __init__(self, *args, uid=None, **kwargs):
         super().__init__(*args, **kwargs)
         # unique ID
@@ -129,6 +141,13 @@ class Metadata(Object):
             kwargs['metadata']['description'] = ""
         if 'creation_time' not in kwargs['metadata']:
             kwargs['metadata']['creation_time'] = time.time()
+        return args, kwargs
+
+    @staticmethod
+    def __strip_unique__(cls_super, *args, **kwargs):
+        kwargs = kwargs.copy()
+        if 'metadata' in kwargs:
+            del kwargs['metadata']
         return args, kwargs
 
     def __init__(self, *args, metadata=None, **kwargs):
