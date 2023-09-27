@@ -291,12 +291,12 @@ def test_object_build_from_def_1():
     assert 'uid' in obj.__kwargs__
 
 
-# def test_object_args_passing_1():
-#     import objects as objs
+def test_object_args_passing_1():
+    import core2_objects as objs
 
-#     obj = objs.TestClassB(1, base_msg="Test1")
+    obj = objs.TestClassB(1, base_msg="Test1")
 
-#     assert obj.dry_args == (1,)
+    assert obj.__args__ == (1,)
 
 
 # @pytest.mark.usefixtures("create_name")
