@@ -299,82 +299,82 @@ def test_object_args_passing_1():
     assert obj.__args__ == (1,)
 
 
-# @pytest.mark.usefixtures("create_name")
-# def test_object_args_passing_2(create_name):
-#     import objects as objs
+@pytest.mark.usefixtures("create_name")
+def test_object_args_passing_2(create_name):
+    import core2_objects as objs
 
-#     obj = objs.TestClassB(1, base_msg="Test1")
+    obj = objs.TestClassB(1, base_msg="Test1")
 
-#     dryml.save_object(obj, create_name)
+    dryml.core2.save_object(obj, dest=create_name)
 
-#     obj_loaded = dryml.load_object(create_name)
+    obj_loaded = dryml.core2.load_object(dest=create_name)
 
-#     assert obj_loaded.dry_args == (1,)
-
-
-# def test_object_args_passing_3():
-#     """
-#     Test passing nested dryobjects as arguments
-#     """
-#     import objects as objs
-
-#     obj1 = objs.TestNest(10)
-
-#     obj2 = objs.TestNest(obj1)
-
-#     obj3 = objs.TestNest(obj2)
-
-#     obj1_def = obj1.definition()
-
-#     obj1_cpy = obj1_def.build()
-
-#     assert obj1.definition() == obj1_cpy.definition()
-#     assert obj1 is not obj1_cpy
-
-#     obj2_def = obj2.definition()
-
-#     obj2_cpy = obj2_def.build()
-
-#     assert obj2.definition() == obj2_cpy.definition()
-#     assert obj2 is not obj2_cpy
-#     assert obj2.A is not obj2_cpy.A
-#     assert type(obj2.A) is type(obj1)
-#     assert type(obj2_cpy.A) is type(obj1)
-
-#     obj3_cpy = obj3.definition().build()
-
-#     assert obj3.definition() == obj3_cpy.definition()
-#     assert obj3 is not obj3_cpy
-#     assert obj3.A is not obj3_cpy.A
-#     assert type(obj3.A) is type(obj2)
-#     assert type(obj3_cpy.A) is type(obj2)
-#     assert obj3.A.A is not obj3_cpy.A.A
-#     assert type(obj3.A.A) is type(obj1)
-#     assert type(obj3_cpy.A.A) is type(obj1)
+    assert obj_loaded.__args__ == (1,)
 
 
-# def test_object_args_passing_4():
-#     """
-#     Test passing nested dryobjects as arguments, within a list
-#     """
-#     import objects as objs
+def test_object_args_passing_3():
+    """
+    Test passing nested dryobjects as arguments
+    """
+    import core2_objects as objs
 
-#     obj1 = objs.TestNest(10)
+    obj1 = objs.TestNest(10)
 
-#     obj2 = objs.TestNest([obj1])
+    obj2 = objs.TestNest(obj1)
 
-#     obj1_cpy = obj1.definition().build()
+    obj3 = objs.TestNest(obj2)
 
-#     assert obj1.definition() == obj1_cpy.definition()
-#     assert obj1 is not obj1_cpy
+    obj1_def = obj1.definition
 
-#     obj2_cpy = obj2.definition().build()
+    obj1_cpy = obj1_def.build()
 
-#     assert obj2.definition() == obj2_cpy.definition()
-#     assert obj2 is not obj2_cpy
-#     assert obj2.A is not obj2_cpy.A
-#     assert type(obj2.A[0]) is type(obj1)
-#     assert type(obj2_cpy.A[0]) is type(obj1)
+    assert obj1.definition == obj1_cpy.definition
+    assert obj1 is not obj1_cpy
+
+    obj2_def = obj2.definition
+
+    obj2_cpy = obj2_def.build()
+
+    assert obj2.definition == obj2_cpy.definition
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A) is type(obj1)
+    assert type(obj2_cpy.A) is type(obj1)
+
+    obj3_cpy = obj3.definition.build()
+
+    assert obj3.definition == obj3_cpy.definition
+    assert obj3 is not obj3_cpy
+    assert obj3.A is not obj3_cpy.A
+    assert type(obj3.A) is type(obj2)
+    assert type(obj3_cpy.A) is type(obj2)
+    assert obj3.A.A is not obj3_cpy.A.A
+    assert type(obj3.A.A) is type(obj1)
+    assert type(obj3_cpy.A.A) is type(obj1)
+
+
+def test_object_args_passing_4():
+    """
+    Test passing nested dryobjects as arguments, within a list
+    """
+    import core2_objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest([obj1])
+
+    obj1_cpy = obj1.definition.build()
+
+    assert obj1.definition == obj1_cpy.definition
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition.build()
+
+    assert obj2.definition == obj2_cpy.definition
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A[0]) is type(obj1)
+    assert type(obj2_cpy.A[0]) is type(obj1)
 
 
 # def test_object_args_passing_5():
