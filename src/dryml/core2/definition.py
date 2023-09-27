@@ -97,7 +97,7 @@ class Definition(dict):
 
     def copy(self):
         # A true deepcopy
-        return deepcopy(self)
+        return deepcopy_skip_definition_object(self)
 
     def build(self, **kwargs):
         return build_from_definition(self, **kwargs)
@@ -132,6 +132,9 @@ class Definition(dict):
     def concretize(self):
         return concretize_definition(self)
 
+    def categorical(self, recursive=False):
+        return categorical_definition(self, recursive=recursive)
+
     def __repr__(self):
         return f"{type(self).__name__}({super().__repr__()})"
 
@@ -146,6 +149,70 @@ class Definition(dict):
     @property
     def kwargs(self):
         return self['kwargs']
+
+
+def categorical_definition(defn: Definition, recursive=True):
+    from dryml.core2.object import Remember
+    # Copy the Definition
+    new_def = deepcopy_skip_definition_object(defn)
+
+    definition_cache = {}
+    level = 0
+
+    def _categorical_def_enter(path, key, value):
+        if id(value) in definition_cache:
+            return value, False
+        elif isinstance(value, Remember):
+            raise TypeError("Plain remember objects are not supported")
+        elif isinstance(value, Definition):
+            nonlocal level
+            level += 1
+            return {}, ItemsView(value)
+        else:
+            return default_enter(path, key, value)
+
+    def _categorical_def_visit(path, key, value):
+        if isinstance(value, ConcreteDefinition):
+            # We shouldn't have any ConcreteDefinitions at this point
+            raise TypeError("ConcreteDefinition should not be here at this point")
+        elif isinstance(value, Remember):
+            raise TypeError("Plain Remember objects are not supported")
+        else:
+            return key, value
+
+    def _categorical_def_exit(path, key, value, new_parent, new_items):
+        if isinstance(value, Definition):
+            # This should catch both Definitions and ConcreteDefinitions
+            nonlocal level
+            level -= 1
+            new_vals = {}
+            for k, v in new_items:
+                new_vals[k] = v
+            args = new_vals['args']
+            kwargs = new_vals['kwargs']
+            if not recursive:
+                if level == 0:
+                    # Only apply __strip_unique__ at the lowest level.
+                    args, kwargs = cls_super(new_vals['cls']).__strip_unique__(*args, **kwargs)
+            else:
+                # Apply __strip_unique__ at all levels.
+                args, kwargs = cls_super(new_vals['cls']).__strip_unique__(*args, **kwargs)
+            return Definition(new_vals['cls'], *args, **kwargs)
+        else:
+            return default_exit(path, key, value, new_parent, new_items)
+
+    if isinstance(new_def, Definition):
+        return remap(
+            [new_def],
+            enter=_categorical_def_enter,
+            visit=_categorical_def_visit,
+            exit=_categorical_def_exit)[0]
+    else:
+        return remap(
+            new_def,
+            enter=_categorical_def_enter,
+            visit=_categorical_def_visit,
+            exit=_categorical_def_exit)
 
 
 def concretize_definition(defn: Definition):

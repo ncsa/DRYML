@@ -377,168 +377,130 @@ def test_object_args_passing_4():
     assert type(obj2_cpy.A[0]) is type(obj1)
 
 
-# def test_object_args_passing_5():
-#     """
-#     Test passing nested dryobjects as arguments, within a nested list
-#     """
-#     import objects as objs
+def test_object_args_passing_5():
+    """
+    Test passing nested dryobjects as arguments, within a nested list
+    """
+    import core2_objects as objs
 
-#     obj1 = objs.TestNest(10)
+    obj1 = objs.TestNest(10)
 
-#     obj2 = objs.TestNest([[obj1]])
+    obj2 = objs.TestNest([[obj1]])
 
-#     obj1_cpy = obj1.definition().build()
+    obj1_cpy = obj1.definition.build()
 
-#     assert obj1.definition() == obj1_cpy.definition()
-#     assert obj1 is not obj1_cpy
+    assert obj1.definition == obj1_cpy.definition
+    assert obj1 is not obj1_cpy
 
-#     obj2_cpy = obj2.definition().build()
+    obj2_cpy = obj2.definition.build()
 
-#     assert obj2.definition() == obj2_cpy.definition()
-#     assert obj2 is not obj2_cpy
-#     assert obj2.A is not obj2_cpy.A
-#     assert type(obj2.A[0][0]) is type(obj1)
-#     assert type(obj2_cpy.A[0][0]) is type(obj1)
-
-
-# def test_object_args_passing_6():
-#     """
-#     Test passing nested dryobjects as arguments, within a dict
-#     """
-#     import objects as objs
-
-#     obj1 = objs.TestNest(10)
-
-#     obj2 = objs.TestNest({'A': obj1})
-
-#     obj1_cpy = obj1.definition().build()
-
-#     assert obj1.definition() == obj1_cpy.definition()
-#     assert obj1 is not obj1_cpy
-
-#     obj2_cpy = obj2.definition().build()
-
-#     assert obj2.definition() == obj2_cpy.definition()
-#     assert obj2 is not obj2_cpy
-#     assert obj2.A is not obj2_cpy.A
-#     assert type(obj2.A['A']) is type(obj1)
-#     assert type(obj2_cpy.A['A']) is type(obj1)
+    assert obj2.definition == obj2_cpy.definition
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A[0][0]) is type(obj1)
+    assert type(obj2_cpy.A[0][0]) is type(obj1)
 
 
-# def test_object_args_passing_7():
-#     """
-#     Test passing nested dryobjects as arguments, within a dict with a list
-#     """
-#     import objects as objs
+def test_object_args_passing_6():
+    """
+    Test passing nested dryobjects as arguments, within a dict
+    """
+    import core2_objects as objs
 
-#     obj1 = objs.TestNest(10)
+    obj1 = objs.TestNest(10)
 
-#     obj2 = objs.TestNest({'A': [[obj1]]})
+    obj2 = objs.TestNest({'A': obj1})
 
-#     obj1_cpy = obj1.definition().build()
+    obj1_cpy = obj1.definition.build()
 
-#     assert obj1.definition() == obj1_cpy.definition()
-#     assert obj1 is not obj1_cpy
+    assert obj1.definition == obj1_cpy.definition
+    assert obj1 is not obj1_cpy
 
-#     obj2_cpy = obj2.definition().build()
+    obj2_cpy = obj2.definition.build()
 
-#     assert obj2.definition() == obj2_cpy.definition()
-#     assert obj2 is not obj2_cpy
-#     assert obj2.A is not obj2_cpy.A
-#     assert type(obj2.A['A'][0][0]) is type(obj1)
-#     assert type(obj2_cpy.A['A'][0][0]) is type(obj1)
-
-
-# def test_object_config_1():
-#     import objects as objs
-
-#     obj = objs.HelloStr(msg="Test")
-#     msg = obj.get_message()
-#     assert msg == "Hello! Test"
-
-#     obj = objs.HelloInt(msg=10)
-#     msg = obj.get_message()
-#     assert msg == "Hello! 10"
+    assert obj2.definition == obj2_cpy.definition
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A['A']) is type(obj1)
+    assert type(obj2_cpy.A['A']) is type(obj1)
 
 
-# def test_object_hash_1():
-#     "Test that object hashes are unique within classes"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     obj2 = objs.HelloStr(msg="Test")
-#     assert obj1.definition().get_individual_id() != \
-#         obj2.definition().get_individual_id()
+def test_object_args_passing_7():
+    """
+    Test passing nested dryobjects as arguments, within a dict with a list
+    """
+    import core2_objects as objs
+
+    obj1 = objs.TestNest(10)
+
+    obj2 = objs.TestNest({'A': [[obj1]]})
+
+    obj1_cpy = obj1.definition.build()
+
+    assert obj1.definition == obj1_cpy.definition
+    assert obj1 is not obj1_cpy
+
+    obj2_cpy = obj2.definition.build()
+
+    assert obj2.definition == obj2_cpy.definition
+    assert obj2 is not obj2_cpy
+    assert obj2.A is not obj2_cpy.A
+    assert type(obj2.A['A'][0][0]) is type(obj1)
+    assert type(obj2_cpy.A['A'][0][0]) is type(obj1)
 
 
-# def test_object_hash_2():
-#     "Test that object hashes are are same for two elements of the same class"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     obj2 = objs.HelloStr(msg="Test")
-#     assert obj1.definition().get_category_id() == \
-#         obj2.definition().get_category_id()
+def test_object_config_1():
+    import core2_objects as objs
+
+    obj = objs.HelloStr(msg="Test")
+    msg = obj.get_message()
+    assert msg == "Hello! Test"
+
+    obj = objs.HelloInt(msg=10)
+    msg = obj.get_message()
+    assert msg == "Hello! 10"
 
 
-# @pytest.mark.usefixtures("create_name")
-# def test_object_hash_3(create_name):
-#     "Test that object hashes are the same after saving and restoring"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     assert obj1.save_self(create_name)
-
-#     obj2 = dryml.load_object(create_name)
-#     assert obj1.definition().get_category_id() == \
-#         obj2.definition().get_category_id()
+def test_object_hash_1():
+    "Test that object hashes are unique within classes"
+    import core2_objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    obj2 = objs.HelloStr(msg="Test")
+    assert obj1.definition != \
+        obj2.definition
 
 
-# @pytest.mark.usefixtures("create_name")
-# def test_object_hash_4(create_name):
-#     "Test that loaded objects are identical hash wise"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     assert obj1.save_self(create_name)
-
-#     obj2 = dryml.load_object(create_name)
-#     assert obj1.definition().get_individual_id() == \
-#         obj2.definition().get_individual_id()
+def test_object_hash_2():
+    "Test that object hashes are are same for two elements of the same class"
+    import core2_objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    obj2 = objs.HelloStr(msg="Test")
+    assert obj1.definition.categorical() == \
+        obj2.definition.categorical()
 
 
-# @pytest.mark.usefixtures("create_name")
-# def test_object_file_hash_1(create_name):
-#     "Test that object hashes are the same after saving and restoring"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     assert obj1.save_self(create_name)
+@pytest.mark.usefixtures("create_name")
+def test_object_hash_3(create_name):
+    "Test that object hashes are the same after saving and restoring"
+    import core2_objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save(dest=create_name)
 
-#     with dryml.ObjectFile(create_name) as dry_file:
-#         assert obj1.definition().get_category_id() == \
-#             dry_file.definition().get_category_id()
-
-
-# @pytest.mark.usefixtures("create_name")
-# def test_object_file_hash_2(create_name):
-#     "Test that loaded objects are identical hash wise"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     assert obj1.save_self(create_name)
-
-#     with dryml.ObjectFile(create_name) as dry_file:
-#         assert obj1.definition().get_individual_id() == \
-#             dry_file.definition().get_individual_id()
+    obj2 = dryml.core2.load_object(dest=create_name)
+    assert obj1.definition.categorical() == \
+        obj2.definition.categorical()
 
 
-# @pytest.mark.usefixtures("create_name")
-# def test_object_file_hash_3(create_name):
-#     "Test that object and object factory hashes are the same"
-#     import objects as objs
-#     obj1 = objs.HelloStr(msg="Test")
-#     assert obj1.save_self(create_name)
+@pytest.mark.usefixtures("create_name")
+def test_object_hash_4(create_name):
+    "Test that loaded objects are identical hash wise"
+    import core2_objects as objs
+    obj1 = objs.HelloStr(msg="Test")
+    assert obj1.save(dest=create_name)
 
-#     f = dryml.ObjectFactory(dryml.ObjectDef(
-#         objs.HelloStr, msg="Test"))
-
-#     assert obj1.definition().get_category_id() == \
-#         f.obj_def.get_category_id()
+    obj2 = dryml.core2.load_object(dest=create_name)
+    assert obj1.definition == \
+        obj2.definition
 
 
 # def test_change_obj_cls_1():
