@@ -238,39 +238,42 @@ def test_basic_object_def_update_1():
     assert obj2.version() == 2
 
 
-# @pytest.mark.usefixtures("create_name")
-# def test_basic_object_def_update_2(create_name):
-#     def build_and_save_obj_1():
-#         time.sleep(1.1)
-#         with open('tests/old/test_objs.py', 'w') as f:
-#             f.write(test_objs_text.format(version=1))
-#         import test_objs
-#         importlib.reload(test_objs)
+@pytest.mark.usefixtures("create_name")
+def test_basic_object_def_update_2(create_name):
+    def build_and_save_obj_1():
+        time.sleep(1.1)
+        with open('tests/objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=1))
+        import objs
+        importlib.reload(objs)
 
-#         obj = test_objs.SimpleObject(10)
+        obj = objs.SimpleObject(10)
 
-#         assert obj.save_self(create_name)
+        assert obj.save(create_name)
 
-#         return obj
+        return obj
 
-#     obj1 = build_and_save_obj_1()
+    obj1 = build_and_save_obj_1()
 
-#     def build_obj_2():
-#         # Sleep to invalidate the cache.
-#         time.sleep(1.1)
-#         with open('tests/old/test_objs.py', 'w') as f:
-#             f.write(test_objs_text.format(version=2))
+    def build_obj_2():
+        # Sleep to invalidate the cache.
+        time.sleep(1.1)
+        with open('tests/objs.py', 'w') as f:
+            f.write(test_objs_text.format(version=2))
 
-#         obj2 = dryml.load_object(create_name, update=True, reload=True)
+        import objs
+        importlib.reload(objs)
 
-#         return obj2
+        obj2 = dryml.core2.load_object(dest=create_name)
 
-#     obj2 = build_obj_2()
+        return obj2
 
-#     assert obj1 == obj2
+    obj2 = build_obj_2()
 
-#     assert obj1.version() == 1
-#     assert obj2.version() == 2
+    assert obj1 == obj2
+
+    assert obj1.version() == 1
+    assert obj2.version() == 2
 
 
 # def test_object_build_from_def_1():
