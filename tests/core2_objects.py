@@ -25,6 +25,27 @@ class HelloInt(HelloObject):
         return f"Hello! {self.int_msg}"
 
 
+class TestBase(Serializable, UniqueID, Metadata):
+    def __init__(self, *args, base_msg: str = "base", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.base_msg = base_msg
+
+
+#class TestClassA(TestBase):
+#    def __init__(self, *args, item=[32], **kwargs):
+#        super().__init__(*args, **kwargs)
+
+
+#class TestClassA2(TestBase):
+#    def __init__(self, *args, item=[32], **kwargs):
+#        super().__init__(*args, **kwargs)
+
+
+class TestClassB(TestBase):
+    def __init__(self, layers, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+
 class TestNest(Remember):
     def __init__(self, A):
         self.A = A

@@ -1,5 +1,6 @@
 import pytest
 import dryml
+from dryml.core2 import Definition
 import zipfile
 import io
 import os
@@ -276,18 +277,18 @@ def test_basic_object_def_update_2(create_name):
     assert obj2.version() == 2
 
 
-# def test_object_build_from_def_1():
-#     """
-#     Test that an object definition with no id results in an object with an id.
-#     """
+def test_object_build_from_def_1():
+    """
+    Test that an object definition with no id results in an object with an id.
+    """
 
-#     import objects
-#     obj = dryml.ObjectDef(
-#         objects.TestClassB,
-#         1,
-#         base_msg='Test').build()
+    import core2_objects as objects
+    obj = Definition(
+        objects.TestClassB,
+        1,
+        base_msg='Test').build()
 
-#     assert 'dry_id' in obj.dry_kwargs
+    assert 'uid' in obj.__kwargs__
 
 
 # def test_object_args_passing_1():
