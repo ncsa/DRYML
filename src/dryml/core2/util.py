@@ -8,6 +8,7 @@ from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
     Parameter, signature
 from boltons.iterutils import remap, is_collection, PathAccessError, default_enter, default_exit
+from icecream import ic
 
 
 def collide_attributes(obj, attr_list):
@@ -205,3 +206,25 @@ def apply_func(
 
 def get_temp_directory():
     return tempfile.TemporaryDirectory()
+
+
+def get_relevant_context(frame):
+    context = []
+    nested_funcs = []
+    while frame:
+        code = frame.f_code
+        func_name = code.co_name
+        
+        if 'self' in frame.f_locals:
+            class_name = frame.f_locals['self'].__class__.__name__
+            func_name = f"{class_name}.{func_name}"
+            context.insert(0, func_name)
+            if nested_funcs:
+                context[-1] = f"{context[-1]}{'.' + '.'.join(nested_funcs)}"
+            break  # Stop once you get the enclosing method and class
+        else:
+            nested_funcs.insert(0, func_name)
+        
+        frame = frame.f_back
+
+    return '.'.join(context)
