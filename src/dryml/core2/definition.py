@@ -99,8 +99,8 @@ class Definition(dict):
         # A true deepcopy
         return deepcopy_skip_definition_object(self)
 
-    def build(self, **kwargs):
-        return build_from_definition(self, **kwargs)
+    def build(self, build_missing=True, **kwargs):
+        return build_from_definition(self, build_missing=build_missing, **kwargs)
 
     def __call__(self, other_def, **kwargs):
         from dryml.core2.object import Remember
@@ -433,7 +433,7 @@ def build_definition(obj):
 
 
 # Creating objects from definitions
-def build_from_definition(definition, **kwargs):
+def build_from_definition(definition, build_missing=True, **kwargs):
     # First, concretize the definition
     concrete_definition = definition.concretize()
 
@@ -445,7 +445,7 @@ def build_from_definition(definition, **kwargs):
                 raise TypeError("Definitions should've been turned into ConcreteDefinitions at this point")
             elif type(value) is ConcreteDefinition:
                 # Delegate to a repo to do the loading
-                obj = repo.load_object(value)
+                obj = repo.load_object(value, build_missing=build_missing)
                 return key, obj
             else:
                 return key, value
@@ -465,7 +465,7 @@ def get_path(obj_or_def, path):
     if key is None:
         return obj_or_def
 
-    path = path[1:]
+    new_path = path[1:]
     if isinstance(obj_or_def, Remember):
         if key == 'cls':
             value = type(obj_or_def)
@@ -474,14 +474,24 @@ def get_path(obj_or_def, path):
         elif key == 'kwargs':
             value = obj_or_def.__kwargs__
         else:
-            raise KeyError(f"Invalid key {key} for Remember object")
+            raise PathAccessError(KeyError("Unsupported key on Remember Object"), key, new_path)
     else:
-        value = obj_or_def[key]
+        try:
+            value = obj_or_def[key]
+        except (KeyError, IndexError, ValueError, TypeError, PathAccessError) as e:
+            if type(e) is PathAccessError:
+                raise PathAccessError(e.exc, key, new_path)
+            else:
+                raise PathAccessError(e, key, new_path)
+
 
     try:
-        return get_path(value, path)
-    except (KeyError, IndexError) as e:
-        raise PathAccessError(f"Can't access key path {path}")
+        return get_path(value, new_path)
+    except (KeyError, IndexError, ValueError, PathAccessError) as e:
+        if type(e) is PathAccessError:
+            raise PathAccessError(e.exc, key, new_path)
+        else:
+            raise PathAccessError(e, key, new_path)
 
 
 def render_path(path, key):
@@ -500,6 +510,14 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
     from dryml.core2.object import Remember
 
     def _selector_match_enter(path, key, value):
+        # Check if this key/path exists in the definition
+        try:
+            def_val = get_path(definition, path+(key,))
+        except PathAccessError:
+            if verbose:
+                print(
+                        f"[{render_path(path, key)}]: Doesn't exist in target\n")
+            return key, False
         if isinstance(value, Definition):
             if strict and value.skip_args:
                 raise TypeError("Definitions which skip args aren't allowed in strict mode")
@@ -511,13 +529,10 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
 
     def _selector_match_visit(path, key, value):
         # Try to get the value at the right path from the definition
+        # Grab the definition value
         try:
             def_val = get_path(definition, path+(key,))
         except PathAccessError:
-            if verbose:
-                print(
-                    f"[{render_path(path, key)}]: Doesn't exist in target\n",
-                    file=output_stream)
             return key, False
 
         if isclass(def_val):
@@ -631,15 +646,27 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
             else:
                 return False
 
+        # This should also not throw any errors.
         def_values = get_path(definition, path+(key,))
 
+        # We expect to be comparing collections at this point.
+        if not isinstance(def_values, Remember) and \
+                (not is_collection(def_values) and not is_dictlike(def_values)):
+            return False
+
+        # Here, we compute the number of values there should be with a special case for 'single' Remember values.
+        if isinstance(def_values, Remember):
+            num_def_values = 1 + len(def_values.__args__) + len(def_values.__kwargs__)
+        else:
+            num_def_values = len(def_values)
+
         if strict:
-            if len(def_values) != len(new_items):
+            if num_def_values != len(new_items):
                 return False
 
         if is_collection(old_parent) and not is_dictlike(old_parent):
             # For tuples and list arguments, the lengths must match.
-            if len(def_values) != len(new_items):
+            if num_def_values != len(new_items):
                 return False
         final = True
         for val in map(lambda t: t[1], new_items):
