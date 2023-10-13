@@ -187,7 +187,7 @@ class Serializable(Remember):
             definition = unpickler(f.read())
 
         if definition != self.definition:
-            raise ValueError("Definition for data in directory {dir} doesn't match this object. Can't load")
+            raise ValueError(f"Definition ({definition}) for data in directory {dir} doesn't match this object ({self.definition}). Can't load")
 
         input_file = os.path.join(dir, 'object.pkl')
         with open(input_file, 'rb') as f:
