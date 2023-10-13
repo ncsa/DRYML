@@ -204,7 +204,6 @@ def test_basic_object_def_update_1():
         obj = objs.SimpleObject(10)
 
         from dryml.core2.definition import hash_value
-        print(f"type hash: {hash_value(type(obj))}")
 
         buffer = io.BytesIO()
 
@@ -225,7 +224,6 @@ def test_basic_object_def_update_1():
         importlib.reload(objs)
 
         from dryml.core2.definition import hash_value
-        print(f"type hash: {hash_value(objs.SimpleObject)}")
 
         obj2 = dryml.core2.load_object(dest=buffer)
 
