@@ -14,13 +14,42 @@ from dryml.core2.util import zip_directory, hashval_to_digest, \
 
 class BaseRepo:
     # Helper class for saving objects
-    def __init__(self):
+    def __init__(self, dir=None):
         self.objs = {}
         # Some helper variables for monitoring
         self._num_saves = 0
         self._num_constructions = 0
 
-    def save_object(self, obj):
+        # We expect the directory to exist.
+        if not os.path.exists(dir):
+            raise ValueError(f"Directory {dir} doesn't exist.")
+        self.dir = dir
+        self.obj_dir = os.path.join(self.dir, "objects")
+
+        # List the directory and find all the object directories
+        try:
+            obj_dirs = os.listdir(self.obj_dir)
+        except FileNotFoundError:
+            # The objects directory doesn't exist
+            os.mkdir(self.obj_dir)
+            obj_dirs = os.listdir(self.obj_dir)
+
+        # TODO: Do I really want to load all objects like this?
+        for obj_dir in obj_dirs:
+            obj_dir = os.path.join(self.obj_dir, obj_dir)
+            def_file = os.path.join(obj_dir, 'def.pkl')
+            with open(def_file, 'rb') as f:
+                obj_def = unpickler(f.read())
+            self.load_object(obj_def.concretize())
+
+        def_file = os.path.join(self.dir, "def.pkl")
+        if os.path.exists(def_file):
+            with open(def_file, "rb") as f:
+                self.main_def = unpickler(f.read())
+        else:
+            self.main_def = None
+
+    def save_object(self, obj, main=False):
         from dryml.core2.object import Serializable
         saved_objs = {}
         def _save_object_enter(path, key, value):
@@ -37,6 +66,7 @@ class BaseRepo:
             if isinstance(value, Serializable):
                 obj_def = value.definition.concretize()
                 if obj_def not in saved_objs:
+                    # TODO: Handle status checking here.
                     self.save_object_imp(value)
                     saved_objs[obj_def] = value
                     self._num_saves += 1
@@ -59,6 +89,9 @@ class BaseRepo:
                 visit=_save_object_visit,
                 exit=_save_object_exit)
 
+        # Save main object definition
+        if main:
+            self.main_def = obj.definition.concretize()
         return True
 
     def save_object_imp(self, obj):
@@ -68,18 +101,27 @@ class BaseRepo:
             if obj is not self.objs[obj_def]:
                 raise ValueError("We already have a different object with definition: {obj_def}")
         else:
+            # Add to repo-wide cache
             self.objs[obj_def] = obj
-        # We return the obj_def to prevent having to recalculate it in other functions
-        return obj_def
 
-    def load_object(self, obj_def):
+        # Create directory for object
+        def_hash_digest = hashval_to_digest(hash(obj_def))
+        object_path = os.path.join(self.dir, "objects", def_hash_digest)
+        os.mkdir(object_path)
+        # Save the object
+        return obj._save_to_dir(object_path)
+
+    def load_object(self, obj_def, build_missing=False):
         from dryml.core2.definition import Definition, \
             ConcreteDefinition
+        loaded_objs = {}
         def _load_object_enter(path, key, value):
+            nonlocal loaded_objs
             if type(value) is Definition:
                 raise TypeError("Definition not allowed here!")
             elif type(value) is ConcreteDefinition:
-                if value in self.objs:
+                if value in loaded_objs:
+                    # We have already loaded this object
                     return value, False
                 else:
                     return {}, ItemsView({'args': value['args'], 'kwargs': value['kwargs']})
@@ -87,26 +129,58 @@ class BaseRepo:
                 return default_enter(path, key, value)
 
         def _load_object_visit(path, key, value):
+            nonlocal loaded_objs
             # We do nothing here.
             if type(value) is ConcreteDefinition:
-                return key, self.objs[value]
+                # we already loaded this object, return it.
+                return key, loaded_objs[value]
             else:
                 return key, value
 
         def _load_object_exit(path, key, value, new_parent, new_items):
-            if isinstance(value, ConcreteDefinition):
-                # We need to create this object.
+            nonlocal loaded_objs
+            def _create_obj():
+                # method to actually create an object at this step
                 new_values = {}
                 for k, v in new_items:
                     new_values[k] = v
                 args = new_values['args']
                 kwargs = new_values['kwargs']
-                obj = value.cls(*args, **kwargs)
-                self.objs[value] = obj
-                # Trigger loading of data for this object
-                self.load_object_imp(value)
                 self._num_constructions += 1
-                return obj
+                return value.cls(*args, **kwargs)
+
+            if isinstance(value, ConcreteDefinition):
+                # Check if we already have this object
+                if value in self.objs:
+                    # we found it
+                    loaded_objs[value] = self.objs[value]
+                    return loaded_objs[value]
+
+                value_hash = hash(value)
+                value_hash_digest = hashval_to_digest(value_hash)
+                object_path = os.path.join(self.dir, "objects", value_hash_digest)
+                if not os.path.exists(object_path):
+                    if not build_missing:
+                        raise IndexError(f"Object with hash {value_hash} not found.")
+                    # We should build the object, but not create or load from a directory
+                    obj = _create_obj()
+                    self.objs[value] = obj
+                    loaded_objs[value] = obj
+                    return obj
+                else:
+                    obj = _create_obj()
+                    # confirm we have the same definition
+                    def_file = os.path.join(object_path, "def.pkl")
+                    with open(def_file, 'rb') as f:
+                        definition = unpickler(f.read())
+                        check_hash = hash(definition.concretize())
+                    if check_hash != value_hash:
+                        raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
+                    # Load the data from the directory
+                    obj._load_from_dir(object_path)
+                    self.objs[value] = obj
+                    loaded_objs[value] = obj
+                    return obj
             else:
                 return default_exit(path, key, value, new_parent, new_items)
         from dryml.core2.definition import Definition, \
@@ -130,72 +204,9 @@ class BaseRepo:
         if type(obj_def) is not ConcreteDefinition:
             raise TypeError("Only ConcreteDefinition is supported")
         # `load_object` should already have created the object if it doesn't exist in the cache yet.
-        return self.objs[obj_def]
+        obj = self.objs[obj_def]
 
-    def close(self):
-        pass
-
-
-class Repo(BaseRepo):
-    def __init__(self):
-        super().__init__()
-
-    def save_object_imp(self, obj):
-        super().save_object_imp(obj)
-
-    def load_object_imp(self, obj_def):
-        return super().load_object_imp(obj_def)
-
-
-class DirRepo(BaseRepo):
-    # A class to manage saving objects to a directory.
-    def __init__(self, dir):
-        super().__init__()
-        # We expect the directory to exist.
-        if not os.path.exists(dir):
-            raise ValueError(f"Directory {dir} doesn't exist.")
-        self.dir = dir
-        self.obj_dir = os.path.join(self.dir, "objects")
-        # List the directory and find all the hashes
-        try:
-            obj_dirs = os.listdir(self.obj_dir)
-        except FileNotFoundError:
-            # The objects directory doesn't exist
-            os.mkdir(self.obj_dir)
-            obj_dirs = os.listdir(self.obj_dir)
-
-        for obj_dir in obj_dirs:
-            obj_dir = os.path.join(self.obj_dir, obj_dir)
-            def_file = os.path.join(obj_dir, 'def.pkl')
-            with open(def_file, 'rb') as f:
-                obj_def = unpickler(f.read())
-            self.load_object(obj_def.concretize())
-
-        def_file = os.path.join(self.dir, "def.pkl")
-        if os.path.exists(def_file):
-            with open(def_file, "rb") as f:
-                self.main_def = unpickler(f.read())
-        else:
-            self.main_def = None
-
-    def save_object(self, obj, main=False):
-        from dryml.core2.object import Serializable
-        super().save_object(obj)
-        if main:
-            self.main_def = obj.definition.concretize()
-        return True
-
-    def save_object_imp(self, obj):
-        obj_def = super().save_object_imp(obj)
-        # Create directory for object
-        def_hash_digest = hashval_to_digest(hash(obj_def))
-        object_path = os.path.join(self.dir, "objects", def_hash_digest)
-        os.mkdir(object_path)
-        # Save the object
-        obj._save_to_dir(object_path)
-
-    def load_object_imp(self, obj_def):
-        obj = super().load_object_imp(obj_def)
+        # Original DirRepo implementation
         def_hash = hash(obj_def)
         def_hash_digest = hashval_to_digest(def_hash)
         object_path = os.path.join(self.dir, "objects", def_hash_digest)
@@ -212,58 +223,89 @@ class DirRepo(BaseRepo):
         obj._load_from_dir(object_path)
         return obj
 
-    def close(self):
-        super().close()
+    def write_main_def(self):
         if self.main_def is not None:
             def_file = os.path.join(self.dir, "def.pkl")
             pickle_to_file(self.main_def, def_file)
 
 
-class ZipRepo(DirRepo):
+    def close(self):
+        self.write_main_def()
+
+
+class Repo(BaseRepo):
+    def __init__(self, dir=None):
+        self._temp_dir = None
+
+        if dir is None:
+            # If none, get a temporary directory
+            self.prepare_temp_dir()
+            super().__init__(self._temp_dir.name)
+        else:
+            super().__init__(dir)
+
+    def create_temp_dir(self):
+        self._temp_dir = get_temp_directory()
+
+    def prepare_temp_dir(self):
+        self.create_temp_dir()
+
+    def close_temp_dir(self):
+        if self._temp_dir is not None:
+            self._temp_dir.__exit__(None, None, None)
+
+    def close(self):
+        self.write_main_def()
+        self.close_temp_dir()
+
+
+class ZipRepo(Repo):
     # A class meant to zip files 'directly' to a zipfile.
     def __init__(self, zip_dest):
-        # We load the zip file to a temporary directory
-        self.temp_dir = get_temp_directory()
+        # Save destination
+        self.zip_dest = zip_dest
 
+        # Initialize the Repo in temporary directory mode
+        super().__init__()
+
+    def prepare_temp_dir(self):
+        self.create_temp_dir()
+        dir = self._temp_dir.name
+
+        # Load the data if it exists
         def _load_data():
-            with zipfile.ZipFile(zip_dest, 'r') as zf:
-                zf.extractall(self.temp_dir.name)
+            with zipfile.ZipFile(self.zip_dest, 'r') as zf:
+                zf.extractall(dir)
 
         # Input validation
-        if isinstance(zip_dest, IOBase):
+        if isinstance(self.zip_dest, IOBase):
             # handles file-like objects
             # Check if the buffer has content, if so load it.
-            zip_dest.seek(0)
-            if zip_dest.read(1):
-                zip_dest.seek(0)
+            self.zip_dest.seek(0)
+            if self.zip_dest.read(1):
+                self.zip_dest.seek(0)
                 _load_data()
-                zip_dest.seek(0)
+                self.zip_dest.seek(0)
         else:
             # detect whether the path exists, and is a zip file
             try:
-                os.fspath(zip_dest)
+                os.fspath(self.zip_dest)
             except TypeError:
-                raise TypeError("zip_dest must be a path or a file-like object.")
-            if os.path.exists(zip_dest):
+                raise TypeError("self.zip_dest must be a path or a file-like object.")
+            if os.path.exists(self.zip_dest):
                 # Load the data if it exists
                 empty = False
-                with open(zip_dest, 'rb') as f:
+                with open(self.zip_dest, 'rb') as f:
                     if not f.read(1):
                         empty = True
                 if not empty:
                     _load_data()
 
-        # Save destination
-        self.zip_dest = zip_dest
-
-        super().__init__(self.temp_dir.name)
-
     def close(self):
-        super().close()
-        # Zip up the temp directory
-        zip_directory(self.temp_dir.name, self.zip_dest)
-        # Close the temp directory
-        self.temp_dir.__exit__(None, None, None)
+        self.write_main_def()
+        # Zip up the directory and its content to its final destination
+        zip_directory(self.dir, self.zip_dest)
+        self.close_temp_dir()
 
 
 @contextmanager
@@ -283,7 +325,7 @@ def manage_repo(dest=None, repo=None):
                 repo = ZipRepo(dest)
             elif os.path.exists(dest) and os.path.isdir(dest):
                 # We have a directory repo
-                repo = DirRepo(dest)
+                repo = Repo(dest)
             else:
                 # We will treat this as a zip repo
                 repo = ZipRepo(dest)
@@ -301,7 +343,9 @@ def save_object(obj, dest=None, repo=None):
         return True
 
 
-def load_object(obj_def=None, dest=None, repo=None):
+def load_object(
+        obj_def=None, dest=None, repo=None,
+        cls_remap=None):
     from dryml.core2.definition import Definition
     with manage_repo(dest=dest, repo=repo) as repo:
         if obj_def is None:
