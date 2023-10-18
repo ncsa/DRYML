@@ -435,7 +435,7 @@ def build_definition(obj):
 # Creating objects from definitions
 def build_from_definition(definition, build_missing=True, **kwargs):
     # First, concretize the definition
-    concrete_definition = definition.concretize()
+    concrete_definition = concretize_definition(definition)
 
     # concrete definitions refer to specific objects
 
