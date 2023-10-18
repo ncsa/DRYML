@@ -535,67 +535,57 @@ def test_object_def_2():
     assert new_obj.__kwargs__['msg'] == 10
 
 
-# def test_object_fac_1():
-#     import objects
+# TODO: possibly redundant test
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_object_save_restore_1(create_temp_named_file):
+    """
+    We test save and restore of nested objects through arguments
+    """
+    import core2_objects as objs
 
-#     obj_fac = dryml.ObjectFactory(
-#         dryml.ObjectDef(objects.HelloInt, msg=10))
+    # Create the data containing objects
+    data_obj1 = objs.TestClassC2(10)
+    data_obj1.set_val(20)
 
-#     obj = obj_fac()
+    data_obj2 = objs.TestClassC2(20)
+    data_obj2.set_val(40)
 
-#     assert isinstance(obj, objects.HelloInt)
-#     assert obj.dry_kwargs['msg'] == 10
+    # Enclose them in another object
+    obj = objs.TestClassC(data_obj1, B=data_obj2)
 
+    assert obj.save(create_temp_named_file)
 
-# @pytest.mark.usefixtures("create_temp_named_file")
-# def test_object_save_restore_1(create_temp_named_file):
-#     """
-#     We test save and restore of nested objects through arguments
-#     """
-#     import objects
+    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
 
-#     # Create the data containing objects
-#     data_obj1 = objects.TestClassC2(10)
-#     data_obj1.set_val(20)
-
-#     data_obj2 = objects.TestClassC2(20)
-#     data_obj2.set_val(40)
-
-#     # Enclose them in another object
-#     obj = objects.TestClassC(data_obj1, B=data_obj2)
-
-#     assert obj.save_self(create_temp_named_file)
-
-#     obj2 = dryml.load_object(create_temp_named_file)
-
-#     assert obj.definition() == obj2.definition()
-#     assert obj.A.data == obj2.A.data
-#     assert obj.B.data == obj2.B.data
+    assert obj.definition == obj2.definition
+    assert obj.A.data == obj2.A.data
+    assert obj.B.data == obj2.B.data
 
 
-# @pytest.mark.usefixtures("create_temp_named_file")
-# def test_object_save_restore_2(create_temp_named_file):
-#     """
-#     We test save and restore of nested objects through arguments
-#     This time, we make sure identical objects are loaded as
-#     the same object.
-#     """
-#     import objects
+# TODO: possibly redundant test
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_object_save_restore_2(create_temp_named_file):
+    """
+    We test save and restore of nested objects through arguments
+    This time, we make sure identical objects are loaded as
+    the same object.
+    """
+    import core2_objects as objs
 
-#     # Create the data containing objects
-#     data_obj1 = objects.TestClassC2(10)
-#     data_obj1.set_val(20)
+    # Create the data containing objects
+    data_obj1 = objs.TestClassC2(10)
+    data_obj1.set_val(20)
 
-#     # Enclose them in another object
-#     obj = objects.TestClassC(data_obj1, B=data_obj1)
+    # Enclose them in another object
+    obj = objs.TestClassC(data_obj1, B=data_obj1)
 
-#     assert obj.save_self(create_temp_named_file)
+    assert obj.save(create_temp_named_file)
 
-#     # Load the object from the file
-#     obj2 = dryml.load_object(create_temp_named_file)
+    # Load the object from the file
+    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
 
-#     assert obj.definition() == obj2.definition()
-#     assert obj.A is obj.B
+    assert obj.definition == obj2.definition
+    assert obj.A is obj.B
 
 
 # @pytest.mark.usefixtures("create_temp_named_file")

@@ -1,4 +1,6 @@
 from dryml.core2.object import Remember, UniqueID, Metadata, Serializable
+import os
+from dryml.core2.util import pickler, unpickler
 
 
 class HelloObject(Serializable, UniqueID):
@@ -57,10 +59,31 @@ class TestClassF1(Remember, UniqueID):
         self.val = None
 
 
-class TestClassC(Remember):
+class TestClassC(Serializable):
     def __init__(self, A, B=None):
         self.A = A
         self.B = B
+
+
+class TestClassC2(Serializable):
+    def __init__(self, C):
+        self.C = C
+        self.data = 0
+
+    def set_val(self, val):
+        self.data = val
+
+    def _save_to_dir_imp(self, dir: str):
+        data_file = os.path.join(dir, 'data.pkl')
+        with open(data_file, 'wb') as f:
+            f.write(pickler(self.data))
+        return True
+
+    def _load_from_dir_imp(self, dir: str):
+        data_file = os.path.join(dir, 'data.pkl')
+        with open(data_file, 'rb') as f:
+            self.data = unpickler(f.read())
+        return True
 
 
 class TestClass1(Remember):

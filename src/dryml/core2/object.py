@@ -171,6 +171,9 @@ class Serializable(Remember):
         def_file = os.path.join(dir, 'def.pkl')
         pickle_to_file(self.definition, def_file)
 
+        return self._save_to_dir_imp(dir)
+
+    def _save_to_dir_imp(self, dir: str):
         output_file = os.path.join(dir, 'object.pkl')
         pickle_to_file(self, output_file)
 
@@ -189,6 +192,9 @@ class Serializable(Remember):
         if definition != self.definition:
             raise ValueError(f"Definition ({definition}) for data in directory {dir} doesn't match this object ({self.definition}). Can't load")
 
+        self._load_from_dir_imp(dir)
+
+    def _load_from_dir_imp(self, dir: str):
         input_file = os.path.join(dir, 'object.pkl')
         with open(input_file, 'rb') as f:
             obj = unpickler(f.read())
