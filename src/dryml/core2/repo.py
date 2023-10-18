@@ -337,7 +337,8 @@ def manage_repo(dest=None, repo=None):
 
 # Saving and Loading
 def save_object(obj, dest=None, repo=None):
-    main = repo is None
+    from dryml.core2 import Remember
+    main = (repo is None) and (isinstance(obj, Remember))
     with manage_repo(dest=dest, repo=repo) as repo:
         repo.save_object(obj, main=main)
         return True
@@ -346,8 +347,8 @@ def save_object(obj, dest=None, repo=None):
 def load_object(
         obj_def=None, dest=None, repo=None,
         cls_remap=None):
-    from dryml.core2.definition import Definition
+    from dryml.core2.definition import Definition, concretize_definition
     with manage_repo(dest=dest, repo=repo) as repo:
         if obj_def is None:
             obj_def = repo.main_def
-        return repo.load_object(obj_def.concretize())
+        return repo.load_object(concretize_definition(obj_def))

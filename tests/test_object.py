@@ -588,87 +588,86 @@ def test_object_save_restore_2(create_temp_named_file):
     assert obj.A is obj.B
 
 
-# @pytest.mark.usefixtures("create_temp_named_file")
-# def test_object_save_restore_3(create_temp_named_file):
-#     """
-#     We test save and restore of nested objects through arguments
-#     Deeper nesting
-#     """
-#     import objects
+@pytest.mark.usefixtures("create_temp_named_file")
+def test_object_save_restore_3(create_temp_named_file):
+    """
+    We test save and restore of nested objects through arguments
+    Deeper nesting
+    """
+    import core2_objects as objs
 
-#     # Create the data containing objects
-#     data_obj1 = objects.TestClassC2(10)
-#     data_obj1.set_val(20)
+    # Create the data containing objects
+    data_obj1 = objs.TestClassC2(10)
+    data_obj1.set_val(20)
 
-#     data_obj2 = objects.TestClassC2(20)
-#     data_obj2.set_val(40)
+    data_obj2 = objs.TestClassC2(20)
+    data_obj2.set_val(40)
 
-#     data_obj3 = objects.TestClassC2('test')
-#     data_obj3.set_val('test')
+    data_obj3 = objs.TestClassC2('test')
+    data_obj3.set_val('test')
 
-#     data_obj4 = objects.TestClassC2(0.5)
-#     data_obj4.set_val(30.5)
+    data_obj4 = objs.TestClassC2(0.5)
+    data_obj4.set_val(30.5)
 
-#     obj1 = objects.TestClassC(data_obj1, B=data_obj2)
-#     obj2 = objects.TestClassC(data_obj3, B=data_obj4)
+    obj1 = objs.TestClassC(data_obj1, B=data_obj2)
+    obj2 = objs.TestClassC(data_obj3, B=data_obj4)
 
-#     # Enclose them in another object
-#     obj = objects.TestClassC(obj1, B=obj2)
+    # Enclose them in another object
+    obj = objs.TestClassC(obj1, B=obj2)
 
-#     assert obj.save_self(create_temp_named_file)
+    assert obj.save(create_temp_named_file)
 
-#     # Load the object from the file
-#     obj2 = dryml.load_object(create_temp_named_file)
+    # Load the object from the file
+    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
 
-#     assert obj.definition() == obj2.definition()
-#     assert obj.A.A.data == obj2.A.A.data
-#     assert obj.A.B.data == obj2.A.B.data
-#     assert obj.B.A.data == obj2.B.A.data
-#     assert obj.B.B.data == obj2.B.B.data
+    assert obj.definition == obj2.definition
+    assert obj.A.A.data == obj2.A.A.data
+    assert obj.A.B.data == obj2.A.B.data
+    assert obj.B.A.data == obj2.B.A.data
+    assert obj.B.B.data == obj2.B.B.data
 
 
-# def test_object_save_restore_4():
-#     """
-#     Test saving/restoring arguments/kwargs
-#     """
+def test_object_save_restore_4():
+    """
+    Test saving/restoring arguments/kwargs
+    """
 
-#     import objects
+    import core2_objects as objs
 
-#     # Create the data containing objects
-#     data_obj1 = objects.TestClassC2(10)
-#     data_obj1.set_val(20)
+    # Create the data containing objects
+    data_obj1 = objs.TestClassC2(10)
+    data_obj1.set_val(20)
 
-#     data_obj2 = objects.TestClassC2(20)
-#     data_obj2.set_val(40)
+    data_obj2 = objs.TestClassC2(20)
+    data_obj2.set_val(40)
 
-#     data_obj3 = objects.TestClassC2('test')
-#     data_obj3.set_val('test')
+    data_obj3 = objs.TestClassC2('test')
+    data_obj3.set_val('test')
 
-#     data_obj4 = objects.TestClassC2(0.5)
-#     data_obj4.set_val(30.5)
+    data_obj4 = objs.TestClassC2(0.5)
+    data_obj4.set_val(30.5)
 
-#     obj1 = objects.TestClassC(data_obj1, B=data_obj2)
-#     obj2 = objects.TestClassC(data_obj3, B=data_obj4)
+    obj1 = objs.TestClassC(data_obj1, B=data_obj2)
+    obj2 = objs.TestClassC(data_obj3, B=data_obj4)
 
-#     from dryml.core.object import DryObjectPlaceholder, \
-#         prep_args_kwargs, reconstruct_args_kwargs
+    args = (obj1, obj2)
+    # Create definitions for the objects we want to save
+    args_def = dryml.core2.definition.build_definition(args)
 
-#     args = (obj1, obj2)
+    # Save objects to a buffer
+    save_buffer = io.BytesIO()
+    dryml.core2.save_object(args, dest=save_buffer)
 
-#     (args, kwargs), ph = prep_args_kwargs(args, {})
+    # Load objects from buffer
+    new_args = dryml.core2.load_object(args_def, dest=save_buffer)
 
-#     assert type(args[0]) is DryObjectPlaceholder
-#     assert type(args[1]) is DryObjectPlaceholder
+    assert type(new_args[0]) is objs.TestClassC
+    assert type(new_args[1]) is objs.TestClassC
 
-#     reconstruct_args_kwargs(args, kwargs, ph)
-
-#     assert type(args[0]) is objects.TestClassC
-#     assert type(args[1]) is objects.TestClassC
-
-#     assert obj1.A.data == args[0].A.data
-#     assert obj1.B.data == args[0].B.data
-#     assert obj2.A.data == args[1].A.data
-#     assert obj2.B.data == args[1].B.data
+    assert obj1.A.data == new_args[0].A.data
+    assert obj1.B.data == new_args[0].B.data
+    assert obj2.A.data == new_args[1].A.data
+    assert obj2.B.data == new_args[1].B.data
 
 
 # def test_object_save_restore_5():
