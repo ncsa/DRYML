@@ -511,26 +511,28 @@ def test_object_hash_4(create_name):
 #     assert obj1.dry_kwargs['item'] == obj2.dry_kwargs['item']
 
 
-# def test_object_def_1():
-#     import objects
-#     obj_def = dryml.ObjectDef(objects.HelloInt, msg=10)
-#     other_def = dryml.ObjectDef(
-#         objects.HelloInt,
-#         msg=10)
+# TODO: possibly redundant test
+def test_object_def_1():
+    import core2_objects as objs
+    obj_def = Definition(objs.HelloInt, msg=10)
+    other_def = Definition(
+        objs.HelloInt,
+        msg=10)
 
-#     assert obj_def['cls'] is other_def['cls']
-#     assert obj_def['dry_args'] == obj_def['dry_args']
-#     assert obj_def['dry_kwargs'] == obj_def['dry_kwargs']
+    assert obj_def.cls is other_def.cls
+    assert obj_def.args == obj_def.args
+    assert obj_def.kwargs == obj_def.kwargs
 
 
-# def test_object_def_2():
-#     import objects
-#     obj_def = dryml.ObjectDef(objects.HelloInt, msg=10)
+# TODO: possibly redundant test
+def test_object_def_2():
+    import core2_objects as objs
+    obj_def = Definition(objs.HelloInt, msg=10)
 
-#     new_obj = obj_def.build()
+    new_obj = obj_def.build()
 
-#     assert isinstance(new_obj, objects.HelloInt)
-#     assert new_obj.dry_kwargs['msg'] == 10
+    assert isinstance(new_obj, objs.HelloInt)
+    assert new_obj.__kwargs__['msg'] == 10
 
 
 # def test_object_fac_1():
