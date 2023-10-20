@@ -192,6 +192,25 @@ def test_save_object_6(create_temp_named_file):
     assert desc_str == obj2.__kwargs__['metadata']['description']
 
 
+def test_save_object_7():
+    """Test that we can't save objects which don't inherit from Serializable"""
+
+    import core2_objects as objs
+    from dryml.core2.object import Remember, Serializable
+    from dryml.core2.repo import save_object
+
+    obj = objs.TestNest(10)
+
+    assert isinstance(obj, Remember)
+    assert not isinstance(obj, Serializable)
+
+    try:
+        save_object(obj)
+        assert False
+    except ValueError:
+        pass
+
+
 def test_basic_object_def_update_1():
     def build_and_save_obj_1():
         time.sleep(1.1)
@@ -670,46 +689,44 @@ def test_object_save_restore_4():
     assert obj2.B.data == new_args[1].B.data
 
 
-# def test_object_save_restore_5():
-#     """
-#     Test saving/restoring arguments/kwargs
-#     """
+def test_object_save_restore_5():
+    """
+    Test saving/restoring arguments/kwargs
+    """
 
-#     import objects
+    import core2_objects as objs
 
-#     # Create the data containing objects
-#     model_obj = objects.TestNest(10)
-#     opt_obj = objects.TestNest3(20, model=model_obj)
-#     loss_obj = objects.TestNest2(A='func')
-#     train_fn_obj = objects.TestNest3(
-#         optimizer=opt_obj,
-#         loss=loss_obj,
-#         epochs=10)
+    # Create the data containing objects
+    model_obj = objs.TestNest2(A=10)
+    opt_obj = objs.TestNest3(20, model=model_obj)
+    loss_obj = objs.TestNest2(A='func')
+    train_fn_obj = objs.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
 
-#     trainable_obj = objects.TestNest3(
-#         model=model_obj,
-#         train_fn=train_fn_obj
-#     )
+    trainable_obj = objs.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
 
-#     from dryml.core.object import DryObjectPlaceholder, \
-#         prep_args_kwargs, reconstruct_args_kwargs
+    args = (trainable_obj,)
 
-#     args = (trainable_obj,)
+    args_defs = dryml.core2.definition.build_definition(args)
 
-#     (args, kwargs), ph = prep_args_kwargs(args, {})
+    save_buffer = io.BytesIO()
+    dryml.core2.save_object(args, dest=save_buffer)
 
-#     assert type(args[0]) is DryObjectPlaceholder
+    new_args = dryml.core2.load_object(args_defs, dest=save_buffer)
 
-#     reconstruct_args_kwargs(args, kwargs, ph)
+    recon_trainable_obj = new_args[0]
+    assert type(recon_trainable_obj) is objs.TestNest3
 
-#     recon_trainable_obj = args[0]
-#     assert type(recon_trainable_obj) is objects.TestNest3
-
-#     assert recon_trainable_obj['model'] is \
-#         recon_trainable_obj['train_fn']['optimizer']['model']
-#     assert recon_trainable_obj['train_fn']['epochs'] == 10
-#     assert recon_trainable_obj['model'].A == 10
-#     assert recon_trainable_obj['train_fn']['optimizer'][0] == 20
+    assert recon_trainable_obj['model'] is \
+        recon_trainable_obj['train_fn']['optimizer']['model']
+    assert recon_trainable_obj['train_fn']['epochs'] == 10
+    assert recon_trainable_obj['model'].A == 10
+    assert recon_trainable_obj['train_fn']['optimizer'][0] == 20
 
 
 # def test_nested_def_build_1():
