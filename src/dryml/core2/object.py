@@ -118,7 +118,7 @@ class UniqueID(Object):
         return args, kwargs
 
     @staticmethod
-    def __strip_unique__(cls_super, *args, **kwargs):
+    def __strip_unique_args__(cls_super, *args, **kwargs):
         kwargs = kwargs.copy()
         if 'uid' in kwargs:
             del kwargs['uid']
@@ -144,7 +144,7 @@ class Metadata(Object):
         return args, kwargs
 
     @staticmethod
-    def __strip_unique__(cls_super, *args, **kwargs):
+    def __strip_unique_args__(cls_super, *args, **kwargs):
         kwargs = kwargs.copy()
         if 'metadata' in kwargs:
             del kwargs['metadata']
