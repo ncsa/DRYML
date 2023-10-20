@@ -33,7 +33,7 @@ def definition_exit(path, key, value, new_parent, new_items):
 
 
 def deepcopy_skip_definition_object(defn):
-    def _deepcopy_enter(path, key, value):
+    def _enter(path, key, value):
         from dryml.core2.object import Object
         if isinstance(value, Object):
             return value, False
@@ -42,7 +42,7 @@ def deepcopy_skip_definition_object(defn):
         else:
             return default_enter(path, key, value)
 
-    def _deepcopy_visit(path, key, value):
+    def _visit(path, key, value):
         from dryml.core2.object import Object
         if isinstance(value, Object):
             # We have an already realized class instance. We shouldn't deep copy it.
@@ -57,9 +57,17 @@ def deepcopy_skip_definition_object(defn):
             return key, deepcopy(value)
 
     if type(defn) is Definition:
-        return remap([defn], enter=_deepcopy_enter, visit=_deepcopy_visit, exit=definition_exit)[0]
+        return remap(
+            [defn],
+            enter=_enter,
+            visit=_visit,
+            exit=definition_exit)[0]
     else:
-        return remap(defn, enter=_deepcopy_enter, visit=_deepcopy_visit, exit=definition_exit)
+        return remap(
+            defn,
+            enter=_enter,
+            visit=_visit,
+            exit=definition_exit)
 
 
 # Special value to skip args
@@ -159,7 +167,7 @@ def categorical_definition(defn: Definition, recursive=True):
     definition_cache = {}
     level = 0
 
-    def _categorical_def_enter(path, key, value):
+    def _enter(path, key, value):
         if id(value) in definition_cache:
             return value, False
         elif isinstance(value, Remember):
@@ -171,7 +179,7 @@ def categorical_definition(defn: Definition, recursive=True):
         else:
             return default_enter(path, key, value)
 
-    def _categorical_def_visit(path, key, value):
+    def _visit(path, key, value):
         if isinstance(value, ConcreteDefinition):
             # We shouldn't have any ConcreteDefinitions at this point
             raise TypeError("ConcreteDefinition should not be here at this point")
@@ -180,7 +188,7 @@ def categorical_definition(defn: Definition, recursive=True):
         else:
             return key, value
 
-    def _categorical_def_exit(path, key, value, new_parent, new_items):
+    def _exit(path, key, value, new_parent, new_items):
         if isinstance(value, Definition):
             # This should catch both Definitions and ConcreteDefinitions
             nonlocal level
@@ -205,15 +213,15 @@ def categorical_definition(defn: Definition, recursive=True):
     if isinstance(new_def, Definition):
         return remap(
             [new_def],
-            enter=_categorical_def_enter,
-            visit=_categorical_def_visit,
-            exit=_categorical_def_exit)[0]
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)[0]
     else:
         return remap(
             new_def,
-            enter=_categorical_def_enter,
-            visit=_categorical_def_visit,
-            exit=_categorical_def_exit)
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)
 
 
 def concretize_definition(defn: Definition):
@@ -221,7 +229,7 @@ def concretize_definition(defn: Definition):
     # Key for this cache will be the ConcreteDefinition hash.
     definition_cache = {}
 
-    def _concretize_definition_enter(path, key, value):
+    def _enter(path, key, value):
         if id(value) in definition_cache:
             return value, False
         elif type(value) is ConcreteDefinition:
@@ -230,7 +238,7 @@ def concretize_definition(defn: Definition):
         else:
             return definition_enter(path, key, value)
 
-    def _concretize_definition_visit(path, key, value):
+    def _visit(path, key, value):
         from dryml.core2.object import Object
         if id(value) in definition_cache: 
             return key, definition_cache[id(value)]
@@ -245,7 +253,7 @@ def concretize_definition(defn: Definition):
         else:
             return key, deepcopy(value)
 
-    def _concretize_definition_exit(path, key, values, new_parent, new_items):
+    def _exit(path, key, values, new_parent, new_items):
         if isinstance(values, Definition):
             for k, v in new_items:
                 new_parent[k] = v
@@ -272,15 +280,15 @@ def concretize_definition(defn: Definition):
     if isinstance(defn, Definition):
         return remap(
             [defn],
-            enter=_concretize_definition_enter,
-            visit=_concretize_definition_visit,
-            exit=_concretize_definition_exit)[0]
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)[0]
     else:
         return remap(
             defn,
-            enter=_concretize_definition_enter,
-            visit=_concretize_definition_visit,
-            exit=_concretize_definition_exit)
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)
 
 
 class ConcreteDefinition(Definition):
@@ -323,7 +331,7 @@ def hash_function(structure):
         def __init__(self, the_hash):
             self.hash = the_hash
 
-    def _hash_visit(path, key, value):
+    def _visit(path, key, value):
         # Skip if it's a hashlib hasher
         if isinstance(value, HashHelper):
             return key, value.hash
@@ -332,7 +340,7 @@ def hash_function(structure):
     
         return key, hash_value(value)
 
-    def _hash_exit(path, key, old_parent, new_parent, new_items):
+    def _exit(path, key, old_parent, new_parent, new_items):
         # At this point, all items should be hashes
 
         # sort the items. format is [(key, value)]
@@ -348,7 +356,11 @@ def hash_function(structure):
 
         return HashHelper(new_hash)
 
-    return remap(structure, enter=definition_enter, visit=_hash_visit, exit=_hash_exit).hash
+    return remap(
+        structure,
+        enter=definition_enter,
+        visit=_visit,
+        exit=_exit).hash
 
 
 # Creating definitions from objects
@@ -356,7 +368,7 @@ def build_definition(obj):
     instance_cache = {}
     from dryml.core2.object import Remember
 
-    def _build_definition_enter(path, key, value):
+    def _enter(path, key, value):
         id_value = id(value)
         if id_value in instance_cache:
             return value, False
@@ -377,7 +389,7 @@ def build_definition(obj):
         else:
             return default_enter(path, key, value)
 
-    def _build_definition_visit(_, key, value):
+    def _visit(_, key, value):
         id_value = id(value)
         if id_value in instance_cache:
             # First return any instance we have already cached
@@ -402,7 +414,7 @@ def build_definition(obj):
             # This is a regular value. We need to deepcopy it.
             return key, deepcopy(value)
 
-    def _build_definition_exit(path, key, values, new_parent, new_items):
+    def _exit(path, key, values, new_parent, new_items):
         if isinstance(values, Remember) and type(new_parent) is dict:
             new_values = {}
             for k, v in new_items:
@@ -427,9 +439,17 @@ def build_definition(obj):
             return default_exit(path, key, values, new_parent, new_items)
 
     if isinstance(obj, Remember):
-        return remap([obj], enter=_build_definition_enter, visit=_build_definition_visit, exit=_build_definition_exit)[0]
+        return remap(
+            [obj],
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)[0]
     else:
-        return remap(obj, enter=_build_definition_enter, visit=_build_definition_visit, exit=_build_definition_exit)
+        return remap(
+            obj,
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)
 
 
 
@@ -441,7 +461,7 @@ def build_from_definition(definition, build_missing=True, **kwargs):
     # concrete definitions refer to specific objects
 
     with manage_repo(**kwargs) as repo:
-        def build_from_definition_visit(_, key, value):
+        def _visit(_, key, value):
             if type(value) is Definition:
                 raise TypeError("Definitions should've been turned into ConcreteDefinitions at this point")
             elif type(value) is ConcreteDefinition:
@@ -452,9 +472,17 @@ def build_from_definition(definition, build_missing=True, **kwargs):
                 return key, value
 
         if isinstance(definition, Definition):
-            return remap([concrete_definition], enter=definition_enter, visit=build_from_definition_visit, exit=definition_exit)[0]
+            return remap(
+                [concrete_definition],
+                enter=definition_enter,
+                visit=_visit,
+                exit=definition_exit)[0]
         else:
-            return remap(concrete_definition, enter=definition_enter, visit=build_from_definition_visit, exit=definition_exit)
+            return remap(
+                concrete_definition,
+                enter=definition_enter,
+                visit=_visit,
+                exit=definition_exit)
 
 
 def get_path(obj_or_def, path):
@@ -510,7 +538,7 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
     # Additionally, Definitions which skip args also aren't allowed
     from dryml.core2.object import Remember
 
-    def _selector_match_enter(path, key, value):
+    def _enter(path, key, value):
         # Check if this key/path exists in the definition
         try:
             def_val = get_path(definition, path+(key,))
@@ -528,7 +556,7 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
         else:
             return default_enter(path, key, value)
 
-    def _selector_match_visit(path, key, value):
+    def _visit(path, key, value):
         # Try to get the value at the right path from the definition
         # Grab the definition value
         try:
@@ -637,7 +665,7 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
                 return key, condition
             
 
-    def _selector_match_exit(path, key, old_parent, new_parent, new_items):
+    def _exit(path, key, old_parent, new_parent, new_items):
         # Type check
         if type(old_parent) != type(new_parent):
             if isinstance(old_parent, Definition) or isinstance(old_parent, Remember):
@@ -676,4 +704,8 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
 
     # We reduce across the selector because we are only checking the values supplied
     # In the selector.
-    return remap(selector, enter=_selector_match_enter, visit=_selector_match_visit, exit=_selector_match_exit)
+    return remap(
+        selector,
+        enter=_enter,
+        visit=_visit,
+        exit=_exit)
