@@ -3,7 +3,7 @@ import core2_objects as objs
 import copy
 
 
-def test_def_5():
+def test_def_1():
     """
     A case which looks at stripping id methods
     """
@@ -36,73 +36,73 @@ def test_def_5():
     assert obj_class_def == obj_def
 
 
-# def test_def_6():
-#     """
-#     A case which looks at stripping id methods
-#     """
+def test_def_2():
+    """
+    A case which looks at stripping id methods
+    """
 
-#     obj = objects.TestNest(('test', 'test'))
-#     obj_def = obj.definition().get_cat_def()
+    obj = objs.TestNest4(('test', 'test'))
+    obj_def = obj.definition.categorical()
 
-#     assert type(obj_def.args[0]) is tuple
-#     assert obj_def.args[0][0] == 'test'
-#     assert obj_def.args[0][1] == 'test'
+    assert type(obj_def.args[0]) is tuple
+    assert obj_def.args[0][0] == 'test'
+    assert obj_def.args[0][1] == 'test'
 
-#     obj = objects.TestNest(['test', 'test'])
-#     obj_def = obj.definition().get_cat_def()
+    obj = objs.TestNest4(['test', 'test'])
+    obj_def = obj.definition.categorical()
 
-#     assert type(obj_def.args[0]) is list
-#     assert obj_def.args[0][0] == 'test'
-#     assert obj_def.args[0][1] == 'test'
+    assert type(obj_def.args[0]) is list
+    assert obj_def.args[0][0] == 'test'
+    assert obj_def.args[0][1] == 'test'
 
 
-# def test_def_7():
+def test_def_3():
+    """
+    A case which looks at nested definition
+    building indifferent situations
+    """
+
+    # Create the data containing objects
+    model_obj = objs.TestNest(10)
+    opt_obj = objs.TestNest3(20, model=model_obj)
+    loss_obj = objs.TestNest2(A='func')
+    train_fn_obj = objs.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
+
+    trainable_obj = objs.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
+
+    obj_def = trainable_obj.definition
+
+    assert obj_def.kwargs['model'] is \
+        obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
+
+
+# def test_def_4():
 #     """
 #     A case which looks at nested definition
 #     building indifferent situations
 #     """
 
 #     # Create the data containing objects
-#     model_obj = objects.TestNest(10)
-#     opt_obj = objects.TestNest3(20, model=model_obj)
-#     loss_obj = objects.TestNest2(A='func')
-#     train_fn_obj = objects.TestNest3(
+#     model_obj = objs.TestNest(10)
+#     opt_obj = objs.TestNest3(20, model=model_obj)
+#     loss_obj = objs.TestNest2(A='func')
+#     train_fn_obj = objs.TestNest3(
 #         optimizer=opt_obj,
 #         loss=loss_obj,
 #         epochs=10)
 
-#     trainable_obj = objects.TestNest3(
+#     trainable_obj = objs.TestNest3(
 #         model=model_obj,
 #         train_fn=train_fn_obj
 #     )
 
-#     obj_def = trainable_obj.definition()
-
-#     assert obj_def.kwargs['model'] is \
-#         obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
-
-
-# def test_def_8():
-#     """
-#     A case which looks at nested definition
-#     building indifferent situations
-#     """
-
-#     # Create the data containing objects
-#     model_obj = objects.TestNest(10)
-#     opt_obj = objects.TestNest3(20, model=model_obj)
-#     loss_obj = objects.TestNest2(A='func')
-#     train_fn_obj = objects.TestNest3(
-#         optimizer=opt_obj,
-#         loss=loss_obj,
-#         epochs=10)
-
-#     trainable_obj = objects.TestNest3(
-#         model=model_obj,
-#         train_fn=train_fn_obj
-#     )
-
-#     obj_def = trainable_obj.definition()
+#     obj_def = trainable_obj.definition
 
 #     # Building from plain definition
 #     trainable_obj_built = obj_def.build()
@@ -115,7 +115,7 @@ def test_def_5():
 #     assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
 
 #     # Building from 'class' definition
-#     trainable_obj_built = obj_def.get_cat_def(recursive=True).build()
+#     trainable_obj_built = obj_def.categorical(recursive=True).build()
 
 #     assert trainable_obj_built['model'] is \
 #         trainable_obj_built['train_fn']['optimizer']['model']
