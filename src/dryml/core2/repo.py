@@ -50,9 +50,11 @@ class BaseRepo:
             self.main_def = None
 
     def save_object(self, obj, main=False):
-        from dryml.core2.object import Serializable
+        from dryml.core2.object import Remember, Serializable
         saved_objs = {}
         def _save_object_enter(path, key, value):
+            if isinstance(value, Remember) and not isinstance(value, Serializable):
+                raise ValueError(f"Cannot save non-serializable Remember object {value}")
             if isinstance(value, Serializable):
                 result = {'args': value.__args__, 'kwargs': value.__kwargs__}
                 return {}, ItemsView(result)
@@ -337,8 +339,8 @@ def manage_repo(dest=None, repo=None):
 
 # Saving and Loading
 def save_object(obj, dest=None, repo=None):
-    from dryml.core2 import Remember
-    main = (repo is None) and (isinstance(obj, Remember))
+    from dryml.core2 import Serializable
+    main = (repo is None) and (isinstance(obj, Serializable))
     with manage_repo(dest=dest, repo=repo) as repo:
         repo.save_object(obj, main=main)
         return True

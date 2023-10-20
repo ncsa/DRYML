@@ -53,6 +53,24 @@ class TestNest(Remember):
         self.A = A
 
 
+class TestNest2(Serializable):
+    def __init__(self, A=None):
+        self.A = A
+
+
+class TestNest3(Serializable):
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __getitem__(self, key):
+        if type(key) is str:
+            return self.__kwargs__[key]
+        elif type(key) is int:
+            return self.__args__[key]
+        else:
+            raise KeyError()
+
+
 class TestClassF1(Remember, UniqueID):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
