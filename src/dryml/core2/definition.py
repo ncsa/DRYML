@@ -192,11 +192,12 @@ def categorical_definition(defn: Definition, recursive=True):
             kwargs = new_vals['kwargs']
             if not recursive:
                 if level == 0:
-                    # Only apply __strip_unique__ at the lowest level.
-                    args, kwargs = cls_super(new_vals['cls']).__strip_unique__(*args, **kwargs)
+                    # Only apply __strip_unique_args__ at the lowest level.
+                    args, kwargs = cls_super(new_vals['cls']).__strip_unique_args__(*args, **kwargs)
             else:
-                # Apply __strip_unique__ at all levels.
-                args, kwargs = cls_super(new_vals['cls']).__strip_unique__(*args, **kwargs)
+                # Apply __strip_unique_args__ at all levels.
+                cls_s = cls_super(new_vals['cls'])
+                args, kwargs = cls_s.__strip_unique_args__(*args, **kwargs)
             return Definition(new_vals['cls'], *args, **kwargs)
         else:
             return default_exit(path, key, value, new_parent, new_items)

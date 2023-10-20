@@ -71,6 +71,12 @@ class TestNest3(Serializable):
             raise KeyError()
 
 
+class TestNest4(Remember, UniqueID):
+    def __init__(self, A, **kwargs):
+        super().__init__(**kwargs)
+        self.A = A
+
+
 class TestClassF1(Remember, UniqueID):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
