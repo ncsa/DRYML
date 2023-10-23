@@ -123,3 +123,30 @@ def test_def_3():
 #     assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
 #     assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
 #     assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
+
+
+def test_unique_objs_1():
+    # Create the data containing objects
+    model_obj = objs.TestNest(10)
+    opt_obj = objs.TestNest3(20, model=model_obj)
+    loss_obj = objs.TestNest2(A='func')
+    train_fn_obj = objs.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
+
+    trainable_obj = objs.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
+
+    from dryml.core2.definition import unique_remember_objects
+
+    unique_objs = unique_remember_objects(trainable_obj)
+
+    assert len(unique_objs) == 5
+    assert model_obj in unique_objs
+    assert opt_obj in unique_objs
+    assert loss_obj in unique_objs
+    assert train_fn_obj in unique_objs
+    assert trainable_obj in unique_objs

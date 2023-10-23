@@ -62,6 +62,13 @@ class Remember(Object):
     def definition(self):
         return build_definition(self)
 
+    @cached_property
+    def concrete_definition(self):
+        return self.definition.concretize()
+
+    def __hash__(self):
+        return hash(self.concrete_definition)
+
     def __repr__(self):
         return f"<{self.__class__.__name__} at {hex(id(self))}>(args={self.__args__}, kwargs={self.__kwargs__})"
 
