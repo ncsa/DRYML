@@ -143,6 +143,10 @@ def get_remember_view(obj):
     return ItemsView({'cls': type(obj), 'args': obj.__args__, 'kwargs': obj.__kwargs__})
 
 
+def get_definition_view(defn):
+    return ItemsView(defn)
+
+
 def get_unique_objects(obj):
     from dryml.core2.object import Remember
 

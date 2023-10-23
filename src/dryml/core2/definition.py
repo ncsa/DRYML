@@ -1,5 +1,4 @@
 from copy import deepcopy
-from collections.abc import ItemsView
 from boltons.iterutils import remap, is_collection, PathAccessError, default_enter, default_exit
 import hashlib
 from inspect import isclass
@@ -8,13 +7,13 @@ import sys
 
 from dryml.core2.util import is_dictlike, cls_super, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
-    digest_to_hashval, get_remember_view
+    digest_to_hashval, get_remember_view, get_definition_view
 from dryml.core2.repo import manage_repo
 
 
 def definition_enter(path, key, value):
     if isinstance(value, Definition):
-        return {}, ItemsView(value)
+        return {}, get_definition_view(value)
     else:
         return default_enter(path, key, value)
 
@@ -175,7 +174,7 @@ def categorical_definition(defn: Definition, recursive=True):
         elif isinstance(value, Definition):
             nonlocal level
             level += 1
-            return {}, ItemsView(value)
+            return {}, get_definition_view(value)
         else:
             return default_enter(path, key, value)
 
@@ -299,12 +298,16 @@ class ConcreteDefinition(Definition):
             if not isclass(args[0]):
                 raise TypeError("ConcreteDefinition's first argument must be a class")
         super().__init__(*args, **kwargs)
+        # Pre-compute hash
+        # TODO: pickling this object should not save this hash
+        # We may decide later to change the hashing algorithm.
+        self._hash = digest_to_hashval(hash_function(self))
 
     def concretize(self):
         return self
 
     def __hash__(self):
-        return digest_to_hashval(hash_function(self))
+        return self._hash
 
 
 def hash_value(value):
@@ -550,7 +553,7 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
         if isinstance(value, Definition):
             if strict and value.skip_args:
                 raise TypeError("Definitions which skip args aren't allowed in strict mode")
-            return {}, ItemsView(value)
+            return {}, get_definition_view(value)
         elif isinstance(value, Remember):
             return {}, get_remember_view(value)
         else:
@@ -709,3 +712,44 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
         enter=_enter,
         visit=_visit,
         exit=_exit)
+
+
+def unique_remember_objects(def_or_obj):
+    # Get a dictionary of unique Remember objects inside
+    # the nested definition or Remember object.
+    from dryml.core2.object import Remember
+    unique_objs = {}
+
+    def _enter(path, key, value):
+        if isinstance(value, Remember):
+            return {}, get_remember_view(value)
+        elif isinstance(value, Definition):
+            return {}, get_definition_view(value)
+        return default_enter(path, key, value)
+
+    def _visit(path, key, value):
+        return key, value
+
+    def _exit(path, key, value, new_parent, new_items):
+        ic(path, key, value, new_parent, new_items)
+        if isinstance(value, Remember):
+            # Add the remember object to our dictionary
+            # if we haven't seen it yet.
+            if value not in unique_objs:
+                unique_objs[value] = value
+        return key, None
+
+    if isinstance(def_or_obj, Remember):
+        remap(
+            [def_or_obj],
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)
+    else:
+        remap(
+            def_or_obj,
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)
+
+    return unique_objs
