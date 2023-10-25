@@ -82,47 +82,49 @@ def test_def_3():
         obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
 
 
-# def test_def_4():
-#     """
-#     A case which looks at nested definition
-#     building indifferent situations
-#     """
+def test_def_4():
+    """
+    A case which looks at nested definition
+    building indifferent situations
+    """
 
-#     # Create the data containing objects
-#     model_obj = objs.TestNest(10)
-#     opt_obj = objs.TestNest3(20, model=model_obj)
-#     loss_obj = objs.TestNest2(A='func')
-#     train_fn_obj = objs.TestNest3(
-#         optimizer=opt_obj,
-#         loss=loss_obj,
-#         epochs=10)
+    # Create the data containing objects
+    model_obj = objs.TestNest(10)
+    opt_obj = objs.TestNest3(20, model=model_obj)
+    loss_obj = objs.TestNest2(A='func')
+    train_fn_obj = objs.TestNest3(
+        optimizer=opt_obj,
+        loss=loss_obj,
+        epochs=10)
 
-#     trainable_obj = objs.TestNest3(
-#         model=model_obj,
-#         train_fn=train_fn_obj
-#     )
+    trainable_obj = objs.TestNest3(
+        model=model_obj,
+        train_fn=train_fn_obj
+    )
 
-#     obj_def = trainable_obj.definition
+    obj_def = trainable_obj.definition
 
-#     # Building from plain definition
-#     trainable_obj_built = obj_def.build()
+    # Building from plain definition
+    trainable_obj_built = obj_def.build()
 
-#     assert trainable_obj_built['model'] is \
-#         trainable_obj_built['train_fn']['optimizer']['model']
-#     assert trainable_obj_built['model'].A == model_obj.A
-#     assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
-#     assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
-#     assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
+    ic(trainable_obj_built)
 
-#     # Building from 'class' definition
-#     trainable_obj_built = obj_def.categorical(recursive=True).build()
+    assert trainable_obj_built['model'] is \
+        trainable_obj_built['train_fn']['optimizer']['model']
+    assert trainable_obj_built['model'].A == model_obj.A
+    assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
+    assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
+    assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
 
-#     assert trainable_obj_built['model'] is \
-#         trainable_obj_built['train_fn']['optimizer']['model']
-#     assert trainable_obj_built['model'].A == model_obj.A
-#     assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
-#     assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
-#     assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
+    # Building from 'class' definition
+    trainable_obj_built = obj_def.categorical(recursive=True).build()
+
+    assert trainable_obj_built['model'] is \
+        trainable_obj_built['train_fn']['optimizer']['model']
+    assert trainable_obj_built['model'].A == model_obj.A
+    assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
+    assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
+    assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
 
 
 def test_unique_objs_1():

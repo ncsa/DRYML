@@ -224,52 +224,74 @@ def categorical_definition(defn: Definition, recursive=True):
 
 
 def concretize_definition(defn: Definition):
+    from dryml.core2.object import Remember
     # Cache for completed results. All duplicate ConcreteDefinitions should refer to the SAME object and so the same definition
     # Key for this cache will be the ConcreteDefinition hash.
     definition_cache = {}
+    built_definitions = {}
 
     def _enter(path, key, value):
         if id(value) in definition_cache:
+            # We've seen this object before
             return value, False
-        elif type(value) is ConcreteDefinition:
+        elif isinstance(value, ConcreteDefinition):
             # The definition is already concrete. don't enter it.
             return value, False
+        elif isinstance(value, Definition):
+            return {}, get_definition_view(value)
+        elif isinstance(value, Remember):
+            return {}, get_remember_view(value)
         else:
-            return definition_enter(path, key, value)
+            return default_enter(path, key, value)
+
 
     def _visit(path, key, value):
-        from dryml.core2.object import Object
         if id(value) in definition_cache: 
+            # We've seen this object before
             return key, definition_cache[id(value)]
         elif type(value) is ConcreteDefinition:
             # Value is already Concrete
             return key, value
-        elif isinstance(value, Object):
+        elif isinstance(value, Remember):
             # We have an already realized class instance. We shouldn't deep copy it.
-            return key, value
+            raise TypeError("We shouldn't get a Remember object here.")
+        elif isinstance(value, Definition):
+            raise TypeError("We shouldn't get a Definition object here.")
         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
             return key, value
         else:
             return key, deepcopy(value)
 
+    def _create_def(new_parent, new_items):
+        for k, v in new_items:
+            new_parent[k] = v
+        try:
+            args = new_parent['args']
+        except KeyError:
+            raise ValueError("Definition {values} which skiped arguments isn't concretizable.")
+        kwargs = new_parent['kwargs']
+        cls = new_parent['cls']
+        # Do argument manipulations
+        args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
+        # Copy args so modifications to this ConcreteDefinition doesn't change the original
+        # Values in the original Definitions
+        args = deepcopy_skip_definition_object(args)
+        kwargs = deepcopy_skip_definition_object(kwargs)
+        # Create the now concrete definition
+        return ConcreteDefinition(cls, *args, **kwargs) 
+
     def _exit(path, key, values, new_parent, new_items):
-        if isinstance(values, Definition):
-            for k, v in new_items:
-                new_parent[k] = v
-            try:
-                args = new_parent['args']
-            except KeyError:
-                raise ValueError("Definition {values} which skiped arguments isn't concretizable.")
-            kwargs = new_parent['kwargs']
-            cls = new_parent['cls']
-            # Do argument manipulations
-            args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
-            # Copy args so modifications to this ConcreteDefinition doesn't change the original
-            # Values in the original Definitions
-            args = deepcopy_skip_definition_object(args)
-            kwargs = deepcopy_skip_definition_object(kwargs)
-            # Create the now concrete definition
-            new_def = ConcreteDefinition(cls, *args, **kwargs) 
+        is_def = isinstance(values, Definition)
+        is_rem = isinstance(values, Remember)
+        if is_def or is_rem:
+            if is_rem:
+                # Check if we've seen this object's definition before.
+                if values in built_definitions:
+                    definition_cache[id(values)] = built_definitions[values]
+                    return definition_cache[id(values)]
+
+            new_def = _create_def(new_parent, new_items)
+            built_definitions[new_def] = new_def
             # Check if we've encountered this definition before
             definition_cache[id(values)] = new_def
             return new_def
@@ -504,34 +526,40 @@ def build_definition(obj):
 
 # Creating objects from definitions
 def build_from_definition(definition, build_missing=True, **kwargs):
-    # First, concretize the definition
-    concrete_definition = concretize_definition(definition)
-
-    # concrete definitions refer to specific objects
-
     with manage_repo(**kwargs) as repo:
-        def _visit(_, key, value):
-            if type(value) is Definition:
-                raise TypeError("Definitions should've been turned into ConcreteDefinitions at this point")
-            elif type(value) is ConcreteDefinition:
-                # Delegate to a repo to do the loading
-                obj = repo.load_object(value, build_missing=build_missing)
-                return key, obj
+        # Get unique objects
+        unique_objs = unique_remember_objects(definition)
+
+        # Add these objects to the repo.
+        if len(unique_objs) > 0:
+            repo.add_object(*(unique_objs.values()))
+
+        # First, concretize the definition
+        concrete_definition = concretize_definition(definition)
+        # concrete definitions refer to specific objects
+
+        def _visit(path, key, value):
+            # Do nothing on visit.
+            return key, value
+
+        def _exit(path, key, value, new_parent, new_items):
+            if isinstance(value, ConcreteDefinition):
+                return repo.load_object(value, build_missing=build_missing)
             else:
-                return key, value
+                return default_exit(path, key, value, new_parent, new_items)
 
         if isinstance(definition, Definition):
             return remap(
                 [concrete_definition],
                 enter=definition_enter,
                 visit=_visit,
-                exit=definition_exit)[0]
+                exit=_exit)[0]
         else:
             return remap(
                 concrete_definition,
                 enter=definition_enter,
                 visit=_visit,
-                exit=definition_exit)
+                exit=_exit)
 
 
 def get_path(obj_or_def, path):
