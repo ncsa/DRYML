@@ -8,7 +8,6 @@ from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
     Parameter, signature
 from boltons.iterutils import remap, is_collection, PathAccessError, default_enter, default_exit
-from icecream import ic
 
 
 def collide_attributes(obj, attr_list):

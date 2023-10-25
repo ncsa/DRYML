@@ -777,7 +777,6 @@ def unique_remember_objects(def_or_obj):
         return key, value
 
     def _exit(path, key, value, new_parent, new_items):
-        ic(path, key, value, new_parent, new_items)
         if isinstance(value, Remember):
             # Add the remember object to our dictionary
             # if we haven't seen it yet.
