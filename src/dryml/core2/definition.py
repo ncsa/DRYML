@@ -290,6 +290,50 @@ def concretize_definition(defn: Definition):
             exit=_exit)
 
 
+def validate_arguments_for_concrete_definition(vals):
+    from dryml.core2.object import Remember
+    # TODO: Maybe also directly validate for 'hashable' plain old data types as well?
+    type_errors = []
+
+    def _enter(path, key, value):
+        if isinstance(value, ConcreteDefinition):
+            # We assume any passed ConcreteDefinition object is already validated
+            return key, False
+        if isinstance(value, Definition):
+            return {}, get_definition_view(value)
+        elif isinstance(value, Remember):
+            return {}, get_remember_view(value)
+        else:
+            return default_enter(path, key, value)
+
+    def _visit(path, key, value):
+        nonlocal type_errors
+        if isinstance(value, ConcreteDefinition):
+            pass
+        elif isinstance(value, Definition):
+            type_errors += [ ( path+(key,), type(value)) ]
+        elif isinstance(value, Remember):
+            type_errors += [ ( path+(key,), type(value)) ]
+        return key, value
+
+    def _exit(path, key, value, new_parent, new_items):
+        # We aren't doing any transformation, so return the original
+        return value
+
+    remap(
+        vals,
+        enter=_enter,
+        visit=_visit,
+        exit=_exit)
+
+    if len(type_errors) > 0:
+        msg = ["The objects at the following paths are of disallowed types for ConcreteDefinition."]
+        for t_error in type_errors:
+            full_path = '/'.join(t_error[0])
+            msg += [ f"{full_path}: class: {t_error[1].__name__}" ]
+        raise TypeError('\n'.join(msg))
+
+
 class ConcreteDefinition(Definition):
     def __init__(self, *args, **kwargs):
         if len(args) == 0:
@@ -297,6 +341,8 @@ class ConcreteDefinition(Definition):
         if len(args) > 0:
             if not isclass(args[0]):
                 raise TypeError("ConcreteDefinition's first argument must be a class")
+        # Input validation
+        validate_arguments_for_concrete_definition({'args': args, 'kwargs': kwargs})
         super().__init__(*args, **kwargs)
         # Pre-compute hash
         # TODO: pickling this object should not save this hash
