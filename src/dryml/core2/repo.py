@@ -230,6 +230,12 @@ class BaseRepo:
             def_file = os.path.join(self.dir, "def.pkl")
             pickle_to_file(self.main_def, def_file)
 
+    def add_object(self, *args):
+        from dryml.core2.object import Remember
+        for obj in args:
+            if not isinstance(obj, Remember):
+                raise TypeError("Only Remember objects can be added to a repository.")
+            self.objs[obj] = obj
 
     def close(self):
         self.write_main_def()
