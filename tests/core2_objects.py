@@ -33,14 +33,14 @@ class TestBase(Serializable, UniqueID, Metadata):
         self.base_msg = base_msg
 
 
-#class TestClassA(TestBase):
-#    def __init__(self, *args, item=[32], **kwargs):
-#        super().__init__(*args, **kwargs)
+class TestClassA(TestBase):
+    def __init__(self, *args, item=[32], **kwargs):
+        super().__init__(*args, **kwargs)
 
 
-#class TestClassA2(TestBase):
-#    def __init__(self, *args, item=[32], **kwargs):
-#        super().__init__(*args, **kwargs)
+class TestClassA2(TestBase):
+    def __init__(self, *args, item=[32], **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 class TestClassB(TestBase):
