@@ -32,17 +32,19 @@ def test_selector_1():
     os.remove('test2.dry')
 
 
-# def test_selector_2():
-#     "args selection"
-#     obj1 = objects.TestClassB(1, base_msg="Test1")
-#     obj2 = objects.TestClassB([1, 2, 3], base_msg="Test2")
+def test_selector_2():
+    "args selection"
+    obj1 = objs.TestClassB(1, base_msg="Test1")
+    obj2 = objs.TestClassB([1, 2, 3], base_msg="Test2")
 
-#     sel = dryml.Selector(cls=objects.TestClassB, args=(1,))
+    sel = Definition(objs.TestClassB, 1)
+    ic(obj1, obj2, sel)
 
-#     assert sel(obj1)
-#     assert sel(obj1.definition())
-#     assert not sel(obj2)
-#     assert not sel(obj2.definition())
+    assert sel(obj1)
+    assert sel(obj1.definition)
+    sel(obj2, verbose=True)
+    assert not sel(obj2)
+    assert not sel(obj2.definition)
 
 
 # def test_selector_3():
