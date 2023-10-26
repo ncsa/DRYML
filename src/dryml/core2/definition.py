@@ -684,7 +684,15 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
                 # we don't have the right type in the selector
                 return key, False
         elif (is_collection(def_val) or is_dictlike(def_val)) and not isinstance(def_val, np.ndarray):
-            # We do nothing for these collections. Wait for their elements to be matched
+            # We do some type checking on this visit. deeper structures have already been visited
+            sel_val = get_path(selector, path+(key,))
+            if type(sel_val) is not type(def_val):
+                # Container class doesn't match
+                if verbose:
+                    print(
+                        f"[{render_path(path, key)}]: Classes don't match. {type(sel_val)} in the selector {type(def_val)} in the target\n",
+                        file=output_stream)
+                return key, False
             return key, value
         elif isinstance(def_val, np.ndarray):
             if isinstance(value, np.ndarray):
