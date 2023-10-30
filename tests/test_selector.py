@@ -38,7 +38,6 @@ def test_selector_2():
     obj2 = objs.TestClassB([1, 2, 3], base_msg="Test2")
 
     sel = Definition(objs.TestClassB, 1)
-    ic(obj1, obj2, sel)
 
     assert sel(obj1)
     assert sel(obj1.definition)
@@ -47,28 +46,28 @@ def test_selector_2():
     assert not sel(obj2.definition)
 
 
-# def test_selector_3():
-#     "kwargs selection"
-#     obj1 = objects.TestClassA(base_msg="Test1", item='a')
-#     obj2 = objects.TestClassA(base_msg="Test2", item=[10, 10, 10])
+def test_selector_3():
+    "kwargs selection"
+    obj1 = objs.TestClassA(base_msg="Test1", item='a')
+    obj2 = objs.TestClassA(base_msg="Test2", item=[10, 10, 10])
 
-#     sel = dryml.Selector(
-#         cls=objects.TestClassA,
-#         kwargs={'item': 'a'})
+    sel = Definition(
+        objs.TestClassA,
+        item='a')
 
-#     assert sel(obj1)
-#     assert sel(obj1.definition())
-#     assert not sel(obj2)
-#     assert not sel(obj2.definition())
+    assert sel(obj1)
+    assert sel(obj1.definition)
+    assert not sel(obj2)
+    assert not sel(obj2.definition)
 
-#     sel = dryml.Selector(
-#         cls=objects.TestClassA,
-#         kwargs={'item': [10, 10, 10]})
+    sel = Definition(
+        objs.TestClassA,
+        item=[10, 10, 10])
 
-#     assert not sel(obj1)
-#     assert not sel(obj1.definition())
-#     assert sel(obj2)
-#     assert sel(obj2.definition())
+    assert not sel(obj1)
+    assert not sel(obj1.definition)
+    assert sel(obj2)
+    assert sel(obj2.definition)
 
 
 # def test_selector_4():
