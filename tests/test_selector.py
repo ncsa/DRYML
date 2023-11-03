@@ -210,25 +210,25 @@ def test_selector_4():
 #     Nested class selection
 #     """
 
-#     obj = objects.TestNest(objects.HelloTrainableD(A=objects.TestNest(10)))
-#     obj_def = obj.definition()
+#     obj = objs.TestNest4(objs.HelloTrainableD(A=objs.TestNest4(10)))
+#     obj_def = obj.definition.copy()
 
-#     sel = dryml.Selector(
-#         cls=objects.TestNest,
-#         args=obj_def['dry_args'])
-
-#     assert sel(obj)
-
-#     del obj_def['dry_args'][0]['dry_kwargs']['dry_id']
-
-#     sel = dryml.Selector(
-#         cls=objects.TestNest,
-#         args=obj_def['dry_args'])
+#     sel = Definition(
+#         objs.TestNest4,
+#         *objs.__args__)
 
 #     assert sel(obj)
 
-#     obj_def = obj.definition()
-#     del obj_def['dry_args'][0]['dry_kwargs']['A']['dry_kwargs']['dry_id']
+#     del obj_def.args[0].kwargs['uid']
+
+#     sel = Definition(
+#         objs.TestNest4,
+#         *obj_def.args)
+
+#     assert sel(obj)
+
+#     obj_def = obj.definition.copy()
+#     del obj_def.args[0].kwargs['A'].kwargs['uid']
 
 #     assert sel(obj)
 
