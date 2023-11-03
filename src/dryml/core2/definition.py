@@ -609,9 +609,10 @@ def render_path(path, key):
 
 
 ## Selecting objects
-def selector_match(selector, definition, strict=False, verbose=False, output_stream=sys.stderr):
+def selector_match(selector, definition, strict=False, cls_str_compare=False, verbose=False, output_stream=sys.stderr):
     # Method for testing if a selector matches a definition
     # if strict is set, it must match exactly, and callables arent' allowed.
+    # cls_str_compare forces a string based name comparison between classes.
     # Additionally, Definitions which skip args also aren't allowed
     from dryml.core2.object import Remember
 
@@ -654,7 +655,7 @@ def selector_match(selector, definition, strict=False, verbose=False, output_str
                             file=output_stream)
                     return key, condition
                 else:
-                    condition = issubclass(value, def_val)
+                    condition = issubclass(def_val, value)
                     if not condition and verbose:
                         print(
                             f"[{render_path(path, key)}]: {get_class_str(def_val)} is not a subclass of {get_class_str(value)}\n",

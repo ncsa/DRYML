@@ -70,137 +70,139 @@ def test_selector_3():
     assert sel(obj2.definition)
 
 
-# def test_selector_4():
-#     "superclass selection"
-#     obj1 = objects.TestClassA(base_msg="Test1", item='a')
-#     obj2 = objects.TestClassA(base_msg="Test2",
-#                               item=[10, 10, 10])
-#     obj3 = objects.TestClassB(0, base_msg="Test3")
-#     obj4 = objects.TestClassB([10, 10], base_msg="Test4")
-#     obj5 = objects.HelloInt(msg=5)
-#     obj6 = objects.HelloInt(msg=20)
-#     obj7 = objects.HelloStr(msg='test')
-#     obj8 = objects.HelloStr(msg='2test')
+def test_selector_4():
+    "superclass selection"
+    obj1 = objs.TestClassA(base_msg="Test1", item='a')
+    obj2 = objs.TestClassA(base_msg="Test2",
+                              item=[10, 10, 10])
+    obj3 = objs.TestClassB(0, base_msg="Test3")
+    obj4 = objs.TestClassB([10, 10], base_msg="Test4")
+    obj5 = objs.HelloInt(msg=5)
+    obj6 = objs.HelloInt(msg=20)
+    obj7 = objs.HelloStr(msg='test')
+    obj8 = objs.HelloStr(msg='2test')
 
-#     sel = dryml.Selector(
-#         cls=objects.TestBase)
+    sel = Definition(
+        objs.TestBase,
+        SKIP_ARGS)
 
-#     assert sel(
-#         obj1,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj1.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj2,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj2.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj3,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj3.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj4,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert sel(
-#         obj4.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj5,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj5.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj6,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj6.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj7,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj7.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj8,
-#         cls_str_compare=False,
-#         verbosity=2)
-#     assert not sel(
-#         obj8.definition(),
-#         cls_str_compare=False,
-#         verbosity=2)
+    assert sel(
+        obj1,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj1.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj2,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj2.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj3,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj3.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj4,
+        cls_str_compare=False,
+        verbose=True)
+    assert sel(
+        obj4.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj5,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj5.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj6,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj6.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj7,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj7.definition,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj8,
+        cls_str_compare=False,
+        verbose=True)
+    assert not sel(
+        obj8.definition,
+        cls_str_compare=False,
+        verbose=True)
 
-#     sel = dryml.Selector(
-#         cls=objects.HelloObject)
+    sel = Definition(
+        objs.HelloObject,
+        SKIP_ARGS)
 
-#     assert not sel(
-#         obj1,
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj1.definition(),
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj2,
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj2.definition(),
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj3,
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj3.definition(),
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj4,
-#         cls_str_compare=False)
-#     assert not sel(
-#         obj4.definition(),
-#         cls_str_compare=False)
-#     assert sel(
-#         obj5,
-#         cls_str_compare=False)
-#     assert sel(
-#         obj5.definition(),
-#         cls_str_compare=False)
-#     assert sel(
-#         obj6,
-#         cls_str_compare=False)
-#     assert sel(
-#         obj6.definition(),
-#         cls_str_compare=False)
-#     assert sel(
-#         obj7,
-#         cls_str_compare=False)
-#     assert sel(
-#         obj7.definition(),
-#         cls_str_compare=False)
-#     assert sel(
-#         obj8,
-#         cls_str_compare=False)
-#     assert sel(
-#         obj8.definition(),
-#         cls_str_compare=False)
+    assert not sel(
+        obj1,
+        cls_str_compare=False)
+    assert not sel(
+        obj1.definition,
+        cls_str_compare=False)
+    assert not sel(
+        obj2,
+        cls_str_compare=False)
+    assert not sel(
+        obj2.definition,
+        cls_str_compare=False)
+    assert not sel(
+        obj3,
+        cls_str_compare=False)
+    assert not sel(
+        obj3.definition,
+        cls_str_compare=False)
+    assert not sel(
+        obj4,
+        cls_str_compare=False)
+    assert not sel(
+        obj4.definition,
+        cls_str_compare=False)
+    assert sel(
+        obj5,
+        cls_str_compare=False)
+    assert sel(
+        obj5.definition,
+        cls_str_compare=False)
+    assert sel(
+        obj6,
+        cls_str_compare=False)
+    assert sel(
+        obj6.definition,
+        cls_str_compare=False)
+    assert sel(
+        obj7,
+        cls_str_compare=False)
+    assert sel(
+        obj7.definition,
+        cls_str_compare=False)
+    assert sel(
+        obj8,
+        cls_str_compare=False)
+    assert sel(
+        obj8.definition,
+        cls_str_compare=False)
 
 
 # def test_selector_5():
