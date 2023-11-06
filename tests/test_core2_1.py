@@ -818,3 +818,9 @@ def test_defer_1():
 
     # Check for new attribute
     assert len(defer_obj.__dict__) == 6
+
+    # Unload the object
+    defer_obj.__unload__()
+
+    # Check the attribute is gone
+    assert len(defer_obj.__dict__) == 5
