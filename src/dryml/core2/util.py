@@ -209,3 +209,14 @@ def apply_func(
 
 def get_temp_directory():
     return tempfile.TemporaryDirectory()
+
+
+def mock_eval(method, *args, **kwargs):
+    # Mock-evaluate a method. Throws a TypeError exception
+    # If the method cannot be evaluated with the given arguments
+
+    # Get the signature of the method
+    sig = signature(method)
+
+    bound_args = sig.bind(*args, **kwargs)
+    bound_args.apply_defaults()

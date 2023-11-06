@@ -1,4 +1,4 @@
-from dryml.core2.object import Remember, UniqueID, Metadata, Serializable
+from dryml.core2.object import Remember, UniqueID, Metadata, Serializable, Defer
 import os
 from dryml.core2.util import pickler, unpickler
 
@@ -141,3 +141,9 @@ class TestClass5(Serializable):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
+
+
+class TestDefer1(Defer):
+    def __init__(self, x):
+        super().__init__()
+        self.x = x

@@ -792,3 +792,29 @@ def test_save_load_3(create_temp_dir):
     assert obj2_2 is obj10_2.x.x.test
     obj3_2 = obj6_2.test
     assert obj3_2 is obj10_2.test.test.x
+
+
+def test_defer_1():
+    # Test that mock initialization properly fails case 1
+    try:
+        objects.TestDefer1(test=10)
+        assert False
+    except TypeError:
+        pass
+
+    # Test that mock initialization properly fails case 1
+    try:
+        objects.TestDefer1(5, test=10)
+        assert False
+    except TypeError:
+        pass
+
+    defer_obj = objects.TestDefer1(5)
+
+    assert len(defer_obj.__dict__) == 5
+
+    # Trigger deferred initialization
+    assert defer_obj.x == 5
+
+    # Check for new attribute
+    assert len(defer_obj.__dict__) == 6
