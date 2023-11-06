@@ -4,7 +4,8 @@ import time
 import os
 
 from dryml.core2.util import cls_super, collide_attributes, \
-    pickle_to_file, unpickler, get_kwarg_defaults
+    pickle_to_file, unpickler, get_kwarg_defaults, \
+    mock_eval
 from dryml.core2.definition import \
     deepcopy_skip_definition_object, build_definition
 
@@ -16,8 +17,18 @@ class CreationControl(type):
 
     def __call__(cls, *args, **kwargs):
         obj = cls.__create_instance__()
+        # Perform class specific argument manipulation
         args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
+        # Do mock initialization
+        try:
+            # We use a `None` object to simulate `self`
+            mock_eval(cls.__init__, None, *args, **kwargs)
+        except TypeError as e:
+            raise TypeError(f"mock initialization failed: {e}")
+
+        # Perform object pre-initialization
         obj.__pre_init__(*args, **kwargs)
+        # Run our initialization method
         obj.__initialize_instance__(*args, **kwargs)
         return obj
 
