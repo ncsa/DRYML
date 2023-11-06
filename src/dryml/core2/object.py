@@ -45,6 +45,8 @@ class Object(metaclass=CreationControl):
 
 class Remember(Object):
     # Support class which remembers the arguments used when creating it.
+    # TODO: Check Invariant: Remember Object shouldn't contain arguments to Definitions.
+    # TODO: Check Invariant: Remember Object should only contain arguments which are other Remember objects or plain old data.
     def __pre_init__(self, *args, **kwargs):
         super().__pre_init__(*args, **kwargs)
         collide_attributes(self, [
