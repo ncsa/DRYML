@@ -514,6 +514,8 @@ class Object(metaclass=Meta):
         # Dry ID
         if dry_id is None:
             self.dry_kwargs['dry_id'] = str(uuid.uuid4())
+        else:
+            self.dry_kwargs['dry_id'] = dry_id
 
         # Handle Metadata
         if dry_metadata is None:

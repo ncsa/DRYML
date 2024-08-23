@@ -187,7 +187,8 @@ class Meta(abc.ABCMeta):
                 continue
             if par.default == inspect.Parameter.empty and \
                par.kind != inspect.Parameter.KEYWORD_ONLY:
-                track_args.append(par.name)
+                if par.name not in track_args:
+                    track_args.append(par.name)
             else:
                 if par.name not in existing_kwargs:
                     track_kwargs.append((par.name, par.default))
