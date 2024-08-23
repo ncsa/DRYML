@@ -6,6 +6,7 @@ import inspect
 import hashlib
 import importlib
 import dill
+import re
 from typing import Type, Union, IO, Optional, Callable
 import zipfile
 import io

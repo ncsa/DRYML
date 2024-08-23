@@ -161,25 +161,40 @@ class ObjectFile(object):
         mod_cls = get_current_cls(obj_def.cls)
         if obj_def.cls != mod_cls and not update:
             raise ValueError("Can't save class definition! It's been changed!")
+        # First, we'll save a string version of the class name in case this is a
+        # class defined in __main__ and we need to know it's name.
+        # Also handles pickling when the class's _abc_impl is wrongly constructed
+        # https://github.com/uqfoundation/dill/issues/332
+        cls_str = get_class_str(mod_cls)
+        with self.z_file.open('cls_str.txt', mode='w') as f:
+            f.write(cls_str.encode('utf-8'))
         try:
             cls_def = dill.dumps(mod_cls)
             with self.z_file.open('cls_def.dill', mode='w') as f:
                 f.write(cls_def)
         except TypeError as e:
             if '_abc_data' in str(e):
-                # Fallback to pickling the class name.
-                # In some cases, the class's _abc_impl
-                # attribute seems wrongly constructed?
-                # https://github.com/uqfoundation/dill/issues/332
-                cls_str = get_class_str(mod_cls)
-                with self.z_file.open('cls_str.txt', mode='w') as f:
-                    f.write(cls_str.encode('utf-8'))
+                # We will fallback to using the class name on load
+                pass
             else:
                 raise e
 
     def load_class_def_v1(self, update: bool = True, reload: bool = False):
         "Helper function for loading a version 1 class definition"
+        # Get the string based class name first. This is now guaranteed to be there.
+        with self.z_file.open('cls_str.txt') as cls_str_file:
+            cls_str = cls_str_file.read().decode('utf-8')
+
         namelist = self.z_file.namelist()
+
+        # We first need to handle the case we have a class defined in `__main__`.
+        if '__main__' in cls_str:
+            if reload is True:
+                raise RuntimeError("Reloading class definitions defined in the __main__ module is currently not supported. Move your class definition to a dedicated module file.")
+            return get_class_from_str(cls_str, reload=reload)
+
+        # we can now fall back to dill for class definitions in __main__.
+
         # Get class definition
         if 'cls_def.dill' in namelist:
             with self.z_file.open('cls_def.dill') as cls_def_file:
@@ -194,13 +209,8 @@ class ObjectFile(object):
                 else:
                     cls_def = dill.loads(cls_def_file.read())
             return cls_def
-        elif 'cls_str.txt' in namelist:
-            with self.z_file.open('cls_str.txt') as cls_str_file:
-                cls_str = cls_str_file.read().decode('utf-8')
-                cls_def = get_class_from_str(cls_str, reload=reload)
-            return cls_def
         else:
-            raise RuntimeError("No stored class data!")
+            return get_class_from_str(cls_str, reload=reload)
 
     def save_definition_v1(self, obj_def: ObjectDef, update: bool = False):
         "Save object def"
@@ -239,7 +249,7 @@ class ObjectFile(object):
 
         return ObjectDef(cls, *args, dry_mut=mut, **kwargs)
 
-    def definition(self, update: bool = True, reload: bool = False):
+    def definition(self, update: bool = False, reload: bool = False):
         meta_data = self.load_meta_data()
         if meta_data['version'] == 1:
             return self.load_definition_v1(update=update, reload=reload)
