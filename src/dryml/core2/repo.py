@@ -161,16 +161,12 @@ class BaseRepo:
                 value_hash = hash(value)
                 value_hash_digest = hashval_to_digest(value_hash)
                 object_path = os.path.join(self.dir, "objects", value_hash_digest)
+                obj = _create_obj()
                 if not os.path.exists(object_path):
                     if not build_missing:
                         raise IndexError(f"Object with hash {value_hash} not found.")
-                    # We should build the object, but not create or load from a directory
-                    obj = _create_obj()
-                    self.objs[value] = obj
-                    loaded_objs[value] = obj
-                    return obj
                 else:
-                    obj = _create_obj()
+                    # We should build the object, but not create or load from a directory
                     # confirm we have the same definition
                     def_file = os.path.join(object_path, "def.pkl")
                     with open(def_file, 'rb') as f:
@@ -180,9 +176,9 @@ class BaseRepo:
                         raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
                     # Load the data from the directory
                     obj._load_from_dir(object_path)
-                    self.objs[value] = obj
-                    loaded_objs[value] = obj
-                    return obj
+                self.objs[value] = obj
+                loaded_objs[value] = obj
+                return obj
             else:
                 return default_exit(path, key, value, new_parent, new_items)
         from dryml.core2.definition import Definition, \
