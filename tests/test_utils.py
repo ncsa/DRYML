@@ -37,7 +37,7 @@ def test_get_unique_objs_1():
 
     unique_objs = get_unique_objects(obj_c_2)
 
-    unique_obj_definitions = set(map(lambda obj: obj.definition.concretize(), unique_objs))
+    unique_obj_definitions = set(map(lambda obj: obj.definition.concretize(), unique_objs.values()))
 
     assert len(unique_objs) == 5
     assert obj_f1_1.definition.concretize() in unique_obj_definitions

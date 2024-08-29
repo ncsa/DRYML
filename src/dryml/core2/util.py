@@ -182,14 +182,14 @@ def get_unique_objects(obj):
             enter=_get_unique_objects_enter,
             visit=_get_unique_objects_visit,
             exit=_get_unique_objects_exit)[0]
-        return list(unique_objs.values())
+        return unique_objs
     else:
         remap(
             obj,
             enter=_get_unique_objects_enter,
             visit=_get_unique_objects_visit,
             exit=_get_unique_objects_exit)
-        return list(unique_objs.values())
+        return unique_objs
 
 
 def apply_func(
@@ -200,9 +200,9 @@ def apply_func(
     if func_kwargs is None:
         func_kwargs = {}
 
-    obj_list = get_unique_objects(obj)
+    obj_dict = get_unique_objects(obj)
 
-    for obj in obj_list:
+    for _, obj in obj_dict.items():
         if sel is None or sel(obj):
             func(obj, *func_args, **func_kwargs)
 
