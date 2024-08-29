@@ -11,6 +11,9 @@ from dryml.core2.definition import \
 
 
 class CreationControl(type):
+    """
+    CreationControl is an object metaclass which introduces specialized object creation steps to give us more control over this process.
+    """
     # Support metaclass to allow more complex metaclass behavior
     def __create_instance__(cls):
         return cls.__new__(cls)
@@ -34,6 +37,9 @@ class CreationControl(type):
 
 
 class Object(metaclass=CreationControl):
+    """
+    The base class for DRYML classes. Contains default implementations for methods needed in the `CreationControl` metaclass.
+    """
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
         # __arg_manipulation__ should be an idempotent function
@@ -55,6 +61,9 @@ class Object(metaclass=CreationControl):
 
 
 class Remember(Object):
+    """
+    This object handles the storing of arguments so the object remembers how it was created
+    """
     # Support class which remembers the arguments used when creating it.
     # TODO: Check Invariant: Remember Object shouldn't contain arguments to Definitions.
     # TODO: Check Invariant: Remember Object should only contain arguments which are other Remember objects or plain old data.
@@ -87,6 +96,9 @@ class Remember(Object):
 
 
 class Defer(Remember):
+    """
+    Defer objects build on Remember functionality. The arguments are recorded, then when attributes are accessed in the object, the deferred initialization is run.
+    """
     # Since methods are part of the class, we only have to remove data from the object. We mark the protected data here. Keep up to date with attributes added 
     def __pre_init__(self, *args, **kwargs):
         super().__pre_init__(*args, **kwargs)
@@ -130,6 +142,9 @@ class Defer(Remember):
 
 
 class UniqueID(Object):
+    """
+    Implements the creation of a unique id for each object. Don't include it in objects you think don't need a unique id.
+    """
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
         args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
@@ -151,6 +166,9 @@ class UniqueID(Object):
 
 
 class Metadata(Object):
+    """
+    Provides basic metadata for the object.
+    """
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
         args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
@@ -176,6 +194,9 @@ class Metadata(Object):
 
 
 class Serializable(Remember):
+    """
+    Serializable objects in DRYML inherit from Remember. They implement saving a loading of the object from disk
+    """
     def save(self, dest, **kwargs):
         from dryml.core2.repo import save_object
         return save_object(self, dest, **kwargs)
