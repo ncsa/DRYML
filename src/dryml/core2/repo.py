@@ -14,7 +14,11 @@ from dryml.core2.util import zip_directory, hashval_to_digest, \
 
 class BaseRepo:
     # Helper class for saving objects
-    def __init__(self, dir=None):
+    def __init__(self, dir=None, preload=True):
+        """
+        dir: The staging directory the repo is using for its objects
+        preload: whether or not to preload all objects in the repository when declaring the repository.
+        """
         self.objs = {}
         # Some helper variables for monitoring
         self._num_saves = 0
@@ -35,12 +39,13 @@ class BaseRepo:
             obj_dirs = os.listdir(self.obj_dir)
 
         # TODO: Do I really want to load all objects like this?
-        for obj_dir in obj_dirs:
-            obj_dir = os.path.join(self.obj_dir, obj_dir)
-            def_file = os.path.join(obj_dir, 'def.pkl')
-            with open(def_file, 'rb') as f:
-                obj_def = unpickler(f.read())
-            self.load_object(obj_def.concretize())
+        if preload:
+            for obj_dir in obj_dirs:
+                obj_dir = os.path.join(self.obj_dir, obj_dir)
+                def_file = os.path.join(obj_dir, 'def.pkl')
+                with open(def_file, 'rb') as f:
+                    obj_def = unpickler(f.read())
+                self.load_object(obj_def.concretize())
 
         def_file = os.path.join(self.dir, "def.pkl")
         if os.path.exists(def_file):
@@ -116,6 +121,8 @@ class BaseRepo:
     def load_object(self, obj_def, build_missing=False):
         from dryml.core2.definition import Definition, \
             ConcreteDefinition
+        from dryml.core2.object import Remember, Defer, Serializable
+        # TODO: Do we need loaded_objs while we have self.objs?
         loaded_objs = {}
         def _load_object_enter(path, key, value):
             nonlocal loaded_objs
@@ -127,6 +134,9 @@ class BaseRepo:
                     return value, False
                 else:
                     return {}, ItemsView({'args': value['args'], 'kwargs': value['kwargs']})
+            elif isinstance(value, Remember):
+                # We do need to traverse objects in a Remember object's arguments.
+                return {}, ItemsView({'args': value.__args__, 'kwargs': value.__kwargs__})
             else:
                 return default_enter(path, key, value)
 
@@ -142,7 +152,7 @@ class BaseRepo:
         def _load_object_exit(path, key, value, new_parent, new_items):
             nonlocal loaded_objs
             def _create_obj():
-                # method to actually create an object at this step
+                # method to actually create the basic object at this step
                 new_values = {}
                 for k, v in new_items:
                     new_values[k] = v
@@ -161,11 +171,14 @@ class BaseRepo:
                 value_hash = hash(value)
                 value_hash_digest = hashval_to_digest(value_hash)
                 object_path = os.path.join(self.dir, "objects", value_hash_digest)
+                # Create object
                 obj = _create_obj()
                 if not os.path.exists(object_path):
+                    # This repo doesn't have a spot for this object
                     if not build_missing:
                         raise IndexError(f"Object with hash {value_hash} not found.")
                 else:
+                    # This repo has data for this object, so we should build it.
                     # We should build the object, but not create or load from a directory
                     # confirm we have the same definition
                     def_file = os.path.join(object_path, "def.pkl")
@@ -179,17 +192,40 @@ class BaseRepo:
                 self.objs[value] = obj
                 loaded_objs[value] = obj
                 return obj
+            elif isinstance(value, Remember):
+                if value.definition.concretize() in loaded_objs:
+                    # Check that it's the same object
+                    if loaded_objs[value.definition.concretize()] is not value:
+                        raise ValueError("Repo already has a different version of object {value.definition}")
+                    # we already handled this, just return it.
+                    return value
+                if value.definition.concretize() in self.objs:
+                    # Check if the repo knows about this object already
+                    if self.objs[value.definition.concretize()] is not value:
+                        raise ValueError("Repo already has a different version of object {value.definition}")
+                if isinstance(value, Serializable):
+                    # Now we want to load the object
+                    # We don't need to check for Defer objects as they will be initialized automatically
+                    value_hash = hash(value.definition.concretize())
+                    value_hash_digest = hashval_to_digest(value_hash)
+                    object_path = os.path.join(self.dir, "objects", value_hash_digest)                   
+                    if os.path.exists(object_path):
+                        value._load_from_dir(object_path)
+                self.objs[value.definition.concretize()] = value
+                loaded_objs[value.definition.concretize()] = value
+                return value
             else:
                 return default_exit(path, key, value, new_parent, new_items)
         from dryml.core2.definition import Definition, \
             ConcreteDefinition
-        if isinstance(obj_def, ConcreteDefinition):
+        if isinstance(obj_def, ConcreteDefinition) or isinstance(obj_def, Remember):
             return remap(
                 [obj_def],
                 enter=_load_object_enter,
                 visit=_load_object_visit,
                 exit=_load_object_exit)[0]
         else:
+            # TODO maybe detect non-remappable types here to make error messages clearer for the user?
             return remap(
                 obj_def,
                 enter=_load_object_enter,
@@ -197,6 +233,7 @@ class BaseRepo:
                 exit=_load_object_exit)
 
     def load_object_imp(self, obj_def):
+        # TODO: Can I get rid of this method?
         from dryml.core2.definition import ConcreteDefinition
         # Perform the actual load from a directory
         if type(obj_def) is not ConcreteDefinition:
@@ -238,15 +275,15 @@ class BaseRepo:
 
 
 class Repo(BaseRepo):
-    def __init__(self, dir=None):
+    def __init__(self, dir=None, preload=True):
         self._temp_dir = None
 
         if dir is None:
             # If none, get a temporary directory
             self.prepare_temp_dir()
-            super().__init__(self._temp_dir.name)
+            super().__init__(self._temp_dir.name, preload=preload)
         else:
-            super().__init__(dir)
+            super().__init__(dir, preload=preload)
 
     def create_temp_dir(self):
         self._temp_dir = get_temp_directory()
@@ -265,12 +302,12 @@ class Repo(BaseRepo):
 
 class ZipRepo(Repo):
     # A class meant to zip files 'directly' to a zipfile.
-    def __init__(self, zip_dest):
+    def __init__(self, zip_dest, preload=True):
         # Save destination
         self.zip_dest = zip_dest
 
         # Initialize the Repo in temporary directory mode
-        super().__init__()
+        super().__init__(preload=preload)
 
     def prepare_temp_dir(self):
         self.create_temp_dir()
@@ -313,26 +350,26 @@ class ZipRepo(Repo):
 
 
 @contextmanager
-def manage_repo(dest=None, repo=None):
+def manage_repo(dest=None, repo=None, preload=True):
     close_repo = False
     if repo is None:
         if dest is None:
-            repo = Repo()
+            repo = Repo(preload=preload)
         elif isinstance(dest, IOBase):
             # This is a file-like object
-            repo = ZipRepo(dest)
+            repo = ZipRepo(dest, preload=preload)
         else:
             # detect if the path is a zip file
             extension = os.path.splitext(dest)[-1]
             if extension == ".zip" or extension == ".dry":
                 # We have a single file repo
-                repo = ZipRepo(dest)
+                repo = ZipRepo(dest, preload=preload)
             elif os.path.exists(dest) and os.path.isdir(dest):
                 # We have a directory repo
-                repo = Repo(dest)
+                repo = Repo(dest, preload=preload)
             else:
                 # We will treat this as a zip repo
-                repo = ZipRepo(dest)
+                repo = ZipRepo(dest, preload=preload)
         close_repo = True
     yield repo
     if close_repo:
