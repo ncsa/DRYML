@@ -824,3 +824,30 @@ def test_defer_1():
 
     # Check the attribute is gone
     assert len(defer_obj.__dict__) == 5
+
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_repo_load_1(create_temp_dir):
+    # First create an object and save it.
+    obj1 = objects.TestClassC2('a')
+    obj1.set_val(10)
+
+    assert obj1.data == 10
+
+    # Save the object to the temp directory
+    repo = Repo(create_temp_dir)
+    repo.save_object(obj1)
+
+    obj_def = obj1.definition
+
+    # Build a 'copy' of the object
+    obj2 = obj_def.build()
+
+    assert obj2.data != 10
+
+    repo2 = Repo(create_temp_dir, preload=False)
+
+    # load the object using another repo.
+    repo2.load_object(obj2)
+
+    assert obj2.data == obj1.data
