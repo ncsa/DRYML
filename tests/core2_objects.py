@@ -28,37 +28,51 @@ class HelloInt(HelloObject):
 
 
 class TestBase(Serializable, UniqueID, Metadata):
+    __test__ = False
+
     def __init__(self, *args, base_msg: str = "base", **kwargs):
         super().__init__(*args, **kwargs)
         self.base_msg = base_msg
 
 
 class TestClassA(TestBase):
+    __test__ = False
+
     def __init__(self, *args, item=[32], **kwargs):
         super().__init__(*args, **kwargs)
 
 
 class TestClassA2(TestBase):
+    __test__ = False
+
     def __init__(self, *args, item=[32], **kwargs):
         super().__init__(*args, **kwargs)
 
 
 class TestClassB(TestBase):
+    __test__ = False
+
     def __init__(self, layers, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
 
 class TestNest(Remember):
+    __test__ = False
+
     def __init__(self, A):
         self.A = A
 
 
 class TestNest2(Serializable):
+    __test__ = False
+
     def __init__(self, A=None):
         self.A = A
 
 
 class TestNest3(Serializable):
+    __test__ = False
+
     def __init__(self, *args, **kwargs):
         pass
 
@@ -72,24 +86,32 @@ class TestNest3(Serializable):
 
 
 class TestNest4(Remember, UniqueID):
+    __test__ = False
+
     def __init__(self, A, **kwargs):
         super().__init__(**kwargs)
         self.A = A
 
 
 class TestClassF1(Remember, UniqueID):
+    __test__ = False
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.val = None
 
 
 class TestClassC(Serializable):
+    __test__ = False
+
     def __init__(self, A, B=None):
         self.A = A
         self.B = B
 
 
 class TestClassC2(Serializable):
+    __test__ = False
+
     def __init__(self, C):
         self.C = C
         self.data = 0
@@ -111,6 +133,8 @@ class TestClassC2(Serializable):
 
 
 class TestClass1(Remember):
+    __test__ = False
+
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
@@ -118,18 +142,24 @@ class TestClass1(Remember):
 
 
 class TestClass2(Remember):
+    __test__ = False
+
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
 
 
 class TestClass3(Remember):
+    __test__ = False
+
     def __init__(self, *args):
         super().__init__()
         self.args = args
 
 
 class TestClass4(Remember, UniqueID, Metadata):
+    __test__ = False
+
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
@@ -137,6 +167,8 @@ class TestClass4(Remember, UniqueID, Metadata):
 
 
 class TestClass5(Serializable):
+    __test__ = False
+
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
@@ -144,6 +176,8 @@ class TestClass5(Serializable):
 
 
 class TestDefer1(Defer):
+    __test__ = False
+
     def __init__(self, x):
         super().__init__()
         self.x = x
