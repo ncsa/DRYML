@@ -181,3 +181,26 @@ class TestDefer1(Defer):
     def __init__(self, x):
         super().__init__()
         self.x = x
+
+
+class TestDefer2(Defer, Serializable):
+    __test__ = False
+
+    def __init__(self, C):
+        self.C = C
+        self.data = 0
+
+    def set_val(self, val):
+        self.data = val
+
+    def _save_to_dir_imp(self, dir: str):
+        data_file = os.path.join(dir, 'data.pkl')
+        with open(data_file, 'wb') as f:
+            f.write(pickler(self.data))
+        return True
+
+    def _load_from_dir_imp(self, dir:str):
+        data_file = os.path.join(dir, 'data.pkl')
+        with open(data_file, 'rb') as f:
+            self.data = unpickler(f.read())
+        return True

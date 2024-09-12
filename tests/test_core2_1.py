@@ -851,3 +851,32 @@ def test_repo_load_1(create_temp_dir):
     repo2.load_object(obj2)
 
     assert obj2.data == obj1.data
+
+@pytest.mark.usefixtures("create_temp_dir")
+def test_repo_load_2(create_temp_dir):
+    # First create an object and save it.
+    obj1 = objects.TestDefer2('a')
+    assert obj1.__initialized__ is False
+    
+    obj1.set_val(10)
+
+    assert obj1.data == 10
+    assert obj1.__initialized__ is True
+
+    # Save the object to the temp directory
+    repo = Repo(create_temp_dir)
+    repo.save_object(obj1)
+
+    obj_def = obj1.definition
+
+    # Build a 'copy' of the object
+    obj2 = obj_def.build()
+
+    assert obj2.__initialized__ is False
+
+    repo2 = Repo(create_temp_dir, preload=False)
+    # load the object using another repo.
+    repo2.load_object(obj2)
+
+    assert obj2.__initialized__ is True
+    assert obj2.data == obj1.data

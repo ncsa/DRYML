@@ -3,9 +3,8 @@ import uuid
 import time
 import os
 
-from dryml.core2.util import cls_super, collide_attributes, \
-    pickle_to_file, unpickler, get_kwarg_defaults, \
-    mock_eval
+from dryml.core2.util import cls_super, pickle_to_file, \
+    unpickler, get_kwarg_defaults, mock_eval
 from dryml.core2.definition import \
     deepcopy_skip_definition_object, build_definition
 
@@ -67,11 +66,11 @@ class Remember(Object):
     # Support class which remembers the arguments used when creating it.
     # TODO: Check Invariant: Remember Object shouldn't contain arguments to Definitions.
     # TODO: Check Invariant: Remember Object should only contain arguments which are other Remember objects or plain old data.
+    __default_attributes__ = [
+            '__args__',
+            '__kwargs__' ]
     def __pre_init__(self, *args, **kwargs):
         super().__pre_init__(*args, **kwargs)
-        collide_attributes(self, [
-            '__args__',
-            '__kwargs__',])
         default_kwargs = get_kwarg_defaults(type(self))
         # TODO investigate whether we should include a check to make sure the user isn't passing
         # any Definition objects. I think we should probably disallow that.
@@ -100,14 +99,17 @@ class Defer(Remember):
     Defer objects build on Remember functionality. The arguments are recorded, then when attributes are accessed in the object, the deferred initialization is run.
     """
     # Since methods are part of the class, we only have to remove data from the object. We mark the protected data here. Keep up to date with attributes added 
+    __default_attributes__ = [
+        '__initialized__',
+        '__initialize__',
+        '__locked__' ,
+        '__orig_keys__']
+
     def __pre_init__(self, *args, **kwargs):
         super().__pre_init__(*args, **kwargs)
-        collide_attributes(self, [
-            '__initialized__',
-            '__locked__',])
         self.__initialized__ = False
         self.__locked__ = False
-        self.__orig_keys__ = None
+        self.__orig_keys__ = None # We fill `__orig_keys__` with something so it gets counted in the next line.
         self.__orig_keys__ = list(self.__dict__.keys())
 
     def __initialize_instance__(self, *args, **kwargs):
@@ -120,16 +122,38 @@ class Defer(Remember):
             return super().__getattribute__(name)
         except AttributeError:
             # If we don't next check if we're initialized
-            if not super().__getattribute__('__initialized__'):
-                super().__getattribute__('__initialize__')()
+            if '__initialized__' in self.__dict__ and not self.__initialized__:
+                # if not, initialize
+                self.__initialize__()
         # Then check again
         return super().__getattribute__(name)
+
+    def __setattr__(self, name, value):
+        # We allow to directly set the default attributes.
+        for cls in self.__class__.__mro__:
+            try:
+                if name in cls.__default_attributes__:
+                    return super().__setattr__(name, value)
+            except AttributeError:
+                pass
+        if '__initialized__' in self.__dict__ and \
+                not self.__initialized__:
+                self.__initialize__()
+        return super().__setattr__(name, value)
 
     def __initialize__(self):
         if self.__locked__:
             raise RuntimeError("Cannot initialize object. Object is locked.")
-        self.__init__(*self.__args__, **self.__kwargs__)
+
+        # We set the __initialized__ flag here so when we set attributes in the future, we don't run the __initialize__ method again.
         self.__initialized__ = True
+
+        try:
+            self.__init__(*self.__args__, **self.__kwargs__)
+        except Exception as e:
+            self.__initialized__ = False
+            raise e
+
 
     def __unload__(self):
         if self.__locked__:
