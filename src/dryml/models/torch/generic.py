@@ -99,7 +99,7 @@ class TorchOptimizer(Object):
         self.opt = self.cls(
             self.model.mdl.parameters(),
             *self.args,
-            *self.kwargs)
+            **self.kwargs)
 
     def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
         try:
