@@ -89,3 +89,31 @@ def binary_f1_score(trainable: Trainable, test_data: Dataset):
         f1_score = 2*precision*recall / (precision + recall)
     return f1_score
 
+@compute_context(ctx_dont_create_context=True)
+def binary_accuracy(trainable: Trainable, test_data: Dataset, threshold=0.5):
+    if not test_data.supervised:
+        raise ValueError("Dataset is unsupervised!")
+
+    data = trainable.eval(test_data).as_not_indexed()
+
+    if not data.batched:
+        data = data.batch()
+
+    total_correct = 0
+    total_samples = 0
+
+    for batch in data.numpy():
+        batch_pred, batch_true = batch
+
+        batch_pred = batch_pred
+        batch_true = batch_true
+
+        # Convert predictions to binary
+        batch_pred_binary = (batch_pred >= threshold).astype(np.int32)
+        batch_pred_binary = batch_pred_binary.flatten()
+        batch_true = batch_true.flatten().astype(np.int32)
+
+        total_correct += np.sum(batch_pred_binary == batch_true)
+        total_samples += len(batch_true)
+
+    return total_correct / total_samples
