@@ -18,7 +18,8 @@ import os
 import re
 import shutil
 from typing import List
-
+from tensorflow import keras 
+from inspect import isclass
 
 def keras_load_checkpoint_from_zip(
         mdl: tf.keras.Model,
@@ -297,7 +298,7 @@ class ModelWrapper(Model):
     @Meta.collect_args
     @Meta.collect_kwargs
     def __init__(self, cls, *args, **kwargs):
-        if type(cls) is not type:
+        if not isclass(cls):
             raise TypeError(
                 f"Expected first argument to be type. Got {type(cls)}")
         self.cls = cls
@@ -624,3 +625,73 @@ class Trainable(TFTrainable):
 
     def prep_eval(self):
         pass
+
+# specifically for the setiment analysis
+class TrainableVectorizer(TFTrainable):
+    def __init__(
+            self, model: Model = None, train_fn: TrainFunction = None):
+        if model is None:
+            raise ValueError(
+                "You need to set the model component of this trainable!")
+        self.model = model
+
+        if train_fn is None:
+            raise ValueError(
+                "You need to set the train_fn component of this trainable!")
+        self.train_fn = train_fn
+        
+        self._temp_checkpoint_dir = None
+
+    def compute_prepare_imp(self):
+        self._temp_checkpoint_dir = get_temp_checkpoint_dir(self.dry_id)
+
+    def compute_cleanup_imp(self):
+        if self._temp_checkpoint_dir is not None:
+            cleanup_checkpoint_dir(self._temp_checkpoint_dir)
+            self._temp_checkpoint_dir = None
+
+    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        vocab_filename = 'vectorizer_vocab.txt'
+        try:
+            # Extract vocabulary file
+            with tempfile.TemporaryDirectory() as d:
+                file.extract(vocab_filename, path=d)
+                vocab_file_path = os.path.join(d, vocab_filename)
+                with open(vocab_file_path, 'r', encoding='utf-8') as f:
+                    vocab = [line.strip() for line in f if line.strip() != '']
+            self.model.mdl.set_vocabulary(vocab)
+        except Exception as e:
+            print(f"Error loading vectorizer vocabulary! {e}")
+            return False
+
+        return True
+
+    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
+        try:
+            vocab = self.model.mdl.get_vocabulary()
+            vocab_filename = 'vectorizer_vocab.txt'
+            with tempfile.TemporaryDirectory() as d:
+                vocab_file_path = os.path.join(d, vocab_filename)
+                with open(vocab_file_path, 'w', encoding='utf-8') as f:
+                    for word in vocab:
+                        f.write(word + '\n')
+                file.write(vocab_file_path, arcname=vocab_filename)
+        except Exception as e:
+            print(f"Error saving vectorizer vocabulary! {e}")
+            return False
+        return True
+
+    def train(self, data, train_spec=None, train_callbacks=[]):
+        self.train_fn(
+            self, data, train_spec=train_spec,
+            train_callbacks=train_callbacks)
+        self.train_state = BaseTrainable.trained
+
+
+    def prep_train(self):
+        pass
+
+    def prep_eval(self):
+        pass
+
+    
