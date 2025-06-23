@@ -11,11 +11,15 @@ from dryml.core2.definition import \
 
 
 class CreationControl(type):
-    # Support metaclass to allow more complex metaclass behavior
+    # Support metaclass to enable close control of the python
+    # object creation process
+
     def __create_instance__(cls):
+        # Base instance creation 
         return cls.__new__(cls)
 
     def __call__(cls, *args, **kwargs):
+        # Object initialization
         obj = cls.__create_instance__()
         # Perform class specific argument manipulation
         args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
@@ -34,6 +38,10 @@ class CreationControl(type):
 
 
 class Object(metaclass=CreationControl):
+    # Base type for using CreationControl metaclass.
+    # Provides basic implementations for all methods used
+    # In the CreationControl process
+
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
         # __arg_manipulation__ should be an idempotent function
@@ -59,6 +67,7 @@ class Remember(Object):
     # TODO: Check Invariant: Remember Object shouldn't contain arguments to Definitions.
     # TODO: Check Invariant: Remember Object should only contain arguments which are other Remember objects or plain old data.
     def __pre_init__(self, *args, **kwargs):
+        # Set up structures for tracking args and store them.
         super().__pre_init__(*args, **kwargs)
         collide_attributes(self, [
             '__args__',
@@ -73,13 +82,16 @@ class Remember(Object):
 
     @cached_property
     def definition(self):
+        # Get a `Definition` object for this particular object.
         return build_definition(self)
 
     @cached_property
     def concrete_definition(self):
+        # Get a `ConcreteDefinition` object for this particular object.
         return self.definition.concretize()
 
     def __hash__(self):
+        # Objects are hashable through through its `ConcreteDefinition`
         return hash(self.concrete_definition)
 
     def __repr__(self):
@@ -130,6 +142,8 @@ class Defer(Remember):
 
 
 class UniqueID(Object):
+    # Mixing in this class adds a `uid` keyword argument which is
+    # initialized automatically if not provided.
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
         args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
@@ -151,6 +165,9 @@ class UniqueID(Object):
 
 
 class Metadata(Object):
+    # Mixing in this class adds a `metadata` keyword argument which is
+    # used to store a basic 'description', and 'creation_time' metadata
+    # along with any other metadata the user wishes to store.
     @staticmethod
     def __arg_manipulation__(cls_super, *args, **kwargs):
         args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
@@ -176,6 +193,7 @@ class Metadata(Object):
 
 
 class Serializable(Remember):
+    # Enables uniform mechanism for saving/loading to disk
     def save(self, dest, **kwargs):
         from dryml.core2.repo import save_object
         return save_object(self, dest, **kwargs)
