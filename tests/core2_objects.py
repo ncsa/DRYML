@@ -1,4 +1,4 @@
-from dryml.core2.object import Remember, UniqueID, Metadata, Serializable, Defer
+from dryml.core2.object import Memorizer, UniqueID, Metadata, Serializable, Lazy
 import os
 from dryml.core2.util import pickler, unpickler
 
@@ -48,7 +48,7 @@ class TestClassB(TestBase):
         super().__init__(*args, **kwargs)
 
 
-class TestNest(Remember):
+class TestNest(Memorizer):
     def __init__(self, A):
         self.A = A
 
@@ -71,13 +71,13 @@ class TestNest3(Serializable):
             raise KeyError()
 
 
-class TestNest4(Remember, UniqueID):
+class TestNest4(Memorizer, UniqueID):
     def __init__(self, A, **kwargs):
         super().__init__(**kwargs)
         self.A = A
 
 
-class TestClassF1(Remember, UniqueID):
+class TestClassF1(Memorizer, UniqueID):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.val = None
@@ -110,26 +110,26 @@ class TestClassC2(Serializable):
         return True
 
 
-class TestClass1(Remember):
+class TestClass1(Memorizer):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
 
 
-class TestClass2(Remember):
+class TestClass2(Memorizer):
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
 
 
-class TestClass3(Remember):
+class TestClass3(Memorizer):
     def __init__(self, *args):
         super().__init__()
         self.args = args
 
 
-class TestClass4(Remember, UniqueID, Metadata):
+class TestClass4(Memorizer, UniqueID, Metadata):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
@@ -143,7 +143,7 @@ class TestClass5(Serializable):
         self.test = test
 
 
-class TestDefer1(Defer):
+class TestLazy1(Lazy):
     def __init__(self, x):
         super().__init__()
         self.x = x

@@ -794,22 +794,22 @@ def test_save_load_3(create_temp_dir):
     assert obj3_2 is obj10_2.test.test.x
 
 
-def test_defer_1():
+def test_lazy_1():
     # Test that mock initialization properly fails case 1
     try:
-        objects.TestDefer1(test=10)
+        objects.TestLazy1(test=10)
         assert False
     except TypeError:
         pass
 
     # Test that mock initialization properly fails case 1
     try:
-        objects.TestDefer1(5, test=10)
+        objects.TestLazy1(5, test=10)
         assert False
     except TypeError:
         pass
 
-    defer_obj = objects.TestDefer1(5)
+    defer_obj = objects.TestLazy1(5)
 
     assert len(defer_obj.__dict__) == 5
 

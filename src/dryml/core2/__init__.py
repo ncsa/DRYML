@@ -1,4 +1,4 @@
-from dryml.core2.object import Remember, Defer, UniqueID, \
+from dryml.core2.object import Memorizer, Lazy, UniqueID, \
     Metadata, Serializable
 from dryml.core2.definition import Definition, SKIP_ARGS
 from dryml.core2.repo import load_object, save_object
@@ -6,8 +6,8 @@ from dryml.core2.repo import load_object, save_object
 __all__ = [
     load_object,
     save_object,
-    Remember,
-    Defer,
+    Memorizer,
+    Lazy,
     UniqueID,
     Metadata,
     Serializable,

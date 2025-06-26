@@ -142,9 +142,9 @@ def test_unique_objs_1():
         train_fn=train_fn_obj
     )
 
-    from dryml.core2.definition import unique_remember_objects
+    from dryml.core2.definition import unique_memorizer_objects
 
-    unique_objs = unique_remember_objects(trainable_obj)
+    unique_objs = unique_memorizer_objects(trainable_obj)
 
     assert len(unique_objs) == 5
     assert model_obj in unique_objs

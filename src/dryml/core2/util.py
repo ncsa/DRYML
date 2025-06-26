@@ -7,7 +7,7 @@ from typing import Optional, Callable
 from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
     Parameter, signature
-from boltons.iterutils import remap, is_collection, PathAccessError, default_enter, default_exit
+from boltons.iterutils import remap, default_enter, default_exit
 
 
 def collide_attributes(obj, attr_list):
@@ -138,7 +138,7 @@ def pickle_to_file(obj, path):
         f.write(pickler(obj))
 
 
-def get_remember_view(obj):
+def get_memorizer_view(obj):
     return ItemsView({'cls': type(obj), 'args': obj.__args__, 'kwargs': obj.__kwargs__})
 
 
@@ -147,19 +147,19 @@ def get_definition_view(defn):
 
 
 def get_unique_objects(obj):
-    from dryml.core2.object import Remember
+    from dryml.core2.object import Memorizer
 
     unique_objs = {}
 
     def _get_unique_objects_enter(path, key, value):
-        if isinstance(value, Remember):
+        if isinstance(value, Memorizer):
             # Check if we've visited this one already
             def_val = value.definition.concretize()
 
             if def_val in unique_objs:
                 return value, False
             else:
-                return {}, get_remember_view(value)
+                return {}, get_memorizer_view(value)
         else:
             return default_enter(path, key, value)
 
@@ -168,15 +168,15 @@ def get_unique_objects(obj):
         return key, value
 
     def _get_unique_objects_exit(path, key, value, new_parent, new_items):
-        if isinstance(value, Remember):
-            # We're exiting a Remember object
+        if isinstance(value, Memorizer):
+            # We're exiting a Memorizer object
             def_val = value.definition.concretize()
 
             unique_objs[def_val] = value
 
         return default_exit(path, key, value, new_parent, new_items)
 
-    if isinstance(obj, Remember):
+    if isinstance(obj, Memorizer):
         remap(
             [obj],
             enter=_get_unique_objects_enter,

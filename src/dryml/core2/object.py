@@ -2,15 +2,34 @@ from functools import cached_property
 import uuid
 import time
 import os
+import inspect
 
-from dryml.core2.util import cls_super, collide_attributes, \
-    pickle_to_file, unpickler, get_kwarg_defaults, \
-    mock_eval
+from dryml.core2.util import collide_attributes, \
+    pickle_to_file, unpickler, get_kwarg_defaults
 from dryml.core2.definition import \
     deepcopy_skip_definition_object, build_definition
 
 
-class CreationControl(type):
+def _validate_init_sig(cls, *args, **kwargs):
+    """
+    Raise TypeError *now* if `cls.__init__` cannot accept the args.
+
+    We bind only to the *signature*; we never execute the body, so it is
+    safe for Lazy/Heavy objects.
+    """
+    sig = inspect.signature(cls.__init__)
+
+    # The first parameter is `self`; use `None` as placeholder.
+    try:
+        sig.bind_partial(None, *args, **kwargs)
+    except TypeError as err:
+        raise TypeError(
+            f"{cls.__name__} cannot be constructed with "
+            f"args={args!r}, kwargs={kwargs!r}: {err}"
+        ) from None
+
+
+class Dryml(type):
     # Support metaclass to enable close control of the python
     # object creation process
 
@@ -21,34 +40,31 @@ class CreationControl(type):
     def __call__(cls, *args, **kwargs):
         # Object initialization
         obj = cls.__create_instance__()
-        # Perform class specific argument manipulation
-        args, kwargs = cls_super(cls).__arg_manipulation__(*args, **kwargs)
-        # Do mock initialization
-        try:
-            # We use a `None` object to simulate `self`
-            mock_eval(cls.__init__, None, *args, **kwargs)
-        except TypeError as e:
-            raise TypeError(f"mock initialization failed: {e}")
+        # Perform class specific argument preparation
+        args, kwargs = cls.__prepare_args__(*args, **kwargs)
+
+        _validate_init_sig(cls, *args, **kwargs)
 
         # Perform object pre-initialization
         obj.__pre_init__(*args, **kwargs)
+
         # Run our initialization method
         obj.__initialize_instance__(*args, **kwargs)
         return obj
 
 
-class Object(metaclass=CreationControl):
+class Object(metaclass=Dryml):
     # Base type for using CreationControl metaclass.
     # Provides basic implementations for all methods used
     # In the CreationControl process
 
-    @staticmethod
-    def __arg_manipulation__(cls_super, *args, **kwargs):
-        # __arg_manipulation__ should be an idempotent function
+    @classmethod
+    def __prepare_args__(cls, *args, **kwargs):
+        # __prepare_args__ should be an idempotent function
         return args, kwargs
 
-    @staticmethod
-    def __strip_unique_args__(cls_super, *args, **kwargs):
+    @classmethod
+    def __strip_unique_args__(cls, *args, **kwargs):
         # __strip_unique_args__ should be an idempotent function
         return args, kwargs
 
@@ -62,10 +78,10 @@ class Object(metaclass=CreationControl):
         pass
 
 
-class Remember(Object):
+class Memorizer(Object):
     # Support class which remembers the arguments used when creating it.
-    # TODO: Check Invariant: Remember Object shouldn't contain arguments to Definitions.
-    # TODO: Check Invariant: Remember Object should only contain arguments which are other Remember objects or plain old data.
+    # TODO: Check Invariant: Memorizer Object shouldn't contain arguments to Definitions.
+    # TODO: Check Invariant: Memorizer Object should only contain arguments which are other Memorizer objects or plain old data.
     def __pre_init__(self, *args, **kwargs):
         # Set up structures for tracking args and store them.
         super().__pre_init__(*args, **kwargs)
@@ -98,7 +114,7 @@ class Remember(Object):
         return f"<{self.__class__.__name__} at {hex(id(self))}>(args={self.__args__}, kwargs={self.__kwargs__})"
 
 
-class Defer(Remember):
+class Lazy(Memorizer):
     # Since methods are part of the class, we only have to remove data from the object. We mark the protected data here. Keep up to date with attributes added 
     def __pre_init__(self, *args, **kwargs):
         super().__pre_init__(*args, **kwargs)
@@ -144,15 +160,15 @@ class Defer(Remember):
 class UniqueID(Object):
     # Mixing in this class adds a `uid` keyword argument which is
     # initialized automatically if not provided.
-    @staticmethod
-    def __arg_manipulation__(cls_super, *args, **kwargs):
-        args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
-        if 'uid' not in kwargs:
-            kwargs['uid'] = str(uuid.uuid4())
+    @classmethod
+    def __prepare_args__(cls, *args, **kwargs):
+        args, kwargs = super().__prepare_args__(*args, **kwargs)
+        kwargs.setdefault("uid", str(uuid.uuid4()))
         return args, kwargs
 
-    @staticmethod
-    def __strip_unique_args__(cls_super, *args, **kwargs):
+    @classmethod
+    def __strip_unique_args__(cls, *args, **kwargs):
+        args, kwargs = super().__strip_unique_args__(*args, **kwargs)
         kwargs = kwargs.copy()
         if 'uid' in kwargs:
             del kwargs['uid']
@@ -168,9 +184,9 @@ class Metadata(Object):
     # Mixing in this class adds a `metadata` keyword argument which is
     # used to store a basic 'description', and 'creation_time' metadata
     # along with any other metadata the user wishes to store.
-    @staticmethod
-    def __arg_manipulation__(cls_super, *args, **kwargs):
-        args, kwargs = cls_super().__arg_manipulation__(*args, **kwargs)
+    @classmethod
+    def __prepare_args__(cls, *args, **kwargs):
+        args, kwargs = super().__prepare_args__(*args, **kwargs)
         if 'metadata' not in kwargs:
             kwargs['metadata'] = {
             }
@@ -180,8 +196,9 @@ class Metadata(Object):
             kwargs['metadata']['creation_time'] = time.time()
         return args, kwargs
 
-    @staticmethod
+    @classmethod
     def __strip_unique_args__(cls_super, *args, **kwargs):
+        args, kwargs = super().__prepare_args__(*args, **kwargs)
         kwargs = kwargs.copy()
         if 'metadata' in kwargs:
             del kwargs['metadata']
@@ -192,7 +209,7 @@ class Metadata(Object):
         self.metadata = metadata
 
 
-class Serializable(Remember):
+class Serializable(Memorizer):
     # Enables uniform mechanism for saving/loading to disk
     def save(self, dest, **kwargs):
         from dryml.core2.repo import save_object

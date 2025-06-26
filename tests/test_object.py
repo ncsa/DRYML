@@ -196,12 +196,12 @@ def test_save_object_7():
     """Test that we can't save objects which don't inherit from Serializable"""
 
     import core2_objects as objs
-    from dryml.core2.object import Remember, Serializable
+    from dryml.core2.object import Memorizer, Serializable
     from dryml.core2.repo import save_object
 
     obj = objs.TestNest(10)
 
-    assert isinstance(obj, Remember)
+    assert isinstance(obj, Memorizer)
     assert not isinstance(obj, Serializable)
 
     try:

@@ -1,15 +1,12 @@
-import tempfile
 import os
 import zipfile
 from boltons.iterutils import remap, default_enter, default_exit
 from collections.abc import ItemsView
 from contextlib import contextmanager
-from typing import Union, List
 from io import IOBase
 
 from dryml.core2.util import zip_directory, hashval_to_digest, \
-    unpickler, pickle_to_file, get_remember_view, \
-    get_temp_directory
+    unpickler, pickle_to_file, get_temp_directory
 
 
 class BaseRepo:
@@ -50,11 +47,11 @@ class BaseRepo:
             self.main_def = None
 
     def save_object(self, obj, main=False):
-        from dryml.core2.object import Remember, Serializable
+        from dryml.core2.object import Memorizer, Serializable
         saved_objs = {}
         def _save_object_enter(path, key, value):
-            if isinstance(value, Remember) and not isinstance(value, Serializable):
-                raise ValueError(f"Cannot save non-serializable Remember object {value}")
+            if isinstance(value, Memorizer) and not isinstance(value, Serializable):
+                raise ValueError(f"Cannot save non-serializable Memorizer object {value}")
             if isinstance(value, Serializable):
                 result = {'args': value.__args__, 'kwargs': value.__kwargs__}
                 return {}, ItemsView(result)
@@ -231,10 +228,10 @@ class BaseRepo:
             pickle_to_file(self.main_def, def_file)
 
     def add_object(self, *args):
-        from dryml.core2.object import Remember
+        from dryml.core2.object import Memorizer
         for obj in args:
-            if not isinstance(obj, Remember):
-                raise TypeError("Only Remember objects can be added to a repository.")
+            if not isinstance(obj, Memorizer):
+                raise TypeError("Only Memorizer objects can be added to a repository.")
             self.objs[obj] = obj
 
     def close(self):
