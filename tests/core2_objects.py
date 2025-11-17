@@ -1,9 +1,9 @@
-from dryml.core2.object import Memorizer, UniqueID, Metadata, Serializable, Lazy
+from dryml.core2.object import Lazy, Pickleable, UniqueID, Metadata
 import os
 from dryml.core2.util import pickler, unpickler
 
 
-class HelloObject(Serializable, UniqueID):
+class HelloObject(UniqueID):
     def __init__(self, **kwargs):
         pass
 
@@ -27,7 +27,7 @@ class HelloInt(HelloObject):
         return f"Hello! {self.int_msg}"
 
 
-class TestBase(Serializable, UniqueID, Metadata):
+class TestBase(UniqueID, Metadata):
     def __init__(self, *args, base_msg: str = "base", **kwargs):
         super().__init__(*args, **kwargs)
         self.base_msg = base_msg
@@ -48,17 +48,17 @@ class TestClassB(TestBase):
         super().__init__(*args, **kwargs)
 
 
-class TestNest(Memorizer):
+class TestNest(Lazy):
     def __init__(self, A):
         self.A = A
 
 
-class TestNest2(Serializable):
+class TestNest2(Lazy):
     def __init__(self, A=None):
         self.A = A
 
 
-class TestNest3(Serializable):
+class TestNest3(Lazy):
     def __init__(self, *args, **kwargs):
         pass
 
@@ -71,25 +71,25 @@ class TestNest3(Serializable):
             raise KeyError()
 
 
-class TestNest4(Memorizer, UniqueID):
+class TestNest4(UniqueID):
     def __init__(self, A, **kwargs):
         super().__init__(**kwargs)
         self.A = A
 
 
-class TestClassF1(Memorizer, UniqueID):
+class TestClassF1(UniqueID):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.val = None
 
 
-class TestClassC(Serializable):
+class TestClassC(Lazy):
     def __init__(self, A, B=None):
         self.A = A
         self.B = B
 
 
-class TestClassC2(Serializable):
+class TestClassC2(Pickleable):
     def __init__(self, C):
         self.C = C
         self.data = 0
@@ -97,46 +97,34 @@ class TestClassC2(Serializable):
     def set_val(self, val):
         self.data = val
 
-    def _save_to_dir_imp(self, dir: str):
-        data_file = os.path.join(dir, 'data.pkl')
-        with open(data_file, 'wb') as f:
-            f.write(pickler(self.data))
-        return True
 
-    def _load_from_dir_imp(self, dir: str):
-        data_file = os.path.join(dir, 'data.pkl')
-        with open(data_file, 'rb') as f:
-            self.data = unpickler(f.read())
-        return True
-
-
-class TestClass1(Memorizer):
+class TestClass1(Lazy):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
 
 
-class TestClass2(Memorizer):
+class TestClass2(Lazy):
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
 
 
-class TestClass3(Memorizer):
+class TestClass3(Lazy):
     def __init__(self, *args):
         super().__init__()
         self.args = args
 
 
-class TestClass4(Memorizer, UniqueID, Metadata):
+class TestClass4(UniqueID, Metadata):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
 
 
-class TestClass5(Serializable):
+class TestClass5(Lazy):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
@@ -147,3 +135,5 @@ class TestLazy1(Lazy):
     def __init__(self, x):
         super().__init__()
         self.x = x
+
+

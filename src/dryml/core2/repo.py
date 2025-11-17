@@ -4,9 +4,10 @@ from boltons.iterutils import remap, default_enter, default_exit
 from collections.abc import ItemsView
 from contextlib import contextmanager
 from io import IOBase
+from pathlib import Path
 
 from dryml.core2.util import zip_directory, hashval_to_digest, \
-    unpickler, pickle_to_file, get_temp_directory
+    pickle_load, pickle_save, get_temp_directory
 
 
 class BaseRepo:
@@ -35,24 +36,20 @@ class BaseRepo:
         for obj_dir in obj_dirs:
             obj_dir = os.path.join(self.obj_dir, obj_dir)
             def_file = os.path.join(obj_dir, 'def.pkl')
-            with open(def_file, 'rb') as f:
-                obj_def = unpickler(f.read())
+            obj_def = pickle_load(def_file)
             self.load_object(obj_def.concretize())
 
         def_file = os.path.join(self.dir, "def.pkl")
         if os.path.exists(def_file):
-            with open(def_file, "rb") as f:
-                self.main_def = unpickler(f.read())
+            self.main_def = pickle_load(def_file)
         else:
             self.main_def = None
 
     def save_object(self, obj, main=False):
-        from dryml.core2.object import Memorizer, Serializable
+        from dryml.core2.object import Lazy
         saved_objs = {}
         def _save_object_enter(path, key, value):
-            if isinstance(value, Memorizer) and not isinstance(value, Serializable):
-                raise ValueError(f"Cannot save non-serializable Memorizer object {value}")
-            if isinstance(value, Serializable):
+            if isinstance(value, Lazy):
                 result = {'args': value.__args__, 'kwargs': value.__kwargs__}
                 return {}, ItemsView(result)
             else:
@@ -62,7 +59,7 @@ class BaseRepo:
             return key, value
 
         def _save_object_exit(path, key, value, new_parent, new_items):
-            if isinstance(value, Serializable):
+            if isinstance(value, Lazy):
                 obj_def = value.definition.concretize()
                 if obj_def not in saved_objs:
                     # TODO: Handle status checking here.
@@ -75,7 +72,7 @@ class BaseRepo:
                 return default_exit(path, key, value, new_parent, new_items)
 
         # Save the object
-        if isinstance(obj, Serializable):
+        if isinstance(obj, Lazy):
             remap(
                 [obj],
                 enter=_save_object_enter,
@@ -108,7 +105,7 @@ class BaseRepo:
         object_path = os.path.join(self.dir, "objects", def_hash_digest)
         os.mkdir(object_path)
         # Save the object
-        return obj._save_to_dir(object_path)
+        return obj.save_to_dir(object_path)
 
     def load_object(self, obj_def, build_missing=False):
         from dryml.core2.definition import Definition, \
@@ -160,7 +157,7 @@ class BaseRepo:
                 object_path = os.path.join(self.dir, "objects", value_hash_digest)
                 if not os.path.exists(object_path):
                     if not build_missing:
-                        raise IndexError(f"Object with hash {value_hash} not found.")
+                        raise IndexError(f"Lazy with hash digest {value_hash_digest} not found.")
                     # We should build the object, but not create or load from a directory
                     obj = _create_obj()
                     self.objs[value] = obj
@@ -170,13 +167,12 @@ class BaseRepo:
                     obj = _create_obj()
                     # confirm we have the same definition
                     def_file = os.path.join(object_path, "def.pkl")
-                    with open(def_file, 'rb') as f:
-                        definition = unpickler(f.read())
-                        check_hash = hash(definition.concretize())
+                    definition = pickle_load(def_file)
+                    check_hash = hash(definition.concretize())
                     if check_hash != value_hash:
                         raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
                     # Load the data from the directory
-                    obj._load_from_dir(object_path)
+                    obj.load_from_dir(object_path)
                     self.objs[value] = obj
                     loaded_objs[value] = obj
                     return obj
@@ -210,12 +206,11 @@ class BaseRepo:
         def_hash_digest = hashval_to_digest(def_hash)
         object_path = os.path.join(self.dir, "objects", def_hash_digest)
         if not os.path.exists(object_path):
-            raise IndexError(f"Object with hash {def_hash} not found.")
+            raise IndexError(f"Lazy with hash {def_hash} not found.")
         # confirm we have the same definition
         def_file = os.path.join(object_path, "def.pkl")
-        with open(def_file, 'rb') as f:
-            definition = unpickler(f.read())
-            check_hash = hash(definition.concretize())
+        definition = pickle_load(f.read())
+        check_hash = hash(definition.concretize())
         if check_hash != def_hash:
             raise ValueError(f"Hashes don't match. {check_hash} != {def_hash}")
         # Load the data from the directory
@@ -225,13 +220,13 @@ class BaseRepo:
     def write_main_def(self):
         if self.main_def is not None:
             def_file = os.path.join(self.dir, "def.pkl")
-            pickle_to_file(self.main_def, def_file)
+            pickle_save(self.main_def, def_file)
 
     def add_object(self, *args):
-        from dryml.core2.object import Memorizer
+        from dryml.core2.object import Lazy
         for obj in args:
-            if not isinstance(obj, Memorizer):
-                raise TypeError("Only Memorizer objects can be added to a repository.")
+            if not isinstance(obj, Lazy):
+                raise TypeError("Only Lazy objects can be added to a repository.")
             self.objs[obj] = obj
 
     def close(self):
@@ -314,46 +309,45 @@ class ZipRepo(Repo):
 
 
 @contextmanager
-def manage_repo(dest=None, repo=None):
+def manage_repo(repo=None):
     close_repo = False
     if repo is None:
-        if dest is None:
-            repo = Repo()
-        elif isinstance(dest, IOBase):
-            # This is a file-like object
-            repo = ZipRepo(dest)
-        else:
-            # detect if the path is a zip file
-            extension = os.path.splitext(dest)[-1]
-            if extension == ".zip" or extension == ".dry":
-                # We have a single file repo
-                repo = ZipRepo(dest)
-            elif os.path.exists(dest) and os.path.isdir(dest):
-                # We have a directory repo
-                repo = Repo(dest)
-            else:
-                # We will treat this as a zip repo
-                repo = ZipRepo(dest)
+        repo = Repo()
         close_repo = True
+    elif isinstance(repo, Repo):
+        pass
+    elif isinstance(repo, IOBase):
+            # This is a file-like object
+        repo = ZipRepo(repo)
+        close_repo = True
+    elif type(repo) in [str, Path]:
+        if os.path.isdir(repo):
+            repo = Repo(repo)
+            close_repo = True
+        # Save as a dryml zip
+        else:
+            repo = ZipRepo(repo)
+            close_repo = True
+    else:
+        raise ValueError(f"Cannot open a repo pointing to location {repo}")
     yield repo
     if close_repo:
         repo.close()
 
 
 # Saving and Loading
-def save_object(obj, dest=None, repo=None):
-    from dryml.core2 import Serializable
-    main = (repo is None) and (isinstance(obj, Serializable))
-    with manage_repo(dest=dest, repo=repo) as repo:
-        repo.save_object(obj, main=main)
-        return True
+def save_object(obj, repo=None):
+    from dryml.core2 import Lazy
+    with manage_repo(repo=repo) as sub_repo:
+        main = (repo is not sub_repo) and isinstance(obj, Lazy)
+        sub_repo.save_object(obj, main=main)
 
 
 def load_object(
-        obj_def=None, dest=None, repo=None,
+        obj_def=None, repo=None,
         cls_remap=None):
-    from dryml.core2.definition import Definition, concretize_definition
-    with manage_repo(dest=dest, repo=repo) as repo:
+    from dryml.core2.definition import concretize_definition
+    with manage_repo(repo=repo) as repo:
         if obj_def is None:
             obj_def = repo.main_def
         return repo.load_object(concretize_definition(obj_def))

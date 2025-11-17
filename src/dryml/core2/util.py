@@ -3,6 +3,7 @@ import os
 import zipfile
 import importlib
 import tempfile
+import io
 from typing import Optional, Callable
 from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
@@ -18,47 +19,6 @@ def collide_attributes(obj, attr_list):
             colliding_attrs.append(attr)
     if len(colliding_attrs) > 0:
         raise AttributeError(f"Attributes {colliding_attrs} already exist on object. Cannot create object.")
-
-
-def cls_super(cls=None):
-    if cls is None:
-         # We must detect the class ourselves
-         frame = currentframe().f_back
-         cls = frame.f_locals.get('self', None).__class__
-    return ClsSuperManager(0, cls.mro())
-
-
-class ClsSuperManager:
-    # A class to mimic `super()` but without an actual instance
-    def __init__(self, mro_i, mro):
-        self.mro = mro
-        self.mro_i = mro_i
-
-    def __call__(self):
-        # Create a new object which will reset the advance counter
-        self.mro_i += 1
-        return self
-
-    def __getattribute__(self, name):
-        if name in super().__getattribute__('__dict__'):
-            # If its a plain attribute just return it
-            return super().__getattribute__(name)
-        else:
-            # We have a method
-            # We must advance through the mro until we find a class with the method
-            for i in range(self.mro_i, len(self.mro)):
-                cls = self.mro[i]
-                if name in cls.__dict__:
-                    # We found a class with the method
-                    # Advance the counter
-                    self.mro_i = i
-                    # Get the method
-                    method = cls.__dict__[name]
-                    def exec_method(*args, **kwargs):
-                        return method(self, *args, **kwargs)
-                    return exec_method
-            # We didn't find anymore classes with this method
-            return None
 
 
 def get_class_str(obj):
@@ -104,6 +64,10 @@ def is_dictlike(val):
     return isinstance(val, Mapping)
 
 
+def is_stream(obj) -> bool:
+    return isinstance(obj, io.IOBase)
+
+
 def zip_directory(folder_path, zip_dest):
     with zipfile.ZipFile(zip_dest, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Ignoring dirs for now. May need to edit this in the future.
@@ -133,9 +97,14 @@ def pickler(obj):
     return dill.dumps(obj, protocol=5)
 
 
-def pickle_to_file(obj, path):
+def pickle_save(obj, path):
     with open(path, 'wb') as f:
         f.write(pickler(obj))
+
+
+def pickle_load(path):
+    with open(path, 'rb') as f:
+        return unpickler(f.read())
 
 
 def get_memorizer_view(obj):
@@ -147,12 +116,12 @@ def get_definition_view(defn):
 
 
 def get_unique_objects(obj):
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
 
     unique_objs = {}
 
     def _get_unique_objects_enter(path, key, value):
-        if isinstance(value, Memorizer):
+        if isinstance(value, Lazy):
             # Check if we've visited this one already
             def_val = value.definition.concretize()
 
@@ -168,15 +137,15 @@ def get_unique_objects(obj):
         return key, value
 
     def _get_unique_objects_exit(path, key, value, new_parent, new_items):
-        if isinstance(value, Memorizer):
-            # We're exiting a Memorizer object
+        if isinstance(value, Lazy):
+            # We're exiting a Lazy object
             def_val = value.definition.concretize()
 
             unique_objs[def_val] = value
 
         return default_exit(path, key, value, new_parent, new_items)
 
-    if isinstance(obj, Memorizer):
+    if isinstance(obj, Lazy):
         remap(
             [obj],
             enter=_get_unique_objects_enter,
@@ -209,14 +178,3 @@ def apply_func(
 
 def get_temp_directory():
     return tempfile.TemporaryDirectory()
-
-
-def mock_eval(method, *args, **kwargs):
-    # Mock-evaluate a method. Throws a TypeError exception
-    # If the method cannot be evaluated with the given arguments
-
-    # Get the signature of the method
-    sig = signature(method)
-
-    bound_args = sig.bind(*args, **kwargs)
-    bound_args.apply_defaults()

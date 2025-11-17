@@ -8,11 +8,10 @@ import sys
 import time
 import importlib
 
-test_objs_text = """from dryml.core2 import Serializable, \
-    Metadata, UniqueID
+test_objs_text = """from dryml.core2 import Metadata, UniqueID
 
 
-class SimpleObject(Serializable, Metadata, UniqueID):
+class SimpleObject(Metadata, UniqueID):
     def __init__(self, i, **kwargs):
         super().__init__(**kwargs)
         self.i = i
@@ -40,9 +39,11 @@ def test_save_object_1():
     obj = objs.SimpleObject(10)
 
     # Test that save to buffer works
-    assert obj.save(temp_buffer)
+    obj.save(temp_buffer)
 
-    obj2 = dryml.core2.load_object(dest=temp_buffer)
+    temp_buffer.seek(0)
+
+    obj2 = dryml.core2.load_object(repo=temp_buffer)
 
     # Test that restore from buffer creates identical object in this context.
     assert obj == obj2
@@ -65,9 +66,9 @@ def test_save_object_2(create_name):
     obj = objs.SimpleObject(10)
 
     file_name = ".".join([create_name, "dry"])
-    assert obj.save(file_name)
+    obj.save(file_name)
 
-    obj2 = dryml.core2.load_object(dest=file_name)
+    obj2 = dryml.core2.load_object(repo=file_name)
 
     assert obj == obj2
 
@@ -88,9 +89,9 @@ def test_save_object_3(create_temp_named_file):
 
     obj = objs.SimpleObject(10)
 
-    assert obj.save(create_temp_named_file)
+    obj.save(create_temp_named_file)
 
-    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
 
     assert obj == obj2
 
@@ -111,11 +112,11 @@ def test_save_object_4(create_temp_file):
 
     obj = objs.SimpleObject(10)
 
-    assert obj.save(create_temp_file)
+    obj.save(create_temp_file)
 
     create_temp_file.flush()
     create_temp_file.seek(0)
-    obj2 = dryml.core2.load_object(dest=create_temp_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_file)
 
     assert obj == obj2
 
@@ -142,7 +143,7 @@ def test_save_object_5(create_temp_file):
     # Create object and save
     obj = objs.SimpleObject(10)
 
-    assert obj.save(create_temp_file)
+    obj.save(create_temp_file)
 
     # Delete test_objs source and module from sys
     if os.path.exists('./tests/objs.py'):
@@ -156,7 +157,7 @@ def test_save_object_5(create_temp_file):
     create_temp_file.flush()
     create_temp_file.seek(0)
 
-    obj2 = dryml.core2.load_object(dest=create_temp_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_file)
 
     assert obj == obj2
 
@@ -179,9 +180,9 @@ def test_save_object_6(create_temp_named_file):
     obj = objs.SimpleObject(10, metadata={'description': desc_str})
     orig_creation_time = obj.__kwargs__['metadata']['creation_time']
 
-    assert obj.save(create_temp_named_file)
+    obj.save(create_temp_named_file)
 
-    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
 
     assert obj == obj2
 
@@ -190,25 +191,6 @@ def test_save_object_6(create_temp_named_file):
 
     assert orig_creation_time == obj2.__kwargs__['metadata']['creation_time']
     assert desc_str == obj2.__kwargs__['metadata']['description']
-
-
-def test_save_object_7():
-    """Test that we can't save objects which don't inherit from Serializable"""
-
-    import core2_objects as objs
-    from dryml.core2.object import Memorizer, Serializable
-    from dryml.core2.repo import save_object
-
-    obj = objs.TestNest(10)
-
-    assert isinstance(obj, Memorizer)
-    assert not isinstance(obj, Serializable)
-
-    try:
-        save_object(obj)
-        assert False
-    except ValueError:
-        pass
 
 
 def test_basic_object_def_update_1():
@@ -226,7 +208,7 @@ def test_basic_object_def_update_1():
 
         buffer = io.BytesIO()
 
-        assert obj.save(buffer)
+        obj.save(buffer)
 
         return obj, buffer
 
@@ -244,7 +226,7 @@ def test_basic_object_def_update_1():
 
         from dryml.core2.definition import hash_value
 
-        obj2 = dryml.core2.load_object(dest=buffer)
+        obj2 = dryml.core2.load_object(repo=buffer)
 
         return obj2
 
@@ -267,7 +249,7 @@ def test_basic_object_def_update_2(create_name):
 
         obj = objs.SimpleObject(10)
 
-        assert obj.save(create_name)
+        obj.save(create_name)
 
         return obj
 
@@ -282,7 +264,7 @@ def test_basic_object_def_update_2(create_name):
         import objs
         importlib.reload(objs)
 
-        obj2 = dryml.core2.load_object(dest=create_name)
+        obj2 = dryml.core2.load_object(repo=create_name)
 
         return obj2
 
@@ -322,9 +304,9 @@ def test_object_args_passing_2(create_name):
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    dryml.core2.save_object(obj, dest=create_name)
+    dryml.core2.save_object(obj, repo=create_name)
 
-    obj_loaded = dryml.core2.load_object(dest=create_name)
+    obj_loaded = dryml.core2.load_object(repo=create_name)
 
     assert obj_loaded.__args__ == (1,)
 
@@ -501,9 +483,9 @@ def test_object_hash_3(create_name):
     "Test that object hashes are the same after saving and restoring"
     import core2_objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save(dest=create_name)
+    obj1.save(repo=create_name)
 
-    obj2 = dryml.core2.load_object(dest=create_name)
+    obj2 = dryml.core2.load_object(repo=create_name)
     assert obj1.definition.categorical() == \
         obj2.definition.categorical()
 
@@ -513,9 +495,9 @@ def test_object_hash_4(create_name):
     "Test that loaded objects are identical hash wise"
     import core2_objects as objs
     obj1 = objs.HelloStr(msg="Test")
-    assert obj1.save(dest=create_name)
+    obj1.save(repo=create_name)
 
-    obj2 = dryml.core2.load_object(dest=create_name)
+    obj2 = dryml.core2.load_object(repo=create_name)
     assert obj1.definition == \
         obj2.definition
 
@@ -572,9 +554,9 @@ def test_object_save_restore_1(create_temp_named_file):
     # Enclose them in another object
     obj = objs.TestClassC(data_obj1, B=data_obj2)
 
-    assert obj.save(create_temp_named_file)
+    obj.save(create_temp_named_file)
 
-    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
 
     assert obj.definition == obj2.definition
     assert obj.A.data == obj2.A.data
@@ -598,10 +580,10 @@ def test_object_save_restore_2(create_temp_named_file):
     # Enclose them in another object
     obj = objs.TestClassC(data_obj1, B=data_obj1)
 
-    assert obj.save(create_temp_named_file)
+    obj.save(create_temp_named_file)
 
     # Load the object from the file
-    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
 
     assert obj.definition == obj2.definition
     assert obj.A is obj.B
@@ -634,10 +616,10 @@ def test_object_save_restore_3(create_temp_named_file):
     # Enclose them in another object
     obj = objs.TestClassC(obj1, B=obj2)
 
-    assert obj.save(create_temp_named_file)
+    obj.save(create_temp_named_file)
 
     # Load the object from the file
-    obj2 = dryml.core2.load_object(dest=create_temp_named_file)
+    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
 
     assert obj.definition == obj2.definition
     assert obj.A.A.data == obj2.A.A.data
@@ -675,10 +657,10 @@ def test_object_save_restore_4():
 
     # Save objects to a buffer
     save_buffer = io.BytesIO()
-    dryml.core2.save_object(args, dest=save_buffer)
+    dryml.core2.save_object(args, repo=save_buffer)
 
     # Load objects from buffer
-    new_args = dryml.core2.load_object(args_def, dest=save_buffer)
+    new_args = dryml.core2.load_object(args_def, repo=save_buffer)
 
     assert type(new_args[0]) is objs.TestClassC
     assert type(new_args[1]) is objs.TestClassC
@@ -715,9 +697,9 @@ def test_object_save_restore_5():
     args_defs = dryml.core2.definition.build_definition(args)
 
     save_buffer = io.BytesIO()
-    dryml.core2.save_object(args, dest=save_buffer)
+    dryml.core2.save_object(args, repo=save_buffer)
 
-    new_args = dryml.core2.load_object(args_defs, dest=save_buffer)
+    new_args = dryml.core2.load_object(args_defs, repo=save_buffer)
 
     recon_trainable_obj = new_args[0]
     assert type(recon_trainable_obj) is objs.TestNest3

@@ -33,8 +33,8 @@ def definition_exit(path, key, value, new_parent, new_items):
 
 def deepcopy_skip_definition_object(defn):
     def _enter(path, key, value):
-        from dryml.core2.object import Object
-        if isinstance(value, Object):
+        from dryml.core2.object import Lazy
+        if isinstance(value, Lazy):
             return value, False
         elif isinstance(value, Definition):
             return value, False
@@ -42,8 +42,8 @@ def deepcopy_skip_definition_object(defn):
             return default_enter(path, key, value)
 
     def _visit(path, key, value):
-        from dryml.core2.object import Object
-        if isinstance(value, Object):
+        from dryml.core2.object import Lazy
+        if isinstance(value, Lazy):
             # We have an already realized class instance. We shouldn't deep copy it.
             return key, value
         elif isinstance(value, Definition):
@@ -110,10 +110,10 @@ class Definition(dict):
         return build_from_definition(self, build_missing=build_missing, **kwargs)
 
     def __call__(self, other_def, **kwargs):
-        from dryml.core2.object import Memorizer
+        from dryml.core2.object import Lazy
         if not isinstance(other_def, Definition) and \
-                not isinstance(other_def, Memorizer):
-            raise TypeError("Definition can only be called on other Definition objects and Memorizer objects")
+                not isinstance(other_def, Lazy):
+            raise TypeError("Definition can only be called on other Definition objects and Lazy objects")
         return selector_match(self, other_def, **kwargs)
 
     @property
@@ -159,7 +159,7 @@ class Definition(dict):
 
 
 def categorical_definition(defn: Definition, recursive=True):
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
     # Copy the Definition
     new_def = deepcopy_skip_definition_object(defn)
 
@@ -169,7 +169,7 @@ def categorical_definition(defn: Definition, recursive=True):
     def _enter(path, key, value):
         if id(value) in definition_cache:
             return value, False
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             raise TypeError("Plain remember objects are not supported")
         elif isinstance(value, Definition):
             nonlocal level
@@ -182,8 +182,8 @@ def categorical_definition(defn: Definition, recursive=True):
         if isinstance(value, ConcreteDefinition):
             # We shouldn't have any ConcreteDefinitions at this point
             raise TypeError("ConcreteDefinition should not be here at this point")
-        elif isinstance(value, Memorizer):
-            raise TypeError("Plain Memorizer objects are not supported")
+        elif isinstance(value, Lazy):
+            raise TypeError("Plain Lazy objects are not supported")
         else:
             return key, value
 
@@ -223,7 +223,7 @@ def categorical_definition(defn: Definition, recursive=True):
 
 
 def concretize_definition(defn: Definition):
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
     # Cache for completed results. All duplicate ConcreteDefinitions should refer to the SAME object and so the same definition
     # Key for this cache will be the ConcreteDefinition hash.
     definition_cache = {}
@@ -238,7 +238,7 @@ def concretize_definition(defn: Definition):
             return value, False
         elif isinstance(value, Definition):
             return {}, get_definition_view(value)
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             return {}, get_memorizer_view(value)
         else:
             return default_enter(path, key, value)
@@ -251,9 +251,9 @@ def concretize_definition(defn: Definition):
         elif type(value) is ConcreteDefinition:
             # Value is already Concrete
             return key, value
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             # We have an already realized class instance. We shouldn't deep copy it.
-            raise TypeError("We shouldn't get a Memorizer object here.")
+            raise TypeError("We shouldn't get a Lazy object here.")
         elif isinstance(value, Definition):
             raise TypeError("We shouldn't get a Definition object here.")
         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
@@ -281,7 +281,7 @@ def concretize_definition(defn: Definition):
 
     def _exit(path, key, values, new_parent, new_items):
         is_def = isinstance(values, Definition)
-        is_rem = isinstance(values, Memorizer)
+        is_rem = isinstance(values, Lazy)
         if is_def or is_rem:
             if is_rem:
                 # Check if we've seen this object's definition before.
@@ -312,7 +312,7 @@ def concretize_definition(defn: Definition):
 
 
 def validate_arguments_for_concrete_definition(vals):
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
     # TODO: Maybe also directly validate for 'hashable' plain old data types as well?
     type_errors = []
 
@@ -322,7 +322,7 @@ def validate_arguments_for_concrete_definition(vals):
             return key, False
         if isinstance(value, Definition):
             return {}, get_definition_view(value)
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             return {}, get_memorizer_view(value)
         else:
             return default_enter(path, key, value)
@@ -333,7 +333,7 @@ def validate_arguments_for_concrete_definition(vals):
             pass
         elif isinstance(value, Definition):
             type_errors += [ ( path+(key,), type(value)) ]
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             type_errors += [ ( path+(key,), type(value)) ]
         return key, value
 
@@ -436,13 +436,13 @@ def hash_function(structure):
 # Creating definitions from objects
 def build_definition(obj):
     instance_cache = {}
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
 
     def _enter(path, key, value):
         id_value = id(value)
         if id_value in instance_cache:
             return value, False
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             return {}, get_memorizer_view(value)
         elif isinstance(value, Definition):
             # We can encounter definitions we have already created
@@ -464,7 +464,7 @@ def build_definition(obj):
         if id_value in instance_cache:
             # First return any instance we have already cached
             return key, instance_cache[id_value]
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             raise TypeError("Unexpected type!")
         elif isinstance(value, Definition):
             # We should've stored this definition in the cache already
@@ -485,14 +485,14 @@ def build_definition(obj):
             return key, deepcopy(value)
 
     def _exit(path, key, values, new_parent, new_items):
-        if isinstance(values, Memorizer) and type(new_parent) is dict:
+        if isinstance(values, Lazy) and type(new_parent) is dict:
             new_values = {}
             for k, v in new_items:
                 new_values[k] = v
             args = new_values['args']
             kwargs = new_values['kwargs']
             # We want to copy the arguments so we don't
-            # mutate them unless they're definitions or Objects
+            # mutate them unless they're definitions or Lazys
             args = deepcopy_skip_definition_object(args)
             kwargs = deepcopy_skip_definition_object(kwargs)
 
@@ -508,7 +508,7 @@ def build_definition(obj):
         else:
             return default_exit(path, key, values, new_parent, new_items)
 
-    if isinstance(obj, Memorizer):
+    if isinstance(obj, Lazy):
         return remap(
             [obj],
             enter=_enter,
@@ -562,7 +562,7 @@ def build_from_definition(definition, build_missing=True, **kwargs):
 
 
 def get_path(obj_or_def, path):
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
     if len(path) == 0:
         return obj_or_def
 
@@ -571,7 +571,7 @@ def get_path(obj_or_def, path):
         return obj_or_def
 
     new_path = path[1:]
-    if isinstance(obj_or_def, Memorizer):
+    if isinstance(obj_or_def, Lazy):
         if key == 'cls':
             value = type(obj_or_def)
         elif key == 'args':
@@ -579,7 +579,7 @@ def get_path(obj_or_def, path):
         elif key == 'kwargs':
             value = obj_or_def.__kwargs__
         else:
-            raise PathAccessError(KeyError("Unsupported key on Memorizer Object"), key, new_path)
+            raise PathAccessError(KeyError("Unsupported key on Lazy"), key, new_path)
     else:
         try:
             value = obj_or_def[key]
@@ -613,7 +613,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
     # if strict is set, it must match exactly, and callables arent' allowed.
     # cls_str_compare forces a string based name comparison between classes.
     # Additionally, Definitions which skip args also aren't allowed
-    from dryml.core2.object import Memorizer
+    from dryml.core2.object import Lazy
 
     def _enter(path, key, value):
         # Check if this key/path exists in the definition
@@ -628,7 +628,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
             if strict and value.skip_args:
                 raise TypeError("Definitions which skip args aren't allowed in strict mode")
             return {}, get_definition_view(value)
-        elif isinstance(value, Memorizer):
+        elif isinstance(value, Lazy):
             return {}, get_memorizer_view(value)
         else:
             return default_enter(path, key, value)
@@ -723,8 +723,8 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
                         file=output_stream)
                 # type doesn't match.
                 return key, False
-        elif (type(value) is bool) and isinstance(def_val, Memorizer):
-            # We've come out of a Memorizer object comparison.
+        elif (type(value) is bool) and isinstance(def_val, Lazy):
+            # We've come out of a Lazy object comparison.
             return key, value
         else:
             # Plain matching branch
@@ -753,7 +753,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
     def _exit(path, key, old_parent, new_parent, new_items):
         # Type check
         if type(old_parent) != type(new_parent):
-            if isinstance(old_parent, Definition) or isinstance(old_parent, Memorizer):
+            if isinstance(old_parent, Definition) or isinstance(old_parent, Lazy):
                 if type(new_parent) is not dict:
                     # The one case we know about should have new_parent be a dict.
                     return False
@@ -764,12 +764,12 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
         def_values = get_path(definition, path+(key,))
 
         # We expect to be comparing collections at this point.
-        if not isinstance(def_values, Memorizer) and \
+        if not isinstance(def_values, Lazy) and \
                 (not is_collection(def_values) and not is_dictlike(def_values)):
             return False
 
-        # Here, we compute the number of values there should be with a special case for 'single' Memorizer values.
-        if isinstance(def_values, Memorizer):
+        # Here, we compute the number of values there should be with a special case for 'single' Lazy values.
+        if isinstance(def_values, Lazy):
             num_def_values = 1 + len(def_values.__args__) + len(def_values.__kwargs__)
         else:
             num_def_values = len(def_values)
@@ -797,13 +797,13 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
 
 
 def unique_memorizer_objects(def_or_obj):
-    # Get a dictionary of unique Memorizer objects inside
-    # the nested definition or Memorizer object.
-    from dryml.core2.object import Memorizer
+    # Get a dictionary of unique Lazy objects inside
+    # the nested definition or Lazy object.
+    from dryml.core2.object import Lazy
     unique_objs = {}
 
     def _enter(path, key, value):
-        if isinstance(value, Memorizer):
+        if isinstance(value, Lazy):
             return {}, get_memorizer_view(value)
         elif isinstance(value, Definition):
             return {}, get_definition_view(value)
@@ -813,14 +813,14 @@ def unique_memorizer_objects(def_or_obj):
         return key, value
 
     def _exit(path, key, value, new_parent, new_items):
-        if isinstance(value, Memorizer):
+        if isinstance(value, Lazy):
             # Add the memorizer object to our dictionary
             # if we haven't seen it yet.
             if value not in unique_objs:
                 unique_objs[value] = value
         return key, None
 
-    if isinstance(def_or_obj, Memorizer):
+    if isinstance(def_or_obj, Lazy):
         remap(
             [def_or_obj],
             enter=_enter,
