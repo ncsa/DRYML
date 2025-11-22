@@ -729,7 +729,8 @@ def test_save_load_1(create_temp_dir):
 
     objs_dir = os.path.join(create_temp_dir, 'objects')
 
-    obj_dir = os.path.join(objs_dir, hashval_to_digest(hash(obj1)))
+    hash_digest = hashval_to_digest(hash(obj1))
+    obj_dir = os.path.join(objs_dir, hash_digest[:2], hash_digest)
 
     ic(os.listdir(create_temp_dir), os.listdir(objs_dir), os.listdir(obj_dir))
 

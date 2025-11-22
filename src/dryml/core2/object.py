@@ -1,13 +1,11 @@
 from functools import cached_property
-from pathlib import Path
 import uuid
 import time
 import os
 import inspect
-import pickle
 
 from dryml.core2.util import collide_attributes, \
-    pickle_save, pickle_load, get_kwarg_defaults, is_stream
+    pickle_save, pickle_load, get_kwarg_defaults
 from dryml.core2.definition import \
     deepcopy_skip_definition_object, build_definition
 
@@ -139,19 +137,19 @@ class Lazy(metaclass=Dryml):
         except AttributeError:
             # If we don't next check if we're initialized
             if not super().__getattribute__('__initialized__'):
-                super().__getattribute__('__initialize__')()
+                super().__getattribute__('initialize')()
         # Then check again
         return super().__getattribute__(name)
 
-    def __initialize__(self):
+    def initialize(self):
         if self.__locked__:
-            raise RuntimeError("Cannot initialize object. Lazy is locked.")
+            raise RuntimeError("Cannot initialize object. Lazy object is locked.")
         self.__init__(*self.__args__, **self.__kwargs__)
         self.__initialized__ = True
 
-    def __unload__(self):
+    def unload(self):
         if self.__locked__:
-            raise RuntimeError("Cannot unload object. Lazy is locked.")
+            raise RuntimeError("Cannot unload object. Lazy object is locked.")
         # Remove all attributes besides self._orig_attrs
         for attr in list(self.__dict__.keys()):
             if attr not in self.__orig_keys__:

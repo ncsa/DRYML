@@ -1,4 +1,5 @@
 import os
+import glob
 import zipfile
 from boltons.iterutils import remap, default_enter, default_exit
 from collections.abc import ItemsView
@@ -6,14 +7,32 @@ from contextlib import contextmanager
 from io import IOBase
 from pathlib import Path
 
+from dryml.core2.definition import Definition, ConcreteDefinition
 from dryml.core2.util import zip_directory, hashval_to_digest, \
     pickle_load, pickle_save, get_temp_directory
+from dryml.core2.object import Lazy
+
+
+class RepoSaveError(Exception):
+    pass
+
+
+class RepoLoadError(Exception):
+    pass
 
 
 class BaseRepo:
+    _num_saves: int
+    _num_constructions: int
+    obj_cache: dict[ConcreteDefinition,Lazy|None]
+    dir: str
+    obj_dir: str
+    main_def: ConcreteDefinition | None
+
     # Helper class for saving objects
     def __init__(self, dir=None):
-        self.objs = {}
+        self.obj_cache = {}
+
         # Some helper variables for monitoring
         self._num_saves = 0
         self._num_constructions = 0
@@ -24,6 +43,13 @@ class BaseRepo:
         self.dir = dir
         self.obj_dir = os.path.join(self.dir, "objects")
 
+        # Load main definition if it exists
+        def_file = os.path.join(self.dir, "def.pkl")
+        if os.path.exists(def_file):
+            self.main_def = pickle_load(def_file)
+        else:
+            self.main_def = None
+
         # List the directory and find all the object directories
         try:
             obj_dirs = os.listdir(self.obj_dir)
@@ -32,21 +58,26 @@ class BaseRepo:
             os.mkdir(self.obj_dir)
             obj_dirs = os.listdir(self.obj_dir)
 
-        # TODO: Do I really want to load all objects like this?
+        # TODO: Do I really want to load all object definitions like this?
+        obj_dirs = glob.glob(f"{self.obj_dir}/[0-9a-f][0-9a-f]/*")
         for obj_dir in obj_dirs:
             obj_dir = os.path.join(self.obj_dir, obj_dir)
             def_file = os.path.join(obj_dir, 'def.pkl')
             obj_def = pickle_load(def_file)
-            self.load_object(obj_def.concretize())
+            self.obj_cache[obj_def] = None
 
-        def_file = os.path.join(self.dir, "def.pkl")
-        if os.path.exists(def_file):
-            self.main_def = pickle_load(def_file)
-        else:
-            self.main_def = None
+    def __len__(self):
+        return len(self.obj_cache)
+
+    def get_object_directory(self, obj_def: ConcreteDefinition):
+        # Get the directory for the object indicated by obj_def
+        def_hash_digest = hashval_to_digest(hash(obj_def))
+
+        # get first two letters
+        obj_subdir = def_hash_digest[:2]
+        return os.path.join(self.obj_dir, obj_subdir, def_hash_digest)
 
     def save_object(self, obj, main=False):
-        from dryml.core2.object import Lazy
         saved_objs = {}
         def _save_object_enter(path, key, value):
             if isinstance(value, Lazy):
@@ -62,8 +93,7 @@ class BaseRepo:
             if isinstance(value, Lazy):
                 obj_def = value.definition.concretize()
                 if obj_def not in saved_objs:
-                    # TODO: Handle status checking here.
-                    self.save_object_imp(value)
+                    self.save_object_instance(value)
                     saved_objs[obj_def] = value
                     self._num_saves += 1
                 return value
@@ -90,29 +120,33 @@ class BaseRepo:
             self.main_def = obj.definition.concretize()
         return True
 
-    def save_object_imp(self, obj):
+    def save_object_instance(self, obj):
         obj_def = obj.definition.concretize()
-        if obj_def in self.objs:
-            # Check that this was the same object
-            if obj is not self.objs[obj_def]:
-                raise ValueError("We already have a different object with definition: {obj_def}")
+        if obj_def in self.obj_cache:
+            if self.obj_cache[obj_def] is None:
+                # Update repo cache
+                self.obj_cache[obj_def] = obj
+            else:
+                # Check that this was the same object
+                if obj is not self.obj_cache[obj_def]:
+                    raise ValueError("We already have a different object with definition: {obj_def}")
         else:
-            # Add to repo-wide cache
-            self.objs[obj_def] = obj
+            # Update repo cache
+            self.obj_cache[obj_def] = obj
 
         # Create directory for object
-        def_hash_digest = hashval_to_digest(hash(obj_def))
-        object_path = os.path.join(self.dir, "objects", def_hash_digest)
-        os.mkdir(object_path)
-        # Save the object
-        return obj.save_to_dir(object_path)
+        object_path = self.get_object_directory(obj_def)
+        if not os.path.exists(object_path):
+            os.makedirs(object_path)
+        if obj.__initialized__:
+            # Save the object
+            obj.save_to_dir(object_path)
+        else:
+            raise RepoSaveError("Cannot save an uninitialized Lazy object.")
 
     def load_object(self, obj_def, build_missing=False):
-        from dryml.core2.definition import Definition, \
-            ConcreteDefinition
         loaded_objs = {}
         def _load_object_enter(path, key, value):
-            nonlocal loaded_objs
             if type(value) is Definition:
                 raise TypeError("Definition not allowed here!")
             elif type(value) is ConcreteDefinition:
@@ -125,7 +159,6 @@ class BaseRepo:
                 return default_enter(path, key, value)
 
         def _load_object_visit(path, key, value):
-            nonlocal loaded_objs
             # We do nothing here.
             if type(value) is ConcreteDefinition:
                 # we already loaded this object, return it.
@@ -134,7 +167,6 @@ class BaseRepo:
                 return key, value
 
         def _load_object_exit(path, key, value, new_parent, new_items):
-            nonlocal loaded_objs
             def _create_obj():
                 # method to actually create an object at this step
                 new_values = {}
@@ -147,9 +179,9 @@ class BaseRepo:
 
             if isinstance(value, ConcreteDefinition):
                 # Check if we already have this object
-                if value in self.objs:
+                if value in self.obj_cache:
                     # we found it
-                    loaded_objs[value] = self.objs[value]
+                    loaded_objs[value] = self.obj_cache[value]
                     return loaded_objs[value]
 
                 value_hash = hash(value)
@@ -160,7 +192,7 @@ class BaseRepo:
                         raise IndexError(f"Lazy with hash digest {value_hash_digest} not found.")
                     # We should build the object, but not create or load from a directory
                     obj = _create_obj()
-                    self.objs[value] = obj
+                    self.obj_cache[value] = obj
                     loaded_objs[value] = obj
                     return obj
                 else:
@@ -173,13 +205,12 @@ class BaseRepo:
                         raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
                     # Load the data from the directory
                     obj.load_from_dir(object_path)
-                    self.objs[value] = obj
+                    self.obj_cache[value] = obj
                     loaded_objs[value] = obj
                     return obj
             else:
                 return default_exit(path, key, value, new_parent, new_items)
-        from dryml.core2.definition import Definition, \
-            ConcreteDefinition
+
         if isinstance(obj_def, ConcreteDefinition):
             return remap(
                 [obj_def],
@@ -194,12 +225,11 @@ class BaseRepo:
                 exit=_load_object_exit)
 
     def load_object_imp(self, obj_def):
-        from dryml.core2.definition import ConcreteDefinition
         # Perform the actual load from a directory
         if type(obj_def) is not ConcreteDefinition:
             raise TypeError("Only ConcreteDefinition is supported")
         # `load_object` should already have created the object if it doesn't exist in the cache yet.
-        obj = self.objs[obj_def]
+        obj = self.obj_cache[obj_def]
 
         # Original DirRepo implementation
         def_hash = hash(obj_def)
@@ -227,7 +257,7 @@ class BaseRepo:
         for obj in args:
             if not isinstance(obj, Lazy):
                 raise TypeError("Only Lazy objects can be added to a repository.")
-            self.objs[obj] = obj
+            self.obj_cache[obj] = obj
 
     def close(self):
         self.write_main_def()
@@ -337,7 +367,6 @@ def manage_repo(repo=None):
 
 # Saving and Loading
 def save_object(obj, repo=None):
-    from dryml.core2 import Lazy
     with manage_repo(repo=repo) as sub_repo:
         main = (repo is not sub_repo) and isinstance(obj, Lazy)
         sub_repo.save_object(obj, main=main)
@@ -346,8 +375,7 @@ def save_object(obj, repo=None):
 def load_object(
         obj_def=None, repo=None,
         cls_remap=None):
-    from dryml.core2.definition import concretize_definition
     with manage_repo(repo=repo) as repo:
         if obj_def is None:
             obj_def = repo.main_def
-        return repo.load_object(concretize_definition(obj_def))
+        return repo.load_object(obj_def)

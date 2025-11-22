@@ -8,8 +8,6 @@ import sys
 from dryml.core2.util import is_dictlike, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
     digest_to_hashval, get_memorizer_view, get_definition_view
-from dryml.core2.repo import manage_repo
-
 
 def definition_enter(path, key, value):
     if isinstance(value, Definition):
@@ -525,6 +523,7 @@ def build_definition(obj):
 
 # Creating objects from definitions
 def build_from_definition(definition, build_missing=True, **kwargs):
+    from dryml.core2.repo import manage_repo
     with manage_repo(**kwargs) as repo:
         # Get unique objects
         unique_objs = unique_memorizer_objects(definition)
