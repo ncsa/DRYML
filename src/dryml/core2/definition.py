@@ -782,7 +782,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
 
         # Here, we compute the number of values there should be with a special case for 'single' Lazy values.
         if isinstance(def_values, Object):
-            num_def_values = 1 + len(def_values.__args__) + len(def_values.__kwargs__)
+            num_def_values = 1 + len(def_values.definition.args) + len(def_values.definition.kwargs)
         else:
             num_def_values = len(def_values)
 
