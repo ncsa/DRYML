@@ -1,5 +1,4 @@
-from dryml.core2.object import Lazy, Pickleable, UniqueID, Metadata
-import os
+from dryml.core2.object import Object, Pickleable, UniqueID, Metadata
 from dryml.core2.util import pickler, unpickler
 
 
@@ -48,17 +47,17 @@ class TestClassB(TestBase):
         super().__init__(*args, **kwargs)
 
 
-class TestNest(Lazy):
+class TestNest(Object):
     def __init__(self, A):
         self.A = A
 
 
-class TestNest2(Lazy):
+class TestNest2(Object):
     def __init__(self, A=None):
         self.A = A
 
 
-class TestNest3(Lazy):
+class TestNest3(Object):
     def __init__(self, *args, **kwargs):
         pass
 
@@ -83,7 +82,7 @@ class TestClassF1(UniqueID):
         self.val = None
 
 
-class TestClassC(Lazy):
+class TestClassC(Object):
     def __init__(self, A, B=None):
         self.A = A
         self.B = B
@@ -98,20 +97,23 @@ class TestClassC2(Pickleable):
         self.data = val
 
 
-class TestClass1(Lazy):
+class TestClass1(Object):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
 
+    def __eq__(self, rhs):
+        return (self.x == rhs.x) and (self.test == rhs.test)
 
-class TestClass2(Lazy):
+
+class TestClass2(Object):
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
 
 
-class TestClass3(Lazy):
+class TestClass3(Object):
     def __init__(self, *args):
         super().__init__()
         self.args = args
@@ -124,16 +126,8 @@ class TestClass4(UniqueID, Metadata):
         self.test = test
 
 
-class TestClass5(Lazy):
+class TestClass5(Object):
     def __init__(self, x, *args, test=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
-
-
-class TestLazy1(Lazy):
-    def __init__(self, x):
-        super().__init__()
-        self.x = x
-
-

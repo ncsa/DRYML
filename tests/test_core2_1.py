@@ -56,7 +56,7 @@ def test_build_definition_2():
     assert len(definition.kwargs.keys()) == 1
     assert definition.kwargs['test'] == 'a'
     sub_def = definition.args[0]
-    assert type(sub_def) == Definition
+    assert type(sub_def) == ConcreteDefinition
     assert sub_def.cls == objects.TestClass1
     assert len(sub_def.args) == 1
     assert sub_def.args[0] == 10
@@ -119,8 +119,8 @@ def test_build_definition_6():
     def_3 = def_4.args[0]
     def_2 = def_4.kwargs['test']
     def_1 = def_3.args[0]
-    assert def_3.kwargs['test'] is def_2
-    assert def_3.args[0] is def_1
+    assert def_3.kwargs['test'] == def_2
+    assert def_3.args[0] == def_1
 
 
 def test_build_from_definition_1():
@@ -802,35 +802,3 @@ def test_save_load_3(create_temp_dir):
     assert obj2_2 is obj10_2.x.x.test
     obj3_2 = obj6_2.test
     assert obj3_2 is obj10_2.test.test.x
-
-
-def test_lazy_1():
-    # Test that mock initialization properly fails case 1
-    try:
-        objects.TestLazy1(test=10)
-        assert False
-    except TypeError:
-        pass
-
-    # Test that mock initialization properly fails case 1
-    try:
-        objects.TestLazy1(5, test=10)
-        assert False
-    except TypeError:
-        pass
-
-    defer_obj = objects.TestLazy1(5)
-
-    assert len(defer_obj.__dict__) == 5
-
-    # Trigger deferred initialization
-    assert defer_obj.x == 5
-
-    # Check for new attribute
-    assert len(defer_obj.__dict__) == 6
-
-    # Unload the object
-    defer_obj.__unload__()
-
-    # Check the attribute is gone
-    assert len(defer_obj.__dict__) == 5

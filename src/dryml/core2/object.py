@@ -24,7 +24,7 @@ class Dryml(type):
                 cls,
                 *args,
                 repo=sub_repo,
-                *kwargs
+                **kwargs
             )
 
             # Concretize pass
@@ -36,12 +36,12 @@ class Dryml(type):
 
         # Create the object initially
         obj = cls.__new__(cls)
-
-        # Initialize object with 
-        obj.__init__(*rt_args, **rt_kwargs)
         # Deepcopy the concrete definition so it's version of the arguments
         # is true to how it was originally called.
         obj.__cdef__ = deepcopy(cdef)
+
+        # Initialize object with 
+        obj.__init__(*rt_args, **rt_kwargs)
 
         return obj
 
@@ -114,7 +114,7 @@ class Pickleable(Object):
         # Grab all heavy-state data
         heavy_state = {}
         for key in self.__dict__:
-            if key not in self.__orig_keys__:
+            if key not in ['definition']:
                 heavy_state[key] = getattr(self, key)
 
         # Save the entire object as a pickle
