@@ -634,7 +634,8 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
         except PathAccessError:
             if verbose:
                 print(
-                        f"[{render_path(path, key)}]: Doesn't exist in target\n")
+                    f"[{render_path(path, key)}]: Doesn't exist in target\n",
+                    file=output_stream)
             return key, False
         if isinstance(value, Definition):
             if strict and value.skip_args:
