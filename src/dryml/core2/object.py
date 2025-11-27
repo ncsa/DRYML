@@ -15,33 +15,49 @@ from copy import deepcopy
 class Dryml(type):
     # Support metaclass to enable capture of input arguments
 
-    def __call__(cls, *args, repo=None, **kwargs):
+    def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
         from dryml.core2.repo import manage_repo
 
         with manage_repo(repo=repo) as sub_repo:
-            # Build initial Definition
-            defn = Definition(
-                cls,
-                *args,
-                repo=sub_repo,
-                **kwargs
-            )
+            if __cdef__ is None:
+                # We are starting the build process
 
-            # Concretize pass
-            cdef = sub_repo.concretize_definition(
-                defn)
+                # Build initial Definition
+                defn = Definition(
+                    cls,
+                    *args,
+                    repo=sub_repo,
+                    **kwargs
+                )
 
-            rt_args = sub_repo.load_object(cdef.args, build_missing=True)
-            rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
+                # Concretize pass
+                cdef = sub_repo.concretize_definition(
+                    defn)
 
-        # Create the object initially
-        obj = cls.__new__(cls)
-        # Deepcopy the concrete definition so it's version of the arguments
-        # is true to how it was originally called.
-        obj.__cdef__ = deepcopy(cdef)
+                rt_args = sub_repo.load_object(cdef.args, build_missing=True)
+                rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
 
-        # Initialize object with 
-        obj.__init__(*rt_args, **rt_kwargs)
+                # Create the object initially
+                obj = cls.__new__(cls)
+                # Deepcopy the concrete definition so it's version of the arguments
+                # is true to how it was originally called.
+                obj.__cdef__ = deepcopy(cdef)
+
+                # Initialize object with 
+                obj.__init__(*rt_args, **rt_kwargs)
+
+            else:
+                cdef = __cdef__
+                # We already have the rt arguments.
+
+                # Create the object initially
+                obj = cls.__new__(cls)
+                # Deepcopy the concrete definition so it's version of the arguments
+                # is true to how it was originally called.
+                obj.__cdef__ = deepcopy(cdef)
+
+                # Initialize object with 
+                obj.__init__(*args, **kwargs)
 
         return obj
 

@@ -246,6 +246,7 @@ class BaseRepo:
             raise RepoSaveError("Cannot save an uninitialized Object object.")
 
     def load_object(self, obj_def, build_missing=False):
+
         loaded_objs = {}
         def _load_object_enter(path, key, value):
             if type(value) is Definition:
@@ -268,16 +269,6 @@ class BaseRepo:
                 return key, value
 
         def _load_object_exit(path, key, value, new_parent, new_items):
-            def _create_obj():
-                # method to actually create an object at this step
-                new_values = {}
-                for k, v in new_items:
-                    new_values[k] = v
-                args = new_values['args']
-                kwargs = new_values['kwargs']
-                self._num_constructions += 1
-                return value.cls(*args, repo=self, **kwargs)
-
             if isinstance(value, ConcreteDefinition):
                 # Check if we already have this object
                 if value in self.obj_cache:
@@ -297,7 +288,16 @@ class BaseRepo:
                 if not build_missing and not def_file:
                     raise RuntimeError("Asked not to build missing objects")
 
-                obj = _create_obj()
+                new_values = {} # Need to build a dictionary because we get a list of tuples
+                for k, v in new_items:
+                    new_values[k] = v
+                # Get runtime args that have been built already
+                args = new_values['args']
+                kwargs = new_values['kwargs']
+
+                # Call special constructor since we already have what we need.
+                obj = value.cls(*args, repo=self, __cdef__=value, **kwargs)
+                self._num_constructions += 1
                 self.obj_cache[value] = obj
                 loaded_objs[value] = obj
 
@@ -314,17 +314,19 @@ class BaseRepo:
                 return default_exit(path, key, value, new_parent, new_items)
 
         if isinstance(obj_def, ConcreteDefinition):
-            return remap(
+            result = remap(
                 [obj_def],
                 enter=_load_object_enter,
                 visit=_load_object_visit,
                 exit=_load_object_exit)[0]
+            return result
         else:
-            return remap(
+            result = remap(
                 obj_def,
                 enter=_load_object_enter,
                 visit=_load_object_visit,
                 exit=_load_object_exit)
+            return result
 
     def write_main_def(self):
         if self.main_def is not None:
