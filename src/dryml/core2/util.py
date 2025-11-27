@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import dill
 import os
 import zipfile
@@ -9,6 +11,25 @@ from collections.abc import Mapping, ItemsView
 from inspect import currentframe, getmodule, isclass, \
     Parameter, signature
 from boltons.iterutils import remap, default_enter, default_exit
+
+
+def _validate_init_sig(cls, *args, **kwargs):
+    """
+    Raise TypeError *now* if `cls.__init__` cannot accept the args.
+
+    We bind only to the *signature*; we never execute the body, so it is
+    safe for Lazy objects.
+    """
+    sig = signature(cls.__init__)
+
+    # The first parameter is `self`; use `None` as placeholder.
+    try:
+        sig.bind_partial(None, *args, **kwargs)
+    except TypeError as err:
+        raise TypeError(
+            f"{cls.__name__} cannot be constructed with "
+            f"args={args!r}, kwargs={kwargs!r}: {err}"
+        ) from None
 
 
 def collide_attributes(obj, attr_list):
@@ -107,8 +128,8 @@ def pickle_load(path):
         return unpickler(f.read())
 
 
-def get_memorizer_view(obj):
-    return ItemsView({'cls': type(obj), 'args': obj.__args__, 'kwargs': obj.__kwargs__})
+def get_object_view(obj):
+    return ItemsView({'cls': obj.definition.cls, 'args': obj.definition.args, 'kwargs': obj.definition.kwargs})
 
 
 def get_definition_view(defn):
@@ -128,7 +149,7 @@ def get_unique_objects(obj):
             if def_val in unique_objs:
                 return value, False
             else:
-                return {}, get_memorizer_view(value)
+                return {}, get_object_view(value)
         else:
             return default_enter(path, key, value)
 
