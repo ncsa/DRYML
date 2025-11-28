@@ -620,7 +620,12 @@ def render_path(path, key):
 
 
 ## Selecting objects
-def selector_match(selector, definition, strict=False, cls_str_compare=False, verbose=False, output_stream=sys.stderr):
+def selector_match(
+        selector, definition,
+        strict=False,
+        cls_str_compare=False,
+        verbose=False,
+        output_stream=sys.stderr):
     # Method for testing if a selector matches a definition
     # if strict is set, it must match exactly, and callables arent' allowed.
     # cls_str_compare forces a string based name comparison between classes.
@@ -630,7 +635,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
     def _enter(path, key, value):
         # Check if this key/path exists in the definition
         try:
-            def_val = get_path(definition, path+(key,))
+            _ = get_path(definition, path+(key,))
         except PathAccessError:
             if verbose:
                 print(
@@ -700,6 +705,12 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
             # We do some type checking on this visit. deeper structures have already been visited
             sel_val = get_path(selector, path+(key,))
             if type(sel_val) is not type(def_val):
+                if isinstance(sel_val, Definition) and isinstance(def_val, Definition):
+                    # Handle definition comparisons
+                    if issubclass(type(def_val), type(sel_val)):
+                        return key, value
+                    else:
+                        return key, False
                 # Container class doesn't match
                 if verbose:
                     print(
@@ -764,6 +775,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
             
 
     def _exit(path, key, old_parent, new_parent, new_items):
+        # Check if this key/path exists in the definition
         # Type check
         if type(old_parent) != type(new_parent):
             if isinstance(old_parent, Definition) or isinstance(old_parent, Object):
