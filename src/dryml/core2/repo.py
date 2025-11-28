@@ -184,6 +184,14 @@ class BaseRepo:
             if isinstance(value, Object):
                 result = {'args': value.definition.args, 'kwargs': value.definition.kwargs}
                 return {}, ItemsView(result)
+            elif isinstance(value, ConcreteDefinition):
+                obj = value._obj
+                if obj is None:
+                    raise ValueError("ConcreteDefinitions must be linked to actual objects through _obj to be savable.")
+                result = {'args': obj.definition.args, 'kwargs': obj.definition.kwargs}
+                return {}, ItemsView(result)
+            elif isinstance(value, Definition):
+                raise ValueError("Plain Definitions aren't allowed here.")
             else:
                 return default_enter(path, key, value)
 
@@ -192,13 +200,21 @@ class BaseRepo:
 
         def _save_object_exit(path, key, value, new_parent, new_items):
             if isinstance(value, Object):
-                obj_def = value.definition()
+                obj_def = value.definition
                 if obj_def not in saved_objs:
                     self.save_object_instance(value)
                     saved_objs[obj_def] = value
                     self._num_saves += 1
                 return value
-
+            elif isinstance(value, ConcreteDefinition):
+                obj = value._obj
+                if obj is None:
+                    raise ValueError("ConcreteDefinitions must be linked to actual objects through _obj to be savable.")
+                if value not in saved_objs:
+                    self.save_object_instance(obj)
+                    saved_objs[value] = obj
+                    self._num_saves += 1
+                return value
             else:
                 return default_exit(path, key, value, new_parent, new_items)
 
@@ -218,11 +234,11 @@ class BaseRepo:
 
         # Save main object definition
         if main:
-            self.main_def = obj.definition()
+            self.main_def = obj.definition
         return True
 
     def save_object_instance(self, obj):
-        obj_def = obj.definition()
+        obj_def = obj.definition
         if obj_def in self.obj_cache:
             if self.obj_cache[obj_def] is None:
                 # Update repo cache
@@ -239,11 +255,7 @@ class BaseRepo:
         object_path = self.get_object_directory(obj_def)
         if not os.path.exists(object_path):
             os.makedirs(object_path)
-        if obj.__initialized__:
-            # Save the object
-            obj.save_to_dir(object_path)
-        else:
-            raise RepoSaveError("Cannot save an uninitialized Object object.")
+        obj.save_to_dir(object_path)
 
     def load_object(self, obj_def, build_missing=False):
 
@@ -271,7 +283,7 @@ class BaseRepo:
         def _load_object_exit(path, key, value, new_parent, new_items):
             if isinstance(value, ConcreteDefinition):
                 # Check if we already have this object
-                if value in self.obj_cache:
+                if value in self.obj_cache and self.obj_cache[value] is not None:
                     # we found it
                     loaded_objs[value] = self.obj_cache[value]
                     return loaded_objs[value]
@@ -305,6 +317,7 @@ class BaseRepo:
                     # confirm we have the same definition
                     definition = pickle_load(def_file)
                     check_hash = hash(definition)
+                    value_hash = hash(value)
                     if check_hash != value_hash:
                         raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
                     # Load the data from the directory

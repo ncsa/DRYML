@@ -42,6 +42,8 @@ class Dryml(type):
                 # Deepcopy the concrete definition so it's version of the arguments
                 # is true to how it was originally called.
                 obj.__cdef__ = deepcopy(cdef)
+                # Assign this object to the cdef's obj ref
+                obj.__cdef__._obj = obj
 
                 # Initialize object with 
                 obj.__init__(*rt_args, **rt_kwargs)
@@ -55,6 +57,8 @@ class Dryml(type):
                 # Deepcopy the concrete definition so it's version of the arguments
                 # is true to how it was originally called.
                 obj.__cdef__ = deepcopy(cdef)
+                # Assign this object to the cdef's obj ref
+                obj.__cdef__._obj = obj
 
                 # Initialize object with 
                 obj.__init__(*args, **kwargs)

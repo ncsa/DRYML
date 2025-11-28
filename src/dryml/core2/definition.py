@@ -176,6 +176,8 @@ class ConcreteDefinition(Definition):
         # TODO: pickling this object should not save this hash
         # We may decide later to change the hashing algorithm.
         self._hash = digest_to_hashval(hash_function(self))
+        # Initialize backward facing reference for if this definition is used in an object.
+        self._obj = None
 
     def concretize(self):
         return self

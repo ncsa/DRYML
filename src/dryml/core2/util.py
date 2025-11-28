@@ -133,7 +133,14 @@ def get_object_view(obj):
 
 
 def get_definition_view(defn):
-    return ItemsView(defn)
+    view_dict = {}
+    if 'cls' in defn:
+        view_dict['cls'] = defn.cls
+    if 'args' in defn:
+        view_dict['args'] = defn.args
+    if 'kwargs' in defn:
+        view_dict['kwargs'] = defn.kwargs
+    return ItemsView(view_dict)
 
 
 def get_unique_objects(obj):
