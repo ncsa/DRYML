@@ -198,7 +198,7 @@ def categorical_definition(defn: Definition, recursive=True):
         if id(value) in definition_cache:
             return value, False
         elif isinstance(value, Object):
-            raise TypeError("Plain remember objects are not supported")
+            raise TypeError("Plain objects are not supported")
         elif isinstance(value, Definition):
             nonlocal level
             level += 1
