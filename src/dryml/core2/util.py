@@ -18,7 +18,7 @@ def _validate_init_sig(cls, *args, **kwargs):
     Raise TypeError *now* if `cls.__init__` cannot accept the args.
 
     We bind only to the *signature*; we never execute the body, so it is
-    safe for Lazy objects.
+    safe for objects.
     """
     sig = signature(cls.__init__)
 
@@ -144,12 +144,13 @@ def get_definition_view(defn):
 
 
 def get_unique_objects(obj):
-    from dryml.core2.object import Lazy
+    from dryml.core2.object import Object
 
     unique_objs = {}
 
     def _get_unique_objects_enter(path, key, value):
-        if isinstance(value, Lazy):
+        from dryml.core2.definition import ConcreteDefinition
+        if isinstance(value, Object):
             # Check if we've visited this one already
             def_val = value.definition.concretize()
 
@@ -157,6 +158,8 @@ def get_unique_objects(obj):
                 return value, False
             else:
                 return {}, get_object_view(value)
+        if isinstance(value, ConcreteDefinition):
+            return {}, get_definition_view(value)
         else:
             return default_enter(path, key, value)
 
@@ -165,15 +168,20 @@ def get_unique_objects(obj):
         return key, value
 
     def _get_unique_objects_exit(path, key, value, new_parent, new_items):
-        if isinstance(value, Lazy):
-            # We're exiting a Lazy object
-            def_val = value.definition.concretize()
+        from dryml.core2.definition import ConcreteDefinition
+        if isinstance(value, Object):
+            # We're exiting a object
+            def_val = value.definition
 
             unique_objs[def_val] = value
+        elif isinstance(value, ConcreteDefinition):
+            if value._obj is None:
+                raise ValueError("Unsupported ConcreteDefinition!")
+            unique_objs[value] = value._obj
 
         return default_exit(path, key, value, new_parent, new_items)
 
-    if isinstance(obj, Lazy):
+    if isinstance(obj, Object):
         remap(
             [obj],
             enter=_get_unique_objects_enter,
