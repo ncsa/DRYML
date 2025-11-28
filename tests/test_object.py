@@ -1,7 +1,7 @@
 import pytest
 import dryml
-from dryml.core2 import Definition
-import zipfile
+from dryml.core2.definition import Definition
+from dryml.core2.repo import manage_repo
 import io
 import os
 import sys
@@ -178,7 +178,7 @@ def test_save_object_6(create_temp_named_file):
 
     desc_str = 'Test Description'
     obj = objs.SimpleObject(10, metadata={'description': desc_str})
-    orig_creation_time = obj.__kwargs__['metadata']['creation_time']
+    orig_creation_time = obj.definition.kwargs['metadata']['creation_time']
 
     obj.save(create_temp_named_file)
 
@@ -189,8 +189,8 @@ def test_save_object_6(create_temp_named_file):
     assert obj.version() == 1
     assert obj2.version() == 1
 
-    assert orig_creation_time == obj2.__kwargs__['metadata']['creation_time']
-    assert desc_str == obj2.__kwargs__['metadata']['description']
+    assert orig_creation_time == obj2.definition.kwargs['metadata']['creation_time']
+    assert desc_str == obj2.definition.kwargs['metadata']['description']
 
 
 def test_basic_object_def_update_1():
@@ -203,8 +203,6 @@ def test_basic_object_def_update_1():
         importlib.reload(objs)
 
         obj = objs.SimpleObject(10)
-
-        from dryml.core2.definition import hash_value
 
         buffer = io.BytesIO()
 
@@ -223,8 +221,6 @@ def test_basic_object_def_update_1():
         # Sleep to invalidate the cache.
         import objs
         importlib.reload(objs)
-
-        from dryml.core2.definition import hash_value
 
         obj2 = dryml.core2.load_object(repo=buffer)
 
@@ -287,7 +283,7 @@ def test_object_build_from_def_1():
         1,
         base_msg='Test').build()
 
-    assert 'uid' in obj.__kwargs__
+    assert 'uid' in obj.definition.kwargs
 
 
 def test_object_args_passing_1():
@@ -295,7 +291,7 @@ def test_object_args_passing_1():
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    assert obj.__args__ == (1,)
+    assert obj.definition.args == (1,)
 
 
 @pytest.mark.usefixtures("create_name")
@@ -308,7 +304,7 @@ def test_object_args_passing_2(create_name):
 
     obj_loaded = dryml.core2.load_object(repo=create_name)
 
-    assert obj_loaded.__args__ == (1,)
+    assert obj_loaded.definition.args == (1,)
 
 
 def test_object_args_passing_3():
@@ -533,7 +529,7 @@ def test_object_def_2():
     new_obj = obj_def.build()
 
     assert isinstance(new_obj, objs.HelloInt)
-    assert new_obj.__kwargs__['msg'] == 10
+    assert new_obj.definition.kwargs['msg'] == 10
 
 
 # TODO: possibly redundant test
@@ -652,8 +648,7 @@ def test_object_save_restore_4():
     obj2 = objs.TestClassC(data_obj3, B=data_obj4)
 
     args = (obj1, obj2)
-    # Create definitions for the objects we want to save
-    args_def = dryml.core2.definition.build_definition(args)
+    args_def = (obj1.definition, obj2.definition)
 
     # Save objects to a buffer
     save_buffer = io.BytesIO()
@@ -694,7 +689,7 @@ def test_object_save_restore_5():
 
     args = (trainable_obj,)
 
-    args_defs = dryml.core2.definition.build_definition(args)
+    args_defs = (trainable_obj.definition,)
 
     save_buffer = io.BytesIO()
     dryml.core2.save_object(args, repo=save_buffer)

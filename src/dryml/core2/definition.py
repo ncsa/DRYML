@@ -162,6 +162,26 @@ class Definition(dict):
     def kwargs(self):
         return self['kwargs']
 
+    def __getstate__(self):
+        # Only structural data; drop ephemeral links
+        state = {
+            "mapping": dict(self),
+            # If you have extra structural attrs, include them here.
+            # DO NOT include _obj, _hash, or repo (unless repo is a serializable id, not an object).
+        }
+        return state
+
+    def __setstate__(self, state):
+        mapping = state["mapping"]
+
+        # Rebuild the dict part
+        self.clear()
+        for k, v in mapping.items():
+            self[k] = v
+
+        # Restore ephemeral bits
+        self.repo = None
+
 
 class ConcreteDefinition(Definition):
     def __init__(self, *args, **kwargs):
@@ -188,6 +208,49 @@ class ConcreteDefinition(Definition):
 
     def __hash__(self):
         return hash(self._hash)
+
+    def __getstate__(self):
+        # Only structural data; drop ephemeral links
+        state = {
+            "mapping": dict(self),
+            # If you have extra structural attrs, include them here.
+            # DO NOT include _obj, _hash, or repo (unless repo is a serializable id, not an object).
+        }
+        return state
+
+    def __setstate__(self, state):
+        mapping = state["mapping"]
+
+        # Rebuild the dict part
+        self.clear()
+        for k, v in mapping.items():
+            self[k] = v
+
+        # Restore ephemeral bits
+        self._obj = None
+        self.repo = None
+        self._hash = stable_hash_function(self)
+
+    def __deepcopy__(self, memo):
+        """
+        Snapshot cls/args/kwargs, but re-use _obj and any repo reference.
+        """
+        cls = self['cls']
+        args = self.get('args', ())
+        kwargs = self.get('kwargs', {})
+
+        cls_cp = deepcopy(cls, memo)
+        args_cp = deepcopy(args, memo)
+        kwargs_cp = deepcopy(kwargs, memo)
+
+        new = type(self)(cls_cp, *args_cp, **kwargs_cp)
+
+        # Reuse identity-ish bits
+        new._obj = self._obj
+        new._hash = self._hash
+        new.repo = getattr(self, "repo", None)
+
+        return new
 
 
 def categorical_definition(defn: Definition, recursive=True):

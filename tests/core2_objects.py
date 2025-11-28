@@ -59,13 +59,14 @@ class TestNest2(Object):
 
 class TestNest3(Object):
     def __init__(self, *args, **kwargs):
-        pass
+        self.args = args
+        self.kwargs = kwargs
 
     def __getitem__(self, key):
         if type(key) is str:
-            return self.__kwargs__[key]
+            return self.kwargs[key]
         elif type(key) is int:
-            return self.__args__[key]
+            return self.args[key]
         else:
             raise KeyError()
 

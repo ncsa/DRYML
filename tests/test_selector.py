@@ -1,5 +1,5 @@
 import dryml
-from dryml.core2 import Definition, SKIP_ARGS
+from dryml.core2.definition import Definition, SKIP_ARGS
 import os
 import core2_objects as objs
 

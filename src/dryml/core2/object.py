@@ -20,48 +20,37 @@ class Dryml(type):
 
         with manage_repo(repo=repo) as sub_repo:
             if __cdef__ is None:
-                # We are starting the build process
-
-                # Build initial Definition
-                defn = Definition(
-                    cls,
-                    *args,
-                    repo=sub_repo,
-                    **kwargs
-                )
-
-                # Concretize pass
-                cdef = sub_repo.concretize_definition(
-                    defn)
+                # First-time construction from a soft Definition
+                defn = Definition(cls, *args, repo=sub_repo, **kwargs)
+                cdef = sub_repo.concretize_definition(defn)
 
                 rt_args = sub_repo.load_object(cdef.args, build_missing=True)
                 rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
 
-                # Create the object initially
-                obj = cls.__new__(cls)
-                # Deepcopy the concrete definition so it's version of the arguments
-                # is true to how it was originally called.
-                obj.__cdef__ = deepcopy(cdef)
-                # Assign this object to the cdef's obj ref
-                obj.__cdef__._obj = obj
-
-                # Initialize object with 
-                obj.__init__(*rt_args, **rt_kwargs)
-
             else:
+                # Reconstruction from an existing ConcreteDefinition
                 cdef = __cdef__
-                # We already have the rt arguments.
+                rt_args = args
+                rt_kwargs = kwargs
 
-                # Create the object initially
-                obj = cls.__new__(cls)
-                # Deepcopy the concrete definition so it's version of the arguments
-                # is true to how it was originally called.
-                obj.__cdef__ = deepcopy(cdef)
-                # Assign this object to the cdef's obj ref
-                obj.__cdef__._obj = obj
+            # Actual object allocation
+            obj = cls.__new__(cls)
 
-                # Initialize object with 
-                obj.__init__(*args, **kwargs)
+            # Attach repo for later use
+            obj._repo = sub_repo
+
+            # Ensure the canonical cdef knows its object
+            # (cdef is canonical here: created by concretize_definition or from repo)
+            if getattr(cdef, "_obj", None) is None:
+                cdef._obj = obj
+
+            # Attach a snapshot definition to the object.
+            # __deepcopy__ on ConcreteDefinition keeps _obj/repo consistent.
+            obj.__cdef__ = deepcopy(cdef)
+            obj.__cdef__._obj = obj   # idempotent, but makes intent clear
+
+            # Initialize with runtime (built) args
+            obj.__init__(*rt_args, **rt_kwargs)
 
         return obj
 
@@ -90,7 +79,9 @@ class Object(metaclass=Dryml):
     d = defn
 
     def __init__(self):
-        pass
+        # Optional sanity assertions (can be turned off later)
+        assert hasattr(self, "__cdef__"), "__cdef__ must be set by Dryml.__call__ before __init__"
+        assert getattr(self.__cdef__, "_obj", None) is self, "__cdef__._obj must point to self"
 
     @cached_property
     def definition(self) -> "ConcreteDefinition":

@@ -1,4 +1,4 @@
-from dryml.core2 import Definition
+from dryml.core2.definition import Definition, ConcreteDefinition
 import core2_objects as objs
 import copy
 
@@ -33,7 +33,7 @@ def test_def_1():
 
     obj_class_def = obj_def.categorical(recursive=False)
     del obj_def.kwargs['uid']
-    assert obj_class_def == obj_def
+    assert obj_class_def(obj_def)
 
 
 def test_def_2():
@@ -78,8 +78,10 @@ def test_def_3():
 
     obj_def = trainable_obj.definition
 
-    assert obj_def.kwargs['model'] is \
-        obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
+    assert obj_def.kwargs['model'] == obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
+    assert obj_def.kwargs['model']._obj is not None
+    assert obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']._obj is not None
+    assert obj_def.kwargs['model']._obj is obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']._obj
 
 
 def test_def_4():
@@ -142,9 +144,9 @@ def test_unique_objs_1():
         train_fn=train_fn_obj
     )
 
-    from dryml.core2.definition import unique_memorizer_objects
+    from dryml.core2.util import get_unique_objects
 
-    unique_objs = unique_memorizer_objects(trainable_obj)
+    unique_objs = get_unique_objects(trainable_obj)
 
     assert len(unique_objs) == 5
     assert model_obj in unique_objs
