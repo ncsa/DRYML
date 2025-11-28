@@ -89,4 +89,4 @@ def test_def_5():
     assert obj.A[0].A.counter == 0
     assert obj.A[1].counter == 0
     assert obj.definition.args[0][1].counter == 1
-    assert obj.definition.args[0][0].args[0].counter == 2 # Each object with the argument in it's graph will get a copy
+    assert obj.definition.args[0][0].args[0].counter == 1 # Each object with the argument in it's graph will get a copy

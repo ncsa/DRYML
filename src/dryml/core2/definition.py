@@ -7,6 +7,7 @@ from inspect import isclass
 import numpy as np
 import sys
 
+from dryml.core2.stable_hash import stable_hash_function
 from dryml.core2.util import is_dictlike, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
     digest_to_hashval, get_object_view, get_definition_view
@@ -175,15 +176,18 @@ class ConcreteDefinition(Definition):
         # Pre-compute hash
         # TODO: pickling this object should not save this hash
         # We may decide later to change the hashing algorithm.
-        self._hash = digest_to_hashval(hash_function(self))
+        self._hash = stable_hash_function(self)
         # Initialize backward facing reference for if this definition is used in an object.
         self._obj = None
 
     def concretize(self):
         return self
 
-    def __hash__(self):
+    def stable_hash(self):
         return self._hash
+
+    def __hash__(self):
+        return hash(self._hash)
 
 
 def categorical_definition(defn: Definition, recursive=True):
@@ -405,44 +409,6 @@ def hash_value(value):
         return hashlib.sha256(value.tobytes()).hexdigest()
     else:
         raise TypeError(f"Value of type {type(value)} not supported for hashing.")
-
-
-def hash_function(structure):
-    # Definition hash support
-    class HashHelper(object):
-        def __init__(self, the_hash):
-            self.hash = the_hash
-
-    def _visit(path, key, value):
-        # Skip if it's a hashlib hasher
-        if isinstance(value, HashHelper):
-            return key, value.hash
-        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
-            return key, value
-    
-        return key, hash_value(value)
-
-    def _exit(path, key, old_parent, new_parent, new_items):
-        # At this point, all items should be hashes
-
-        # sort the items. format is [(key, value)]
-        new_items = sorted(new_items, key=lambda x: x[0])
-
-        # Combine the hashes
-        hasher = hashlib.sha256()
-        # Add a string representation of the old parent type
-        hasher.update(type(old_parent).__qualname__.encode())
-        for _, v in new_items:
-            hasher.update(v.encode())
-        new_hash = hasher.hexdigest()
-
-        return HashHelper(new_hash)
-
-    return remap(
-        structure,
-        enter=definition_enter,
-        visit=_visit,
-        exit=_exit).hash
 
 
 # Creating definitions from objects

@@ -92,7 +92,7 @@ class BaseRepo:
             raise ValueError("Repo not linked to a directory.")
 
         # Get the directory for the object indicated by obj_def
-        def_hash_digest = hashval_to_digest(hash(obj_def))
+        def_hash_digest = obj_def.stable_hash()
 
         # get first two letters
         obj_subdir = def_hash_digest[:2]
@@ -316,8 +316,8 @@ class BaseRepo:
                 if def_file is not None:
                     # confirm we have the same definition
                     definition = pickle_load(def_file)
-                    check_hash = hash(definition)
-                    value_hash = hash(value)
+                    check_hash = definition.stable_hash()
+                    value_hash = value.stable_hash()
                     if check_hash != value_hash:
                         raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
                     # Load the data from the directory

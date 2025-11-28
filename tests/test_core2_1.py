@@ -2,10 +2,9 @@ import pytest
 import numpy as np
 import core2_objects as objects
 from dryml.core2.definition import Definition, \
-    ConcreteDefinition, hash_function, selector_match, \
+    ConcreteDefinition, stable_hash_function, selector_match, \
     SKIP_ARGS
 from dryml.core2.repo import Repo, save_object, load_object
-from dryml.core2.util import hashval_to_digest
 import os
 import glob
 from io import StringIO
@@ -264,13 +263,13 @@ def test_definition_hash_1():
         objects.TestClass1,
         10, test='a')
 
-    def_hash1 = hash_function(definition1)
+    def_hash1 = stable_hash_function(definition1)
 
     definition2 = Definition(
         objects.TestClass1,
         10, test='a')
 
-    def_hash_2 = hash_function(definition2)
+    def_hash_2 = stable_hash_function(definition2)
 
     assert def_hash1 == def_hash_2
 
@@ -283,7 +282,7 @@ def test_definition_hash_2():
         var3='c',
         var4='d')
 
-    def_hash1 = hash_function(definition1)
+    def_hash1 = stable_hash_function(definition1)
 
     definition2 = Definition(
         objects.TestClass2,
@@ -292,7 +291,7 @@ def test_definition_hash_2():
         var2='b',
         var1='a')
 
-    def_hash2 = hash_function(definition2)
+    def_hash2 = stable_hash_function(definition2)
 
     assert def_hash1 == def_hash2
 
@@ -309,7 +308,7 @@ def test_definition_hash_4():
         var3='c',
         var4='d')
 
-    def_hash1 = hash_function(definition1)
+    def_hash1 = stable_hash_function(definition1)
 
     definition2 = Definition(
         objects.TestClass2,
@@ -322,7 +321,7 @@ def test_definition_hash_4():
         var2='b',
         var1='a')
 
-    def_hash2 = hash_function(definition2)
+    def_hash2 = stable_hash_function(definition2)
 
     assert def_hash1 == def_hash2
 
@@ -339,7 +338,7 @@ def test_definition_hash_5():
         var3='c',
         var4='d')
 
-    def_hash1 = hash_function(definition1)
+    def_hash1 = stable_hash_function(definition1)
 
     definition2 = Definition(
         objects.TestClass2,
@@ -352,7 +351,7 @@ def test_definition_hash_5():
         var2='b',
         var1='a')
 
-    def_hash2 = hash_function(definition2)
+    def_hash2 = stable_hash_function(definition2)
 
     assert def_hash1 != def_hash2
 
@@ -372,7 +371,7 @@ def test_definition_hash_6():
         var3='c',
         var4='d')
 
-    def_hash1 = hash_function(definition1)
+    def_hash1 = stable_hash_function(definition1)
 
     definition2 = Definition(
         objects.TestClass2,
@@ -385,7 +384,7 @@ def test_definition_hash_6():
         var2='b',
         var1='a')
 
-    def_hash2 = hash_function(definition2)
+    def_hash2 = stable_hash_function(definition2)
 
     assert def_hash1 == def_hash2
 
@@ -406,7 +405,7 @@ def test_definition_hash_7():
         var3='c',
         var4='d')
 
-    def_hash1 = hash_function(definition1)
+    def_hash1 = stable_hash_function(definition1)
 
     definition2 = Definition(
         objects.TestClass2,
@@ -419,7 +418,7 @@ def test_definition_hash_7():
         var2='b',
         var1='a')
 
-    def_hash2 = hash_function(definition2)
+    def_hash2 = stable_hash_function(definition2)
 
     assert def_hash1 != def_hash2
 
@@ -730,7 +729,7 @@ def test_save_load_1(create_temp_dir):
 
     objs_dir = os.path.join(create_temp_dir, 'objects')
 
-    hash_digest = hashval_to_digest(hash(obj1))
+    hash_digest = obj1.definition.stable_hash()
     obj_dir = os.path.join(objs_dir, hash_digest[:2], hash_digest)
 
     ic(os.listdir(create_temp_dir), os.listdir(objs_dir), os.listdir(obj_dir))

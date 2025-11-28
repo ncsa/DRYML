@@ -1,5 +1,6 @@
 from copy import deepcopy
 from dryml.core2.object import Object
+from dryml.core2.stable_hash import _stable_leaf_bytes
 
 
 class TestClassA(Object):
@@ -20,3 +21,6 @@ class DeepcopyAware:
             setattr(new, k, deepcopy(v, memo))
         new.counter += 1
         return new
+
+    def __stable_leaf_bytes__(self):
+        return _stable_leaf_bytes(self.val)
