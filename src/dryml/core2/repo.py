@@ -363,7 +363,11 @@ class BaseRepo:
 
         if unpack is true, plain objects are returned
         """
-        return self.get(key)
+        result = self.get(key)
+        if len(result) == 0:
+            raise KeyError(f"Repo doesn't contain an object with definition {key}")
+        else:
+            return list(self.get(key).values())[0]
 
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
@@ -469,15 +473,18 @@ class BaseRepo:
                 raise TypeError("Only Object objects can be added to a repository.")
 
         # Recursively add objects.
+        def _add_object(obj: Object):
+            if obj.definition in self.obj_cache:
+                raise KeyError(f"Repo already has an object matching {obj.definition}!")
+            self.obj_cache[obj.definition] = obj
+
 
         def _enter(path, key, value):
             ic(path, key, value)
             if isinstance(value, Object):
                 return {}, get_object_view(value)
             elif isinstance(value, ConcreteDefinition):
-                # Enter the definition's object.
-                if value._obj is not None:
-                    return {}, get_object_view(value._obj)
+                return {}, get_definition_view(value)
             else:
                 return default_enter(path, key, value)
 
@@ -485,10 +492,14 @@ class BaseRepo:
             ic(path, key, value, new_parent, new_items)
             if isinstance(value, Object):
                 ic("got an object on exit.")
-                if value.definition in self.obj_cache:
-                    raise KeyError(f"Repo already has an object matching {value.definition}!")
-                self.obj_cache[value.definition] = value
+                _add_object(value)
                 return value
+            elif isinstance(value, ConcreteDefinition):
+                if value._obj is None:
+                    raise ValueError("Can't use a ConcreteDefinition without _obj pointer..")
+                ic("got an object through concrete definition on exit.")
+                _add_object(value._obj)
+                return value._obj
             else:
                 return default_exit(path, key, value, new_parent, new_items)
 
