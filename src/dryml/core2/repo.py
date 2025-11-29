@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 import glob
 import zipfile
-from boltons.iterutils import remap, default_enter, default_exit
+from typing import Callable
+from boltons.iterutils import remap, default_enter, default_visit, default_exit
 from collections.abc import ItemsView
 from contextlib import contextmanager
 from io import IOBase
@@ -26,6 +27,9 @@ class RepoSaveError(Exception):
 
 class RepoLoadError(Exception):
     pass
+
+
+SelectorType = Callable | Definition | ConcreteDefinition
 
 
 class BaseRepo:
@@ -341,17 +345,158 @@ class BaseRepo:
                 exit=_load_object_exit)
             return result
 
+    def __contains__(
+            self, item: Object | ConcreteDefinition):
+        if isinstance(ConcreteDefinition):
+            obj_def = item
+        elif isinstance(Object):
+            obj_def = item.definition
+        else:
+            raise TypeError(
+                f"Unsupported type {type(item)} for repo.contains!")
+        return obj_def in self.obj_cache and self.obj_cache[obj_def] is not None
+
+    def __getitem__(
+            self, key: ConcreteDefinition):
+        """
+        Easy access to objects within.
+
+        if unpack is true, plain objects are returned
+        """
+        return self.get(key)
+
+    def get(self,
+            selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
+            sel_args=None, sel_kwargs=None,
+            load_objects: bool = False,
+            build_missing=False,
+            verbose: bool = True) -> dict[ConcreteDefinition,Object]:
+
+        if type(selector) is list:
+            pass
+        elif type(selector) is not tuple:
+            selector = (selector,)
+        selectors = selector
+
+        def get_obj(obj_def: ConcreteDefinition) -> Object | None:
+            if obj_def in self.obj_cache:
+                if self.obj_cache[obj_def] is None:
+                    # We have content for this object,
+                    # but we haven't loaded it yet.
+                    if load_objects or build_missing:
+                        return self.load_object(obj_def, build_missing=build_missing)
+                else:
+                    return self.obj_cache[obj_def]
+            if build_missing:
+                return self.load_object(obj_def, build_missing=build_missing)
+
+            return None
+
+        selected_objects = {}
+        for sel in selectors:
+            if isinstance(sel, ConcreteDefinition):
+                if sel in selected_objects:
+                    continue
+                obj = get_obj(sel)
+                if obj is not None:
+                    selected_objects[sel] = obj
+            elif isinstance(sel, Definition):
+                for obj_def in self.obj_cache:
+                    if sel(obj_def):
+                        if obj_def in selected_objects:
+                            continue
+                        obj = get_obj(obj_def)
+                        if obj is not None:
+                            selected_objects[obj_def] = obj
+            elif isinstance(sel, Callable):
+                for obj_def in self.obj_cache:
+                    if self.obj_cache[obj_def] is not None:
+                        if sel(self.obj_cache[obj_def]):
+                            selected_objects[obj_def] = self.obj_cache[obj_def]
+            elif sel is None:
+                for obj_def in self.obj_cache:
+                    obj = get_obj(obj_def)
+                    if obj is not None:
+                        selected_objects[obj_def] = obj
+            else:
+                raise TypeError("sel is of incorrect type.")
+
+        return selected_objects
+
+    def apply(self,
+              func, func_args=None, func_kwargs=None,
+              selector: Optional[Callable] = None,
+              sel_args=None, sel_kwargs=None,
+              verbose: bool = False,
+              **kwargs):
+        """
+        Apply a function to all objects tracked by the repo.
+        We can also use a Selector to apply only to specific models
+        **kwargs is passed to self.get
+        """
+        if func_args is None:
+            func_args = []
+        if func_kwargs is None:
+            func_kwargs = {}
+
+        # Create apply function
+        def apply_func(obj):
+            return func(obj, *func_args, **func_kwargs)
+
+        # Get object list
+        objs = self.get(
+            selector=selector,
+            sel_args=sel_args, sel_kwargs=sel_kwargs,
+            **kwargs)
+
+        obj_iter = objs.items()
+        if verbose:
+            tqdm(obj_iter)
+        return {
+            obj_def: apply_func(obj) for obj_def, obj in obj_iter
+        }
+
     def write_main_def(self):
         if self.main_def is not None:
             def_file = os.path.join(self.dir, "def.pkl")
             pickle_save(self.main_def, def_file)
 
     def add_object(self, *args):
+        ic(args)
         from dryml.core2.object import Object
         for obj in args:
             if not isinstance(obj, Object):
                 raise TypeError("Only Object objects can be added to a repository.")
-            self.obj_cache[obj] = obj
+
+        # Recursively add objects.
+
+        def _enter(path, key, value):
+            ic(path, key, value)
+            if isinstance(value, Object):
+                return {}, get_object_view(value)
+            elif isinstance(value, ConcreteDefinition):
+                # Enter the definition's object.
+                if value._obj is not None:
+                    return {}, get_object_view(value._obj)
+            else:
+                return default_enter(path, key, value)
+
+        def _exit(path, key, value, new_parent, new_items):
+            ic(path, key, value, new_parent, new_items)
+            if isinstance(value, Object):
+                ic("got an object on exit.")
+                if value.definition in self.obj_cache:
+                    raise KeyError(f"Repo already has an object matching {value.definition}!")
+                self.obj_cache[value.definition] = value
+                return value
+            else:
+                return default_exit(path, key, value, new_parent, new_items)
+
+        remap(
+             args,
+             enter=_enter,
+             visit=default_visit,
+             exit=_exit)
 
     def close(self):
         self.write_main_def()
