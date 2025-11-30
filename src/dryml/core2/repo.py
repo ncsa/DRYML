@@ -413,7 +413,8 @@ class Repo:
             selector = (selector,)
         selectors = selector
 
-        def get_obj(obj_def: ConcreteDefinition) -> Object | None:
+
+        def get_obj(obj_def: Definition) -> Object | None:
             if obj_def in self.obj_cache:
                 if self.obj_cache[obj_def] is None:
                     # We have content for this object,
@@ -436,13 +437,19 @@ class Repo:
                 if obj is not None:
                     selected_objects[sel] = obj
             elif isinstance(sel, Definition):
+                added_objs = False
                 for obj_def in self.obj_cache:
                     if sel(obj_def):
                         if obj_def in selected_objects:
                             continue
                         obj = get_obj(obj_def)
                         if obj is not None:
+                            added_objs = True
                             selected_objects[obj_def] = obj
+                if not added_objs and build_missing:
+                    cdef = self.concretize_definition(sel)
+                    obj = get_obj(cdef)
+                    selected_objects[cdef] = obj
             elif isinstance(sel, Callable):
                 for obj_def in self.obj_cache:
                     if self.obj_cache[obj_def] is not None:

@@ -128,7 +128,9 @@ def test_get_api_3(create_temp_dir):
 
     assert len(repo.get(selector=test_obj_def)) == 0
 
-    test_obj = repo.get(selector=test_obj_def, build_missing=True)
+    obj_dict = repo.get(selector=test_obj_def, build_missing=True)
+
+    test_obj = list(obj_dict.values())[0]
 
     assert len(repo) == 1
     assert test_obj_def(test_obj)
@@ -138,16 +140,10 @@ def test_get_api_3(create_temp_dir):
 def test_get_api_4(create_temp_dir):
     repo = dryml.core2.Repo()
 
-    test_obj_def = dryml.ObjectDef(
-        objs.HelloStr,
+    test_obj_def = objs.HelloStr.d(
         msg='test')
 
-    try:
-        repo.get(test_obj_def, build_missing_def=False)
-        assert False
-    except KeyError:
-        pass
-
+    assert len(repo.get(test_obj_def, build_missing=False)) == 0
     assert len(repo) == 0
 
 
@@ -155,18 +151,17 @@ def test_get_api_4(create_temp_dir):
 def test_get_api_5(create_temp_dir):
     repo = dryml.core2.Repo()
 
-    test_obj_def = dryml.ObjectDef(
-        objs.TestNest,
-        dryml.ObjectDef(
-            objs.TestNest2,
+    test_obj_def = objs.TestNest.d(
+        objs.TestNest2.d(
             A=5)
         )
 
-    obj = repo.get(test_obj_def, build_missing_def=True)
+    obj = list(repo.get(test_obj_def, build_missing=True).values())[0]
 
     assert len(repo) == 2
 
-    obj2 = repo.get(test_obj_def)
+    obj_dict = repo.get(test_obj_def)
+    obj2 = list(obj_dict.values())[0]
     assert obj is obj2
     assert len(repo) == 2
 

@@ -110,7 +110,7 @@ class Definition(dict):
         from .object import Object
         if not isinstance(other_def, Definition) and \
                 not isinstance(other_def, Object):
-            raise TypeError("Definition can only be called on other Definition objects and Object objects")
+            raise TypeError(f"Definition can only be called on other Definition objects and Object objects got {type(other_def)}")
         return selector_match(self, other_def, **kwargs)
 
     @property
