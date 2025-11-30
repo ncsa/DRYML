@@ -9,13 +9,13 @@ from enum import Enum
 
 import numpy as np
 
-from dryml.core2.util import get_definition_view, is_dictlike
+from .general import get_definition_view, is_dictlike
 from boltons.iterutils import remap, is_collection, default_enter
 
 # ---------- ENTER HOOK FOR Definition ----------
 
 def stable_definition_enter(path, key, value):
-    from dryml.core2.definition import Definition
+    from ..definition import Definition
     """Treat Definition objects via their normalized 'view'."""
     if isinstance(value, Definition):
         # Hash the normalized view instead of the raw Definition

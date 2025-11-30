@@ -7,16 +7,16 @@ from inspect import isclass
 import numpy as np
 import sys
 
-from dryml.core2.stable_hash import stable_hash_function
-from dryml.core2.util import is_dictlike, \
+from .utils.stable_hash import stable_hash_function
+from .utils.general import is_dictlike, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
-    digest_to_hashval, get_object_view, get_definition_view
+    get_object_view, get_definition_view
 
-def definition_enter(path, key, value):
-    if isinstance(value, Definition):
-        return {}, get_definition_view(value)
-    else:
-        return default_enter(path, key, value)
+#def definition_enter(path, key, value):
+#    if isinstance(value, Definition):
+#        return {}, get_definition_view(value)
+#    else:
+#        return default_enter(path, key, value)
 
 
 def definition_exit(path, key, value, new_parent, new_items):
@@ -32,41 +32,41 @@ def definition_exit(path, key, value, new_parent, new_items):
         return default_exit(path, key, value, new_parent, new_items)
 
 
-def deepcopy_skip_definition_object(defn):
-    from dryml.core2.object import Object
-    def _enter(path, key, value):
-        if isinstance(value, Object):
-            return value, False
-        elif isinstance(value, Definition):
-            return value, False
-        else:
-            return default_enter(path, key, value)
+# def deepcopy_skip_definition_object(defn):
+#     from dryml.core2.object import Object
+#     def _enter(path, key, value):
+#         if isinstance(value, Object):
+#             return value, False
+#         elif isinstance(value, Definition):
+#             return value, False
+#         else:
+#             return default_enter(path, key, value)
 
-    def _visit(path, key, value):
-        if isinstance(value, Object):
-            # We have an already realized class instance. We shouldn't deep copy it.
-            return key, value
-        elif isinstance(value, Definition):
-            # unique definitions are supposed to refer to specific objects during 'rendering'
-            # We shouldn't copy Definitions
-            return key, value
-        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
-            return key, value
-        else:
-            return key, deepcopy(value)
+#     def _visit(path, key, value):
+#         if isinstance(value, Object):
+#             # We have an already realized class instance. We shouldn't deep copy it.
+#             return key, value
+#         elif isinstance(value, Definition):
+#             # unique definitions are supposed to refer to specific objects during 'rendering'
+#             # We shouldn't copy Definitions
+#             return key, value
+#         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
+#             return key, value
+#         else:
+#             return key, deepcopy(value)
 
-    if type(defn) is Definition:
-        return remap(
-            [defn],
-            enter=_enter,
-            visit=_visit,
-            exit=definition_exit)[0]
-    else:
-        return remap(
-            defn,
-            enter=_enter,
-            visit=_visit,
-            exit=definition_exit)
+#     if type(defn) is Definition:
+#         return remap(
+#             [defn],
+#             enter=_enter,
+#             visit=_visit,
+#             exit=definition_exit)[0]
+#     else:
+#         return remap(
+#             defn,
+#             enter=_enter,
+#             visit=_visit,
+#             exit=definition_exit)
 
 
 # Special value to skip args
@@ -103,11 +103,12 @@ class Definition(dict):
         super().__setitem__(key, value)
 
     def copy(self):
-        # A true deepcopy
-        return deepcopy_skip_definition_object(self)
+        return deepcopy(self)
+    #    # A true deepcopy
+    #    return deepcopy_skip_definition_object(self)
 
     def __call__(self, other_def, **kwargs):
-        from dryml.core2.object import Object
+        from .object import Object
         if not isinstance(other_def, Definition) and \
                 not isinstance(other_def, Object):
             raise TypeError("Definition can only be called on other Definition objects and Object objects")
@@ -134,7 +135,7 @@ class Definition(dict):
         return not self.__eq__(rhs)
 
     def concretize(self, repo=None) -> ConcreteDefinition:
-        from dryml.core2.repo import manage_repo
+        from .repo import manage_repo
         with manage_repo(repo=repo) as sub_repo:
             return sub_repo.concretize_definition(self)
 
@@ -142,7 +143,7 @@ class Definition(dict):
         return categorical_definition(self, recursive=recursive)
 
     def build(self, repo=None, build_missing=True) -> Object:
-        from dryml.core2.repo import manage_repo
+        from .repo import manage_repo
         with manage_repo(repo=repo) as sub_repo:
             concrete_def = sub_repo.concretize_definition(self)
             return sub_repo.load_object(concrete_def, build_missing=build_missing)
@@ -254,7 +255,7 @@ class ConcreteDefinition(Definition):
 
 
 def categorical_definition(defn: Definition, recursive=True):
-    from dryml.core2.object import Object
+    from .object import Object
     # Copy the Definition
     new_def = deepcopy(defn)
 
@@ -414,7 +415,7 @@ def categorical_definition(defn: Definition, recursive=True):
 
 
 def validate_arguments_for_concrete_definition(vals):
-    from dryml.core2.object import Object
+    from .object import Object
     # TODO: Maybe also directly validate for 'hashable' plain old data types as well?
     type_errors = []
 
@@ -605,7 +606,7 @@ def hash_value(value):
 
 
 def get_path(obj_or_def, path):
-    from dryml.core2.object import Object
+    from .object import Object
     if len(path) == 0:
         return obj_or_def
 
@@ -661,7 +662,7 @@ def selector_match(
     # if strict is set, it must match exactly, and callables arent' allowed.
     # cls_str_compare forces a string based name comparison between classes.
     # Additionally, Definitions which skip args also aren't allowed
-    from dryml.core2.object import Object
+    from .object import Object
 
     def _enter(path, key, value):
         # Check if this key/path exists in the definition
@@ -855,7 +856,7 @@ def selector_match(
 def unique_objects(def_or_obj):
     # Get a dictionary of unique Object objects inside
     # the nested definition or Object object.
-    from dryml.core2.object import Object
+    from .object import Object
     unique_objs = {}
 
     def _enter(path, key, value):

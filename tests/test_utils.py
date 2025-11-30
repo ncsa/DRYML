@@ -1,4 +1,4 @@
-from dryml.core2.util import get_class_str, get_class_from_str, \
+from dryml.core2.utils.general import get_class_str, get_class_from_str, \
     get_unique_objects, apply_func
 from dryml.core2.definition import Definition, SKIP_ARGS
 import core2_objects as objects

@@ -144,7 +144,7 @@ def test_unique_objs_1():
         train_fn=train_fn_obj
     )
 
-    from dryml.core2.util import get_unique_objects
+    from dryml.core2.utils.general import get_unique_objects
 
     unique_objs = get_unique_objects(trainable_obj)
 

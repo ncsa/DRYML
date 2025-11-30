@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dryml.core2.object import Object
-from dryml.core2.stable_hash import _stable_leaf_bytes
+from dryml.core2.utils.stable_hash import _stable_leaf_bytes
 
 
 class TestClassA(Object):

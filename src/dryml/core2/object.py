@@ -4,19 +4,17 @@ from functools import cached_property
 import uuid
 import time
 import os
-import inspect
-
-from dryml.core2.util import pickle_save, pickle_load, _validate_init_sig
-from dryml.core2.definition import Definition, \
-    deepcopy_skip_definition_object
 from copy import deepcopy
+
+from .utils.general import pickle_save, pickle_load, _validate_init_sig
+from .definition import Definition
 
 
 class Dryml(type):
     # Support metaclass to enable capture of input arguments
 
     def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
-        from dryml.core2.repo import manage_repo
+        from .repo import manage_repo
 
         with manage_repo(repo=repo) as sub_repo:
             if __cdef__ is None:
@@ -72,7 +70,7 @@ class Object(metaclass=Dryml):
 
     @classmethod
     def defn(cls, *args, repo=None, **kwargs) -> "Definition":
-        from dryml.core2.definition import Definition
+        from .definition import Definition
         return Definition(cls, *args, repo=repo, **kwargs)
 
     # Alias for defn
@@ -96,7 +94,7 @@ class Object(metaclass=Dryml):
         return f"<{self.definition.cls} at {hex(id(self))}>(args={self.definition.args}, kwargs={self.definition.kwargs})"
 
     def save(self, repo=None):
-        from dryml.core2.repo import save_object
+        from .repo import save_object
         save_object(self, repo=repo)
 
     def save_to_dir(self, dest_dir: str):
@@ -107,7 +105,7 @@ class Object(metaclass=Dryml):
         pass
 
     def load(self, repo=None):
-        from dryml.core2.repo import load_object
+        from .repo import load_object
         load_object(self, repo=repo)
             
 

@@ -9,16 +9,14 @@ from collections.abc import ItemsView
 from contextlib import contextmanager
 from io import IOBase
 from pathlib import Path
-import numpy as np
 
-from dryml.core2.definition import Definition, ConcreteDefinition, deepcopy_skip_definition_object
-from dryml.core2.util import zip_directory, hashval_to_digest, \
+from boltons.iterutils import remap, default_enter, default_exit
+
+from .definition import Definition, ConcreteDefinition
+from .utils.general import zip_directory, \
     pickle_load, pickle_save, get_temp_directory, get_object_view, \
-    get_definition_view, is_dictlike
-
-from boltons.iterutils import remap, is_collection, default_enter, default_exit
-from copy import deepcopy
-from dryml.core2.object import Object
+    get_definition_view
+from .object import Object
 
 
 class RepoSaveError(Exception):

@@ -8,7 +8,7 @@ import tempfile
 import io
 from typing import Optional, Callable
 from collections.abc import Mapping, ItemsView
-from inspect import currentframe, getmodule, isclass, \
+from inspect import getmodule, isclass, \
     Parameter, signature
 from boltons.iterutils import remap, default_enter, default_exit
 
@@ -144,18 +144,18 @@ def get_definition_view(defn):
 
 
 def get_unique_objects(obj):
-    from dryml.core2.object import Object
+    from ..object import Object
 
     unique_objs = {}
 
     def _get_unique_objects_enter(path, key, value):
-        from dryml.core2.definition import ConcreteDefinition
+        from ..definition import ConcreteDefinition
         if isinstance(value, Object):
-            # Check if we've visited this one already
+            # check if we've visited this one already
             def_val = value.definition.concretize()
 
             if def_val in unique_objs:
-                return value, False
+                return value, false
             else:
                 return {}, get_object_view(value)
         if isinstance(value, ConcreteDefinition):
@@ -164,24 +164,24 @@ def get_unique_objects(obj):
             return default_enter(path, key, value)
 
     def _get_unique_objects_visit(path, key, value):
-        # We aren't processing anything
+        # we aren't processing anything
         return key, value
 
     def _get_unique_objects_exit(path, key, value, new_parent, new_items):
-        from dryml.core2.definition import ConcreteDefinition
+        from ..definition import ConcreteDefinition
         if isinstance(value, Object):
-            # We're exiting a object
+            # we're exiting a object
             def_val = value.definition
 
             unique_objs[def_val] = value
         elif isinstance(value, ConcreteDefinition):
             if value._obj is None:
-                raise ValueError("Unsupported ConcreteDefinition!")
+                raise ValueError("unsupported ConcreteDefinition!")
             unique_objs[value] = value._obj
 
         return default_exit(path, key, value, new_parent, new_items)
 
-    if isinstance(obj, Object):
+    if isinstance(obj, object):
         remap(
             [obj],
             enter=_get_unique_objects_enter,

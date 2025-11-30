@@ -1,5 +1,5 @@
 from dryml.core2.object import Object, Pickleable, UniqueID, Metadata
-from dryml.core2.util import pickler, unpickler
+from dryml.core2.utils.general import pickler, unpickler
 
 
 class HelloObject(UniqueID):
