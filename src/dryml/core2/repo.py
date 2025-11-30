@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import glob
 import zipfile
 from typing import Callable
@@ -17,6 +18,7 @@ from .utils.general import zip_directory, \
     pickle_load, pickle_save, get_temp_directory, get_object_view, \
     get_definition_view
 from .object import Object
+from .store.store import Store
 
 
 class RepoSaveError(Exception):
@@ -30,19 +32,25 @@ class RepoLoadError(Exception):
 SelectorType = Callable | Definition | ConcreteDefinition
 
 
-class BaseRepo:
+class Repo:
+    # Trackers
     _num_saves: int
     _num_constructions: int
+
+    # Caches
     # Links particular concrete definition with particular object
-    obj_cache: dict[ConcreteDefinition,Object|None]
+    obj_cache: dict[ConcreteDefinition, Object | None]
     # Links particular Definition object with a concrete definition (Definitions are resolved )
-    cdef_cache: dict[int,ConcreteDefinition]
-    dir: str
-    obj_dir: str
+    cdef_cache: dict[int, ConcreteDefinition]
+
+    # Main definition
     main_def: ConcreteDefinition | None
 
+    # Backing stores
+    stores: list[Store]
+
     # Helper class for saving objects
-    def __init__(self, dir=None):
+    def __init__(self, stores=None):
         # Initialize caches
         self.obj_cache = {}
         self.cdef_cache = {}
@@ -54,51 +62,36 @@ class BaseRepo:
         # Initialize the main def
         self.main_def = None
 
-        if dir is not None:
-            self.init_from_dir(dir)
+        # Multiple stores, optional
+        self.stores: list[Store] = list(stores or [])
 
-    def init_from_dir(self, dir):
-        # We expect the directory to exist.
-        if not os.path.exists(dir):
-            raise ValueError(f"Directory {dir} doesn't exist.")
+        # Optional default store for write
+        self.default_store: Store | None = self.stores[0] if self.stores else None
 
-        self.dir = dir
-        self.obj_dir = os.path.join(self.dir, "objects")
+    # Store Methods
 
-        # Load main definition if it exists
-        def_file = os.path.join(self.dir, "def.pkl")
-        if os.path.exists(def_file):
-            self.main_def = pickle_load(def_file)
+    def add_store(self, store: "Store", make_default=False):
+        self.stores.append(store)
+        if make_default or self.default_store is None:
+            self.default_store = store
 
-        # List the directory and find all the object directories
-        try:
-            obj_dirs = os.listdir(self.obj_dir)
-        except FileNotFoundError:
-            # The objects directory doesn't exist
-            os.mkdir(self.obj_dir)
-            obj_dirs = os.listdir(self.obj_dir)
+    def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
+        # do any stores have data for this cdef?
+        return any(store.has_cdef(cdef) for store in self.stores)
 
-        # TODO: Do I really want to load all object definitions like this?
-        obj_dirs = glob.glob(f"{self.obj_dir}/[0-9a-f][0-9a-f]/*")
-        for obj_dir in obj_dirs:
-            obj_dir = os.path.join(self.obj_dir, obj_dir)
-            def_file = os.path.join(obj_dir, 'def.pkl')
-            obj_def = pickle_load(def_file)
-            self.obj_cache[obj_def] = None
+    def hydrate_from_stores(self):
+        """
+        Ask each store to enumerate all cdefs it has.
+        Populate obj_cache[cdef] = None for those not already present.
+        """
+        for store in self.stores:
+            for cdef in store.hydrate_index():
+                self.obj_cache.setdefault(cdef, None)
 
     def __len__(self):
         return len(self.obj_cache)
 
-    def get_object_directory(self, obj_def: ConcreteDefinition):
-        if self.obj_dir is None:
-            raise ValueError("Repo not linked to a directory.")
-
-        # Get the directory for the object indicated by obj_def
-        def_hash_digest = obj_def.stable_hash()
-
-        # get first two letters
-        obj_subdir = def_hash_digest[:2]
-        return os.path.join(self.obj_dir, obj_subdir, def_hash_digest)
+    # Graph Logic
 
     def concretize_definition(self, defn):
         """
@@ -180,6 +173,35 @@ class BaseRepo:
                 visit=_visit,
                 exit=_exit)
 
+    def _save_single_object(self, obj: Object):
+        """
+        Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
+        """
+
+        obj_def = obj.definition
+        if obj_def in self.obj_cache:
+            if self.obj_cache[obj_def] is None:
+                # Update repo cache
+                self.obj_cache[obj_def] = obj
+            else:
+                # Check that this was the same object
+                if obj is not self.obj_cache[obj_def]:
+                    raise ValueError("We already have a different object with definition: {obj_def}")
+        else:
+            # Update repo cache
+            self.obj_cache[obj_def] = obj
+
+        if self.default_store is not None:
+            self.default_store.save_object(obj)
+            self._num_saves += 1
+            return
+        elif len(self.stores) > 0:
+            self.stores[0].save_object(obj)
+            self._num_saves += 1
+            return
+        else:
+            raise RepoSaveError("No store available to save object!")
+
     def save_object(self, obj, main=False):
         saved_objs = {}
         def _save_object_enter(path, key, value):
@@ -204,18 +226,16 @@ class BaseRepo:
             if isinstance(value, Object):
                 obj_def = value.definition
                 if obj_def not in saved_objs:
-                    self.save_object_instance(value)
+                    self._save_single_object(value)
                     saved_objs[obj_def] = value
-                    self._num_saves += 1
                 return value
             elif isinstance(value, ConcreteDefinition):
                 obj = value._obj
                 if obj is None:
                     raise ValueError("ConcreteDefinitions must be linked to actual objects through _obj to be savable.")
                 if value not in saved_objs:
-                    self.save_object_instance(obj)
+                    self._save_single_object(obj)
                     saved_objs[value] = obj
-                    self._num_saves += 1
                 return value
             else:
                 return default_exit(path, key, value, new_parent, new_items)
@@ -239,25 +259,34 @@ class BaseRepo:
             self.main_def = obj.definition
         return True
 
-    def save_object_instance(self, obj):
-        obj_def = obj.definition
-        if obj_def in self.obj_cache:
-            if self.obj_cache[obj_def] is None:
-                # Update repo cache
-                self.obj_cache[obj_def] = obj
-            else:
-                # Check that this was the same object
-                if obj is not self.obj_cache[obj_def]:
-                    raise ValueError("We already have a different object with definition: {obj_def}")
-        else:
-            # Update repo cache
-            self.obj_cache[obj_def] = obj
+    def _load_single_object(self, cdef: ConcreteDefinition, args, kwargs, build_missing=False) -> Object:
+        """
+        Defines how the Repo updates its caches and delegates loading a single object from one of it's stores
+        """
 
-        # Create directory for object
-        object_path = self.get_object_directory(obj_def)
-        if not os.path.exists(object_path):
-            os.makedirs(object_path)
-        obj.save_to_dir(object_path)
+        # Already loaded?
+        if cdef in self.obj_cache and self.obj_cache[cdef] is not None:
+            return self.obj_cache[cdef]
+
+        in_store = self.has_cdef_light(cdef)
+
+        if not build_missing and not in_store:
+            raise RuntimeError("Asked not to build missing objects")
+
+        # Construct object; graph algorithm makes sure args/kwargs are already
+        # realized and passed in
+        obj = cdef.cls(*args, repo=self, __cdef__=cdef, **kwargs)
+        self._num_constructions += 1
+
+        # Try to hydrate from stores, use first one that has it
+        if in_store:
+            for store in self.stores:
+                if store.has_cdef(cdef):
+                    store.load_object(obj)
+                    break
+
+        self.obj_cache[cdef] = obj
+        return obj
 
     def load_object(self, obj_def, build_missing=False):
 
@@ -290,18 +319,6 @@ class BaseRepo:
                     loaded_objs[value] = self.obj_cache[value]
                     return loaded_objs[value]
 
-                if self.obj_dir:
-                    object_path = self.get_object_directory(value)
-                    def_file = os.path.join(object_path, "def.pkl")
-                    if not os.path.exists(def_file):
-                        def_file = None
-                else:   
-                    object_path = None
-                    def_file = None
-
-                if not build_missing and not def_file:
-                    raise RuntimeError("Asked not to build missing objects")
-
                 new_values = {} # Need to build a dictionary because we get a list of tuples
                 for k, v in new_items:
                     new_values[k] = v
@@ -309,21 +326,10 @@ class BaseRepo:
                 args = new_values['args']
                 kwargs = new_values['kwargs']
 
-                # Call special constructor since we already have what we need.
-                obj = value.cls(*args, repo=self, __cdef__=value, **kwargs)
-                self._num_constructions += 1
-                self.obj_cache[value] = obj
+                obj = self._load_single_object(value, args, kwargs, build_missing=build_missing)
+
                 loaded_objs[value] = obj
 
-                if def_file is not None:
-                    # confirm we have the same definition
-                    definition = pickle_load(def_file)
-                    check_hash = definition.stable_hash()
-                    value_hash = value.stable_hash()
-                    if check_hash != value_hash:
-                        raise ValueError(f"Hashes don't match. {check_hash} != {value_hash}")
-                    # Load the data from the directory
-                    obj.load_from_dir(object_path)
                 return obj
             else:
                 return default_exit(path, key, value, new_parent, new_items)
@@ -351,8 +357,12 @@ class BaseRepo:
             obj_def = item.definition
         else:
             raise TypeError(
-                f"Unsupported type {type(item)} for repo.contains!")
-        return obj_def in self.obj_cache and self.obj_cache[obj_def] is not None
+                f"Unsupported type {type(item)} for Repo.__contains__!")
+
+        # “Strong” membership: known in cache and either loaded or known to exist
+        in_cache = obj_def in self.obj_cache
+        in_store = self.has_cdef_light(obj_def)
+        return in_cache or in_store
 
     def __getitem__(
             self, key: ConcreteDefinition):
@@ -511,81 +521,6 @@ class BaseRepo:
         self.write_main_def()
 
 
-class Repo(BaseRepo):
-    def __init__(self, dir=None):
-        self._temp_dir = None
-
-        if dir is None:
-            # If none, get a temporary directory
-            self.prepare_temp_dir()
-            super().__init__(self._temp_dir.name)
-        else:
-            super().__init__(dir)
-
-    def create_temp_dir(self):
-        self._temp_dir = get_temp_directory()
-
-    def prepare_temp_dir(self):
-        self.create_temp_dir()
-
-    def close_temp_dir(self):
-        if self._temp_dir is not None:
-            self._temp_dir.__exit__(None, None, None)
-
-    def close(self):
-        self.write_main_def()
-        self.close_temp_dir()
-
-
-class ZipRepo(Repo):
-    # A class meant to zip files 'directly' to a zipfile.
-    def __init__(self, zip_dest):
-        # Save destination
-        self.zip_dest = zip_dest
-
-        # Initialize the Repo in temporary directory mode
-        super().__init__()
-
-    def prepare_temp_dir(self):
-        self.create_temp_dir()
-        dir = self._temp_dir.name
-
-        # Load the data if it exists
-        def _load_data():
-            with zipfile.ZipFile(self.zip_dest, 'r') as zf:
-                zf.extractall(dir)
-
-        # Input validation
-        if isinstance(self.zip_dest, IOBase):
-            # handles file-like objects
-            # Check if the buffer has content, if so load it.
-            self.zip_dest.seek(0)
-            if self.zip_dest.read(1):
-                self.zip_dest.seek(0)
-                _load_data()
-                self.zip_dest.seek(0)
-        else:
-            # detect whether the path exists, and is a zip file
-            try:
-                os.fspath(self.zip_dest)
-            except TypeError:
-                raise TypeError("self.zip_dest must be a path or a file-like object.")
-            if os.path.exists(self.zip_dest):
-                # Load the data if it exists
-                empty = False
-                with open(self.zip_dest, 'rb') as f:
-                    if not f.read(1):
-                        empty = True
-                if not empty:
-                    _load_data()
-
-    def close(self):
-        self.write_main_def()
-        # Zip up the directory and its content to its final destination
-        zip_directory(self.dir, self.zip_dest)
-        self.close_temp_dir()
-
-
 @contextmanager
 def manage_repo(repo=None):
     close_repo = False
@@ -611,6 +546,68 @@ def manage_repo(repo=None):
     yield repo
     if close_repo:
         repo.close()
+
+@contextmanager
+def manage_repo(repo=None):
+    """
+    Handle all the following cases:
+
+      * repo is None:
+          - create a fresh Repo() with no stores (pure in-memory)
+          - auto-close at the end of the context
+
+      * repo is a Repo:
+          - use it as-is, do not close it at the end
+
+      * repo is an IOBase:
+          - treat it as a zip container
+          - create ZipStore(repo), Repo([ZipStore])
+          - auto-close (commit+cleanup) at the end
+
+      * repo is a str/Path:
+          - if it points to an existing directory: DirStore(path)
+          - else: ZipStore(path)
+          - Repo([store])
+          - auto-close at the end
+    """
+    close_repo = False
+
+    if repo is None:
+        # in-memory repo, no backing store yet
+        repo_obj = Repo()
+        close_repo = True
+
+    elif isinstance(repo, Repo):
+        # user-supplied repo, don't manage its lifetime
+        repo_obj = repo
+
+    elif isinstance(repo, IOBase):
+        from .store.zip import ZipStore
+        # file-like => zip-backed store in a temp dir
+        store = ZipStore(repo)
+        repo_obj = Repo(stores=[store])
+        close_repo = True
+
+    elif isinstance(repo, (str, Path)):
+        from .store.dir import DirStore
+        from .store.zip import ZipStore
+        path = os.fspath(repo)
+        if os.path.isdir(path):
+            store = DirStore(path)
+        else:
+            # treat as zip file path (may or may not exist yet)
+            store = ZipStore(path)
+        repo_obj = Repo(stores=[store])
+        close_repo = True
+
+    else:
+        raise ValueError(f"Cannot open a repo pointing to location {repo!r}")
+
+    try:
+        yield repo_obj
+    finally:
+        if close_repo:
+            repo_obj.close()
 
 
 # Saving and Loading
