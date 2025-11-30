@@ -206,8 +206,8 @@ def test_build_from_definition_6():
     repo = Repo() 
     obj = definition.build(repo=repo)
     assert repo._num_constructions == 2
-    assert definition(obj.definition)
-    assert definition(obj)
+    assert definition(obj.definition, verbose=True)
+    assert definition(obj, verbose=True)
 
 
 def test_build_from_definition_7():
@@ -732,14 +732,10 @@ def test_save_load_1(create_temp_dir):
     hash_digest = obj1.definition.stable_hash()
     obj_dir = os.path.join(objs_dir, hash_digest[:2], hash_digest)
 
-    ic(os.listdir(create_temp_dir), os.listdir(objs_dir), os.listdir(obj_dir))
-
     assert len(os.listdir(create_temp_dir)) == 2
     assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 1
 
-    ic("1")
     obj1_2 = load_object(obj1.definition, repo=create_temp_dir)
-    ic("2")
     assert obj1_2.x == 10
     assert obj1_2.test == 'a'
 

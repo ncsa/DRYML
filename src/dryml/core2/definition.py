@@ -103,9 +103,8 @@ class Definition(dict):
         super().__setitem__(key, value)
 
     def copy(self):
+        # This might be the wrong implementation for regular Defintion.
         return deepcopy(self)
-    #    # A true deepcopy
-    #    return deepcopy_skip_definition_object(self)
 
     def __call__(self, other_def, **kwargs):
         from .object import Object
@@ -209,6 +208,9 @@ class ConcreteDefinition(Definition):
 
     def __hash__(self):
         return hash(self._hash)
+
+    def copy(self):
+        return deepcopy(self)
 
     def __getstate__(self):
         # Only structural data; drop ephemeral links

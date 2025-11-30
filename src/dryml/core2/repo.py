@@ -63,10 +63,33 @@ class Repo:
         self.main_def = None
 
         # Multiple stores, optional
-        self.stores: list[Store] = list(stores or [])
+        self.stores: list[Store] = []
+        if isinstance(stores, Store):
+            self.stores = [stores]
+        elif stores is None:
+            self.stores = []
+        elif isinstance(stores, (list, tuple)):
+            self.stores = []
+            for store in stores:
+                if not isinstance(store, Store):
+                    self.stores.append(make_store(store))
+                else:
+                    self.stores.append(store)
 
         # Optional default store for write
         self.default_store: Store | None = self.stores[0] if self.stores else None
+
+        # Try to read main def from first store
+        if len(self.stores) > 0:
+            # Attempt to read from the default store first.
+            if self.default_store is not None:
+                main_def = self.default_store.read_main_def()
+            if main_def is None:
+                for store in self.stores:
+                    main_def = store.read_main_def()
+
+            if main_def is not None:
+                self.set_main_def(main_def)
 
     # Store Methods
 
@@ -256,7 +279,7 @@ class Repo:
 
         # Save main object definition
         if main:
-            self.main_def = obj.definition
+            self.set_main_def(obj.definition)
         return True
 
     def _load_single_object(self, cdef: ConcreteDefinition, args, kwargs, build_missing=False) -> Object:
@@ -468,13 +491,15 @@ class Repo:
             obj_def: apply_func(obj) for obj_def, obj in obj_iter
         }
 
-    def write_main_def(self):
-        if self.main_def is not None:
-            def_file = os.path.join(self.dir, "def.pkl")
-            pickle_save(self.main_def, def_file)
+    def set_main_def(self, main_def: ConcreteDefinition):
+        self.main_def = main_def
+        if self.default_store is not None:
+            self.default_store.set_main_def(self.main_def)
+        else:
+            if len(stores) > 0:
+                stores[0].set_main_def(self.main_def)
 
     def add_object(self, *args):
-        ic(args)
         from dryml.core2.object import Object
         for obj in args:
             if not isinstance(obj, Object):
@@ -488,7 +513,6 @@ class Repo:
 
 
         def _enter(path, key, value):
-            ic(path, key, value)
             if isinstance(value, Object):
                 return {}, get_object_view(value)
             elif isinstance(value, ConcreteDefinition):
@@ -497,15 +521,12 @@ class Repo:
                 return default_enter(path, key, value)
 
         def _exit(path, key, value, new_parent, new_items):
-            ic(path, key, value, new_parent, new_items)
             if isinstance(value, Object):
-                ic("got an object on exit.")
                 _add_object(value)
                 return value
             elif isinstance(value, ConcreteDefinition):
                 if value._obj is None:
                     raise ValueError("Can't use a ConcreteDefinition without _obj pointer..")
-                ic("got an object through concrete definition on exit.")
                 _add_object(value._obj)
                 return value._obj
             else:
@@ -517,35 +538,34 @@ class Repo:
              visit=default_visit,
              exit=_exit)
 
-    def close(self):
-        self.write_main_def()
+    def flush(self):
+        # Commit all stores
+        for store in self.stores:
+            store.commit()
+
+    def close(self, flush=True):
+        if flush:
+            self.flush()
 
 
-@contextmanager
-def manage_repo(repo=None):
-    close_repo = False
-    if repo is None:
-        repo = Repo()
-        close_repo = True
-    elif isinstance(repo, Repo):
-        pass
-    elif isinstance(repo, IOBase):
-            # This is a file-like object
-        repo = ZipRepo(repo)
-        close_repo = True
-    elif type(repo) in [str, Path]:
-        if os.path.isdir(repo):
-            repo = Repo(repo)
-            close_repo = True
-        # Save as a dryml zip
+def make_store(store):
+    if isinstance(store, IOBase):
+        from .store.zip import ZipStore
+        # file-like => zip-backed store in a temp dir
+        return ZipStore(store)
+
+    elif isinstance(store, (str, Path)):
+        from .store.dir import DirStore
+        from .store.zip import ZipStore
+        path = os.fspath(store)
+        if os.path.isdir(path):
+            store = DirStore(store)
         else:
-            repo = ZipRepo(repo)
-            close_repo = True
+            # treat as zip file path (may or may not exist yet)
+            store = ZipStore(store)
+        return store
     else:
-        raise ValueError(f"Cannot open a repo pointing to location {repo}")
-    yield repo
-    if close_repo:
-        repo.close()
+        raise ValueError(f"Cannot open a store pointing to location {store!r}")
 
 @contextmanager
 def manage_repo(repo=None):
@@ -581,27 +601,10 @@ def manage_repo(repo=None):
         # user-supplied repo, don't manage its lifetime
         repo_obj = repo
 
-    elif isinstance(repo, IOBase):
-        from .store.zip import ZipStore
-        # file-like => zip-backed store in a temp dir
-        store = ZipStore(repo)
-        repo_obj = Repo(stores=[store])
-        close_repo = True
-
-    elif isinstance(repo, (str, Path)):
-        from .store.dir import DirStore
-        from .store.zip import ZipStore
-        path = os.fspath(repo)
-        if os.path.isdir(path):
-            store = DirStore(path)
-        else:
-            # treat as zip file path (may or may not exist yet)
-            store = ZipStore(path)
-        repo_obj = Repo(stores=[store])
-        close_repo = True
-
     else:
-        raise ValueError(f"Cannot open a repo pointing to location {repo!r}")
+        store = make_store(repo)
+        repo_obj = Repo(stores=[store])
+        close_repo = True
 
     try:
         yield repo_obj
@@ -611,9 +614,9 @@ def manage_repo(repo=None):
 
 
 # Saving and Loading
-def save_object(obj, repo=None):
+def save_object(obj, repo=None, main=False):
     with manage_repo(repo=repo) as sub_repo:
-        main = (repo is not sub_repo) and isinstance(obj, Object)
+        main = main or ((repo is not sub_repo) and isinstance(obj, Object))
         sub_repo.save_object(obj, main=main)
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from .store import Store
 from ..utils.general import pickle_save, pickle_load
 
@@ -12,6 +14,7 @@ class DirStore(Store):
         self.base_dir = os.fspath(base_dir)
         self.obj_dir = os.path.join(self.base_dir, "objects")
         os.makedirs(self.obj_dir, exist_ok=True)
+        self.set_main_def(self.read_main_def())
 
     def _object_dir(self, cdef: "ConcreteDefinition") -> str:
         digest = cdef.stable_hash()
@@ -61,3 +64,22 @@ class DirStore(Store):
         obj.load_from_dir(obj_dir)
         return True
 
+    def _main_def_path(self) -> str:
+        return os.path.join(self.base_dir, "def.pkl")
+
+    def read_main_def(self) -> ConcreteDefinition | None:
+        path = self._main_def_path()
+        if os.path.exists(path):
+            return pickle_load(path)
+        return None
+
+    def set_main_def(self, main_def: ConcreteDefinition) -> None:
+        self._main_def = main_def
+
+    def write_main_def(self, main_def: ConcreteDefinition) -> None:
+        path = self._main_def_path()
+        pickle_save(main_def, path)
+
+    def commit(self) -> None:
+        if self._main_def is not None:
+            self.write_main_def(self._main_def)

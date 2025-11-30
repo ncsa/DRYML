@@ -17,10 +17,14 @@ class ZipStore(Store):
         self.base_dir = self._tmp.name
         self.obj_dir = os.path.join(self.base_dir, "objects")
         os.makedirs(self.obj_dir, exist_ok=True)
-        self.main_def_path = os.path.join(self.base_dir, "def.pkl")
 
-        # hydrate from existing zip, if any
+        # cache for main_def
+        self._main_def: ConcreteDefinition | None = None
+
         self._extract_if_nonempty()
+
+        # if an existing main def is present, cache it
+        self.set_main_def(self.read_main_def())
 
     def _extract_if_nonempty(self):
         def _load():
@@ -77,6 +81,8 @@ class ZipStore(Store):
         return True
 
     def commit(self) -> None:
+        self.write_main_def()
+
         # write base_dir back into zip_dest
         if isinstance(self.zip_dest, IOBase):
             buf = self.zip_dest
@@ -99,28 +105,109 @@ class ZipStore(Store):
     def close(self) -> None:
         self._tmp.cleanup()
 
+    def _main_def_path(self) -> str:
+        return os.path.join(self.base_dir, "def.pkl")
+
+    def read_main_def(self) -> ConcreteDefinition | None:
+        # prefer cached version; fall back to on-disk if needed
+        if self._main_def is not None:
+            return self._main_def
+        path = self._main_def_path()
+        if os.path.exists(path):
+            return pickle_load(path)
+        else:
+            return None
+
+    def write_main_def(self) -> None:
+        if self._main_def is not None:
+            pickle_save(self._main_def, self._main_def_path())
+
+    def set_main_def(self, main_def: ConcreteDefinition) -> None:
+        # just cache it; actual file write happens in commit()
+        self._main_def = main_def
+
 
 class ZipExportStore(Store):
+    """
+    Sink-only Store that creates a zip from an existing directory tree.
+
+    - It NEVER participates in graph IO (no per-object save/load).
+    - It just zips a subset of paths from `src_dir` into `zip_dest`.
+    - Optionally embeds a `main_def` as def.pkl at the root of the zip.
+    """
+
     def __init__(self, zip_dest, src_dir: str, include_paths: set[str]):
+        """
+        Parameters
+        ----------
+        zip_dest : str | Path | IOBase
+            Destination zip path or file-like object.
+        src_dir : str
+            Existing directory to read from (e.g., a DirStore.base_dir).
+        include_paths : set[str]
+            Relative paths (from src_dir) to include in the export.
+            Directories are included recursively.
+        """
         self.zip_dest = zip_dest
         self.src_dir = os.fspath(src_dir)
-        self.include_paths = include_paths  # relative paths to include
+        self.include_paths = set(include_paths)
+        self._main_def: ConcreteDefinition | None = None
 
-    def has_cdef(self, cdef): return False
-    def hydrate_index(self): return ()
-    def save_object(self, obj): pass          # no-op; we export existing data
-    def load_object(self, obj): return False  # cannot load
+    # --- Store interface: membership / index ---
 
-    def commit(self):
+    def has_cdef(self, cdef: ConcreteDefinition) -> bool:
+        # Exporter does not own any cdefs; it's sink-only.
+        return False
+
+    def hydrate_index(self) -> Iterable[ConcreteDefinition]:
+        # Nothing to hydrate; exporter doesn't enumerate objects.
+        return ()
+
+    # --- Store interface: per-object IO ---
+
+    def save_object(self, obj: Object) -> None:
+        # No-op: export uses existing files in src_dir only.
+        return
+
+    def load_object(self, obj: Object) -> bool:
+        # Cannot load from an export-only store.
+        return False
+
+    # --- Store interface: main_def ---
+
+    def read_main_def(self) -> ConcreteDefinition | None:
+        # We only know about the main_def that was explicitly written to us.
+        return self._main_def
+
+    def set_main_def(self, main_def: ConcreteDefinition) -> None:
+        # Remember it so commit() can write def.pkl into the zip.
+        self._main_def = main_def
+
+    # --- Store interface: lifecycle ---
+
+    def commit(self) -> None:
+        """
+        Create/overwrite the zip:
+
+        - If _main_def is set, write it as def.pkl at the root of the zip.
+        - Then write all include_paths (files or directories) from src_dir.
+        """
         if isinstance(self.zip_dest, IOBase):
             buf = self.zip_dest
             buf.seek(0)
             buf.truncate(0)
             zf_ctx = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
         else:
-            zf_ctx = zipfile.ZipFile(os.fspath(self.zip_dest), "w", zipfile.ZIP_DEFLATED)
+            zf_ctx = zipfile.ZipFile(os.fspath(self.zip_dest),
+                                     "w", zipfile.ZIP_DEFLATED)
 
         with zf_ctx as zf:
+            # Optional main def at root
+            if self._main_def is not None:
+                data = pickle.dumps(self._main_def)
+                zf.writestr("def.pkl", data)
+
+            # Stream included paths from src_dir
             for rel in self.include_paths:
                 full = os.path.join(self.src_dir, rel)
                 if os.path.isdir(full):
@@ -129,8 +216,16 @@ class ZipExportStore(Store):
                             ffull = os.path.join(root, name)
                             frel = os.path.relpath(ffull, self.src_dir)
                             zf.write(ffull, frel)
-                else:
+                elif os.path.isfile(full):
                     zf.write(full, rel)
+                else:
+                    # Missing path: silently skip or raise, your choice.
+                    # raise FileNotFoundError(full)
+                    pass
 
         if isinstance(self.zip_dest, IOBase):
             self.zip_dest.seek(0)
+
+    def close(self) -> None:
+        # Nothing to clean up (no temp dir).
+        pass

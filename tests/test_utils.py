@@ -51,8 +51,12 @@ def test_apply_func_1():
     obj1 = objects.TestNest(objects.TestClassF1())
 
     def f(o):
+        ic(o, o.val)
         o.val = 20
+        ic(o.val)
+    ic(obj1.A)
     apply_func(obj1, f, sel=Definition(objects.TestClassF1, SKIP_ARGS))
+    ic(obj1.A)
 
     assert obj1.A.val == 20
 

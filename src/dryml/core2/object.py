@@ -93,9 +93,9 @@ class Object(metaclass=Dryml):
     def __repr__(self):
         return f"<{self.definition.cls} at {hex(id(self))}>(args={self.definition.args}, kwargs={self.definition.kwargs})"
 
-    def save(self, repo=None):
+    def save(self, repo=None, main=True):
         from .repo import save_object
-        save_object(self, repo=repo)
+        save_object(self, repo=repo, main=main)
 
     def save_to_dir(self, dest_dir: str):
         pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
@@ -108,7 +108,6 @@ class Object(metaclass=Dryml):
         from .repo import load_object
         load_object(self, repo=repo)
             
-
     def load_from_dir(self, src_dir: str):
         loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
         assert loaded_def == self.definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.definition}"

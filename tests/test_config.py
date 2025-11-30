@@ -109,8 +109,6 @@ def test_def_4():
     # Building from plain definition
     trainable_obj_built = obj_def.build()
 
-    ic(trainable_obj_built)
-
     assert trainable_obj_built['model'] is \
         trainable_obj_built['train_fn']['optimizer']['model']
     assert trainable_obj_built['model'].A == model_obj.A

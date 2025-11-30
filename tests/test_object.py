@@ -39,7 +39,7 @@ def test_save_object_1():
     obj = objs.SimpleObject(10)
 
     # Test that save to buffer works
-    obj.save(temp_buffer)
+    obj.save(repo=temp_buffer)
 
     temp_buffer.seek(0)
 

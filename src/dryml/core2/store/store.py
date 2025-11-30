@@ -36,6 +36,18 @@ class Store(ABC):
         """
         ...
 
+    def read_main_def(self) -> "ConcreteDefinition" | None:
+        """Return the stored main ConcreteDefinition, or None if not present."""
+        return None
+
+    def write_main_def(self, main_def: "ConcreteDefinition") -> None:
+        """Persist the given main ConcreteDefinition (no-op by default)."""
+        pass
+
+    def set_main_def(self, main_def: "ConcreteDefinition") -> None:
+        """Set the store's main def"""
+        pass
+
     def commit(self) -> None:
         """Optional; useful for zips, S3, HDF5, etc."""
         ...
