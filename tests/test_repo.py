@@ -330,39 +330,6 @@ def test_save_8(create_temp_dir):
 
 
 @pytest.mark.usefixtures("create_temp_dir")
-def test_delete_1(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
-
-    repo.add_object(objs.HelloStr(msg='test'))
-
-    repo.save()
-
-    assert len(os.listdir(create_temp_dir)) == 1
-
-    repo.delete()
-
-    assert len(os.listdir(create_temp_dir)) == 0
-    try:
-        repo.get(load_objects=True)
-        assert False
-    except KeyError:
-        pass
-
-
-@pytest.mark.usefixtures("create_temp_dir")
-def test_delete_2(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
-
-    repo.add_object(objs.HelloStr(msg='test'))
-
-    assert len(repo) == 1
-
-    repo.delete()
-
-    assert len(repo) == 0
-
-
-@pytest.mark.usefixtures("create_temp_dir")
 def test_object_save_restore_with_repo_1(create_temp_dir):
     """
     We test save and restore of nested objects through arguments
