@@ -144,58 +144,69 @@ def get_definition_view(defn):
     return ItemsView(view_dict)
 
 
-def get_unique_objects(obj):
+def list_unique_concrete_definitions(obj_or_def):
     from ..object import Object
+    from ..definition import Definition
+    from ..definition import ConcreteDefinition
 
-    unique_objs = {}
+    unique_cdefs = set()
 
-    def _get_unique_objects_enter(path, key, value):
-        from ..definition import ConcreteDefinition
+    def _enter(path, key, value):
         if isinstance(value, Object):
             # check if we've visited this one already
-            def_val = value.definition.concretize()
+            def_val = value.definition
 
-            if def_val in unique_objs:
+            if def_val in unique_cdefs:
                 return value, false
             else:
-                return {}, get_object_view(value)
-        if isinstance(value, ConcreteDefinition):
+                return {}, get_definition_view(def_val)
+        elif isinstance(value, ConcreteDefinition):
             return {}, get_definition_view(value)
+        elif isinstance(value, Definition):
+            raise ValueError("Unexpected Definition found in object graph!")
         else:
             return default_enter(path, key, value)
 
-    def _get_unique_objects_visit(path, key, value):
+    def _visit(path, key, value):
         # we aren't processing anything
         return key, value
 
-    def _get_unique_objects_exit(path, key, value, new_parent, new_items):
-        from ..definition import ConcreteDefinition
+    def _exit(path, key, value, new_parent, new_items):
         if isinstance(value, Object):
-            # we're exiting a object
+            # we're exiting an object
             def_val = value.definition
 
-            unique_objs[def_val] = value
+            unique_cdefs.add(def_val)
         elif isinstance(value, ConcreteDefinition):
-            if value._obj is None:
-                raise ValueError("unsupported ConcreteDefinition!")
-            unique_objs[value] = value._obj
+            #if value._obj is None:
+            #    raise ValueError("unsupported ConcreteDefinition!")
+            unique_cdefs.add(value)
 
         return default_exit(path, key, value, new_parent, new_items)
 
-    if isinstance(obj, object):
+    if isinstance(obj_or_def, Object):
         remap(
-            [obj],
-            enter=_get_unique_objects_enter,
-            visit=_get_unique_objects_visit,
-            exit=_get_unique_objects_exit)[0]
-        return list(unique_objs.values())
+            [obj_or_def],
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)[0]
+        return list(unique_cdefs)
     else:
         remap(
-            obj,
-            enter=_get_unique_objects_enter,
-            visit=_get_unique_objects_visit,
-            exit=_get_unique_objects_exit)
-        return list(unique_objs.values())
+            obj_or_def,
+            enter=_enter,
+            visit=_visit,
+            exit=_exit)
+        return list(unique_cdefs)
+
+
+def list_unique_objects(obj):
+    unique_cdefs = list_unique_concrete_definitions(obj)
+
+    if any(cdef._obj is None for cdef in unique_cdefs):
+        raise ValueError("Some ConcreteDefinitions do not have associated objects!")
+
+    return [cdef._obj for cdef in unique_cdefs if cdef._obj is not None]
 
 
 def apply_func(
@@ -206,7 +217,7 @@ def apply_func(
     if func_kwargs is None:
         func_kwargs = {}
 
-    obj_list = get_unique_objects(obj)
+    obj_list = list_unique_objects(obj)
 
     ic(obj_list, func)
 
