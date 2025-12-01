@@ -2,6 +2,7 @@ import pytest
 import dryml
 import os
 import tempfile
+import glob
 
 import core2_objects as objs
 from dryml.core2 import SKIP_ARGS
@@ -219,37 +220,8 @@ def test_write_1(create_temp_dir):
 
 
 @pytest.mark.usefixtures("create_temp_dir")
-def test_reload_1(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
-
-    objs = []
-
-    objs.append(objs.TestClassA(item=[10]))
-    objs.append(objs.TestClassA(item=[10, 10]))
-    objs.append(objs.TestClassA(item='a'))
-
-    for obj in objs:
-        repo.add_object(obj)
-
-    repo.reload_objs(selector=dryml.Selector(cls=objs.TestClassA),
-                     as_cls=objs.TestClassA2)
-
-    obj = repo.get(selector=dryml.Selector(
-        cls=objs.TestClassA2, kwargs={'item': [10]}))
-    assert objs[0].dry_kwargs['item'] == obj.dry_kwargs['item']
-
-    obj = repo.get(selector=dryml.Selector(
-        cls=objs.TestClassA2, kwargs={'item': [10, 10]}))
-    assert objs[1].dry_kwargs['item'] == obj.dry_kwargs['item']
-
-    obj = repo.get(selector=dryml.Selector(
-        cls=objs.TestClassA2, kwargs={'item': 'a'}))
-    assert objs[2].dry_kwargs['item'] == obj.dry_kwargs['item']
-
-
-@pytest.mark.usefixtures("create_temp_dir")
 def test_save_1(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
+    repo = dryml.core2.Repo(create_temp_dir)
 
     repo.add_object(objs.HelloStr(msg='test'))
 
@@ -262,37 +234,7 @@ def test_save_1(create_temp_dir):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(create_temp_dir)
 
-    try:
-        repo.get(only_loaded=True)
-        assert False
-    except KeyError:
-        pass
-
-    repo.save()
-
-    assert len(os.listdir(create_temp_dir)) == 1
-
-
-@pytest.mark.usefixtures("create_temp_dir")
-def test_save_2(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
-
-    repo.add_object(objs.HelloStr(msg='test'), filepath='test_file')
-
-    # Save objects in repository
-    repo.save()
-
-    # Delete the repo
-    del repo
-
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(create_temp_dir)
-
-    try:
-        repo.get(only_loaded=True)
-        assert False
-    except KeyError:
-        pass
+    assert len(repo.get(load_objects=False)) == 0
 
     repo.save()
 
@@ -306,59 +248,26 @@ def prep_and_clean_test_dir2():
         yield dir1, dir2
 
 
-def test_save_3(prep_and_clean_test_dir2):
-    dir1, dir2 = prep_and_clean_test_dir2
-    repo = dryml.core2.Repo(dir1, create=True)
-
-    repo.add_object(objs.HelloStr(msg='test'),
-                    filepath='test_file')
-    repo.add_object(objs.HelloInt(msg=5),
-                    filepath=os.path.join(dir2, 'test_file'))
-
-    # Save objects in repository
-    repo.save()
-
-    # Delete the repo
-    del repo
-
-    assert len(os.listdir(dir1)) == 1
-    assert len(os.listdir(dir2)) == 1
-
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(dir1)
-
-    try:
-        repo.get(only_loaded=True)
-        assert False
-    except KeyError:
-        pass
-
-    del repo
-
-    repo = dryml.core2.Repo(dir2)
-
-    try:
-        repo.get(only_loaded=True)
-        assert False
-    except KeyError:
-        pass
-
-
 def test_save_4(prep_and_clean_test_dir2):
     dir1, dir2 = prep_and_clean_test_dir2
-    repo = dryml.core2.Repo(dir1, create=True)
+    repo = dryml.core2.Repo(dir1)
 
-    repo.add_object(objs.HelloStr(msg='test'), filepath='test_file')
+    repo.add_object(objs.HelloStr(msg='test'))
     repo.add_object(objs.HelloInt(msg=5))
 
     # Save objects in repository
     repo.save()
-    repo.save(directory=dir2)
+
+    # Save to a new location
+    new_dirstore = dryml.core2.store.dir.DirStore(dir2)
+    repo.save(store=new_dirstore)
 
     # Delete the repo
     del repo
 
-    assert set(os.listdir(dir1)) == set(os.listdir(dir2))
+    defs_1 = set(glob.glob(os.path.join(dir1, '**', 'def.pkl')))
+    defs_2 = set(glob.glob(os.path.join(dir2, '**', 'def.pkl')))
+    assert defs_1 == defs_2
 
 
 @pytest.mark.usefixtures("create_temp_dir")

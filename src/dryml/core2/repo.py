@@ -74,9 +74,6 @@ class Repo:
                 else:
                     self.stores.append(store)
 
-        # Optional default store for write
-        self.default_store: Store | None = self.stores[0] if self.stores else None
-
         # Try to read main def from first store
         if len(self.stores) > 0:
             # Attempt to read from the default store first.
@@ -90,6 +87,10 @@ class Repo:
                 self.set_main_def(main_def)
 
     # Store Methods
+
+    @property
+    def default_store(self):
+        return self.stores[0] if len(self.stores) > 0 else None
 
     def add_store(self, store: "Store", make_default=False):
         self.stores.append(store)
@@ -194,7 +195,7 @@ class Repo:
                 visit=_visit,
                 exit=_exit)
 
-    def _save_single_object(self, obj: Object):
+    def _save_single_object(self, obj: Object, store: Store|None=None):
         """
         Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
         """
@@ -212,18 +213,16 @@ class Repo:
             # Update repo cache
             self.obj_cache[obj_def] = obj
 
-        if self.default_store is not None:
-            self.default_store.save_object(obj)
+        if store is not None:
+            store.save_object(obj)
             self._num_saves += 1
-            return
-        elif len(self.stores) > 0:
-            self.stores[0].save_object(obj)
-            self._num_saves += 1
-            return
         else:
             raise RepoSaveError("No store available to save object!")
 
-    def save_object(self, obj, main=False):
+    def save_object(self, obj, main=False, store=None):
+        if store is None:
+            store = self.default_store
+
         saved_objs = {}
         def _save_object_enter(path, key, value):
             if isinstance(value, Object):
@@ -247,7 +246,7 @@ class Repo:
             if isinstance(value, Object):
                 obj_def = value.definition
                 if obj_def not in saved_objs:
-                    self._save_single_object(value)
+                    self._save_single_object(value, store=store)
                     saved_objs[obj_def] = value
                 return value
             elif isinstance(value, ConcreteDefinition):
@@ -255,7 +254,7 @@ class Repo:
                 if obj is None:
                     raise ValueError("ConcreteDefinitions must be linked to actual objects through _obj to be savable.")
                 if value not in saved_objs:
-                    self._save_single_object(obj)
+                    self._save_single_object(obj, store=store)
                     saved_objs[value] = obj
                 return value
             else:
@@ -277,17 +276,21 @@ class Repo:
 
         # Save main object definition
         if main:
-            self.set_main_def(obj.definition)
+            self.set_main_def(obj.definition, store=store)
         return True
 
-    def save(self):
-        # Save all loaded objects in the cache
-        obj_list = []
-        for _, obj in self.obj_cache.items():
-            if obj is not None:
-                obj_list.append(obj)
-        self.save_object(obj_list, main=False)
-        self.flush()
+    def save(self, obj: Object | None = None, store=None):
+        if obj is None:
+            # Save all loaded objects in the cache
+            obj_list = []
+            for _, obj in self.obj_cache.items():
+                if obj is not None:
+                    obj_list.append(obj)
+            self.save_object(obj_list, main=False, store=store)
+            self.flush()
+        else:
+            self.save_object(obj, main=False, store=store)
+            self.flush()
 
     def _load_single_object(self, cdef: ConcreteDefinition, args, kwargs, build_missing=False) -> Object:
         """
@@ -420,7 +423,6 @@ class Repo:
             selector = (selector,)
         selectors = selector
 
-
         def get_obj(obj_def: Definition) -> Object | None:
             if obj_def in self.obj_cache:
                 if self.obj_cache[obj_def] is None:
@@ -505,13 +507,10 @@ class Repo:
             obj_def: apply_func(obj) for obj_def, obj in obj_iter
         }
 
-    def set_main_def(self, main_def: ConcreteDefinition):
+    def set_main_def(self, main_def: ConcreteDefinition, store=None):
         self.main_def = main_def
-        if self.default_store is not None:
-            self.default_store.set_main_def(self.main_def)
-        else:
-            if len(stores) > 0:
-                stores[0].set_main_def(self.main_def)
+        if store is not None:
+            store.set_main_def(self.main_def)
 
     def add_object(self, *args):
         from dryml.core2.object import Object
