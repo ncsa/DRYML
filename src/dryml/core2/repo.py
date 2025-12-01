@@ -49,6 +49,10 @@ class Repo:
     # Backing stores
     stores: list[Store]
 
+    # Settings
+    save_objs_on_deletion: bool = False
+
+
     # Helper class for saving objects
     def __init__(self, stores=None):
         # Initialize caches
@@ -559,6 +563,12 @@ class Repo:
     def close(self, flush=True):
         if flush:
             self.flush()
+
+    def __del__(self):
+        if self.save_objs_on_deletion:
+            ic("Auto-saving repo on deletion...", self.default_store)
+            self.save()
+            self.close(flush=True)
 
 
 def make_store(store):

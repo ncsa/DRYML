@@ -6,6 +6,7 @@ import zipfile
 import importlib
 import tempfile
 import io
+import glob
 from typing import Optional, Callable
 from collections.abc import Mapping, ItemsView
 from inspect import getmodule, isclass, \
@@ -218,3 +219,8 @@ def apply_func(
 
 def get_temp_directory():
     return tempfile.TemporaryDirectory()
+
+def dir_store_inspect(root_path: str):
+    files = glob.glob(os.path.join(root_path, '**', 'def.pkl'), recursive=True)
+    # Strip root directory
+    return list(map(lambda f: f[len(root_path)+1:], files))

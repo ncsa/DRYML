@@ -6,6 +6,7 @@ import glob
 
 import core2_objects as objs
 from dryml.core2 import SKIP_ARGS
+from dryml.core2.utils.general import dir_store_inspect
 
 
 @pytest.mark.usefixtures("create_temp_dir")
@@ -265,44 +266,29 @@ def test_save_4(prep_and_clean_test_dir2):
     # Delete the repo
     del repo
 
-    defs_1 = set(glob.glob(os.path.join(dir1, '**', 'def.pkl')))
-    defs_2 = set(glob.glob(os.path.join(dir2, '**', 'def.pkl')))
+    defs_1 = set(dir_store_inspect(dir1))
+    defs_2 = set(dir_store_inspect(dir2))
     assert defs_1 == defs_2
 
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_5(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
+    repo = dryml.core2.Repo(create_temp_dir)
 
-    repo.add_object(objs.HelloStr(msg='test'), filepath='test_file')
+    repo.add_object(objs.HelloStr(msg='test'))
 
     repo.save_objs_on_deletion = True
 
     # Delete the repo
     del repo
 
-    assert len(os.listdir(create_temp_dir)) == 1
-
-
-@pytest.mark.usefixtures("create_temp_dir")
-def test_save_6(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
-
-    repo.add_object(objs.HelloStr(msg='test'), filepath='test_file')
-
-    repo.save_and_cache()
-
-    try:
-        repo.get(only_loaded=True)
-        assert False
-    except KeyError:
-        pass
-    assert len(os.listdir(create_temp_dir)) == 1
+    defs = set(dir_store_inspect(create_temp_dir))
+    assert len(defs) == 1
 
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_7(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
+    repo = dryml.core2.Repo(create_temp_dir)
 
     obj1 = objs.TestNest2(A=5)
     obj2 = objs.TestNest(obj1)
@@ -311,28 +297,27 @@ def test_save_7(create_temp_dir):
 
     assert len(repo) == 2
 
-    assert obj1 is repo[obj1]
-    assert obj1 is repo[obj1.dry_id]
-    assert obj2 is repo[obj2]
-    assert obj2 is repo[obj2.dry_id]
+    assert obj1 is repo[obj1.definition]
+    assert obj2 is repo[obj2.definition]
 
     repo.save(obj2)
 
-    assert len(os.listdir(create_temp_dir)) == 2
+    assert len(dir_store_inspect(create_temp_dir)) == 2
 
     del repo
 
     repo = dryml.core2.Repo(create_temp_dir)
+    repo.hydrate_from_stores()
 
     assert len(repo) == 2
 
-    assert type(repo.get(obj1)) is not list
-    assert type(repo.get(obj2)) is not list
+    assert len(repo.get(obj1.definition)) == 1
+    assert len(repo.get(obj2.definition)) == 1
 
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_save_8(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
+    repo = dryml.core2.Repo(create_temp_dir)
 
     obj1 = objs.TestNest2(A=5)
     obj2 = objs.TestNest(obj1)
@@ -341,7 +326,7 @@ def test_save_8(create_temp_dir):
 
     assert len(repo) == 2
 
-    assert len(os.listdir(create_temp_dir)) == 2
+    assert len(dir_store_inspect(create_temp_dir)) == 2
 
 
 @pytest.mark.usefixtures("create_temp_dir")
