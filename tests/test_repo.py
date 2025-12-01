@@ -168,53 +168,54 @@ def test_get_api_5(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_write_1(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir, create=True)
+    repo = dryml.core2.Repo(create_temp_dir)
 
-    objs = []
+    obj_list = []
 
-    objs.append(objs.HelloStr(msg='test'))
-    objs.append(objs.HelloInt(msg=10))
-    objs.append(objs.HelloInt(msg=10))
-    objs.append(objs.TestClassA(item=[10, 10]))
-    objs.append(objs.TestClassB('test'))
+    obj_list.append(objs.HelloStr(msg='test'))
+    obj_list.append(objs.HelloInt(msg=10))
+    obj_list.append(objs.HelloInt(msg=10))
+    obj_list.append(objs.TestClassA(item=[10, 10]))
+    obj_list.append(objs.TestClassB('test'))
 
-    for obj in objs:
-        repo.add_object(obj)
+    repo.add_object(*obj_list)
 
     repo.save()
+    repo.close()
 
     # Delete repo
     del repo
 
     repo = dryml.core2.Repo(create_temp_dir)
+    repo.hydrate_from_stores()
 
     assert len(repo) == 5
 
-    obj = repo.get(selector=dryml.Selector(
-        cls=objs.HelloStr, kwargs={'msg': 'test'}))
-    assert type(obj) is not list
-    assert objs[0].definition().get_individual_id() == \
-        obj.definition().get_individual_id()
+    obj_dict = repo.get(selector=objs.HelloStr.d(msg='test'))
+    assert len(obj_dict) == 1
+    obj = list(obj_dict.values())[0]
+    assert obj_list[0].definition.stable_hash() == \
+        obj.definition.stable_hash()
 
-    obj_list = repo.get(selector=dryml.Selector(
-        cls=objs.HelloInt, kwargs={'msg': 10}))
-    assert len(obj_list) == 2
-    assert objs[1].definition().get_category_id() == \
-        obj_list[0].definition().get_category_id()
-    assert objs[1].definition().get_category_id() == \
-        obj_list[1].definition().get_category_id()
+    obj_dict = repo.get(selector=objs.HelloInt.d(msg=10))
+    obj_list_2 = list(obj_dict.values())
+    assert len(obj_list_2) == 2
+    assert obj_list[1].definition.categorical().stable_hash() == \
+        obj_list_2[0].definition.categorical().stable_hash()
+    assert obj_list[1].definition.categorical().stable_hash() == \
+        obj_list_2[1].definition.categorical().stable_hash()
 
-    obj = repo.get(selector=dryml.Selector(
-        cls=objs.TestClassA, kwargs={'item': [10, 10]}))
-    assert type(obj) is not list
-    assert objs[3].definition().get_individual_id() == \
-        obj.definition().get_individual_id()
+    obj_dict = repo.get(selector=objs.TestClassA.d(item=[10, 10]))
+    assert len(obj_dict) == 1
+    obj = list(obj_dict.values())[0]
+    assert obj_list[3].definition.stable_hash() == \
+        obj.definition.stable_hash()
 
-    obj = repo.get(selector=dryml.Selector(
-        cls=objs.TestClassB, args=['test']))
-    assert type(obj) is not list
-    assert objs[4].definition().get_individual_id() == \
-        obj.definition().get_individual_id()
+    obj_dict = repo.get(selector=objs.TestClassB.d('test'))
+    assert len(obj_dict) == 1
+    obj = list(obj_dict.values())[0]
+    assert obj_list[4].definition.stable_hash() == \
+        obj.definition.stable_hash()
 
 
 @pytest.mark.usefixtures("create_temp_dir")

@@ -63,13 +63,11 @@ class Repo:
         self.main_def = None
 
         # Multiple stores, optional
-        self.stores: list[Store] = []
-        if isinstance(stores, Store):
-            self.stores = [stores]
-        elif stores is None:
-            self.stores = []
-        elif isinstance(stores, (list, tuple)):
-            self.stores = []
+        self.stores = []
+        if stores is not None:
+            if not isinstance(stores, (tuple, list)):
+                stores = [stores]
+
             for store in stores:
                 if not isinstance(store, Store):
                     self.stores.append(make_store(store))
@@ -282,6 +280,15 @@ class Repo:
             self.set_main_def(obj.definition)
         return True
 
+    def save(self):
+        # Save all loaded objects in the cache
+        obj_list = []
+        for _, obj in self.obj_cache.items():
+            if obj is not None:
+                obj_list.append(obj)
+        self.save_object(obj_list, main=False)
+        self.flush()
+
     def _load_single_object(self, cdef: ConcreteDefinition, args, kwargs, build_missing=False) -> Object:
         """
         Defines how the Repo updates its caches and delegates loading a single object from one of it's stores
@@ -403,8 +410,8 @@ class Repo:
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
             sel_args=None, sel_kwargs=None,
-            load_objects: bool = False,
-            build_missing=False,
+            load_objects: bool = True,
+            build_missing: bool = False,
             verbose: bool = True) -> dict[ConcreteDefinition,Object]:
 
         if type(selector) is list:
