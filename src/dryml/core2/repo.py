@@ -524,8 +524,8 @@ class Repo:
 
         # Recursively add objects.
         def _add_object(obj: Object):
-            if obj.definition in self.obj_cache:
-                raise KeyError(f"Repo already has an object matching {obj.definition}!")
+            if obj.definition in self.obj_cache and obj is not self.obj_cache[obj.definition]:
+                raise KeyError(f"Repo already has a different object matching {obj.definition}!")
             self.obj_cache[obj.definition] = obj
 
 
