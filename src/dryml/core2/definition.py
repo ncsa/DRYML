@@ -147,6 +147,12 @@ class Definition(dict):
             concrete_def = sub_repo.concretize_definition(self)
             return sub_repo.load_object(concrete_def, build_missing=build_missing)
 
+    def stable_hash(self):
+        return stable_hash_function(self)
+
+    def __hash__(self):
+        return hash(self.stable_hash())
+
     def __repr__(self):
         return f"{type(self).__name__}({super().__repr__()})"
 
@@ -182,6 +188,26 @@ class Definition(dict):
         # Restore ephemeral bits
         self.repo = None
 
+    def __deepcopy__(self, memo):
+        """
+        Snapshot cls/args/kwargs, but re-use _obj and any repo reference.
+        """
+        cls = self['cls']
+        args = self.get('args', ())
+        kwargs = self.get('kwargs', {})
+
+        cls_cp = deepcopy(cls, memo)
+        args_cp = deepcopy(args, memo)
+        kwargs_cp = deepcopy(kwargs, memo)
+
+        new = type(self)(cls_cp, *args_cp, **kwargs_cp)
+
+        # Reuse identity-ish bits
+        new.repo = getattr(self, "repo", None)
+
+        return new
+
+
 
 class ConcreteDefinition(Definition):
     def __init__(self, *args, **kwargs):
@@ -205,9 +231,6 @@ class ConcreteDefinition(Definition):
 
     def stable_hash(self):
         return self._hash
-
-    def __hash__(self):
-        return hash(self._hash)
 
     def copy(self):
         return deepcopy(self)
