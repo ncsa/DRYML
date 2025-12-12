@@ -31,6 +31,9 @@ class Dryml(type):
                 rt_args = args
                 rt_kwargs = kwargs
 
+            # Run pre-init check
+            cls.__pre_init__()
+
             # Actual object allocation
             obj = cls.__new__(cls)
 
@@ -75,6 +78,10 @@ class Object(metaclass=Dryml):
 
     # Alias for defn
     d = defn
+
+    @classmethod
+    def __pre_init__(cls):
+        pass
 
     def __init__(self):
         # Optional sanity assertions (can be turned off later)
