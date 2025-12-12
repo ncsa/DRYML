@@ -388,9 +388,9 @@ class Repo:
 
     def __contains__(
             self, item: Object | ConcreteDefinition):
-        if isinstance(ConcreteDefinition):
+        if isinstance(item, ConcreteDefinition):
             obj_def = item
-        elif isinstance(Object):
+        elif isinstance(item, Object):
             obj_def = item.definition
         else:
             raise TypeError(
