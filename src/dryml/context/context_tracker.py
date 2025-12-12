@@ -5,10 +5,11 @@ A module for tracking the currently available computing context
 
 from contextlib import contextmanager
 from typing import Type, Union, Optional
-from dryml.core.utils import is_nonstring_iterable
 from collections import UserDict
 import multiprocessing
 import re
+
+from dryml.core2.utils.general import list_unique_concrete_definitions
 
 
 specific_resource_re = re.compile('^(cpu|gpu)/([0-9]+)$')

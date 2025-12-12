@@ -398,53 +398,50 @@ def test_object_save_restore_with_repo_2(create_temp_dir):
     assert obj.B.data == obj2.B.data
 
 
-# @pytest.mark.usefixtures("create_temp_dir")
-# def test_object_save_restore_with_repo_3(create_temp_dir):
-#     """
-#     We test save and restore of nested objects with a repo
-#     """
+@pytest.mark.usefixtures("create_temp_dir")
+def test_object_save_restore_with_repo_3(create_temp_dir):
+    """
+    We test save and restore of nested objects with a repo
+    """
 
-#     # Create workshop
-#     repo = dryml.core2.Repo(create_temp_dir)
+    # Create workshop
+    repo = dryml.core2.Repo(create_temp_dir)
 
-#     obj_a = objs.TestNest(10)
-#     repo.add_object(obj_a)
+    obj_a = objs.TestNest(10)
+    repo.add_object(obj_a)
 
-#     def build_def(repo):
-#         # Create the data containing objects
-#         obj_a = dryml.core.utils.head(repo.get(
-#             selector=dryml.ObjectDef(objs.TestNest, 10)))
+    def build_def(repo):
+        # Create the data containing objects
+        obj_dict = repo.get(objs.TestNest.d(10))
+        obj_a = list(obj_dict.values())[0]
 
-#         mdl_def = dryml.ObjectDef(
-#             objs.TestNest2,
-#             A=10)
+        mdl_def = objs.TestNest2.d(
+            A=10)
 
-#         mdl_def = dryml.ObjectDef(
-#             objs.TestNest3,
-#             model=mdl_def)
+        mdl_def = objs.TestNest3.d(
+            model=mdl_def)
 
-#         mdl_def = dryml.ObjectDef(
-#             objs.TestNest3,
-#             obj_a,
-#             mdl_def)
+        mdl_def = objs.TestNest3.d(
+            obj_a,
+            mdl_def)
 
-#         return mdl_def
+        return mdl_def
 
-#     model_def = build_def(repo)
+    model_def = build_def(repo)
 
-#     @dryml.compute_context(ctx_context_reqs={'default': {}})
-#     def test_method(model_def, location):
-#         # Create repo
-#         repo = dryml.core2.Repo(directory=location)
+    @dryml.compute_context(ctx_context_reqs={'default': {}})
+    def test_method(model_def, location):
+        # Create repo
+        repo = dryml.core2.Repo(location)
+        # Build the object
+        model_obj = model_def.build(repo=repo)
 
-#         # Build the object
-#         model_obj = model_def.build(repo=repo)
+        # Save all objects
+        repo.save(model_obj)
 
-#         # Save all objects
-#         repo.save(model_obj)
+    test_method(model_def, create_temp_dir)
 
-#     test_method(model_def, create_temp_dir)
+    repo.hydrate_from_stores()
 
-#     repo.load_objects_from_directory()
-
-#     repo.get(model_def, sel_kwargs={'verbosity': 2})
+    obj_dict = repo.get(model_def, sel_kwargs={'verbosity': 2})
+    assert len(obj_dict) == 1
