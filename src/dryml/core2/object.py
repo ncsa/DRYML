@@ -37,12 +37,10 @@ class Dryml(type):
             # Actual object allocation
             obj = cls.__new__(cls)
 
-            # Attach repo for later use
-            obj._repo = sub_repo
-
             # Ensure the canonical cdef knows its object
             # (cdef is canonical here: created by concretize_definition or from repo)
-            if getattr(cdef, "_obj", None) is None:
+
+            if cdef._obj is None:
                 cdef._obj = obj
 
             # Attach a snapshot definition to the object.
@@ -52,6 +50,10 @@ class Dryml(type):
 
             # Initialize with runtime (built) args
             obj.__init__(*rt_args, **rt_kwargs)
+
+            # Attach repo for later use
+            obj._repo = sub_repo
+
 
         return obj
 

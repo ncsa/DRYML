@@ -10,6 +10,7 @@ from collections.abc import ItemsView
 from contextlib import contextmanager
 from io import IOBase
 from pathlib import Path
+import weakref
 
 from boltons.iterutils import remap, default_enter, default_exit
 
@@ -39,9 +40,9 @@ class Repo:
 
     # Caches
     # Links particular concrete definition with particular object
-    obj_cache: dict[ConcreteDefinition, Object | None]
+    obj_cache: weakref.WeakValueDictionary[ConcreteDefinition, Object | None]
     # Links particular Definition object with a concrete definition (Definitions are resolved )
-    cdef_cache: dict[int, ConcreteDefinition]
+    cdef_cache: weakref.WeakValueDictionary[int, ConcreteDefinition]
 
     # Main definition
     main_def: ConcreteDefinition | None

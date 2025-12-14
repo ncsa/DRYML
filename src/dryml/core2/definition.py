@@ -6,6 +6,7 @@ import hashlib
 from inspect import isclass
 import numpy as np
 import sys
+import weakref
 
 from .utils.stable_hash import stable_hash_function
 from .utils.general import is_dictlike, \
@@ -95,7 +96,7 @@ class Definition(dict):
                 args=args,
                 kwargs=kwargs)
 
-        self.repo = repo
+        self._repo = repo
 
     def __setitem__(self, key, value):
         if key not in self.allowed_keys:
@@ -186,7 +187,7 @@ class Definition(dict):
             self[k] = v
 
         # Restore ephemeral bits
-        self.repo = None
+        self._repo = None
 
     def __deepcopy__(self, memo):
         """
@@ -203,9 +204,28 @@ class Definition(dict):
         new = type(self)(cls_cp, *args_cp, **kwargs_cp)
 
         # Reuse identity-ish bits
-        new.repo = getattr(self, "repo", None)
+        new._repo = self._repo
 
         return new
+
+    @property
+    def _repo(self):
+        if isinstance(self.__repo, weakref.ReferenceType):
+            # We have a weakref
+            return self.__repo()
+        else:
+            return self.__repo
+
+    @_repo.setter
+    def _repo(self, val: "Repo | None"):
+        from .repo import Repo
+        if val is None:
+            self.__repo = None
+        elif not isinstance(val, Repo):
+            raise TypeError(f"Can only set _repo to an Object. Received {type(val)}")
+        else:
+            self.__repo = weakref.ref(val)
+
 
 
 
@@ -277,6 +297,24 @@ class ConcreteDefinition(Definition):
         new.repo = getattr(self, "repo", None)
 
         return new
+
+    @property
+    def _obj(self):
+        if isinstance(self.__obj, weakref.ReferenceType):
+            # We have a weakref
+            return self.__obj()
+        else:
+            return self.__obj
+
+    @_obj.setter
+    def _obj(self, val: "Object | None"):
+        from .object import Object
+        if val is None:
+            self.__obj = None
+        elif not isinstance(val, Object):
+            raise TypeError(f"Can only set _obj to an Object. Received {type(val)}")
+        else:
+            self.__obj = weakref.ref(val)
 
 
 def categorical_definition(defn: Definition, recursive=True):
