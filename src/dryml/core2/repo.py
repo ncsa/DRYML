@@ -506,7 +506,7 @@ class Repo:
 
         obj_iter = objs.items()
         if verbose:
-            tqdm(obj_iter)
+            obj_iter = tqdm(obj_iter)
         return {
             obj_def: apply_func(obj) for obj_def, obj in obj_iter
         }
