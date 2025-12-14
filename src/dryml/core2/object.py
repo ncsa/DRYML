@@ -125,12 +125,12 @@ class Object(metaclass=Dryml):
 
 
 class Pickleable(Object):
+    _HEAVY_EXCLUDE = {"_repo", "__cdef__", "definition"}
+
     def save_imp(self, dest_dir: str):
         # Grab all heavy-state data
-        heavy_state = {}
-        for key in self.__dict__:
-            if key not in ['definition']:
-                heavy_state[key] = getattr(self, key)
+        heavy_state = {k: v for k, v in self.__dict__.items()
+                       if k not in self._HEAVY_EXCLUDE}
 
         # Save the entire object as a pickle
         pickle_save(heavy_state, os.path.join(dest_dir, "heavy.pkl"))
