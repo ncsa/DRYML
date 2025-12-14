@@ -649,4 +649,6 @@ def load_object(
     with manage_repo(repo=repo) as repo:
         if obj_def is None:
             obj_def = repo.main_def
+            if obj_def is None:
+                raise ValueError("When obj_def is None, the repo must have a main def, we didn't find one.")
         return repo.load_object(obj_def)
