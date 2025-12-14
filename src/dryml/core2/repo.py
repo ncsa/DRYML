@@ -81,12 +81,14 @@ class Repo:
         # Try to read main def from first store
         if len(self.stores) > 0:
             # Attempt to read from the default store first.
+            main_def = None
             if self.default_store is not None:
                 main_def = self.default_store.read_main_def()
             if main_def is None:
                 for store in self.stores:
                     main_def = store.read_main_def()
-
+                    if main_def is not None:
+                        break
             if main_def is not None:
                 self.set_main_def(main_def)
 
@@ -97,9 +99,10 @@ class Repo:
         return self.stores[0] if len(self.stores) > 0 else None
 
     def add_store(self, store: "Store", make_default=False):
-        self.stores.append(store)
         if make_default or self.default_store is None:
-            self.default_store = store
+            self.stores.insert(0, store)
+        else:
+            self.stores.append(store)
 
     def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
         # do any stores have data for this cdef?
