@@ -40,7 +40,7 @@ class Repo:
 
     # Caches
     # Links particular concrete definition with particular object
-    obj_cache: weakref.WeakValueDictionary[ConcreteDefinition, Object | None]
+    obj_cache: dict[ConcreteDefinition, Object]
     # Links particular Definition object with a concrete definition (Definitions are resolved )
     cdef_cache: weakref.WeakValueDictionary[int, ConcreteDefinition]
 
@@ -58,7 +58,7 @@ class Repo:
     def __init__(self, stores=None):
         # Initialize caches
         self.obj_cache = {}
-        self.cdef_cache = {}
+        self.cdef_cache = weakref.WeakValueDictionary()
 
         # Some helper variables for monitoring
         self._num_saves = 0
