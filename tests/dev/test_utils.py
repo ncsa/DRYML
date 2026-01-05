@@ -1,5 +1,6 @@
 from dryml.core2.utils.general import get_class_str, get_class_from_str, \
-    list_unique_objects, list_unique_concrete_definitions
+    list_unique_objects, list_unique_concrete_definitions, apply_func
+from dryml.core2.definition import Definition, SKIP_ARGS
 import core2_objects as objects
 
 
@@ -44,3 +45,36 @@ def test_list_unique_objs_1():
     assert obj_f1_3.definition in unique_obj_definitions
     assert obj_c_1.definition in unique_obj_definitions
     assert obj_c_2.definition in unique_obj_definitions
+
+
+def test_apply_func_1():
+    obj1 = objects.TestNest(objects.TestClassF1())
+
+    def f(o):
+        ic(o, o.val)
+        o.val = 20
+        ic(o.val)
+    ic(obj1.A)
+    apply_func(obj1, f, sel=Definition(objects.TestClassF1, SKIP_ARGS))
+    ic(obj1.A)
+
+    assert obj1.A.val == 20
+
+
+def test_apply_func_2():
+    obj1 = objects.TestClassC(
+        objects.TestClassF1(),
+        B=objects.TestClassC(
+            objects.TestClassF1(),
+            B=objects.TestClassF1()))
+
+    def f(o):
+        o.val = 20
+
+    apply_func(obj1, f, sel=Definition(objects.TestClassF1, SKIP_ARGS))
+
+    assert obj1.A.val == 20
+    assert obj1.B.A.val == 20
+    assert obj1.B.B.val == 20
+    assert not hasattr(obj1, 'val')
+    assert not hasattr(obj1.B, 'val')

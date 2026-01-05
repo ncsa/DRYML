@@ -1,5 +1,9 @@
 from dryml.core2.object import Object, Pickleable, UniqueID, Metadata
 from dryml.core2.utils.general import pickler, unpickler
+from copy import deepcopy
+from dryml.core2.object import Object
+from dryml.core2.utils.stable_hash import _stable_leaf_bytes
+
 
 
 class HelloObject(UniqueID):
@@ -41,6 +45,9 @@ class TestClassA2(TestBase):
     def __init__(self, *args, item=[32], **kwargs):
         super().__init__(*args, **kwargs)
 
+class TestClassA3(Object):
+    def __init__(self, A):
+        self.A = A
 
 class TestClassB(TestBase):
     def __init__(self, layers, *args, **kwargs):
@@ -132,3 +139,21 @@ class TestClass5(Object):
         super().__init__(*args, **kwargs)
         self.x = x
         self.test = test
+
+
+class DeepcopyAware:
+    def __init__(self, val):
+        self.val = val
+        self.counter = 0
+
+    def __deepcopy__(self, memo):
+        cls = type(self)
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        for k, v in self.__dict__.items():
+            setattr(new, k, deepcopy(v, memo))
+        new.counter += 1
+        return new
+
+    def __stable_leaf_bytes__(self):
+        return _stable_leaf_bytes(self.val)

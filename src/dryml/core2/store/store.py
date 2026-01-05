@@ -4,6 +4,17 @@ from abc import ABC, abstractmethod
 from typing import Iterable
 
 class Store(ABC):
+    @property
+    def base_dir(self) -> str:
+        """Base directory"""
+        ...
+
+    @property
+    def object_root_dir(self) -> str:
+        """Base directory"""
+        ...
+
+
     @abstractmethod
     def has_cdef(self, cdef: "ConcreteDefinition") -> bool:
         """Lightweight membership test: do you have data for this cdef?"""

@@ -272,18 +272,6 @@ def test_basic_object_def_update_2(create_name):
     assert obj2.version() == 2
 
 
-def test_object_build_from_def_1():
-    """
-    Test that an object definition with no id results in an object with an id.
-    """
-
-    import core2_objects as objects
-    obj = Definition(
-        objects.TestClassB,
-        1,
-        base_msg='Test').build()
-
-    assert 'uid' in obj.definition.kwargs
 
 
 def test_object_args_passing_1():

@@ -636,25 +636,17 @@ def get_context_requirements(objs):
     """
     Set a context appropriate for the object or set of objects
     """
-    from dryml import Object
-
-    if issubclass(type(objs), Object):
-        objs = [objs]
-
-    if not is_nonstring_iterable(objs):
-        raise ValueError(
-            "set_appropriate_context only supports single "
-            "Objects or an iterable of Objects.")
+    cdefs = list_unique_concrete_definitions(objs)
 
     ctx_reqs = {}
 
-    for obj in objs:
-        obj_reqs = obj.dry_context_requirements()
-        for ctx_name in obj_reqs:
+    for cdef in cdefs:
+        ctx_req = getattr(cdef.cls, "__compute_requirements__", None)
+        for ctx_name in ctx_req:
             if ctx_name in ctx_reqs:
-                ctx_reqs[ctx_name].append(obj_reqs[ctx_name])
+                ctx_reqs[ctx_name].append(ctx_req[ctx_name])
             else:
-                ctx_reqs[ctx_name] = [obj_reqs[ctx_name]]
+                ctx_reqs[ctx_name] = [ctx_req[ctx_name]]
 
     for ctx_name in ctx_reqs:
         ctx_reqs[ctx_name] = combine_requests(ctx_reqs[ctx_name])

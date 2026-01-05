@@ -12,7 +12,7 @@ class DirStore(Store):
       base_dir/objects/<hh>/<full_hash>/...
     """
     def __init__(self, base_dir: str):
-        self.base_dir = os.fspath(base_dir)
+        self._base_dir = os.fspath(base_dir)
         self.obj_dir = os.path.join(self.base_dir, "objects")
         os.makedirs(self.obj_dir, exist_ok=True)
         self.set_main_def(self.read_main_def())
@@ -21,6 +21,16 @@ class DirStore(Store):
         digest = cdef.stable_hash()
         sub = digest[:2]
         return os.path.join(self.obj_dir, sub, digest)
+
+    @property
+    def base_dir(self) -> str:
+        """Base directory"""
+        return self._base_dir
+
+    @property
+    def object_root_dir(self) -> str:
+        """Base directory"""
+        return self.obj_dir
 
     def _def_file(self, cdef: "ConcreteDefinition") -> str:
         return os.path.join(self._object_dir(cdef), "def.pkl")

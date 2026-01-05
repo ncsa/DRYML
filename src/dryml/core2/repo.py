@@ -576,7 +576,11 @@ class Repo:
 
 
 def make_store(store):
-    if isinstance(store, IOBase):
+    from .store.store import Store
+    if isinstance(store, Store):
+        return store
+
+    elif isinstance(store, IOBase):
         from .store.zip import ZipStore
         # file-like => zip-backed store in a temp dir
         return ZipStore(store)
@@ -606,6 +610,9 @@ def manage_repo(repo=None):
       * repo is a Repo:
           - use it as-is, do not close it at the end
 
+      * repo is a Store:
+          - Use the store as is
+
       * repo is an IOBase:
           - treat it as a zip container
           - create ZipStore(repo), Repo([ZipStore])
@@ -616,6 +623,9 @@ def manage_repo(repo=None):
           - else: ZipStore(path)
           - Repo([store])
           - auto-close at the end
+
+      * repo is a list containing the previous types
+          - Create a repo backed with multiple stores
     """
     close_repo = False
 
@@ -629,8 +639,19 @@ def manage_repo(repo=None):
         repo_obj = repo
 
     else:
-        store = make_store(repo)
-        repo_obj = Repo(stores=[store])
+        if isinstance(repo, list):
+            # Check there are no Repos or Nones.
+            for el in repo:
+                if el is None or isinstance(el, Repo):
+                    raise ValueError("Store list can't contain a None or Repo object.")
+            stores = [
+                make_store(store)
+                for store in repo
+            ]
+        else:
+            stores = [ make_store(repo) ]
+            
+        repo_obj = Repo(stores=stores)
         close_repo = True
 
     try:

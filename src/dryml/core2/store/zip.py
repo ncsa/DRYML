@@ -3,6 +3,7 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 from io import IOBase
+import glob
 import tempfile
 import os
 
@@ -14,7 +15,7 @@ class ZipStore(Store):
     def __init__(self, zip_dest: str | Path | IOBase):
         self.zip_dest = zip_dest
         self._tmp = tempfile.TemporaryDirectory()
-        self.base_dir = self._tmp.name
+        self._base_dir = self._tmp.name
         self.obj_dir = os.path.join(self.base_dir, "objects")
         os.makedirs(self.obj_dir, exist_ok=True)
 
@@ -25,6 +26,16 @@ class ZipStore(Store):
 
         # if an existing main def is present, cache it
         self.set_main_def(self.read_main_def())
+
+    @property
+    def base_dir(self) -> str:
+        """Base directory"""
+        return self._base_dir
+
+    @property
+    def object_root_dir(self) -> str:
+        """Base directory"""
+        return self.obj_dir
 
     def _extract_if_nonempty(self):
         def _load():

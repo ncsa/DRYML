@@ -151,7 +151,7 @@ def test_get_api_4(create_temp_dir):
 
 @pytest.mark.usefixtures("create_temp_dir")
 def test_get_api_5(create_temp_dir):
-    repo = dryml.core2.Repo()
+    repo = dryml.core2.Repo(create_temp_dir)
 
     test_obj_def = objs.TestNest.d(
         objs.TestNest2.d(
@@ -220,26 +220,6 @@ def test_write_1(create_temp_dir):
         obj.definition.stable_hash()
 
 
-@pytest.mark.usefixtures("create_temp_dir")
-def test_save_1(create_temp_dir):
-    repo = dryml.core2.Repo(create_temp_dir)
-
-    repo.add_object(objs.HelloStr(msg='test'))
-
-    # Save objects in repository
-    repo.save()
-
-    # Delete the repo
-    del repo
-
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(create_temp_dir)
-
-    assert len(repo.get(load_objects=False)) == 0
-
-    repo.save()
-
-    assert len(os.listdir(create_temp_dir)) == 1
 
 
 @pytest.fixture

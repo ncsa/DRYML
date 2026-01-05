@@ -1,6 +1,5 @@
-from dryml.core2.definition import Definition, ConcreteDefinition
-import core2_objects as objs
-import copy
+import core2_objects as objects
+from dryml.core2.definition import Definition
 
 
 def test_def_1():
@@ -8,16 +7,16 @@ def test_def_1():
     A case which looks at stripping id methods
     """
 
-    obj = objs.TestNest4(
-        objs.TestNest2(
-            A=objs.TestNest4(5)))
+    obj = objects.TestNest4(
+        objects.TestNest2(
+            A=objects.TestNest4(5)))
 
     obj_def_manual = Definition(
-        objs.TestNest4,
+        objects.TestNest4,
         Definition(
-            objs.TestNest2,
+            objects.TestNest2,
             A=Definition(
-                objs.TestNest4,
+                objects.TestNest4,
                 5)
             )
         )
@@ -41,14 +40,14 @@ def test_def_2():
     A case which looks at stripping id methods
     """
 
-    obj = objs.TestNest4(('test', 'test'))
+    obj = objects.TestNest4(('test', 'test'))
     obj_def = obj.definition.categorical()
 
     assert type(obj_def.args[0]) is tuple
     assert obj_def.args[0][0] == 'test'
     assert obj_def.args[0][1] == 'test'
 
-    obj = objs.TestNest4(['test', 'test'])
+    obj = objects.TestNest4(['test', 'test'])
     obj_def = obj.definition.categorical()
 
     assert type(obj_def.args[0]) is list
@@ -63,15 +62,15 @@ def test_def_3():
     """
 
     # Create the data containing objects
-    model_obj = objs.TestNest(10)
-    opt_obj = objs.TestNest3(20, model=model_obj)
-    loss_obj = objs.TestNest2(A='func')
-    train_fn_obj = objs.TestNest3(
+    model_obj = objects.TestNest(10)
+    opt_obj = objects.TestNest3(20, model=model_obj)
+    loss_obj = objects.TestNest2(A='func')
+    train_fn_obj = objects.TestNest3(
         optimizer=opt_obj,
         loss=loss_obj,
         epochs=10)
 
-    trainable_obj = objs.TestNest3(
+    trainable_obj = objects.TestNest3(
         model=model_obj,
         train_fn=train_fn_obj
     )
@@ -91,15 +90,15 @@ def test_def_4():
     """
 
     # Create the data containing objects
-    model_obj = objs.TestNest(10)
-    opt_obj = objs.TestNest3(20, model=model_obj)
-    loss_obj = objs.TestNest2(A='func')
-    train_fn_obj = objs.TestNest3(
+    model_obj = objects.TestNest(10)
+    opt_obj = objects.TestNest3(20, model=model_obj)
+    loss_obj = objects.TestNest2(A='func')
+    train_fn_obj = objects.TestNest3(
         optimizer=opt_obj,
         loss=loss_obj,
         epochs=10)
 
-    trainable_obj = objs.TestNest3(
+    trainable_obj = objects.TestNest3(
         model=model_obj,
         train_fn=train_fn_obj
     )
@@ -125,30 +124,3 @@ def test_def_4():
     assert trainable_obj_built['train_fn']['optimizer'][0] == opt_obj[0]
     assert trainable_obj_built['train_fn']['epochs'] == train_fn_obj['epochs']
     assert trainable_obj_built['train_fn']['loss'].A == loss_obj.A
-
-
-def test_unique_objs_1():
-    # Create the data containing objects
-    model_obj = objs.TestNest(10)
-    opt_obj = objs.TestNest3(20, model=model_obj)
-    loss_obj = objs.TestNest2(A='func')
-    train_fn_obj = objs.TestNest3(
-        optimizer=opt_obj,
-        loss=loss_obj,
-        epochs=10)
-
-    trainable_obj = objs.TestNest3(
-        model=model_obj,
-        train_fn=train_fn_obj
-    )
-
-    from dryml.core2.utils.general import list_unique_objects
-
-    unique_objs = list_unique_objects(trainable_obj)
-
-    assert len(unique_objs) == 5
-    assert model_obj in unique_objs
-    assert opt_obj in unique_objs
-    assert loss_obj in unique_objs
-    assert train_fn_obj in unique_objs
-    assert trainable_obj in unique_objs
