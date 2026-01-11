@@ -49,6 +49,10 @@ class Dryml(type):
             obj.__cdef__._obj = obj   # idempotent, but makes intent clear
 
             # Initialize with runtime (built) args
+            # thaw the rtargs
+            from .freeze import deep_thaw
+            rt_args = deep_thaw(rt_args)
+            rt_kwargs = deep_thaw(rt_kwargs)
             obj.__init__(*rt_args, **rt_kwargs)
 
             # Attach repo for later use

@@ -170,6 +170,10 @@ class Repo:
             cls = new_parent['cls']
             # Do argument manipulations
             args, kwargs = cls.__prepare_args__(*args, **kwargs)
+            # Freeze args
+            from .freeze import deep_freeze
+            args = deep_freeze(args, path=("args",))
+            kwargs = deep_freeze(kwargs, path=("kwargs",))
             # Create the now concrete definition
             return ConcreteDefinition(cls, *args, **kwargs) 
 
