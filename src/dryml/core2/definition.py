@@ -8,7 +8,7 @@ import numpy as np
 import sys
 import weakref
 
-from .utils.stable_hash import stable_hash_function
+from .utils.stable_hash import stable_hash_function, stable_int_hash
 from .utils.general import is_dictlike, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
     get_object_view, get_definition_view
@@ -76,6 +76,7 @@ SKIP_ARGS = object()
 
 class Definition(dict):
     allowed_keys = ['cls', 'args', 'kwargs']
+    __hash__ = None
     def __init__(self, *args, repo=None, **kwargs):
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]):
@@ -150,9 +151,6 @@ class Definition(dict):
 
     def stable_hash(self):
         return stable_hash_function(self)
-
-    def __hash__(self):
-        return hash(self.stable_hash())
 
     def __repr__(self):
         return f"{type(self).__name__}({super().__repr__()})"
@@ -231,6 +229,7 @@ class Definition(dict):
 
 class ConcreteDefinition(Definition):
     def __init__(self, *args, **kwargs):
+        self._frozen = False
         if len(args) == 0:
             raise ValueError("ConcreteDefinition must be created with arguments")
         if len(args) > 0:
@@ -242,15 +241,34 @@ class ConcreteDefinition(Definition):
         # Pre-compute hash
         # TODO: pickling this object should not save this hash
         # We may decide later to change the hashing algorithm.
-        self._hash = stable_hash_function(self)
+        self._hash = hash(self)
         # Initialize backward facing reference for if this definition is used in an object.
         self._obj = None
+        self._frozen = True
+
+    def _deny(self, *_, **__):
+        raise TypeError("ConcreteDefinition is immutable")
+
+    def __setitem__(self, k, v):
+        if getattr(self, "_frozen", False):
+            self._deny()
+        return super().__setitem__(k, v)
+
+    def __delitem__(self, k): self._deny()
+    def clear(self): self._deny()
+    def pop(self, *a, **k): self._deny()
+    def popitem(self): self._deny()
+    def setdefault(self, *a, **k): self._deny()
+    def update(self, *a, **k): self._deny()
 
     def concretize(self):
         return self
 
-    def stable_hash(self):
-        return self._hash
+    def __hash__(self):
+        if hasattr(self, "_hash"):
+            return self._hash
+        else:
+            return stable_int_hash(self.stable_hash())
 
     def copy(self):
         return deepcopy(self)
@@ -483,6 +501,7 @@ def validate_arguments_for_concrete_definition(vals):
     type_errors = []
 
     def _enter(path, key, value):
+        from ..freeze import FrozenList, FrozenTuple, FrozenDict, FrozenSet
         if isinstance(value, ConcreteDefinition):
             # We assume any passed ConcreteDefinition object is already validated
             return key, False
@@ -490,6 +509,19 @@ def validate_arguments_for_concrete_definition(vals):
             return {}, get_definition_view(value)
         elif isinstance(value, Object):
             return {}, get_object_view(value)
+        # Canonicalize container markers so Frozen* hashes match their source types
+        if isinstance(old_parent, FrozenList):
+
+            type_marker = "builtins.list"
+        elif isinstance(old_parent, FrozenTuple):
+            type_marker = "builtins.tuple"
+        elif isinstance(old_parent, FrozenDict):
+            type_marker = "builtins.dict"
+        elif isinstance(old_parent, FrozenSet):
+            type_marker = "builtins.set"
+        else:
+            type_marker = f"{type(old_parent).__module__}.{type(old_parent).__qualname__}"
+
         else:
             return default_enter(path, key, value)
 

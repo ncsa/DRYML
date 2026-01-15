@@ -198,3 +198,16 @@ class Metadata(Object):
     def __init__(self, *args, metadata=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.metadata = metadata
+
+
+class Compute(Object):
+    @classmethod
+    def __pre_init__(cls):
+        super().__pre_init__()
+
+        ctx = getattr(cls, "__compute_requirements__", None)
+
+        from dryml.context.context_tracker import context_check
+
+        if ctx is not None:
+            context_check(ctx)

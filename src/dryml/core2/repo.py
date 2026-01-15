@@ -172,8 +172,8 @@ class Repo:
             args, kwargs = cls.__prepare_args__(*args, **kwargs)
             # Freeze args
             from .freeze import deep_freeze
-            args = deep_freeze(args, path=("args",))
-            kwargs = deep_freeze(kwargs, path=("kwargs",))
+            args = tuple(deep_freeze(a, path=("args", str(i))) for i, a in enumerate(args))
+            kwargs = {k: deep_freeze(v, path=("kwargs", str(k))) for k, v in kwargs.items()}
             # Create the now concrete definition
             return ConcreteDefinition(cls, *args, **kwargs) 
 

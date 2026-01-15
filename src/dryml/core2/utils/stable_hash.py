@@ -12,6 +12,11 @@ import numpy as np
 from .general import get_definition_view, is_dictlike
 from boltons.iterutils import remap, is_collection, default_enter
 
+def stable_int_hash(s: str, *, bits: int = 64) -> int:
+    # blake2b is fast and stable; digest_size controls output size
+    digest = hashlib.blake2b(s.encode("utf-8"), digest_size=bits // 8).digest()
+    return int.from_bytes(digest, byteorder="big", signed=False)
+
 # ---------- ENTER HOOK FOR Definition ----------
 
 def stable_definition_enter(path, key, value):
@@ -199,7 +204,18 @@ def stable_hash_function(structure) -> str:
         hasher = hashlib.sha256()
 
         # Include container type and length so different containers don't collide
-        type_marker = f"{type(old_parent).__module__}.{type(old_parent).__qualname__}"
+        # Canonicalize container markers so Frozen* hashes match their source types
+        from ..freeze import FrozenList, FrozenTuple, FrozenDict, FrozenSet
+        if isinstance(old_parent, FrozenList):
+            type_marker = "builtins.list"
+        elif isinstance(old_parent, FrozenTuple):
+            type_marker = "builtins.tuple"
+        elif isinstance(old_parent, FrozenDict):
+            type_marker = "builtins.dict"
+        elif isinstance(old_parent, FrozenSet):
+            type_marker = "builtins.set"
+        else:
+            type_marker = f"{type(old_parent).__module__}.{type(old_parent).__qualname__}"
         hasher.update(b"T" + type_marker.encode("utf-8"))
         hasher.update(b"|" + str(len(new_items)).encode("ascii"))
 
