@@ -8,7 +8,7 @@ import numpy as np
 import sys
 import weakref
 
-from .utils.stable_hash import stable_hash_function
+from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .utils.general import is_dictlike, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
     get_object_view, get_definition_view
@@ -74,38 +74,83 @@ def definition_exit(path, key, value, new_parent, new_items):
 SKIP_ARGS = object()
 
 
-class Definition(dict):
-    allowed_keys = ['cls', 'args', 'kwargs']
-    def __init__(self, *args, repo=None, **kwargs):
+@dataclass(slots=True, init=False, eq=False)
+class Definition(ABCMapping):
+    """
+    Mutable, selector-capable spec.
+    - Unhashable by contract.
+    - Behaves like a mapping with keys: cls, (args?), kwargs
+    """
+    _cls: Callable[..., Any] | type | None
+    _args: tuple[Any, ...] | None
+    kwargs: dict[str, Any]
+    __repo: Any = field(default=None, repr=False, compare=False)
+
+    __hash__ = None  # critical: prevent dict/set usage
+
+    def __init__(self, *args, **kwargs):
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]):
-                raise ValueError("First positional argument must be a class or callable.")
+                if args[0] is SKIP_ARGS and len(args) == 1:
+                    self._cls = None
+                    self.args = None
+                    self.kwargs = kwargs
+                else:
+                    raise ValueError("First positional argument must be a class or callable.")
             if len(args) > 1 and args[1] is SKIP_ARGS:
                 if len(args) > 2:
                     raise ValueError("SKIP_ARGS must be the only positional argument besides the class.")
-                super().__init__(
-                    cls=args[0],
-                    kwargs=kwargs)
+
+                self._cls = args[0]
+                self.args = None
+                self.kwargs = kwargs
+
             else:
-                super().__init__(
-                    cls=args[0],
-                    args=args[1:],
-                    kwargs=kwargs)
+                self._cls = args[0]
+                self.args = args[1:]
+                self.kwargs = kwargs
         else:
-            super().__init__(
-                args=args,
-                kwargs=kwargs)
+            self._cls = None
+            self.args = args
+            self.kwargs = kwargs
 
-        self._repo = repo
+        # Always initialize to None.
+        self._repo = None
 
-    def __setitem__(self, key, value):
-        if key not in self.allowed_keys:
-            raise KeyError(f"Key {key} not allowed in Definition. Allowed keys are {self.allowed_keys}")
-        super().__setitem__(key, value)
+    # --- mapping interface (for get_definition_view / remap compatibility) ---
+    def __getitem__(self, k: str) -> Any:
+        if k == "cls":
+            if self._cls is None:
+                raise KeyError("cls")
+            return self._cls
+        if k == "args":
+            if self._args is None:
+                raise KeyError("args")
+            return self._args
+        if k == "kwargs":
+            return self.kwargs
+        raise KeyError(k)
 
-    def copy(self):
-        # This might be the wrong implementation for regular Defintion.
-        return deepcopy(self)
+    def __iter__(self) -> Iterator[str]:
+        if self._cls is not None:
+            yield "cls"
+        if self._args is not None:
+            yield "args"
+        yield "kwargs"
+
+    def __len__(self) -> int:
+        return 1 + (1 if self._args is not None else 0) + (1 if self.cls is not None else 0)
+
+    #def copy(self):
+    #    # This might be the wrong implementation for regular Defintion.
+    #    return deepcopy(self)
+
+    def match(self, other_def, **kwargs) -> bool:
+        from .definition import selector_match  # or wherever you keep it
+        return selector_match(self, other_def, **kwargs)
+
+    def __call__(self, other_def, **kwargs):
+        return self.match(other_def, **kwargs)
 
     def __call__(self, other_def, **kwargs):
         from .object import Object
@@ -113,13 +158,6 @@ class Definition(dict):
                 not isinstance(other_def, Object):
             raise TypeError(f"Definition can only be called on other Definition objects and Object objects got {type(other_def)}")
         return selector_match(self, other_def, **kwargs)
-
-    @property
-    def skip_args(self):
-        if 'args' not in self:
-            return True
-        else:
-            return False
 
     def __eq__(self, rhs):
         if type(self) != type(rhs):
