@@ -121,88 +121,6 @@ class Repo:
     def __len__(self):
         return len(self.obj_cache)
 
-    # Graph Logic
-
-    def concretize_definition(self, defn):
-        """
-        Inside a possibly nested structure do these transformations:
-            Definition -> ConcreteDefinition
-            Object -> ConcreteDefinition
-        """
-
-        def _enter(path, key, value):
-            if id(value) in self.cdef_cache:
-                # We've seen this object before
-                return value, False
-            elif isinstance(value, ConcreteDefinition):
-                # The definition is already concrete. don't enter it.
-                return value, False
-            elif isinstance(value, Definition):
-                return {}, get_definition_view(value)
-            elif isinstance(value, Object):
-                return {}, get_object_view(value)
-            else:
-                return default_enter(path, key, value)
-
-        def _visit(path, key, value):
-            if id(value) in self.cdef_cache: 
-                # We've seen this object before
-                return key, self.cdef_cache[id(value)]
-            elif type(value) is ConcreteDefinition:
-                # Value is already Concrete
-                return key, value
-            elif isinstance(value, Object):
-                # We have an already realized class instance. We shouldn't deep copy it.
-                raise TypeError("We shouldn't get an Object object here.")
-            elif isinstance(value, Definition):
-                raise TypeError("We shouldn't get a Definition object here.")
-            else:
-                return key, value
-
-        def _create_cdef(new_parent, new_items):
-            for k, v in new_items:
-                new_parent[k] = v
-            try:
-                args = new_parent['args']
-            except KeyError:
-                raise ValueError("Definition {values} which skipped arguments isn't concretizable.")
-            kwargs = new_parent['kwargs']
-            cls = new_parent['cls']
-            # Do argument manipulations
-            args, kwargs = cls.__prepare_args__(*args, **kwargs)
-            # Create the now concrete definition
-            return ConcreteDefinition(cls, *args, **kwargs) 
-
-        def _exit(path, key, values, new_parent, new_items):
-            is_obj = isinstance(values, Object)
-            if isinstance(values, Definition) or is_obj:
-                if is_obj:
-                    # Store the object since we know it's cdef
-                    self.obj_cache[values.__cdef__] = values
-                    # Store the link between this particular value and its cdef.
-                    self.cdef_cache[id(values)] = values.__cdef__
-                    return values.__cdef__
-
-                # Cache built
-                new_cdef = _create_cdef(new_parent, new_items)
-                self.cdef_cache[id(values)] = new_cdef
-                return new_cdef
-            else:
-                return default_exit(path, key, values, new_parent, new_items)
-
-        if isinstance(defn, Definition):
-            return remap(
-                [defn],
-                enter=_enter,
-                visit=_visit,
-                exit=_exit)[0]
-        else:
-            return remap(
-                defn,
-                enter=_enter,
-                visit=_visit,
-                exit=_exit)
-
     def _save_single_object(self, obj: Object, store: Store|None=None):
         """
         Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
@@ -366,10 +284,10 @@ class Repo:
             # Thaw the definition
 
             # Check if we already have this object
-            if obj_def in self.obj_cache and self.obj_cache[value] is not None:
+            if obj_def in self.obj_cache and self.obj_cache[obj_def] is not None:
                 # we found it
-                loaded_objs[value] = self.obj_cache[value]
-                return loaded_objs[value]
+                loaded_objs[obj_def] = self.obj_cache[obj_def]
+                return loaded_objs[obj_def]
 
             # Thaw concretized args
             rt_args = self.load_object(

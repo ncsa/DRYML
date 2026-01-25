@@ -17,11 +17,11 @@ class FrozenList(tuple):
         return super().__new__(cls, tuple(items))
 
 
-#class FrozenTuple(tuple):
-#    """Tagged tuple for symmetric thaw handling."""
-#    __slots__ = ()
-#    def __new__(cls, items: Iterable[Any]):
-#        return super().__new__(cls, tuple(items))
+class FrozenTuple(tuple):
+    """Tagged tuple for symmetric thaw handling."""
+    __slots__ = ()
+    def __new__(cls, items: Iterable[Any]):
+        return super().__new__(cls, tuple(items))
 
 
 class FrozenSet(frozenset):
@@ -86,7 +86,7 @@ class FrozenNDArray(np.ndarray):
         return np.array(self, copy=True)
 
 
-frozen_container_types = (FrozenList, tuple, FrozenSet, FrozenDict)
+frozen_container_types = (FrozenList, FrozenTuple, FrozenSet, FrozenDict)
 
 
 # -----------------------------

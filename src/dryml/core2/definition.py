@@ -15,7 +15,7 @@ from .utils.general import is_dictlike, \
     get_object_view
 from .utils.recurse import cycle_detect
 from .types import is_pod, compatible_containers, container_types
-from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenNDArray, frozen_container_types
+from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
 from .errors import PathAccessError
 
 # Special value to skip args
@@ -170,7 +170,7 @@ class Definition(DefInterface, Mapping):
     def build(self, repo=None, build_missing=True) -> Object:
         from .repo import manage_repo
         with manage_repo(repo=repo) as sub_repo:
-            concrete_def = Definition.concretize(self, repo=sub_repo)
+            concrete_def = self.concretize(repo=sub_repo)
             return sub_repo.load_object(concrete_def, build_missing=build_missing)
 
     def stable_hash(self):
@@ -370,7 +370,7 @@ def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"
             return obj
         if isinstance(obj, tuple):
             # Freeze the tuple
-            return FrozenTuple(tuple([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)]))
+            return FrozenTuple([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
         if isinstance(obj, list):
             # Freeze the list
             return FrozenList([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
@@ -570,7 +570,7 @@ def thaw_concrete(cdef_or_obj: Any, cache = None) -> Any:
         cache[id(cdef_or_obj)] = new_val
         return new_val
 
-    if isinstance(cdef_or_obj, tuple):
+    if isinstance(cdef_or_obj, FrozenTuple):
         new_val = tuple([thaw_concrete(v, cache=cache) for v in cdef_or_obj])
         cache[id(cdef_or_obj)] = new_val
         return new_val

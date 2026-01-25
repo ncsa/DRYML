@@ -1,7 +1,7 @@
 from typing import Any
 
 import numpy as np
-from .freeze import FrozenList, FrozenDict, FrozenSet
+from .freeze import FrozenList, FrozenTuple, FrozenDict, FrozenSet
 
 # Officially supported DRYML types (and related methods)
 
@@ -12,14 +12,14 @@ def is_pod(x: Any) -> bool:
     return isinstance(x, _PY_POD) or isinstance(x, _NP_SCALAR)
 
 compatible_containers = {
-    'tuple': (tuple,), # Tuples
+    'tuple': (tuple, FrozenList), # Tuples
     'list': (list, FrozenList),
     'dict': (dict, FrozenDict),
     'set': (set, FrozenSet)
 }
 
 container_types = (
-    tuple,
+    tuple, FrozenTuple,
     list, FrozenList,
     dict, FrozenDict,
     set, FrozenSet

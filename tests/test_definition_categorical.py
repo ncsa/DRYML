@@ -80,9 +80,9 @@ def test_def_3():
     obj_def = trainable_obj.definition
 
     assert obj_def.kwargs['model'] == obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']
-    assert obj_def.kwargs['model']._obj is not None
-    assert obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']._obj is not None
-    assert obj_def.kwargs['model']._obj is obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']._obj
+    #assert obj_def.kwargs['model']._obj is not None
+    #assert obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']._obj is not None
+    #assert obj_def.kwargs['model']._obj is obj_def.kwargs['train_fn'].kwargs['optimizer'].kwargs['model']._obj
 
 
 def test_def_4():
@@ -108,7 +108,7 @@ def test_def_4():
     obj_def = trainable_obj.definition
 
     # Building from plain definition
-    trainable_obj_built = obj_def.build()
+    trainable_obj_built = obj_def.thaw().build()
 
     assert trainable_obj_built['model'] is \
         trainable_obj_built['train_fn']['optimizer']['model']

@@ -51,11 +51,11 @@ def test_definition_concrete_4():
 
 def test_definition_concretize_types_1():
     # Test that concretize properly transforms containers and other types.
-    from dryml.core2.freeze import FrozenList, FrozenSet, FrozenDict, FrozenNDArray
+    from dryml.core2.freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
 
     test_pairs = [
         ([1,2,3], FrozenList),
-        ((1,2,3), tuple),
+        ((1,2,3), FrozenTuple),
         (set([1,2,3]), FrozenSet),
         ({1: 2, 3: 4}, FrozenDict),
         (np.array([1,2,3]), FrozenNDArray),
@@ -69,11 +69,11 @@ def test_definition_concretize_types_1():
 
 def test_definition_concretize_types_2():
     # Test that concretize properly transforms containers and other types.
-    from dryml.core2.freeze import FrozenList, FrozenSet, FrozenDict, FrozenNDArray
+    from dryml.core2.freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
 
     test_pairs = [
         (FrozenList([1,2,3]), list),
-        ((1,2,3), tuple),
+        (FrozenTuple((1,2,3)), tuple),
         (FrozenSet([1,2,3]), set),
         (FrozenDict({1: 2, 3: 4}), dict),
         (FrozenNDArray.from_array(np.array([1,2,3])), np.ndarray),
