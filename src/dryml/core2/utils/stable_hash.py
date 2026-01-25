@@ -9,25 +9,14 @@ from enum import Enum
 
 import numpy as np
 
-from .general import get_definition_view, is_dictlike
+from .general import is_dictlike
+from .recurse import cycle_detect
 from boltons.iterutils import remap, is_collection, default_enter
 
 def stable_int_hash(s: str, *, bits: int = 64) -> int:
     # blake2b is fast and stable; digest_size controls output size
     digest = hashlib.blake2b(s.encode("utf-8"), digest_size=bits // 8).digest()
     return int.from_bytes(digest, byteorder="big", signed=False)
-
-# ---------- ENTER HOOK FOR Definition ----------
-
-def stable_definition_enter(path, key, value):
-    from ..definition import Definition
-    """Treat Definition objects via their normalized 'view'."""
-    if isinstance(value, Definition):
-        # Hash the normalized view instead of the raw Definition
-        return {}, get_definition_view(value)
-    else:
-        return default_enter(path, key, value)
-
 
 # ---------- LEAF ENCODING (DETERMINISTIC) ----------
 
@@ -138,19 +127,66 @@ def _is_container(value) -> bool:
     return (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray)
 
 
-def _stable_hash_any(value) -> str:
-    """
-    Hash arbitrary value: dispatch to leaf or full structural hash.
-    """
-    if _is_container(value):
-        return stable_hash_function(value)
-    else:
-        return stable_hash_value(value)
-
-
 # ---------- MAIN STRUCTURAL HASH ----------
 
-def stable_hash_function(structure) -> str:
+def stable_hash_container(cont, cache=None) -> str:
+    # For lists/tuples/etc we keep traversal order (insertion order).
+    if cache is None:
+        cache = {}
+
+    hasher = hashlib.sha256()
+
+    # Include container type and length so different containers don't collide
+    # Canonicalize container markers so Frozen* hashes match their source types
+    from ..freeze import FrozenList, FrozenDict, FrozenSet
+    from ..definition import Definition, ConcreteDefinition
+    if isinstance(cont, (list, FrozenList)):
+        type_marker = "builtins.list"
+        cont_iter = enumerate(cont)
+    elif isinstance(cont, (tuple,)):
+        type_marker = "builtins.tuple"
+        cont_iter = enumerate(cont)
+    elif isinstance(cont, (dict, FrozenDict)):
+        type_marker = "builtins.dict"
+        cont_iter = cont.items()
+    elif isinstance(cont, (set, FrozenSet)):
+        type_marker = "builtins.set"
+        cont_iter = enumerate(cont)
+    elif isinstance(cont, (Definition, ConcreteDefinition)):
+        type_marker = f"{type(cont).__module__}.{type(cont).__qualname__}"
+        keys = iter(cont)
+        cont_iter = map(lambda k: (k, cont[k]), keys)
+    else:
+        raise TypeError(f"Unsupported container type {type(cont)} for stable_hash_container")
+    hasher.update(b"T" + type_marker.encode("utf-8"))
+    hasher.update(b"|" + str(len(cont)).encode("ascii"))
+
+    key_val_list = list(cont_iter)
+    # Get hash vals for keys and vals
+    key_val_hash_list = list(map(
+        lambda kv: (
+            stable_hash_function(kv[0], cache=cache),
+            stable_hash_function(kv[1], cache=cache),
+        ),
+        key_val_list,
+    ))
+
+    # Sort by key hash
+    key_val_hash_list.sort(key=lambda kv: kv[0])
+
+    for child_key_hash, child_val_hash in key_val_hash_list:
+        # Hash the key structurally (so keys are part of the identity)
+        hasher.update(b"K")
+        hasher.update(child_key_hash.encode("utf-8"))
+
+        hasher.update(b"V")
+        hasher.update(child_val_hash.encode('utf-8'))
+
+    return hasher.hexdigest()
+
+
+@cycle_detect
+def stable_hash_function(structure, cache=None) -> str:
     """
     Deterministic structural hash of an arbitrary (possibly nested) Python structure.
 
@@ -160,92 +196,23 @@ def stable_hash_function(structure) -> str:
     - np.ndarray: hashed by shape + dtype + contents.
     - Definition: hashed via get_definition_view().
     """
+    from ..object import Object
 
-    # Handle scalar / leaf roots directly (remap would not call exit() on them)
-    if not _is_container(structure):
-        return stable_hash_value(structure)
+    if cache is None:
+        cache = {}
 
-    class HashHelper:
-        """
-        Wrapper used during traversal so that parent nodes can distinguish:
-        - a fully-hashed child container (HashHelper)
-        - a raw value
-        """
+    if id(structure) in cache:
+        return cache[id(structure)]
 
-        __slots__ = ("hash",)
-
-        def __init__(self, the_hash: str):
-            self.hash = the_hash
-
-    def _visit(path, key, value):
-        # If child is already a helper, unwrap to its digest so parents see strings
-        if isinstance(value, HashHelper):
-            return key, value.hash
-
-        # Traverse into containers (except np.ndarray which is a leaf)
-        if _is_container(value):
-            return key, value
-
-        # Leaf -> deterministic digest string
-        return key, stable_hash_value(value)
-
-    def _exit(path, key, old_parent, new_parent, new_items):
-        # new_items: list[(child_key, child_digest_or_container)]
-
-        # For mappings and sets, we want order-independent hashing:
-        if is_dictlike(old_parent) or isinstance(old_parent, (set, frozenset)):
-            # sort by a deterministic token derived from the key
-            new_items = sorted(
-                new_items,
-                key=lambda kv: _stable_hash_any(kv[0]),
-            )
-        # For lists/tuples/etc we keep traversal order (insertion order).
-
-        hasher = hashlib.sha256()
-
-        # Include container type and length so different containers don't collide
-        # Canonicalize container markers so Frozen* hashes match their source types
-        from ..freeze import FrozenList, FrozenTuple, FrozenDict, FrozenSet
-        if isinstance(old_parent, FrozenList):
-            type_marker = "builtins.list"
-        elif isinstance(old_parent, FrozenTuple):
-            type_marker = "builtins.tuple"
-        elif isinstance(old_parent, FrozenDict):
-            type_marker = "builtins.dict"
-        elif isinstance(old_parent, FrozenSet):
-            type_marker = "builtins.set"
-        else:
-            type_marker = f"{type(old_parent).__module__}.{type(old_parent).__qualname__}"
-        hasher.update(b"T" + type_marker.encode("utf-8"))
-        hasher.update(b"|" + str(len(new_items)).encode("ascii"))
-
-        for child_key, child_val in new_items:
-            # Hash the key structurally (so keys are part of the identity)
-            key_digest = _stable_hash_any(child_key)
-            hasher.update(b"K")
-            hasher.update(key_digest.encode("ascii"))
-
-            # child_val should already be a digest string at this point
-            if not isinstance(child_val, str):
-                raise TypeError(
-                    f"Expected child digest string in _exit, got {type(child_val)!r}"
-                )
-
-            hasher.update(b"V")
-            hasher.update(child_val.encode("ascii"))
-
-        return HashHelper(hasher.hexdigest())
-
-    result = remap(
-        structure,
-        enter=stable_definition_enter,
-        visit=_visit,
-        exit=_exit,
-    )
-
-    # For container roots, we expect a HashHelper; for leaf roots we handled above.
-    if isinstance(result, HashHelper):
-        return result.hash
+    if _is_container(structure):
+        hash_value = stable_hash_container(structure, cache=cache)
+        cache[id(structure)] = hash_value
+        return hash_value
+    elif isinstance(structure, Object):
+        hash_value = stable_hash_function(structure.definition)
+        cache[id(structure)] = hash_value
+        return hash_value
     else:
-        # Fallback (in case remap ever returns a raw value for some reason)
-        return _stable_hash_any(result)
+        hash_value = stable_hash_value(structure)
+        cache[id(structure)] = hash_value
+        return hash_value

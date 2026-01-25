@@ -28,11 +28,13 @@ def test_def_1():
 
     assert 'uid' not in obj_def_manual.kwargs
     obj_class_def = obj_def.categorical(recursive=True)
-    assert obj_class_def == obj_def_manual
+    ic(obj_def, obj_class_def, obj_class_def.args, obj_class_def.kwargs)
+    assert obj_class_def.match(obj_def_manual)
 
     obj_class_def = obj_def.categorical(recursive=False)
-    del obj_def.kwargs['uid']
-    assert obj_class_def(obj_def)
+    obj_def_thawed = obj_def.thaw()
+    del obj_def_thawed.kwargs['uid']
+    assert obj_class_def(obj_def_thawed)
 
 
 def test_def_2():

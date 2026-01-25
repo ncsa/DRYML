@@ -16,10 +16,10 @@ from boltons.iterutils import remap, default_enter, default_exit
 
 from .definition import Definition, ConcreteDefinition
 from .utils.general import zip_directory, \
-    pickle_load, pickle_save, get_temp_directory, get_object_view, \
-    get_definition_view
+    pickle_load, pickle_save, get_temp_directory, get_object_view
 from .object import Object
 from .store.store import Store
+from .types import is_pod
 
 
 class RepoSaveError(Exception):
@@ -42,7 +42,7 @@ class Repo:
     # Links particular concrete definition with particular object
     obj_cache: dict[ConcreteDefinition, Object]
     # Links particular Definition object with a concrete definition (Definitions are resolved )
-    cdef_cache: weakref.WeakValueDictionary[int, ConcreteDefinition]
+    cdef_cache: weakref.WeakValueDictionary[str, ConcreteDefinition]
 
     # Main definition
     main_def: ConcreteDefinition | None
@@ -329,66 +329,76 @@ class Repo:
         self.obj_cache[cdef] = obj
         return obj
 
-    def load_object(self, obj_def, build_missing=False):
-
-        loaded_objs = {}
-        def _load_object_enter(path, key, value):
-            if type(value) is Definition:
-                raise TypeError("Definition not allowed here!")
-            elif type(value) is ConcreteDefinition:
-                if value in loaded_objs:
-                    # We have already loaded this object
-                    return value, False
-                else:
-                    return {}, ItemsView({'args': value['args'], 'kwargs': value['kwargs']})
-            else:
-                return default_enter(path, key, value)
-
-        def _load_object_visit(path, key, value):
-            # We do nothing here.
-            if type(value) is ConcreteDefinition:
-                # we already loaded this object, return it.
-                return key, loaded_objs[value]
-            else:
-                return key, value
-
-        def _load_object_exit(path, key, value, new_parent, new_items):
-            if isinstance(value, ConcreteDefinition):
-                # Check if we already have this object
-                if value in self.obj_cache and self.obj_cache[value] is not None:
-                    # we found it
-                    loaded_objs[value] = self.obj_cache[value]
-                    return loaded_objs[value]
-
-                new_values = {} # Need to build a dictionary because we get a list of tuples
-                for k, v in new_items:
-                    new_values[k] = v
-                # Get runtime args that have been built already
-                args = new_values['args']
-                kwargs = new_values['kwargs']
-
-                obj = self._load_single_object(value, args, kwargs, build_missing=build_missing)
-
-                loaded_objs[value] = obj
-
-                return obj
-            else:
-                return default_exit(path, key, value, new_parent, new_items)
+    def load_object(self, obj_def, path: list[str|int]|None=None, build_missing=False, loaded_objs=None) -> Object:
+        if path is None:
+            path = [''] # Treat this as the root node
+        if loaded_objs is None:
+            loaded_objs = {}
+        from .freeze import FrozenNDArray, FrozenList, FrozenDict, FrozenSet
+        if is_pod(obj_def):
+            # We have a plain old data type
+            return obj_def
+        if isinstance(obj_def, FrozenNDArray):
+            # Copy the frozen array, return editable
+            return obj_def.thaw()
+        if isinstance(obj_def, tuple):
+            # We have a frozen container
+            return tuple([
+                self.load_object(v, path+[i], build_missing=build_missing)
+                for i, v in enumerate(obj_def)])
+        if isinstance(obj_def, FrozenList):
+            # We have a frozen list
+            return [
+                self.load_object(v, path+[i], build_missing=build_missing)
+                for i, v in enumerate(obj_def)]
+        if isinstance(obj_def, FrozenSet):
+            # We have a frozen set
+            return set([
+                self.load_object(v, path+[i], build_missing=build_missing)
+                for i, v in enumerate(obj_def)])
+        if isinstance(obj_def, FrozenDict):
+            # We have a frozen container
+            return {
+                k: self.load_object(v, path+[k], build_missing=build_missing)
+                for k, v in obj_def.items()}
 
         if isinstance(obj_def, ConcreteDefinition):
-            result = remap(
-                [obj_def],
-                enter=_load_object_enter,
-                visit=_load_object_visit,
-                exit=_load_object_exit)[0]
-            return result
+            # Thaw the definition
+
+            # Check if we already have this object
+            if obj_def in self.obj_cache and self.obj_cache[value] is not None:
+                # we found it
+                loaded_objs[value] = self.obj_cache[value]
+                return loaded_objs[value]
+
+            # Thaw concretized args
+            rt_args = self.load_object(
+                obj_def.args,
+                path + ['args'],
+                build_missing=build_missing)
+            rt_kwargs = self.load_object(
+                obj_def.kwargs,
+                path + ['kwargs'],
+                build_missing=build_missing) 
+
+            try:
+                new_obj = self._load_single_object(obj_def, rt_args, rt_kwargs, build_missing=build_missing)
+            except Exception as e:
+                raise RepoLoadError(f"Error loading object at path {'/'.join(map(str, path))} with definition {obj_def}: {e}") from e
+
+            loaded_objs[obj_def] = new_obj
+
+            return new_obj
+
+        if isinstance(obj_def, Definition):
+            return self.load_object(obj_def.definition, build_missing=build_missing)
+        if isinstance(obj_def, Object):
+            # this object is already loaded.
+            if obj_def.definition not in self.obj_cache:
+                self.obj_cache[obj_def.definition] = obj_def
+            return obj_def
         else:
-            result = remap(
-                obj_def,
-                enter=_load_object_enter,
-                visit=_load_object_visit,
-                exit=_load_object_exit)
-            return result
+            raise RepoLoadError(f"Cannot load object of type {type(obj_def)} at path {'/'.join(map(str, path))}")
 
     def __contains__(
             self, item: Object | ConcreteDefinition):
@@ -464,7 +474,7 @@ class Repo:
                             added_objs = True
                             selected_objects[obj_def] = obj
                 if not added_objs and build_missing:
-                    cdef = self.concretize_definition(sel)
+                    cdef = Definition.concretize(sel, repo=self)
                     obj = get_obj(cdef)
                     selected_objects[cdef] = obj
             elif isinstance(sel, Callable):
@@ -520,44 +530,44 @@ class Repo:
         if store is not None:
             store.set_main_def(self.main_def)
 
-    def add_object(self, *args):
-        from dryml.core2.object import Object
-        for obj in args:
-            if not isinstance(obj, Object):
-                raise TypeError("Only Object objects can be added to a repository.")
+    # def add_objects(self, *args):
+    #     from dryml.core2.object import Object
+    #     for obj in args:
+    #         if not isinstance(obj, Object):
+    #             raise TypeError("Only Object objects can be added to a repository.")
 
-        # Recursively add objects.
-        def _add_object(obj: Object):
-            if obj.definition in self.obj_cache and obj is not self.obj_cache[obj.definition]:
-                raise KeyError(f"Repo already has a different object matching {obj.definition}!")
-            self.obj_cache[obj.definition] = obj
+    #     # Recursively add objects.
+    #     def _add_object(obj: Object):
+    #         if obj.definition in self.obj_cache and obj is not self.obj_cache[obj.definition]:
+    #             raise KeyError(f"Repo already has a different object matching {obj.definition}!")
+    #         self.obj_cache[obj.definition] = obj
 
 
-        def _enter(path, key, value):
-            if isinstance(value, Object):
-                return {}, get_object_view(value)
-            elif isinstance(value, ConcreteDefinition):
-                return {}, get_definition_view(value)
-            else:
-                return default_enter(path, key, value)
+    #     def _enter(path, key, value):
+    #         if isinstance(value, Object):
+    #             return {}, get_object_view(value)
+    #         elif isinstance(value, ConcreteDefinition):
+    #             return {}, get_definition_view(value)
+    #         else:
+    #             return default_enter(path, key, value)
 
-        def _exit(path, key, value, new_parent, new_items):
-            if isinstance(value, Object):
-                _add_object(value)
-                return value
-            elif isinstance(value, ConcreteDefinition):
-                if value._obj is None:
-                    raise ValueError("Can't use a ConcreteDefinition without _obj pointer..")
-                _add_object(value._obj)
-                return value._obj
-            else:
-                return default_exit(path, key, value, new_parent, new_items)
+    #     def _exit(path, key, value, new_parent, new_items):
+    #         if isinstance(value, Object):
+    #             _add_object(value)
+    #             return value
+    #         elif isinstance(value, ConcreteDefinition):
+    #             if value._obj is None:
+    #                 raise ValueError("Can't use a ConcreteDefinition without _obj pointer..")
+    #             _add_object(value._obj)
+    #             return value._obj
+    #         else:
+    #             return default_exit(path, key, value, new_parent, new_items)
 
-        remap(
-             args,
-             enter=_enter,
-             visit=default_visit,
-             exit=_exit)
+    #     remap(
+    #          args,
+    #          enter=_enter,
+    #          visit=default_visit,
+    #          exit=_exit)
 
     def flush(self):
         # Commit all stores

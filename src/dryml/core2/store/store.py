@@ -14,7 +14,6 @@ class Store(ABC):
         """Base directory"""
         ...
 
-
     @abstractmethod
     def has_cdef(self, cdef: "ConcreteDefinition") -> bool:
         """Lightweight membership test: do you have data for this cdef?"""

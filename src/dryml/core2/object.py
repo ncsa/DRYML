@@ -5,22 +5,42 @@ import uuid
 import time
 import os
 from copy import deepcopy
+from contextvars import ContextVar
+from contextlib import contextmanager
 
-from .utils.general import pickle_save, pickle_load, _validate_init_sig
+from .utils.general import pickle_save, pickle_load
 from .definition import Definition
+
+
+_definition_mode: ContextVar[bool] = ContextVar("dryml_definition_mode", default=False)
+
+
+def in_definition_mode() -> bool:
+    return _definition_mode.get()
+
+
+@contextmanager
+def definition_mode(enabled: bool = True):
+    token = _definition_mode.set(enabled)
+    try:
+        yield
+    finally:
+        _definition_mode.reset(token)
 
 
 class Dryml(type):
     # Support metaclass to enable capture of input arguments
 
     def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
-        from .repo import manage_repo
+        if in_definition_mode():
+            return cls.defn(*args, **kwargs)
 
+        from .repo import manage_repo
         with manage_repo(repo=repo) as sub_repo:
             if __cdef__ is None:
                 # First-time construction from a soft Definition
-                defn = Definition(cls, *args, repo=sub_repo, **kwargs)
-                cdef = sub_repo.concretize_definition(defn)
+                defn = Definition(cls, *args, **kwargs)
+                cdef = defn.concretize(repo=sub_repo)
 
                 rt_args = sub_repo.load_object(cdef.args, build_missing=True)
                 rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
@@ -40,13 +60,14 @@ class Dryml(type):
             # Ensure the canonical cdef knows its object
             # (cdef is canonical here: created by concretize_definition or from repo)
 
-            if cdef._obj is None:
-                cdef._obj = obj
+            #if cdef._obj is None:
+            #    cdef._obj = obj
 
             # Attach a snapshot definition to the object.
             # __deepcopy__ on ConcreteDefinition keeps _obj/repo consistent.
-            obj.__cdef__ = deepcopy(cdef)
-            obj.__cdef__._obj = obj   # idempotent, but makes intent clear
+            #obj.__cdef__ = deepcopy(cdef)
+            obj.__cdef__ = cdef
+            #obj.__cdef__._obj = obj   # idempotent, but makes intent clear
 
             # Initialize with runtime (built) args
             obj.__init__(*rt_args, **rt_kwargs)
@@ -74,9 +95,9 @@ class Object(metaclass=Dryml):
         return args, kwargs
 
     @classmethod
-    def defn(cls, *args, repo=None, **kwargs) -> "Definition":
+    def defn(cls, *args, **kwargs) -> "Definition":
         from .definition import Definition
-        return Definition(cls, *args, repo=repo, **kwargs)
+        return Definition(cls, *args, **kwargs)
 
     # Alias for defn
     d = defn
@@ -88,9 +109,9 @@ class Object(metaclass=Dryml):
     def __init__(self):
         # Optional sanity assertions (can be turned off later)
         assert hasattr(self, "__cdef__"), "__cdef__ must be set by Dryml.__call__ before __init__"
-        assert getattr(self.__cdef__, "_obj", None) is self, "__cdef__._obj must point to self"
+        #assert getattr(self.__cdef__, "_obj", None) is self, "__cdef__._obj must point to self"
 
-    @cached_property
+    @property
     def definition(self) -> "ConcreteDefinition":
         # Get a `Definition` object for this particular object.
         return self.__cdef__
@@ -155,6 +176,7 @@ class UniqueID(Object):
 
     @classmethod
     def __strip_unique_args__(cls, *args, **kwargs):
+        ic("1!!!!!")
         args, kwargs = super().__strip_unique_args__(*args, **kwargs)
         kwargs = kwargs.copy()
         if 'uid' in kwargs:

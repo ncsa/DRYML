@@ -1,5 +1,5 @@
 from dryml.core2.utils.general import get_class_str, get_class_from_str, \
-    list_unique_objects, list_unique_concrete_definitions
+    get_unique_objects, get_unique_concrete_definitions
 import core2_objects as objects
 
 
@@ -34,11 +34,9 @@ def test_list_unique_objs_1():
         obj_f1_1,
         B=obj_c_1)
 
-    unique_objs = list_unique_objects(obj_c_2)
+    unique_obj_definitions = set(get_unique_concrete_definitions(obj_c_2))
 
-    unique_obj_definitions = set(list_unique_concrete_definitions(obj_c_2))
-
-    assert len(unique_objs) == 5
+    assert len(unique_obj_definitions) == 5
     assert obj_f1_1.definition in unique_obj_definitions
     assert obj_f1_2.definition in unique_obj_definitions
     assert obj_f1_3.definition in unique_obj_definitions

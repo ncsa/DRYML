@@ -23,8 +23,8 @@ def test_definition_eq_3():
         objects.TestClass1, lambda x: x == 10, test='a')
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
-    assert sel_1 != def_2
-    assert def_2 != sel_1
+    assert sel_1.match(def_2, strict=False)
+    assert not def_2.match(sel_1, strict=False)
 
 
 def test_definition_eq_4():
@@ -32,6 +32,6 @@ def test_definition_eq_4():
         objects.TestClass1, 10, test=lambda x: x == 'a')
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
-    assert sel_1 != def_2
-    assert def_2 != sel_1
+    assert sel_1.match(def_2, strict=False)
+    assert not def_2.match(sel_1, strict=False)
 

@@ -11,7 +11,6 @@ from typing import Optional, Callable
 from collections.abc import Mapping, ItemsView
 from inspect import getmodule, isclass, \
     Parameter, signature
-from boltons.iterutils import remap, default_enter, default_exit
 
 
 def _validate_init_sig(cls, *args, **kwargs):
@@ -133,91 +132,52 @@ def get_object_view(obj):
     return ItemsView({'cls': obj.definition.cls, 'args': obj.definition.args, 'kwargs': obj.definition.kwargs})
 
 
-def get_definition_view(defn):
-    view_dict = {}
-    if 'cls' in defn:
-        view_dict['cls'] = defn.cls
-    if 'args' in defn:
-        view_dict['args'] = defn.args
-    if 'kwargs' in defn:
-        view_dict['kwargs'] = defn.kwargs
-    return ItemsView(view_dict)
-
-
-def list_unique_concrete_definitions(obj_or_def):
+def get_unique_concrete_definitions(obj_or_def) -> set["ConcreteDefinition"]:
     from ..object import Object
     from ..definition import Definition
     from ..definition import ConcreteDefinition
 
-    unique_cdefs = set()
-
-    def _enter(path, key, value):
-        if isinstance(value, Object):
-            # check if we've visited this one already
-            def_val = value.definition
-
-            if def_val in unique_cdefs:
-                return value, false
-            else:
-                return {}, get_definition_view(def_val)
-        elif isinstance(value, ConcreteDefinition):
-            return {}, get_definition_view(value)
-        elif isinstance(value, Definition):
-            raise ValueError("Unexpected Definition found in object graph!")
-        else:
-            return default_enter(path, key, value)
-
-    def _visit(path, key, value):
-        # we aren't processing anything
-        return key, value
-
-    def _exit(path, key, value, new_parent, new_items):
-        if isinstance(value, Object):
-            # we're exiting an object
-            def_val = value.definition
-
-            unique_cdefs.add(def_val)
-        elif isinstance(value, ConcreteDefinition):
-            #if value._obj is None:
-            #    raise ValueError("unsupported ConcreteDefinition!")
-            unique_cdefs.add(value)
-
-        return default_exit(path, key, value, new_parent, new_items)
 
     if isinstance(obj_or_def, Object):
-        remap(
-            [obj_or_def],
-            enter=_enter,
-            visit=_visit,
-            exit=_exit)[0]
-        return list(unique_cdefs)
-    else:
-        remap(
-            obj_or_def,
-            enter=_enter,
-            visit=_visit,
-            exit=_exit)
-        return list(unique_cdefs)
+        return get_unique_concrete_definitions(obj_or_def.definition)
+    if isinstance(obj_or_def, ConcreteDefinition):
+        args_cdefs = list(get_unique_concrete_definitions(obj_or_def.args))
+        kwargs_cdefs = list(get_unique_concrete_definitions(obj_or_def.kwargs))
+        return set([obj_or_def] + args_cdefs + kwargs_cdefs)
+
+    if isinstance(obj_or_def, Definition):
+        raise ValueError("Unexpected Definition found in object graph!")
+
+    if isinstance(obj_or_def, (list, tuple, set)):
+        all_cdefs = []
+        for el in obj_or_def:
+            all_cdefs.extend(list(get_unique_concrete_definitions(el)))
+        return set(all_cdefs)
+
+    if isinstance(obj_or_def, Mapping):
+        all_cdefs = []
+        for el in obj_or_def.values():
+            all_cdefs.extend(list(get_unique_concrete_definitions(el)))
+        return set(all_cdefs)
+
+    return set()
 
 
-def list_unique_objects(obj):
-    unique_cdefs = list_unique_concrete_definitions(obj)
+def get_unique_objects(obj, repo) -> list["Object"]:
+    unique_cdefs = get_unique_concrete_definitions(obj)
 
-    if any(cdef._obj is None for cdef in unique_cdefs):
-        raise ValueError("Some ConcreteDefinitions do not have associated objects!")
-
-    return [cdef._obj for cdef in unique_cdefs if cdef._obj is not None]
+    return [repo[cdef] for cdef in unique_cdefs]
 
 
 def apply_func(
         obj, func, func_args=None, sel=Optional[Callable],
-        func_kwargs=None):
+        func_kwargs=None, repo=None):
     if func_args is None:
         func_args = ()
     if func_kwargs is None:
         func_kwargs = {}
 
-    obj_list = list_unique_objects(obj)
+    obj_list = get_unique_objects(obj, repo)
 
     ic(obj_list, func)
 

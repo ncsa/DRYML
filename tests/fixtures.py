@@ -27,7 +27,7 @@ StoreDef = Literal["directory", "zip_filepath", "buffer", "zip_buffer"]
 @dataclass
 class StoreResource:
     kind: StoreDef
-    root: Path
+    root: Path | None
     resource: object  # str path OR IOBase
 
     def rewind(self) -> None:
@@ -48,14 +48,16 @@ class StoreResource:
 
 
 def build_store_resource(tmp_path_factory, kind: StoreDef, *, prefix: str = "store") -> StoreResource:
-    root = tmp_path_factory.mktemp(f"{prefix}_{kind}_{uuid.uuid4().hex[:8]}")
+    root: Path | None = None
 
     if kind == "directory":
+        root = tmp_path_factory.mktemp(f"{prefix}_{kind}_{uuid.uuid4().hex[:8]}")
         d = root / "repo_dir"
         d.mkdir()
         resource = str(d)
 
     elif kind == "zip_filepath":
+        root = tmp_path_factory.mktemp(f"{prefix}_{kind}_{uuid.uuid4().hex[:8]}")
         # path that does not need to exist yet
         resource = str(root / "repo.dry")
 
