@@ -136,16 +136,17 @@ def test_selector_12():
         test=objects.TestClass1(
             20,
             test=objects.TestClass1(30, test='c')))
-    def_1 = Definition(
-        objects.TestClass2,
-        10,
-        test=Definition(
-            objects.TestClass1,
-            30,
-            test=Definition(
-                objects.TestClass2,
+    with core2.definition_mode():
+        def_1 = objects.TestClass2(
+            10,
+            test=objects.TestClass1(
                 30,
-                test=lambda x: x != 'c')))
+                test=objects.TestClass2(
+                    30,
+                    test=lambda x: x != 'c'
+                )
+            )
+        )
     temp_stream = StringIO()
     assert not def_1(obj_1, verbose=True, full_diagnostic=True, output_stream=temp_stream)
     temp_stream.seek(0)
