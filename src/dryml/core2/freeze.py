@@ -42,8 +42,7 @@ class FrozenSet(frozenset):
 
 class FrozenDict(ABCMapping):
     """
-    Immutable mapping, not a dict subclass (important: boltons.remap default_enter
-    will build a plain dict for dictlikes, avoiding 'can’t populate an immutable dict').
+    Immutable mapping, not a dict subclass
     """
     __slots__ = ("_items", "_dict")
 

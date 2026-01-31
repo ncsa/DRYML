@@ -135,7 +135,7 @@ class Definition(DefInterface, Mapping):
         else:
             return False
 
-    # --- mapping interface (for get_definition_view / remap compatibility) ---
+    # --- mapping interface (for view compatibility) ---
     def __getitem__(self, k: str) -> Any:
         if k == "cls":
             if self._cls is None:

@@ -8,7 +8,7 @@ import tempfile
 import io
 import glob
 from typing import Optional, Callable
-from collections.abc import Mapping, ItemsView
+from collections.abc import Mapping, Iterable, ItemsView
 from inspect import getmodule, isclass, \
     Parameter, signature
 
@@ -83,6 +83,26 @@ def get_kwarg_defaults(cls):
 
 def is_dictlike(val):
     return isinstance(val, Mapping)
+
+
+def is_collection(val) -> bool:
+    """
+    True for non-mapping iterables (lists, tuples, sets, generators, etc.),
+    but False for string/bytes-like objects and mappings.
+    """
+    if val is None:
+        return False
+
+    # Treat these as scalars/leaves, not collections
+    if isinstance(val, (str, bytes, bytearray, memoryview)):
+        return False
+
+    # Leave mappings to is_dictlike()
+    if isinstance(val, Mapping):
+        return False
+
+    # Iterable => collection
+    return isinstance(val, Iterable)
 
 
 def is_stream(obj) -> bool:

@@ -776,33 +776,6 @@ class Repo:
         for arg in args:
             _add_object(arg)
 
-
-    #     def _enter(path, key, value):
-    #         if isinstance(value, Object):
-    #             return {}, get_object_view(value)
-    #         elif isinstance(value, ConcreteDefinition):
-    #             return {}, get_definition_view(value)
-    #         else:
-    #             return default_enter(path, key, value)
-
-    #     def _exit(path, key, value, new_parent, new_items):
-    #         if isinstance(value, Object):
-    #             _add_object(value)
-    #             return value
-    #         elif isinstance(value, ConcreteDefinition):
-    #             if value._obj is None:
-    #                 raise ValueError("Can't use a ConcreteDefinition without _obj pointer..")
-    #             _add_object(value._obj)
-    #             return value._obj
-    #         else:
-    #             return default_exit(path, key, value, new_parent, new_items)
-
-    #     remap(
-    #          args,
-    #          enter=_enter,
-    #          visit=default_visit,
-    #          exit=_exit)
-
     def flush(self):
         # Commit all stores
         for store in self.stores:

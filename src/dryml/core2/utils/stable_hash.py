@@ -9,9 +9,8 @@ from enum import Enum
 
 import numpy as np
 
-from .general import is_dictlike
+from .general import is_dictlike, is_collection
 from .recurse import cycle_detect
-from boltons.iterutils import remap, is_collection, default_enter
 
 def stable_int_hash(s: str, *, bits: int = 64) -> int:
     # blake2b is fast and stable; digest_size controls output size
@@ -121,7 +120,6 @@ def stable_hash_value(value) -> str:
 
 def _is_container(value) -> bool:
     """
-    Container in the sense of remap traversal.
     Note: np.ndarray is explicitly *not* treated as a container here.
     """
     return (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray)
