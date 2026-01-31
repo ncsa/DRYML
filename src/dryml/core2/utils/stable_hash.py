@@ -185,7 +185,7 @@ def stable_hash_container(cont, cache=None) -> str:
     return hasher.hexdigest()
 
 
-@cycle_detect
+@cycle_detect()
 def stable_hash_function(structure, cache=None) -> str:
     """
     Deterministic structural hash of an arbitrary (possibly nested) Python structure.

@@ -8,7 +8,7 @@ from copy import deepcopy
 from contextvars import ContextVar
 from contextlib import contextmanager
 
-from .utils.general import pickle_save, pickle_load
+from .utils.general import pickle_save, pickle_load, revision_path
 from .definition import Definition
 
 
@@ -57,23 +57,19 @@ class Dryml(type):
             # Actual object allocation
             obj = cls.__new__(cls)
 
-            # Ensure the canonical cdef knows its object
-            # (cdef is canonical here: created by concretize_definition or from repo)
-
-            #if cdef._obj is None:
-            #    cdef._obj = obj
-
-            # Attach a snapshot definition to the object.
-            # __deepcopy__ on ConcreteDefinition keeps _obj/repo consistent.
-            #obj.__cdef__ = deepcopy(cdef)
+            # Attach the definition to the object.
             obj.__cdef__ = cdef
-            #obj.__cdef__._obj = obj   # idempotent, but makes intent clear
+
+            # Set the workspace
+            if isinstance(obj, WorkspaceCapable):
+                ws = sub_repo.workspace_manager.alloc(cdef.stable_hash())
+                os.makedirs(ws.path(), exist_ok=True)
+                obj.__ws__ = ws
+            else:
+                obj.__ws__ = None
 
             # Initialize with runtime (built) args
             obj.__init__(*rt_args, **rt_kwargs)
-
-            # Attach repo for later use
-            obj._repo = sub_repo
 
 
         return obj
@@ -83,6 +79,9 @@ class Object(metaclass=Dryml):
     # Base type for using CreationControl metaclass.
     # Provides basic implementations for all methods used
     # In the CreationControl process
+
+    __ws__: WorkspaceHandle | None
+    __cdef__: ConcreteDefinition
 
     @classmethod
     def __prepare_args__(cls, *args, **kwargs):
@@ -109,7 +108,14 @@ class Object(metaclass=Dryml):
     def __init__(self):
         # Optional sanity assertions (can be turned off later)
         assert hasattr(self, "__cdef__"), "__cdef__ must be set by Dryml.__call__ before __init__"
-        #assert getattr(self.__cdef__, "_obj", None) is self, "__cdef__._obj must point to self"
+        assert hasattr(self, "__ws__"), "__ws__ must be set by Dryml.__call__ before __init__"
+
+    @property
+    def workspace(self) -> str:
+        if self.__ws__ is None:
+            raise RuntimeError("This object has no workspace")
+        return self.__ws__.path()
+
 
     @property
     def definition(self) -> "ConcreteDefinition":
@@ -123,44 +129,47 @@ class Object(metaclass=Dryml):
     def __repr__(self):
         return f"<{self.definition.cls} at {hex(id(self))}>(args={self.definition.args}, kwargs={self.definition.kwargs})"
 
-    def save(self, repo=None, main=True):
+    def save(self, repo=None, main=True, revision: str|None = None):
         from .repo import save_object
-        save_object(self, repo=repo, main=main)
+        save_object(self, repo=repo, main=main, revision=revision)
 
-    def save_to_dir(self, dest_dir: str):
+    def save_state_to_dir(self, dest_dir: str, revision: str|None = None):
         pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
-        self.save_imp(dest_dir)
+        self.save_state_to_dir_imp(dest_dir, revision)
 
-    def save_imp(self, dest_dir: str):
+    def save_state_to_dir_imp(self, dest_dir: str, revision: str|None = None):
         pass
 
-    def load(self, repo=None):
+    def load(self, repo=None, revision: str|None = None):
         from .repo import load_object
-        load_object(self, repo=repo)
+        load_object(self, repo=repo, revision=revision)
             
-    def load_from_dir(self, src_dir: str):
+    def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
         loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
         assert loaded_def == self.definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.definition}"
-        self.load_imp(src_dir)
+        self.restore_state_from_dir_imp(src_dir, revision=revision)
 
-    def load_imp(self, src_dir: str):
+    def restore_state_from_dir_imp(self, src_dir: str, revision: str|None = None):
         pass
 
 
 class Pickleable(Object):
-    _HEAVY_EXCLUDE = {"_repo", "__cdef__", "definition"}
+    _HEAVY_EXCLUDE = {"__cdef__", "__ws__", "definition"}
 
-    def save_imp(self, dest_dir: str):
+    def save_state_to_dir_imp(self, dest_dir: str, revision: str|None=None):
         # Grab all heavy-state data
         heavy_state = {k: v for k, v in self.__dict__.items()
                        if k not in self._HEAVY_EXCLUDE}
 
         # Save the entire object as a pickle
-        pickle_save(heavy_state, os.path.join(dest_dir, "heavy.pkl"))
+        pickle_save(
+            heavy_state,
+            revision_path("heavy", "pkl", dest_dir, revision=revision))
 
-    def load_imp(self, src_dir: str):
+    def restore_state_from_dir_imp(self, src_dir: str, revision: str|None):
         # heavy-state data is stored in heavy.pkl
-        heavy_state = pickle_load(os.path.join(src_dir, "heavy.pkl"))
+        heavy_state = pickle_load(
+            revision_path("heavy", "pkl", src_dir, revision=revision))
 
         self.__dict__.update(heavy_state)
 
@@ -176,7 +185,6 @@ class UniqueID(Object):
 
     @classmethod
     def __strip_unique_args__(cls, *args, **kwargs):
-        ic("1!!!!!")
         args, kwargs = super().__strip_unique_args__(*args, **kwargs)
         kwargs = kwargs.copy()
         if 'uid' in kwargs:
@@ -216,3 +224,8 @@ class Metadata(Object):
     def __init__(self, *args, metadata=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.metadata = metadata
+
+
+class WorkspaceCapable:
+    """Opt-in: this object gets a workspace."""
+    pass

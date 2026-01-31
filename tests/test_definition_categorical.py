@@ -32,7 +32,7 @@ def test_def_1():
     assert obj_class_def.match(obj_def_manual)
 
     obj_class_def = obj_def.categorical(recursive=False)
-    obj_def_thawed = obj_def.thaw()
+    obj_def_thawed = obj_def.to_definition()
     del obj_def_thawed.kwargs['uid']
     assert obj_class_def(obj_def_thawed)
 
@@ -108,7 +108,7 @@ def test_def_4():
     obj_def = trainable_obj.definition
 
     # Building from plain definition
-    trainable_obj_built = obj_def.thaw().build()
+    trainable_obj_built = obj_def.to_definition().build()
 
     assert trainable_obj_built['model'] is \
         trainable_obj_built['train_fn']['optimizer']['model']

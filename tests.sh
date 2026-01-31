@@ -6,4 +6,4 @@ else
     dirs=$@
 fi;
 
-pytest -x --cov=dryml ${dirs}
+pytest --cov=dryml ${dirs}

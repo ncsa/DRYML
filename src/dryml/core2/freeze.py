@@ -16,6 +16,9 @@ class FrozenList(tuple):
     def __new__(cls, items: Iterable[Any]):
         return super().__new__(cls, tuple(items))
 
+    def __repr__(self) -> str:
+        return f"F{list(self)!r}"
+
 
 class FrozenTuple(tuple):
     """Tagged tuple for symmetric thaw handling."""
@@ -23,12 +26,18 @@ class FrozenTuple(tuple):
     def __new__(cls, items: Iterable[Any]):
         return super().__new__(cls, tuple(items))
 
+    def __repr__(self) -> str:
+        return f"F{tuple(self)!r}"
+
 
 class FrozenSet(frozenset):
     """Immutable representation of a Python set (tagged for thaw to set)."""
     __slots__ = ()
     def __new__(cls, items: Iterable[Any]):
         return super().__new__(cls, items)
+
+    def __repr__(self) -> str:
+        return f"F{set(self)!r}"
 
 
 class FrozenDict(ABCMapping):
@@ -64,7 +73,7 @@ class FrozenDict(ABCMapping):
         return self._dict.values()
 
     def __repr__(self) -> str:
-        return f"FrozenDict({self._dict!r})"
+        return f"F{self._dict!r}"
 
 
 class FrozenNDArray(np.ndarray):
@@ -84,6 +93,9 @@ class FrozenNDArray(np.ndarray):
 
     def thaw(self):
         return np.array(self, copy=True)
+
+    def __repr__(self) -> str:
+        return f"FNDArray(shape={self.shape}, dtype={self.dtype}, writeable={getattr(self, '_frozen_writeable', False)})"
 
 
 frozen_container_types = (FrozenList, FrozenTuple, FrozenSet, FrozenDict)

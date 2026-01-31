@@ -2,24 +2,22 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import glob
-import zipfile
 from typing import Callable
-from boltons.iterutils import remap, default_enter, default_visit, default_exit
-from collections.abc import ItemsView
 from contextlib import contextmanager
 from io import IOBase
 from pathlib import Path
 import weakref
-
-from boltons.iterutils import remap, default_enter, default_exit
+from contextvars import ContextVar
+import numpy as np
+import atexit
 
 from .definition import Definition, ConcreteDefinition
-from .utils.general import zip_directory, \
-    pickle_load, pickle_save, get_temp_directory, get_object_view
+from .utils.recurse import cycle_detect
 from .object import Object
 from .store.store import Store
 from .types import is_pod
+from .policies import InstancePolicy, CachePolicy
+from .freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
 
 
 class RepoSaveError(Exception):
@@ -40,7 +38,12 @@ class Repo:
 
     # Caches
     # Links particular concrete definition with particular object
-    obj_cache: dict[ConcreteDefinition, Object]
+    weak_obj_cache: weakref.WeakValueDictionary[ConcreteDefinition, Object]
+    strong_obj_cache: dict[ConcreteDefinition, Object]
+
+    # known to exist in stores
+    light_index: set[ConcreteDefinition]
+
     # Links particular Definition object with a concrete definition (Definitions are resolved )
     cdef_cache: weakref.WeakValueDictionary[str, ConcreteDefinition]
 
@@ -57,7 +60,9 @@ class Repo:
     # Helper class for saving objects
     def __init__(self, stores=None):
         # Initialize caches
-        self.obj_cache = {}
+        self.weak_obj_cache = weakref.WeakValueDictionary()
+        self.strong_obj_cache = {}
+        self.light_index = set()
         self.cdef_cache = weakref.WeakValueDictionary()
 
         # Some helper variables for monitoring
@@ -105,9 +110,37 @@ class Repo:
         else:
             self.stores.append(store)
 
+    def cache_strong(self, obj: Object) -> None:
+        self.strong_obj_cache[obj.__cdef__] = obj
+
+    def cache_weak(self, obj: Object) -> None:
+        self.weak_obj_cache[obj.__cdef__] = obj
+
+    # --- helpers you already have ---
+    def get_cached(self, cdef, *, reuse_weak: bool = True):
+        obj = self.strong_obj_cache.get(cdef)
+        if obj is not None:
+            return obj
+        if reuse_weak:
+            return self.weak_obj_cache.get(cdef)
+        return None
+
+    def pin(self, obj):
+        """Promote to strong cache."""
+        cdef = obj.__cdef__
+        self.strong_obj_cache[cdef] = obj
+        self.weak_obj_cache.pop(cdef, None)
+
+    def unpin(self, obj_or_cdef):
+        """Demote to weak cache."""
+        cdef = obj_or_cdef if isinstance(obj_or_cdef, ConcreteDefinition) else obj_or_cdef.__cdef__
+        obj = self.strong_obj_cache.pop(cdef, None)
+        if obj is not None:
+            self.weak_obj_cache[cdef] = obj
+
     def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
         # do any stores have data for this cdef?
-        return any(store.has_cdef(cdef) for store in self.stores)
+        return any(store.has(cdef) for store in self.stores)
 
     def hydrate_from_stores(self):
         """
@@ -116,89 +149,89 @@ class Repo:
         """
         for store in self.stores:
             for cdef in store.hydrate_index():
-                self.obj_cache.setdefault(cdef, None)
+                self.light_index.add(cdef)
 
     def __len__(self):
-        return len(self.obj_cache)
+        return len(self.strong_obj_cache)
 
-    def _save_single_object(self, obj: Object, store: Store|None=None):
+    def _save_single_object(self, obj: Object, store: Store|None=None, revision: str|None=None):
         """
         Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
         """
+        ic("1")
 
         obj_def = obj.definition
-        if obj_def in self.obj_cache:
-            if self.obj_cache[obj_def] is None:
+        if obj_def in self.strong_obj_cache:
+            if self.strong_obj_cache.get(obj_def) is None:
                 # Update repo cache
-                self.obj_cache[obj_def] = obj
+                self.strong_obj_cache[obj_def] = obj
             else:
                 # Check that this was the same object
-                if obj is not self.obj_cache[obj_def]:
+                if obj is not self.strong_obj_cache.get(obj_def):
                     raise ValueError("We already have a different object with definition: {obj_def}")
         else:
             # Update repo cache
-            self.obj_cache[obj_def] = obj
+            self.strong_obj_cache[obj_def] = obj
+        ic("2")
 
         if store is not None:
-            store.save_object(obj)
+            ic(store)
+            store.save_object(obj, revision=revision)
             self._num_saves += 1
+            ic(self._num_saves)
         else:
             raise RepoSaveError("No store available to save object!")
 
-    def save_object(self, obj, main=False, store=None):
+    def save_object(self, obj, main=False, store=None, revision: str|None=None):
         if store is None:
             store = self.default_store
 
-        saved_objs = {}
-        def _save_object_enter(path, key, value):
-            if isinstance(value, Object):
-                result = {'args': value.definition.args, 'kwargs': value.definition.kwargs}
-                return {}, ItemsView(result)
-            elif isinstance(value, ConcreteDefinition):
-                obj = value._obj
-                if obj is None:
-                    raise ValueError("ConcreteDefinitions must be linked to actual objects through _obj to be savable.")
-                result = {'args': obj.definition.args, 'kwargs': obj.definition.kwargs}
-                return {}, ItemsView(result)
-            elif isinstance(value, Definition):
-                raise ValueError("Plain Definitions aren't allowed here.")
+        saved_objs: dict[ConcreteDefinition,Object] = {}
+        ic(store, saved_objs)
+
+        @cycle_detect()
+        def _save_object(obj):
+            ic("1")
+            if isinstance(obj, Object):
+                ic("object branch")
+                # we must descend into args/kwargs first
+                cdef = obj.definition
+                _save_object(cdef.args)
+                _save_object(cdef.kwargs)
+
+                if cdef not in saved_objs:
+                    # Save the object
+                    self._save_single_object(obj, store=store, revision=revision)
+                    saved_objs[cdef] = obj
+                return
+
+            if isinstance(obj, ConcreteDefinition):
+                ic("concrete definition branch")
+                # We must find the linked object
+                linked_obj = self.get_cached(obj)
+                if linked_obj is None:
+                    raise RepoSaveError(f"Definition of object {obj} is not reachable in this repo!")
+                _save_object(linked_obj)
+                return
+
+            if isinstance(obj, (list, tuple, set, FrozenList, FrozenTuple, FrozenSet)):
+                ic("iterable branch")
+                for el in obj:
+                    _save_object(el)
+                return
+            if isinstance(obj, (FrozenDict, dict)):
+                ic("mapping branch")
+                for el in obj.values():
+                    _save_object(el)
+                return
+            if isinstance(obj, Definition):
+                raise RepoSaveError("Plain Definitions aren't allowed here.")
+            if is_pod(obj) or isinstance(obj, (np.ndarray, FrozenNDArray)):
+                return
             else:
-                return default_enter(path, key, value)
+                raise RepoSaveError(f"Cannot save object of type {type(obj)}!")
 
-        def _save_object_visit(path, key, value):
-            return key, value
-
-        def _save_object_exit(path, key, value, new_parent, new_items):
-            if isinstance(value, Object):
-                obj_def = value.definition
-                if obj_def not in saved_objs:
-                    self._save_single_object(value, store=store)
-                    saved_objs[obj_def] = value
-                return value
-            elif isinstance(value, ConcreteDefinition):
-                obj = value._obj
-                if obj is None:
-                    raise ValueError("ConcreteDefinitions must be linked to actual objects through _obj to be savable.")
-                if value not in saved_objs:
-                    self._save_single_object(obj, store=store)
-                    saved_objs[value] = obj
-                return value
-            else:
-                return default_exit(path, key, value, new_parent, new_items)
-
-        # Save the object
-        if isinstance(obj, Object):
-            remap(
-                [obj],
-                enter=_save_object_enter,
-                visit=_save_object_visit,
-                exit=_save_object_exit)
-        else:
-            remap(
-                obj,
-                enter=_save_object_enter,
-                visit=_save_object_visit,
-                exit=_save_object_exit)
+        _save_object(obj)
 
         # Save main object definition
         if main:
@@ -209,7 +242,7 @@ class Repo:
         if obj is None:
             # Save all loaded objects in the cache
             obj_list = []
-            for _, obj in self.obj_cache.items():
+            for _, obj in self.strong_obj_cache.items():
                 if obj is not None:
                     obj_list.append(obj)
             self.save_object(obj_list, main=False, store=store)
@@ -218,119 +251,371 @@ class Repo:
             self.save_object(obj, main=False, store=store)
             self.flush()
 
-    def _load_single_object(self, cdef: ConcreteDefinition, args, kwargs, build_missing=False) -> Object:
-        """
-        Defines how the Repo updates its caches and delegates loading a single object from one of it's stores
-        """
+    def _first_store_with(self, cdef):
+        for st in self.stores:
+            if st.has(cdef):
+                return st
+        return None
 
-        # Already loaded?
-        if cdef in self.obj_cache and self.obj_cache[cdef] is not None:
-            return self.obj_cache[cdef]
+    # -------------------------------------------------------------------------
+    # Core: realize arbitrary structure into runtime Python + Objects
+    # -------------------------------------------------------------------------
+    @cycle_detect(arg_pos=1)
+    def _realize(
+        self,
+        x: Any,
+        *,
+        instance: InstancePolicy = "reuse",
+        restore_state: bool = True,
+        build_missing: bool = False,
+        reuse_weak: bool = True,
+        cache: CachePolicy = "weak",
+        revision: str | None = None,
+        # internal
+        memo: dict | None = None,          # memo for cdef->obj within a single call
+        path: list[str | int] | None = None,
+        _stack: set[int] | None = None,    # cycle guard for containers
+    ) -> Any:
+        if memo is None:
+            memo = {}
+        if path is None:
+            path = ["<root>"]
+        if _stack is None:
+            _stack = set()
 
+        # scalars
+        if is_pod(x):
+            return x
+
+        # ndarray / FrozenNDArray -> writable ndarray
+        if isinstance(x, FrozenNDArray):
+            # your FrozenNDArray currently doesn't define .thaw() in the snippet;
+            # support both styles.
+            if hasattr(x, "thaw"):
+                return x.thaw()
+            return np.array(x, copy=True)
+
+        if isinstance(x, np.ndarray):
+            return np.array(x, copy=True)
+
+        # ConcreteDefinition -> object materialization
+        from .definition import ConcreteDefinition, Definition  # local to avoid cycles
+        from .object import Object
+
+        if isinstance(x, ConcreteDefinition):
+            return self._materialize_cdef(
+                x,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+                memo=memo,
+                path=path,
+            )
+
+        # Definition -> concretize then materialize
+        if isinstance(x, Definition):
+            cdef = x.concretize(repo=self)
+            return self._materialize_cdef(
+                cdef,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+                memo=memo,
+                path=path,
+            )
+
+        # Object encountered during realization
+        if isinstance(x, Object):
+            if instance == "new":
+                # interpret "new" as "clone-by-identity": rebuild from its cdef
+                return self._materialize_cdef(
+                    x.definition,
+                    instance="new",
+                    restore_state=restore_state,
+                    build_missing=build_missing,
+                    reuse_weak=reuse_weak,
+                    cache=cache,
+                    revision=revision,
+                    memo=memo,
+                    path=path,
+                )
+            # reuse: return it, but ensure repo can reach it
+            if self.get_cached(x.definition, reuse_weak=reuse_weak) is None:
+                self.cache_weak(x.definition, x)
+            return x
+
+        # Containers (cycle-safe)
+        oid = id(x)
+        if oid in _stack:
+            raise RepoLoadError(f"Cycle detected while realizing at {'/'.join(map(str, path))}")
+        _stack.add(oid)
+        try:
+            # tuple-like
+            if isinstance(x, (tuple, FrozenTuple)):
+                return tuple(
+                    self._realize(
+                        v,
+                        instance=instance,
+                        restore_state=restore_state,
+                        build_missing=build_missing,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision,
+                        memo=memo,
+                        path=path + [i],
+                        _stack=_stack,
+                    )
+                    for i, v in enumerate(x)
+                )
+
+            # list-like (FrozenList is tuple-tagged)
+            if isinstance(x, FrozenList) or isinstance(x, list):
+                return [
+                    self._realize(
+                        v,
+                        instance=instance,
+                        restore_state=restore_state,
+                        build_missing=build_missing,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision,
+                        memo=memo,
+                        path=path + [i],
+                        _stack=_stack,
+                    )
+                    for i, v in enumerate(list(x))
+                ]
+
+            # set-like
+            if isinstance(x, (set, FrozenSet)):
+                out = set()
+                for i, v in enumerate(x):
+                    out.add(
+                        self._realize(
+                            v,
+                            instance=instance,
+                            restore_state=restore_state,
+                            build_missing=build_missing,
+                            reuse_weak=reuse_weak,
+                            cache=cache,
+                            revision=revision,
+                            memo=memo,
+                            path=path + [f"<set:{i}>"],
+                            _stack=_stack,
+                        )
+                    )
+                return out
+
+            # mapping-like (FrozenDict implements Mapping)
+            if isinstance(x, (dict, FrozenDict)):
+                out = {}
+                for k, v in (x.items() if hasattr(x, "items") else x):
+                    rk = self._realize(
+                        k,
+                        instance=instance,
+                        restore_state=restore_state,
+                        build_missing=build_missing,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision,
+                        memo=memo,
+                        path=path + ["<key>"],
+                        _stack=_stack,
+                    )
+                    rv = self._realize(
+                        v,
+                        instance=instance,
+                        restore_state=restore_state,
+                        build_missing=build_missing,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision,
+                        memo=memo,
+                        path=path + [str(k)],
+                        _stack=_stack,
+                    )
+                    out[rk] = rv
+                return out
+
+        finally:
+            _stack.remove(oid)
+
+        raise RepoLoadError(
+            f"Cannot realize type {type(x).__name__} at {'/'.join(map(str, path))}"
+        )
+
+    # -------------------------------------------------------------------------
+    # Core: turn a ConcreteDefinition into a live Object under load knobs
+    # -------------------------------------------------------------------------
+    def _materialize_cdef(
+        self,
+        cdef,
+        *,
+        instance: InstancePolicy = "reuse",
+        restore_state: bool = True,
+        build_missing: bool = False,
+        reuse_weak: bool = True,
+        cache: CachePolicy = "weak",
+        revision: str | None = None,
+        # internal
+        memo: dict | None = None,   # cdef->obj memo for this realization pass
+        path: list[str | int] | None = None,
+    ):
+        if memo is None:
+            memo = {}
+        if path is None:
+            path = ["<root>"]
+
+        # If we've already materialized this cdef in this call, return it
+        if cdef in memo:
+            return memo[cdef]
+
+        # Enforce sane caching semantics for "new"
+        if instance == "new" and cache != "none":
+            # caches are keyed ONLY by cdef, so caching a "new" instance would overwrite.
+            raise ValueError("instance='new' requires cache='none' (caches are keyed by cdef)")
+
+        # Reuse path: consult caches
+        if instance == "reuse":
+            obj = self.get_cached(cdef, reuse_weak=reuse_weak)
+            if obj is not None:
+                if restore_state and revision is not None and obj.state_revision != revision:
+                    st = self._first_store_with(cdef)
+                    if st is None:
+                        raise RepoLoadError("No store has requested revision")
+                    ok = st.restore_object(obj, revision=revision)
+                    if not ok:
+                        raise RepoLoadError("Store can't restore requested revision")
+                return obj
+
+        # Determine whether state exists somewhere
         in_store = self.has_cdef_light(cdef)
 
-        if not build_missing and not in_store:
-            raise RuntimeError("Asked not to build missing objects")
+        # If caller expects state and we can't find any, respect build_missing
+        if restore_state and (not in_store) and (not build_missing):
+            raise RepoLoadError(
+                f"Missing stored state for {cdef} at {'/'.join(map(str, path))} "
+                f"(set build_missing=True to allow fresh construction)"
+            )
 
-        # Construct object; graph algorithm makes sure args/kwargs are already
-        # realized and passed in
-        obj = cdef.cls(*args, repo=self, __cdef__=cdef, **kwargs)
-        self._num_constructions += 1
+        # Realize constructor args/kwargs (objects inside become objects)
+        # NOTE: pass cache="none" while constructing dependencies when instance="new"
+        # to avoid overwriting caches as well.
+        sub_cache = cache if instance == "reuse" else "none"
 
-        # Try to hydrate from stores, use first one that has it
-        if in_store:
-            for store in self.stores:
-                if store.has_cdef(cdef):
-                    store.load_object(obj)
-                    break
+        rt_args = self._realize(
+            cdef.args,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=sub_cache,
+            revision=revision,
+            memo=memo,
+            path=path + ["args"],
+        )
+        rt_kwargs = self._realize(
+            cdef.kwargs,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=sub_cache,
+            revision=revision,
+            memo=memo,
+            path=path + ["kwargs"],
+        )
 
-        self.obj_cache[cdef] = obj
+        # Construct a new instance (bypass re-concretization by passing __cdef__)
+        try:
+            obj = cdef.cls(*rt_args, repo=self, __cdef__=cdef, **rt_kwargs)
+
+            self._num_constructions += 1
+        except Exception as e:
+            raise RepoLoadError(
+                f"Error constructing {cdef.cls.__name__} at {'/'.join(map(str, path))}: {e}"
+            ) from e
+
+        # Memo immediately (preserve sharing inside this graph)
+        memo[cdef] = obj
+
+        # Optionally restore heavy state from store
+        ic(restore_state, in_store)
+        if restore_state and in_store:
+            st = self._first_store_with(cdef)
+            if st is None:
+                # has_cdef_light said True but we didn't find it; treat as missing
+                if not build_missing:
+                    raise RepoLoadError(f"Inconsistent store index for {cdef}")
+            else:
+                try:
+                    st.restore_object(obj, revision=revision)
+                except Exception as e:
+                    raise RepoLoadError(
+                        f"Error restoring state for {cdef} at {'/'.join(map(str, path))}: {e}"
+                    ) from e
+
+        # Cache result (only meaningful for instance='reuse')
+        if instance == "reuse":
+            if cache == "strong":
+                self.cache_strong(obj)
+            elif cache == "weak":
+                self.cache_weak(obj)
+            elif cache == "none":
+                pass
+            else:
+                raise ValueError(f"Unknown cache policy: {cache!r}")
+
         return obj
 
-    def load_object(self, obj_def, path: list[str|int]|None=None, build_missing=False, loaded_objs=None) -> Object:
-        if path is None:
-            path = [''] # Treat this as the root node
-        if loaded_objs is None:
-            loaded_objs = {}
-        from .freeze import FrozenNDArray, FrozenList, FrozenDict, FrozenSet
-        if is_pod(obj_def):
-            # We have a plain old data type
-            return obj_def
-        if isinstance(obj_def, FrozenNDArray):
-            # Copy the frozen array, return editable
-            return obj_def.thaw()
-        if isinstance(obj_def, tuple):
-            # We have a frozen container
-            return tuple([
-                self.load_object(v, path+[i], build_missing=build_missing)
-                for i, v in enumerate(obj_def)])
-        if isinstance(obj_def, FrozenList):
-            # We have a frozen list
-            return [
-                self.load_object(v, path+[i], build_missing=build_missing)
-                for i, v in enumerate(obj_def)]
-        if isinstance(obj_def, FrozenSet):
-            # We have a frozen set
-            return set([
-                self.load_object(v, path+[i], build_missing=build_missing)
-                for i, v in enumerate(obj_def)])
-        if isinstance(obj_def, FrozenDict):
-            # We have a frozen container
-            return {
-                k: self.load_object(v, path+[k], build_missing=build_missing)
-                for k, v in obj_def.items()}
 
-        if isinstance(obj_def, ConcreteDefinition):
-            # Thaw the definition
+    def load_object(
+        self,
+        x: object,
+        *,
+        instance: InstancePolicy = "reuse",
+        restore_state: bool = True,
+        build_missing: bool = False,
+        reuse_weak: bool = True,
+        cache: CachePolicy = "weak",
+        revision: str | None = None,
+    ):
+        memo: dict[ConcreteDefinition, Object] = {}
+        return self._realize(
+            x,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+            path=[""],
+            memo=memo,
+        )
 
-            # Check if we already have this object
-            if obj_def in self.obj_cache and self.obj_cache[obj_def] is not None:
-                # we found it
-                loaded_objs[obj_def] = self.obj_cache[obj_def]
-                return loaded_objs[obj_def]
-
-            # Thaw concretized args
-            rt_args = self.load_object(
-                obj_def.args,
-                path + ['args'],
-                build_missing=build_missing)
-            rt_kwargs = self.load_object(
-                obj_def.kwargs,
-                path + ['kwargs'],
-                build_missing=build_missing) 
-
-            try:
-                new_obj = self._load_single_object(obj_def, rt_args, rt_kwargs, build_missing=build_missing)
-            except Exception as e:
-                raise RepoLoadError(f"Error loading object at path {'/'.join(map(str, path))} with definition {obj_def}: {e}") from e
-
-            loaded_objs[obj_def] = new_obj
-
-            return new_obj
-
-        if isinstance(obj_def, Definition):
-            return self.load_object(obj_def.definition, build_missing=build_missing)
-        if isinstance(obj_def, Object):
-            # this object is already loaded.
-            if obj_def.definition not in self.obj_cache:
-                self.obj_cache[obj_def.definition] = obj_def
-            return obj_def
-        else:
-            raise RepoLoadError(f"Cannot load object of type {type(obj_def)} at path {'/'.join(map(str, path))}")
 
     def __contains__(
-            self, item: Object | ConcreteDefinition):
+            self, item: Object | ConcreteDefinition, weak=True):
+        # if weak is true, check both strong and weak caches
         if isinstance(item, ConcreteDefinition):
-            obj_def = item
+            cdef = item
         elif isinstance(item, Object):
-            obj_def = item.definition
+            cdef = item.definition
         else:
             raise TypeError(
                 f"Unsupported type {type(item)} for Repo.__contains__!")
 
         # “Strong” membership: known in cache and either loaded or known to exist
-        in_cache = obj_def in self.obj_cache
-        in_store = self.has_cdef_light(obj_def)
+        in_cache = cdef in self.strong_obj_cache
+        if not in_cache and weak:
+            in_cache = cdef in self.weak_obj_cache
+        in_store = cdef in self.light_index
         return in_cache or in_store
 
     def __getitem__(
@@ -349,29 +634,35 @@ class Repo:
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
             sel_args=None, sel_kwargs=None,
-            load_objects: bool = True,
+            instance: InstancePolicy = "reuse",
+            restore_state: bool = True,
             build_missing: bool = False,
-            verbose: bool = True) -> dict[ConcreteDefinition,Object]:
-
+            reuse_weak: bool = True,
+            cache: CachePolicy = "weak",
+            revision: str | None = None,
+            verbose: bool = True) -> dict[ConcreteDefinition, Object]:
         if type(selector) is list:
             pass
         elif type(selector) is not tuple:
             selector = (selector,)
         selectors = selector
 
-        def get_obj(obj_def: Definition) -> Object | None:
-            if obj_def in self.obj_cache:
-                if self.obj_cache[obj_def] is None:
-                    # We have content for this object,
-                    # but we haven't loaded it yet.
-                    if load_objects or build_missing:
-                        return self.load_object(obj_def, build_missing=build_missing)
-                else:
-                    return self.obj_cache[obj_def]
-            if build_missing:
-                return self.load_object(obj_def, build_missing=build_missing)
+        # Build list of all cdefs known in the repo
+        cached_cdefs = []
+        cached_cdefs.extend(self.strong_obj_cache.keys())
+        if reuse_weak:
+            cached_cdefs.extend(self.weak_obj_cache.keys())
+        cached_cdefs = set(cached_cdefs).union(self.light_index)
 
-            return None
+        def get_obj(cdef: ConcreteDefinition) -> Object | None:
+            return self._materialize_cdef(
+                cdef,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision)
 
         selected_objects = {}
         for sel in selectors:
@@ -382,29 +673,23 @@ class Repo:
                 if obj is not None:
                     selected_objects[sel] = obj
             elif isinstance(sel, Definition):
-                added_objs = False
-                for obj_def in self.obj_cache:
-                    if sel(obj_def):
-                        if obj_def in selected_objects:
+                for cdef in cached_cdefs:
+                    if sel(cdef, *sel_args, **sel_kwargs):
+                        if cdef in selected_objects:
                             continue
-                        obj = get_obj(obj_def)
+                        obj = get_obj(cdef)
                         if obj is not None:
-                            added_objs = True
                             selected_objects[obj_def] = obj
-                if not added_objs and build_missing:
-                    cdef = Definition.concretize(sel, repo=self)
-                    obj = get_obj(cdef)
-                    selected_objects[cdef] = obj
             elif isinstance(sel, Callable):
-                for obj_def in self.obj_cache:
-                    if self.obj_cache[obj_def] is not None:
-                        if sel(self.obj_cache[obj_def]):
-                            selected_objects[obj_def] = self.obj_cache[obj_def]
+                for cdef in cached_cdefs:
+                    if cdef in self.strong_obj_cache:
+                        if sel(self.strong_obj_cache[cdef], *sel_args, **sel_kwargs):
+                            selected_objects[cdef] = self.strong_obj_cache[cdef]
             elif sel is None:
-                for obj_def in self.obj_cache:
-                    obj = get_obj(obj_def)
+                for cdef in cached_cdefs:
+                    obj = get_obj(cdef)
                     if obj is not None:
-                        selected_objects[obj_def] = obj
+                        selected_objects[cdef] = obj
             else:
                 raise TypeError("sel is of incorrect type.")
 
@@ -448,17 +733,48 @@ class Repo:
         if store is not None:
             store.set_main_def(self.main_def)
 
-    # def add_objects(self, *args):
-    #     from dryml.core2.object import Object
-    #     for obj in args:
-    #         if not isinstance(obj, Object):
-    #             raise TypeError("Only Object objects can be added to a repository.")
+    def add_objects(self, *args):
+        from dryml.core2.object import Object
 
-    #     # Recursively add objects.
-    #     def _add_object(obj: Object):
-    #         if obj.definition in self.obj_cache and obj is not self.obj_cache[obj.definition]:
-    #             raise KeyError(f"Repo already has a different object matching {obj.definition}!")
-    #         self.obj_cache[obj.definition] = obj
+        # Recursively add objects.
+        def _add_object(obj: Any):
+            if isinstance(obj, Object):
+                cdef = obj.definition
+                _add_object(cdef.args)
+                _add_object(cdef.kwargs)
+                if cdef in self.strong_obj_cache and (obj is not self.strong_obj_cache[cdef]):
+                    raise KeyError(f"Repo already has a different object matching {cdef}!")
+                else:
+                    self.pin(obj)
+                return
+            if isinstance(obj, ConcreteDefinition):
+                # Find linked object
+                linked_obj = self.get_cached(obj)
+                if linked_obj is None:
+                    # check the general repo
+                    if self is not _global_repo: 
+                        ic("Checking global repo", id(_global_repo))
+                        linked_obj = _global_repo.get_cached(obj)
+                if linked_obj is None:    
+                    raise KeyError(f"No object linked to definition {obj} found in repo!")
+                _add_object(linked_obj)
+                return
+            if isinstance(obj, (list, FrozenList, tuple, FrozenTuple, set, FrozenSet)):
+                for el in obj:
+                    _add_object(el)
+                return
+            if isinstance(obj, (dict, FrozenDict)):
+                for el in obj.values():
+                    _add_object(el)
+                return
+            if is_pod(obj):
+                return
+            if isinstance(obj, Definition):
+                raise ValueError("Plain Definitions aren't allowed here.")
+            raise TypeError(f"Unsupported type {type(obj)} found when adding objects to repo.")
+
+        for arg in args:
+            _add_object(arg)
 
 
     #     def _enter(path, key, value):
@@ -526,6 +842,46 @@ def make_store(store):
     else:
         raise ValueError(f"Cannot open a store pointing to location {store!r}")
 
+
+# Context management for default repo
+_current_repo: ContextVar["Repo|None"] = ContextVar("_current_repo", default=None)
+_global_repo: "Repo" = Repo()
+
+
+# This cleanup system is required because we use a 'heavy'
+# hash function which wants to import types at runtime.
+# This causes a crash at cleanup, so we explicitly cleanup
+# repos so they aren't left until after the module import
+# system is cleaned up.
+def global_repo_cleanup():
+    global _global_repo
+    global _current_repo
+    _global_repo.close()
+    del _global_repo
+    r = _current_repo.get()
+    if r is not None:
+        r.close()
+        del r
+atexit.register(global_repo_cleanup)
+
+
+# Get the current default repo
+def get_default_repo() -> "Repo":
+    r = _current_repo.get()
+    return r if r is not None else _global_repo
+
+
+# Context manager for isolated repo
+@contextmanager
+def isolated_repo():
+    r = Repo()
+    tok = _current_repo.set(r)
+    try:
+        yield r
+    finally:
+        _current_repo.reset(tok)
+
+
 @contextmanager
 def manage_repo(repo=None):
     """
@@ -558,9 +914,7 @@ def manage_repo(repo=None):
     close_repo = False
 
     if repo is None:
-        # in-memory repo, no backing store yet
-        repo_obj = Repo()
-        close_repo = True
+        repo_obj = get_default_repo()
 
     elif isinstance(repo, Repo):
         # user-supplied repo, don't manage its lifetime
@@ -590,18 +944,19 @@ def manage_repo(repo=None):
 
 
 # Saving and Loading
-def save_object(obj, repo=None, main=False):
+def save_object(obj, repo=None, main=False, revision: str|None = None):
     with manage_repo(repo=repo) as sub_repo:
         main = main or ((repo is not sub_repo) and isinstance(obj, Object))
-        sub_repo.save_object(obj, main=main)
+        sub_repo.add_objects(obj)
+        sub_repo.save_object(obj, main=main, revision=revision)
 
 
 def load_object(
         obj_def=None, repo=None,
-        cls_remap=None):
+        **kwargs):
     with manage_repo(repo=repo) as repo:
         if obj_def is None:
             obj_def = repo.main_def
             if obj_def is None:
                 raise ValueError("When obj_def is None, the repo must have a main def, we didn't find one.")
-        return repo.load_object(obj_def)
+        return repo.load_object(obj_def, **kwargs)

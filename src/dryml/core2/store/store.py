@@ -15,7 +15,7 @@ class Store(ABC):
         ...
 
     @abstractmethod
-    def has_cdef(self, cdef: "ConcreteDefinition") -> bool:
+    def has(self, cdef: "ConcreteDefinition") -> bool:
         """Lightweight membership test: do you have data for this cdef?"""
         ...
 
@@ -23,12 +23,12 @@ class Store(ABC):
     def hydrate_index(self) -> Iterable["ConcreteDefinition"]:
         """
         Full hydration: scan underlying storage and yield all cdefs
-        that have data here. Repo will populate obj_cache[cdef] = None.
+        that have data here.
         """
         ...
 
     @abstractmethod
-    def save_object(self, obj: "Object") -> None:
+    def save_object(self, obj: Object, *, revision: str|None = None) -> None:
         """
         Save an individual object.
         Store is responsible for creating/using a directory (dir store),
@@ -37,7 +37,7 @@ class Store(ABC):
         ...
 
     @abstractmethod
-    def load_object(self, obj: "Object") -> bool:
+    def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
         """
         Load data for this object, if present. Returns True if loaded,
         False if this store doesn't have data for it.

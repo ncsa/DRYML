@@ -191,7 +191,21 @@ def apply_func(
 def get_temp_directory():
     return tempfile.TemporaryDirectory()
 
+
 def dir_store_inspect(root_path: str):
     files = glob.glob(os.path.join(root_path, '**', 'def.pkl'), recursive=True)
     # Strip root directory
     return list(map(lambda f: f[len(root_path)+1:], files))
+
+
+def revision_path(file_stem: str, file_ext: str, dir: str, revision: str|None=None):
+    filename = [file_stem]
+    if revision is not None:
+        filename.append(revision)
+    filename.append(file_ext)
+    return os.path.join(dir, '.'.join(filename))
+
+
+def get_revision(filepath: str, file_stem: str, file_ext: str):
+    filename = os.path.basename(filepath)
+    return filename[len(file_stem)+1:-(len(file_ext)+1)]

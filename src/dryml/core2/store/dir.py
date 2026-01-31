@@ -35,45 +35,33 @@ class DirStore(Store):
     def _def_file(self, cdef: "ConcreteDefinition") -> str:
         return os.path.join(self._object_dir(cdef), "def.pkl")
 
-    def has_cdef(self, cdef: "ConcreteDefinition") -> bool:
+    def has(self, cdef: "ConcreteDefinition") -> bool:
         return os.path.exists(self._def_file(cdef))
 
     def hydrate_index(self) -> Iterable["ConcreteDefinition"]:
         # Walk the objects tree, load def.pkl for each, and yield cdef
         pattern = os.path.join(self.obj_dir, "[0-9a-f][0-9a-f]", "*", "def.pkl")
         for def_path in glob.glob(pattern):
-            obj_dir = os.path.dirname(def_path)
             cdef = pickle_load(def_path)
-            # Optional: sanity check hash matches directory name
+            # TODO: Optional: sanity check hash matches directory name
             yield cdef
 
-    def save_object(self, obj: "Object") -> None:
-        cdef = obj.definition
-        obj_dir = self._object_dir(cdef)
+    def save_object(self, obj: Object, *, revision: str|None = None) -> None:
+        obj_dir = self._object_dir(obj.definition)
         os.makedirs(obj_dir, exist_ok=True)
 
-        # Save definition for checking later / quick load
-        def_path = os.path.join(obj_dir, "def.pkl")
-        pickle_save(cdef, def_path)
-
         # Let the object serialize itself
-        obj.save_to_dir(obj_dir)
+        obj.save_state_to_dir(obj_dir, revision=revision)
 
-    def load_object(self, obj: "Object") -> bool:
+    def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
         cdef = obj.definition
         def_path = self._def_file(cdef)
         if not os.path.exists(def_path):
-            return False
+            return
 
-        obj_dir = os.path.dirname(def_path)
+        obj_dir = self._object_dir(cdef)
 
-        # Confirm definition matches
-        stored_cdef = pickle_load(def_path)
-        if stored_cdef.stable_hash() != cdef.stable_hash():
-            raise RepoLoadError("Definition hash mismatch while loading object.")
-
-        obj.load_from_dir(obj_dir)
-        return True
+        obj.restore_state_from_dir(obj_dir, revision=revision)
 
     def _main_def_path(self) -> str:
         return os.path.join(self.base_dir, "def.pkl")

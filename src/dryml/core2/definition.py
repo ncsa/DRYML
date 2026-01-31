@@ -17,6 +17,7 @@ from .utils.recurse import cycle_detect
 from .types import is_pod, compatible_containers, container_types
 from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
 from .errors import PathAccessError
+from .policies import InstancePolicy, CachePolicy
 
 # Special value to skip args
 SKIP_ARGS = object()
@@ -38,8 +39,41 @@ class DefInterface(ABC):
     def kwargs(self):
         ...
 
+    @abstractmethod
+    def concretize(self, repo: "Repo | None"=None) -> Any:
+        ...
+
     def categorical(self, recursive=False):
         return categorical_definition(self, recursive=recursive)
+
+    def build(
+            self, *,
+            repo: "Repo | None" = None,
+            instance: "InstancePolicy" = "reuse",
+            restore_state: bool = True,
+            build_missing: bool =True,
+            cache: "CachePolicy" = "weak",
+            revision: "str | None" = None) -> Object:
+        from .repo import manage_repo
+        with manage_repo(repo=repo) as sub_repo:
+            concrete_def = self.concretize(repo=sub_repo)
+            return sub_repo.load_object(
+                concrete_def,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                cache=cache,
+                revision=revision)
+
+    def match(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs) -> bool:
+        from .definition import selector_match  # or wherever you keep it
+        return selector_match(self, other_def, strict=strict, verbose=verbose, **sel_kwargs)
+
+    def __call__(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs):
+        return self.match(other_def, strict=strict, verbose=verbose, **sel_kwargs)
+
+    def stable_hash(self):
+        return stable_hash_function(self)
 
 
 @dataclass(slots=True, init=False, eq=False)
@@ -53,7 +87,6 @@ class Definition(DefInterface, Mapping):
     _cls: Callable[..., Any] | type | None
     _args: tuple[Any, ...] | None
     kwargs: dict[str, Any]
-    #__repo: Any = field(default=None, repr=False, compare=False)
 
     __hash__ = None  # critical: prevent dict/set usage
 
@@ -83,9 +116,6 @@ class Definition(DefInterface, Mapping):
             self._args = args
             self.kwargs = kwargs
 
-        ## Always initialize to None.
-        #self._repo = None
-
     @property
     def cls(self):
         return self._cls
@@ -104,24 +134,6 @@ class Definition(DefInterface, Mapping):
             return True
         else:
             return False
-
-    #@property
-    #def _repo(self):
-    #    if isinstance(self.__repo, weakref.ReferenceType):
-    #        # We have a weakref
-    #        return self.__repo()
-    #    else:
-    #        return self.__repo
-
-    #@_repo.setter
-    #def _repo(self, val: "Repo | None"):
-    #    from .repo import Repo
-    #    if val is None:
-    #        self.__repo = None
-    #    elif not isinstance(val, Repo):
-    #        raise TypeError(f"Can only set _repo to an Object. Received {type(val)}")
-    #    else:
-    #        self.__repo = weakref.ref(val)
 
     # --- mapping interface (for get_definition_view / remap compatibility) ---
     def __getitem__(self, k: str) -> Any:
@@ -147,13 +159,6 @@ class Definition(DefInterface, Mapping):
     def __len__(self) -> int:
         return 1 + (1 if self._args is not None else 0) + (1 if self.cls is not None else 0)
 
-    def match(self, other_def, **kwargs) -> bool:
-        from .definition import selector_match  # or wherever you keep it
-        return selector_match(self, other_def, **kwargs)
-
-    def __call__(self, other_def, **kwargs):
-        return self.match(other_def, **kwargs)
-
     def __eq__(self, rhs):
         if type(self) != type(rhs):
             return False
@@ -166,15 +171,6 @@ class Definition(DefInterface, Mapping):
 
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
-
-    def build(self, repo=None, build_missing=True) -> Object:
-        from .repo import manage_repo
-        with manage_repo(repo=repo) as sub_repo:
-            concrete_def = self.concretize(repo=sub_repo)
-            return sub_repo.load_object(concrete_def, build_missing=build_missing)
-
-    def stable_hash(self):
-        return stable_hash_function(self)
 
     def __repr__(self):
         arg_elements = []
@@ -203,9 +199,6 @@ class Definition(DefInterface, Mapping):
         self._cls = state['cls']
         self._args = state['args']
         self.kwargs = state['kwargs']
-
-        ## Restore ephemeral bits
-        #self._repo = None
 
     def __deepcopy__(self, memo):
         """
@@ -243,6 +236,9 @@ class ConcreteDefinition(DefInterface, Mapping):
     args: FrozenTuple[Any, ...]
     kwargs: FrozenDict[str, Any]
 
+    def __hash__(self) -> int:
+        return stable_int_hash(self.stable_hash())
+
     def __getitem__(self, k: str) -> Any:
         if k == "cls": return self.cls
         if k == "args": return self.args
@@ -254,13 +250,6 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     def __len__(self) -> int:
         return 3
-
-    def __hash__(self) -> int:
-        return stable_int_hash(self.stable_hash())
-
-    def stable_hash(self):
-        return stable_hash_function(self)
-
 
     def __repr__(self):
         arg_elements = []
@@ -286,9 +275,6 @@ class ConcreteDefinition(DefInterface, Mapping):
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
 
-    def match(self, other_def, **kwargs) -> bool:
-        from .definition import selector_match  # or wherever you keep it
-        return selector_match(self, other_def, **kwargs)
 
     def __deepcopy__(self, memo):
         """
@@ -302,8 +288,11 @@ class ConcreteDefinition(DefInterface, Mapping):
     def copy(self):
         return deepcopy(self)
 
-    def thaw(self):
+    def to_definition(self):
         return thaw_concrete(self)
+
+    def concretize(self, repo: "Repo | None"=None) -> Any:
+        return self
 
 
 def get_path(obj_or_def, path):
@@ -352,13 +341,14 @@ def render_path(path, key):
     return "/".join(map(str, path))
 
 
-@cycle_detect
+@cycle_detect()
 def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"=None) -> Any:
     if path is None:
         path = [''] # Treat this as the root node
     from .repo import manage_repo
     from .object import Object
     with manage_repo(repo=repo) as sub_repo:
+        ic(id(sub_repo))
         if is_pod(obj) or isinstance(obj, FrozenNDArray):
             # We have a plain old data type
             return obj
@@ -389,6 +379,7 @@ def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"
             return FrozenNDArray.from_array(obj)
 
         if isinstance(obj, Object):
+            sub_repo.cache_weak(obj)
             return obj.__cdef__
 
         if isinstance(obj, Definition):
@@ -421,9 +412,9 @@ def categorical_definition(defn: DefInterface, recursive=True, cache=None):
 
     if isinstance(new_def, (Object, ConcreteDefinition)):
         # we need to thaw first.
-        new_def = new_def.thaw()
+        new_def = new_def.to_definition()
 
-    @cycle_detect
+    @cycle_detect()
     def _categorical(obj):
         nonlocal level
         level += 1
@@ -471,74 +462,7 @@ def categorical_definition(defn: DefInterface, recursive=True, cache=None):
     return _categorical(new_def)
 
 
-#def categorical_definition(defn: Definition, recursive=True, definition_cache = None, level=0):
-#    from .object import Object
-#    # Copy the Definition
-#    new_def = deepcopy(defn)
-
-#    if definition_cache is None:
-#        definition_cache = {}
-    
-#    #if isinstance(defn, Definition):
-
-
-#    def _enter(path, key, value):
-#        if id(value) in definition_cache:
-#            return value, False
-#        elif isinstance(value, Object):
-#            raise TypeError("Plain objects are not supported")
-#        elif isinstance(value, Definition):
-#            nonlocal level
-#            level += 1
-#            return {}, get_definition_view(value)
-#        else:
-#            return default_enter(path, key, value)
-
-#    def _visit(path, key, value):
-#        if isinstance(value, ConcreteDefinition):
-#            # We shouldn't have any ConcreteDefinitions at this point
-#            raise TypeError("ConcreteDefinition should not be here at this point")
-#        elif isinstance(value, Object):
-#            raise TypeError("Plain Object objects are not supported")
-#        else:
-#            return key, value
-
-#    def _exit(path, key, value, new_parent, new_items):
-#        if isinstance(value, Definition):
-#            # This should catch both Definitions and ConcreteDefinitions
-#            nonlocal level
-#            level -= 1
-#            new_vals = {}
-#            for k, v in new_items:
-#                new_vals[k] = v
-#            args = new_vals['args']
-#            kwargs = new_vals['kwargs']
-#            if not recursive:
-#                if level == 0:
-#                    # Only apply __strip_unique_args__ at the lowest level.
-#                    args, kwargs = new_vals['cls'].__strip_unique_args__(*args, **kwargs)
-#            else:
-#                # Apply __strip_unique_args__ at all levels.
-#                args, kwargs = new_vals['cls'].__strip_unique_args__(*args, **kwargs)
-#            return Definition(new_vals['cls'], *args, **kwargs)
-#        else:
-#            return default_exit(path, key, value, new_parent, new_items)
-
-#    if isinstance(new_def, Definition):
-#        return remap(
-#            [new_def],
-#            enter=_enter,
-#            visit=_visit,
-#            exit=_exit)[0]
-#    else:
-#        return remap(
-#            new_def,
-#            enter=_enter,
-#            visit=_visit,
-#            exit=_exit)
-
-
-@cycle_detect
+@cycle_detect()
 def thaw_concrete(cdef_or_obj: Any, cache = None) -> Any:
     """
     Thaw a ConcreteDefinition or frozen container into a mutable Definition or container.
@@ -608,7 +532,11 @@ def selector_match(
         strict=True,
         cls_str_compare=False,
         verbose=False,
+        full_diagnostic=False,
         output_stream=sys.stderr):
+    """
+    full_diagnostic - If true, doesn't stop on the first match failure. Continues to compare to produce a full report of what differs.
+    """
 
     from .object import Object
 
@@ -627,19 +555,19 @@ def selector_match(
 
         def _selector_print(msg: str):
             if verbose:
-                print(f"[{render_path(path, None)}]: {msg}", file=output_stream)
+                output_stream.write(f"[{render_path(path, None)}]: {msg}\n")
 
         # Check we can access the current path in the definition
         try:
             target_val = get_path(target, path)
         except PathAccessError:
-            _selector_print("Path doesn't exist in target\n")
+            _selector_print("Path doesn't exist in target")
             return False
 
         try:
             sel_val = get_path(selector, path)
         except PathAccessError:
-            _selector_print("Path doesn't exist in selector\n")
+            _selector_print("Path doesn't exist in selector")
             return False
 
         if isinstance(target_val, Definition):
@@ -651,18 +579,18 @@ def selector_match(
             if strict:
                 condition = sel_val is target_val
                 if not condition:
-                    _selector_print("Classes differ\n")
+                    _selector_print("Classes differ")
                 return condition
             else:
                 condition = issubclass(target_val, sel_val)
                 if not condition:
-                    _selector_print(f"Classes not subclass: {get_class_str(target_val)} is not a subclass of {get_class_str(sel_val)}\n")
+                    _selector_print(f"Classes not subclass: {get_class_str(target_val)} is not a subclass of {get_class_str(sel_val)}")
                 return condition
         elif isinstance(sel_val, str) and isclass(target_val):
             # We can do a class string comparison
             condition = (sel_val == get_class_str(target_val))
             if not condition:
-                _selector_print(f"Class string comparison failed: {sel_val} != {get_class_str(target_val)}\n")
+                _selector_print(f"Class string comparison failed: {sel_val} != {get_class_str(target_val)}")
             return condition
         # Double container comparison
         elif isinstance(sel_val, container_types) and isinstance(target_val, container_types):
@@ -671,14 +599,14 @@ def selector_match(
             def_conditions = map(lambda t: isinstance(target_val, t), compatible_containers.values())
             containers_match = any(list(map(lambda t: t[0] and t[1], zip(val_conditions, def_conditions))))
             if not containers_match:
-                _selector_print(f"Container types don't match. {type(sel_val)} in the selector {type(target_val)} in the target\n")
+                _selector_print(f"Container types don't match. {type(sel_val)} in the selector {type(target_val)} in the target")
                 return False
 
             # tuple/set/list check
             if isinstance(target_val, compatible_containers['tuple']) or isinstance(target_val, compatible_containers['set']) or isinstance(target_val, compatible_containers['list']):
                 # tuples must match length
                 if len(sel_val) != len(target_val):
-                    _selector_print(f"Container lengths don't match. {len(sel_val)} in the selector {len(target_val)} in the target\n")
+                    _selector_print(f"Container lengths don't match. {len(sel_val)} in the selector {len(target_val)} in the target")
                     return False
 
                 # Descend into each element
@@ -687,10 +615,9 @@ def selector_match(
                     res = _selector_match_func(path + [i,])
                     if not res:
                         compare_failed = True
-                        break
-                if compare_failed:
-                    return False
-                return True
+                        if not full_diagnostic:
+                            break
+                return not compare_failed
 
             # dict check
             if isinstance(target_val, compatible_containers['dict']):
@@ -701,26 +628,27 @@ def selector_match(
                 for k in sel_val.keys():
                     if k not in target_val:
                         compare_failed = True
-                        break
+                        if not full_diagnostic:
+                            break
                     res = _selector_match_func(path + [k,])
+                    ic(k, res)
                     if not res:
                         compare_failed = True
-                        break
-                if compare_failed:
-                    return False
-                return True
+                        if not full_diagnostic:
+                            break
+                return not compare_failed
             raise TypeError(f"Unhandled container type ({target_val}) in selector_match")
 
         elif isinstance(sel_val, np.ndarray) and isinstance(target_val, np.ndarray):
             condition = (sel_val.shape == target_val.shape)
             if not condition:
                 _selector_print(
-                    f" Mismatched array shapes {sel_val.shape} != {target_val.shape}\n")
+                    f" Mismatched array shapes {sel_val.shape} != {target_val.shape}")
                 return False
             condition = np.all(target_val == sel_val)
             if not condition:
                 _selector_print(
-                    "Unequal Arrays\n")
+                    "Unequal Arrays")
                 return False
             return True
 
@@ -729,17 +657,25 @@ def selector_match(
                 sel_def = sel_val.definition
             else:
                 sel_def = sel_val
+            compare_failed = False
             # Descent into dryml objects
             if sel_def.cls is not None:
                 if not _selector_match_func(path + ['cls',]):
-                    return False
+                    if full_diagnostic:
+                        compare_failed = True
+                    else:
+                        return False
             # args selection
             if sel_def.args is not None:
                 if not _selector_match_func(path + ['args',]):
-                    return False
+                    if full_diagnostic:
+                        compare_failed = True
+                    else:
+                        return False
             # kwargs selection
-            cond = _selector_match_func(path + ['kwargs',])
-            return cond
+            compare_failed = not _selector_match_func(path + ['kwargs',])
+
+            return not compare_failed
         
         elif is_nonclass_callable(sel_val):
             if strict:
@@ -747,20 +683,21 @@ def selector_match(
             condition = sel_val(target_val)
             if not condition:
                 _selector_print(
-                    f"Callable test failed\n")
+                    f"Callable test failed")
             return condition
 
         else:
             # Plain matching branch
             if type(sel_val) is not type(target_val):
                 _selector_print(
-                        "Type mismatch\n")
+                        "Type mismatch")
                 return False
             else:
                 condition = (sel_val == target_val)
                 if not condition:
+                    ic(path, sel_val, target_val)
                     _selector_print(
-                        "Values differ\n",)
+                        "Values differ")
                 return condition
 
     return _selector_match_func()

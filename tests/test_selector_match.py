@@ -97,7 +97,7 @@ def test_selector_9():
     def_1 = Definition(
         objects.TestClass1, 20, test='b')
     temp_stream = StringIO()
-    assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
+    assert not def_1(obj_1, verbose=True, full_diagnostic=True, output_stream=temp_stream)
     temp_stream.seek(0)
     stream_text = temp_stream.read()
     assert "[root/args/0]: Values differ" in stream_text
@@ -109,7 +109,7 @@ def test_selector_10():
     def_1 = Definition(
         objects.TestClass1, 20, test='b')
     temp_stream = StringIO()
-    assert not def_1(def_2, verbose=True, output_stream=temp_stream)
+    assert not def_1(def_2, verbose=True, full_diagnostic=True, output_stream=temp_stream)
     temp_stream.seek(0)
     stream_text = temp_stream.read()
     assert "[root/args/0]: Values differ" in stream_text
@@ -126,7 +126,8 @@ def test_selector_11():
     assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
     temp_stream.seek(0)
     stream_text = temp_stream.read()
-    assert "[root/cls]: core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
+    assert "[root/cls]:" in stream_text
+    assert "core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
 
 
 def test_selector_12():
@@ -146,12 +147,13 @@ def test_selector_12():
                 30,
                 test=lambda x: x != 'c')))
     temp_stream = StringIO()
-    assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
+    assert not def_1(obj_1, verbose=True, full_diagnostic=True, output_stream=temp_stream)
     temp_stream.seek(0)
     stream_text = temp_stream.read()
-    assert "[root/cls]: core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
+    assert "[root/cls]:" in stream_text
+    assert "[root/kwargs/test/kwargs/test/cls]:" in stream_text
+    assert "core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
     assert "[root/kwargs/test/args/0]: Values differ" in stream_text
-    assert "[root/kwargs/test/kwargs/test/cls]: core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
     assert "[root/kwargs/test/kwargs/test/kwargs/test]: Callable test failed" in stream_text
 
 

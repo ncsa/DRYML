@@ -90,14 +90,14 @@ def test_object_args_passing_3():
 
     obj1_def = obj1.definition
 
-    obj1_cpy = obj1_def.build()
+    obj1_cpy = obj1_def.build(instance="new", cache="none")
 
     assert obj1.definition == obj1_cpy.definition
     assert obj1 is not obj1_cpy
 
     obj2_def = obj2.definition
 
-    obj2_cpy = obj2_def.build()
+    obj2_cpy = obj2_def.build(instance="new", cache="none")
 
     assert obj2.definition == obj2_cpy.definition
     assert obj2 is not obj2_cpy
@@ -105,7 +105,7 @@ def test_object_args_passing_3():
     assert type(obj2.A) is type(obj1)
     assert type(obj2_cpy.A) is type(obj1)
 
-    obj3_cpy = obj3.definition.build()
+    obj3_cpy = obj3.definition.build(instance="new", cache="none")
 
     assert obj3.definition == obj3_cpy.definition
     assert obj3 is not obj3_cpy
@@ -127,12 +127,12 @@ def test_object_args_passing_4():
 
     obj2 = objs.TestNest([obj1])
 
-    obj1_cpy = obj1.definition.build()
+    obj1_cpy = obj1.definition.build(instance="new", cache="none")
 
     assert obj1.definition == obj1_cpy.definition
     assert obj1 is not obj1_cpy
 
-    obj2_cpy = obj2.definition.build()
+    obj2_cpy = obj2.definition.build(instance="new", cache="none")
 
     assert obj2.definition == obj2_cpy.definition
     assert obj2 is not obj2_cpy
@@ -151,12 +151,12 @@ def test_object_args_passing_5():
 
     obj2 = objs.TestNest([[obj1]])
 
-    obj1_cpy = obj1.definition.build()
+    obj1_cpy = obj1.definition.build(instance="new", cache="none")
 
     assert obj1.definition == obj1_cpy.definition
     assert obj1 is not obj1_cpy
 
-    obj2_cpy = obj2.definition.build()
+    obj2_cpy = obj2.definition.build(instance="new", cache="none")
 
     assert obj2.definition == obj2_cpy.definition
     assert obj2 is not obj2_cpy
@@ -175,12 +175,12 @@ def test_object_args_passing_6():
 
     obj2 = objs.TestNest({'A': obj1})
 
-    obj1_cpy = obj1.definition.build()
+    obj1_cpy = obj1.definition.build(instance="new", cache="none")
 
     assert obj1.definition == obj1_cpy.definition
     assert obj1 is not obj1_cpy
 
-    obj2_cpy = obj2.definition.build()
+    obj2_cpy = obj2.definition.build(instance="new", cache="none")
 
     assert obj2.definition == obj2_cpy.definition
     assert obj2 is not obj2_cpy
@@ -199,12 +199,12 @@ def test_object_args_passing_7():
 
     obj2 = objs.TestNest({'A': [[obj1]]})
 
-    obj1_cpy = obj1.definition.build()
+    obj1_cpy = obj1.definition.build(instance="new", cache="none")
 
     assert obj1.definition == obj1_cpy.definition
     assert obj1 is not obj1_cpy
 
-    obj2_cpy = obj2.definition.build()
+    obj2_cpy = obj2.definition.build(instance="new", cache="none")
 
     assert obj2.definition == obj2_cpy.definition
     assert obj2 is not obj2_cpy

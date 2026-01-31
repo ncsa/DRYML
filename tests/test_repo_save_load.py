@@ -7,7 +7,8 @@ import core2_objects as objects
 def test_save_1(primary_store_set):
     # Create repo and save object
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
-    repo.add_object(objects.HelloStr(msg='test'))
+    repo.add_objects(objects.HelloStr(msg='test'))
+    assert len(repo.strong_obj_cache) == 1
     repo.save()
     repo.close(flush=True)
 
@@ -19,12 +20,11 @@ def test_save_1(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.get(load_objects=False)) == 0
+    assert len(repo.get(restore_state=False)) == 0
 
     # But storage *does* have content; hydrate index into cache
     repo.hydrate_from_stores()
-    assert len(repo.obj_cache) == 1
-    assert list(repo.obj_cache.values()) == [None] # known, not loaded
+    assert len(repo.light_index) == 1
 
     # Save again should be no-op-ish and not corrupt anything
     repo.save()
@@ -35,10 +35,10 @@ def test_save_1(primary_store_set):
     # Still exactly one stored object after reopening again
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
     repo.hydrate_from_stores()
-    assert len(repo.obj_cache) == 1
+    assert len(repo.light_index) == 1
 
     # Test that we can load a single object
-    objs_loaded = repo.get(load_objects=True)
+    objs_loaded = repo.get(restore_state=True)
     assert len(objs_loaded) == 1
 
 
@@ -46,6 +46,8 @@ def test_object_save_restore_1(primary_store_set):
     """
     We test save and restore of nested objects through arguments
     """
+
+    ic(id(dryml.core2.repo._global_repo))
 
     # Create the data containing objects
     data_obj1 = objects.TestClassC2(10)
@@ -56,6 +58,9 @@ def test_object_save_restore_1(primary_store_set):
 
     # Enclose them in another object
     obj = objects.TestClassC(data_obj1, B=data_obj2)
+
+    ic(list(dryml.core2.repo._global_repo.strong_obj_cache.keys()))
+    ic(list(dryml.core2.repo._global_repo.weak_obj_cache.keys()))
 
     # Save to the backend
     obj.save(repo=primary_store_set.stores)
