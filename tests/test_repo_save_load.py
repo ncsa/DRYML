@@ -14,9 +14,6 @@ def test_save_1(primary_store_set):
 
     primary_store_set.rewind_all()
 
-    # Re-open repo; objects should not be loaded automatically
-    repo = dryml.core2.Repo
-
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
@@ -40,6 +37,62 @@ def test_save_1(primary_store_set):
     # Test that we can load a single object
     objs_loaded = repo.get(restore_state=True)
     assert len(objs_loaded) == 1
+
+
+def test_save_1(primary_store_set):
+    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+
+    repo.add_objects(objects.HelloStr(msg='test'))
+
+    # Save objects in repository
+    repo.save()
+
+    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+    # Delete the repo
+    del repo
+
+    dryml.core2.repo._global_repo.clear_cache(weak=True)
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+
+    try:
+        result = repo.get(build_missing=False)
+        assert len(result) == 0
+    except KeyError:
+        pass
+
+    repo.save()
+
+    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+
+def test_save_2(primary_store_set):
+    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+
+    repo.add_objects(objects.HelloStr(msg='test'))
+
+    # Save objects in repository
+    repo.save()
+    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+    # Delete the repo
+    del repo
+    dryml.core2.repo._global_repo.clear_cache(weak=True)
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+
+    try:
+        result = repo.get(build_missing=False)
+        assert len(result) == 0
+    except KeyError:
+        pass
+
+    repo.save()
+
+    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
 
 def test_object_save_restore_1(primary_store_set):

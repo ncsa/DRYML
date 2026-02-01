@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import glob
 from pathlib import Path
 from typing import Callable
 from contextlib import contextmanager
@@ -790,6 +791,18 @@ class Repo:
             ic("Auto-saving repo on deletion...", self.default_store)
             self.save()
             self.close(flush=True)
+
+    def clear_cache(self, strong=False, weak=True):
+        if strong:
+            self.strong_obj_cache.clear()
+        if weak:
+            self.weak_obj_cache.clear()
+
+    @staticmethod
+    def dir_store_inspect(root_path: str):
+        files = glob.glob(os.path.join(root_path, '**', 'def.pkl'), recursive=True)
+        # Strip root directory
+        return list(map(lambda f: f[len(root_path)+1:], files))
 
 
 def make_store(store):
