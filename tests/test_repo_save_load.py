@@ -100,8 +100,6 @@ def test_object_save_restore_1(primary_store_set):
     We test save and restore of nested objects through arguments
     """
 
-    ic(id(dryml.core2.repo._global_repo))
-
     # Create the data containing objects
     data_obj1 = objects.TestClassC2(10)
     data_obj1.set_val(20)
@@ -111,9 +109,6 @@ def test_object_save_restore_1(primary_store_set):
 
     # Enclose them in another object
     obj = objects.TestClassC(data_obj1, B=data_obj2)
-
-    ic(list(dryml.core2.repo._global_repo.strong_obj_cache.keys()))
-    ic(list(dryml.core2.repo._global_repo.weak_obj_cache.keys()))
 
     # Save to the backend
     obj.save(repo=primary_store_set.stores)
@@ -281,7 +276,6 @@ def test_save_load_1(primary_store_set):
     dryml.core2.save_object(obj1, repo=repo, main=True)
     repo.flush()
 
-    ic(os.listdir(repo.stores[0].base_dir))
     assert len(os.listdir(repo.stores[0].base_dir)) == 2
     assert len(os.listdir(repo.stores[0].object_root_dir)) == 1
 

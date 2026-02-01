@@ -159,7 +159,6 @@ class Repo:
         """
         Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
         """
-        ic("1")
 
         obj_def = obj.definition
         if obj_def in self.strong_obj_cache:
@@ -173,13 +172,10 @@ class Repo:
         else:
             # Update repo cache
             self.strong_obj_cache[obj_def] = obj
-        ic("2")
 
         if store is not None:
-            ic(store)
             store.save_object(obj, revision=revision)
             self._num_saves += 1
-            ic(self._num_saves)
         else:
             raise RepoSaveError("No store available to save object!")
 
@@ -188,13 +184,10 @@ class Repo:
             store = self.default_store
 
         saved_objs: dict[ConcreteDefinition,Object] = {}
-        ic(store, saved_objs)
 
         @cycle_detect()
         def _save_object(obj):
-            ic("1")
             if isinstance(obj, Object):
-                ic("object branch")
                 # we must descend into args/kwargs first
                 cdef = obj.definition
                 _save_object(cdef.args)
@@ -207,7 +200,6 @@ class Repo:
                 return
 
             if isinstance(obj, ConcreteDefinition):
-                ic("concrete definition branch")
                 # We must find the linked object
                 linked_obj = self.get_cached(obj)
                 if linked_obj is None:
@@ -216,12 +208,10 @@ class Repo:
                 return
 
             if isinstance(obj, (list, tuple, set, FrozenList, FrozenTuple, FrozenSet)):
-                ic("iterable branch")
                 for el in obj:
                     _save_object(el)
                 return
             if isinstance(obj, (FrozenDict, dict)):
-                ic("mapping branch")
                 for el in obj.values():
                     _save_object(el)
                 return
@@ -547,7 +537,6 @@ class Repo:
         memo[cdef] = obj
 
         # Optionally restore heavy state from store
-        ic(restore_state, in_store)
         if restore_state and in_store:
             st = self._first_store_with(cdef)
             if st is None:
@@ -754,7 +743,6 @@ class Repo:
                 if linked_obj is None:
                     # check the general repo
                     if self is not _global_repo: 
-                        ic("Checking global repo", id(_global_repo))
                         linked_obj = _global_repo.get_cached(obj)
                 if linked_obj is None:    
                     raise KeyError(f"No object linked to definition {obj} found in repo!")
@@ -788,7 +776,6 @@ class Repo:
 
     def __del__(self):
         if self.save_objs_on_deletion:
-            ic("Auto-saving repo on deletion...", self.default_store)
             self.save()
             self.close(flush=True)
 

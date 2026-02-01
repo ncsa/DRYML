@@ -199,12 +199,8 @@ def apply_func(
 
     obj_list = get_unique_objects(obj, repo)
 
-    ic(obj_list, func)
-
     for obj in obj_list:
-        ic(obj)
         if sel is None or sel(obj, verbose=True):
-            ic("Selected", obj)
             func(obj, *func_args, **func_kwargs)
 
 

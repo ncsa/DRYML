@@ -348,7 +348,6 @@ def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"
     from .repo import manage_repo
     from .object import Object
     with manage_repo(repo=repo) as sub_repo:
-        ic(id(sub_repo))
         if is_pod(obj) or isinstance(obj, FrozenNDArray):
             # We have a plain old data type
             return obj
@@ -631,7 +630,6 @@ def selector_match(
                         if not full_diagnostic:
                             break
                     res = _selector_match_func(path + [k,])
-                    ic(k, res)
                     if not res:
                         compare_failed = True
                         if not full_diagnostic:
@@ -695,7 +693,6 @@ def selector_match(
             else:
                 condition = (sel_val == target_val)
                 if not condition:
-                    ic(path, sel_val, target_val)
                     _selector_print(
                         "Values differ")
                 return condition
