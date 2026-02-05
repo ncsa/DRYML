@@ -41,6 +41,7 @@ class Repo:
     # Links particular concrete definition with particular object
     weak_obj_cache: weakref.WeakValueDictionary[ConcreteDefinition, Object]
     strong_obj_cache: dict[ConcreteDefinition, Object]
+    obj_default_store: dict[ConcreteDefinition, Store]
 
     # known to exist in stores
     light_index: set[ConcreteDefinition]
@@ -63,6 +64,7 @@ class Repo:
         # Initialize caches
         self.weak_obj_cache = weakref.WeakValueDictionary()
         self.strong_obj_cache = {}
+        self.obj_default_store = {}
         self.light_index = set()
         self.cdef_cache = weakref.WeakValueDictionary()
 
@@ -105,7 +107,19 @@ class Repo:
     def default_store(self):
         return self.stores[0] if len(self.stores) > 0 else None
 
+    def set_default_store(self, store: "Store"):
+        if not isinstance(store, Store):
+            store = make_store(store)
+        if store not in self.stores:
+            self.stores.insert(0, store)
+        else:
+            # Find and move to front
+            store_idx = self.stores.index(store)
+            self.stores.insert(0, self.stores.pop(store_idx))
+
     def add_store(self, store: "Store", make_default=False):
+        if not isinstance(store, Store):
+            store = make_store(store)
         if make_default or self.default_store is None:
             self.stores.insert(0, store)
         else:
@@ -155,48 +169,54 @@ class Repo:
     def __len__(self):
         return len(self.strong_obj_cache)
 
-    def _save_single_object(self, obj: Object, store: Store|None=None, revision: str|None=None):
-        """
-        Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
-        """
+    def save_object(self, obj, main=False, store=None, revision_map: dict[ConcreteDefinition,str]|None=None):
 
-        obj_def = obj.definition
-        if obj_def in self.strong_obj_cache:
-            if self.strong_obj_cache.get(obj_def) is None:
-                # Update repo cache
-                self.strong_obj_cache[obj_def] = obj
-            else:
+        saved_objs: dict[int,set[ConcreteDefinition]] = {}
+        if revision_map is None:
+            revision_map = {}
+
+        def _save_single_object(obj: Object, store: Store|None=None, revision_map: dict[ConcreteDefinition,str]|None=None):
+            """
+            Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
+            """
+
+            cdef = obj.definition
+            if store is None:
+                if cdef in self.obj_default_store:
+                    store = self.obj_default_store[cdef]
+                else:
+                    store = self.default_store
+
+            _save_object(cdef.args, store=store, revision_map=revision_map)
+            _save_object(cdef.kwargs, store=store, revision_map=revision_map)
+
+            if cdef in self.strong_obj_cache:
                 # Check that this was the same object
-                if obj is not self.strong_obj_cache.get(obj_def):
-                    raise ValueError("We already have a different object with definition: {obj_def}")
-        else:
-            # Update repo cache
-            self.strong_obj_cache[obj_def] = obj
+                if obj is not self.strong_obj_cache[cdef]:
+                    raise ValueError("We already have a different object with definition: {cdef}")
+            else:
+                # Update repo cache
+                self.pin(obj)
 
-        if store is not None:
-            store.save_object(obj, revision=revision)
-            self._num_saves += 1
-        else:
-            raise RepoSaveError("No store available to save object!")
+            if store is None:
+                raise RepoSaveError("No store available to save object!")
 
-    def save_object(self, obj, main=False, store=None, revision: str|None=None):
-        if store is None:
-            store = self.default_store
+            if id(store) not in saved_objs:
+                saved_objs[id(store)] = set()
 
-        saved_objs: dict[ConcreteDefinition,Object] = {}
+            if cdef not in saved_objs[id(store)]:
+                # Save the object
+                revision = revision_map.get(cdef, None)
+                store.save_object(obj, revision=revision)
+                saved_objs[id(store)].add(cdef)
+                self._num_saves += 1
+
 
         @cycle_detect()
-        def _save_object(obj):
+        def _save_object(obj: Any, store: Store|None=None, revision_map: dict[ConcreteDefinition,str]|None=None):
             if isinstance(obj, Object):
                 # we must descend into args/kwargs first
-                cdef = obj.definition
-                _save_object(cdef.args)
-                _save_object(cdef.kwargs)
-
-                if cdef not in saved_objs:
-                    # Save the object
-                    self._save_single_object(obj, store=store, revision=revision)
-                    saved_objs[cdef] = obj
+                _save_single_object(obj, store=store, revision_map=revision_map)
                 return
 
             if isinstance(obj, ConcreteDefinition):
@@ -204,16 +224,16 @@ class Repo:
                 linked_obj = self.get_cached(obj)
                 if linked_obj is None:
                     raise RepoSaveError(f"Definition of object {obj} is not reachable in this repo!")
-                _save_object(linked_obj)
+                _save_object(linked_obj, store=store, revision_map=revision_map)
                 return
 
             if isinstance(obj, (list, tuple, set, FrozenList, FrozenTuple, FrozenSet)):
                 for el in obj:
-                    _save_object(el)
+                    _save_object(el, store=store, revision_map=revision_map)
                 return
             if isinstance(obj, (FrozenDict, dict)):
                 for el in obj.values():
-                    _save_object(el)
+                    _save_object(el, store=store, revision_map=revision_map)
                 return
             if isinstance(obj, Definition):
                 raise RepoSaveError("Plain Definitions aren't allowed here.")
@@ -222,7 +242,7 @@ class Repo:
             else:
                 raise RepoSaveError(f"Cannot save object of type {type(obj)}!")
 
-        _save_object(obj)
+        _save_object(obj, store=store, revision_map=revision_map)
 
         # Save main object definition
         if main:
@@ -720,11 +740,18 @@ class Repo:
 
     def set_main_def(self, main_def: ConcreteDefinition, store=None):
         self.main_def = main_def
+        if store is None:
+            store = self.default_store
         if store is not None:
             store.set_main_def(self.main_def)
 
-    def add_objects(self, *args):
+    def add_objects(self, *args, store=None):
         from dryml.core2.object import Object
+
+        def _add_object_single(obj: Object):
+            self.pin(obj)
+            if store is not None:
+                self.obj_default_store[obj.definition] = store
 
         # Recursively add objects.
         def _add_object(obj: Any):
@@ -735,7 +762,7 @@ class Repo:
                 if cdef in self.strong_obj_cache and (obj is not self.strong_obj_cache[cdef]):
                     raise KeyError(f"Repo already has a different object matching {cdef}!")
                 else:
-                    self.pin(obj)
+                    _add_object_single(obj)
                 return
             if isinstance(obj, ConcreteDefinition):
                 # Find linked object
@@ -917,19 +944,19 @@ def manage_repo(repo=None):
 
 
 # Saving and Loading
-def save_object(obj, repo=None, main=False, revision: str|None = None):
+def save_object(obj, repo=None, main=False, revision_map: dict[ConcreteDefinition,str]|None=None):
     with manage_repo(repo=repo) as sub_repo:
         main = main or ((repo is not sub_repo) and isinstance(obj, Object))
         sub_repo.add_objects(obj)
-        sub_repo.save_object(obj, main=main, revision=revision)
+        sub_repo.save_object(obj, main=main, revision_map=revision_map)
 
 
 def load_object(
-        obj_def=None, repo=None,
+        cdef=None, repo=None,
         **kwargs):
     with manage_repo(repo=repo) as repo:
-        if obj_def is None:
-            obj_def = repo.main_def
-            if obj_def is None:
-                raise ValueError("When obj_def is None, the repo must have a main def, we didn't find one.")
-        return repo.load_object(obj_def, **kwargs)
+        if cdef is None:
+            cdef = repo.main_def
+            if cdef is None:
+                raise ValueError("When cdef is None, the repo must have a main def, we didn't find one.")
+        return repo.load_object(cdef, **kwargs)

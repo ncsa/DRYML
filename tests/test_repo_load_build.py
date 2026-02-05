@@ -69,7 +69,7 @@ def test_object_args_passing_2(create_name):
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    save_object(obj, repo=create_name)
+    save_object(obj, main=True, repo=create_name)
 
     obj_loaded = load_object(repo=create_name)
 

@@ -62,33 +62,12 @@ class ZipStore(Store):
         sub = digest[:2]
         return os.path.join(self.obj_dir, sub, digest)
 
-    def _def_file(self, cdef: "ConcreteDefinition") -> str:
-        return os.path.join(self._object_dir(cdef), "def.pkl")
-
     def has(self, cdef: "ConcreteDefinition") -> bool:
         return os.path.exists(self._def_file(cdef))
 
     def hydrate_index(self) -> list["ConcreteDefinition"]:
         pattern = os.path.join(self.obj_dir, "[0-9a-f][0-9a-f]", "*", "def.pkl")
         return [pickle_load(p) for p in glob.glob(pattern)]
-
-    def save_object(self, obj: Object, *, revision: str|None = None) -> None:
-        cdef = obj.definition
-        obj_dir = self._object_dir(cdef)
-        os.makedirs(obj_dir, exist_ok=True)
-        pickle_save(cdef, os.path.join(obj_dir, "def.pkl"))
-        obj.save_state_to_dir(obj_dir, revision=revision)
-
-    def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
-        cdef = obj.definition
-        def_path = self._def_file(cdef)
-        if not os.path.exists(def_path):
-            return False
-        stored_cdef = pickle_load(def_path)
-        if stored_cdef.stable_hash() != cdef.stable_hash():
-            raise RepoLoadError("Definition hash mismatch in ZipStore.load_object")
-        obj_dir = os.path.dirname(def_path)
-        obj.restore_state_from_dir(obj_dir, revision=revision)
 
     def commit(self) -> None:
         self.write_main_def()
