@@ -9,7 +9,7 @@ from collections import UserDict
 import multiprocessing
 import re
 
-from dryml.core2.utils.general import list_unique_concrete_definitions
+from dryml.core2.utils.general import get_unique_concrete_definitions
 
 
 specific_resource_re = re.compile('^(cpu|gpu)/([0-9]+)$')
@@ -636,7 +636,7 @@ def get_context_requirements(objs):
     """
     Set a context appropriate for the object or set of objects
     """
-    cdefs = list_unique_concrete_definitions(objs)
+    cdefs = get_unique_concrete_definitions(objs)
 
     ctx_reqs = {}
 
