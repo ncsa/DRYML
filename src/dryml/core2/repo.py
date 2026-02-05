@@ -28,6 +28,7 @@ class BaseRepo:
         if not os.path.exists(dir):
             raise ValueError(f"Directory {dir} doesn't exist.")
         self.dir = dir
+        ic(self.dir, os.listdir(self.dir))
         self.obj_dir = os.path.join(self.dir, "objects")
 
         # List the directory and find all the object directories
@@ -37,6 +38,7 @@ class BaseRepo:
             # The objects directory doesn't exist
             os.mkdir(self.obj_dir)
             obj_dirs = os.listdir(self.obj_dir)
+        ic(self.obj_dir, os.listdir(self.obj_dir))
 
         # TODO: Do I really want to load all objects like this?
         if preload:
@@ -73,6 +75,7 @@ class BaseRepo:
             if isinstance(value, Serializable):
                 obj_def = value.definition.concretize()
                 if obj_def not in saved_objs:
+                    ic("saving object", obj_def)
                     # TODO: Handle status checking here.
                     self.save_object_imp(value)
                     saved_objs[obj_def] = value
@@ -106,6 +109,7 @@ class BaseRepo:
         if obj_def in self.objs:
             # Check that this was the same object
             if obj is not self.objs[obj_def]:
+                #ic(obj, id(obj), self.objs, obj_def, self.objs[obj_def], id(self.objs[obj_def]))
                 raise ValueError("We already have a different object with definition: {obj_def}")
         else:
             # Add to repo-wide cache
@@ -114,6 +118,7 @@ class BaseRepo:
         # Create directory for object
         def_hash_digest = hashval_to_digest(hash(obj_def))
         object_path = os.path.join(self.dir, "objects", def_hash_digest)
+        ic("saving to", object_path)
         os.mkdir(object_path)
         # Save the object
         return obj._save_to_dir(object_path)
@@ -159,6 +164,7 @@ class BaseRepo:
                 args = new_values['args']
                 kwargs = new_values['kwargs']
                 self._num_constructions += 1
+                ic("------------ constructing object! ------------", value.cls, args, kwargs)
                 return value.cls(*args, **kwargs)
 
             if isinstance(value, ConcreteDefinition):
@@ -342,34 +348,54 @@ class ZipRepo(Repo):
                 if not empty:
                     _load_data()
 
-    def close(self):
+    def write_to_file(self, dest):
         self.write_main_def()
         # Zip up the directory and its content to its final destination
-        zip_directory(self.dir, self.zip_dest)
+        zip_directory(self.dir, dest)
+
+    def close(self):
+        self.write_to_file(self.zip_dest)
         self.close_temp_dir()
 
 
+def transport_repo(repo=None, dest='localhost'):
+    if repo is None:
+        raise AttributeError("Can't send a non-existent repo")
+
+    if dest != 'localhost':
+        # TODO: Implement network support (SSH Maybe?)
+        raise RuntimeError("Sending repos to a different machine than the current machine is currently unsupported.")
+
+    # TODO implement more specific support
+    if isinstance(repo, Repo):
+        # Directory based repo, we can send the address
+        return repo.dir
+
+
 @contextmanager
-def manage_repo(dest=None, repo=None, preload=True):
+def manage_repo(repo=None, preload=True):
     close_repo = False
     if repo is None:
-        if dest is None:
-            repo = Repo(preload=preload)
-        elif isinstance(dest, IOBase):
-            # This is a file-like object
-            repo = ZipRepo(dest, preload=preload)
+        repo = Repo(preload=preload)
+        close_repo = True
+    elif isinstance(repo, BaseRepo):
+        pass
+    elif isinstance(repo, IOBase):
+        # This is a file-like object
+        repo = ZipRepo(repo, preload=preload)
+        close_repo = True
+    else:
+        # detect if the path is a zip file
+        extension = os.path.splitext(repo)[-1]
+        if extension == ".zip" or extension == ".dry":
+            # We have a single file repo
+            repo = ZipRepo(repo, preload=preload)
+        elif os.path.exists(repo) and os.path.isdir(repo):
+            # We have a directory repo
+            repo = Repo(repo, preload=preload)
         else:
-            # detect if the path is a zip file
-            extension = os.path.splitext(dest)[-1]
-            if extension == ".zip" or extension == ".dry":
-                # We have a single file repo
-                repo = ZipRepo(dest, preload=preload)
-            elif os.path.exists(dest) and os.path.isdir(dest):
-                # We have a directory repo
-                repo = Repo(dest, preload=preload)
-            else:
-                # We will treat this as a zip repo
-                repo = ZipRepo(dest, preload=preload)
+            # We will treat this as a zip repo
+            repo = ZipRepo(repo, preload=preload)
         close_repo = True
     yield repo
     if close_repo:
@@ -377,19 +403,23 @@ def manage_repo(dest=None, repo=None, preload=True):
 
 
 # Saving and Loading
-def save_object(obj, dest=None, repo=None):
+def save_object(obj, repo=None):
     from dryml.core2 import Serializable
-    main = (repo is None) and (isinstance(obj, Serializable))
-    with manage_repo(dest=dest, repo=repo) as repo:
+    main = False
+    if isinstance(obj, Serializable):
+        main = True
+    with manage_repo(repo=repo) as repo:
         repo.save_object(obj, main=main)
         return True
 
 
 def load_object(
-        obj_def=None, dest=None, repo=None,
+        obj_def=None, repo=None,
         cls_remap=None):
     from dryml.core2.definition import Definition, concretize_definition
-    with manage_repo(dest=dest, repo=repo) as repo:
+    ic(obj_def)
+    with manage_repo(repo=repo) as repo:
         if obj_def is None:
             obj_def = repo.main_def
+            ic(obj_def)
         return repo.load_object(concretize_definition(obj_def))

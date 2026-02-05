@@ -369,6 +369,7 @@ class ConcreteDefinition(Definition):
         # Pre-compute hash
         # TODO: pickling this object should not save this hash
         # We may decide later to change the hashing algorithm.
+        ic("---------BUILDING HASH---------", self)
         self._hash = digest_to_hashval(hash_function(self))
 
     def concretize(self):
@@ -380,20 +381,15 @@ class ConcreteDefinition(Definition):
 
 def hash_value(value):
     # Hashes for supported values here
+    val_bytes = None
     if isclass(value):
-        return str(get_class_str(value))
-
-    try:
-        hash_val = hash(value)
-        return hashval_to_digest(hash_val)
-    except TypeError:
-        pass
-
-    if isinstance(value, np.ndarray):
-        # Hash for numpy arrays
-        return hashlib.sha256(value.tobytes()).hexdigest()
+        val_bytes = str(get_class_str(value)).encode()
+    elif isinstance(value, np.ndarray):
+        val_bytes = value.tobytes()
     else:
-        raise TypeError(f"Value of type {type(value)} not supported for hashing.")
+        val_bytes = str(value).encode()
+
+    return hashlib.sha256(val_bytes).hexdigest()
 
 
 def hash_function(structure):
@@ -409,7 +405,9 @@ def hash_function(structure):
         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
             return key, value
     
-        return key, hash_value(value)
+        h_val = hash_value(value)
+        ic(h_val)
+        return key, h_val
 
     def _exit(path, key, old_parent, new_parent, new_items):
         # At this point, all items should be hashes
@@ -420,10 +418,13 @@ def hash_function(structure):
         # Combine the hashes
         hasher = hashlib.sha256()
         # Add a string representation of the old parent type
-        hasher.update(type(old_parent).__qualname__.encode())
+        type_val = type(old_parent).__qualname__.encode()
+        ic(type_val)
+        hasher.update(type_val)
         for _, v in new_items:
             hasher.update(v.encode())
         new_hash = hasher.hexdigest()
+        ic(new_hash)
 
         return HashHelper(new_hash)
 

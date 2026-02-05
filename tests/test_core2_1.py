@@ -724,12 +724,12 @@ def test_save_load_1(create_temp_dir):
     # Test save/load to/from a directory
     obj1 = objects.TestClass5(10, test='a')
 
-    save_object(obj1, dest=create_temp_dir)
+    save_object(obj1, repo=create_temp_dir)
 
     assert len(os.listdir(create_temp_dir)) == 2
     assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 1
 
-    obj1_2 = load_object(obj1.definition, dest=create_temp_dir)
+    obj1_2 = load_object(obj1.definition, repo=create_temp_dir)
     assert obj1_2.x == 10
     assert obj1_2.test == 'a'
 
@@ -746,12 +746,12 @@ def test_save_load_2(create_temp_dir):
     assert obj4.test is obj2
     assert obj4.x is obj3
 
-    save_object(obj4, dest=create_temp_dir)
+    save_object(obj4, repo=create_temp_dir)
 
     assert len(os.listdir(create_temp_dir)) == 2
     assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 4
 
-    obj4_2 = load_object(obj4.definition, dest=create_temp_dir)
+    obj4_2 = load_object(obj4.definition, repo=create_temp_dir)
     assert obj4_2 is not obj4
     obj3_2 = obj4_2.x
     obj2_2 = obj4_2.test
@@ -778,12 +778,12 @@ def test_save_load_3(create_temp_dir):
 
     obj11 = objects.TestClass5(obj10, test=obj10)
 
-    save_object(obj11, dest=create_temp_dir)
+    save_object(obj11, repo=create_temp_dir)
 
     assert len(os.listdir(create_temp_dir)) == 2
     assert len(os.listdir(os.path.join(create_temp_dir, 'objects'))) == 11
 
-    obj11_2 = load_object(obj11.definition, dest=create_temp_dir)
+    obj11_2 = load_object(obj11.definition, repo=create_temp_dir)
     obj10_2 = obj11_2.x
     assert obj11_2.test is obj10_2
     obj6_2 = obj10_2.x.test
@@ -857,7 +857,7 @@ def test_repo_load_2(create_temp_dir):
     # First create an object and save it.
     obj1 = objects.TestDefer2('a')
     assert obj1.__initialized__ is False
-    
+
     obj1.set_val(10)
 
     assert obj1.data == 10

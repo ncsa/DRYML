@@ -152,3 +152,10 @@ def test_unique_objs_1():
     assert loss_obj in unique_objs
     assert train_fn_obj in unique_objs
     assert trainable_obj in unique_objs
+
+
+def test_def_hash_1():
+    obj_def = Definition(objs.TestDefer2, 'a')
+    obj_def_2 = Definition(objs.TestDefer2, 'a')
+
+    assert hash(obj_def.concretize()) == hash(obj_def_2.concretize())

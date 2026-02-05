@@ -208,7 +208,10 @@ def apply_func(
 
 
 def get_temp_directory():
-    return tempfile.TemporaryDirectory()
+    ic(os.listdir('/tmp'))
+    the_dir = tempfile.TemporaryDirectory()
+    ic(the_dir, os.listdir('/tmp'))
+    return the_dir
 
 
 def mock_eval(method, *args, **kwargs):

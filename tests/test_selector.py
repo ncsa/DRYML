@@ -17,13 +17,13 @@ def test_selector_1():
     assert not sel(obj2)
     assert not sel(obj2.definition)
 
-    dryml.core2.save_object(obj1, dest='test1.dry')
-    dryml.core2.save_object(obj2, dest='test2.dry')
+    dryml.core2.save_object(obj1, repo='test1.dry')
+    dryml.core2.save_object(obj2, repo='test2.dry')
 
     # Test selectors work with loaded classes
 
-    obj1_loaded = dryml.core2.load_object(dest='test1.dry')
-    obj2_loaded = dryml.core2.load_object(dest='test2.dry')
+    obj1_loaded = dryml.core2.load_object(repo='test1.dry')
+    obj2_loaded = dryml.core2.load_object(repo='test2.dry')
 
     assert sel(obj1_loaded)
     assert not sel(obj2_loaded)

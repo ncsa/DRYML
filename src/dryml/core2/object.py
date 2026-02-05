@@ -221,9 +221,9 @@ class Serializable(Remember):
     """
     Serializable objects in DRYML inherit from Remember. They implement saving a loading of the object from disk
     """
-    def save(self, dest, **kwargs):
+    def save(self, repo, **kwargs):
         from dryml.core2.repo import save_object
-        return save_object(self, dest, **kwargs)
+        return save_object(self, repo, **kwargs)
 
     def _save_to_dir(self, dir: str):
         # Directory into which the model should save its 'heavy' content
