@@ -18,7 +18,7 @@ All DRYML `Object`s can be uniquely identified, and serialized to disk. Once sav
 
 ### Reuse Model Components
 
-DRYML borrows from the Entity Component System programming pattern, and many Model types are created from components which are attached to the model, and can be reused. These can include training procedure, optimization algorithm, loss function, and the underlying NN model itself. This compartmentalization allows us to enable hyperparameter searches over nearly any parameter of your ML algorithm from the NN topology, from the optimizer learning rate, to the training procedure. It also allows the user to define a complex training procedure once, and then reuse it for multiple related problems in the future. DRYML also has defined training procedures for some common ML frameworks.
+DRYML borrows from the Entity Component System (ECS) programming pattern, and many Model types are created from components which are attached to the model, and can be reused. These can include training procedure, optimization algorithm, loss function, and the underlying NN model itself. This compartmentalization allows us to enable hyperparameter searches over nearly any parameter of your ML algorithm from the NN topology, from the optimizer learning rate, to the training procedure. It also allows the user to define a complex training procedure once, and then reuse it for multiple related problems in the future. Centering the composability of training experiments also allows the user to separate the components after a training experiment is complete. Composable and Separable. DRYML also has defined training procedures for some common ML frameworks.
 
 ### Compare Models Between Frameworks
 
