@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from copy import deepcopy
 from boltons.iterutils import remap, is_collection, PathAccessError, default_enter, default_exit
 import hashlib
@@ -7,7 +9,7 @@ import sys
 
 from dryml.core2.util import is_dictlike, \
     get_class_str, is_nonclass_callable, hashval_to_digest, \
-    digest_to_hashval, get_memorizer_view, get_definition_view
+    digest_to_hashval, get_object_view, get_definition_view
 
 def definition_enter(path, key, value):
     if isinstance(value, Definition):
@@ -30,9 +32,9 @@ def definition_exit(path, key, value, new_parent, new_items):
 
 
 def deepcopy_skip_definition_object(defn):
+    from dryml.core2.object import Object
     def _enter(path, key, value):
-        from dryml.core2.object import Lazy
-        if isinstance(value, Lazy):
+        if isinstance(value, Object):
             return value, False
         elif isinstance(value, Definition):
             return value, False
@@ -40,8 +42,7 @@ def deepcopy_skip_definition_object(defn):
             return default_enter(path, key, value)
 
     def _visit(path, key, value):
-        from dryml.core2.object import Lazy
-        if isinstance(value, Lazy):
+        if isinstance(value, Object):
             # We have an already realized class instance. We shouldn't deep copy it.
             return key, value
         elif isinstance(value, Definition):
@@ -51,6 +52,7 @@ def deepcopy_skip_definition_object(defn):
         elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
             return key, value
         else:
+            ic("copying", value)
             return key, deepcopy(value)
 
     if type(defn) is Definition:
@@ -73,8 +75,7 @@ SKIP_ARGS = object()
 
 class Definition(dict):
     allowed_keys = ['cls', 'args', 'kwargs']
-    def __init__(self, *args, **kwargs):
-        init = False
+    def __init__(self, *args, repo=None, **kwargs):
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]):
                 raise ValueError("First positional argument must be a class or callable.")
@@ -84,16 +85,17 @@ class Definition(dict):
                 super().__init__(
                     cls=args[0],
                     kwargs=kwargs)
-                init = True
             else:
                 super().__init__(
                     cls=args[0],
                     args=args[1:],
                     kwargs=kwargs)
-                init = True
+        else:
+            super().__init__(
+                args=args,
+                kwargs=kwargs)
 
-        if not init:
-            super().__init__(*args, **kwargs)
+        self.repo = repo
 
     def __setitem__(self, key, value):
         if key not in self.allowed_keys:
@@ -104,14 +106,11 @@ class Definition(dict):
         # A true deepcopy
         return deepcopy_skip_definition_object(self)
 
-    def build(self, build_missing=True, **kwargs):
-        return build_from_definition(self, build_missing=build_missing, **kwargs)
-
     def __call__(self, other_def, **kwargs):
-        from dryml.core2.object import Lazy
+        from dryml.core2.object import Object
         if not isinstance(other_def, Definition) and \
-                not isinstance(other_def, Lazy):
-            raise TypeError("Definition can only be called on other Definition objects and Lazy objects")
+                not isinstance(other_def, Object):
+            raise TypeError("Definition can only be called on other Definition objects and Object objects")
         return selector_match(self, other_def, **kwargs)
 
     @property
@@ -134,11 +133,19 @@ class Definition(dict):
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
 
-    def concretize(self):
-        return concretize_definition(self)
+    def concretize(self, repo=None) -> ConcreteDefinition:
+        from dryml.core2.repo import manage_repo
+        with manage_repo(repo=repo) as sub_repo:
+            return sub_repo.concretize_definition(self)
 
     def categorical(self, recursive=False):
         return categorical_definition(self, recursive=recursive)
+
+    def build(self, repo=None, build_missing=True) -> Object:
+        from dryml.core2.repo import manage_repo
+        with manage_repo(repo=repo) as sub_repo:
+            concrete_def = sub_repo.concretize_definition(self)
+            return sub_repo.load_object(concrete_def, build_missing=build_missing)
 
     def __repr__(self):
         return f"{type(self).__name__}({super().__repr__()})"
@@ -154,6 +161,28 @@ class Definition(dict):
     @property
     def kwargs(self):
         return self['kwargs']
+
+
+class ConcreteDefinition(Definition):
+    def __init__(self, *args, **kwargs):
+        if len(args) == 0:
+            raise ValueError("ConcreteDefinition must be created with arguments")
+        if len(args) > 0:
+            if not isclass(args[0]):
+                raise TypeError("ConcreteDefinition's first argument must be a class")
+        # Input validation
+        validate_arguments_for_concrete_definition({'args': args, 'kwargs': kwargs})
+        super().__init__(*args, **kwargs)
+        # Pre-compute hash
+        # TODO: pickling this object should not save this hash
+        # We may decide later to change the hashing algorithm.
+        self._hash = digest_to_hashval(hash_function(self))
+
+    def concretize(self):
+        return self
+
+    def __hash__(self):
+        return self._hash
 
 
 def categorical_definition(defn: Definition, recursive=True):
@@ -220,97 +249,104 @@ def categorical_definition(defn: Definition, recursive=True):
             exit=_exit)
 
 
-def concretize_definition(defn: Definition):
-    from dryml.core2.object import Lazy
-    # Cache for completed results. All duplicate ConcreteDefinitions should refer to the SAME object and so the same definition
-    # Key for this cache will be the ConcreteDefinition hash.
-    definition_cache = {}
-    built_definitions = {}
-
-    def _enter(path, key, value):
-        if id(value) in definition_cache:
-            # We've seen this object before
-            return value, False
-        elif isinstance(value, ConcreteDefinition):
-            # The definition is already concrete. don't enter it.
-            return value, False
-        elif isinstance(value, Definition):
-            return {}, get_definition_view(value)
-        elif isinstance(value, Lazy):
-            return {}, get_memorizer_view(value)
-        else:
-            return default_enter(path, key, value)
-
-
-    def _visit(path, key, value):
-        if id(value) in definition_cache: 
-            # We've seen this object before
-            return key, definition_cache[id(value)]
-        elif type(value) is ConcreteDefinition:
-            # Value is already Concrete
-            return key, value
-        elif isinstance(value, Lazy):
-            # We have an already realized class instance. We shouldn't deep copy it.
-            raise TypeError("We shouldn't get a Lazy object here.")
-        elif isinstance(value, Definition):
-            raise TypeError("We shouldn't get a Definition object here.")
-        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
-            return key, value
-        else:
-            return key, deepcopy(value)
-
-    def _create_def(new_parent, new_items):
-        for k, v in new_items:
-            new_parent[k] = v
-        try:
-            args = new_parent['args']
-        except KeyError:
-            raise ValueError("Definition {values} which skiped arguments isn't concretizable.")
-        kwargs = new_parent['kwargs']
-        cls = new_parent['cls']
-        # Do argument manipulations
-        args, kwargs = cls.__prepare_args__(*args, **kwargs)
-        # Copy args so modifications to this ConcreteDefinition doesn't change the original
-        # Values in the original Definitions
-        args = deepcopy_skip_definition_object(args)
-        kwargs = deepcopy_skip_definition_object(kwargs)
-        # Create the now concrete definition
-        return ConcreteDefinition(cls, *args, **kwargs) 
-
-    def _exit(path, key, values, new_parent, new_items):
-        is_def = isinstance(values, Definition)
-        is_rem = isinstance(values, Lazy)
-        if is_def or is_rem:
-            if is_rem:
-                # Check if we've seen this object's definition before.
-                if values in built_definitions:
-                    definition_cache[id(values)] = built_definitions[values]
-                    return definition_cache[id(values)]
-
-            new_def = _create_def(new_parent, new_items)
-            built_definitions[new_def] = new_def
-            # Check if we've encountered this definition before
-            definition_cache[id(values)] = new_def
-            return new_def
-        else:
-            return default_exit(path, key, values, new_parent, new_items)
-
-    if isinstance(defn, Definition):
-        return remap(
-            [defn],
-            enter=_enter,
-            visit=_visit,
-            exit=_exit)[0]
-    else:
-        return remap(
-            defn,
-            enter=_enter,
-            visit=_visit,
-            exit=_exit)
+#def concretize_definition(defn, def_cache=None):
+#    """
+#    Inside a possibly nested structure do these transformations:
+#        Definition -> ConcreteDefinition
+#        Object -> ConcreteDefinition
+#    """
+#
+#    from dryml.core2.object import Lazy
+#    # Cache for completed results. All duplicate ConcreteDefinitions should refer to the SAME object and so the same definition
+#    # Key for this cache will be the ConcreteDefinition hash.
+#    if def_cache is None:
+#        def_cache = {}
+#    built_definitions = {}
+#
+#    def _enter(path, key, value):
+#        if id(value) in def_cache:
+#            # We've seen this object before
+#            return value, False
+#        elif isinstance(value, ConcreteDefinition):
+#            # The definition is already concrete. don't enter it.
+#            return value, False
+#        elif isinstance(value, Definition):
+#            return {}, get_definition_view(value)
+#        elif isinstance(value, Lazy):
+#            return {}, get_object_view(value)
+#        else:
+#            return default_enter(path, key, value)
+#
+#
+#    def _visit(path, key, value):
+#        if id(value) in def_cache: 
+#            # We've seen this object before
+#            return key, def_cache[id(value)]
+#        elif type(value) is ConcreteDefinition:
+#            # Value is already Concrete
+#            return key, value
+#        elif isinstance(value, Lazy):
+#            # We have an already realized class instance. We shouldn't deep copy it.
+#            raise TypeError("We shouldn't get a Lazy object here.")
+#        elif isinstance(value, Definition):
+#            raise TypeError("We shouldn't get a Definition object here.")
+#        elif (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray):
+#            return key, value
+#        else:
+#            return key, deepcopy(value)
+#
+#    def _create_def(new_parent, new_items):
+#        for k, v in new_items:
+#            new_parent[k] = v
+#        try:
+#            args = new_parent['args']
+#        except KeyError:
+#            raise ValueError("Definition {values} which skiped arguments isn't concretizable.")
+#        kwargs = new_parent['kwargs']
+#        cls = new_parent['cls']
+#        # Do argument manipulations
+#        args, kwargs = cls.__prepare_args__(*args, **kwargs)
+#        # Copy args so modifications to this ConcreteDefinition doesn't change the original
+#        # Values in the original Definitions
+#        args = deepcopy_skip_definition_object(args)
+#        kwargs = deepcopy_skip_definition_object(kwargs)
+#        # Create the now concrete definition
+#        return ConcreteDefinition(cls, *args, **kwargs) 
+#
+#    def _exit(path, key, values, new_parent, new_items):
+#        is_def = isinstance(values, Definition)
+#        is_rem = isinstance(values, Lazy)
+#        if is_def or is_rem:
+#            if is_rem:
+#                # Check if we've seen this object's definition before.
+#                if values in built_definitions:
+#                    def_cache[id(values)] = built_definitions[values]
+#                    return def_cache[id(values)]
+#
+#            new_def = _create_def(new_parent, new_items)
+#            built_definitions[new_def] = new_def
+#            # Check if we've encountered this definition before
+#            def_cache[id(values)] = new_def
+#            return new_def
+#        else:
+#            return default_exit(path, key, values, new_parent, new_items)
+#
+#    if isinstance(defn, Definition):
+#        return remap(
+#            [defn],
+#            enter=_enter,
+#            visit=_visit,
+#            exit=_exit)[0]
+#    else:
+#        return remap(
+#            defn,
+#            enter=_enter,
+#            visit=_visit,
+#            exit=_exit)
 
 
 def validate_arguments_for_concrete_definition(vals):
-    from dryml.core2.object import Lazy
+    from dryml.core2.object import Object
     # TODO: Maybe also directly validate for 'hashable' plain old data types as well?
     type_errors = []
 
@@ -320,18 +356,17 @@ def validate_arguments_for_concrete_definition(vals):
             return key, False
         if isinstance(value, Definition):
             return {}, get_definition_view(value)
-        elif isinstance(value, Lazy):
-            return {}, get_memorizer_view(value)
+        elif isinstance(value, Object):
+            return {}, get_object_view(value)
         else:
             return default_enter(path, key, value)
 
     def _visit(path, key, value):
-        nonlocal type_errors
         if isinstance(value, ConcreteDefinition):
             pass
         elif isinstance(value, Definition):
             type_errors += [ ( path+(key,), type(value)) ]
-        elif isinstance(value, Lazy):
+        elif isinstance(value, Object):
             type_errors += [ ( path+(key,), type(value)) ]
         return key, value
 
@@ -351,28 +386,6 @@ def validate_arguments_for_concrete_definition(vals):
             full_path = '/'.join(t_error[0])
             msg += [ f"{full_path}: class: {t_error[1].__name__}" ]
         raise TypeError('\n'.join(msg))
-
-
-class ConcreteDefinition(Definition):
-    def __init__(self, *args, **kwargs):
-        if len(args) == 0:
-            raise ValueError("ConcreteDefinition must be created with arguments")
-        if len(args) > 0:
-            if not isclass(args[0]):
-                raise TypeError("ConcreteDefinition's first argument must be a class")
-        # Input validation
-        validate_arguments_for_concrete_definition({'args': args, 'kwargs': kwargs})
-        super().__init__(*args, **kwargs)
-        # Pre-compute hash
-        # TODO: pickling this object should not save this hash
-        # We may decide later to change the hashing algorithm.
-        self._hash = digest_to_hashval(hash_function(self))
-
-    def concretize(self):
-        return self
-
-    def __hash__(self):
-        return self._hash
 
 
 def hash_value(value):
@@ -441,7 +454,7 @@ def build_definition(obj):
         if id_value in instance_cache:
             return value, False
         elif isinstance(value, Lazy):
-            return {}, get_memorizer_view(value)
+            return {}, get_object_view(value)
         elif isinstance(value, Definition):
             # We can encounter definitions we have already created
             found_def = False
@@ -522,42 +535,43 @@ def build_definition(obj):
 
 
 # Creating objects from definitions
-def build_from_definition(definition, build_missing=True, **kwargs):
-    from dryml.core2.repo import manage_repo
-    with manage_repo(**kwargs) as repo:
-        # Get unique objects
-        unique_objs = unique_memorizer_objects(definition)
+#def build_from_definition(definition, build_missing=True, **kwargs):
 
-        # Add these objects to the repo.
-        if len(unique_objs) > 0:
-            repo.add_object(*(unique_objs.values()))
-
-        # First, concretize the definition
-        concrete_definition = concretize_definition(definition)
-        # concrete definitions refer to specific objects
-
-        def _visit(path, key, value):
-            # Do nothing on visit.
-            return key, value
-
-        def _exit(path, key, value, new_parent, new_items):
-            if isinstance(value, ConcreteDefinition):
-                return repo.load_object(value, build_missing=build_missing)
-            else:
-                return default_exit(path, key, value, new_parent, new_items)
-
-        if isinstance(definition, Definition):
-            return remap(
-                [concrete_definition],
-                enter=definition_enter,
-                visit=_visit,
-                exit=_exit)[0]
-        else:
-            return remap(
-                concrete_definition,
-                enter=definition_enter,
-                visit=_visit,
-                exit=_exit)
+    #from dryml.core2.repo import manage_repo
+    #with manage_repo(**kwargs) as repo:
+    #    # Get unique objects
+    #    unique_objs = unique_memorizer_objects(definition)
+#
+#        # Add these objects to the repo.
+#        if len(unique_objs) > 0:
+#            repo.add_object(*(unique_objs.values()))
+#
+#        # First, concretize the definition
+#        concrete_definition = concretize_definition(definition)
+#        # concrete definitions refer to specific objects
+#
+#        def _visit(path, key, value):
+#            # Do nothing on visit.
+#            return key, value
+#
+#        def _exit(path, key, value, new_parent, new_items):
+#            if isinstance(value, ConcreteDefinition):
+#                return repo.load_object(value, build_missing=build_missing)
+#            else:
+#                return default_exit(path, key, value, new_parent, new_items)
+#
+#        if isinstance(definition, Definition):
+#            return remap(
+#                [concrete_definition],
+#                enter=definition_enter,
+#                visit=_visit,
+#                exit=_exit)[0]
+#        else:
+#            return remap(
+#                concrete_definition,
+#                enter=definition_enter,
+#                visit=_visit,
+#                exit=_exit)
 
 
 def get_path(obj_or_def, path):
@@ -628,7 +642,7 @@ def selector_match(selector, definition, strict=False, cls_str_compare=False, ve
                 raise TypeError("Definitions which skip args aren't allowed in strict mode")
             return {}, get_definition_view(value)
         elif isinstance(value, Lazy):
-            return {}, get_memorizer_view(value)
+            return {}, get_object_view(value)
         else:
             return default_enter(path, key, value)
 
@@ -803,7 +817,7 @@ def unique_memorizer_objects(def_or_obj):
 
     def _enter(path, key, value):
         if isinstance(value, Lazy):
-            return {}, get_memorizer_view(value)
+            return {}, get_object_view(value)
         elif isinstance(value, Definition):
             return {}, get_definition_view(value)
         return default_enter(path, key, value)

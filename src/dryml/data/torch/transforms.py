@@ -1,4 +1,4 @@
-from dryml.core.config import Meta
+from dryml.config import Meta
 from dryml.models import Trainable
 from dryml.data import Dataset
 from dryml.data.torch import TorchDataset

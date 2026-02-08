@@ -1,15 +1,17 @@
-from dryml.core2.object import Lazy, UniqueID, \
-    Metadata
-from dryml.core2.definition import Definition, SKIP_ARGS
-from dryml.core2.repo import Repo, load_object, save_object
+#from dryml.core2.object import Lazy, UniqueID, \
+#    Metadata
+#from dryml.core2.object import Object
+#from dryml.core2.definition import Definition, SKIP_ARGS
+#from dryml.core2.repo import Repo, load_object, save_object
 
 __all__ = [
-    load_object,
-    save_object,
-    Lazy,
-    UniqueID,
-    Metadata,
-    Definition,
-    SKIP_ARGS,
-    Repo,
+#    Object
+#    load_object,
+#    save_object,
+#    Lazy,
+#    UniqueID,
+#    Metadata,
+#    Definition,
+#    SKIP_ARGS,
+#    Repo,
 ]

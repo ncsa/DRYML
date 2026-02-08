@@ -1,57 +1,52 @@
+from __future__ import annotations
+
 from functools import cached_property
 import uuid
 import time
 import os
 import inspect
 
-from dryml.core2.util import collide_attributes, \
-    pickle_save, pickle_load, get_kwarg_defaults
-from dryml.core2.definition import \
+from dryml.core2.util import pickle_save, pickle_load, _validate_init_sig
+from dryml.core2.definition import Definition, \
     deepcopy_skip_definition_object, build_definition
-
-
-def _validate_init_sig(cls, *args, **kwargs):
-    """
-    Raise TypeError *now* if `cls.__init__` cannot accept the args.
-
-    We bind only to the *signature*; we never execute the body, so it is
-    safe for Lazy/Heavy objects.
-    """
-    sig = inspect.signature(cls.__init__)
-
-    # The first parameter is `self`; use `None` as placeholder.
-    try:
-        sig.bind_partial(None, *args, **kwargs)
-    except TypeError as err:
-        raise TypeError(
-            f"{cls.__name__} cannot be constructed with "
-            f"args={args!r}, kwargs={kwargs!r}: {err}"
-        ) from None
+from copy import deepcopy
 
 
 class Dryml(type):
-    # Support metaclass to enable close control of the python
-    # object creation process
+    # Support metaclass to enable capture of input arguments
 
-    def __create_instance__(cls):
-        # Base instance creation 
-        return cls.__new__(cls)
+    def __call__(cls, *args, repo=None, **kwargs):
+        from dryml.core2.repo import manage_repo
 
-    def __call__(cls, *args, **kwargs):
-        # Lazy initialization
-        obj = cls.__create_instance__()
-        # Perform class specific argument preparation
-        args, kwargs = cls.__prepare_args__(*args, **kwargs)
+        with manage_repo(repo=repo) as sub_repo:
+            # Build initial Definition
+            defn = Definition(
+                cls,
+                *args,
+                repo=sub_repo,
+                *kwargs
+            )
 
-        _validate_init_sig(cls, *args, **kwargs)
+            # Concretize pass
+            cdef = sub_repo.concretize_definition(
+                defn)
 
-        # Perform object pre-initialization
-        obj.__pre_init__(*args, **kwargs)
+            rt_args = sub_repo.load_object(cdef.args, build_missing=True)
+            rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
+
+        # Create the object initially
+        obj = cls.__new__(cls)
+
+        # Initialize object with 
+        obj.__init__(*rt_args, **rt_kwargs)
+        # Deepcopy the concrete definition so it's version of the arguments
+        # is true to how it was originally called.
+        obj.__cdef__ = deepcopy(cdef)
 
         return obj
 
 
-class Lazy(metaclass=Dryml):
+class Object(metaclass=Dryml):
     # Base type for using CreationControl metaclass.
     # Provides basic implementations for all methods used
     # In the CreationControl process
@@ -66,52 +61,35 @@ class Lazy(metaclass=Dryml):
         # __strip_unique_args__ should be an idempotent function
         return args, kwargs
 
-    # Since methods are part of the class, we only have to remove data from the object. We mark the protected data here. Keep up to date with attributes added 
-    def __pre_init__(self, *args, **kwargs):
-        # Set up structures for tracking args and store them.
-        collide_attributes(self, [
-            '__initialized__',
-            '__locked__',
-            '__args__',
-            '__kwargs__',])
-        default_kwargs = get_kwarg_defaults(type(self))
-        # TODO investigate whether we should include a check to make sure the user isn't passing
-        # any Definition objects. I think we should probably disallow that.
-        self.__args__ = deepcopy_skip_definition_object(args)
-        # We merge the default kwargs with the kwargs passed in.
-        # Defaults are first so they can be overwritten.
-        self.__kwargs__ = deepcopy_skip_definition_object({ **default_kwargs, **kwargs })
-        self.__initialized__ = False
-        self.__locked__ = False
-        self.__orig_keys__ = None
-        self.__orig_keys__ = list(self.__dict__.keys())
+    @classmethod
+    def defn(cls, *args, repo=None, **kwargs) -> "Definition":
+        from dryml.core2.definition import Definition
+        return Definition(cls, *args, repo=repo, **kwargs)
+
+    # Alias for defn
+    d = defn
 
     def __init__(self):
         pass
 
     @cached_property
-    def definition(self):
+    def definition(self) -> "ConcreteDefinition":
         # Get a `Definition` object for this particular object.
-        return build_definition(self)
-
-    @cached_property
-    def concrete_definition(self):
-        # Get a `ConcreteDefinition` object for this particular object.
-        return self.definition.concretize()
+        return self.__cdef__
 
     def __hash__(self):
-        # Lazys are hashable through through its `ConcreteDefinition`
-        return hash(self.concrete_definition)
+        # Objects are hashable through through its `ConcreteDefinition`
+        return hash(self.definition)
 
     def __repr__(self):
-        return f"<{self.__class__.__name__} at {hex(id(self))}>(args={self.__args__}, kwargs={self.__kwargs__})"
+        return f"<{self.definition.cls} at {hex(id(self))}>(args={self.definition.args}, kwargs={self.definition.kwargs})"
 
     def save(self, repo=None):
         from dryml.core2.repo import save_object
         save_object(self, repo=repo)
 
     def save_to_dir(self, dest_dir: str):
-        pickle_save(self.concrete_definition, os.path.join(dest_dir, 'def.pkl'))
+        pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
         self.save_imp(dest_dir)
 
     def save_imp(self, dest_dir: str):
@@ -124,40 +102,14 @@ class Lazy(metaclass=Dryml):
 
     def load_from_dir(self, src_dir: str):
         loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
-        assert loaded_def == self.concrete_definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.concrete_definition}"
+        assert loaded_def == self.definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.definition}"
         self.load_imp(src_dir)
 
     def load_imp(self, src_dir: str):
         pass
 
-    def __getattribute__(self, name):
-        # First, check if we have this attribute
-        try:
-            return super().__getattribute__(name)
-        except AttributeError:
-            # If we don't next check if we're initialized
-            if not super().__getattribute__('__initialized__'):
-                super().__getattribute__('initialize')()
-        # Then check again
-        return super().__getattribute__(name)
 
-    def initialize(self):
-        if self.__locked__:
-            raise RuntimeError("Cannot initialize object. Lazy object is locked.")
-        self.__init__(*self.__args__, **self.__kwargs__)
-        self.__initialized__ = True
-
-    def unload(self):
-        if self.__locked__:
-            raise RuntimeError("Cannot unload object. Lazy object is locked.")
-        # Remove all attributes besides self._orig_attrs
-        for attr in list(self.__dict__.keys()):
-            if attr not in self.__orig_keys__:
-                delattr(self, attr)
-        self.__initialized__ = False
-
-
-class Pickleable(Lazy):
+class Pickleable(Object):
     def save_imp(self, dest_dir: str):
         # Grab all heavy-state data
         heavy_state = {}
@@ -175,7 +127,7 @@ class Pickleable(Lazy):
         self.__dict__.update(heavy_state)
 
 
-class UniqueID(Lazy):
+class UniqueID(Object):
     # Mixing in this class adds a `uid` keyword argument which is
     # initialized automatically if not provided.
     @classmethod
@@ -198,7 +150,7 @@ class UniqueID(Lazy):
         self.uid = uid
 
 
-class Metadata(Lazy):
+class Metadata(Object):
     # Mixing in this class adds a `metadata` keyword argument which is
     # used to store a basic 'description', and 'creation_time' metadata
     # along with any other metadata the user wishes to store.
