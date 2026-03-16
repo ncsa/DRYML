@@ -744,14 +744,20 @@ class Repo:
             store = self.default_store
         if store is not None:
             store.set_main_def(self.main_def)
+        else:
+            raise ValueError("No store available to set main definition!")
 
-    def add_objects(self, *args, store=None):
+    def add_objects(self, *args, store: Store|None=None):
         from dryml.core2.object import Object
 
         def _add_object_single(obj: Object):
             self.pin(obj)
             if store is not None:
                 self.obj_default_store[obj.definition] = store
+            else:
+                # Set the default store to the current default store of the repo, if it exists
+                if self.default_store is not None:
+                    self.obj_default_store[obj.definition] = self.default_store
 
         # Recursively add objects.
         def _add_object(obj: Any):

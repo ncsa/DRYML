@@ -2,6 +2,8 @@ import dryml
 import os
 import glob
 import core2_objects as objects
+import pytest
+import tempfile
 
 
 def test_save_1(primary_store_set):
@@ -39,35 +41,6 @@ def test_save_1(primary_store_set):
     assert len(objs_loaded) == 1
 
 
-def test_save_1(primary_store_set):
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
-
-    repo.add_objects(objects.HelloStr(msg='test'))
-
-    # Save objects in repository
-    repo.save()
-
-    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
-
-    # Delete the repo
-    del repo
-
-    dryml.core2.repo._global_repo.clear_cache(weak=True)
-
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
-
-    try:
-        result = repo.get(build_missing=False)
-        assert len(result) == 0
-    except KeyError:
-        pass
-
-    repo.save()
-
-    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
-
-
 def test_save_2(primary_store_set):
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
@@ -75,6 +48,35 @@ def test_save_2(primary_store_set):
 
     # Save objects in repository
     repo.save()
+
+    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+    # Delete the repo
+    del repo
+
+    dryml.core2.repo._global_repo.clear_cache(weak=True)
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+
+    try:
+        result = repo.get(build_missing=False)
+        assert len(result) == 0
+    except KeyError:
+        pass
+
+    repo.save()
+
+    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+
+def test_save_3(primary_store_set):
+    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+
+    repo.add_objects(objects.HelloStr(msg='test'))
+
+    # Save objects in repository
+    repo.save()
     assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
     # Delete the repo
@@ -93,6 +95,58 @@ def test_save_2(primary_store_set):
     repo.save()
 
     assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+
+@pytest.fixture
+def prep_and_clean_test_dir2():
+    with tempfile.TemporaryDirectory() as dir1, \
+         tempfile.TemporaryDirectory() as dir2:
+        yield dir1, dir2
+
+
+def test_save_4(prep_and_clean_test_dir2):
+    from dryml.core2.repo import make_store
+
+    dir1, dir2 = prep_and_clean_test_dir2
+    store1 = make_store(dir1)
+    store2 = make_store(dir2)
+    repo = dryml.core2.Repo([store1, store2])
+
+    repo.add_objects(objects.HelloStr(msg='test'))
+    store1 = make_store(dir1)
+    repo.set_default_store(store2)
+    repo.add_objects(objects.HelloInt(msg=5))
+
+    # Save objects in repository
+    repo.save()
+
+    # Delete the repo
+    del repo
+
+    assert len(dryml.core2.Repo.dir_store_inspect(dir1)) == 1
+    assert len(dryml.core2.Repo.dir_store_inspect(dir2)) == 1
+
+    # Load the repository objects should not be loaded right away
+    repo = dryml.core2.Repo(dir1)
+
+    try:
+        results = repo.get(build_missing=True)
+        assert len(results) == 0
+    except KeyError:
+        pass
+
+    del repo
+
+    repo = dryml.core2.Repo(dir2)
+
+    try:
+        results = repo.get(build_missing=True)
+        assert len(results) == 0
+    except KeyError:
+        pass
+
+    assert len(dryml.core2.Repo.dir_store_inspect(dir1)) == 1
+    assert len(dryml.core2.Repo.dir_store_inspect(dir2)) == 1
 
 
 def test_object_save_restore_1(primary_store_set):
