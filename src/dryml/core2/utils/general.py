@@ -32,6 +32,11 @@ def _validate_init_sig(cls, *args, **kwargs):
         ) from None
 
 
+def validate_class(cls):
+    assert isinstance(cls, type), f"Expected a class, got {cls!r}"
+    return cls
+
+
 def collide_attributes(obj, attr_list):
     # Check if these attributes are already defined. Throw an error if they are.
     colliding_attrs = []

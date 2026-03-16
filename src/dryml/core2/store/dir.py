@@ -32,9 +32,6 @@ class DirStore(Store):
         """Base directory"""
         return self.obj_dir
 
-    def _def_file(self, cdef: "ConcreteDefinition") -> str:
-        return os.path.join(self._object_dir(cdef), "def.pkl")
-
     def has(self, cdef: "ConcreteDefinition") -> bool:
         return os.path.exists(self._def_file(cdef))
 
@@ -45,23 +42,6 @@ class DirStore(Store):
             cdef = pickle_load(def_path)
             # TODO: Optional: sanity check hash matches directory name
             yield cdef
-
-    def save_object(self, obj: Object, *, revision: str|None = None) -> None:
-        obj_dir = self._object_dir(obj.definition)
-        os.makedirs(obj_dir, exist_ok=True)
-
-        # Let the object serialize itself
-        obj.save_state_to_dir(obj_dir, revision=revision)
-
-    def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
-        cdef = obj.definition
-        def_path = self._def_file(cdef)
-        if not os.path.exists(def_path):
-            return
-
-        obj_dir = self._object_dir(cdef)
-
-        obj.restore_state_from_dir(obj_dir, revision=revision)
 
     def _main_def_path(self) -> str:
         return os.path.join(self.base_dir, "def.pkl")
@@ -82,3 +62,6 @@ class DirStore(Store):
     def commit(self) -> None:
         if self._main_def is not None:
             self.write_main_def(self._main_def)
+
+    def __repr__(self) -> str:
+        return f"{type(self)}(dir: {self.base_dir})"

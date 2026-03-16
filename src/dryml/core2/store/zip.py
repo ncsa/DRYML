@@ -218,3 +218,6 @@ class ZipExportStore(Store):
     def close(self) -> None:
         # Nothing to clean up (no temp dir).
         pass
+
+    def __repr__(self) -> str:
+        return f"{type(self)}(base_dir: {self._base_dir} dest: {self.zip_dest})"
