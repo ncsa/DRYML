@@ -405,3 +405,45 @@ def test_save_load_3(primary_store_set):
     assert obj2_2 is obj10_2.x.x.test
     obj3_2 = obj6_2.test
     assert obj3_2 is obj10_2.test.test.x
+
+
+def test_save_load_revision_1(primary_store_set):
+    # Test that we can save revisions and load them again
+    obj = objects.TestClassC2(10)
+    obj.set_val(1)
+
+    assert obj.data == 1
+
+    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
+
+    repo.save_object(obj, revision='A')
+
+    obj.set_val(2)
+
+    assert obj.data == 2
+
+    repo.save_object(obj, revision='B')
+
+    store_dir = primary_store_set.stores[0].base_dir
+
+    assert len(dryml.core2.Repo.dir_store_inspect(store_dir)) == 1
+    test_glob = os.path.join(store_dir, '**/*.pkl')
+    assert len(glob.glob(os.path.join(store_dir, '**/*.pkl'), recursive=True)) == 3
+
+    # Remove the objects
+    del repo
+    del obj
+
+    # Re-create repo
+    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
+
+    with dryml.core2.definition_mode():
+        obj_def = objects.TestClassC2(10)
+
+    obj = repo.load_object(obj_def, revision='A')
+
+    assert obj.data == 1
+
+    obj = repo.load_object(obj_def, revision='B')
+
+    assert obj.data == 2

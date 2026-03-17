@@ -30,6 +30,7 @@ class RepoLoadError(Exception):
 
 
 SelectorType = Callable | Definition | ConcreteDefinition
+RevisionType = dict[ConcreteDefinition, str]
 
 
 class Repo:
@@ -169,13 +170,12 @@ class Repo:
     def __len__(self):
         return len(self.strong_obj_cache)
 
-    def save_object(self, obj, main=False, store=None, revision_map: dict[ConcreteDefinition,str]|None=None):
+    def save_object(self, obj, main=False, store=None, revision: RevisionType|str|None=None):
 
         saved_objs: dict[int,set[ConcreteDefinition]] = {}
-        if revision_map is None:
-            revision_map = {}
+        revision = manage_revision(obj, revision)
 
-        def _save_single_object(obj: Object, store: Store|None=None, revision_map: dict[ConcreteDefinition,str]|None=None):
+        def _save_single_object(obj: Object, store: Store|None=None):
             """
             Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
             """
@@ -187,8 +187,8 @@ class Repo:
                 else:
                     store = self.default_store
 
-            _save_object(cdef.args, store=store, revision_map=revision_map)
-            _save_object(cdef.kwargs, store=store, revision_map=revision_map)
+            _save_object(cdef.args, store=store)
+            _save_object(cdef.kwargs, store=store)
 
             if cdef in self.strong_obj_cache:
                 # Check that this was the same object
@@ -206,17 +206,17 @@ class Repo:
 
             if cdef not in saved_objs[id(store)]:
                 # Save the object
-                revision = revision_map.get(cdef, None)
-                store.save_object(obj, revision=revision)
+                revision_str = revision.get(cdef, None)
+                store.save_object(obj, revision=revision_str)
                 saved_objs[id(store)].add(cdef)
                 self._num_saves += 1
 
 
         @cycle_detect()
-        def _save_object(obj: Any, store: Store|None=None, revision_map: dict[ConcreteDefinition,str]|None=None):
+        def _save_object(obj: Any, store: Store|None=None):
             if isinstance(obj, Object):
                 # we must descend into args/kwargs first
-                _save_single_object(obj, store=store, revision_map=revision_map)
+                _save_single_object(obj, store=store)
                 return
 
             if isinstance(obj, ConcreteDefinition):
@@ -224,16 +224,16 @@ class Repo:
                 linked_obj = self.get_cached(obj)
                 if linked_obj is None:
                     raise RepoSaveError(f"Definition of object {obj} is not reachable in this repo!")
-                _save_object(linked_obj, store=store, revision_map=revision_map)
+                _save_object(linked_obj, store=store)
                 return
 
             if isinstance(obj, (list, tuple, set, FrozenList, FrozenTuple, FrozenSet)):
                 for el in obj:
-                    _save_object(el, store=store, revision_map=revision_map)
+                    _save_object(el, store=store)
                 return
             if isinstance(obj, (FrozenDict, dict)):
                 for el in obj.values():
-                    _save_object(el, store=store, revision_map=revision_map)
+                    _save_object(el, store=store)
                 return
             if isinstance(obj, Definition):
                 raise RepoSaveError("Plain Definitions aren't allowed here.")
@@ -242,24 +242,24 @@ class Repo:
             else:
                 raise RepoSaveError(f"Cannot save object of type {type(obj)}!")
 
-        _save_object(obj, store=store, revision_map=revision_map)
+        _save_object(obj, store=store)
 
         # Save main object definition
         if main:
             self.set_main_def(obj.definition, store=store)
         return True
 
-    def save(self, obj: Object | None = None, store=None):
+    def save(self, obj: Object | None = None, store=None, revision: RevisionType|str|None=None):
         if obj is None:
             # Save all loaded objects in the cache
             obj_list = []
             for _, obj in self.strong_obj_cache.items():
                 if obj is not None:
                     obj_list.append(obj)
-            self.save_object(obj_list, main=False, store=store)
+            self.save_object(obj_list, main=False, store=store, revision=revision)
             self.flush()
         else:
-            self.save_object(obj, main=False, store=store)
+            self.save_object(obj, main=False, store=store, revision=revision)
             self.flush()
 
     def _first_store_with(self, cdef):
@@ -281,7 +281,7 @@ class Repo:
         build_missing: bool = False,
         reuse_weak: bool = True,
         cache: CachePolicy = "weak",
-        revision: str | None = None,
+        revision: RevisionType | None = None,
         # internal
         memo: dict | None = None,          # memo for cdef->obj within a single call
         path: list[str | int] | None = None,
@@ -314,14 +314,15 @@ class Repo:
         from .object import Object
 
         if isinstance(x, ConcreteDefinition):
+            revision = manage_revision(x, revision)
             return self._materialize_cdef(
                 x,
+                revision,
                 instance=instance,
                 restore_state=restore_state,
                 build_missing=build_missing,
                 reuse_weak=reuse_weak,
                 cache=cache,
-                revision=revision,
                 memo=memo,
                 path=path,
             )
@@ -329,30 +330,32 @@ class Repo:
         # Definition -> concretize then materialize
         if isinstance(x, Definition):
             cdef = x.concretize(repo=self)
+            revision = manage_revision(cdef, revision)
             return self._materialize_cdef(
                 cdef,
+                revision,
                 instance=instance,
                 restore_state=restore_state,
                 build_missing=build_missing,
                 reuse_weak=reuse_weak,
                 cache=cache,
-                revision=revision,
                 memo=memo,
                 path=path,
             )
 
         # Object encountered during realization
         if isinstance(x, Object):
+            revision = manage_revision(x.definition, revision)
             if instance == "new":
                 # interpret "new" as "clone-by-identity": rebuild from its cdef
                 return self._materialize_cdef(
                     x.definition,
+                    revision,
                     instance="new",
                     restore_state=restore_state,
                     build_missing=build_missing,
                     reuse_weak=reuse_weak,
                     cache=cache,
-                    revision=revision,
                     memo=memo,
                     path=path,
                 )
@@ -369,6 +372,7 @@ class Repo:
         try:
             # tuple-like
             if isinstance(x, (tuple, FrozenTuple)):
+                revision = manage_revision(x, revision)
                 return tuple(
                     self._realize(
                         v,
@@ -387,6 +391,7 @@ class Repo:
 
             # list-like (FrozenList is tuple-tagged)
             if isinstance(x, FrozenList) or isinstance(x, list):
+                revision = manage_revision(x, revision)
                 return [
                     self._realize(
                         v,
@@ -405,6 +410,7 @@ class Repo:
 
             # set-like
             if isinstance(x, (set, FrozenSet)):
+                revision = manage_revision(x, revision)
                 out = set()
                 for i, v in enumerate(x):
                     out.add(
@@ -425,6 +431,7 @@ class Repo:
 
             # mapping-like (FrozenDict implements Mapping)
             if isinstance(x, (dict, FrozenDict)):
+                revision = manage_revision(x, revision)
                 out = {}
                 for k, v in (x.items() if hasattr(x, "items") else x):
                     rk = self._realize(
@@ -467,13 +474,13 @@ class Repo:
     def _materialize_cdef(
         self,
         cdef,
+        revision: RevisionType,
         *,
         instance: InstancePolicy = "reuse",
         restore_state: bool = True,
         build_missing: bool = False,
         reuse_weak: bool = True,
         cache: CachePolicy = "weak",
-        revision: str | None = None,
         # internal
         memo: dict | None = None,   # cdef->obj memo for this realization pass
         path: list[str | int] | None = None,
@@ -487,6 +494,8 @@ class Repo:
         if cdef in memo:
             return memo[cdef]
 
+        revision_str = revision.get(cdef, None)
+
         # Enforce sane caching semantics for "new"
         if instance == "new" and cache != "none":
             # caches are keyed ONLY by cdef, so caching a "new" instance would overwrite.
@@ -496,13 +505,14 @@ class Repo:
         if instance == "reuse":
             obj = self.get_cached(cdef, reuse_weak=reuse_weak)
             if obj is not None:
-                if restore_state and revision is not None and obj.state_revision != revision:
+                if restore_state and revision_str is not None:
                     st = self._first_store_with(cdef)
                     if st is None:
-                        raise RepoLoadError("No store has requested revision")
-                    ok = st.restore_object(obj, revision=revision)
-                    if not ok:
-                        raise RepoLoadError("Store can't restore requested revision")
+                        raise RepoLoadError(f"No store has requested object ({cdef})")
+                    try:
+                        st.restore_object(obj, revision=revision_str)
+                    except Exception as e:
+                        raise RepoLoadError(f"Store can't restore requested revision ({revision_str}) for object ({cdef})") from e
                 return obj
 
         # Determine whether state exists somewhere
@@ -565,7 +575,7 @@ class Repo:
                     raise RepoLoadError(f"Inconsistent store index for {cdef}")
             else:
                 try:
-                    st.restore_object(obj, revision=revision)
+                    st.restore_object(obj, revision=revision_str)
                 except Exception as e:
                     raise RepoLoadError(
                         f"Error restoring state for {cdef} at {'/'.join(map(str, path))}: {e}"
@@ -594,7 +604,7 @@ class Repo:
         build_missing: bool = False,
         reuse_weak: bool = True,
         cache: CachePolicy = "weak",
-        revision: str | None = None,
+        revision: RevisionType|str | None = None,
     ):
         memo: dict[ConcreteDefinition, Object] = {}
         return self._realize(
@@ -649,13 +659,16 @@ class Repo:
             build_missing: bool = False,
             reuse_weak: bool = True,
             cache: CachePolicy = "weak",
-            revision: str | None = None,
+            revision: RevisionType | None = None,
             verbose: bool = True) -> dict[ConcreteDefinition, Object]:
         if type(selector) is list:
             pass
         elif type(selector) is not tuple:
             selector = (selector,)
         selectors = selector
+        if isinstance(revision, str):
+            raise ValueError("plain string revisions aren't supported in `get`.")
+        revision = manage_revision(None, revision)
 
         # Build list of all cdefs known in the repo
         cached_cdefs = []
@@ -667,12 +680,12 @@ class Repo:
         def get_obj(cdef: ConcreteDefinition) -> Object | None:
             return self._materialize_cdef(
                 cdef,
+                revision,
                 instance=instance,
                 restore_state=restore_state,
                 build_missing=build_missing,
                 reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision)
+                cache=cache)
 
         selected_objects = {}
         for sel in selectors:
@@ -820,7 +833,7 @@ class Repo:
 
     @staticmethod
     def dir_store_inspect(root_path: str):
-        files = glob.glob(os.path.join(root_path, '**', 'def.pkl'), recursive=True)
+        files = glob.glob(os.path.join(root_path, '**/def.pkl'), recursive=True)
         # Strip root directory
         return list(map(lambda f: f[len(root_path)+1:], files))
 
@@ -888,6 +901,20 @@ def isolated_repo():
         _current_repo.reset(tok)
 
 
+def manage_revision(obj: Any, revision: RevisionMapType | str | None):
+    if revision is None:
+        return {}
+    elif isinstance(revision, str):
+        if isinstance(obj, Object):
+            return {obj.definition: revision}
+        elif isinstance(obj, ConcreteDefinition):
+            return {obj: revision}
+        else:
+            raise ValueError("When revision is a string, manage_revision must get a clear object or definition to create the revision dictionary.")
+    else:
+        return revision
+
+
 @contextmanager
 def manage_repo(repo=None):
     """
@@ -950,19 +977,21 @@ def manage_repo(repo=None):
 
 
 # Saving and Loading
-def save_object(obj, repo=None, main=False, revision_map: dict[ConcreteDefinition,str]|None=None):
+def save_object(obj, repo=None, main=False, revision: RevisionType|str|None=None):
     with manage_repo(repo=repo) as sub_repo:
+        revision = manage_revision(obj, revision)
         main = main or ((repo is not sub_repo) and isinstance(obj, Object))
         sub_repo.add_objects(obj)
-        sub_repo.save_object(obj, main=main, revision_map=revision_map)
+        sub_repo.save_object(obj, main=main, revision=revision)
 
 
 def load_object(
         cdef=None, repo=None,
+        revision: RevisionType|str|None=None,
         **kwargs):
     with manage_repo(repo=repo) as repo:
         if cdef is None:
             cdef = repo.main_def
             if cdef is None:
                 raise ValueError("When cdef is None, the repo must have a main def, we didn't find one.")
-        return repo.load_object(cdef, **kwargs)
+        return repo.load_object(cdef, revision=revision, **kwargs)

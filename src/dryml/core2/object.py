@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import uuid
 import time
 import os
@@ -11,6 +13,9 @@ from .definition import Definition
 
 
 _definition_mode: ContextVar[bool] = ContextVar("dryml_definition_mode", default=False)
+
+if TYPE_CHECKING:
+    from .repo import RevisionMapType
 
 
 def in_definition_mode() -> bool:
@@ -127,8 +132,9 @@ class Object(metaclass=Dryml):
     def __repr__(self):
         return f"<{self.definition.cls} at {hex(id(self))}>(args={self.definition.args}, kwargs={self.definition.kwargs})"
 
-    def save(self, repo=None, main=True, revision: str|None = None):
-        from .repo import save_object
+    def save(self, repo=None, main=True, revision: RevisionType|str|None = None):
+        from .repo import save_object, manage_revision
+        revision = manage_revision(self, revision)
         save_object(self, repo=repo, main=main, revision=revision)
 
     def save_state_to_dir(self, dest_dir: str, revision: str|None = None):
@@ -138,8 +144,9 @@ class Object(metaclass=Dryml):
     def save_state_to_dir_imp(self, dest_dir: str, revision: str|None = None):
         pass
 
-    def load(self, repo=None, revision: str|None = None):
+    def load(self, repo=None, revision: RevisionType|str|None = None):
         from .repo import load_object
+        revision = manage_revision(self, revision)
         load_object(self, repo=repo, revision=revision)
             
     def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
@@ -160,9 +167,11 @@ class Pickleable(Object):
                        if k not in self._HEAVY_EXCLUDE}
 
         # Save the entire object as a pickle
+        rev_path = revision_path("heavy", "pkl", dest_dir, revision=revision)
         pickle_save(
             heavy_state,
-            revision_path("heavy", "pkl", dest_dir, revision=revision))
+            rev_path
+            )
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str|None):
         # heavy-state data is stored in heavy.pkl

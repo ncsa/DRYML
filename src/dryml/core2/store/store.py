@@ -48,6 +48,9 @@ class Store(ABC):
         os.makedirs(obj_dir, exist_ok=True)
 
         # Let the object serialize itself
+        if revision is not None:
+            if not isinstance(revision, str):
+                raise ValueError("revision must be a string or None at the Store.")
         obj.save_state_to_dir(obj_dir, revision=revision)
 
     def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
