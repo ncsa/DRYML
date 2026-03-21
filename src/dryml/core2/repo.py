@@ -505,14 +505,43 @@ class Repo:
         if instance == "reuse":
             obj = self.get_cached(cdef, reuse_weak=reuse_weak)
             if obj is not None:
-                if restore_state and revision_str is not None:
-                    st = self._first_store_with(cdef)
-                    if st is None:
-                        raise RepoLoadError(f"No store has requested object ({cdef})")
-                    try:
-                        st.restore_object(obj, revision=revision_str)
-                    except Exception as e:
-                        raise RepoLoadError(f"Store can't restore requested revision ({revision_str}) for object ({cdef})") from e
+                ic(cdef, revision, revision_str)
+                if restore_state:
+                    # Descend into args and kwargs and restore them as well.
+                    # TODO: Do we need to change build_missing or other options here?
+                    #       I suspect not, but worth double-checking.
+                    #       cache options is changed from below for example.
+                    _ = self._realize(
+                        cdef.args,
+                        instance=instance,
+                        restore_state=restore_state,
+                        build_missing=build_missing,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision,
+                        memo=memo,
+                        path=path + ["args"],
+                    )
+                    _ = rt_kwargs = self._realize(
+                        cdef.kwargs,
+                        instance=instance,
+                        restore_state=restore_state,
+                        build_missing=build_missing,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision,
+                        memo=memo,
+                        path=path + ["kwargs"],
+                    )
+                    # Restore this object
+                    if revision_str is not None:
+                        st = self._first_store_with(cdef)
+                        if st is None:
+                            raise RepoLoadError(f"No store has requested object ({cdef})")
+                        try:
+                            st.restore_object(obj, revision=revision_str)
+                        except Exception as e:
+                            raise RepoLoadError(f"Store can't restore requested revision ({revision_str}) for object ({cdef})") from e
                 return obj
 
         # Determine whether state exists somewhere
