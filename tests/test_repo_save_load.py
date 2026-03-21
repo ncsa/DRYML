@@ -5,10 +5,13 @@ import core2_objects as objects
 import pytest
 import tempfile
 
+from dryml.core2 import definition_mode
+from dryml.core2.repo import Repo, default_repo
+
 
 def test_save_1(primary_store_set):
     # Create repo and save object
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = Repo(stores=primary_store_set.stores)
     repo.add_objects(objects.HelloStr(msg='test'))
     assert len(repo.strong_obj_cache) == 1
     repo.save()
@@ -447,3 +450,86 @@ def test_save_load_revision_1(primary_store_set):
     obj = repo.load_object(obj_def, revision='B')
 
     assert obj.data == 2
+
+
+def test_save_load_revision_2(primary_store_set):
+    # Test that we can save nested revisions and load them again
+
+    repo = Repo(stores=primary_store_set.stores)
+
+    with default_repo(repo):
+        obj1 = objects.TestClassC2(10)
+        obj1_cdef = obj1.definition
+
+        obj1.set_val(1)
+        repo.save_object(obj1, revision='A')
+
+        obj1.set_val(2)
+        repo.save_object(obj1, revision='B')
+
+        obj2 = objects.TestClassC2(20)
+        obj2_cdef = obj2.definition
+
+        obj2.set_val(1)
+        repo.save_object(obj2, revision='A')
+
+        obj2.set_val(2)
+        repo.save_object(obj2, revision='B')
+
+        obj3 = objects.TestNest3(obj1, obj2)
+
+        repo.save_object(obj3)
+
+    # Clear objects
+    del obj1, obj2, obj3, repo
+
+    repo = Repo(stores=primary_store_set.stores)
+
+    with definition_mode():
+        test_nest_def = objects.TestNest3(
+            obj1_cdef,
+            obj2_cdef)
+
+    obj = repo.load_object(
+        test_nest_def,
+        revision = {
+            obj1_cdef: 'A',
+            obj2_cdef: 'A' })
+
+    assert obj.args[0].C == 10
+    assert obj.args[0].data == 1
+    assert obj.args[1].C == 20
+    assert obj.args[1].data == 1
+
+    obj = repo.load_object(
+        test_nest_def,
+        revision = {
+            obj1_cdef: 'A',
+            obj2_cdef: 'B' })
+
+    assert obj.args[0].C == 10
+    assert obj.args[0].data == 1
+    assert obj.args[1].C == 20
+    assert obj.args[1].data == 2
+
+    obj = repo.load_object(
+        test_nest_def,
+        revision = {
+            obj1_cdef: 'B',
+            obj2_cdef: 'A' })
+
+    assert obj.args[0].C == 10
+    assert obj.args[0].data == 2
+    assert obj.args[1].C == 20
+    assert obj.args[1].data == 1
+
+    obj = repo.load_object(
+        test_nest_def,
+        revision = {
+            obj1_cdef: 'B',
+            obj2_cdef: 'B' })
+
+    assert obj.args[0].C == 10
+    assert obj.args[0].data == 2
+    assert obj.args[1].C == 20
+    assert obj.args[1].data == 2
