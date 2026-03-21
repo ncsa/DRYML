@@ -15,7 +15,7 @@ from .definition import Definition
 _definition_mode: ContextVar[bool] = ContextVar("dryml_definition_mode", default=False)
 
 if TYPE_CHECKING:
-    from .repo import RevisionMapType
+    from .repo import RevisionType
 
 
 def in_definition_mode() -> bool:
