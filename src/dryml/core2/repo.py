@@ -921,8 +921,9 @@ def get_default_repo() -> "Repo":
 
 # Context manager for isolated repo
 @contextmanager
-def isolated_repo():
-    r = Repo()
+def default_repo(r: Repo|None=None):
+    if r is None:
+        r = Repo()
     tok = _current_repo.set(r)
     try:
         yield r
