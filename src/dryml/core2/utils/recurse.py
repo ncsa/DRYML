@@ -3,7 +3,6 @@ from ..errors import CycleError
 # decorator to detect cycles in recursive function calls
 def cycle_detect(arg_pos=0, kwarg_name=None):
     def decorator(f):
-        print(f)
         f._path_oids = set()
 
         if arg_pos is not None and kwarg_name is not None:
