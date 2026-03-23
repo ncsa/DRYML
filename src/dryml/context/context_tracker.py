@@ -1,654 +1,412 @@
-"""
-A module for tracking the currently available computing context
-"""
-
+from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Type, Union, Optional
-from collections import UserDict
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, Callable, Mapping, Type
 import multiprocessing
-import re
 
 from dryml.core2.utils.general import get_unique_concrete_definitions
+from .resource_spec import (
+    ResourceAllocation,
+    ResourceSpec,
+    combine_resource_specs,
+    normalize_compute_reqs,
+)
 
 
-specific_resource_re = re.compile('^(cpu|gpu)/([0-9]+)$')
-
-
-class InsufficientResourcesError(Exception):
+class ContextError(Exception):
     pass
 
 
-class ResourceRequest(UserDict):
-    """
-    A request of specific resources.
-    """
+class InsufficientResourcesError(ContextError):
+    pass
 
+
+class ContextAlreadyActiveError(ContextError):
+    pass
+
+
+class NoContextError(ContextError):
+    pass
+
+
+class WrongContextError(ContextError):
+    pass
+
+
+class ContextIncompatibilityError(ContextError):
+    pass
+
+
+class ContextBootstrapError(ContextError):
+    pass
+
+
+def _detect_num_gpus() -> int:
+    try:
+        import GPUtil
+        return len(GPUtil.getGPUs())
+    except Exception:
+        pass
+    try:
+        import torch
+        return int(torch.cuda.device_count())
+    except Exception:
+        return 0
+
+
+def _detect_total_memory_bytes() -> int | None:
+    try:
+        import psutil
+        return int(psutil.virtual_memory().total)
+    except Exception:
+        return None
+
+
+class ResourcePool:
     def __init__(
-            self, *args, **res_map):
-        super().__init__()
-        for arg in args:
-            if type(arg) is not dict:
-                raise TypeError("Non dict arguments not supported")
-            self.data.update(**arg)
-        self.data.update(**res_map)
-        if len(self.data.keys()):
-            # Nothing passed, by default only get one cpu.
-            self['num_cpus'] = 1
+        self,
+        num_cpus: int | None = None,
+        num_gpus: int | None = None,
+        total_memory_bytes: int | None = None,
+    ):
+        if num_cpus is None:
+            num_cpus = multiprocessing.cpu_count()
+        if num_gpus is None:
+            num_gpus = _detect_num_gpus()
+        if total_memory_bytes is None:
+            total_memory_bytes = _detect_total_memory_bytes()
 
-    def __setitem__(self, key, val):
-        if type(val) not in [float, int]:
-            raise ValueError(
-                "Can't set a non-float or non-int resource fraction")
-        if key in ['num_gpus', 'num_cpus']:
-            self.data[key] = val
-        else:
-            spec_resource_match = specific_resource_re.match(key)
-            if not spec_resource_match:
-                raise KeyError(f"Resource key {key} not valid.")
-            self.data[key] = val
-
-
-def combine_requests(requests: [ResourceRequest]):
-    # In the future I might expand functionality
-    # here to do combinations other than max.
-    all_keys = []
-    for req in requests:
-        all_keys += list(req.keys())
-
-    result_request = ResourceRequest()
-
-    for key in all_keys:
-        max_val = max(map(
-            lambda r: r[key],
-            filter(lambda r: key in r, requests)))
-        result_request[key] = max_val
-
-    return result_request
-
-
-def combine_reqs(*requests):
-    result_request = {}
-    for req in requests:
-        for framework in req:
-            if framework not in result_request:
-                result_request[framework] = [req[framework]]
-            else:
-                result_request[framework].append(req[framework])
-
-    for framework in result_request:
-        result_request[framework] = combine_requests(result_request[framework])
-
-    return result_request
-
-
-def resource_request_builder(req_dict):
-    return ResourceRequest(req_dict)
-
-
-class ResourceAllocation(UserDict):
-    def __init__(
-            self, **resource_map):
-        super().__init__()
-        self.data.update(**resource_map)
-
-    @property
-    def gpus(self):
-        return list(filter(lambda k: 'gpu' in k, self.keys()))
-
-    @property
-    def num_gpus(self):
-        return len(self.gpus)
-
-    @property
-    def cpus(self):
-        return list(filter(lambda k: 'cpu' in k, self.keys()))
-
-    @property
-    def num_cpus(self):
-        return len(self.cpus)
-
-    def satisfies(self, request: Optional[Union[ResourceRequest, dict]] = {}):
-        # Handle construction of the resource request object
-        if type(request) is dict:
-            request = ResourceRequest(request)
-
-        # Get list of specific request keys
-        specific_keys = list(filter(
-            lambda k: k not in ['num_cpus', 'num_gpus'],
-            request.keys()))
-        for key in specific_keys:
-            if self[key] < request[key]:
-                return False
-
-        # Get remaining resource keys
-        remaining_resource_keys = list(filter(
-            lambda k: k not in specific_keys,
-            self.keys()))
-
-        # Check if we have enough to satisfy num_gpu/num_cpus
-        if 'num_gpus' in request:
-            if request['num_gpus'] == -1:
-                # All remaining gpus are requested. for now,
-                # don't apply any constraint
-                pass
-            else:
-                num_gpu_keys = len(list(filter(
-                    lambda k: 'gpu' in k,
-                    remaining_resource_keys)))
-                if num_gpu_keys < request['num_gpus']:
-                    return False
-        if 'num_cpus' in request:
-            if request['num_cpus'] == -1:
-                # All remaining cpus are requested. for now,
-                # don't apply any constraint
-                pass
-            else:
-                num_cpu_keys = len(list(filter(
-                    lambda k: 'cpu' in k,
-                    remaining_resource_keys)))
-                if num_cpu_keys < request['num_cpus']:
-                    return False
-
-        return True
-
-
-class ResourcePool(object):
-    """
-    For now, the cpu entries of a resource pool are essentially dummy
-    variables. They aren't really doing anything. This can be expanded
-    later to handle parallelized algorithms
-
-    Perhaps for now, 'num_gpus' should indicate how many 'full' gpus
-    """
-    def __init__(self, num_cpus=None, num_gpus=None, _test=False):
-        self.resource_map = {}
-        if not _test:
-            total_num_cpus = len(list(range(multiprocessing.cpu_count())))
-            if num_cpus is None:
-                num_cpus = total_num_cpus
-            elif num_cpus > total_num_cpus:
-                raise InsufficientResourcesError("There are not enough cpus!")
-        else:
-            if num_cpus is None:
-                raise ValueError(
-                    "In testing, you must pass a value to 'num_cpus'.")
+        self.capacity: dict[str, float] = {}
+        self.available: dict[str, float] = {}
+        self.total_memory_bytes = total_memory_bytes
+        self.available_memory_bytes = total_memory_bytes
 
         for i in range(num_cpus):
-            self.resource_map[f"cpu/{i}"] = 1.
-
-        if not _test:
-            import GPUtil
-            try:
-                total_num_gpus = len(GPUtil.getGPUs())
-            except ValueError:
-                # There was an issue retrieving gpus!
-                total_num_gpus = 0
-            if num_gpus is None:
-                num_gpus = total_num_gpus
-            elif num_gpus > total_num_gpus:
-                raise InsufficientResourcesError("There are not enough gpus!")
-        else:
-            if num_gpus is None:
-                raise ValueError(
-                    "In testing, you must pass a value to 'num_gpus'.")
+            key = f"cpu/{i}"
+            self.capacity[key] = 1.0
+            self.available[key] = 1.0
 
         for i in range(num_gpus):
-            self.resource_map[f"gpu/{i}"] = 1.
+            key = f"gpu/{i}"
+            self.capacity[key] = 1.0
+            self.available[key] = 1.0
 
-    def __repr__(self):
-        return self.resource_map.__repr__()
-
-    def __str__(self):
-        return self.resource_map.__str__()
-
-    @property
-    def cpus(self):
-        return list(filter(lambda k: 'cpu' in k, self.resource_map.keys()))
-
-    @property
-    def num_cpus(self):
-        return len(self.cpus)
-
-    @property
-    def gpus(self):
-        return list(filter(lambda k: 'gpu' in k, self.resource_map.keys()))
-
-    @property
-    def num_gpus(self):
-        return len(self.gpus)
-
-    def request(self, resource_request: Union[ResourceRequest, dict]):
-        # Handle construction of the resource request object
-        if type(resource_request) is dict:
-            resource_request = ResourceRequest(resource_request)
-
+    def request(self, spec: Mapping[str, Any] | ResourceSpec | None) -> ResourceAllocation:
+        spec = ResourceSpec.from_user(spec)
         alloc = ResourceAllocation()
-        # First, we should allocate the specific resource requests
-        for key in resource_request:
-            spec_match = specific_resource_re.match(key)
-            if spec_match is not None:
-                avail_val = self.resource_map[key]
-                ask_val = resource_request[key]
-                if ask_val > avail_val:
-                    self.release(alloc)
+
+        try:
+            # specific fractional requests first
+            for key, need in spec.specific.items():
+                have = self.available.get(key, 0.0)
+                if need > have:
                     raise InsufficientResourcesError(
-                        f"{key} doesn't have enough availability")
-                alloc[key] = ask_val
-                self.resource_map[key] = avail_val-ask_val
+                        f"Requested {need} of {key}, only {have} available"
+                    )
+                alloc.add(key, need)
+                self.available[key] = have - need
 
-        if 'num_gpus' in resource_request and \
-                resource_request['num_gpus'] != -1:
-            gpu_keys = list(filter(
-                lambda s: 'gpu' in s,
-                self.resource_map.keys()))
-            gpu_keys = sorted(
-                gpu_keys,
-                key=lambda k: self.resource_map[k],
-                reverse=True)
-            for i in range(resource_request['num_gpus']):
-                gpu_key = gpu_keys[i]
-                if self.resource_map[gpu_key] < 1.:
-                    self.release(alloc)
+            # full GPUs
+            gpu_keys = [
+                key for key, avail in self.available.items()
+                if key.startswith("gpu/")
+                and key not in alloc.assigned
+                and avail >= 1.0
+            ]
+            if len(gpu_keys) < spec.num_gpus:
+                raise InsufficientResourcesError(
+                    f"Requested {spec.num_gpus} GPUs, only {len(gpu_keys)} available"
+                )
+            for key in gpu_keys[:spec.num_gpus]:
+                alloc.add(key, 1.0)
+                self.available[key] = 0.0
+
+            # full CPUs
+            cpu_keys = [
+                key for key, avail in self.available.items()
+                if key.startswith("cpu/")
+                and key not in alloc.assigned
+                and avail >= 1.0
+            ]
+            if len(cpu_keys) < spec.num_cpus:
+                raise InsufficientResourcesError(
+                    f"Requested {spec.num_cpus} CPUs, only {len(cpu_keys)} available"
+                )
+            for key in cpu_keys[:spec.num_cpus]:
+                alloc.add(key, 1.0)
+                self.available[key] = 0.0
+
+            if spec.memory_bytes is not None and self.available_memory_bytes is not None:
+                if spec.memory_bytes > self.available_memory_bytes:
                     raise InsufficientResourcesError(
-                        "Couldn't find a gpu with full availability!")
-                alloc[gpu_key] = 1.
-                self.resource_map[gpu_key] = 0.
-        else:
-            if 'num_gpus' in resource_request:
-                if resource_request['num_gpus'] == -1:
-                    # Allocate all remaining gpus that aren't yet allocated.
-                    already_allocated_gpu_keys = alloc.gpus
-                    available_gpu_keys = self.gpus
-                    remaining_gpu_keys = list(filter(
-                        lambda k: k not in already_allocated_gpu_keys,
-                        available_gpu_keys))
-                    remaining_gpu_keys = list(filter(
-                        lambda k: self.resource_map[k] == 1.,
-                        remaining_gpu_keys))
-                    for gpu_key in remaining_gpu_keys:
-                        alloc[gpu_key] = 1.
-                        self.resource_map[gpu_key] = 0.
-                else:
-                    # Report error
-                    self.release(alloc)
-                    raise ValueError(
-                        f"'num_gpus' value {resource_request['num_gpus']}"
-                        "not supported.")
+                        f"Requested {spec.memory_bytes} bytes, "
+                        f"only {self.available_memory_bytes} available"
+                    )
+                self.available_memory_bytes -= spec.memory_bytes
+                alloc.memory_bytes = spec.memory_bytes
 
-        # Next, allocate general resource requests
-        if 'num_cpus' in resource_request and \
-                resource_request['num_cpus'] != -1:
-            cpu_keys = list(filter(
-                lambda s: 'cpu' in s,
-                self.resource_map.keys()))
-            cpu_keys = sorted(
-                cpu_keys,
-                key=lambda k: self.resource_map[k],
-                reverse=True)
-            for i in range(resource_request['num_cpus']):
-                cpu_key = cpu_keys[i]
-                if self.resource_map[cpu_key] < 1.:
-                    self.release(alloc)
-                    raise InsufficientResourcesError(
-                        "Couldn't find a cpu with full availability!")
-                alloc[cpu_key] = 1.
-                self.resource_map[cpu_key] = 0.
-        else:
-            if 'num_cpus' in resource_request:
-                if resource_request['num_cpus'] == -1:
-                    already_allocated_cpu_keys = alloc.cpus
-                    available_cpu_keys = self.cpus
-                    remaining_cpu_keys = list(filter(
-                        lambda k: k not in already_allocated_cpu_keys,
-                        available_cpu_keys))
-                    remaining_cpu_keys = list(filter(
-                        lambda k: self.resource_map[k] == 1.,
-                        remaining_cpu_keys))
-                    for cpu_key in remaining_cpu_keys:
-                        alloc[cpu_key] = 1.
-                        self.resource_map[cpu_key] = 0.
-                else:
-                    self.release(alloc)
-                    raise ValueError(
-                        f"'num_cpus' value {resource_request['num_cpus']} "
-                        "not supported.")
+            return alloc
 
-        return alloc
+        except Exception:
+            self.release(alloc)
+            raise
 
-    def release(self, alloc: ResourceAllocation):
-        for key in alloc:
-            self.resource_map[key] += alloc[key]
+    def release(self, alloc: ResourceAllocation | None) -> None:
+        if alloc is None:
+            return
+
+        for key, value in alloc.assigned.items():
+            self.available[key] = min(
+                self.capacity[key],
+                self.available[key] + value,
+            )
+
+        if alloc.memory_bytes is not None and self.available_memory_bytes is not None:
+            self.available_memory_bytes = min(
+                self.total_memory_bytes,
+                self.available_memory_bytes + alloc.memory_bytes,
+            )
 
 
-# Create the global resource pool for this process
-_resource_pool = ResourcePool()
-_context_manager = None
+_GLOBAL_POOL: ResourcePool | None = None
+_ACTIVE_CONTEXT: ContextVar["ContextContainer | None"] = ContextVar(
+    "dryml_active_context",
+    default=None,
+)
 
 
-def default_context_loader():
-    from dryml.context import ComputeContext
-    return ComputeContext
+def get_global_resource_pool() -> ResourcePool:
+    global _GLOBAL_POOL
+    if _GLOBAL_POOL is None:
+        _GLOBAL_POOL = ResourcePool()
+    return _GLOBAL_POOL
 
 
-def tf_context_loader():
-    from dryml.context.tf import TFComputeContext
+def active_context() -> "ContextContainer | None":
+    return _ACTIVE_CONTEXT.get()
+
+
+@dataclass(slots=True)
+class WorkerBootstrap:
+    env: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+class ComputeContext:
+    name = "base"
+
+    def __init__(
+        self,
+        resource_request: Mapping[str, Any] | ResourceSpec | None = None,
+        *,
+        pool: ResourcePool | None = None,
+    ):
+        self.resource_request = ResourceSpec.from_user(resource_request)
+        self.pool = get_global_resource_pool() if pool is None else pool
+        self.allocation: ResourceAllocation | None = None
+
+    # parent process
+    def acquire_context(self) -> None:
+        if self.allocation is not None:
+            raise ContextAlreadyActiveError(f"{self.name} context is already active")
+        self.allocation = self.pool.request(self.resource_request)
+
+    def release_context(self) -> None:
+        if self.allocation is None:
+            return
+        self.pool.release(self.allocation)
+        self.allocation = None
+
+    # worker process
+    def child_env(self) -> dict[str, str]:
+        return {}
+
+    def child_setup(self) -> None:
+        pass
+
+    def child_teardown(self) -> None:
+        pass
+
+
+def _plain_context_loader():
+    from .plain.context import PlainComputeContext
+    return PlainComputeContext
+
+
+def _tf_context_loader():
+    from .tf.context import TFComputeContext
     return TFComputeContext
 
 
-def torch_context_loader():
-    from dryml.context.torch import TorchComputeContext
+def _torch_context_loader():
+    from .torch.context import TorchComputeContext
     return TorchComputeContext
 
 
-context_loaders = {
-    'default': default_context_loader,
-    'tf': tf_context_loader,
-    'torch': torch_context_loader,
+def _jax_context_loader():
+    from .jax.context import JAXComputeContext
+    return JAXComputeContext
+
+
+_CONTEXT_LOADERS: dict[str, Callable[[], Type[ComputeContext]]] = {
+    "plain": _plain_context_loader,
+    "tf": _tf_context_loader,
+    "torch": _torch_context_loader,
+    "jax": _jax_context_loader,
 }
+_CONTEXT_CACHE: dict[str, Type[ComputeContext]] = {}
 
 
-class context_map(UserDict):
-    def __getitem__(self, key):
+def get_context_class(ctx_name: str) -> Type[ComputeContext]:
+    if ctx_name not in _CONTEXT_CACHE:
+        _CONTEXT_CACHE[ctx_name] = _CONTEXT_LOADERS[ctx_name]()
+    return _CONTEXT_CACHE[ctx_name]
+
+
+class ContextContainer:
+    def __init__(self, resource_requests: Mapping[str, Any] | None = None):
+        self.resource_requests = normalize_compute_reqs(resource_requests)
+        self.contexts: dict[str, ComputeContext] = {}
+        self._token = None
+
+    def acquire_context(self) -> None:
+        if active_context() is not None:
+            raise ContextAlreadyActiveError("Another context is already active")
+
+        acquired: list[str] = []
         try:
-            return self.data[key]
-        except KeyError:
-            ctx_cls = context_loaders[key]()
-            self.data[key] = (ctx_cls, make_context_manager(ctx_cls))
-            return self.data[key]
+            for ctx_name, spec in self.resource_requests.items():
+                ctx_cls = get_context_class(ctx_name)
+                ctx = ctx_cls(resource_request=spec)
+                ctx.acquire_context()
+                self.contexts[ctx_name] = ctx
+                acquired.append(ctx_name)
+        except Exception:
+            for ctx_name in reversed(acquired):
+                self.contexts[ctx_name].release_context()
+            self.contexts.clear()
+            raise
 
+        self._token = _ACTIVE_CONTEXT.set(self)
 
-contexts = context_map({})
+    def release_context(self) -> None:
+        for ctx_name in reversed(list(self.contexts.keys())):
+            self.contexts[ctx_name].release_context()
+        self.contexts.clear()
 
+        if self._token is not None:
+            _ACTIVE_CONTEXT.reset(self._token)
+            self._token = None
 
-def context():
-    global _context_manager
-    return _context_manager
-
-
-def get_context_class(ctx_name):
-    global contexts
-    return contexts[ctx_name][0]
-
-
-def get_context_manager(ctx_name):
-    global contexts
-    return contexts[ctx_name][1]
-
-
-class ResourcesUnavailableError(Exception):
-    """
-    Signals a context is unable to allocate necessary resources
-    """
-    pass
-
-
-class ContextAlreadyActiveError(Exception):
-    """
-    Signals a context is already active.
-    """
-    pass
-
-
-class WrongContextError(Exception):
-    """
-    Signals the wrong context is active.
-    """
-    pass
-
-
-class NoContextError(Exception):
-    """
-    Signals there is no context active.
-    """
-    pass
-
-
-class ContextIncompatibilityError(Exception):
-    """
-    Signals there is no single context which satisfies
-    all requirements.
-    """
-    pass
-
-
-def context_check(ctx_reqs):
-    """
-    Check if there's a context, and its capabilities
-    """
-    ctx_mgr = context()
-    if ctx_mgr is None:
-        raise NoContextError()
-
-    if not ctx_mgr.satisfies(ctx_reqs):
-        raise ContextIncompatibilityError(
-            f"Context doesn't satisfy requirements {ctx_reqs}")
-
-
-class ComputeContext(object):
-    def __init__(
-            self,
-            resource_request: Optional[Union[ResourceRequest, dict]] = {}):
-        if type(resource_request) is dict:
-            resource_request = ResourceRequest(resource_request)
-        self.resource_request = resource_request
-        self.allocation = None
-
-    def acquire_context(self):
-        global _resource_pool
-        # Acquire allocation
-        self.allocation = _resource_pool.request(self.resource_request)
-
-    def release_context(self):
-        global _resource_pool
-        # Release allocation
-        _resource_pool.release(self.allocation)
-        self.allocation = None
-
-
-class ContextContainer(object):
-    """
-    Manages the creation of a compute context objects.
-    """
-    def __init__(self, resource_requests: Optional[dict] = {'default': {}}):
-        self.resource_requests = resource_requests
-        self.contexts = {}
-        self.activated_object_map = {}
-
-    def acquire_context(self):
-        # Check that there isn't another manager active already
-        global _context_manager
-        if _context_manager is not None:
-            raise ContextAlreadyActiveError()
-
-        # Acquire needed contexts and resources
-        for ctx_name in self.resource_requests:
-            # Acquire each context in turn
-            ctx_cls = get_context_class(ctx_name)
-            ctx = ctx_cls(resource_request=self.resource_requests[ctx_name])
-            ctx.acquire_context()
-            self.contexts[ctx_name] = ctx
-
-        # Set the global context
-        _context_manager = self
-
-    def deactivate_objects(self, save_cache=None):
-        # First, we'll build a tree of activated objects.
-        from dryml import build_obj_tree
-        obj_tree = build_obj_tree(self.activated_object_map.values())
-
-        # Prepare the save caching function
-        if save_cache is None:
-            from dryml.core.save_cache import SaveCache
-            save_cache = SaveCache()
-
-        # Save objects in the tree depth-first.
-        obj_tree.apply_df(
-            lambda o: o.save_compute(save_cache=save_cache))
-        # Cleanup compute in the tree depth-first.
-        obj_tree.apply_df(lambda o: o.compute_cleanup())
-
-        def remove_self(o):
-            del self.activated_object_map[id(o)]
-        # Remove all objects in the tree from active tracking
-        # (Should not fail!)
-        obj_tree.apply_df(remove_self)
-
-    def release_context(self):
-        # Deactivate each tracked object
-        self.deactivate_objects()
-
-        # Release each contained context
+    def worker_bootstrap(self) -> WorkerBootstrap:
+        result = WorkerBootstrap()
         for ctx_name in self.contexts:
-            ctx = self.contexts[ctx_name]
-            ctx.release_context()
-
-        global _context_manager
-        # Remove current_context
-        _context_manager = None
-
-    def add_activated_object(self, obj):
-        from dryml.core.object import Object
-        if type(obj) is not Object:
-            TypeError("Can only activate Objects for computation.")
-        self.activated_object_map[id(obj)] = obj
-
-    def remove_activated_object(self, obj):
-        from dryml.core.object import Object
-        if type(obj) is not Object:
-            TypeError("Can only activate Objects for computation.")
-        del self.activated_object_map[id(obj)]
-
-    def contains_activated_object(self, obj):
-        from dryml.core.object import Object
-        if type(obj) is not Object:
-            TypeError("Can only activate Objects for computation.")
-        if id(obj) in self.activated_object_map:
-            return True
-        else:
-            return False
-
-    def satisfies(self, ctx_reqs):
-        for ctx_name in ctx_reqs:
-            ctx_cls = get_context_class(ctx_name)
-            found_satisfier = False
-            for c_name in self.contexts:
-                c_cls = get_context_class(c_name)
-                if ctx_cls in c_cls.mro():
-                    if self.contexts[c_name] \
-                           .allocation.satisfies(ctx_reqs[ctx_name]):
-                        found_satisfier = True
-                        break
-            if not found_satisfier:
-                return False
-        return True
-
-    def get_num_gpus_tf(self):
-        if 'tf' not in self.contexts:
-            raise WrongContextError("No TF Context active.")
-        return self.contexts['tf'].allocation.num_gpus
-
-    def get_torch_devices(self):
-        if 'torch' not in self.contexts:
-            raise WrongContextError("No Torch Context active.")
-        return self.contexts['torch'].compute_devices()
+            env = self.contexts[ctx_name].child_env()
+            for key, val in env.items():
+                if key in result.env and result.env[key] != val:
+                    raise ContextIncompatibilityError(
+                        f"Conflicting bootstrap env for {key}: "
+                        f"{result.env[key]!r} vs {val!r}"
+                    )
+                result.env[key] = val
+        return result
 
 
-def set_context(ctx_reqs):
+def set_context(
+    resource_requests: Mapping[str, Any] | None = None,
+    *,
+    replace: bool = False,
+) -> ContextContainer:
     """
-    Set a context globally. Good for local compute sessions
+    Imperatively activate a context and leave it active until cleared.
+
+    Useful for notebooks:
+        ctx = set_context({"torch": {"num_gpus": 1}})
+        ...
+        clear_context()
     """
-    ctx_manager = ContextContainer(resource_requests=ctx_reqs)
-    ctx_manager.acquire_context()
+    current = active_context()
+    if current is not None:
+        if not replace:
+            raise ContextAlreadyActiveError("Another context is already active")
+        current.release_context()
+
+    mgr = ContextContainer(resource_requests)
+    mgr.acquire_context()
+    return mgr
 
 
-def make_context_manager(ctx_cls: Type):
-    @contextmanager
-    def context_manager(*args, **kwargs):
-        ctx_obj = ctx_cls(*args, **kwargs)
-        ctx_obj.acquire_context()
-        try:
-            yield ctx_obj
-        finally:
-            ctx_obj.release_context()
-
-    return context_manager
-
-
-ContextManager = make_context_manager(ContextContainer)
-
-
-def consolidate_contexts(ctx_name_list):
+def clear_context() -> None:
     """
-    Find a collection of contexts satisfies all listed context
-    requirements.
+    Clear the currently active context, if any.
     """
+    current = active_context()
+    if current is not None:
+        current.release_context()
 
-    # Add default context in case no context names are given
-    ctx_name_list.append('default')
 
-    # Build list of unique context names
-    ctx_name_list = list(set(ctx_name_list))
-    ctx_cls_list = list(map(
-        lambda name: get_context_class(name),
-        ctx_name_list))
+@contextmanager
+def use_context(resource_requests: Mapping[str, Any] | None = None):
+    mgr = ContextContainer(resource_requests)
+    mgr.acquire_context()
+    try:
+        yield mgr
+    finally:
+        mgr.release_context()
 
-    # Get MRO for each class
-    ctx_cls_mros = list(map(
-        lambda cls: cls.mro(),
-        ctx_cls_list))
+def context_check(
+    ctx_reqs: Mapping[str, Mapping[str, Any] | ResourceSpec],
+) -> None:
+    """
+    Check that the currently active context satisfies the requested context specs.
 
-    # Compute how many context classes from the
-    # ctx_cls_list are contained in each mro
+    Example:
+        context_check({"torch": {"num_gpus": 1}})
+        context_check({"plain": {"num_cpus": 4}})
+        context_check({
+            "plain": {"num_cpus": 4},
+            "tf": {"num_gpus": 1},
+        })
+    """
+    mgr = active_context()
+    if mgr is None:
+        raise NoContextError("No active context")
 
-    def mro_count(mro, ctx_cls_list):
-        return len(list(filter(lambda cls: cls in mro, ctx_cls_list)))
+    normalized = normalize_compute_reqs(ctx_reqs)
 
-    ctx_cls_mro_contain_count = list(map(
-        lambda mro: mro_count(mro, ctx_cls_list),
-        ctx_cls_mros))
+    for req_name, req_spec in normalized.items():
+        req_cls = get_context_class(req_name)
 
-    # Find context with maximum
-    max_v = ctx_cls_mro_contain_count[0]
-    max_i = 0
-    for i in range(len(ctx_cls_mro_contain_count)):
-        if ctx_cls_mro_contain_count[i] > max_v:
-            max_i = i
-            max_v = ctx_cls_mro_contain_count[i]
-    max_ctx_name = ctx_name_list[max_i]
+        found_satisfier = False
+        for active_name, active_ctx in mgr.contexts.items():
+            active_cls = get_context_class(active_name)
 
-    # form list of leftover contexts which aren't
-    # covered by the max context
-    max_ctx_mro = ctx_cls_mros[max_i]
-    leftover_ctx_names = []
+            if req_cls in active_cls.mro():
+                alloc = active_ctx.allocation
+                if alloc is not None and alloc.satisfies(req_spec):
+                    found_satisfier = True
+                    break
 
-    for i in range(len(ctx_name_list)):
-        if ctx_cls_list[i] not in max_ctx_mro:
-            leftover_ctx_names.append(ctx_name_list[i])
-
-    if len(leftover_ctx_names) > 0:
-        return [max_ctx_name] + consolidate_contexts(leftover_ctx_names)
-    else:
-        return [max_ctx_name]
-
+        if not found_satisfier:
+            raise ContextIncompatibilityError(
+                f"Current context does not satisfy {req_name!r}: {req_spec}"
+            )
 
 def get_context_requirements(objs):
-    """
-    Set a context appropriate for the object or set of objects
-    """
     cdefs = get_unique_concrete_definitions(objs)
 
-    ctx_reqs = {}
-
+    ctx_reqs: dict[str, list[ResourceSpec]] = {}
     for cdef in cdefs:
-        ctx_req = getattr(cdef.cls, "__compute_requirements__", None)
-        for ctx_name in ctx_req:
-            if ctx_name in ctx_reqs:
-                ctx_reqs[ctx_name].append(ctx_req[ctx_name])
-            else:
-                ctx_reqs[ctx_name] = [ctx_req[ctx_name]]
+        raw_req = getattr(cdef.cls, "__compute_reqs__", None)
+        if not raw_req:
+            continue
 
-    for ctx_name in ctx_reqs:
-        ctx_reqs[ctx_name] = combine_requests(ctx_reqs[ctx_name])
+        for ctx_name, spec in normalize_compute_reqs(raw_req).items():
+            ctx_reqs.setdefault(ctx_name, []).append(spec)
 
-    return ctx_reqs
+    return {
+        ctx_name: combine_resource_specs(specs)
+        for ctx_name, specs in ctx_reqs.items()
+    }

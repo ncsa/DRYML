@@ -1,40 +1,45 @@
-from typing import Optional, Union
-from dryml.context import ComputeContext
-from dryml.context.context_tracker import ResourceRequest
+from __future__ import annotations
+
+from ..context_tracker import ContextBootstrapError
+from ..plain.context import PlainComputeContext
 
 
-class TorchComputeContext(ComputeContext):
-    def __init__(
-            self,
-            resource_request: Optional[Union[ResourceRequest, dict]] = {}):
-        super().__init__(resource_request=resource_request)
+class TorchComputeContext(PlainComputeContext):
+    name = "torch"
 
-    def acquire_context(self):
-        # Let parent handle allocation
-        super().acquire_context()
+    def child_env(self) -> dict[str, str]:
+        env = super().child_env()
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
 
-        # Get allocated gpus
-        alloc_gpus = self.allocation.gpus
+        if self.allocation.gpu_ids:
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.allocation.gpu_ids))
+        return env
 
-        # check if we need to set memory limits on any of these gpus
-        need_mem_limit = False
-        for gpu_key in alloc_gpus:
-            if self.allocation[gpu_key] < 1.:
-                need_mem_limit = True
-                break
+    def child_setup(self) -> None:
+        super().child_setup()
 
-        if need_mem_limit:
-            print("WARNING, currently there is no way to "
-                  "limit memory used by torch.")
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
 
-    def compute_devices(self):
-        device_list = list(map(
-            lambda n: n.replace('gpu/', 'cuda:'),
-            self.allocation.gpus))
-        if len(device_list) == 0:
-            device_list = ['cpu']
-        return device_list
+        import torch
 
-    def release_context(self):
-        # Let parent handle releasing allocation
-        super().release_context()
+        # visible devices are renumbered after CUDA_VISIBLE_DEVICES
+        visible_gpu_count = len(self.allocation.gpu_ids)
+        for local_idx in range(visible_gpu_count):
+            frac = self.allocation.assigned.get(f"gpu/{self.allocation.gpu_ids[local_idx]}", 1.0)
+            if frac < 1.0:
+                torch.cuda.memory.set_per_process_memory_fraction(frac, device=local_idx)
+
+    def child_teardown(self) -> None:
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    def compute_devices(self) -> list[str]:
+        if self.allocation is None or self.allocation.num_gpus == 0:
+            return ["cpu"]
+        return [f"cuda:{i}" for i in range(self.allocation.num_gpus)]

@@ -1,32 +1,30 @@
-from dryml.context.context_tracker import context, set_context, \
-    contexts, ComputeContext, get_context_class, context_check, \
-    ResourcesUnavailableError, WrongContextError, get_context_manager, \
-    NoContextError, ContextAlreadyActiveError, get_context_requirements, \
-    ResourcePool, ResourceRequest, ResourceAllocation, \
-    InsufficientResourcesError, ContextManager, ContextContainer, \
-    ContextIncompatibilityError, combine_requests, combine_reqs
+from .context_tracker import active_context, use_context, \
+    set_context, clear_context, context_check, \
+    ContextError, InsufficientResourcesError, \
+    ContextAlreadyActiveError, NoContextError, \
+    WrongContextError, ContextIncompatibilityError, \
+    ContextBootstrapError
+
+from .resource_spec import ResourceSpec, InvalidResourceSpecError, \
+    combine_resource_specs, normalize_compute_reqs, combine_compute_reqs
 
 
 __all__ = [
-    context,
+    active_context,
+    use_context,
     set_context,
-    get_context_class,
-    get_context_manager,
-    get_context_requirements,
+    clear_context,
     context_check,
-    contexts,
-    combine_requests,
-    combine_reqs,
-    ComputeContext,
-    ContextManager,
-    ContextContainer,
-    ResourcesUnavailableError,
-    WrongContextError,
-    NoContextError,
-    ContextAlreadyActiveError,
-    ContextIncompatibilityError,
-    ResourcePool,
-    ResourceRequest,
-    ResourceAllocation,
+    ResourceSpec,
+    combine_resource_specs,
+    normalize_compute_reqs,
+    combine_compute_reqs,
+    ContextError,
     InsufficientResourcesError,
+    ContextAlreadyActiveError,
+    NoContextError,
+    WrongContextError,
+    ContextIncompatibilityError,
+    ContextBootstrapError,
+    InvalidResourceSpecError,
 ]

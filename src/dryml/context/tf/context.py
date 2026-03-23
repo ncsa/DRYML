@@ -1,92 +1,70 @@
-import tensorflow as tf
-from typing import Optional, Union
-from dryml.context import ComputeContext
-from dryml.context.context_tracker import ResourceRequest
+from __future__ import annotations
+
+from ..context_tracker import ContextBootstrapError
+from ..plain.context import PlainComputeContext
 
 
-class TFComputeContext(ComputeContext):
-    def __init__(
-            self,
-            resource_request: Optional[Union[ResourceRequest, dict]] = {}):
-        super().__init__(resource_request=resource_request)
-        self.strategy = None
-        self.strategy_scope = None
+class TFComputeContext(PlainComputeContext):
+    name = "tf"
 
-    def acquire_context(self):
-        # Let parent handle allocation
-        super().acquire_context()
+    def child_env(self) -> dict[str, str]:
+        env = super().child_env()
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
 
-        # Get allocated gpus
-        alloc_gpus = self.allocation.gpus
+        if self.allocation.gpu_ids:
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.allocation.gpu_ids))
+        return env
 
-        # check if we need to set memory limits on any of these gpus
-        need_mem_limit = False
-        for gpu_key in alloc_gpus:
-            if self.allocation[gpu_key] < 1.:
-                need_mem_limit = True
-                break
+    def child_setup(self) -> None:
+        super().child_setup()
 
-        # If needed, get actual GPU information
-        gpu_info = None
-        if need_mem_limit:
+        if self.allocation is None:
+            raise ContextBootstrapError("No allocation available")
+
+        import tensorflow as tf
+
+        gpus = tf.config.list_physical_devices("GPU")
+        if not gpus:
+            return
+
+        # After CUDA_VISIBLE_DEVICES, these are renumbered 0..N-1 from the worker's view.
+        # Fractional limits only make sense if specific gpu/<id> fractions were requested.
+        fractional = [
+            self.allocation.assigned[key]
+            for key in self.allocation.gpus
+            if self.allocation.assigned[key] < 1.0
+        ]
+        if fractional:
+            if len(set(fractional)) != 1:
+                raise ContextBootstrapError(
+                    "TF child_setup currently only supports one shared fraction "
+                    "across visible GPUs"
+                )
+
+            frac = fractional[0]
             try:
                 import GPUtil
                 gpu_info = GPUtil.getGPUs()
-            except ImportError as e:
-                print("Need GPUtil available to set memory limits on gpus.")
-                raise e
+            except Exception as e:
+                raise ContextBootstrapError(
+                    "GPUtil is required for TF fractional GPU memory limits"
+                ) from e
 
-        def get_gpu_id(key):
-            return int(key.split('/')[1])
-
-        # Get ids of gpus assigned. We first need to remove other
-        # gpus from being visible.
-        visible_gpu_ids = list(map(get_gpu_id, alloc_gpus))
-        tf_gpu_objs = tf.config.list_physical_devices(device_type='GPU')
-        tf_gpu_objs_restricted = []
-        for i in range(len(visible_gpu_ids)):
-            tf_gpu_objs_restricted.append(tf_gpu_objs[visible_gpu_ids[i]])
-        tf.config.set_visible_devices(tf_gpu_objs_restricted, 'GPU')
-
-        if need_mem_limit:
-            # We need to restrict memory for some gpus.
-            restrict_gpu_keys = list(filter(
-                lambda k: self.allocation[k] < 1.,
-                alloc_gpus))
-
-            # Create config objects
-            for i in range(len(restrict_gpu_keys)):
-                gpu_key = restrict_gpu_keys[i]
-                gpu_id = get_gpu_id(gpu_key)
-                target_mem = int(
-                    gpu_info[gpu_id].memoryTotal*self.allocation[gpu_key])
+            # visible GPUs are renumbered after CUDA_VISIBLE_DEVICES
+            visible_ids = list(range(len(self.allocation.gpu_ids)))
+            for visible_id in visible_ids:
+                total_mb = int(gpu_info[self.allocation.gpu_ids[visible_id]].memoryTotal)
                 tf.config.set_logical_device_configuration(
-                    tf_gpu_objs[gpu_id],
+                    gpus[visible_id],
                     [tf.config.LogicalDeviceConfiguration(
-                        memory_limit=target_mem)])
+                        memory_limit=int(total_mb * frac)
+                    )]
+                )
 
-        logical_devices = tf.config.list_logical_devices('GPU')
-        if len(logical_devices) > 1:
-            # Get visible logical device names
-            gpu_names = list(map(lambda device: device.name, logical_devices))
-
-            # Create
-            self.strategy = tf.distribute.MirroredStrategy(gpu_names)
-            # Fix improper tear-down on program exit:
-            # https://github.com/tensorflow/tensorflow/issues/50487
-            import atexit
-            atexit.register(
-                self.strategy._extended._collective_ops._pool.close)
-
-        if self.strategy is not None:
-            self.strategy_scope = self.strategy.scope()
-            self.strategy_scope.__enter__()
-
-    def release_context(self):
-        if self.strategy_scope is not None:
-            self.strategy_scope.__exit__(None, None, None)
-            self.strategy_scope = None
-            self.strategy = None
-
-        # Let parent handle releasing allocation
-        super().release_context()
+    def child_teardown(self) -> None:
+        try:
+            import tensorflow as tf
+            tf.keras.backend.clear_session(free_memory=True)
+        except Exception:
+            pass

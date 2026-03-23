@@ -233,6 +233,15 @@ class Metadata(Object):
         self.metadata = metadata
 
 
+class Compute(Object):
+    # Define the components 
+    @classmethod
+    def __pre_init__(cls):
+        assert hasattr(cls, "__compute_reqs__"), "classes which inherit Compute must define a __compute_reqs__ attribute listing their compute requirements"
+        from ..context import context_check
+        context_check(cls.__compute_reqs__)
+
+
 class WorkspaceCapable:
     """Opt-in: this object gets a workspace."""
     pass
