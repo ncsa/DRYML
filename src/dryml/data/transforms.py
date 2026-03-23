@@ -21,8 +21,8 @@ class StaticTransform(Trainable):
             self,
             data: Dataset,
             func: Callable,
-            func_args=(),
-            func_kwargs={}):
+            func_args=None,
+            func_kwargs=None):
         # Apply function to data
         #
         # Args:
@@ -30,6 +30,11 @@ class StaticTransform(Trainable):
         #  func: Function to apply.
         #  func_args: Additional arguments to pass to func.
         #  func_kwargs: Additional keyword arguments to pass to func.
+
+        if func_args is None:
+            func_args = tuple()
+        if func_kwargs is None:
+            func_kwargs = {}
 
         func_inspect = function_inspection(func)
 
@@ -314,3 +319,33 @@ class FuncTransform(StaticTransform):
             self.func,
             func_args=self.args,
             func_kwargs=self.kwargs)
+
+
+class Select(StaticTransform):
+    def __init__(self, idxs, mode='X'):
+        self.train_state = Trainable.trained
+        if mode not in ['all', 'X', 'Y']:
+            raise ValueError(f"mode '{mode}' not supported.")
+        self.mode = mode
+        self.idxs = idxs
+
+    def train(self, *args, train_spec=None, **kwargs):
+        pass
+
+    def build_func(self):
+        def func(x):
+            result = x
+            for idx in self.idxs:
+                result = result[idx]
+            return result
+        return func
+
+    def eval(self, data: Dataset, *args, **kwargs):
+        def func(x):
+            result = x
+            for idx in self.idxs:
+                result = result[idx]
+            return result
+        return self.applier(
+            data,
+            func)

@@ -224,3 +224,7 @@ def revision_path(file_stem: str, file_ext: str, dir: str, revision: str|None=No
 def get_revision(filepath: str, file_stem: str, file_ext: str):
     filename = os.path.basename(filepath)
     return filename[len(file_stem)+1:-(len(file_ext)+1)]
+
+
+def is_iterator(obj:Any) -> bool:
+    return isinstance(obj, Iterator)
