@@ -505,7 +505,6 @@ class Repo:
         if instance == "reuse":
             obj = self.get_cached(cdef, reuse_weak=reuse_weak)
             if obj is not None:
-                ic(cdef, revision, revision_str)
                 if restore_state:
                     # Descend into args and kwargs and restore them as well.
                     # TODO: Do we need to change build_missing or other options here?
