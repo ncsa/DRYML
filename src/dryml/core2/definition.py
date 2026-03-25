@@ -351,37 +351,37 @@ def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"
         if is_pod(obj) or isinstance(obj, FrozenNDArray):
             # We have a plain old data type
             return obj
-        if isinstance(obj, frozen_container_types):
+        elif isinstance(obj, frozen_container_types):
             # We have a frozen container
             return obj
-        if isinstance(obj, ConcreteDefinition):
+        elif isinstance(obj, ConcreteDefinition):
             # ConcreteDefinitions are already concrete
             return obj
-        if isinstance(obj, tuple):
+        elif isinstance(obj, tuple):
             # Freeze the tuple
             return FrozenTuple([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
-        if isinstance(obj, list):
+        elif isinstance(obj, list):
             # Freeze the list
             return FrozenList([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
-        if isinstance(obj, set):
+        elif isinstance(obj, set):
             # Freeze the set
             return FrozenSet([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
 
-        if isinstance(obj, dict):
+        elif isinstance(obj, dict):
             # Freeze the dict
             new_dict = {}
             for k, v in obj.items():
                 new_dict[k] = concretize_func(v, path + [k], repo=sub_repo)
             return FrozenDict(new_dict)
 
-        if isinstance(obj, np.ndarray):
+        elif isinstance(obj, np.ndarray):
             return FrozenNDArray.from_array(obj)
 
-        if isinstance(obj, Object):
+        elif isinstance(obj, Object):
             sub_repo.cache_weak(obj)
             return obj.__cdef__
 
-        if isinstance(obj, Definition):
+        elif isinstance(obj, Definition):
             # Check the repo object
 
             # Normalize args
@@ -395,6 +395,9 @@ def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"
             c_kwargs = concretize_func(c_kwargs, path + ['kwargs'], repo=sub_repo)
             
             return ConcreteDefinition(obj.cls, c_args, c_kwargs)
+        elif isinstance(obj, type):
+            # We allow plain types
+            return obj
         else:
             raise TypeError(f"Cannot concretize object of type {type(obj)} at path {'/'.join(map(str, path))}")
 

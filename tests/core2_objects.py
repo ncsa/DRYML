@@ -3,6 +3,7 @@ from dryml.core2.utils.general import pickler, unpickler
 from copy import deepcopy
 from dryml.core2.object import Object
 from dryml.core2.utils.stable_hash import _stable_leaf_bytes
+from dryml.core2.utils.general import validate_class
 
 
 
@@ -140,6 +141,11 @@ class TestClass5(Object):
         self.x = x
         self.test = test
 
+
+class TestWrapper(Object):
+    def __init__(self, cls, *args, **kwargs):
+        super().__init__()
+        self.obj = validate_class(cls)(*args, **kwargs)
 
 # class DeepcopyAware:
 #     def __init__(self, val):

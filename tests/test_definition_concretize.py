@@ -85,6 +85,12 @@ def test_definition_concretize_types_2():
         assert len(result) == len(test_input)
 
 
+def test_definition_concretize_types_3():
+    obj = objects.TestWrapper(list, (1, 2, 3))
+    assert type(obj.obj) is list
+    assert obj.obj == [1,2,3]
+
+
 # def test_definition_concrete_5():
 #     # Test that the same Definition objects produce identical ConcreteDefinition objects after concretization even after the original Definition has been deepcopied
 #     def_1 = Definition(objects.TestClass1, 10, test='a')

@@ -9,7 +9,7 @@ _PY_POD = (type(None), bool, int, float, str, bytes)
 _NP_SCALAR = (np.generic,)
 
 def is_pod(x: Any) -> bool:
-    return isinstance(x, _PY_POD) or isinstance(x, _NP_SCALAR)
+    return isinstance(x, _PY_POD) or isinstance(x, _NP_SCALAR) or isinstance(x, type)
 
 compatible_containers = {
     'tuple': (tuple, FrozenList), # Tuples
