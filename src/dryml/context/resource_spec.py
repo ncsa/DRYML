@@ -137,6 +137,9 @@ class ResourceAllocation:
 
         return True
 
+    def __repr__(self) -> str:
+        return f"assigned: {self.assigned} memory_bytes: {self.memory_bytes}"
+
 
 def combine_resource_specs(
     specs: Iterable[Mapping[str, Any] | ResourceSpec | None],

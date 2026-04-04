@@ -229,6 +229,9 @@ class ComputeContext:
     def child_teardown(self) -> None:
         pass
 
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.allocation})"
+
 
 def _plain_context_loader():
     from .plain.context import PlainComputeContext
@@ -312,6 +315,9 @@ class ContextContainer:
                     )
                 result.env[key] = val
         return result
+
+    def __repr__(self) -> str:
+        return f"ContextContainer:{self.contexts}"
 
 
 def set_context(
