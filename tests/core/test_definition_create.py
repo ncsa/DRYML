@@ -1,5 +1,4 @@
 import numpy as np
-from copy import deepcopy
 import core2_objects as objects
 from dryml.core2.definition import Definition, ConcreteDefinition
 
