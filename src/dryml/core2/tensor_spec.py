@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any
+from typing import Any, Callable, TypeAlias
 
 from .dtype import DType, normalize_dtype
 
@@ -205,3 +205,101 @@ class TensorSpec:
         if include_batch and self.batch is not None:
             return (self.batch, *shape)
         return shape
+
+
+SpecTree: TypeAlias = (
+    TensorSpec
+    | dict[str, "SpecTree"]
+    | tuple["SpecTree", ...]
+    | list["SpecTree"]
+)
+
+
+def is_spec_tree(x: Any) -> bool:
+    if isinstance(x, TensorSpec):
+        return True
+
+    if isinstance(x, dict):
+        return all(isinstance(k, str) and is_spec_tree(v) for k, v in x.items())
+
+    if isinstance(x, tuple):
+        return all(is_spec_tree(v) for v in x)
+
+    if isinstance(x, list):
+        return all(is_spec_tree(v) for v in x)
+
+    return False
+
+
+def validate_spec_tree(x: Any, path: str = "spec") -> None:
+    if isinstance(x, TensorSpec):
+        return
+
+    if isinstance(x, dict):
+        for k, v in x.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"{path}: dict keys must be str, got {type(k).__name__}"
+                )
+            validate_spec_tree(v, f"{path}[{k!r}]")
+        return
+
+    if isinstance(x, tuple):
+        for i, v in enumerate(x):
+            validate_spec_tree(v, f"{path}[{i}]")
+        return
+
+    if isinstance(x, list):
+        for i, v in enumerate(x):
+            validate_spec_tree(v, f"{path}[{i}]")
+        return
+
+    raise TypeError(
+        f"{path}: expected TensorSpec, dict[str, SpecTree], tuple, or list; "
+        f"got {type(x).__name__}"
+    )
+
+
+def map_spec_tree(
+    spec: SpecTree,
+    fn: Callable[[TensorSpec], TensorSpec],
+) -> SpecTree:
+    if isinstance(spec, TensorSpec):
+        return fn(spec)
+
+    if isinstance(spec, dict):
+        return {k: map_spec_tree(v, fn) for k, v in spec.items()}
+
+    if isinstance(spec, tuple):
+        return tuple(map_spec_tree(v, fn) for v in spec)
+
+    if isinstance(spec, list):
+        return [map_spec_tree(v, fn) for v in spec]
+
+    raise TypeError(f"Unsupported spec tree node: {type(spec).__name__}")
+
+
+def iter_tensor_specs(spec: SpecTree):
+    if isinstance(spec, TensorSpec):
+        yield spec
+        return
+
+    if isinstance(spec, dict):
+        for v in spec.values():
+            yield from iter_tensor_specs(v)
+        return
+
+    if isinstance(spec, (tuple, list)):
+        for v in spec:
+            yield from iter_tensor_specs(v)
+        return
+
+    raise TypeError(f"Unsupported spec tree node: {type(spec).__name__}")
+
+
+def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch") -> SpecTree:
+    return map_spec_tree(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
+
+
+def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
+    return map_spec_tree(spec, lambda s: s.without_batch())

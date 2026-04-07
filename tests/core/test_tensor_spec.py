@@ -3,7 +3,17 @@ import pickle
 import pytest
 
 from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import (
+    Dynamic,
+    Layout,
+    TensorSpec,
+    is_spec_tree,
+    validate_spec_tree,
+    map_spec_tree,
+    iter_tensor_specs,
+    batch_spec_tree,
+    unbatch_spec_tree,
+)
 
 
 def test_tensor_spec_normalizes_dtype_and_shape():
@@ -146,3 +156,126 @@ def test_tensor_spec_layout_metadata():
     assert spec.layout is Layout.RAGGED
     assert spec.ragged_rank == 1
     assert spec.row_splits_dtype == DType("int", 64)
+
+
+def test_is_spec_tree_simple_dict():
+    spec = {
+        "cart": TensorSpec(dtype="float32", shape=(3,)),
+        "sph": TensorSpec(dtype="float32", shape=(2,)),
+    }
+
+    assert is_spec_tree(spec)
+
+
+def test_is_spec_tree_nested():
+    spec = {
+        "x": TensorSpec(dtype="float32", shape=(3,)),
+        "y": (
+            TensorSpec(dtype="int32", shape=()),
+            {"z": TensorSpec(dtype="float64", shape=(2, 2))},
+        ),
+    }
+
+    assert is_spec_tree(spec)
+
+
+def test_is_spec_tree_rejects_bad_dict_key():
+    spec = {
+        0: TensorSpec(dtype="float32", shape=(3,)),
+    }
+
+    assert not is_spec_tree(spec)
+
+
+def test_is_spec_tree_rejects_bad_leaf():
+    spec = {
+        "cart": TensorSpec(dtype="float32", shape=(3,)),
+        "bad": "not a tensor spec",
+    }
+
+    assert not is_spec_tree(spec)
+
+
+def test_validate_spec_tree_accepts_valid_tree():
+    spec = {
+        "cart": TensorSpec(dtype="float32", shape=(3,)),
+        "sph": TensorSpec(dtype="float32", shape=(2,)),
+        "meta": (
+            TensorSpec(dtype="int32", shape=()),
+            {"mask": TensorSpec(dtype="bool", shape=(Dynamic,))},
+        ),
+    }
+
+    validate_spec_tree(spec)
+
+
+def test_validate_spec_tree_rejects_bad_key_with_path():
+    spec = {
+        "good": TensorSpec(dtype="float32", shape=(3,)),
+        1: TensorSpec(dtype="float32", shape=(2,)),
+    }
+
+    with pytest.raises(TypeError, match=r"spec: dict keys must be str|spec\["):
+        validate_spec_tree(spec)
+
+
+def test_validate_spec_tree_rejects_bad_leaf_with_path():
+    spec = {
+        "outer": {
+            "inner": "bad leaf",
+        }
+    }
+
+    with pytest.raises(TypeError, match=r"outer"):
+        validate_spec_tree(spec)
+
+
+def test_map_spec_tree_applies_to_all_leaves():
+    spec = {
+        "cart": TensorSpec(dtype="float32", shape=(3,)),
+        "sph": (
+            TensorSpec(dtype="float32", shape=(2,)),
+            {"mask": TensorSpec(dtype="bool", shape=(3,))},
+        ),
+    }
+
+    new_spec = map_spec_tree(spec, lambda s: s.with_batch())
+
+    assert new_spec["cart"].batch is Dynamic
+    assert new_spec["sph"][0].batch is Dynamic
+    assert new_spec["sph"][1]["mask"].batch is Dynamic
+
+    # original unchanged
+    assert spec["cart"].batch is None
+    assert spec["sph"][0].batch is None
+    assert spec["sph"][1]["mask"].batch is None
+
+
+def test_iter_tensor_specs_yields_all_leaves():
+    a = TensorSpec(dtype="float32", shape=(3,))
+    b = TensorSpec(dtype="float32", shape=(2,))
+    c = TensorSpec(dtype="bool", shape=(Dynamic,))
+
+    spec = {
+        "cart": a,
+        "nested": (b, {"mask": c}),
+    }
+
+    out = list(iter_tensor_specs(spec))
+
+    assert out == [a, b, c]
+
+
+def test_batch_and_unbatch_spec_tree():
+    spec = {
+        "cart": TensorSpec(dtype="float32", shape=(3,)),
+        "sph": TensorSpec(dtype="float32", shape=(2,)),
+    }
+
+    batched = batch_spec_tree(spec)
+    assert batched["cart"].batch is Dynamic
+    assert batched["sph"].batch is Dynamic
+
+    unbatched = unbatch_spec_tree(batched)
+    assert unbatched["cart"].batch is None
+    assert unbatched["sph"].batch is None
