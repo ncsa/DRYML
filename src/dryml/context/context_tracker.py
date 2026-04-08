@@ -808,16 +808,16 @@ def use_context(resource_requests: Mapping[str, Any] | None = None):
     finally:
         mgr.release_context()
 
-def context_check(
+def check_context(
     ctx_reqs: Mapping[str, Mapping[str, Any] | ResourceSpec],
 ) -> None:
     """
     Check that the currently active context satisfies the requested context specs.
 
     Example:
-        context_check({"torch": {"num_gpus": 1}})
-        context_check({"plain": {"num_cpus": 4}})
-        context_check({
+        check_context({"torch": {"num_gpus": 1}})
+        check_context({"plain": {"num_cpus": 4}})
+        check_context({
             "plain": {"num_cpus": 4},
             "tf": {"num_gpus": 1},
         })
