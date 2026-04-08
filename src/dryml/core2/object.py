@@ -234,6 +234,7 @@ class Metadata(Object):
 
 
 class Compute(Object):
+    __compute_reqs__ = "plain"
     # Define the components 
     @classmethod
     def __pre_init__(cls):

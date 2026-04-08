@@ -18,8 +18,12 @@ class ConcretizeError(TypeError):
 
 @dataclass(frozen=True)
 class CycleError(ValueError):
+    msg: str = ""
     def __str__(self) -> str:
-        return "Cycle detected"
+        if self.msg != "":
+            return f"Cycle detected: {self.msg}"
+        else:
+            return "Cycle detected"
 
 
 @dataclass(frozen=True)
