@@ -10,13 +10,6 @@ from dryml.core2.store.store import Store
 from dryml.core2.repo import make_store
 
 
-if os.environ.get('GITHUB_ACTIONS') == 'true':
-    # Enforce special loading order to prevent crash
-    # https://github.com/pytorch/pytorch/issues/101152
-    import torch  # noqa: F401
-    import tensorflow as tf  # noqa: F401
-
-
 StoreDef = Literal["directory", "zip_filepath", "buffer", "zip_buffer"]
 
 

@@ -1,5 +1,6 @@
 from .context_tracker import active_context, use_context, \
-    set_context, clear_context, context_check, \
+    add_context, set_context, clear_context, \
+    context_check, \
     ContextError, InsufficientResourcesError, \
     ContextAlreadyActiveError, NoContextError, \
     WrongContextError, ContextIncompatibilityError, \
@@ -13,6 +14,7 @@ __all__ = [
     active_context,
     use_context,
     set_context,
+    add_context,
     clear_context,
     context_check,
     ResourceSpec,
