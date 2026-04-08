@@ -6,11 +6,12 @@ import zipfile
 import importlib
 import tempfile
 import io
-import glob
+import sys
 from typing import Optional, Callable
 from collections.abc import Mapping, Iterable, ItemsView
 from inspect import getmodule, isclass, \
     Parameter, signature
+import importlib.util
 
 
 def _validate_init_sig(cls, *args, **kwargs):
@@ -240,3 +241,128 @@ def adjust_class_module(cls):
     frm = inspect.stack()[2]
     calling_mod = inspect.getmodule(frm[0])
     cls.__module__ = calling_mod.__name__
+
+
+def _normalize_module_names(names: str | Iterable[str]) -> tuple[str, ...]:
+    if isinstance(names, str):
+        names = (names,)
+    else:
+        names = tuple(names)
+
+    if not names:
+        raise ValueError("At least one module name must be provided.")
+
+    for name in names:
+        if not isinstance(name, str):
+            raise TypeError(
+                "Module names must be str or an iterable of str, "
+                f"got element of type {type(name)!r}."
+            )
+        if not name:
+            raise ValueError("Module names must be non-empty strings.")
+
+    return names
+
+
+def _resolve_module_name(name: str, package: str | None = None) -> str:
+    """
+    Resolve a possibly-relative module name to its absolute form.
+
+    Examples
+    --------
+    _resolve_module_name("jax") -> "jax"
+    _resolve_module_name(".jax.context", package="dryml.context")
+        -> "dryml.context.jax.context"
+    """
+    if name.startswith("."):
+        if package is None:
+            raise ValueError(
+                f"Relative module name {name!r} requires 'package' to be set."
+            )
+        return importlib.util.resolve_name(name, package)
+
+    return name
+
+
+def _resolve_module_names(
+    names: str | Iterable[str],
+    package: str | None = None,
+) -> tuple[str, ...]:
+    names = _normalize_module_names(names)
+    return tuple(_resolve_module_name(name, package=package) for name in names)
+
+
+def _module_key_matches(name: str, *, include_children: bool) -> bool:
+    if name in sys.modules:
+        return True
+
+    if include_children:
+        prefix = name + "."
+        return any(mod_name.startswith(prefix) for mod_name in sys.modules)
+
+    return False
+
+
+def module_is_imported(
+    names: str | Iterable[str],
+    *,
+    match_all: bool = True,
+    package: str | None = None,
+    include_children: bool = False,
+) -> bool:
+    """
+    Check whether one or more modules are already imported in this process.
+
+    Parameters
+    ----------
+    names
+        A module name or iterable of module names. Relative names like
+        '.jax.context' are allowed if `package` is provided.
+    match_all
+        If True, return True only if all names are already imported.
+        If False, return True if any name is already imported.
+    package
+        Package context used to resolve relative module names.
+    include_children
+        If True, treat a package as imported if any submodule is imported.
+
+        Example:
+            module_is_imported("jax", include_children=True)
+
+        will return True if either "jax" or something like "jax.numpy"
+        is present in sys.modules.
+    """
+    names = _resolve_module_names(names, package=package)
+    results = (_module_key_matches(name, include_children=include_children)
+               for name in names)
+    return all(results) if match_all else any(results)
+
+
+def module_is_available(
+    names: str | Iterable[str],
+    *,
+    match_all: bool = True,
+    package: str | None = None,
+) -> bool:
+    """
+    Check whether one or more modules are discoverable without importing them.
+
+    Parameters
+    ----------
+    names
+        A module name or iterable of module names. Relative names like
+        '.jax.context' are allowed if `package` is provided.
+    match_all
+        If True, return True only if all names are discoverable.
+        If False, return True if any name is discoverable.
+    package
+        Package context used to resolve relative module names.
+
+    Notes
+    -----
+    This does not guarantee that importing the module will succeed. It only
+    checks whether an import spec can be found.
+    """
+    names = _resolve_module_names(names, package=package)
+    results = (importlib.util.find_spec(name) is not None for name in names)
+    return all(results) if match_all else any(results)
