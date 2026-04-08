@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Callable, TypeAlias
+from typing import Any, Callable, TypeAlias, TypeVar
 
 from .dtype import DType, normalize_dtype
 
@@ -260,23 +260,38 @@ def validate_spec_tree(x: Any, path: str = "spec") -> None:
     )
 
 
-def map_spec_tree(
-    spec: SpecTree,
-    fn: Callable[[TensorSpec], TensorSpec],
-) -> SpecTree:
-    if isinstance(spec, TensorSpec):
-        return fn(spec)
+T = TypeVar("T")
 
-    if isinstance(spec, dict):
-        return {k: map_spec_tree(v, fn) for k, v in spec.items()}
 
-    if isinstance(spec, tuple):
-        return tuple(map_spec_tree(v, fn) for v in spec)
+def _is_namedtuple_instance(x: Any) -> bool:
+    return isinstance(x, tuple) and hasattr(type(x), "_fields")
 
-    if isinstance(spec, list):
-        return [map_spec_tree(v, fn) for v in spec]
 
-    raise TypeError(f"Unsupported spec tree node: {type(spec).__name__}")
+def map_tree_leaves(x: Any, leaf_fn: Callable[[Any], T]) -> Any:
+    """
+    Recursively map leaf_fn over plain Python container trees.
+
+    Supported containers:
+      - dict
+      - list
+      - tuple
+      - namedtuple instances
+
+    Everything else is treated as a leaf.
+    """
+    if isinstance(x, dict):
+        return {k: map_tree_leaves(v, leaf_fn) for k, v in x.items()}
+
+    if _is_namedtuple_instance(x):
+        return type(x)(*(map_tree_leaves(v, leaf_fn) for v in x))
+
+    if isinstance(x, tuple):
+        return tuple(map_tree_leaves(v, leaf_fn) for v in x)
+
+    if isinstance(x, list):
+        return [map_tree_leaves(v, leaf_fn) for v in x]
+
+    return leaf_fn(x)
 
 
 def iter_tensor_specs(spec: SpecTree):
@@ -298,8 +313,8 @@ def iter_tensor_specs(spec: SpecTree):
 
 
 def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch") -> SpecTree:
-    return map_spec_tree(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
+    return map_tree_leaves(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
 
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
-    return map_spec_tree(spec, lambda s: s.without_batch())
+    return map_tree_leaves(spec, lambda s: s.without_batch())

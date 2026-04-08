@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from dryml.core2.tensor_spec import TensorSpec, Dynamic, Layout
+from dryml.core2.tensor_spec import TensorSpec, Dynamic, Layout, map_tree_leaves
 from dryml.core2.dtype import normalize_dtype
 from .spec import TorchTensorSpec
 from .dtype import dtype
@@ -125,35 +125,41 @@ def tensor_spec(
         PyTorch tensors carry shape, dtype, and layout, but not batch semantics.
         If True, interpret the leading axis as batch.
     """
-    if isinstance(x, TorchTensorSpec):
-        full_shape = _shape_to_dryml(x.shape)
-        out_dtype = dtype(x.dtype)
-        layout, sparse_format = _layout_from_torch_layout(x.layout)
-    else:
-        if not hasattr(x, "shape") or not hasattr(x, "dtype"):
-            raise TypeError(
-                "dryml.torch.tensor_spec(x) expects a torch.Tensor-like object "
-                "or TorchTensorSpec."
-            )
 
-        full_shape = _shape_to_dryml(x.shape)
-        out_dtype = dtype(x.dtype)
 
-        layout_obj = getattr(x, "layout", None)
-        if layout_obj is None:
-            raise TypeError(
-                f"Cannot determine PyTorch layout for object of type {type(x).__name__}."
-            )
+    def leaf_to_spec(x: Any) -> TensorSpec:
 
-        layout, sparse_format = _layout_from_torch_layout(layout_obj)
+        if isinstance(x, TorchTensorSpec):
+            full_shape = _shape_to_dryml(x.shape)
+            out_dtype = dtype(x.dtype)
+            layout, sparse_format = _layout_from_torch_layout(x.layout)
+        else:
+            if not hasattr(x, "shape") or not hasattr(x, "dtype"):
+                raise TypeError(
+                    "dryml.torch.tensor_spec(x) expects a torch.Tensor-like object "
+                    "or TorchTensorSpec."
+                )
 
-    sample_shape, batch = _split_batch(full_shape, assume_batched=assume_batched)
+            full_shape = _shape_to_dryml(x.shape)
+            out_dtype = dtype(x.dtype)
 
-    return TensorSpec(
-        dtype=out_dtype,
-        shape=sample_shape,
-        batch=batch,
-        layout=layout,
-        batch_axis_name=batch_axis_name if batch is not None else None,
-        sparse_format=sparse_format,
-    )
+            layout_obj = getattr(x, "layout", None)
+            if layout_obj is None:
+                raise TypeError(
+                    f"Cannot determine PyTorch layout for object of type {type(x).__name__}."
+                )
+
+            layout, sparse_format = _layout_from_torch_layout(layout_obj)
+
+        sample_shape, batch = _split_batch(full_shape, assume_batched=assume_batched)
+
+        return TensorSpec(
+            dtype=out_dtype,
+            shape=sample_shape,
+            batch=batch,
+            layout=layout,
+            batch_axis_name=batch_axis_name if batch is not None else None,
+            sparse_format=sparse_format,
+        )
+
+    return map_tree_leaves(x, leaf_to_spec)

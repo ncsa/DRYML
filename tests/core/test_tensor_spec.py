@@ -9,7 +9,7 @@ from dryml.core2.tensor_spec import (
     TensorSpec,
     is_spec_tree,
     validate_spec_tree,
-    map_spec_tree,
+    map_tree_leaves,
     iter_tensor_specs,
     batch_spec_tree,
     unbatch_spec_tree,
@@ -239,7 +239,7 @@ def test_map_spec_tree_applies_to_all_leaves():
         ),
     }
 
-    new_spec = map_spec_tree(spec, lambda s: s.with_batch())
+    new_spec = map_tree_leaves(spec, lambda s: s.with_batch())
 
     assert new_spec["cart"].batch is Dynamic
     assert new_spec["sph"][0].batch is Dynamic

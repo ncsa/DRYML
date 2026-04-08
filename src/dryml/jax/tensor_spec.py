@@ -1,6 +1,6 @@
 from typing import Any
 
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, map_tree_leaves
 from .dtype import dtype
 
 
@@ -74,19 +74,24 @@ def tensor_spec(
 
     This treats JAX specs/arrays as dense tensor metadata.
     """
-    if not hasattr(x, "shape") or not hasattr(x, "dtype"):
-        raise TypeError(
-            "dryml.jax.tensor_spec(x) expects a jax.ShapeDtypeStruct-like "
-            "or JAX array-like object with .shape and .dtype."
+
+
+    def leaf_to_spec(x: Any) -> TensorSpec:
+        if not hasattr(x, "shape") or not hasattr(x, "dtype"):
+            raise TypeError(
+                "dryml.jax.tensor_spec(x) expects a jax.ShapeDtypeStruct-like "
+                "or JAX array-like object with .shape and .dtype."
+            )
+
+        full_shape = _shape_to_dryml(x.shape)
+        sample_shape, batch = _split_batch(full_shape, assume_batched=assume_batched)
+
+        return TensorSpec(
+            dtype=dtype(x.dtype),
+            shape=sample_shape,
+            batch=batch,
+            layout=Layout.DENSE,
+            batch_axis_name=batch_axis_name if batch is not None else None,
         )
 
-    full_shape = _shape_to_dryml(x.shape)
-    sample_shape, batch = _split_batch(full_shape, assume_batched=assume_batched)
-
-    return TensorSpec(
-        dtype=dtype(x.dtype),
-        shape=sample_shape,
-        batch=batch,
-        layout=Layout.DENSE,
-        batch_axis_name=batch_axis_name if batch is not None else None,
-    )
+    return map_tree_leaves(x, leaf_to_spec)

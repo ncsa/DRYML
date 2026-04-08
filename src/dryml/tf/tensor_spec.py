@@ -1,6 +1,6 @@
 import tensorflow as tf
 from typing import Any
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, SpecTree, map_tree_leaves
 from .dtype import dtype
 
 
@@ -86,11 +86,11 @@ def _split_batch(
 
 
 def tensor_spec(
-    x: Any,
+    x: SpecTree,
     *,
     assume_batched: bool = False,
     batch_axis_name: str | None = "batch",
-) -> TensorSpec:
+) -> SpecTree:
     """
     Convert a TensorFlow TypeSpec or TensorFlow value to a DRYML TensorSpec.
 
@@ -100,48 +100,50 @@ def tensor_spec(
         TensorFlow specs do not intrinsically identify a "batch axis".
         If True, interpret the leading axis as batch.
     """
-    import tensorflow as tf  # type: ignore
+    def leaf_to_spec(x: Any) -> TensorSpec:
 
-    if not isinstance(x, tf.TypeSpec):
-        x = tf.type_spec_from_value(x)
+        if not isinstance(x, tf.TypeSpec):
+            x = tf.type_spec_from_value(x)
 
-    if isinstance(x, tf.RaggedTensorSpec):
-        shape = _tf_shape_to_dryml(x.shape)
-        sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
+        if isinstance(x, tf.RaggedTensorSpec):
+            shape = _tf_shape_to_dryml(x.shape)
+            sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
 
-        return TensorSpec(
-            dtype=dtype(x.dtype),
-            shape=sample_shape,
-            batch=batch,
-            layout=Layout.RAGGED,
-            batch_axis_name=batch_axis_name if batch is not None else None,
-            ragged_rank=int(x.ragged_rank),
-            row_splits_dtype=dtype(x.row_splits_dtype),
-        )
+            return TensorSpec(
+                dtype=dtype(x.dtype),
+                shape=sample_shape,
+                batch=batch,
+                layout=Layout.RAGGED,
+                batch_axis_name=batch_axis_name if batch is not None else None,
+                ragged_rank=int(x.ragged_rank),
+                row_splits_dtype=dtype(x.row_splits_dtype),
+            )
 
-    if isinstance(x, tf.SparseTensorSpec):
-        shape = _tf_shape_to_dryml(x.shape)
-        sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
+        if isinstance(x, tf.SparseTensorSpec):
+            shape = _tf_shape_to_dryml(x.shape)
+            sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
 
-        return TensorSpec(
-            dtype=dtype(x.dtype),
-            shape=sample_shape,
-            batch=batch,
-            layout=Layout.SPARSE,
-            batch_axis_name=batch_axis_name if batch is not None else None,
-            sparse_format="tf_sparse",
-        )
+            return TensorSpec(
+                dtype=dtype(x.dtype),
+                shape=sample_shape,
+                batch=batch,
+                layout=Layout.SPARSE,
+                batch_axis_name=batch_axis_name if batch is not None else None,
+                sparse_format="tf_sparse",
+            )
 
-    if isinstance(x, tf.TensorSpec):
-        shape = _tf_shape_to_dryml(x.shape)
-        sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
+        if isinstance(x, tf.TensorSpec):
+            shape = _tf_shape_to_dryml(x.shape)
+            sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
 
-        return TensorSpec(
-            dtype=dtype(x.dtype),
-            shape=sample_shape,
-            batch=batch,
-            layout=Layout.DENSE,
-            batch_axis_name=batch_axis_name if batch is not None else None,
-        )
+            return TensorSpec(
+                dtype=dtype(x.dtype),
+                shape=sample_shape,
+                batch=batch,
+                layout=Layout.DENSE,
+                batch_axis_name=batch_axis_name if batch is not None else None,
+            )
 
-    raise TypeError(f"Unsupported TensorFlow spec/value type: {type(x).__name__}")
+        raise TypeError(f"Unsupported TensorFlow spec/value type: {type(x).__name__}")
+
+    return map_tree_leaves(x, leaf_to_spec)
