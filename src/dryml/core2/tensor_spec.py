@@ -206,6 +206,25 @@ class TensorSpec:
             return (self.batch, *shape)
         return shape
 
+    def __repr__(self) -> str:
+        cls_str = f"{type(self).__name__}"
+
+        var_strs = []
+        var_strs.append(self.dtype.name)
+        var_strs.append(f"shape={self.shape}")
+        if self.batch is not None:
+            var_strs.append(f"batch={self.batch}")
+        if self.layout is not Layout.DENSE:
+            var_strs.append(f"layout={self.layout}")
+        if self.ragged_rank is not None:
+            var_strs.append(f"ragged_rank={self.ragged_rank}")
+        if self.row_splits_dtype is not None:
+            var_strs.append(f"row_splits_dtype={self.row_splits_dtype}")
+        if self.sparse_format is not None:
+            var_strs.append(f"sparse_format={self.sparse_format}")
+
+        return f"{cls_str}({",".join(var_strs)})"
+
 
 SpecTree: TypeAlias = (
     TensorSpec
