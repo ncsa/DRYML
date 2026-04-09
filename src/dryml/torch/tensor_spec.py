@@ -160,6 +160,7 @@ def tensor_spec(
             layout=layout,
             batch_axis_name=batch_axis_name if batch is not None else None,
             sparse_format=sparse_format,
+            backend = "torch",
         )
 
     return map_tree_leaves(x, leaf_to_spec)

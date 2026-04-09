@@ -117,6 +117,7 @@ def tensor_spec(
                 batch_axis_name=batch_axis_name if batch is not None else None,
                 ragged_rank=int(x.ragged_rank),
                 row_splits_dtype=dtype(x.row_splits_dtype),
+                backend = "tf",
             )
 
         if isinstance(x, tf.SparseTensorSpec):
@@ -130,6 +131,7 @@ def tensor_spec(
                 layout=Layout.SPARSE,
                 batch_axis_name=batch_axis_name if batch is not None else None,
                 sparse_format="tf_sparse",
+                backend = "tf",
             )
 
         if isinstance(x, tf.TensorSpec):
@@ -142,6 +144,7 @@ def tensor_spec(
                 batch=batch,
                 layout=Layout.DENSE,
                 batch_axis_name=batch_axis_name if batch is not None else None,
+                backend = "tf",
             )
 
         raise TypeError(f"Unsupported TensorFlow spec/value type: {type(x).__name__}")

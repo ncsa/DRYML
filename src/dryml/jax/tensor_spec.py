@@ -92,6 +92,7 @@ def tensor_spec(
             batch=batch,
             layout=Layout.DENSE,
             batch_axis_name=batch_axis_name if batch is not None else None,
+            backend = "jax",
         )
 
     return map_tree_leaves(x, leaf_to_spec)

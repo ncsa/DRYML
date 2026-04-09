@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any, Callable, TypeAlias, TypeVar
 
 from .dtype import DType, normalize_dtype
+from .backend import Backend
 
 
 class Dim(Enum):
@@ -101,10 +102,14 @@ class TensorSpec:
 
     batch_axis_name:
         Optional name for the batch axis.
+
+    backend:
+        Optional name for the backend used for this tensor
     """
     dtype: DType | str | Any
     shape: tuple[DimLike, ...] | None = ()
     batch: BatchLike = None
+    backend: Backend | None = None
     layout: Layout = Layout.DENSE
     ragged_rank: int | None = None
     row_splits_dtype: DType | None = None
@@ -132,6 +137,10 @@ class TensorSpec:
         if self.batch is None and self.batch_axis_name != "batch":
             # optional: either allow this or force None when unbatched
             pass
+
+        if self.backend is not None:
+            if not isinstance(self.backend, Backend):
+                object.__setattr__(self, "backend", Backend(self.backend))
 
     @property
     def rank(self) -> int | None:
@@ -222,6 +231,8 @@ class TensorSpec:
             var_strs.append(f"row_splits_dtype={self.row_splits_dtype}")
         if self.sparse_format is not None:
             var_strs.append(f"sparse_format={self.sparse_format}")
+        if self.backend is not None:
+            var_strs.append(f"backend={self.backend}")
 
         return f"{cls_str}({",".join(var_strs)})"
 
