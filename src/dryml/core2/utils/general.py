@@ -5,11 +5,10 @@ import os
 import zipfile
 import importlib
 import tempfile
-import io
 import sys
 from typing import Optional, Callable
 from collections.abc import Mapping, Iterable, ItemsView
-from inspect import getmodule, isclass, \
+from inspect import getmodule, \
     Parameter, signature
 import importlib.util
 
@@ -72,10 +71,6 @@ def get_class_from_str(cls_str: str, reload: bool = False):
     return get_class_by_name(module_string, cls_name, reload=reload)
 
 
-def is_nonclass_callable(obj):
-    return callable(obj) and not isclass(obj)
-
-
 def get_kwarg_defaults(cls):
     kwarg_defaults = {}
     for current_class in reversed(cls.mro()):
@@ -85,34 +80,6 @@ def get_kwarg_defaults(cls):
                 if param.default != Parameter.empty:
                     kwarg_defaults[name] = param.default
     return kwarg_defaults
-
-
-def is_dictlike(val):
-    return isinstance(val, Mapping)
-
-
-def is_collection(val) -> bool:
-    """
-    True for non-mapping iterables (lists, tuples, sets, generators, etc.),
-    but False for string/bytes-like objects and mappings.
-    """
-    if val is None:
-        return False
-
-    # Treat these as scalars/leaves, not collections
-    if isinstance(val, (str, bytes, bytearray, memoryview)):
-        return False
-
-    # Leave mappings to is_dictlike()
-    if isinstance(val, Mapping):
-        return False
-
-    # Iterable => collection
-    return isinstance(val, Iterable)
-
-
-def is_stream(obj) -> bool:
-    return isinstance(obj, io.IOBase)
 
 
 def zip_directory(folder_path, zip_dest):

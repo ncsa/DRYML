@@ -9,7 +9,7 @@ from enum import Enum
 
 import numpy as np
 
-from .general import is_dictlike, is_collection
+from .types import is_dictlike, is_collection
 from .recurse import cycle_detect
 
 def stable_int_hash(s: str, *, bits: int = 64) -> int:

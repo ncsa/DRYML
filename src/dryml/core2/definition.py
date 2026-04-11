@@ -10,8 +10,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
-from .utils.general import is_dictlike, \
-    get_class_str, is_nonclass_callable, hashval_to_digest, \
+from .utils.types import is_dictlike, is_nonclass_callable
+from .utils.general import get_class_str, hashval_to_digest, \
     get_object_view
 from .utils.recurse import cycle_detect
 from .types import is_pod, compatible_containers, container_types
