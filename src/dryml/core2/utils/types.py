@@ -2,6 +2,17 @@ from inspect import isclass
 from typing import Mapping, Iterable, Iterator, Any
 
 
+_ATOMIC_TYPES = (
+    type(None),
+    bool,
+    int,
+    float,
+    complex,
+    bytes,
+    str,
+)
+
+
 def is_nonclass_callable(obj):
     return callable(obj) and not isclass(obj)
 

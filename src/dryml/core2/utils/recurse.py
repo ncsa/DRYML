@@ -2,17 +2,7 @@ from contextvars import ContextVar
 from functools import wraps
 
 from ..errors import CycleError
-
-
-_ATOMIC_TYPES = (
-    type(None),
-    bool,
-    int,
-    float,
-    complex,
-    bytes,
-    str,
-)
+from .types import _ATOMIC_TYPES
 
 
 def cycle_detect(arg_pos=0, kwarg_name=None, should_track=None):
