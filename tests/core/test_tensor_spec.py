@@ -8,12 +8,10 @@ from dryml.core2.tensor_spec import (
     Layout,
     TensorSpec,
     is_spec_tree,
-    validate_spec_tree,
-    map_tree_leaves,
-    iter_tensor_specs,
     batch_spec_tree,
     unbatch_spec_tree,
 )
+from dryml.core2.utils.recurse import iter_leaves, map_leaves
 
 
 def test_tensor_spec_normalizes_dtype_and_shape():
@@ -196,41 +194,7 @@ def test_is_spec_tree_rejects_bad_leaf():
     assert not is_spec_tree(spec)
 
 
-def test_validate_spec_tree_accepts_valid_tree():
-    spec = {
-        "cart": TensorSpec(dtype="float32", shape=(3,)),
-        "sph": TensorSpec(dtype="float32", shape=(2,)),
-        "meta": (
-            TensorSpec(dtype="int32", shape=()),
-            {"mask": TensorSpec(dtype="bool", shape=(Dynamic,))},
-        ),
-    }
-
-    validate_spec_tree(spec)
-
-
-def test_validate_spec_tree_rejects_bad_key_with_path():
-    spec = {
-        "good": TensorSpec(dtype="float32", shape=(3,)),
-        1: TensorSpec(dtype="float32", shape=(2,)),
-    }
-
-    with pytest.raises(TypeError, match=r"spec: dict keys must be str|spec\["):
-        validate_spec_tree(spec)
-
-
-def test_validate_spec_tree_rejects_bad_leaf_with_path():
-    spec = {
-        "outer": {
-            "inner": "bad leaf",
-        }
-    }
-
-    with pytest.raises(TypeError, match=r"outer"):
-        validate_spec_tree(spec)
-
-
-def test_map_spec_tree_applies_to_all_leaves():
+def test_map_leaves_applies_to_all_leaves():
     spec = {
         "cart": TensorSpec(dtype="float32", shape=(3,)),
         "sph": (
@@ -239,7 +203,7 @@ def test_map_spec_tree_applies_to_all_leaves():
         ),
     }
 
-    new_spec = map_tree_leaves(spec, lambda s: s.with_batch())
+    new_spec = map_leaves(spec, lambda s: s.with_batch())
 
     assert new_spec["cart"].batch is Dynamic
     assert new_spec["sph"][0].batch is Dynamic
@@ -261,7 +225,7 @@ def test_iter_tensor_specs_yields_all_leaves():
         "nested": (b, {"mask": c}),
     }
 
-    out = list(iter_tensor_specs(spec))
+    out = list(iter_leaves(spec))
 
     assert out == [a, b, c]
 

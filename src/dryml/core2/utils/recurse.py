@@ -1,8 +1,10 @@
 from contextvars import ContextVar
 from functools import wraps
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
 
 from ..errors import CycleError
-from .types import _ATOMIC_TYPES
+from .types import _ATOMIC_TYPES, is_namedtuple
 
 
 def cycle_detect(arg_pos=0, kwarg_name=None, should_track=None):
@@ -52,3 +54,89 @@ def cycle_detect(arg_pos=0, kwarg_name=None, should_track=None):
         return wrapper
 
     return decorator
+
+
+T = TypeVar("T")
+
+
+def map_leaves(
+        x: Any,
+        leaf_fn: Callable[[Any], T],
+        pred: Callable[[Any], bool]|None = None) -> Any:
+    """
+    Recursively map `leaf_fn` over the leaves of a plain Python tree.
+    If pred is specified, only applies the function to the leaves that
+    satisfy the predicate.
+
+    Supported container nodes:
+      - dict          (maps over values, preserves keys)
+      - list
+      - tuple
+      - namedtuple instances
+
+    Everything else is treated as a leaf.
+    """
+    if isinstance(x, dict):
+        return {k: map_leaves(v, leaf_fn, pred=pred) for k, v in x.items()}
+
+    if is_namedtuple(x):
+        return type(x)(*(map_leaves(v, leaf_fn, pred=pred) for v in x))
+
+    if isinstance(x, tuple):
+        return tuple(map_leaves(v, leaf_fn, pred=pred) for v in x)
+
+    if isinstance(x, list):
+        return [map_leaves(v, leaf_fn, pred=pred) for v in x]
+
+    if pred is None or pred(x):
+        return leaf_fn(x)
+    else:
+        return x
+
+
+def iter_leaves(
+        x: Any,
+        pred: Callable[[Any], bool]|None=None) -> Iterator[Any]:
+    """
+    Yield leaves from a plain Python tree in left-to-right traversal order.
+    if pred is specified, only yields the leaves matching the predicate.
+    """
+    if isinstance(x, dict):
+        for v in x.values():
+            yield from iter_leaves(v, pred=pred)
+        return
+
+    if is_namedtuple(x):
+        for v in x:
+            yield from iter_leaves(v, pred=pred)
+        return
+
+    if isinstance(x, (tuple, list)):
+        for v in x:
+            yield from iter_leaves(v, pred=pred)
+        return
+
+    if pred is None or pred(x):
+        yield x
+
+
+def first_leaf(x: Any, pred: Callable[[Any], bool]|None=None) -> Any:
+    """
+    Return the first leaf encountered in a left-to-right traversal.
+
+    Raises
+    ------
+    ValueError
+        If the tree is empty (for example {}, [], (), or an empty namedtuple).
+    """
+    try:
+        return next(iter_leaves(x, pred=pred))
+    except StopIteration as e:
+        raise ValueError("Cannot get first leaf from an empty tree, or no leaves matched the predicate.") from e
+
+
+def leaf_values(x: Any, pred: Callable[[Any], bool]|None=None) -> list[Any]:
+    """
+    Collect all leaves into a list.
+    """
+    return list(iter_leaves(x, pred=pred))

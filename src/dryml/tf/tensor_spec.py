@@ -1,6 +1,7 @@
 import tensorflow as tf
 from typing import Any
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, SpecTree, map_tree_leaves
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, SpecTree
+from dryml.core2.utils.recurse import map_leaves
 from .dtype import dtype
 
 
@@ -149,4 +150,4 @@ def tensor_spec(
 
         raise TypeError(f"Unsupported TensorFlow spec/value type: {type(x).__name__}")
 
-    return map_tree_leaves(x, leaf_to_spec)
+    return map_leaves(x, leaf_to_spec)

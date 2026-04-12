@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from inspect import isclass
 from typing import Mapping, Iterable, Iterator, Any
 
@@ -47,3 +49,14 @@ def is_stream(obj) -> bool:
 
 def is_iterator(obj:Any) -> bool:
     return isinstance(obj, Iterator)
+
+
+def is_namedtuple(x: Any) -> bool:
+    """
+    True for instances of collections.namedtuple subclasses.
+
+    We intentionally check the type for `_fields` so this works for
+    standard namedtuple instances while avoiding false positives from
+    arbitrary tuple-like objects.
+    """
+    return isinstance(x, tuple) and hasattr(type(x), "_fields")

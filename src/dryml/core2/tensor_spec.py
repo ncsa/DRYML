@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Callable, TypeAlias, TypeVar
+from typing import Any, TypeAlias
 
 from .dtype import DType, normalize_dtype
 from .backend import Backend
+from .utils.recurse import map_leaves
 
 
 class Dim(Enum):
@@ -261,90 +262,9 @@ def is_spec_tree(x: Any) -> bool:
     return False
 
 
-def validate_spec_tree(x: Any, path: str = "spec") -> None:
-    if isinstance(x, TensorSpec):
-        return
-
-    if isinstance(x, dict):
-        for k, v in x.items():
-            if not isinstance(k, str):
-                raise TypeError(
-                    f"{path}: dict keys must be str, got {type(k).__name__}"
-                )
-            validate_spec_tree(v, f"{path}[{k!r}]")
-        return
-
-    if isinstance(x, tuple):
-        for i, v in enumerate(x):
-            validate_spec_tree(v, f"{path}[{i}]")
-        return
-
-    if isinstance(x, list):
-        for i, v in enumerate(x):
-            validate_spec_tree(v, f"{path}[{i}]")
-        return
-
-    raise TypeError(
-        f"{path}: expected TensorSpec, dict[str, SpecTree], tuple, or list; "
-        f"got {type(x).__name__}"
-    )
-
-
-T = TypeVar("T")
-
-
-def _is_namedtuple_instance(x: Any) -> bool:
-    return isinstance(x, tuple) and hasattr(type(x), "_fields")
-
-
-def map_tree_leaves(x: Any, leaf_fn: Callable[[Any], T]) -> Any:
-    """
-    Recursively map leaf_fn over plain Python container trees.
-
-    Supported containers:
-      - dict
-      - list
-      - tuple
-      - namedtuple instances
-
-    Everything else is treated as a leaf.
-    """
-    if isinstance(x, dict):
-        return {k: map_tree_leaves(v, leaf_fn) for k, v in x.items()}
-
-    if _is_namedtuple_instance(x):
-        return type(x)(*(map_tree_leaves(v, leaf_fn) for v in x))
-
-    if isinstance(x, tuple):
-        return tuple(map_tree_leaves(v, leaf_fn) for v in x)
-
-    if isinstance(x, list):
-        return [map_tree_leaves(v, leaf_fn) for v in x]
-
-    return leaf_fn(x)
-
-
-def iter_tensor_specs(spec: SpecTree):
-    if isinstance(spec, TensorSpec):
-        yield spec
-        return
-
-    if isinstance(spec, dict):
-        for v in spec.values():
-            yield from iter_tensor_specs(v)
-        return
-
-    if isinstance(spec, (tuple, list)):
-        for v in spec:
-            yield from iter_tensor_specs(v)
-        return
-
-    raise TypeError(f"Unsupported spec tree node: {type(spec).__name__}")
-
-
 def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch") -> SpecTree:
-    return map_tree_leaves(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
+    return map_leaves(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
 
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
-    return map_tree_leaves(spec, lambda s: s.without_batch())
+    return map_leaves(spec, lambda s: s.without_batch())

@@ -1,6 +1,7 @@
 from typing import Any
 
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, map_tree_leaves
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.utils.recurse import map_leaves
 from .dtype import dtype
 
 
@@ -95,4 +96,4 @@ def tensor_spec(
             backend = "jax",
         )
 
-    return map_tree_leaves(x, leaf_to_spec)
+    return map_leaves(x, leaf_to_spec)

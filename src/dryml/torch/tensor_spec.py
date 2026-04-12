@@ -1,7 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from dryml.core2.tensor_spec import TensorSpec, Dynamic, Layout, map_tree_leaves
+from dryml.core2.tensor_spec import TensorSpec, Dynamic, Layout
 from dryml.core2.dtype import normalize_dtype
+from dryml.core2.utils.recurse import map_leaves
 from .spec import TorchTensorSpec
 from .dtype import dtype
 
@@ -163,4 +164,4 @@ def tensor_spec(
             backend = "torch",
         )
 
-    return map_tree_leaves(x, leaf_to_spec)
+    return map_leaves(x, leaf_to_spec)
