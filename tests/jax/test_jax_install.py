@@ -3,9 +3,11 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 import dryml.jax as dryml_jax
+import numpy as np
 
 from dryml.core2.dtype import DType
 from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.backend import discover_backend
 
 
 def test_jax_dtype_from_dtype_object():
@@ -74,3 +76,12 @@ def test_jax_dynamic_dim_rejected_if_forward_methods_installed():
 
     with pytest.raises(ValueError):
         spec.jax()
+
+
+def test_jax_backend_detectors():
+    assert discover_backend(jnp.array(1)) == "jax"
+    assert discover_backend(jnp.float32(1.5)) == "jax"
+    assert discover_backend(1) == "python"
+    assert discover_backend(1.5) == "python"
+    assert discover_backend(np.uint8(1)) == "numpy"
+    assert discover_backend(np.float64(1.5)) == "numpy"

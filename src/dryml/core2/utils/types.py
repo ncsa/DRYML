@@ -15,6 +15,17 @@ _ATOMIC_TYPES = (
 )
 
 
+POD_TYPES = (
+    type(None),
+    bool,
+    int,
+    float,
+    complex,
+    bytes,
+    str,
+)
+
+
 def is_nonclass_callable(obj):
     return callable(obj) and not isclass(obj)
 
@@ -60,3 +71,12 @@ def is_namedtuple(x: Any) -> bool:
     arbitrary tuple-like objects.
     """
     return isinstance(x, tuple) and hasattr(type(x), "_fields")
+
+
+def is_python_builtin_pod(x: Any) -> bool:
+    return type(x) in {type(None), bool, int, float, complex, str, bytes}
+
+
+def is_numpy(x: Any) -> bool:
+    import numpy as np
+    return isinstance(x, (np.ndarray, np.generic))

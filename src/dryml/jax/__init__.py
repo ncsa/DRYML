@@ -5,13 +5,21 @@ check_context('jax')
 
 from dryml.core2.dtype import DType
 from dryml.core2.tensor_spec import TensorSpec
+from dryml.core2.backend import Backend
 
 from .dtype import dtype, _dtype_jax
 from .tensor_spec import tensor_spec, _tensor_spec_jax
+from .backend import is_jax_available, is_jax_value
+
 
 def _install() -> None:
     install_method(DType, "jax", _dtype_jax)
     install_method(TensorSpec, "jax", _tensor_spec_jax)
+
+    from dryml.core2.backend import backend_testers
+    from dryml.core2.backend import backend_existence_testers
+    backend_testers[Backend.jax] = is_jax_value
+    backend_existence_testers[Backend.jax] = is_jax_available
 
 _install()
 
