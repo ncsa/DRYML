@@ -14,4 +14,5 @@ def is_torch_available():
 
 def is_torch_value(x: Any) -> bool:
     import torch
-    return torch.is_tensor(x)
+    from .spec import TorchTensorSpec
+    return torch.is_tensor(x) or isinstance(x, TorchTensorSpec)

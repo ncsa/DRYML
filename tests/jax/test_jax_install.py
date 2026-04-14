@@ -6,7 +6,7 @@ import dryml.jax as dryml_jax
 import numpy as np
 
 from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
 from dryml.core2.backend import discover_backend
 
 
@@ -24,7 +24,7 @@ def test_jax_dtype_from_shape_dtype_struct():
 def test_jax_tensor_spec_from_shape_dtype_struct_unbatched():
     x = jax.ShapeDtypeStruct((4, 32), jnp.float32)
 
-    spec = dryml_jax.tensor_spec(x, assume_batched=False)
+    spec = dryml_jax.as_tensor_spec(x, assume_batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (4, 32)
@@ -35,7 +35,7 @@ def test_jax_tensor_spec_from_shape_dtype_struct_unbatched():
 def test_jax_tensor_spec_from_shape_dtype_struct_assume_batched():
     x = jax.ShapeDtypeStruct((4, 32), jnp.float32)
 
-    spec = dryml_jax.tensor_spec(x, assume_batched=True)
+    spec = dryml_jax.as_tensor_spec(x, assume_batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -47,7 +47,7 @@ def test_jax_tensor_spec_from_shape_dtype_struct_assume_batched():
 def test_jax_tensor_spec_from_array():
     x = jnp.zeros((3, 16), dtype=jnp.float32)
 
-    spec = dryml_jax.tensor_spec(x, assume_batched=True)
+    spec = dryml_jax.as_tensor_spec(x, assume_batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (16,)
@@ -85,3 +85,14 @@ def test_jax_backend_detectors():
     assert discover_backend(1.5) == "python"
     assert discover_backend(np.uint8(1)) == "numpy"
     assert discover_backend(np.float64(1.5)) == "numpy"
+
+
+def test_jax_tensor_spec_auto_ingest():
+    x = jax.ShapeDtypeStruct((4, 32), jnp.float32)
+    spec = TensorSpec(dtype="float32", shape=(32,), batch=4)
+    assert spec == as_tensor_spec(x, assume_batched=True)
+
+    key = jax.random.key(0)
+    x = jax.random.uniform(key, shape=(4, 32), dtype=jnp.float32)
+    spec = TensorSpec(dtype="float32", shape=(4, 32,))
+    assert spec == as_tensor_spec(x)

@@ -111,7 +111,7 @@ def dtype(x: Any) -> DType:
     return normalize_dtype(s.removeprefix("torch."))
 
 
-def tensor_spec(
+def as_tensor_spec(
     x: Any,
     *,
     assume_batched: bool = False,

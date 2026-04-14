@@ -7,7 +7,8 @@ torch = pytest.importorskip("torch")
 import dryml.torch as dryml_torch
 
 from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
+from dryml.core2.backend import discover_backend
 from dryml.torch import TorchTensorSpec
 
 
@@ -25,7 +26,7 @@ def test_torch_dtype_from_tensor():
 def test_torch_tensor_spec_dense_unbatched():
     x = torch.zeros((4, 32), dtype=torch.float32)
 
-    spec = dryml_torch.tensor_spec(x, assume_batched=False)
+    spec = dryml_torch.as_tensor_spec(x, assume_batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (4, 32)
@@ -36,7 +37,7 @@ def test_torch_tensor_spec_dense_unbatched():
 def test_torch_tensor_spec_dense_assume_batched():
     x = torch.zeros((4, 32), dtype=torch.float32)
 
-    spec = dryml_torch.tensor_spec(x, assume_batched=True)
+    spec = dryml_torch.as_tensor_spec(x, assume_batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -50,7 +51,7 @@ def test_torch_tensor_spec_sparse_coo():
     values = torch.tensor([3.0, 4.0])
     x = torch.sparse_coo_tensor(indices, values, size=(2, 3))
 
-    spec = dryml_torch.tensor_spec(x)
+    spec = dryml_torch.as_tensor_spec(x)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (2, 3)
@@ -66,7 +67,7 @@ def test_torch_tensor_spec_from_adapter():
         layout=torch.strided,
     )
 
-    spec = dryml_torch.tensor_spec(x, assume_batched=True)
+    spec = dryml_torch.as_tensor_spec(x, assume_batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -114,3 +115,13 @@ def test_torch_backend_detectors():
     assert discover_backend(1.5) == "python"
     assert discover_backend(np.uint8(1)) == "numpy"
     assert discover_backend(np.float64(1.5)) == "numpy"
+
+
+def test_torch_tensor_spec_auto_ingest():
+    x = TorchTensorSpec((4, 32), dtype=torch.float32)
+    spec = TensorSpec(dtype="float32", shape=(32,), batch=4)
+    assert spec == as_tensor_spec(x, assume_batched=True)
+
+    x = torch.randn((4, 32), dtype=torch.float32)
+    spec = TensorSpec(dtype="float32", shape=(4, 32,))
+    assert spec == as_tensor_spec(x)

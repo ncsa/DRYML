@@ -86,7 +86,7 @@ def _split_batch(
     return shape[1:], shape[0]
 
 
-def tensor_spec(
+def as_tensor_spec(
     x: SpecTree,
     *,
     assume_batched: bool = False,

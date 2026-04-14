@@ -23,6 +23,22 @@ class Backend(Enum):
         else:
             return self.value == rhs.value
 
+    @property
+    def module(self):
+        from dryml.context import ContextError
+        import importlib
+        if not backend_existence_testers[self]():
+            raise ContextError("This backend is not available in this context.")
+        return importlib.import_module(f"dryml.{self.value}")
+
+    @property
+    def dtype(self):
+        return self.module.dtype
+
+    @property
+    def as_tensor_spec(self):
+        return self.module.as_tensor_spec
+
 
 backend_testers = {
     Backend.python: is_python_builtin_pod,

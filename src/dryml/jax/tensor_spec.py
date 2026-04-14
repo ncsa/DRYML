@@ -64,7 +64,7 @@ def _split_batch(
     return shape[1:], shape[0]
 
 
-def tensor_spec(
+def as_tensor_spec(
     x: Any,
     *,
     assume_batched: bool = False,
@@ -80,7 +80,7 @@ def tensor_spec(
     def leaf_to_spec(x: Any) -> TensorSpec:
         if not hasattr(x, "shape") or not hasattr(x, "dtype"):
             raise TypeError(
-                "dryml.jax.tensor_spec(x) expects a jax.ShapeDtypeStruct-like "
+                "dryml.jax.as_tensor_spec(x) expects a jax.ShapeDtypeStruct-like "
                 "or JAX array-like object with .shape and .dtype."
             )
 

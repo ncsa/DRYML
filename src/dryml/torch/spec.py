@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
+import torch
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +14,12 @@ class TorchTensorSpec:
     """
     shape: tuple[int | object, ...] | None
     dtype: Any
-    layout: Any
+    layout: Any | None = None
     device: Any | None = None
     requires_grad: bool | None = None
+
+
+    def __post_init__(self):
+        if self.layout is None:
+            object.__setattr__(self, "layout", torch.strided)
+

@@ -9,7 +9,7 @@ from dryml.core2.backend import Backend
 
 from .spec import TorchTensorSpec
 from .dtype import dtype, _dtype_torch
-from .tensor_spec import tensor_spec, _tensor_spec_torch
+from .tensor_spec import as_tensor_spec, _tensor_spec_torch
 from .backend import is_torch_value, is_torch_available
 
 
@@ -26,4 +26,4 @@ def _install() -> None:
 _install()
 
 
-__all__ = ["dtype", "tensor_spec", "TorchTensorSpec"]
+__all__ = ["dtype", "as_tensor_spec", "TorchTensorSpec"]

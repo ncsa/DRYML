@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+from multiprocessing.sharedctypes import Value
 from typing import Any, TypeAlias
 
 from .dtype import DType, normalize_dtype
-from .backend import Backend
-from .utils.recurse import map_leaves
+from .backend import discover_backend, Backend
+from .utils.recurse import map_leaves, iter_leaves
 
 
 class Dim(Enum):
@@ -237,6 +238,15 @@ class TensorSpec:
 
         return f"{cls_str}({",".join(var_strs)})"
 
+    def __eq__(self, rhs) -> bool:
+        if not isinstance(rhs, TensorSpec):
+            raise NotImplementedError(f"TensorSpec comparison not implemented for this type ({type(rhs)})")
+
+        return (
+            self.dtype == rhs.dtype and
+            self.shape == rhs.shape and
+            self.batch == rhs.batch )
+
 
 SpecTree: TypeAlias = (
     TensorSpec
@@ -268,3 +278,17 @@ def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batc
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
     return map_leaves(spec, lambda s: s.without_batch())
+
+
+def as_tensor_spec(x: Any, *args, require_consistent_backend=True, **kwargs):
+    # Tensor Specs should have a consistent backend.
+    all_backends = set(map(discover_backend, iter_leaves(x)))
+    if len(all_backends) == 0:
+        raise ValueError("No values with a backend?")
+
+    if require_consistent_backend and len(all_backends) > 1:
+        raise ValueError(f"Found values from multiple backends: {all_backends}")
+
+    backend = all_backends.pop()
+
+    return backend.as_tensor_spec(x, *args, **kwargs)

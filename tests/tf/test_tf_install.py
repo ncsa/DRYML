@@ -7,7 +7,8 @@ tf = pytest.importorskip("tensorflow")
 import dryml.tf as dryml_tf
 
 from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
+from dryml.core2.backend import discover_backend
 
 
 def test_tf_dtype_from_dtype_object():
@@ -24,7 +25,7 @@ def test_tf_dtype_from_spec():
 def test_tf_tensor_spec_dense_unbatched():
     x = tf.TensorSpec(shape=(None, 32), dtype=tf.float32)
 
-    spec = dryml_tf.tensor_spec(x, assume_batched=False)
+    spec = dryml_tf.as_tensor_spec(x, assume_batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (Dynamic, 32)
@@ -35,7 +36,7 @@ def test_tf_tensor_spec_dense_unbatched():
 def test_tf_tensor_spec_dense_assume_batched():
     x = tf.TensorSpec(shape=(None, 32), dtype=tf.float32)
 
-    spec = dryml_tf.tensor_spec(x, assume_batched=True)
+    spec = dryml_tf.as_tensor_spec(x, assume_batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -47,7 +48,7 @@ def test_tf_tensor_spec_dense_assume_batched():
 def test_tf_tensor_spec_from_value():
     x = tf.zeros((4, 32), dtype=tf.float32)
 
-    spec = dryml_tf.tensor_spec(x, assume_batched=True)
+    spec = dryml_tf.as_tensor_spec(x, assume_batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -63,7 +64,7 @@ def test_tf_tensor_spec_ragged():
         row_splits_dtype=tf.int64,
     )
 
-    spec = dryml_tf.tensor_spec(x, assume_batched=False)
+    spec = dryml_tf.as_tensor_spec(x, assume_batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (Dynamic, Dynamic, 8)
@@ -76,7 +77,7 @@ def test_tf_tensor_spec_ragged():
 def test_tf_tensor_spec_sparse():
     x = tf.SparseTensorSpec(shape=(None, 16), dtype=tf.float32)
 
-    spec = dryml_tf.tensor_spec(x, assume_batched=False)
+    spec = dryml_tf.as_tensor_spec(x, assume_batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (Dynamic, 16)
@@ -127,3 +128,13 @@ def test_tf_backend_detectors():
     assert discover_backend(1.5) == "python"
     assert discover_backend(np.uint8(1)) == "numpy"
     assert discover_backend(np.float64(1.5)) == "numpy"
+
+
+def test_tf_tensor_spec_auto_ingest():
+    x = tf.TensorSpec((4, 32), dtype=tf.float32)
+    spec = TensorSpec(dtype="float32", shape=(32,), batch=4)
+    assert spec == as_tensor_spec(x, assume_batched=True)
+
+    x = tf.random.uniform(shape=(4, 32), dtype=tf.float32)
+    spec = TensorSpec(dtype="float32", shape=(4, 32,))
+    assert spec == as_tensor_spec(x)

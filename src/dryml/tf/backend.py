@@ -14,4 +14,4 @@ def is_tf_available():
 
 def is_tf_value(x: Any) -> bool:
     import tensorflow as tf
-    return tf.is_tensor(x)
+    return tf.is_tensor(x) or isinstance(x, tf.TensorSpec)

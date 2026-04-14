@@ -9,7 +9,7 @@ from dryml.core2.tensor_spec import TensorSpec
 from dryml.core2.backend import Backend
 
 from .dtype import dtype, _dtype_tf
-from .tensor_spec import tensor_spec, _tensor_spec_tf
+from .tensor_spec import as_tensor_spec, _tensor_spec_tf
 from .backend import is_tf_available, is_tf_value
 
 
@@ -26,4 +26,4 @@ def _install() -> None:
 _install()
 
 
-__all__ = ["dtype", "tensor_spec"]
+__all__ = ["dtype", "as_tensor_spec"]
