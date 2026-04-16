@@ -18,6 +18,7 @@ from .store.store import Store
 from .policies import InstancePolicy, CachePolicy
 from .repo_graph import RepoSaveVisitor, RepoRealizeTransformer, RepoAddObjectsVisitor, RepoRealizeConfig, manage_revision
 from .utils.graph import GraphCtx
+from .canonical import from_canonical
 
 
 class RepoSaveError(Exception):
@@ -216,21 +217,18 @@ class Repo:
         memo: dict | None = None,
         path: list[str | int] | None = None,
     ):
-        if memo is None:
-            memo = {}
-        if path is None:
-            path = []
-
-        cfg = RepoRealizeConfig(
+        return from_canonical(
+            x,
+            repo=self,
             instance=instance,
             restore_state=restore_state,
             build_missing=build_missing,
             reuse_weak=reuse_weak,
             cache=cache,
             revision=revision,
+            memo=memo,
+            path=path,
         )
-        ctx = GraphCtx(path=tuple(path), memo=memo)
-        return RepoRealizeTransformer(self, cfg).transform(x, ctx)
 
     # -------------------------------------------------------------------------
     # Core: turn a ConcreteDefinition into a live Object under load knobs

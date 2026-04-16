@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, TypeAlias
 
@@ -13,6 +14,7 @@ from .freeze import (
     FrozenTuple,
 )
 from .types import is_pod
+from .utils.graph import GraphCtx, GraphTransformer
 
 if TYPE_CHECKING:
     from .definition import ConcreteDefinition
@@ -289,45 +291,350 @@ def map_dict_items(x: Any, key_fn, value_fn):
     raise TypeError(f"{type(x).__name__} is not dict-like")
 
 
+
+# ----------------------------------------------------------------------
+# Internal transformers
+# ----------------------------------------------------------------------
+
+class _ToCanonicalTransformer(GraphTransformer):
+    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        return is_canonical_value(obj)
+
+    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
+        return obj
+
+    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
+        kind = node_kind(obj)
+        return kind in {
+            NodeKind.LIST,
+            NodeKind.TUPLE,
+            NodeKind.SET,
+            NodeKind.DICT,
+            NodeKind.DEFINITION,
+        }
+
+    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
+        from .definition import ConcreteDefinition
+        from .object import Object
+
+        kind = node_kind(obj)
+        repo = ctx.state["repo"]
+
+        if kind is NodeKind.NDARRAY:
+            return FrozenNDArray.from_array(obj)
+
+        if kind is NodeKind.LIST:
+            return FrozenList(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.TUPLE:
+            return FrozenTuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.SET:
+            return FrozenSet(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.DICT:
+            return FrozenDict({
+                k: self.transform(v, ctx.child(k if isinstance(k, (str, int)) else str(k)))
+                for k, v in obj.items()
+            })
+
+        if kind is NodeKind.OBJECT:
+            repo.cache_weak(obj)
+            return obj.__cdef__
+
+        if kind is NodeKind.DEFINITION:
+            if obj.cls is None:
+                raise ValueError(
+                    f"Cannot concretize Definition with missing cls at {ctx.path_str()}"
+                )
+            if obj.args is None:
+                raise ValueError(
+                    f"Cannot concretize Definition with missing args at {ctx.path_str()}"
+                )
+
+            prep_args, prep_kwargs = obj.cls.__prepare_args__(*obj.args, **obj.kwargs)
+            c_args = self.transform(prep_args, ctx.child("args"))
+            c_kwargs = self.transform(prep_kwargs, ctx.child("kwargs"))
+
+            if not isinstance(c_args, FrozenTuple):
+                raise TypeError(
+                    f"Prepared args did not concretize to FrozenTuple at {ctx.path_str()}"
+                )
+            if not isinstance(c_kwargs, FrozenDict):
+                raise TypeError(
+                    f"Prepared kwargs did not concretize to FrozenDict at {ctx.path_str()}"
+                )
+
+            return ConcreteDefinition(obj.cls, c_args, c_kwargs)
+
+        raise TypeError(
+            f"Cannot canonicalize object of type {type(obj).__name__} at {ctx.path_str()}"
+        )
+
+
+class _ThawValueTransformer(GraphTransformer):
+    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        return node_kind(obj) in {NodeKind.POD, NodeKind.TYPE}
+
+    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
+        return obj
+
+    def memo_key(self, obj: Any, ctx: GraphCtx):
+        kind = node_kind(obj)
+        if kind in {
+            NodeKind.FROZEN_NDARRAY,
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_DICT,
+            NodeKind.CONCRETE_DEFINITION,
+            NodeKind.DEFINITION,
+            NodeKind.OBJECT,
+        }:
+            return id(obj)
+        return None
+
+    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
+        kind = node_kind(obj)
+        return kind in {
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_DICT,
+            NodeKind.CONCRETE_DEFINITION,
+            NodeKind.DEFINITION,
+            NodeKind.OBJECT,
+        }
+
+    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
+        from .definition import Definition
+
+        kind = node_kind(obj)
+
+        if kind is NodeKind.FROZEN_NDARRAY:
+            return obj.thaw()
+
+        if kind is NodeKind.FROZEN_LIST:
+            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
+
+        if kind is NodeKind.FROZEN_TUPLE:
+            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.FROZEN_SET:
+            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
+
+        if kind is NodeKind.FROZEN_DICT:
+            return {
+                k: self.transform(v, ctx.child(k if isinstance(k, (str, int)) else str(k)))
+                for k, v in obj.items()
+            }
+
+        if kind is NodeKind.CONCRETE_DEFINITION:
+            thaw_args = self.transform(obj.args, ctx.child("args"))
+            thaw_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
+            return Definition(obj.cls, *thaw_args, **thaw_kwargs)
+
+        if kind is NodeKind.DEFINITION:
+            return obj
+
+        if kind is NodeKind.OBJECT:
+            return self.transform(obj.definition, ctx)
+
+        raise TypeError(
+            f"Cannot thaw value of type {type(obj).__name__} at {ctx.path_str()}"
+        )
+
+
+@dataclass(slots=True)
+class _FromCanonicalConfig:
+    instance: str = "reuse"
+    restore_state: bool = True
+    build_missing: bool = False
+    reuse_weak: bool = True
+    cache: str = "weak"
+    revision: dict | str | None = None
+
+
+class _FromCanonicalTransformer(GraphTransformer):
+    def __init__(self, repo: "Repo", config: _FromCanonicalConfig):
+        self.repo = repo
+        self.config = config
+
+    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        return node_kind(obj) in {NodeKind.POD, NodeKind.TYPE}
+
+    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
+        return obj
+
+    def memo_key(self, obj: Any, ctx: GraphCtx):
+        if node_kind(obj) is NodeKind.CONCRETE_DEFINITION:
+            return obj
+        return None
+
+    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
+        return node_kind(obj) in {
+            NodeKind.LIST,
+            NodeKind.TUPLE,
+            NodeKind.SET,
+            NodeKind.DICT,
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT,
+            NodeKind.DEFINITION,
+            NodeKind.OBJECT,
+        }
+
+    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
+        kind = node_kind(obj)
+
+        if kind is NodeKind.FROZEN_NDARRAY:
+            return obj.thaw() if hasattr(obj, "thaw") else np.array(obj, copy=True)
+
+        if kind is NodeKind.NDARRAY:
+            return np.array(obj, copy=True)
+
+        if kind is NodeKind.CONCRETE_DEFINITION:
+            from .repo import manage_revision
+
+            revision = manage_revision(obj, self.config.revision)
+            return self.repo._materialize_cdef(
+                obj,
+                revision,
+                instance=self.config.instance,
+                restore_state=self.config.restore_state,
+                build_missing=self.config.build_missing,
+                reuse_weak=self.config.reuse_weak,
+                cache=self.config.cache,
+                memo=ctx.memo,
+                path=list(ctx.path),
+            )
+
+        if kind is NodeKind.DEFINITION:
+            from .repo import manage_revision
+
+            cdef = to_canonical(obj, repo=self.repo)
+            revision = manage_revision(cdef, self.config.revision)
+            return self.repo._materialize_cdef(
+                cdef,
+                revision,
+                instance=self.config.instance,
+                restore_state=self.config.restore_state,
+                build_missing=self.config.build_missing,
+                reuse_weak=self.config.reuse_weak,
+                cache=self.config.cache,
+                memo=ctx.memo,
+                path=list(ctx.path),
+            )
+
+        if kind is NodeKind.OBJECT:
+            from .repo import manage_revision
+
+            revision = manage_revision(obj.definition, self.config.revision)
+
+            if self.config.instance == "new":
+                return self.repo._materialize_cdef(
+                    obj.definition,
+                    revision,
+                    instance="new",
+                    restore_state=self.config.restore_state,
+                    build_missing=self.config.build_missing,
+                    reuse_weak=self.config.reuse_weak,
+                    cache=self.config.cache,
+                    memo=ctx.memo,
+                    path=list(ctx.path),
+                )
+
+            if self.repo.get_cached(obj.definition, reuse_weak=self.config.reuse_weak) is None:
+                self.repo.cache_weak(obj)
+
+            return obj
+
+        if kind is NodeKind.FROZEN_TUPLE:
+            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.FROZEN_LIST:
+            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
+
+        if kind is NodeKind.FROZEN_SET:
+            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
+
+        if kind is NodeKind.TUPLE:
+            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.LIST:
+            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
+
+        if kind is NodeKind.SET:
+            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
+
+        if kind in {NodeKind.DICT, NodeKind.FROZEN_DICT}:
+            return map_dict_items(
+                obj,
+                key_fn=lambda k: self.transform(k, ctx.child("<key>")),
+                value_fn=lambda k, v: self.transform(
+                    v,
+                    ctx.child(k if isinstance(k, (str, int)) else str(k)),
+                ),
+            )
+
+        raise TypeError(
+            f"Cannot de-canonicalize value of type {type(obj).__name__} at {ctx.path_str()}"
+        )
+
 # ----------------------------------------------------------------------
 # Thin public wrappers for now
 # ----------------------------------------------------------------------
 
-def to_canonical(x: Any, *, repo: "Repo | None" = None) -> CanonicalValue:
-    """
-    Thin wrapper for now. The actual implementation still lives in the
-    concretization transformer.
-    """
-    from .definition import concretize_func
-    return concretize_func(x, repo=repo)
+def to_canonical(
+    x: Any,
+    *,
+    repo: "Repo | None" = None,
+    path: list[str | int] | tuple[str | int, ...] | None = None,
+):
+    from .repo import manage_repo
+
+    with manage_repo(repo=repo) as sub_repo:
+        ctx = GraphCtx(
+            path=tuple(path) if path is not None else (),
+            state={"repo": sub_repo},
+        )
+        return _ToCanonicalTransformer().transform(x, ctx)
 
 
-def thaw_value(x: Any) -> Any:
-    """
-    Thin wrapper for now. The actual implementation still lives in the
-    thaw transformer.
-    """
-    from .definition import thaw_concrete
-    return thaw_concrete(x)
+def thaw_value(
+    x: Any,
+    *,
+    cache: dict | None = None,
+    path: list[str | int] | tuple[str | int, ...] | None = None,
+):
+    if cache is None:
+        cache = {}
+
+    ctx = GraphCtx(
+        path=tuple(path) if path is not None else (),
+        memo=cache,
+    )
+    return _ThawValueTransformer().transform(x, ctx)
 
 
 def from_canonical(
     x: Any,
     *,
     repo: "Repo",
-    instance="reuse",
+    instance: str = "reuse",
     restore_state: bool = True,
     build_missing: bool = False,
     reuse_weak: bool = True,
-    cache="weak",
+    cache: str = "weak",
     revision=None,
+    memo: dict | None = None,
+    path: list[str | int] | tuple[str | int, ...] | None = None,
 ):
-    """
-    Thin wrapper for now. Later this can become the direct de-canonicalization
-    entry point if you want to move more logic out of Repo.
-    """
-    return repo.load_object(
-        x,
+    if memo is None:
+        memo = {}
+
+    cfg = _FromCanonicalConfig(
         instance=instance,
         restore_state=restore_state,
         build_missing=build_missing,
@@ -335,3 +642,9 @@ def from_canonical(
         cache=cache,
         revision=revision,
     )
+
+    ctx = GraphCtx(
+        path=tuple(path) if path is not None else (),
+        memo=memo,
+    )
+    return _FromCanonicalTransformer(repo, cfg).transform(x, ctx)

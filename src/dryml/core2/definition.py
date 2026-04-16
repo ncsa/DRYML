@@ -20,6 +20,8 @@ from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArra
 from .errors import PathAccessError
 from .policies import InstancePolicy, CachePolicy
 from .canonical import (
+    to_canonical,
+    thaw_value,
     NodeKind,
     is_canonical_value,
     is_runtime_leaf,
@@ -231,7 +233,7 @@ class Definition(DefInterface, Mapping):
         return new
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
-        return concretize_func(self, repo=repo)
+        return to_canonical(self, repo=repo)
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,8 +300,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     def copy(self):
         return deepcopy(self)
 
-    def to_definition(self):
-        return thaw_concrete(self)
+    def to_definition(self, repo: "Repo | None" = None) -> Any:
+        return thaw_value(self)
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return self
@@ -437,21 +439,6 @@ class ConcretizeTransformer(GraphTransformer):
         raise TypeError(
             f"Cannot concretize object of type {type(obj).__name__} at {ctx.path_str()}"
         )
-
-
-def concretize_func(
-    obj: Any,
-    path: list[str | int] | None = None,
-    repo: "Repo | None" = None,
-) -> Any:
-    from .repo import manage_repo
-
-    with manage_repo(repo=repo) as sub_repo:
-        ctx = GraphCtx(
-            path=tuple(path) if path is not None else (),
-            state={"repo": sub_repo},
-        )
-        return ConcretizeTransformer().transform(obj, ctx)
 
 
 # ----------------------------------------------------------------------
@@ -909,3 +896,15 @@ def selector_match(
         full_diagnostic=full_diagnostic,
         output_stream=output_stream,
     ).match(selector, target)
+
+
+def concretize_func(
+    obj: Any,
+    path: list[str | int] | None = None,
+    repo: "Repo | None" = None,
+) -> Any:
+    return to_canonical(obj, repo=repo, path=path)
+
+
+def thaw_concrete(cdef_or_obj: Any, cache=None) -> Any:
+    return thaw_value(cdef_or_obj, cache=cache)
