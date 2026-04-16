@@ -13,12 +13,11 @@ import numpy as np
 import atexit
 
 from .definition import Definition, ConcreteDefinition
-from .utils.recurse import cycle_detect
 from .object import Object
 from .store.store import Store
-from .types import is_pod
 from .policies import InstancePolicy, CachePolicy
-from .freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
+from .repo_graph import RepoSaveVisitor, RepoRealizeTransformer, RepoAddObjectsVisitor, RepoRealizeConfig, manage_revision
+from .utils.graph import GraphCtx
 
 
 class RepoSaveError(Exception):
@@ -56,6 +55,9 @@ class Repo:
     # Backing stores
     stores: list[Store]
 
+    # Object config store
+    obj_config: dict[ConcreteDefinition, Any]
+
     # Settings
     save_objs_on_deletion: bool = False
 
@@ -68,6 +70,7 @@ class Repo:
         self.obj_default_store = {}
         self.light_index = set()
         self.cdef_cache = weakref.WeakValueDictionary()
+        self.obj_config = {}
 
         # Some helper variables for monitoring
         self._num_saves = 0
@@ -170,81 +173,10 @@ class Repo:
     def __len__(self):
         return len(self.strong_obj_cache)
 
-    def save_object(self, obj, main=False, store=None, revision: RevisionType|str|None=None):
-
-        saved_objs: dict[int,set[ConcreteDefinition]] = {}
+    def save_object(self, obj, main=False, store=None, revision=None):
         revision = manage_revision(obj, revision)
+        RepoSaveVisitor(self, store=store, revision=revision).visit(obj)
 
-        def _save_single_object(obj: Object, store: Store|None=None):
-            """
-            Defines how the Repo updates its caches and delegates saving a single object to one of it's stores
-            """
-
-            cdef = obj.definition
-            if store is None:
-                if cdef in self.obj_default_store:
-                    store = self.obj_default_store[cdef]
-                else:
-                    store = self.default_store
-
-            _save_object(cdef.args, store=store)
-            _save_object(cdef.kwargs, store=store)
-
-            if cdef in self.strong_obj_cache:
-                # Check that this was the same object
-                if obj is not self.strong_obj_cache[cdef]:
-                    raise ValueError("We already have a different object with definition: {cdef}")
-            else:
-                # Update repo cache
-                self.pin(obj)
-
-            if store is None:
-                raise RepoSaveError("No store available to save object!")
-
-            if id(store) not in saved_objs:
-                saved_objs[id(store)] = set()
-
-            if cdef not in saved_objs[id(store)]:
-                # Save the object
-                revision_str = revision.get(cdef, None)
-                store.save_object(obj, revision=revision_str)
-                saved_objs[id(store)].add(cdef)
-                self._num_saves += 1
-
-
-        @cycle_detect()
-        def _save_object(obj: Any, store: Store|None=None):
-            if isinstance(obj, Object):
-                # we must descend into args/kwargs first
-                _save_single_object(obj, store=store)
-                return
-
-            if isinstance(obj, ConcreteDefinition):
-                # We must find the linked object
-                linked_obj = self.get_cached(obj)
-                if linked_obj is None:
-                    raise RepoSaveError(f"Definition of object {obj} is not reachable in this repo!")
-                _save_object(linked_obj, store=store)
-                return
-
-            if isinstance(obj, (list, tuple, set, FrozenList, FrozenTuple, FrozenSet)):
-                for el in obj:
-                    _save_object(el, store=store)
-                return
-            if isinstance(obj, (FrozenDict, dict)):
-                for el in obj.values():
-                    _save_object(el, store=store)
-                return
-            if isinstance(obj, Definition):
-                raise RepoSaveError("Plain Definitions aren't allowed here.")
-            if is_pod(obj) or isinstance(obj, (np.ndarray, FrozenNDArray)):
-                return
-            else:
-                raise RepoSaveError(f"Cannot save object of type {type(obj)}!")
-
-        _save_object(obj, store=store)
-
-        # Save main object definition
         if main:
             self.set_main_def(obj.definition, store=store)
         return True
@@ -271,7 +203,6 @@ class Repo:
     # -------------------------------------------------------------------------
     # Core: realize arbitrary structure into runtime Python + Objects
     # -------------------------------------------------------------------------
-    @cycle_detect(arg_pos=1)
     def _realize(
         self,
         x: Any,
@@ -282,191 +213,24 @@ class Repo:
         reuse_weak: bool = True,
         cache: CachePolicy = "weak",
         revision: RevisionType | None = None,
-        # internal
-        memo: dict | None = None,          # memo for cdef->obj within a single call
+        memo: dict | None = None,
         path: list[str | int] | None = None,
-        _stack: set[int] | None = None,    # cycle guard for containers
-    ) -> Any:
+    ):
         if memo is None:
             memo = {}
         if path is None:
-            path = ["<root>"]
-        if _stack is None:
-            _stack = set()
+            path = []
 
-        # scalars
-        if is_pod(x):
-            return x
-
-        # ndarray / FrozenNDArray -> writable ndarray
-        if isinstance(x, FrozenNDArray):
-            # your FrozenNDArray currently doesn't define .thaw() in the snippet;
-            # support both styles.
-            if hasattr(x, "thaw"):
-                return x.thaw()
-            return np.array(x, copy=True)
-
-        if isinstance(x, np.ndarray):
-            return np.array(x, copy=True)
-
-        # ConcreteDefinition -> object materialization
-        from .definition import ConcreteDefinition, Definition  # local to avoid cycles
-        from .object import Object
-
-        if isinstance(x, ConcreteDefinition):
-            revision = manage_revision(x, revision)
-            return self._materialize_cdef(
-                x,
-                revision,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                memo=memo,
-                path=path,
-            )
-
-        # Definition -> concretize then materialize
-        if isinstance(x, Definition):
-            cdef = x.concretize(repo=self)
-            revision = manage_revision(cdef, revision)
-            return self._materialize_cdef(
-                cdef,
-                revision,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                memo=memo,
-                path=path,
-            )
-
-        # Object encountered during realization
-        if isinstance(x, Object):
-            revision = manage_revision(x.definition, revision)
-            if instance == "new":
-                # interpret "new" as "clone-by-identity": rebuild from its cdef
-                return self._materialize_cdef(
-                    x.definition,
-                    revision,
-                    instance="new",
-                    restore_state=restore_state,
-                    build_missing=build_missing,
-                    reuse_weak=reuse_weak,
-                    cache=cache,
-                    memo=memo,
-                    path=path,
-                )
-            # reuse: return it, but ensure repo can reach it
-            if self.get_cached(x.definition, reuse_weak=reuse_weak) is None:
-                self.cache_weak(x.definition, x)
-            return x
-
-        # Containers (cycle-safe)
-        oid = id(x)
-        if oid in _stack:
-            raise RepoLoadError(f"Cycle detected while realizing at {'/'.join(map(str, path))}")
-        _stack.add(oid)
-        try:
-            # tuple-like
-            if isinstance(x, (tuple, FrozenTuple)):
-                revision = manage_revision(x, revision)
-                return tuple(
-                    self._realize(
-                        v,
-                        instance=instance,
-                        restore_state=restore_state,
-                        build_missing=build_missing,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision,
-                        memo=memo,
-                        path=path + [i],
-                        _stack=_stack,
-                    )
-                    for i, v in enumerate(x)
-                )
-
-            # list-like (FrozenList is tuple-tagged)
-            if isinstance(x, FrozenList) or isinstance(x, list):
-                revision = manage_revision(x, revision)
-                return [
-                    self._realize(
-                        v,
-                        instance=instance,
-                        restore_state=restore_state,
-                        build_missing=build_missing,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision,
-                        memo=memo,
-                        path=path + [i],
-                        _stack=_stack,
-                    )
-                    for i, v in enumerate(list(x))
-                ]
-
-            # set-like
-            if isinstance(x, (set, FrozenSet)):
-                revision = manage_revision(x, revision)
-                out = set()
-                for i, v in enumerate(x):
-                    out.add(
-                        self._realize(
-                            v,
-                            instance=instance,
-                            restore_state=restore_state,
-                            build_missing=build_missing,
-                            reuse_weak=reuse_weak,
-                            cache=cache,
-                            revision=revision,
-                            memo=memo,
-                            path=path + [f"<set:{i}>"],
-                            _stack=_stack,
-                        )
-                    )
-                return out
-
-            # mapping-like (FrozenDict implements Mapping)
-            if isinstance(x, (dict, FrozenDict)):
-                revision = manage_revision(x, revision)
-                out = {}
-                for k, v in (x.items() if hasattr(x, "items") else x):
-                    rk = self._realize(
-                        k,
-                        instance=instance,
-                        restore_state=restore_state,
-                        build_missing=build_missing,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision,
-                        memo=memo,
-                        path=path + ["<key>"],
-                        _stack=_stack,
-                    )
-                    rv = self._realize(
-                        v,
-                        instance=instance,
-                        restore_state=restore_state,
-                        build_missing=build_missing,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision,
-                        memo=memo,
-                        path=path + [str(k)],
-                        _stack=_stack,
-                    )
-                    out[rk] = rv
-                return out
-
-        finally:
-            _stack.remove(oid)
-
-        raise RepoLoadError(
-            f"Cannot realize type {type(x).__name__} at {'/'.join(map(str, path))}"
+        cfg = RepoRealizeConfig(
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
         )
+        ctx = GraphCtx(path=tuple(path), memo=memo)
+        return RepoRealizeTransformer(self, cfg).transform(x, ctx)
 
     # -------------------------------------------------------------------------
     # Core: turn a ConcreteDefinition into a live Object under load knobs
@@ -788,56 +552,10 @@ class Repo:
         else:
             raise ValueError("No store available to set main definition!")
 
-    def add_objects(self, *args, store: Store|None=None):
-        from dryml.core2.object import Object
-
-        def _add_object_single(obj: Object):
-            self.pin(obj)
-            if store is not None:
-                self.obj_default_store[obj.definition] = store
-            else:
-                # Set the default store to the current default store of the repo, if it exists
-                if self.default_store is not None:
-                    self.obj_default_store[obj.definition] = self.default_store
-
-        # Recursively add objects.
-        def _add_object(obj: Any):
-            if isinstance(obj, Object):
-                cdef = obj.definition
-                _add_object(cdef.args)
-                _add_object(cdef.kwargs)
-                if cdef in self.strong_obj_cache and (obj is not self.strong_obj_cache[cdef]):
-                    raise KeyError(f"Repo already has a different object matching {cdef}!")
-                else:
-                    _add_object_single(obj)
-                return
-            if isinstance(obj, ConcreteDefinition):
-                # Find linked object
-                linked_obj = self.get_cached(obj)
-                if linked_obj is None:
-                    # check the general repo
-                    if self is not _global_repo: 
-                        linked_obj = _global_repo.get_cached(obj)
-                if linked_obj is None:    
-                    raise KeyError(f"No object linked to definition {obj} found in repo!")
-                _add_object(linked_obj)
-                return
-            if isinstance(obj, (list, FrozenList, tuple, FrozenTuple, set, FrozenSet)):
-                for el in obj:
-                    _add_object(el)
-                return
-            if isinstance(obj, (dict, FrozenDict)):
-                for el in obj.values():
-                    _add_object(el)
-                return
-            if is_pod(obj):
-                return
-            if isinstance(obj, Definition):
-                raise ValueError("Plain Definitions aren't allowed here.")
-            raise TypeError(f"Unsupported type {type(obj)} found when adding objects to repo.")
-
+    def add_objects(self, *args, store=None):
+        vis = RepoAddObjectsVisitor(self, store=store)
         for arg in args:
-            _add_object(arg)
+            vis.visit(arg)
 
     def flush(self):
         # Commit all stores
@@ -928,20 +646,6 @@ def default_repo(r: Repo|None=None):
         yield r
     finally:
         _current_repo.reset(tok)
-
-
-def manage_revision(obj: Any, revision: RevisionMapType | str | None):
-    if revision is None:
-        return {}
-    elif isinstance(revision, str):
-        if isinstance(obj, Object):
-            return {obj.definition: revision}
-        elif isinstance(obj, ConcreteDefinition):
-            return {obj: revision}
-        else:
-            raise ValueError("When revision is a string, manage_revision must get a clear object or definition to create the revision dictionary.")
-    else:
-        return revision
 
 
 @contextmanager
