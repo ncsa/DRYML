@@ -13,6 +13,7 @@ from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .utils.types import is_dictlike, is_nonclass_callable
 from .utils.general import get_class_str, hashval_to_digest, \
     get_object_view
+from .utils.graph import GraphCtx, GraphTransformer
 from .utils.recurse import cycle_detect
 from .types import is_pod, compatible_containers, container_types
 from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
@@ -341,190 +342,331 @@ def render_path(path, key):
     return "/".join(map(str, path))
 
 
-@cycle_detect()
-def concretize_func(obj: Any, path: list[str|int]|None=None, repo: "Repo | None"=None) -> Any:
-    if path is None:
-        path = [''] # Treat this as the root node
-    from .repo import manage_repo
-    from .object import Object
-    with manage_repo(repo=repo) as sub_repo:
-        if is_pod(obj) or isinstance(obj, FrozenNDArray):
-            # We have a plain old data type
-            return obj
-        elif isinstance(obj, frozen_container_types):
-            # We have a frozen container
-            return obj
-        elif isinstance(obj, ConcreteDefinition):
-            # ConcreteDefinitions are already concrete
-            return obj
-        elif isinstance(obj, tuple):
-            # Freeze the tuple
-            return FrozenTuple([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
-        elif isinstance(obj, list):
-            # Freeze the list
-            return FrozenList([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
-        elif isinstance(obj, set):
-            # Freeze the set
-            return FrozenSet([concretize_func(v, path + [i], repo=sub_repo) for i, v in enumerate(obj)])
+# ----------------------------------------------------------------------
+# Concretization
+# ----------------------------------------------------------------------
 
-        elif isinstance(obj, dict):
-            # Freeze the dict
-            new_dict = {}
-            for k, v in obj.items():
-                new_dict[k] = concretize_func(v, path + [k], repo=sub_repo)
-            return FrozenDict(new_dict)
+class ConcretizeTransformer(GraphTransformer):
+    """
+    Convert runtime Python / Object / Definition structures into the
+    canonical 'concrete' representation used by ConcreteDefinition args/kwargs.
 
-        elif isinstance(obj, np.ndarray):
+    Policy lives here in core, not in utils.graph.
+    """
+
+    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        return (
+            is_pod(obj)
+            or isinstance(obj, FrozenNDArray)
+            or isinstance(obj, frozen_container_types)
+            or isinstance(obj, ConcreteDefinition)
+            or isinstance(obj, type)
+        )
+
+    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
+        return obj
+
+    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
+        from .definition import Definition
+
+        return (
+            super().should_track_cycle(obj, ctx)
+            or isinstance(obj, Definition)
+        )
+
+    def transform_tuple(self, obj: tuple[Any, ...], ctx: GraphCtx) -> Any:
+        return FrozenTuple(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
+
+    def transform_list(self, obj: list[Any], ctx: GraphCtx) -> Any:
+        return FrozenList(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
+
+    def transform_set(self, obj: set[Any], ctx: GraphCtx) -> Any:
+        return FrozenSet(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
+
+    def transform_dict(self, obj: dict[Any, Any], ctx: GraphCtx) -> Any:
+        # Match current behavior: recurse into values, preserve keys as-is.
+        out = {}
+        for k, v in obj.items():
+            child_path = k if isinstance(k, (str, int)) else str(k)
+            out[k] = self.transform(v, ctx.child(child_path))
+        return FrozenDict(out)
+
+    def transform_other(self, obj: Any, ctx: GraphCtx) -> Any:
+        from .definition import Definition, ConcreteDefinition
+        from .object import Object
+
+        repo = ctx.state["repo"]
+
+        if isinstance(obj, np.ndarray):
             return FrozenNDArray.from_array(obj)
 
-        elif isinstance(obj, Object):
-            sub_repo.cache_weak(obj)
+        if isinstance(obj, Object):
+            repo.cache_weak(obj)
             return obj.__cdef__
 
-        elif isinstance(obj, Definition):
-            # Check the repo object
-
-            # Normalize args
-            if obj.args is None:
-                raise ValueError(f"Cannot concretize Definition with missing args at path {'/'.join(map(str, path))}")
+        if isinstance(obj, Definition):
             if obj.cls is None:
-                raise ValueError(f"Cannot concretize Definition with missing cls at path {'/'.join(map(str, path))}")
-            # Normalize args
-            c_args, c_kwargs = obj.cls.__prepare_args__(*obj.args, **obj.kwargs)
-            c_args = concretize_func(c_args, path + ['args'], repo=sub_repo)
-            c_kwargs = concretize_func(c_kwargs, path + ['kwargs'], repo=sub_repo)
-            
+                raise ValueError(
+                    f"Cannot concretize Definition with missing cls at {ctx.path_str()}"
+                )
+            if obj.args is None:
+                raise ValueError(
+                    f"Cannot concretize Definition with missing args at {ctx.path_str()}"
+                )
+
+            prep_args, prep_kwargs = obj.cls.__prepare_args__(*obj.args, **obj.kwargs)
+
+            c_args = self.transform(prep_args, ctx.child("args"))
+            c_kwargs = self.transform(prep_kwargs, ctx.child("kwargs"))
+
+            if not isinstance(c_args, FrozenTuple):
+                raise TypeError(
+                    f"Prepared args did not concretize to FrozenTuple at {ctx.path_str()}"
+                )
+            if not isinstance(c_kwargs, FrozenDict):
+                raise TypeError(
+                    f"Prepared kwargs did not concretize to FrozenDict at {ctx.path_str()}"
+                )
+
             return ConcreteDefinition(obj.cls, c_args, c_kwargs)
-        elif isinstance(obj, type):
-            # We allow plain types
+
+        raise TypeError(
+            f"Cannot concretize object of type {type(obj).__name__} at {ctx.path_str()}"
+        )
+
+
+def concretize_func(
+    obj: Any,
+    path: list[str | int] | None = None,
+    repo: "Repo | None" = None,
+) -> Any:
+    from .repo import manage_repo
+
+    with manage_repo(repo=repo) as sub_repo:
+        ctx = GraphCtx(
+            path=tuple(path) if path is not None else (),
+            state={"repo": sub_repo},
+        )
+        return ConcretizeTransformer().transform(obj, ctx)
+
+
+# ----------------------------------------------------------------------
+# Categorical definition
+# ----------------------------------------------------------------------
+
+class CategoricalDefinitionTransformer(GraphTransformer):
+    """
+    Strip unique args recursively (or only at the root when recursive=False).
+    """
+
+    def __init__(self, recursive: bool = True):
+        super().__init__()
+        self.recursive = recursive
+
+    def transform(self, obj: Any, ctx: GraphCtx | None = None) -> Any:
+        if ctx is not None and (not self.recursive) and ctx.path:
+            # Match the intended current behavior: only operate at the root.
             return obj
-        else:
-            raise TypeError(f"Cannot concretize object of type {type(obj)} at path {'/'.join(map(str, path))}")
+        return super().transform(obj, ctx)
 
+    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        return is_pod(obj) or isinstance(obj, type)
 
-def categorical_definition(defn: DefInterface, recursive=True, cache=None):
-    from .object import Object
-    # Copy the Definition
-    new_def = deepcopy(defn)
+    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
+        return obj
 
-    level = 0
+    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
+        from .definition import Definition
 
-    if cache is None:
-        cache = {}
+        return super().should_track_cycle(obj, ctx) or isinstance(obj, Definition)
 
-    if isinstance(new_def, (Object, ConcreteDefinition)):
-        # we need to thaw first.
-        new_def = new_def.to_definition()
+    def transform_other(self, obj: Any, ctx: GraphCtx) -> Any:
+        from .definition import Definition
 
-    @cycle_detect()
-    def _categorical(obj):
-        nonlocal level
-        level += 1
-        if level > 1 and (not recursive):
-            # Don't recurse further
-            return obj
-        try:
-            if is_pod(obj):
-                # We have a plain old data type
-                return obj
-            # At this point we know we're recursive, so proceed
-            if isinstance(obj, (tuple, list, set)):
-                # We have an iterable
-                return type(obj)([_categorical(v) for v in obj])
-            if isinstance(obj, dict):
-                # We have a dict
-                return {k: _categorical(v) for k, v in obj.items()}
+        if isinstance(obj, Definition):
+            if obj.cls is None:
+                raise ValueError(
+                    f"Cannot categorical-ify Definition with missing cls at {ctx.path_str()}"
+                )
 
-            if isinstance(obj, Definition):
-                # descend into Definition args/kwargs
-                defn_args = _categorical(obj.args) if obj.args is not None else None
-                defn_kwargs = _categorical(obj.kwargs)
-                temp_args = defn_args if defn.args is not None else tuple()
-                new_args, new_kwargs = defn.cls.__strip_unique_args__(
-                    *temp_args,
-                    **defn_kwargs)
-                if obj.args is None:
-                    new_args = None
+            defn_args = (
+                self.transform(obj.args, ctx.child("args"))
+                if obj.args is not None
+                else None
+            )
+            defn_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
 
-                new_defn_args = []
-                if obj.cls is not None:
-                    new_defn_args.append(obj.cls)
-                if obj.args is not None:
-                    new_defn_args.extend(new_args)
+            temp_args = defn_args if obj.args is not None else tuple()
+            new_args, new_kwargs = obj.cls.__strip_unique_args__(
+                *temp_args,
+                **defn_kwargs,
+            )
 
-                return Definition(
-                    *new_defn_args,
-                    **new_kwargs)
-
+            new_defn_args = [obj.cls]
+            if obj.args is not None:
+                new_defn_args.extend(new_args)
             else:
-                raise TypeError(f"Cannot categorical-ify object of type {type(obj)}")
-        finally:
-            level -= 1
+                from .definition import SKIP_ARGS
+                new_defn_args.append(SKIP_ARGS)
 
-    return _categorical(new_def)
+            return Definition(*new_defn_args, **new_kwargs)
+
+        raise TypeError(
+            f"Cannot categorical-ify object of type {type(obj).__name__} at {ctx.path_str()}"
+        )
 
 
-@cycle_detect()
-def thaw_concrete(cdef_or_obj: Any, cache = None) -> Any:
-    """
-    Thaw a ConcreteDefinition or frozen container into a mutable Definition or container.
-    All nested elements are thawed recursively.
-    ConcreteDefinition -> Definition
-    Object -> Definition
-    """
+def categorical_definition(defn, recursive=True, cache=None):
+    from .definition import ConcreteDefinition
     from .object import Object
+
     if cache is None:
         cache = {}
-    if id(cdef_or_obj) in cache:
-        return cache[id(cdef_or_obj)]
-    if is_pod(cdef_or_obj):
-        # We have a plain old data type
-        return cdef_or_obj
-    if isinstance(cdef_or_obj, FrozenNDArray):
-        # We have a frozen array
-        new_val = cdef_or_obj.thaw()
-        cache[id(cdef_or_obj)] = new_val
-        return new_val
-    # Thaw containers
-    if isinstance(cdef_or_obj, FrozenList):
-        new_val = [thaw_concrete(v, cache=cache) for v in cdef_or_obj]
-        cache[id(cdef_or_obj)] = new_val
-        return new_val
 
-    if isinstance(cdef_or_obj, FrozenSet):
-        new_val = set([thaw_concrete(v, cache=cache) for v in cdef_or_obj])
-        cache[id(cdef_or_obj)] = new_val
-        return new_val
-
-    if isinstance(cdef_or_obj, FrozenTuple):
-        new_val = tuple([thaw_concrete(v, cache=cache) for v in cdef_or_obj])
-        cache[id(cdef_or_obj)] = new_val
-        return new_val
-
-    if isinstance(cdef_or_obj, FrozenDict):
-        # Freeze the dict
-        new_dict = {}
-        for k, v in cdef_or_obj.items():
-            new_dict[k] = thaw_concrete(v, cache=cache)
-        cache[id(cdef_or_obj)] = new_dict
-        return new_dict
-
-    if isinstance(cdef_or_obj, ConcreteDefinition):
-        thaw_args = thaw_concrete(cdef_or_obj.args, cache=cache)
-        thaw_kwargs = thaw_concrete(cdef_or_obj.kwargs, cache=cache)
-        new_def = Definition(cdef_or_obj.cls, *thaw_args, **thaw_kwargs)
-        cache[id(cdef_or_obj)] = new_def
-        return new_def
-
-    if isinstance(cdef_or_obj, Definition):
-        # We already have a Definition, just return it
-        return cdef_or_obj
-    if isinstance(cdef_or_obj, Object):
-        new_def = thaw_concrete(cdef_or_obj.definition, cache=cache)
-        cache[id(cdef_or_obj)] = new_def
-        return new_def
+    if isinstance(defn, Object):
+        root = thaw_concrete(defn.definition, cache=cache)
+    elif isinstance(defn, ConcreteDefinition):
+        root = thaw_concrete(defn, cache=cache)
     else:
-        raise TypeError(f"Cannot thaw object of type {type(cdef_or_obj)}")
+        root = deepcopy(defn)
+
+    return CategoricalDefinitionTransformer(recursive=recursive).transform(root)
+
+
+# ----------------------------------------------------------------------
+# Thawing
+# ----------------------------------------------------------------------
+
+class ThawConcreteTransformer(GraphTransformer):
+    """
+    Convert ConcreteDefinition / frozen containers back into mutable runtime
+    Definition / Python containers.
+    """
+
+    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        return is_pod(obj)
+
+    def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
+        return obj
+
+    def memo_key(self, obj: Any, ctx: GraphCtx):
+        from .definition import ConcreteDefinition, Definition
+        from .object import Object
+
+        if isinstance(
+            obj,
+            (
+                FrozenNDArray,
+                FrozenList,
+                FrozenSet,
+                FrozenTuple,
+                FrozenDict,
+                ConcreteDefinition,
+                Definition,
+                Object,
+            ),
+        ):
+            return id(obj)
+        return None
+
+    def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
+        from .definition import ConcreteDefinition, Definition
+        from .object import Object
+
+        return (
+            super().should_track_cycle(obj, ctx)
+            or isinstance(
+                obj,
+                (
+                    FrozenList,
+                    FrozenSet,
+                    FrozenTuple,
+                    FrozenDict,
+                    ConcreteDefinition,
+                    Definition,
+                    Object,
+                ),
+            )
+        )
+
+    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
+        """
+        Important: handle frozen/core-specific node types before the generic
+        container dispatch in GraphTransformer, since some frozen container
+        types may be tuple-/set-/mapping-tagged.
+        """
+        from .definition import ConcreteDefinition, Definition
+        from .object import Object
+
+        if isinstance(obj, FrozenNDArray):
+            return self.transform_frozen_ndarray(obj, ctx)
+
+        if isinstance(obj, FrozenList):
+            return self.transform_frozen_list(obj, ctx)
+
+        if isinstance(obj, FrozenSet):
+            return self.transform_frozen_set(obj, ctx)
+
+        if isinstance(obj, FrozenTuple):
+            return self.transform_frozen_tuple(obj, ctx)
+
+        if isinstance(obj, FrozenDict):
+            return self.transform_frozen_dict(obj, ctx)
+
+        if isinstance(obj, ConcreteDefinition):
+            return self.transform_concrete_definition(obj, ctx)
+
+        if isinstance(obj, Definition):
+            return self.transform_definition(obj, ctx)
+
+        if isinstance(obj, Object):
+            return self.transform_object(obj, ctx)
+
+        return super().dispatch(obj, ctx)
+
+    def transform_frozen_ndarray(self, obj: FrozenNDArray, ctx: GraphCtx) -> Any:
+        return obj.thaw()
+
+    def transform_frozen_list(self, obj: FrozenList, ctx: GraphCtx) -> list[Any]:
+        return [self.transform(v, ctx.child(i)) for i, v in enumerate(obj)]
+
+    def transform_frozen_set(self, obj: FrozenSet, ctx: GraphCtx) -> set[Any]:
+        return {self.transform(v, ctx.child(i)) for i, v in enumerate(obj)}
+
+    def transform_frozen_tuple(self, obj: FrozenTuple, ctx: GraphCtx) -> tuple[Any, ...]:
+        return tuple(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
+
+    def transform_frozen_dict(self, obj: FrozenDict, ctx: GraphCtx) -> dict[Any, Any]:
+        out = {}
+        for k, v in obj.items():
+            child_path = k if isinstance(k, (str, int)) else str(k)
+            out[k] = self.transform(v, ctx.child(child_path))
+        return out
+
+    def transform_concrete_definition(self, obj, ctx: GraphCtx) -> Any:
+        from .definition import Definition
+
+        thaw_args = self.transform(obj.args, ctx.child("args"))
+        thaw_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
+        return Definition(obj.cls, *thaw_args, **thaw_kwargs)
+
+    def transform_definition(self, obj, ctx: GraphCtx) -> Any:
+        return obj
+
+    def transform_object(self, obj, ctx: GraphCtx) -> Any:
+        return self.transform(obj.definition, ctx)
+
+    def transform_other(self, obj: Any, ctx: GraphCtx) -> Any:
+        raise TypeError(
+            f"Cannot thaw object of type {type(obj).__name__} at {ctx.path_str()}"
+        )
+
+
+def thaw_concrete(cdef_or_obj: Any, cache=None) -> Any:
+    if cache is None:
+        cache = {}
+    ctx = GraphCtx(memo=cache)
+    return ThawConcreteTransformer().transform(cdef_or_obj, ctx)
 
 
 ## Selecting objects
