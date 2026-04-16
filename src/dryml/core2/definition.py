@@ -19,6 +19,15 @@ from .types import is_pod, compatible_containers, container_types
 from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
 from .errors import PathAccessError
 from .policies import InstancePolicy, CachePolicy
+from .canonical import (
+    NodeKind,
+    is_canonical_value,
+    is_runtime_leaf,
+    iter_value_children,
+    map_dict_items,
+    matching_container_family,
+    _path_part_from_key,
+    node_kind)
 
 # Special value to skip args
 SKIP_ARGS = object()
@@ -355,56 +364,52 @@ class ConcretizeTransformer(GraphTransformer):
     """
 
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
-        return (
-            is_pod(obj)
-            or isinstance(obj, FrozenNDArray)
-            or isinstance(obj, frozen_container_types)
-            or isinstance(obj, ConcreteDefinition)
-            or isinstance(obj, type)
-        )
+        return is_canonical_value(obj)
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
         return obj
 
     def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
-        from .definition import Definition
+        kind = node_kind(obj)
+        return kind in {
+            NodeKind.LIST,
+            NodeKind.TUPLE,
+            NodeKind.SET,
+            NodeKind.SET,
+            NodeKind.DICT,
+            NodeKind.DEFINITION,
+        }
 
-        return (
-            super().should_track_cycle(obj, ctx)
-            or isinstance(obj, Definition)
-        )
 
-    def transform_tuple(self, obj: tuple[Any, ...], ctx: GraphCtx) -> Any:
-        return FrozenTuple(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
-
-    def transform_list(self, obj: list[Any], ctx: GraphCtx) -> Any:
-        return FrozenList(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
-
-    def transform_set(self, obj: set[Any], ctx: GraphCtx) -> Any:
-        return FrozenSet(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
-
-    def transform_dict(self, obj: dict[Any, Any], ctx: GraphCtx) -> Any:
-        # Match current behavior: recurse into values, preserve keys as-is.
-        out = {}
-        for k, v in obj.items():
-            child_path = k if isinstance(k, (str, int)) else str(k)
-            out[k] = self.transform(v, ctx.child(child_path))
-        return FrozenDict(out)
-
-    def transform_other(self, obj: Any, ctx: GraphCtx) -> Any:
-        from .definition import Definition, ConcreteDefinition
+    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
         from .object import Object
 
+        kind = node_kind(obj)
         repo = ctx.state["repo"]
 
-        if isinstance(obj, np.ndarray):
+        if kind is NodeKind.NDARRAY:
             return FrozenNDArray.from_array(obj)
 
-        if isinstance(obj, Object):
+        if kind is NodeKind.LIST:
+            return FrozenList(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.TUPLE:
+            return FrozenTuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.SET:
+            return FrozenSet(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
+
+        if kind is NodeKind.DICT:
+            return FrozenDict({
+                k: self.transform(v, ctx.child(_path_part_from_key(k)))
+                for k, v in obj.items()
+            })
+
+        if kind is NodeKind.OBJECT:
             repo.cache_weak(obj)
             return obj.__cdef__
 
-        if isinstance(obj, Definition):
+        if kind is NodeKind.DEFINITION:
             if obj.cls is None:
                 raise ValueError(
                     f"Cannot concretize Definition with missing cls at {ctx.path_str()}"
@@ -415,7 +420,6 @@ class ConcretizeTransformer(GraphTransformer):
                 )
 
             prep_args, prep_kwargs = obj.cls.__prepare_args__(*obj.args, **obj.kwargs)
-
             c_args = self.transform(prep_args, ctx.child("args"))
             c_kwargs = self.transform(prep_kwargs, ctx.child("kwargs"))
 
@@ -544,119 +548,69 @@ class ThawConcreteTransformer(GraphTransformer):
     """
 
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
-        return is_pod(obj)
+        kind = node_kind(obj)
+        return kind in {NodeKind.POD, NodeKind.TYPE}
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
         return obj
 
     def memo_key(self, obj: Any, ctx: GraphCtx):
-        from .definition import ConcreteDefinition, Definition
-        from .object import Object
-
-        if isinstance(
-            obj,
-            (
-                FrozenNDArray,
-                FrozenList,
-                FrozenSet,
-                FrozenTuple,
-                FrozenDict,
-                ConcreteDefinition,
-                Definition,
-                Object,
-            ),
-        ):
+        kind = node_kind(obj)
+        if kind in {
+            NodeKind.FROZEN_NDARRAY,
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_DICT,
+            NodeKind.CONCRETE_DEFINITION,
+            NodeKind.DEFINITION,
+            NodeKind.OBJECT,}:
             return id(obj)
         return None
 
     def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
-        from .definition import ConcreteDefinition, Definition
-        from .object import Object
-
-        return (
-            super().should_track_cycle(obj, ctx)
-            or isinstance(
-                obj,
-                (
-                    FrozenList,
-                    FrozenSet,
-                    FrozenTuple,
-                    FrozenDict,
-                    ConcreteDefinition,
-                    Definition,
-                    Object,
-                ),
-            )
-        )
+        kind = node_kind(obj)
+        return kind in {
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_DICT,
+            NodeKind.CONCRETE_DEFINITION,
+            NodeKind.DEFINITION,
+            NodeKind.OBJECT}
 
     def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
-        """
-        Important: handle frozen/core-specific node types before the generic
-        container dispatch in GraphTransformer, since some frozen container
-        types may be tuple-/set-/mapping-tagged.
-        """
-        from .definition import ConcreteDefinition, Definition
-        from .object import Object
+        kind = node_kind(obj)
 
-        if isinstance(obj, FrozenNDArray):
-            return self.transform_frozen_ndarray(obj, ctx)
+        if kind is NodeKind.FROZEN_NDARRAY:
+            return obj.thaw()
 
-        if isinstance(obj, FrozenList):
-            return self.transform_frozen_list(obj, ctx)
+        if kind is NodeKind.FROZEN_LIST:
+            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
 
-        if isinstance(obj, FrozenSet):
-            return self.transform_frozen_set(obj, ctx)
+        if kind is NodeKind.FROZEN_TUPLE:
+            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
 
-        if isinstance(obj, FrozenTuple):
-            return self.transform_frozen_tuple(obj, ctx)
+        if kind is NodeKind.FROZEN_SET:
+            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
 
-        if isinstance(obj, FrozenDict):
-            return self.transform_frozen_dict(obj, ctx)
+        if kind is NodeKind.FROZEN_DICT:
+            return {
+                k: self.transform(v, ctx.child(_path_part_from_key(k)))
+                for k, v in obj.items()
+            }
 
-        if isinstance(obj, ConcreteDefinition):
-            return self.transform_concrete_definition(obj, ctx)
+        if kind is NodeKind.CONCRETE_DEFINITION:
+            thaw_args = self.transform(obj.args, ctx.child("args"))
+            thaw_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
+            return Definition(obj.cls, *thaw_args, **thaw_kwargs)
 
-        if isinstance(obj, Definition):
-            return self.transform_definition(obj, ctx)
+        if kind is NodeKind.DEFINITION:
+            return obj
 
-        if isinstance(obj, Object):
-            return self.transform_object(obj, ctx)
+        if kind is NodeKind.OBJECT:
+            return self.transform(obj.definition, ctx)
 
-        return super().dispatch(obj, ctx)
-
-    def transform_frozen_ndarray(self, obj: FrozenNDArray, ctx: GraphCtx) -> Any:
-        return obj.thaw()
-
-    def transform_frozen_list(self, obj: FrozenList, ctx: GraphCtx) -> list[Any]:
-        return [self.transform(v, ctx.child(i)) for i, v in enumerate(obj)]
-
-    def transform_frozen_set(self, obj: FrozenSet, ctx: GraphCtx) -> set[Any]:
-        return {self.transform(v, ctx.child(i)) for i, v in enumerate(obj)}
-
-    def transform_frozen_tuple(self, obj: FrozenTuple, ctx: GraphCtx) -> tuple[Any, ...]:
-        return tuple(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
-
-    def transform_frozen_dict(self, obj: FrozenDict, ctx: GraphCtx) -> dict[Any, Any]:
-        out = {}
-        for k, v in obj.items():
-            child_path = k if isinstance(k, (str, int)) else str(k)
-            out[k] = self.transform(v, ctx.child(child_path))
-        return out
-
-    def transform_concrete_definition(self, obj, ctx: GraphCtx) -> Any:
-        from .definition import Definition
-
-        thaw_args = self.transform(obj.args, ctx.child("args"))
-        thaw_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
-        return Definition(obj.cls, *thaw_args, **thaw_kwargs)
-
-    def transform_definition(self, obj, ctx: GraphCtx) -> Any:
-        return obj
-
-    def transform_object(self, obj, ctx: GraphCtx) -> Any:
-        return self.transform(obj.definition, ctx)
-
-    def transform_other(self, obj: Any, ctx: GraphCtx) -> Any:
         raise TypeError(
             f"Cannot thaw object of type {type(obj).__name__} at {ctx.path_str()}"
         )
@@ -696,46 +650,18 @@ class SelectorMatcher(GraphMatcher):
         if self.verbose:
             self.output_stream.write(f"[{self._render(ctx)}]: {msg}\n")
 
-    def _container_family(self, x: Any):
-        for name, typ in compatible_containers.items():
-            if isinstance(x, typ):
-                return name
-        return None
-
     def _normalize_dryml(self, x: Any):
         from .object import Object
-
         if isinstance(x, Object):
             return x.definition
         return x
 
     def _is_structural(self, x: Any) -> bool:
-        from .object import Object
-
-        if isinstance(x, (Object, Definition, ConcreteDefinition)):
-            return True
-        if isinstance(x, container_types):
-            return True
-        if isinstance(x, np.ndarray):
-            return True
-        return False
-
-    def _matching_container_family(self, selector: Any, target: Any):
-        """
-        Return the compatible container family for this pair, or None.
-
-        Order matters here because some frozen container types may satisfy
-        multiple isinstance checks (for example, a tuple-tagged FrozenList).
-        """
-        if isinstance(selector, compatible_containers["dict"]) and isinstance(target, compatible_containers["dict"]):
-            return "dict"
-        if isinstance(selector, compatible_containers["list"]) and isinstance(target, compatible_containers["list"]):
-            return "list"
-        if isinstance(selector, compatible_containers["tuple"]) and isinstance(target, compatible_containers["tuple"]):
-            return "tuple"
-        if isinstance(selector, compatible_containers["set"]) and isinstance(target, compatible_containers["set"]):
-            return "set"
-        return None
+        return node_kind(x) not in {
+            NodeKind.POD,
+            NodeKind.TYPE,
+            NodeKind.UNSUPPORTED,
+        }
 
     # ------------------------------------------------------------------
     # graph matcher hooks
@@ -790,8 +716,8 @@ class SelectorMatcher(GraphMatcher):
                 )
             return condition
 
-        # compatible container families
-        family = self._matching_container_family(selector, target)
+        # centralized container compatibility
+        family = matching_container_family(selector, target)
         if family is not None:
             if family == "tuple":
                 return self.match_tuple(selector, target, ctx)
