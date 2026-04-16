@@ -2,6 +2,7 @@ from typing import Any
 from enum import Enum
 
 from dryml.core2.utils.types import is_numpy, is_python_builtin_pod
+from dryml.core2.utils.recurse import iter_leaves
 
 
 class Backend(Enum):
@@ -40,6 +41,15 @@ class Backend(Enum):
         return self.module.as_tensor_spec
 
 
+backend_map = {
+    "python": Backend.python,
+    "numpy": Backend.numpy,
+    "tf": Backend.tf,
+    "torch": Backend.torch,
+    "jax": Backend.jax
+}
+
+
 backend_testers = {
     Backend.python: is_python_builtin_pod,
     Backend.numpy: is_numpy,
@@ -73,12 +83,22 @@ def available_backends():
     return backends
 
 
-def discover_backend(x: Any, backends:list[Backend]|None=None) -> Backend:
-    if backends is None:
-        backends = available_backends()
+def discover_backend(x: Any, _backends:list[Backend]|None=None) -> Backend:
+    if _backends is None:
+        _backends = available_backends()
 
-    for backend in backends:
+    for backend in _backends:
         if backend_testers[backend](x):
             return backend
 
     raise TypeError("Unable to discover backend")
+
+
+def discover_backends(*args, _backends: list[Backend]|None=None, **kwargs) -> set[Backend]:
+    if _backends is None:
+        _backends = available_backends()
+
+    arg_backends = set(map(lambda v: discover_backends(v, _backends=_backends), iter_leaves(args)))
+    kwarg_backends = set(map(lambda v: discover_backends(v, _backends=_backends), iter_leaves(kwargs)))
+
+    return arg_backends.union(kwarg_backends)
