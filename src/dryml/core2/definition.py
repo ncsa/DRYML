@@ -13,7 +13,7 @@ from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .utils.types import is_dictlike, is_nonclass_callable
 from .utils.general import get_class_str, hashval_to_digest, \
     get_object_view
-from .utils.graph import GraphCtx, GraphTransformer
+from .utils.graph import GraphCtx, GraphTransformer, GraphMatcher
 from .utils.recurse import cycle_detect
 from .types import is_pod, compatible_containers, container_types
 from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
@@ -669,177 +669,317 @@ def thaw_concrete(cdef_or_obj: Any, cache=None) -> Any:
     return ThawConcreteTransformer().transform(cdef_or_obj, ctx)
 
 
-## Selecting objects
-def selector_match(
-        selector,
-        target,
-        strict=True,
-        cls_str_compare=False,
-        verbose=False,
-        full_diagnostic=False,
-        output_stream=sys.stderr):
-    """
-    full_diagnostic - If true, doesn't stop on the first match failure. Continues to compare to produce a full report of what differs.
-    """
+class SelectorMatcher(GraphMatcher):
+    def __init__(
+        self,
+        *,
+        strict: bool = True,
+        cls_str_compare: bool = False,
+        verbose: bool = False,
+        full_diagnostic: bool = False,
+        output_stream=sys.stderr,
+    ):
+        self.strict = strict
+        self.cls_str_compare = cls_str_compare
+        self.verbose = verbose
+        self.full_diagnostic = full_diagnostic
+        self.output_stream = output_stream
 
-    from .object import Object
+    # ------------------------------------------------------------------
+    # small helpers
+    # ------------------------------------------------------------------
 
-    dryml_obj_types = (Object, Definition, ConcreteDefinition)
+    def _render(self, ctx: GraphCtx) -> str:
+        return render_path(list(ctx.path), None)
 
-    def _selector_match_func(
-        path: list[str|int]|None=None):
+    def _print(self, ctx: GraphCtx, msg: str) -> None:
+        if self.verbose:
+            self.output_stream.write(f"[{self._render(ctx)}]: {msg}\n")
 
-        # Method for testing if a selector matches a definition
-        # if strict is set, it must match exactly, and callables arent' allowed.
-        # cls_str_compare forces a string based name comparison between classes.
-        # Additionally, Definitions which skip args also aren't allowed
+    def _container_family(self, x: Any):
+        for name, typ in compatible_containers.items():
+            if isinstance(x, typ):
+                return name
+        return None
+
+    def _normalize_dryml(self, x: Any):
         from .object import Object
-        if path is None:
-            path = []
 
-        def _selector_print(msg: str):
-            if verbose:
-                output_stream.write(f"[{render_path(path, None)}]: {msg}\n")
+        if isinstance(x, Object):
+            return x.definition
+        return x
 
-        # Check we can access the current path in the definition
-        try:
-            target_val = get_path(target, path)
-        except PathAccessError:
-            _selector_print("Path doesn't exist in target")
-            return False
+    def _is_structural(self, x: Any) -> bool:
+        from .object import Object
 
-        try:
-            sel_val = get_path(selector, path)
-        except PathAccessError:
-            _selector_print("Path doesn't exist in selector")
-            return False
+        if isinstance(x, (Object, Definition, ConcreteDefinition)):
+            return True
+        if isinstance(x, container_types):
+            return True
+        if isinstance(x, np.ndarray):
+            return True
+        return False
 
-        if isinstance(target_val, Definition):
-            if strict and target_val.skip_args:
-                raise TypeError(f"Definitions which skip args aren't allowed in strict mode {render_path(path, None)}")
+    def _matching_container_family(self, selector: Any, target: Any):
+        """
+        Return the compatible container family for this pair, or None.
 
-        # class specific conditionals
-        if isclass(sel_val) and isclass(target_val):
-            if strict:
-                condition = sel_val is target_val
+        Order matters here because some frozen container types may satisfy
+        multiple isinstance checks (for example, a tuple-tagged FrozenList).
+        """
+        if isinstance(selector, compatible_containers["dict"]) and isinstance(target, compatible_containers["dict"]):
+            return "dict"
+        if isinstance(selector, compatible_containers["list"]) and isinstance(target, compatible_containers["list"]):
+            return "list"
+        if isinstance(selector, compatible_containers["tuple"]) and isinstance(target, compatible_containers["tuple"]):
+            return "tuple"
+        if isinstance(selector, compatible_containers["set"]) and isinstance(target, compatible_containers["set"]):
+            return "set"
+        return None
+
+    # ------------------------------------------------------------------
+    # graph matcher hooks
+    # ------------------------------------------------------------------
+
+    def memo_key(self, selector: Any, target: Any, ctx: GraphCtx):
+        if self._is_structural(selector) or self._is_structural(target):
+            return (id(selector), id(target))
+        return None
+
+    def should_track_cycle(self, selector: Any, target: Any, ctx: GraphCtx) -> bool:
+        return self._is_structural(selector) or self._is_structural(target)
+
+    # ------------------------------------------------------------------
+    # dispatch
+    # ------------------------------------------------------------------
+
+    def dispatch(self, selector: Any, target: Any, ctx: GraphCtx) -> bool:
+        from .object import Object
+
+        dryml_obj_types = (Object, Definition, ConcreteDefinition)
+
+        if isinstance(target, Definition):
+            if self.strict and target.skip_args:
+                raise TypeError(
+                    f"Definitions which skip args aren't allowed in strict mode {self._render(ctx)}"
+                )
+
+        # class comparisons
+        if isclass(selector) and isclass(target):
+            if self.strict:
+                condition = selector is target
                 if not condition:
-                    _selector_print("Classes differ")
+                    self._print(ctx, "Classes differ")
                 return condition
             else:
-                condition = issubclass(target_val, sel_val)
+                condition = issubclass(target, selector)
                 if not condition:
-                    _selector_print(f"Classes not subclass: {get_class_str(target_val)} is not a subclass of {get_class_str(sel_val)}")
+                    self._print(
+                        ctx,
+                        f"Classes not subclass: {get_class_str(target)} "
+                        f"is not a subclass of {get_class_str(selector)}",
+                    )
                 return condition
-        elif isinstance(sel_val, str) and isclass(target_val):
-            # We can do a class string comparison
-            condition = (sel_val == get_class_str(target_val))
-            if not condition:
-                _selector_print(f"Class string comparison failed: {sel_val} != {get_class_str(target_val)}")
-            return condition
-        # Double container comparison
-        elif isinstance(sel_val, container_types) and isinstance(target_val, container_types):
-            # Check that containers are compatible.
-            val_conditions = map(lambda t: isinstance(sel_val, t), compatible_containers.values())
-            def_conditions = map(lambda t: isinstance(target_val, t), compatible_containers.values())
-            containers_match = any(list(map(lambda t: t[0] and t[1], zip(val_conditions, def_conditions))))
-            if not containers_match:
-                _selector_print(f"Container types don't match. {type(sel_val)} in the selector {type(target_val)} in the target")
-                return False
 
-            # tuple/set/list check
-            if isinstance(target_val, compatible_containers['tuple']) or isinstance(target_val, compatible_containers['set']) or isinstance(target_val, compatible_containers['list']):
-                # tuples must match length
-                if len(sel_val) != len(target_val):
-                    _selector_print(f"Container lengths don't match. {len(sel_val)} in the selector {len(target_val)} in the target")
+        if self.cls_str_compare and isinstance(selector, str) and isclass(target):
+            condition = selector == get_class_str(target)
+            if not condition:
+                self._print(
+                    ctx,
+                    f"Class string comparison failed: {selector} != {get_class_str(target)}",
+                )
+            return condition
+
+        # compatible container families
+        family = self._matching_container_family(selector, target)
+        if family is not None:
+            if family == "tuple":
+                return self.match_tuple(selector, target, ctx)
+            if family == "list":
+                return self.match_list(selector, target, ctx)
+            if family == "set":
+                return self.match_set(selector, target, ctx)
+            if family == "dict":
+                return self.match_dict(selector, target, ctx)
+
+            raise TypeError(f"Unhandled container family {family!r} in selector_match")
+
+        # ndarray
+        if isinstance(selector, np.ndarray) and isinstance(target, np.ndarray):
+            if selector.shape != target.shape:
+                self._print(
+                    ctx,
+                    f"Mismatched array shapes {selector.shape} != {target.shape}",
+                )
+                return False
+            condition = np.all(target == selector)
+            if not condition:
+                self._print(ctx, "Unequal arrays")
+            return condition
+
+        # dryml object / definition
+        if isinstance(selector, dryml_obj_types) and isinstance(target, dryml_obj_types):
+            return self.match_dryml(selector, target, ctx)
+
+        # callable selector
+        if is_nonclass_callable(selector):
+            if self.strict:
+                raise TypeError(
+                    f"Callable selectors are not allowed in strict mode {self._render(ctx)}"
+                )
+            condition = selector(target)
+            if not condition:
+                self._print(ctx, "Callable test failed")
+            return condition
+
+        return self.match_other(selector, target, ctx)
+
+    # ------------------------------------------------------------------
+    # container overrides with diagnostics / selector semantics
+    # ------------------------------------------------------------------
+
+    def match_tuple(self, selector, target, ctx: GraphCtx) -> bool:
+        if len(selector) != len(target):
+            self._print(
+                ctx,
+                f"Container lengths don't match. {len(selector)} in selector, "
+                f"{len(target)} in target",
+            )
+            return False
+
+        compare_failed = False
+        for i, (sel_v, tgt_v) in enumerate(zip(selector, target)):
+            res = self.match(sel_v, tgt_v, ctx.child(i))
+            if not res:
+                compare_failed = True
+                if not self.full_diagnostic:
+                    return False
+        return not compare_failed
+
+    def match_list(self, selector, target, ctx: GraphCtx) -> bool:
+        if len(selector) != len(target):
+            self._print(
+                ctx,
+                f"Container lengths don't match. {len(selector)} in selector, "
+                f"{len(target)} in target",
+            )
+            return False
+
+        compare_failed = False
+        for i, (sel_v, tgt_v) in enumerate(zip(selector, target)):
+            res = self.match(sel_v, tgt_v, ctx.child(i))
+            if not res:
+                compare_failed = True
+                if not self.full_diagnostic:
+                    return False
+        return not compare_failed
+
+    def match_set(self, selector, target, ctx: GraphCtx) -> bool:
+        if len(selector) != len(target):
+            self._print(
+                ctx,
+                f"Set lengths don't match. {len(selector)} in selector, "
+                f"{len(target)} in target",
+            )
+            return False
+
+        unmatched = list(target)
+        compare_failed = False
+
+        for i, sel_v in enumerate(selector):
+            found = None
+            for j, tgt_v in enumerate(unmatched):
+                if self.match(sel_v, tgt_v, ctx.child(i)):
+                    found = j
+                    break
+            if found is None:
+                compare_failed = True
+                self._print(ctx.child(i), "No matching set element found")
+                if not self.full_diagnostic:
+                    return False
+            else:
+                unmatched.pop(found)
+
+        return not compare_failed
+
+    def match_dict(self, selector, target, ctx: GraphCtx) -> bool:
+        # Selector semantics: only keys mentioned in selector must match.
+        compare_failed = False
+
+        for k in selector.keys():
+            child_ctx = ctx.child(k if isinstance(k, (str, int)) else str(k))
+            if k not in target:
+                compare_failed = True
+                self._print(child_ctx, "Key missing in target")
+                if not self.full_diagnostic:
+                    return False
+                continue
+
+            res = self.match(selector[k], target[k], child_ctx)
+            if not res:
+                compare_failed = True
+                if not self.full_diagnostic:
                     return False
 
-                # Descend into each element
-                compare_failed = False
-                for i in range(len(sel_val)):
-                    res = _selector_match_func(path + [i,])
-                    if not res:
-                        compare_failed = True
-                        if not full_diagnostic:
-                            break
-                return not compare_failed
+        return not compare_failed
 
-            # dict check
-            if isinstance(target_val, compatible_containers['dict']):
-                # Check each element in order.
-                # Descend into each element
-                # Only check the mentioned keys in the value dict.
-                compare_failed = False
-                for k in sel_val.keys():
-                    if k not in target_val:
-                        compare_failed = True
-                        if not full_diagnostic:
-                            break
-                    res = _selector_match_func(path + [k,])
-                    if not res:
-                        compare_failed = True
-                        if not full_diagnostic:
-                            break
-                return not compare_failed
-            raise TypeError(f"Unhandled container type ({target_val}) in selector_match")
+    # ------------------------------------------------------------------
+    # dryml-specific matching
+    # ------------------------------------------------------------------
 
-        elif isinstance(sel_val, np.ndarray) and isinstance(target_val, np.ndarray):
-            condition = (sel_val.shape == target_val.shape)
-            if not condition:
-                _selector_print(
-                    f" Mismatched array shapes {sel_val.shape} != {target_val.shape}")
+    def match_dryml(self, selector, target, ctx: GraphCtx) -> bool:
+        sel_def = self._normalize_dryml(selector)
+        tgt_def = self._normalize_dryml(target)
+
+        compare_failed = False
+
+        if sel_def.cls is not None:
+            if not self.match(sel_def.cls, tgt_def.cls, ctx.child("cls")):
+                compare_failed = True
+                if not self.full_diagnostic:
+                    return False
+
+        if sel_def.args is not None:
+            if not self.match(sel_def.args, tgt_def.args, ctx.child("args")):
+                compare_failed = True
+                if not self.full_diagnostic:
+                    return False
+
+        if not self.match(sel_def.kwargs, tgt_def.kwargs, ctx.child("kwargs")):
+            compare_failed = True
+            if not self.full_diagnostic:
                 return False
-            condition = np.all(target_val == sel_val)
-            if not condition:
-                _selector_print(
-                    "Unequal Arrays")
-                return False
-            return True
 
-        elif isinstance(sel_val, dryml_obj_types) and isinstance(target_val, dryml_obj_types):
-            if isinstance(sel_val, Object):
-                sel_def = sel_val.definition
-            else:
-                sel_def = sel_val
-            compare_failed = False
-            # Descent into dryml objects
-            if sel_def.cls is not None:
-                if not _selector_match_func(path + ['cls',]):
-                    if full_diagnostic:
-                        compare_failed = True
-                    else:
-                        return False
-            # args selection
-            if sel_def.args is not None:
-                if not _selector_match_func(path + ['args',]):
-                    if full_diagnostic:
-                        compare_failed = True
-                    else:
-                        return False
-            # kwargs selection
-            compare_failed = not _selector_match_func(path + ['kwargs',])
+        return not compare_failed
 
-            return not compare_failed
-        
-        elif is_nonclass_callable(sel_val):
-            if strict:
-                raise TypeError(f"Callable selectors are not allowed in strict mode {render_path(path, None)}")
-            condition = sel_val(target_val)
-            if not condition:
-                _selector_print(
-                    f"Callable test failed")
-            return condition
+    # ------------------------------------------------------------------
+    # plain values
+    # ------------------------------------------------------------------
 
-        else:
-            # Plain matching branch
-            if type(sel_val) is not type(target_val):
-                _selector_print(
-                        "Type mismatch")
-                return False
-            else:
-                condition = (sel_val == target_val)
-                if not condition:
-                    _selector_print(
-                        "Values differ")
-                return condition
+    def match_other(self, selector: Any, target: Any, ctx: GraphCtx) -> bool:
+        if type(selector) is not type(target):
+            self._print(ctx, "Type mismatch")
+            return False
 
-    return _selector_match_func()
+        condition = selector == target
+        if not condition:
+            self._print(ctx, "Values differ")
+        return condition
+
+
+def selector_match(
+    selector,
+    target,
+    strict=True,
+    cls_str_compare=False,
+    verbose=False,
+    full_diagnostic=False,
+    output_stream=sys.stderr,
+):
+    return SelectorMatcher(
+        strict=strict,
+        cls_str_compare=cls_str_compare,
+        verbose=verbose,
+        full_diagnostic=full_diagnostic,
+        output_stream=output_stream,
+    ).match(selector, target)
