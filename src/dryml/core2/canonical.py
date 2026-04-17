@@ -856,15 +856,15 @@ def to_canonical(
 def thaw_value(
     x: Any,
     *,
-    cache: dict | None = None,
+    memo: dict | None = None,
     path: list[str | int] | tuple[str | int, ...] | None = None,
 ):
-    if cache is None:
-        cache = {}
+    if memo is None:
+        memo = {}
 
     ctx = GraphCtx(
         path=tuple(path) if path is not None else (),
-        memo=cache,
+        memo=memo,
     )
     return _ThawValueTransformer().transform(x, ctx)
 

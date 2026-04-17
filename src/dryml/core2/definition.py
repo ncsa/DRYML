@@ -7,14 +7,14 @@ import sys
 #import weakref
 from collections.abc import Mapping
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .utils.types import is_nonclass_callable
 from .utils.general import get_class_str
 from .utils.graph import GraphCtx, GraphTransformer, GraphMatcher
 from .types import is_pod
-from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
+from .freeze import FrozenDict, FrozenTuple
 from .errors import PathAccessError
 from .policies import InstancePolicy, CachePolicy
 from .canonical import (
@@ -225,6 +225,9 @@ class Definition(DefInterface, Mapping):
 
         return new
 
+    def thaw(self, memo: dict|None=None) -> Any:
+        return self
+
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return to_canonical(self, repo=repo)
 
@@ -238,8 +241,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     """
 
     cls: type
-    args: FrozenTuple[Any, ...]
-    kwargs: FrozenDict[str, Any]
+    args: FrozenTuple[Any, ...] = field(default_factory = lambda: FrozenTuple())
+    kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
 
     def __hash__(self) -> int:
         return stable_int_hash(self.stable_hash())
@@ -293,8 +296,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     def copy(self):
         return deepcopy(self)
 
-    def to_definition(self, repo: "Repo | None" = None) -> Any:
-        return thaw_value(self)
+    def thaw(self, memo: dict | None = None) -> Any:
+        return thaw_value(self, memo=memo)
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return self
@@ -412,17 +415,17 @@ class CategoricalDefinitionTransformer(GraphTransformer):
         )
 
 
-def categorical_definition(defn, recursive=True, cache=None):
+def categorical_definition(defn, recursive=True, memo=None):
     from .definition import ConcreteDefinition
     from .object import Object
 
-    if cache is None:
-        cache = {}
+    if memo is None:
+        memo = {}
 
     if isinstance(defn, Object):
-        root = thaw_concrete(defn.definition, cache=cache)
+        root = thaw_concrete(defn.definition, memo=memo)
     elif isinstance(defn, ConcreteDefinition):
-        root = thaw_concrete(defn, cache=cache)
+        root = thaw_concrete(defn, memo=memo)
     else:
         root = deepcopy(defn)
 
@@ -726,5 +729,5 @@ def concretize_func(
     return to_canonical(obj, repo=repo, path=path)
 
 
-def thaw_concrete(cdef_or_obj: Any, cache=None) -> Any:
-    return thaw_value(cdef_or_obj, cache=cache)
+def thaw_concrete(cdef_or_obj: Any, memo: dict|None =None) -> Any:
+    return thaw_value(cdef_or_obj, memo=memo)
