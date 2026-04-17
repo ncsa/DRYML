@@ -811,7 +811,7 @@ class _FromCanonicalTransformer(GraphTransformer):
             return obj
 
         if kind is NodeKind.FUNCTION_SPEC:
-            return resolve_function(kind)
+            return resolve_function(obj)
 
         if kind in {
             NodeKind.FROZEN_LIST,

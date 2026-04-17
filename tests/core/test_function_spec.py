@@ -153,3 +153,39 @@ def test_concrete_definition_source_lambda_string():
 
     fn = cdef["args"][0].resolve()
     assert fn(10) == 13
+
+
+def test_concrete_definition_thaw_source_lambda_string():
+    spec = FunctionSpec.from_source("lambda x: x + 3")
+    cdef = ConcreteDefinition(FunctionHolder, FrozenTuple((spec,)))
+
+    d = cdef.thaw()
+
+    assert d.args[0](10) == 13
+
+
+def test_concrete_definition_thaw_function_spec():
+    spec = FunctionSpec.from_function(top_level_add1)
+    cdef = ConcreteDefinition(FunctionHolder, FrozenTuple((spec,)))
+
+    d = cdef.thaw()
+
+    assert d.args[0](3) == 4
+
+
+def test_concrete_definition_build_source_lambda_string():
+    spec = FunctionSpec.from_source("lambda x: x + 3")
+    cdef = ConcreteDefinition(FunctionHolder, FrozenTuple((spec,)))
+
+    o = cdef.build()
+
+    assert o.fn(10) == 13
+
+
+def test_concrete_definition_build_function_spec():
+    spec = FunctionSpec.from_function(top_level_add1)
+    cdef = ConcreteDefinition(FunctionHolder, FrozenTuple((spec,)))
+
+    o = cdef.build()
+
+    assert o.fn(3) == 4
