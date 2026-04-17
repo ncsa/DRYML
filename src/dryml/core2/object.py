@@ -145,6 +145,7 @@ class Object(metaclass=Dryml):
         pass
 
     def load(self, repo=None, revision: RevisionType|str|None = None):
+        from .repo_graph import manage_revision
         from .repo import load_object
         revision = manage_revision(self, revision)
         load_object(self, repo=repo, revision=revision)

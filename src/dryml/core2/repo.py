@@ -491,7 +491,7 @@ class Repo:
                             continue
                         obj = get_obj(cdef)
                         if obj is not None:
-                            selected_objects[obj_def] = obj
+                            selected_objects[cdef] = obj
             elif isinstance(sel, Callable):
                 for cdef in cached_cdefs:
                     if cdef in self.strong_obj_cache:
