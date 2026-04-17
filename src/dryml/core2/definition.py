@@ -91,7 +91,7 @@ class Definition(DefInterface, Mapping):
 
     _cls: Callable[..., Any] | type | None
     _args: tuple[Any, ...] | None
-    kwargs: dict[str, Any]
+    _kwargs: dict[str, Any]
 
     __hash__ = None  # critical: prevent dict/set usage
 
@@ -101,7 +101,7 @@ class Definition(DefInterface, Mapping):
                 if args[0] is SKIP_ARGS and len(args) == 1:
                     self._cls = None
                     self._args = None
-                    self.kwargs = kwargs
+                    self._kwargs = kwargs
                 else:
                     raise ValueError("First positional argument must be a class or callable.")
             if len(args) > 1 and args[1] is SKIP_ARGS:
@@ -110,16 +110,16 @@ class Definition(DefInterface, Mapping):
 
                 self._cls = args[0]
                 self._args = None
-                self.kwargs = kwargs
+                self._kwargs = kwargs
 
             else:
                 self._cls = args[0]
                 self._args = args[1:]
-                self.kwargs = kwargs
+                self._kwargs = kwargs
         else:
             self._cls = None
             self._args = args
-            self.kwargs = kwargs
+            self._kwargs = kwargs
 
     @property
     def cls(self):
@@ -131,7 +131,7 @@ class Definition(DefInterface, Mapping):
 
     @property
     def kwargs(self):
-        return self.kwargs
+        return self._kwargs
 
     @property
     def skip_args(self) -> bool:
@@ -197,13 +197,13 @@ class Definition(DefInterface, Mapping):
         return {
             'cls': self._cls,
             'args': self._args,
-            'kwargs': self.kwargs
+            'kwargs': self._kwargs
         }
 
     def __setstate__(self, state):
         self._cls = state['cls']
         self._args = state['args']
-        self.kwargs = state['kwargs']
+        self._kwargs = state['kwargs']
 
     def __deepcopy__(self, memo):
         """
@@ -216,7 +216,7 @@ class Definition(DefInterface, Mapping):
             cp_args.append(SKIP_ARGS)
         else:
             cp_args.extend(deepcopy(self._args, memo))
-        cp_kwargs = deepcopy(self.kwargs, memo)
+        cp_kwargs = deepcopy(self._kwargs, memo)
 
         new = type(self)(*cp_args, **cp_kwargs)
 
