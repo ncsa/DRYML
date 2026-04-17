@@ -466,6 +466,7 @@ class SelectorMatcher(GraphMatcher):
         return node_kind(x) not in {
             NodeKind.POD,
             NodeKind.TYPE,
+            NodeKind.IDENTITY_VALUE,
             NodeKind.UNSUPPORTED,
         }
 

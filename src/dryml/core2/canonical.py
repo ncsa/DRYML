@@ -20,6 +20,45 @@ if TYPE_CHECKING:
     from .definition import ConcreteDefinition
     from .repo import Repo
 
+# Identity semantic values:
+# runtime == canonical == thawed
+from .dtype import DType
+from .tensor_spec import TensorSpec
+# If Backend is a real runtime type/class, include it too.
+# from .backend import Backend
+
+
+# ----------------------------------------------------------------------
+# Identity semantic values
+# ----------------------------------------------------------------------
+
+# These are values that should pass through unchanged across all three
+# surfaces: runtime, canonical, and thawed.
+IDENTITY_VALUE_TYPES = (
+    DType,
+    TensorSpec,
+    # Backend,   # uncomment if Backend is a real runtime type/class
+)
+
+
+def is_identity_value(x: Any) -> bool:
+    """
+    Semantic value objects that do not need representation changes across
+    runtime/canonical/thawed surfaces.
+
+    Important:
+    - DType / TensorSpec belong here.
+    - Future represented specs like FunctionSpec should *not* go here,
+      because they will decode back to a callable at runtime/thaw time.
+    """
+    if isinstance(x, IDENTITY_VALUE_TYPES):
+        return True
+
+    # Enums like Dim / Layout / Dynamic are also fine as identity values.
+    if isinstance(x, Enum):
+        return True
+
+    return False
 
 # ----------------------------------------------------------------------
 # Canonical type aliases
@@ -143,6 +182,7 @@ def is_container_value(x: Any) -> bool:
 class NodeKind(Enum):
     POD = auto()
     TYPE = auto()
+    IDENTITY_VALUE = auto()
 
     NDARRAY = auto()
     FROZEN_NDARRAY = auto()
@@ -173,6 +213,9 @@ def node_kind(x: Any) -> NodeKind:
 
     if isinstance(x, type):
         return NodeKind.TYPE
+
+    if is_identity_value(x):
+        return NodeKind.IDENTITY_VALUE
 
     if isinstance(x, FrozenNDArray):
         return NodeKind.FROZEN_NDARRAY
@@ -215,6 +258,7 @@ def is_canonical_value(x: Any) -> bool:
     return node_kind(x) in {
         NodeKind.POD,
         NodeKind.TYPE,
+        NodeKind.IDENTITY_VALUE,
         NodeKind.FROZEN_NDARRAY,
         NodeKind.FROZEN_LIST,
         NodeKind.FROZEN_TUPLE,
@@ -232,6 +276,7 @@ def is_runtime_leaf(x: Any) -> bool:
     return node_kind(x) in {
         NodeKind.POD,
         NodeKind.TYPE,
+        NodeKind.IDENTITY_VALUE,
         NodeKind.NDARRAY,
         NodeKind.FROZEN_NDARRAY,
     }
@@ -562,7 +607,11 @@ class _ToCanonicalTransformer(GraphTransformer):
 
 class _ThawValueTransformer(GraphTransformer):
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
-        return node_kind(obj) in {NodeKind.POD, NodeKind.TYPE}
+        return node_kind(obj) in {
+            NodeKind.POD,
+            NodeKind.TYPE,
+            NodeKind.IDENTITY_VALUE,
+        }
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
         return obj
@@ -647,7 +696,11 @@ class _FromCanonicalTransformer(GraphTransformer):
         self.config = config
 
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
-        return node_kind(obj) in {NodeKind.POD, NodeKind.TYPE}
+        return node_kind(obj) in {
+            NodeKind.POD,
+            NodeKind.TYPE,
+            NodeKind.IDENTITY_VALUE,
+        }
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
         return obj
