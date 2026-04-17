@@ -11,6 +11,7 @@ import numpy as np
 
 from .types import is_dictlike, is_collection
 from .recurse import cycle_detect
+from .graph import GraphHasher, GraphCtx
 
 def stable_int_hash(s: str, *, bits: int = 64) -> int:
     # blake2b is fast and stable; digest_size controls output size
@@ -116,101 +117,127 @@ def stable_hash_value(value) -> str:
     return hashlib.sha256(_stable_leaf_bytes(value)).hexdigest()
 
 
-# ---------- CONTAINER DETECTION ----------
+# ----------------------------------------------------------------------
+# graph hasher
+# ----------------------------------------------------------------------
 
-def _is_container(value) -> bool:
-    """
-    Note: np.ndarray is explicitly *not* treated as a container here.
-    """
-    return (is_dictlike(value) or is_collection(value)) and not isinstance(value, np.ndarray)
+class StableHashGraphHasher(GraphHasher):
+    def is_atomic(self, obj, ctx: GraphCtx) -> bool:
+        from ..canonical import node_kind, NodeKind
+
+        kind = node_kind(obj)
+        return kind in {
+            NodeKind.POD,
+            NodeKind.TYPE,
+            NodeKind.IDENTITY_VALUE,
+            NodeKind.NDARRAY,
+            NodeKind.FROZEN_NDARRAY,
+            NodeKind.FUNCTION_SPEC,
+        }
+
+    def hash_atomic(self, obj, ctx: GraphCtx) -> str:
+        return stable_hash_value(obj)
+
+    def should_track_cycle(self, obj, ctx: GraphCtx) -> bool:
+        from ..canonical import node_kind, NodeKind
+
+        kind = node_kind(obj)
+        return kind in {
+            NodeKind.LIST,
+            NodeKind.TUPLE,
+            NodeKind.SET,
+            NodeKind.DICT,
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT,
+            NodeKind.DEFINITION,
+            NodeKind.CONCRETE_DEFINITION,
+            NodeKind.OBJECT,
+        }
+
+    def dispatch(self, obj, ctx: GraphCtx) -> str:
+        from ..canonical import node_kind, NodeKind
+        from ..definition import Definition, ConcreteDefinition
+        from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+        from ..object import Object
+
+        kind = node_kind(obj)
+
+        if kind is NodeKind.OBJECT:
+            return self.hash(obj.definition, ctx.child("definition"))
+
+        if kind in {NodeKind.LIST, NodeKind.FROZEN_LIST}:
+            return self._hash_sequence("builtins.list", obj, ctx)
+
+        if kind in {NodeKind.TUPLE, NodeKind.FROZEN_TUPLE}:
+            return self._hash_sequence("builtins.tuple", obj, ctx)
+
+        if kind in {NodeKind.SET, NodeKind.FROZEN_SET}:
+            return self._hash_set("builtins.set", obj, ctx)
+
+        if kind in {NodeKind.DICT, NodeKind.FROZEN_DICT}:
+            return self._hash_mapping("builtins.dict", obj, ctx)
+
+        if isinstance(obj, (Definition, ConcreteDefinition)):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            items = [(k, obj[k]) for k in obj]
+            return self._hash_mapping(type_marker, dict(items), ctx)
+
+        raise TypeError(f"Unsupported type {type(obj)} for stable hashing")
+
+    def _hash_sequence(self, type_marker: str, seq, ctx: GraphCtx) -> str:
+        """
+        Order-sensitive hashing.
+        """
+        hasher = hashlib.sha256()
+        hasher.update(b"T" + type_marker.encode("utf-8"))
+        hasher.update(b"|" + str(len(seq)).encode("ascii"))
+
+        for i, v in enumerate(seq):
+            child_hash = self.hash(v, ctx.child(i))
+            hasher.update(b"I" + str(i).encode("ascii"))
+            hasher.update(b"V" + child_hash.encode("utf-8"))
+
+        return hasher.hexdigest()
+
+    def _hash_set(self, type_marker: str, st, ctx: GraphCtx) -> str:
+        """
+        Order-insensitive hashing by child hash.
+        """
+        hasher = hashlib.sha256()
+        hasher.update(b"T" + type_marker.encode("utf-8"))
+        hasher.update(b"|" + str(len(st)).encode("ascii"))
+
+        child_hashes = sorted(self.hash(v, ctx.child(i)) for i, v in enumerate(st))
+        for child_hash in child_hashes:
+            hasher.update(b"V" + child_hash.encode("utf-8"))
+
+        return hasher.hexdigest()
+
+    def _hash_mapping(self, type_marker: str, mp, ctx: GraphCtx) -> str:
+        """
+        Order-insensitive by key hash, key-sensitive, value-sensitive.
+        """
+        hasher = hashlib.sha256()
+        hasher.update(b"T" + type_marker.encode("utf-8"))
+        hasher.update(b"|" + str(len(mp)).encode("ascii"))
+
+        key_val_hashes = []
+        for k, v in mp.items():
+            key_hash = self.hash(k, ctx.child("<key>"))
+            val_hash = self.hash(v, ctx.child(k if isinstance(k, (str, int)) else str(k)))
+            key_val_hashes.append((key_hash, val_hash))
+
+        key_val_hashes.sort(key=lambda kv: kv[0])
+
+        for key_hash, val_hash in key_val_hashes:
+            hasher.update(b"K" + key_hash.encode("utf-8"))
+            hasher.update(b"V" + val_hash.encode("utf-8"))
+
+        return hasher.hexdigest()
 
 
-# ---------- MAIN STRUCTURAL HASH ----------
-
-def stable_hash_container(cont, cache=None) -> str:
-    # For lists/tuples/etc we keep traversal order (insertion order).
-    if cache is None:
-        cache = {}
-
-    hasher = hashlib.sha256()
-
-    # Include container type and length so different containers don't collide
-    # Canonicalize container markers so Frozen* hashes match their source types
-    from ..freeze import FrozenList, FrozenDict, FrozenSet
-    from ..definition import Definition, ConcreteDefinition
-    if isinstance(cont, (list, FrozenList)):
-        type_marker = "builtins.list"
-        cont_iter = enumerate(cont)
-    elif isinstance(cont, (tuple,)):
-        type_marker = "builtins.tuple"
-        cont_iter = enumerate(cont)
-    elif isinstance(cont, (dict, FrozenDict)):
-        type_marker = "builtins.dict"
-        cont_iter = cont.items()
-    elif isinstance(cont, (set, FrozenSet)):
-        type_marker = "builtins.set"
-        cont_iter = enumerate(cont)
-    elif isinstance(cont, (Definition, ConcreteDefinition)):
-        type_marker = f"{type(cont).__module__}.{type(cont).__qualname__}"
-        keys = iter(cont)
-        cont_iter = map(lambda k: (k, cont[k]), keys)
-    else:
-        raise TypeError(f"Unsupported container type {type(cont)} for stable_hash_container")
-    hasher.update(b"T" + type_marker.encode("utf-8"))
-    hasher.update(b"|" + str(len(cont)).encode("ascii"))
-
-    key_val_list = list(cont_iter)
-    # Get hash vals for keys and vals
-    key_val_hash_list = list(map(
-        lambda kv: (
-            stable_hash_function(kv[0], cache=cache),
-            stable_hash_function(kv[1], cache=cache),
-        ),
-        key_val_list,
-    ))
-
-    # Sort by key hash
-    key_val_hash_list.sort(key=lambda kv: kv[0])
-
-    for child_key_hash, child_val_hash in key_val_hash_list:
-        # Hash the key structurally (so keys are part of the identity)
-        hasher.update(b"K")
-        hasher.update(child_key_hash.encode("utf-8"))
-
-        hasher.update(b"V")
-        hasher.update(child_val_hash.encode('utf-8'))
-
-    return hasher.hexdigest()
-
-
-@cycle_detect()
 def stable_hash_function(structure, cache=None) -> str:
-    """
-    Deterministic structural hash of an arbitrary (possibly nested) Python structure.
-
-    - Dicts / mappings: order-independent but key-sensitive.
-    - Sets / frozensets: order-independent.
-    - Lists / tuples: order-dependent.
-    - np.ndarray: hashed by shape + dtype + contents.
-    - Definition: hashed via get_definition_view().
-    """
-    from ..object import Object
-
-    if cache is None:
-        cache = {}
-
-    if id(structure) in cache:
-        return cache[id(structure)]
-
-    if _is_container(structure):
-        hash_value = stable_hash_container(structure, cache=cache)
-        cache[id(structure)] = hash_value
-        return hash_value
-    elif isinstance(structure, Object):
-        hash_value = stable_hash_function(structure.definition)
-        cache[id(structure)] = hash_value
-        return hash_value
-    else:
-        hash_value = stable_hash_value(structure)
-        cache[id(structure)] = hash_value
-        return hash_value
+    ctx = GraphCtx(memo={} if cache is None else cache)
+    return StableHashGraphHasher().hash(structure, ctx)
