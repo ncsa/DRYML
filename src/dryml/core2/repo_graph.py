@@ -1,30 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
-
-from .definition import ConcreteDefinition, Definition
-from .freeze import (
-    FrozenDict,
-    FrozenList,
-    FrozenNDArray,
-    FrozenSet,
-    FrozenTuple,
-)
+from .definition import ConcreteDefinition
 from .object import Object
-from .policies import CachePolicy, InstancePolicy
-from .types import is_pod
-from .utils.graph import GraphCtx, GraphTransformer, GraphVisitor
+from .utils.graph import GraphCtx, GraphVisitor
 from .canonical import (
     NodeKind,
-    is_canonical_value,
     is_runtime_leaf,
     iter_value_children,
-    map_dict_items,
-    matching_container_family,
-    _path_part_from_key,
     node_kind)
 
 

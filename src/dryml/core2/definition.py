@@ -10,12 +10,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
-from .utils.types import is_dictlike, is_nonclass_callable
-from .utils.general import get_class_str, hashval_to_digest, \
-    get_object_view
+from .utils.types import is_nonclass_callable
+from .utils.general import get_class_str
 from .utils.graph import GraphCtx, GraphTransformer, GraphMatcher
-from .utils.recurse import cycle_detect
-from .types import is_pod, compatible_containers, container_types
+from .types import is_pod
 from .freeze import FrozenDict, FrozenList, FrozenTuple, FrozenSet, FrozenNDArray, frozen_container_types
 from .errors import PathAccessError
 from .policies import InstancePolicy, CachePolicy
@@ -23,12 +21,7 @@ from .canonical import (
     to_canonical,
     thaw_value,
     NodeKind,
-    is_canonical_value,
-    is_runtime_leaf,
-    iter_value_children,
-    map_dict_items,
     matching_container_family,
-    _path_part_from_key,
     node_kind)
 
 # Special value to skip args
