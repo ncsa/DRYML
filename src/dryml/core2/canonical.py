@@ -36,6 +36,36 @@ CanonicalAtom: TypeAlias = (
     | type
 )
 
+
+CanonicalKey: TypeAlias = str | int
+
+
+def is_canonical_key(x: Any) -> bool:
+    """
+    Canonical mapping keys are restricted to exactly str and int.
+
+    Note that bool is intentionally *not* accepted, even though bool is a
+    subclass of int.
+    """
+    return (type(x) is str) or (type(x) is int)
+
+
+def validate_canonical_key(
+    k: Any,
+    *,
+    where: str = "mapping key",
+    path: tuple[str | int, ...] | None = None,
+) -> None:
+    if is_canonical_key(k):
+        return
+
+    loc = "<root>" if not path else "/".join(map(str, path))
+    raise TypeError(
+        f"Invalid {where} of type {type(k).__name__} at {loc}. "
+        "Only str and int keys are allowed."
+    )
+
+
 if TYPE_CHECKING:
     CanonicalValue: TypeAlias = (
         CanonicalAtom
@@ -49,6 +79,8 @@ if TYPE_CHECKING:
 else:
     CanonicalValue: TypeAlias = Any
 
+
+# Canonical mappings are FrozenDict[CanonicalKey, CanonicalValue]
 
 # ----------------------------------------------------------------------
 # Container compatibility
@@ -210,7 +242,8 @@ def is_runtime_leaf(x: Any) -> bool:
 # ----------------------------------------------------------------------
 
 def _path_part_from_key(k: Any) -> str | int:
-    return k if isinstance(k, (str, int)) else str(k)
+    validate_canonical_key(k, where="mapping key")
+    return k
 
 
 def iter_value_children(x: Any):
@@ -218,11 +251,18 @@ def iter_value_children(x: Any):
     Yield (path_part, child) for the value-children of a supported container.
 
     For dict-like containers, keys are preserved and only values are yielded.
+    Keys must be canonical keys (str or int).
     """
     kind = node_kind(x)
 
-    if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET,
-                NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET}:
+    if kind in {
+        NodeKind.LIST,
+        NodeKind.TUPLE,
+        NodeKind.SET,
+        NodeKind.FROZEN_LIST,
+        NodeKind.FROZEN_TUPLE,
+        NodeKind.FROZEN_SET,
+    }:
         for i, v in enumerate(x):
             yield i, v
         return
@@ -273,19 +313,25 @@ def map_dict_items(x: Any, key_fn, value_fn):
     """
     Map key_fn/value_fn over dict-like containers, rebuilding the same family.
     Only valid for dict / FrozenDict.
+
+    Rebuilt keys must be canonical keys (str or int).
     """
     kind = node_kind(x)
 
     if kind is NodeKind.DICT:
         out = {}
         for k, v in x.items():
-            out[key_fn(k)] = value_fn(k, v)
+            new_k = key_fn(k)
+            validate_canonical_key(new_k, where="mapping key")
+            out[new_k] = value_fn(k, v)
         return out
 
     if kind is NodeKind.FROZEN_DICT:
         out = {}
         for k, v in x.items():
-            out[key_fn(k)] = value_fn(k, v)
+            new_k = key_fn(k)
+            validate_canonical_key(new_k, where="mapping key")
+            out[new_k] = value_fn(k, v)
         return FrozenDict(out)
 
     raise TypeError(f"{type(x).__name__} is not dict-like")
@@ -407,11 +453,21 @@ def transform_container(
         * same kind
         * canonical kind
         * runtime kind
-    - `transform_keys` is only relevant for dict-like containers
+
+    Dict key policy:
+      - keys must be canonical keys (str or int)
+      - keys are preserved, not transformed
+      - `transform_keys=True` is not supported
     """
     kind = node_kind(x)
     if not is_value_container_kind(kind):
         raise TypeError(f"{type(x).__name__} is not a supported container")
+
+    if transform_keys:
+        raise ValueError(
+            "Dict key transformation is disabled. "
+            "Canonical dict keys must be preserved."
+        )
 
     out_kind = target_container_kind(kind, target=target)
 
@@ -424,9 +480,8 @@ def transform_container(
     if kind in (RUNTIME_DICT_KINDS | CANONICAL_DICT_KINDS):
         items = {}
         for k, v in x.items():
-            new_k = value_fn("<key>", k) if transform_keys else k
-            new_v = value_fn(_path_part_from_key(k), v)
-            items[new_k] = new_v
+            key = _path_part_from_key(k)   # validates key and preserves it
+            items[key] = value_fn(key, v)
         return rebuild_dict_kind(out_kind, items)
 
     raise TypeError(f"Unhandled container kind {kind}")
@@ -695,7 +750,6 @@ class _FromCanonicalTransformer(GraphTransformer):
                 obj,
                 lambda p, v: self.transform(v, ctx.child(p)),
                 target="runtime",
-                transform_keys=(kind in {NodeKind.DICT, NodeKind.FROZEN_DICT}),
             )
 
         raise TypeError(
