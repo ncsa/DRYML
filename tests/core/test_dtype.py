@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from dryml.core2.dtype import DType, normalize_dtype
+from dryml.core2.utils.stable_hash import stable_hash_function
 
 
 def test_dtype_equality_hash_and_pickle():
@@ -108,3 +109,7 @@ def test_normalize_dtype_accepts_dtype_instance():
 
 def test_dtype_not_equal_to_raw_string():
     assert DType("float", 32) != "float32"
+
+
+def test_dtype_hashing():
+    stable_hash_function(DType("float", 32))

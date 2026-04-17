@@ -247,6 +247,9 @@ class TensorSpec:
             self.shape == rhs.shape and
             self.batch == rhs.batch )
 
+    def __stable_leaf_bytes__(self):
+        return str(self).encode("utf-8")
+
 
 SpecTree: TypeAlias = (
     TensorSpec

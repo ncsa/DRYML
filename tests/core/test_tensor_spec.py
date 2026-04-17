@@ -12,6 +12,7 @@ from dryml.core2.tensor_spec import (
     unbatch_spec_tree,
 )
 from dryml.core2.utils.recurse import iter_leaves, map_leaves
+from dryml.core2.utils.stable_hash import stable_hash_function
 
 
 def test_tensor_spec_normalizes_dtype_and_shape():
@@ -243,3 +244,7 @@ def test_batch_and_unbatch_spec_tree():
     unbatched = unbatch_spec_tree(batched)
     assert unbatched["cart"].batch is None
     assert unbatched["sph"].batch is None
+
+
+def test_tensor_spec_hashing():
+    stable_hash_function(TensorSpec(dtype="float32", shape=(3,)))

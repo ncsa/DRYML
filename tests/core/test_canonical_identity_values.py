@@ -16,6 +16,7 @@ from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
 from dryml.core2.definition import ConcreteDefinition, Definition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.object import Object
+from dryml.core2.repo import default_repo
 
 
 class _DummyObject(Object):
@@ -200,22 +201,45 @@ def test_thaw_value_preserves_identity_values_inside_concretedefinition():
 
 def test_from_canonical_preserves_identity_values_inside_concretedefinition_args_kwargs():
     repo = Repo()
+    with default_repo(repo):
 
-    spec = TensorSpec(
-        dtype=DType("float", 32),
-        shape=(8, 8),
-    )
-    dt = DType("int", 32)
+        spec = TensorSpec(
+            dtype=DType("float", 32),
+            shape=(8, 8),
+        )
+        dt = DType("int", 32)
 
-    cdef = ConcreteDefinition(
-        _DummyObject,
-        FrozenTuple((spec,)),
-        FrozenDict({"dtype": dt}),
-    )
+        cdef = ConcreteDefinition(
+            _DummyObject,
+            FrozenTuple((spec,)),
+            FrozenDict({"dtype": dt}),
+        )
 
-    # realize only the arg/kwarg payloads, not the object itself
-    rt_args = from_canonical(cdef.args, repo=repo)
-    rt_kwargs = from_canonical(cdef.kwargs, repo=repo)
+        # realize only the arg/kwarg payloads, not the object itself
+        rt_args = from_canonical(cdef.args, repo=repo)
+        rt_kwargs = from_canonical(cdef.kwargs, repo=repo)
 
-    assert rt_args[0] is spec
-    assert rt_kwargs["dtype"] is dt
+        assert rt_args[0] is spec
+        assert rt_kwargs["dtype"] is dt
+
+
+def test_build_preserves_identity_values_inside_concretedefinition_args_kwargs():
+    repo = Repo()
+    with default_repo(repo):
+
+        spec = TensorSpec(
+            dtype=DType("float", 32),
+            shape=(8, 8),
+        )
+        dt = DType("int", 32)
+
+        cdef = ConcreteDefinition(
+            _DummyObject,
+            FrozenTuple((spec,)),
+            FrozenDict({"dtype": dt}),
+        )
+
+        o = cdef.build(repo=repo)
+
+        assert o.__cdef__.args[0] is spec
+        assert o.__cdef__.kwargs["dtype"] is dt
