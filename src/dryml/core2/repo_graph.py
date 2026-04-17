@@ -34,21 +34,14 @@ def manage_revision(obj: Any, revision: RevisionMapType | str | None):
         return revision
 
 
-# ----------------------------------------------------------------------
-# Save visitor
-# ----------------------------------------------------------------------
-
-class RepoSaveVisitor(GraphVisitor):
-    def __init__(self, repo: "Repo", *, store=None, revision=None):
+class RepoStructuralVisitor(GraphVisitor):
+    def __init__(self, repo):
         self.repo = repo
-        self.store = store
-        self.revision = revision
-        self.saved_objs: dict[int, set[ConcreteDefinition]] = {}
 
-    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+    def is_atomic(self, obj, ctx):
         return is_runtime_leaf(obj)
 
-    def visit_atomic(self, obj: Any, ctx: GraphCtx) -> None:
+    def visit_atomic(self, obj, ctx):
         return None
 
     def dispatch(self, obj: Any, ctx: GraphCtx) -> None:
@@ -82,6 +75,18 @@ class RepoSaveVisitor(GraphVisitor):
         raise RepoSaveError(
             f"Cannot save object of type {type(obj).__name__} at {ctx.path_str()}!"
         )
+
+
+# ----------------------------------------------------------------------
+# Save visitor
+# ----------------------------------------------------------------------
+
+class RepoSaveVisitor(RepoStructuralVisitor):
+    def __init__(self, repo: "Repo", *, store=None, revision=None):
+        super().__init__(repo)
+        self.store = store
+        self.revision = revision
+        self.saved_objs: dict[int, set[ConcreteDefinition]] = {}
 
     def visit_object(self, obj: Object, ctx: GraphCtx) -> None:
         self._save_single_object(obj, ctx)
@@ -131,48 +136,10 @@ class RepoSaveVisitor(GraphVisitor):
 # Add-objects visitor
 # ----------------------------------------------------------------------
 
-class RepoAddObjectsVisitor(GraphVisitor):
+class RepoAddObjectsVisitor(RepoStructuralVisitor):
     def __init__(self, repo: "Repo", *, store=None):
-        self.repo = repo
+        super().__init__(repo)
         self.store = store
-
-    def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
-        return is_runtime_leaf(obj)
-
-    def visit_atomic(self, obj: Any, ctx: GraphCtx) -> None:
-        return None
-
-    def dispatch(self, obj: Any, ctx: GraphCtx) -> None:
-        kind = node_kind(obj)
-
-        if kind is NodeKind.OBJECT:
-            self.visit_object(obj, ctx)
-            return
-
-        if kind is NodeKind.CONCRETE_DEFINITION:
-            self.visit_concrete_definition(obj, ctx)
-            return
-
-        if kind is NodeKind.DEFINITION:
-            raise ValueError("Plain Definitions aren't allowed here.")
-
-        if kind in {
-            NodeKind.LIST,
-            NodeKind.TUPLE,
-            NodeKind.SET,
-            NodeKind.DICT,
-            NodeKind.FROZEN_LIST,
-            NodeKind.FROZEN_TUPLE,
-            NodeKind.FROZEN_SET,
-            NodeKind.FROZEN_DICT,
-        }:
-            for part, child in iter_value_children(obj):
-                self.visit(child, ctx.child(part))
-            return
-
-        raise TypeError(
-            f"Unsupported type {type(obj).__name__} found when adding objects to repo at {ctx.path_str()}."
-        )
 
     def visit_object(self, obj: Object, ctx: GraphCtx) -> None:
         cdef = obj.definition
