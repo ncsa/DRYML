@@ -291,6 +291,146 @@ def map_dict_items(x: Any, key_fn, value_fn):
     raise TypeError(f"{type(x).__name__} is not dict-like")
 
 
+# ----------------------------------------------------------------------
+# Container transform helpers
+# ----------------------------------------------------------------------
+
+RUNTIME_SEQ_KINDS = {
+    NodeKind.LIST,
+    NodeKind.TUPLE,
+    NodeKind.SET,
+}
+
+CANONICAL_SEQ_KINDS = {
+    NodeKind.FROZEN_LIST,
+    NodeKind.FROZEN_TUPLE,
+    NodeKind.FROZEN_SET,
+}
+
+RUNTIME_DICT_KINDS = {
+    NodeKind.DICT,
+}
+
+CANONICAL_DICT_KINDS = {
+    NodeKind.FROZEN_DICT,
+}
+
+
+def is_value_container_kind(kind: NodeKind) -> bool:
+    return kind in (
+        RUNTIME_SEQ_KINDS
+        | CANONICAL_SEQ_KINDS
+        | RUNTIME_DICT_KINDS
+        | CANONICAL_DICT_KINDS
+    )
+
+
+def rebuild_sequence_kind(kind: NodeKind, values):
+    if kind is NodeKind.LIST:
+        return list(values)
+    if kind is NodeKind.TUPLE:
+        return tuple(values)
+    if kind is NodeKind.SET:
+        return set(values)
+
+    if kind is NodeKind.FROZEN_LIST:
+        return FrozenList(values)
+    if kind is NodeKind.FROZEN_TUPLE:
+        return FrozenTuple(values)
+    if kind is NodeKind.FROZEN_SET:
+        return FrozenSet(values)
+
+    raise TypeError(f"{kind} is not a sequence/set container kind")
+
+
+def rebuild_dict_kind(kind: NodeKind, items: dict[Any, Any]):
+    if kind is NodeKind.DICT:
+        return dict(items)
+    if kind is NodeKind.FROZEN_DICT:
+        return FrozenDict(items)
+    raise TypeError(f"{kind} is not a dict container kind")
+
+
+def target_container_kind(kind: NodeKind, *, target: str) -> NodeKind:
+    """
+    target:
+      - 'same'       -> preserve current kind
+      - 'canonical'  -> runtime containers become frozen/canonical
+      - 'runtime'    -> frozen/canonical containers become plain runtime
+    """
+    if target == "same":
+        return kind
+
+    if target == "canonical":
+        mapping = {
+            NodeKind.LIST: NodeKind.FROZEN_LIST,
+            NodeKind.TUPLE: NodeKind.FROZEN_TUPLE,
+            NodeKind.SET: NodeKind.FROZEN_SET,
+            NodeKind.DICT: NodeKind.FROZEN_DICT,
+
+            NodeKind.FROZEN_LIST: NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE: NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET: NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT: NodeKind.FROZEN_DICT,
+        }
+        return mapping[kind]
+
+    if target == "runtime":
+        mapping = {
+            NodeKind.LIST: NodeKind.LIST,
+            NodeKind.TUPLE: NodeKind.TUPLE,
+            NodeKind.SET: NodeKind.SET,
+            NodeKind.DICT: NodeKind.DICT,
+
+            NodeKind.FROZEN_LIST: NodeKind.LIST,
+            NodeKind.FROZEN_TUPLE: NodeKind.TUPLE,
+            NodeKind.FROZEN_SET: NodeKind.SET,
+            NodeKind.FROZEN_DICT: NodeKind.DICT,
+        }
+        return mapping[kind]
+
+    raise ValueError(f"Unknown target container mode: {target!r}")
+
+
+def transform_container(
+    x: Any,
+    value_fn,
+    *,
+    target: str = "same",
+    transform_keys: bool = False,
+):
+    """
+    Generic container entry/exit helper.
+
+    - `value_fn(path_part, value)` maps child values
+    - `target` controls whether the rebuilt container is:
+        * same kind
+        * canonical kind
+        * runtime kind
+    - `transform_keys` is only relevant for dict-like containers
+    """
+    kind = node_kind(x)
+    if not is_value_container_kind(kind):
+        raise TypeError(f"{type(x).__name__} is not a supported container")
+
+    out_kind = target_container_kind(kind, target=target)
+
+    # sequence / set families
+    if kind in (RUNTIME_SEQ_KINDS | CANONICAL_SEQ_KINDS):
+        mapped = [value_fn(p, v) for p, v in iter_value_children(x)]
+        return rebuild_sequence_kind(out_kind, mapped)
+
+    # dict families
+    if kind in (RUNTIME_DICT_KINDS | CANONICAL_DICT_KINDS):
+        items = {}
+        for k, v in x.items():
+            new_k = value_fn("<key>", k) if transform_keys else k
+            new_v = value_fn(_path_part_from_key(k), v)
+            items[new_k] = new_v
+        return rebuild_dict_kind(out_kind, items)
+
+    raise TypeError(f"Unhandled container kind {kind}")
+
 
 # ----------------------------------------------------------------------
 # Internal transformers
@@ -323,20 +463,13 @@ class _ToCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.NDARRAY:
             return FrozenNDArray.from_array(obj)
 
-        if kind is NodeKind.LIST:
-            return FrozenList(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
-
-        if kind is NodeKind.TUPLE:
-            return FrozenTuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
-
-        if kind is NodeKind.SET:
-            return FrozenSet(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
-
-        if kind is NodeKind.DICT:
-            return FrozenDict({
-                k: self.transform(v, ctx.child(k if isinstance(k, (str, int)) else str(k)))
-                for k, v in obj.items()
-            })
+        if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
+            return transform_container(
+                obj,
+                lambda p, v: self.transform(v, ctx.child(p)),
+                target="canonical",
+                transform_keys=False,
+            )
 
         if kind is NodeKind.OBJECT:
             repo.cache_weak(obj)
@@ -414,20 +547,18 @@ class _ThawValueTransformer(GraphTransformer):
         if kind is NodeKind.FROZEN_NDARRAY:
             return obj.thaw()
 
-        if kind is NodeKind.FROZEN_LIST:
-            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
-
-        if kind is NodeKind.FROZEN_TUPLE:
-            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
-
-        if kind is NodeKind.FROZEN_SET:
-            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
-
-        if kind is NodeKind.FROZEN_DICT:
-            return {
-                k: self.transform(v, ctx.child(k if isinstance(k, (str, int)) else str(k)))
-                for k, v in obj.items()
-            }
+        if kind in {
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT,
+        }:
+            return transform_container(
+                obj,
+                lambda p, v: self.transform(v, ctx.child(p)),
+                target="runtime",
+                transform_keys=False,
+            )
 
         if kind is NodeKind.CONCRETE_DEFINITION:
             thaw_args = self.transform(obj.args, ctx.child("args"))
@@ -550,32 +681,21 @@ class _FromCanonicalTransformer(GraphTransformer):
 
             return obj
 
-        if kind is NodeKind.FROZEN_TUPLE:
-            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
-
-        if kind is NodeKind.FROZEN_LIST:
-            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
-
-        if kind is NodeKind.FROZEN_SET:
-            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
-
-        if kind is NodeKind.TUPLE:
-            return tuple(self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj))
-
-        if kind is NodeKind.LIST:
-            return [self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)]
-
-        if kind is NodeKind.SET:
-            return {self.transform(v, ctx.child(p)) for p, v in iter_value_children(obj)}
-
-        if kind in {NodeKind.DICT, NodeKind.FROZEN_DICT}:
-            return map_dict_items(
+        if kind in {
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT,
+            NodeKind.LIST,
+            NodeKind.TUPLE,
+            NodeKind.SET,
+            NodeKind.DICT,
+        }:
+            return transform_container(
                 obj,
-                key_fn=lambda k: self.transform(k, ctx.child("<key>")),
-                value_fn=lambda k, v: self.transform(
-                    v,
-                    ctx.child(k if isinstance(k, (str, int)) else str(k)),
-                ),
+                lambda p, v: self.transform(v, ctx.child(p)),
+                target="runtime",
+                transform_keys=(kind in {NodeKind.DICT, NodeKind.FROZEN_DICT}),
             )
 
         raise TypeError(
