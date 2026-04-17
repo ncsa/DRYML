@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, Callable
 
 import numpy as np
 
@@ -27,6 +27,8 @@ from .tensor_spec import TensorSpec
 # If Backend is a real runtime type/class, include it too.
 # from .backend import Backend
 
+from .function_spec import FunctionSpec, function_spec, resolve_function
+
 
 # ----------------------------------------------------------------------
 # Identity semantic values
@@ -37,7 +39,6 @@ from .tensor_spec import TensorSpec
 IDENTITY_VALUE_TYPES = (
     DType,
     TensorSpec,
-    # Backend,   # uncomment if Backend is a real runtime type/class
 )
 
 
@@ -187,6 +188,9 @@ class NodeKind(Enum):
     NDARRAY = auto()
     FROZEN_NDARRAY = auto()
 
+    FUNCTION = auto()
+    FUNCTION_SPEC = auto()
+
     LIST = auto()
     TUPLE = auto()
     SET = auto()
@@ -251,6 +255,12 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, Object):
         return NodeKind.OBJECT
 
+    if isinstance(x, Callable):
+        return NodeKind.FUNCTION
+
+    if isinstance(x, FunctionSpec):
+        return NodeKind.FUNCTION_SPEC
+
     return NodeKind.UNSUPPORTED
 
 
@@ -265,6 +275,7 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.FROZEN_SET,
         NodeKind.FROZEN_DICT,
         NodeKind.CONCRETE_DEFINITION,
+        NodeKind.FUNCTION_SPEC,
     }
 
 
@@ -279,6 +290,7 @@ def is_runtime_leaf(x: Any) -> bool:
         NodeKind.IDENTITY_VALUE,
         NodeKind.NDARRAY,
         NodeKind.FROZEN_NDARRAY,
+        NodeKind.FUNCTION,
     }
 
 
@@ -600,6 +612,9 @@ class _ToCanonicalTransformer(GraphTransformer):
 
             return ConcreteDefinition(obj.cls, c_args, c_kwargs)
 
+        if kind is NodeKind.FUNCTION:
+            return function_spec(obj)
+
         raise TypeError(
             f"Cannot canonicalize object of type {type(obj).__name__} at {ctx.path_str()}"
         )
@@ -674,6 +689,12 @@ class _ThawValueTransformer(GraphTransformer):
 
         if kind is NodeKind.OBJECT:
             return self.transform(obj.definition, ctx)
+
+        if kind is NodeKind.FUNCTION_SPEC:
+            return resolve_function(obj)
+
+        if kind is NodeKind.FUNCTION:
+            return obj
 
         raise TypeError(
             f"Cannot thaw value of type {type(obj).__name__} at {ctx.path_str()}"
@@ -788,6 +809,9 @@ class _FromCanonicalTransformer(GraphTransformer):
                 self.repo.cache_weak(obj)
 
             return obj
+
+        if kind is NodeKind.FUNCTION_SPEC:
+            return resolve_function(kind)
 
         if kind in {
             NodeKind.FROZEN_LIST,
