@@ -204,6 +204,20 @@ def test_function_spec_source_captures_module_alias():
     assert g(0.0) == 0.0
 
 
+def test_function_spec_source_captures_module_alias_nested():
+    def build_func():
+        def f(x):
+            return np.sin(x)
+        return f
+
+    spec = FunctionSpec.from_function(build_func)
+    assert spec.kind == "source"
+    assert spec.imports == {"np": "numpy"}
+
+    g = spec.resolve()
+    assert g()(0.0) == 0.0
+
+
 def test_function_spec_source_reuses_live_main_function(monkeypatch):
     import __main__
 
@@ -217,3 +231,32 @@ def test_function_spec_source_reuses_live_main_function(monkeypatch):
         assert spec.resolve() is f
     finally:
         del __main__.f
+
+
+def test_function_spec_source_captures_module_alias_via_outer_local():
+    def outer():
+        lib = np
+        def f(x):
+            return lib.sin(x)
+        return f
+
+    spec = FunctionSpec.from_function(outer)
+    assert spec.kind == "source"
+    assert spec.imports == {"np": "numpy"}
+
+    g = spec.resolve()
+    assert g()(0.0) == 0.0
+
+
+def test_function_spec_source_nested_uses_outer_parameter():
+    def outer(scale):
+        def f(x):
+            return x * scale
+        return f
+
+    spec = FunctionSpec.from_function(outer)
+    assert spec.kind == "source"
+    assert spec.imports == {}
+
+    g = spec.resolve()
+    assert g(3)(10) == 30

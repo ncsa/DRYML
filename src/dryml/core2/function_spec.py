@@ -202,116 +202,217 @@ def _source_spec_from_function(fn: FunctionType):
     )
 
 
-class _FunctionScopeNameCollector(ast.NodeVisitor):
-    def __init__(self):
-        self.bound: set[str] = set()
-        self.used: set[str] = set()
-        self._depth = 0
+@dataclass(frozen=True)
+class _ScopeDeps:
+    bound_here: set[str]
+    needed_globals: set[str]
 
-    def _bind_target(self, node):
+
+class _LexicalDependencyCollector:
+    """
+    Compute external global names required by a serialized scope tree.
+
+    A nested scope may use names bound in an enclosing serialized scope without
+    requiring those names to be captured externally.
+    """
+
+    def __init__(self):
+        self._builtins = set(dir(builtins))
+
+    def collect(self, node: ast.AST) -> set[str]:
+        deps = self._collect_scope(node, available_from_parents=set())
+        return deps.needed_globals
+
+    def _collect_scope(
+        self,
+        node: ast.AST,
+        available_from_parents: set[str],
+    ) -> _ScopeDeps:
+        bound_here = self._initial_bound_names(node)
+        used_here: set[str] = set()
+        needed_globals: set[str] = set()
+
+        def walk(n: ast.AST | None):
+            nonlocal needed_globals
+            if n is None:
+                return
+
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # Nested function name is bound in the current scope.
+                bound_here.add(n.name)
+
+                # Optional: fail early on nested decorated defs.
+                if n.decorator_list:
+                    raise ValueError(
+                        f"Decorated nested function {n.name!r} is not supported."
+                    )
+
+                child = self._collect_scope(
+                    n,
+                    available_from_parents=available_from_parents | bound_here,
+                )
+                needed_globals |= child.needed_globals
+                return
+
+            if isinstance(n, ast.ClassDef):
+                bound_here.add(n.name)
+
+                if n.decorator_list:
+                    raise ValueError(
+                        f"Decorated nested class {n.name!r} is not supported."
+                    )
+
+                child = self._collect_scope(
+                    n,
+                    available_from_parents=available_from_parents | bound_here,
+                )
+                needed_globals |= child.needed_globals
+                return
+
+            if isinstance(n, ast.Lambda):
+                child = self._collect_scope(
+                    n,
+                    available_from_parents=available_from_parents | bound_here,
+                )
+                needed_globals |= child.needed_globals
+                return
+
+            if isinstance(n, ast.Import):
+                for alias in n.names:
+                    bound_here.add(alias.asname or alias.name.split(".", 1)[0])
+                return
+
+            if isinstance(n, ast.ImportFrom):
+                for alias in n.names:
+                    bound_here.add(alias.asname or alias.name)
+                return
+
+            if isinstance(n, ast.Name):
+                if isinstance(n.ctx, ast.Load):
+                    used_here.add(n.id)
+                elif isinstance(n.ctx, (ast.Store, ast.Del)):
+                    bound_here.add(n.id)
+                return
+
+            if isinstance(n, ast.For):
+                walk(n.iter)
+                self._bind_target(n.target, bound_here)
+                for stmt in n.body:
+                    walk(stmt)
+                for stmt in n.orelse:
+                    walk(stmt)
+                return
+
+            if isinstance(n, ast.AsyncFor):
+                walk(n.iter)
+                self._bind_target(n.target, bound_here)
+                for stmt in n.body:
+                    walk(stmt)
+                for stmt in n.orelse:
+                    walk(stmt)
+                return
+
+            if isinstance(n, ast.With):
+                for item in n.items:
+                    walk(item.context_expr)
+                    if item.optional_vars is not None:
+                        self._bind_target(item.optional_vars, bound_here)
+                for stmt in n.body:
+                    walk(stmt)
+                return
+
+            if isinstance(n, ast.AsyncWith):
+                for item in n.items:
+                    walk(item.context_expr)
+                    if item.optional_vars is not None:
+                        self._bind_target(item.optional_vars, bound_here)
+                for stmt in n.body:
+                    walk(stmt)
+                return
+
+            if isinstance(n, ast.ExceptHandler):
+                if n.type is not None:
+                    walk(n.type)
+                if n.name:
+                    bound_here.add(n.name)
+                for stmt in n.body:
+                    walk(stmt)
+                return
+
+            if isinstance(n, ast.NamedExpr):
+                walk(n.value)
+                self._bind_target(n.target, bound_here)
+                return
+
+            if isinstance(n, ast.comprehension):
+                walk(n.iter)
+                self._bind_target(n.target, bound_here)
+                for if_ in n.ifs:
+                    walk(if_)
+                return
+
+            if isinstance(n, (ast.Global, ast.Nonlocal)):
+                return
+
+            for child in ast.iter_child_nodes(n):
+                walk(child)
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+        elif isinstance(node, ast.Lambda):
+            body = [node.body]
+        else:
+            raise TypeError(f"Unsupported scope root {type(node).__name__}")
+
+        for item in body:
+            walk(item)
+
+        unresolved_here = (
+            used_here
+            - bound_here
+            - available_from_parents
+            - self._builtins
+        )
+
+        needed_globals |= unresolved_here
+        return _ScopeDeps(bound_here=bound_here, needed_globals=needed_globals)
+
+    def _initial_bound_names(self, node: ast.AST) -> set[str]:
+        bound: set[str] = set()
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bound.add(node.name)
+            self._bind_arguments(node.args, bound)
+        elif isinstance(node, ast.Lambda):
+            self._bind_arguments(node.args, bound)
+        elif isinstance(node, ast.ClassDef):
+            pass
+        else:
+            raise TypeError(f"Unsupported scope root {type(node).__name__}")
+
+        return bound
+
+    def _bind_arguments(self, args: ast.arguments, bound: set[str]):
+        for arg in (
+            list(args.posonlyargs)
+            + list(args.args)
+            + list(args.kwonlyargs)
+        ):
+            bound.add(arg.arg)
+
+        if args.vararg:
+            bound.add(args.vararg.arg)
+        if args.kwarg:
+            bound.add(args.kwarg.arg)
+
+    def _bind_target(self, node: ast.AST, bound: set[str]):
         if isinstance(node, ast.Name):
-            self.bound.add(node.id)
+            bound.add(node.id)
         elif isinstance(node, (ast.Tuple, ast.List)):
             for elt in node.elts:
-                self._bind_target(elt)
-
-    def visit_FunctionDef(self, node):
-        if self._depth > 0:
-            self.bound.add(node.name)
-            return
-
-        self._depth += 1
-        self.bound.add(node.name)
-
-        for arg in (
-            list(node.args.posonlyargs)
-            + list(node.args.args)
-            + list(node.args.kwonlyargs)
-        ):
-            self.bound.add(arg.arg)
-
-        if node.args.vararg:
-            self.bound.add(node.args.vararg.arg)
-        if node.args.kwarg:
-            self.bound.add(node.args.kwarg.arg)
-
-        for stmt in node.body:
-            self.visit(stmt)
-
-        self._depth -= 1
-
-    def visit_Lambda(self, node):
-        if self._depth > 0:
-            return
-
-        self._depth += 1
-        for arg in (
-            list(node.args.posonlyargs)
-            + list(node.args.args)
-            + list(node.args.kwonlyargs)
-        ):
-            self.bound.add(arg.arg)
-
-        if node.args.vararg:
-            self.bound.add(node.args.vararg.arg)
-        if node.args.kwarg:
-            self.bound.add(node.args.kwarg.arg)
-
-        self.visit(node.body)
-        self._depth -= 1
-
-    def visit_ClassDef(self, node):
-        self.bound.add(node.name)
-
-    def visit_Import(self, node):
-        for alias in node.names:
-            self.bound.add(alias.asname or alias.name.split(".", 1)[0])
-
-    def visit_ImportFrom(self, node):
-        for alias in node.names:
-            self.bound.add(alias.asname or alias.name)
-
-    def visit_Name(self, node):
-        if isinstance(node.ctx, ast.Load):
-            self.used.add(node.id)
-        elif isinstance(node.ctx, (ast.Store, ast.Del)):
-            self.bound.add(node.id)
-
-    def visit_For(self, node):
-        self._bind_target(node.target)
-        self.visit(node.iter)
-        for stmt in node.body:
-            self.visit(stmt)
-        for stmt in node.orelse:
-            self.visit(stmt)
-
-    def visit_AsyncFor(self, node):
-        self.visit_For(node)
-
-    def visit_With(self, node):
-        for item in node.items:
-            self.visit(item.context_expr)
-            if item.optional_vars is not None:
-                self._bind_target(item.optional_vars)
-        for stmt in node.body:
-            self.visit(stmt)
-
-    def visit_AsyncWith(self, node):
-        self.visit_With(node)
-
-    def visit_ExceptHandler(self, node):
-        if node.name:
-            self.bound.add(node.name)
-        for stmt in node.body:
-            self.visit(stmt)
-
-    def visit_NamedExpr(self, node):
-        self.visit(node.value)
-        self._bind_target(node.target)
-
-    def free_names(self) -> set[str]:
-        builtins_ns = set(dir(builtins))
-        return self.used - self.bound - builtins_ns
+                self._bind_target(elt, bound)
+        elif isinstance(node, ast.Starred):
+            self._bind_target(node.value, bound)
 
 
 def _collect_source_imports(
@@ -325,19 +426,19 @@ def _collect_source_imports(
 
     root = tree.body[0]
     if isinstance(root, ast.Expr) and isinstance(root.value, ast.Lambda):
-        node = root.value
-    elif isinstance(root, ast.FunctionDef):
-        node = root
+        scope_node = root.value
+    elif isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        scope_node = root
     else:
         raise ValueError("Unsupported source form for FunctionSpec.")
 
-    collector = _FunctionScopeNameCollector()
-    collector.visit(node)
+    collector = _LexicalDependencyCollector()
+    free_names = collector.collect(scope_node)
 
     imports: dict[str, str] = {}
     missing: list[str] = []
 
-    for name in sorted(collector.free_names()):
+    for name in sorted(free_names):
         if name not in fn.__globals__:
             missing.append(name)
             continue
