@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import builtins
+import json
+import types
+import __main__
 from dataclasses import dataclass
 import ast
 import importlib
@@ -10,6 +14,52 @@ from typing import Literal
 
 
 FunctionSpecKind = Literal["import", "source"]
+
+
+def _object_import_path(obj) -> str | None:
+    """
+    Return a stable import path for modules and importable objects.
+
+    Forms:
+      'numpy'
+      'numpy:sin'
+      'dryml.core.function_spec:FunctionSpec'
+    """
+    if inspect.ismodule(obj):
+        name = getattr(obj, "__name__", None)
+        return name if name else None
+
+    module_name = getattr(obj, "__module__", None)
+    qualname = getattr(obj, "__qualname__", None)
+
+    if not module_name or not qualname:
+        return None
+
+    if module_name == "__main__":
+        return None
+
+    if "<locals>" in qualname:
+        return None
+
+    try:
+        module = importlib.import_module(module_name)
+        resolved = _resolve_qualname(module, qualname)
+    except Exception:
+        return None
+
+    if resolved is obj:
+        return f"{module_name}:{qualname}"
+
+    return None
+
+
+def _resolve_import_path(path: str):
+    if ":" not in path:
+        return importlib.import_module(path)
+
+    module_name, qualname = path.split(":", 1)
+    module = importlib.import_module(module_name)
+    return _resolve_qualname(module, qualname)
 
 
 def _normalize_source(source: str) -> str:
@@ -134,11 +184,212 @@ def _source_spec_from_function(fn: FunctionType):
 
     if fn.__name__ == "<lambda>":
         lambda_source = _extract_lambda_source(raw_source)
-        return FunctionSpec(kind="source", source=lambda_source, name=None)
+        imports = _collect_source_imports(fn, lambda_source)
+        return FunctionSpec(
+            kind="source",
+            source=lambda_source,
+            name=None,
+            imports=imports,
+        )
 
     source, name = _extract_named_function_source(fn, raw_source)
-    return FunctionSpec(kind="source", source=source, name=name)
+    imports = _collect_source_imports(fn, source)
+    return FunctionSpec(
+        kind="source",
+        source=source,
+        name=name,
+        imports=imports,
+    )
 
+
+class _FunctionScopeNameCollector(ast.NodeVisitor):
+    def __init__(self):
+        self.bound: set[str] = set()
+        self.used: set[str] = set()
+        self._depth = 0
+
+    def _bind_target(self, node):
+        if isinstance(node, ast.Name):
+            self.bound.add(node.id)
+        elif isinstance(node, (ast.Tuple, ast.List)):
+            for elt in node.elts:
+                self._bind_target(elt)
+
+    def visit_FunctionDef(self, node):
+        if self._depth > 0:
+            self.bound.add(node.name)
+            return
+
+        self._depth += 1
+        self.bound.add(node.name)
+
+        for arg in (
+            list(node.args.posonlyargs)
+            + list(node.args.args)
+            + list(node.args.kwonlyargs)
+        ):
+            self.bound.add(arg.arg)
+
+        if node.args.vararg:
+            self.bound.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.bound.add(node.args.kwarg.arg)
+
+        for stmt in node.body:
+            self.visit(stmt)
+
+        self._depth -= 1
+
+    def visit_Lambda(self, node):
+        if self._depth > 0:
+            return
+
+        self._depth += 1
+        for arg in (
+            list(node.args.posonlyargs)
+            + list(node.args.args)
+            + list(node.args.kwonlyargs)
+        ):
+            self.bound.add(arg.arg)
+
+        if node.args.vararg:
+            self.bound.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            self.bound.add(node.args.kwarg.arg)
+
+        self.visit(node.body)
+        self._depth -= 1
+
+    def visit_ClassDef(self, node):
+        self.bound.add(node.name)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self.bound.add(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node):
+        for alias in node.names:
+            self.bound.add(alias.asname or alias.name)
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Load):
+            self.used.add(node.id)
+        elif isinstance(node.ctx, (ast.Store, ast.Del)):
+            self.bound.add(node.id)
+
+    def visit_For(self, node):
+        self._bind_target(node.target)
+        self.visit(node.iter)
+        for stmt in node.body:
+            self.visit(stmt)
+        for stmt in node.orelse:
+            self.visit(stmt)
+
+    def visit_AsyncFor(self, node):
+        self.visit_For(node)
+
+    def visit_With(self, node):
+        for item in node.items:
+            self.visit(item.context_expr)
+            if item.optional_vars is not None:
+                self._bind_target(item.optional_vars)
+        for stmt in node.body:
+            self.visit(stmt)
+
+    def visit_AsyncWith(self, node):
+        self.visit_With(node)
+
+    def visit_ExceptHandler(self, node):
+        if node.name:
+            self.bound.add(node.name)
+        for stmt in node.body:
+            self.visit(stmt)
+
+    def visit_NamedExpr(self, node):
+        self.visit(node.value)
+        self._bind_target(node.target)
+
+    def free_names(self) -> set[str]:
+        builtins_ns = set(dir(builtins))
+        return self.used - self.bound - builtins_ns
+
+
+def _collect_source_imports(
+    fn: FunctionType,
+    source: str,
+) -> dict[str, str]:
+    tree = ast.parse(source)
+
+    if len(tree.body) != 1:
+        raise ValueError("Expected a single function expression or definition.")
+
+    root = tree.body[0]
+    if isinstance(root, ast.Expr) and isinstance(root.value, ast.Lambda):
+        node = root.value
+    elif isinstance(root, ast.FunctionDef):
+        node = root
+    else:
+        raise ValueError("Unsupported source form for FunctionSpec.")
+
+    collector = _FunctionScopeNameCollector()
+    collector.visit(node)
+
+    imports: dict[str, str] = {}
+    missing: list[str] = []
+
+    for name in sorted(collector.free_names()):
+        if name not in fn.__globals__:
+            missing.append(name)
+            continue
+
+        obj = fn.__globals__[name]
+        path = _object_import_path(obj)
+        if path is None:
+            missing.append(name)
+            continue
+
+        imports[name] = path
+
+    if missing:
+        raise ValueError(
+            "Could not capture stable import paths for source-backed function "
+            f"{fn.__name__!r}. Missing/unimportable globals: {missing}"
+        )
+
+    return imports
+
+
+def _current_main_ns() -> dict[str, object]:
+    try:
+        return vars(__main__)
+    except Exception:
+        return {}
+
+
+def _matching_live_function(spec: "FunctionSpec"):
+    if spec.kind != "source" or spec.name is None:
+        return None
+
+    ns = _current_main_ns()
+    candidate = ns.get(spec.name)
+
+    if not inspect.isfunction(candidate):
+        return None
+
+    try:
+        candidate_spec = FunctionSpec.from_function(candidate)
+    except Exception:
+        return None
+
+    if (
+        candidate_spec.kind == "source"
+        and candidate_spec.name == spec.name
+        and candidate_spec.source == spec.source
+        and (candidate_spec.imports or {}) == (spec.imports or {})
+    ):
+        return candidate
+
+    return None
 
 @dataclass(frozen=True, slots=True)
 class FunctionSpec:
@@ -163,6 +414,7 @@ class FunctionSpec:
     # source mode
     source: str | None = None
     name: str | None = None  # required for `def ...`; None allowed for lambda expr
+    imports: dict[str,str] | None = None
 
     def __post_init__(self):
         if self.kind not in ("import", "source"):
@@ -173,9 +425,9 @@ class FunctionSpec:
                 raise ValueError(
                     "Import FunctionSpec requires `module` and `qualname`."
                 )
-            if self.source is not None or self.name is not None:
+            if self.source is not None or self.name is not None or self.imports is not None:
                 raise ValueError(
-                    "Import FunctionSpec may not define `source` or `name`."
+                    "Import FunctionSpec may not define `source`, `name`, or `imports`."
                 )
 
         elif self.kind == "source":
@@ -187,6 +439,9 @@ class FunctionSpec:
                 raise ValueError(
                     "Source FunctionSpec may not define `module` or `qualname`."
                 )
+
+            imports = self.imports or {}
+            object.__setattr__(self, "imports", dict(sorted(imports.items())))
 
     @classmethod
     def from_function(cls, fn: FunctionType) -> FunctionSpec:
@@ -261,10 +516,16 @@ class FunctionSpec:
             fn = _resolve_qualname(module, self.qualname)
 
         elif self.kind == "source":
+            live = _matching_live_function(self)
+            if live is not None:
+                return live
+
             ns: dict[str, object] = {}
 
+            for name, path in (self.imports or {}).items():
+                ns[name] = _resolve_import_path(path)
+
             if self.name is None:
-                # treat as expression, e.g. lambda x: x + 1
                 fn = eval(self.source, ns, ns)
             else:
                 exec(self.source, ns, ns)
@@ -299,7 +560,15 @@ class FunctionSpec:
         )
 
     def __stable_leaf_bytes__(self):
-        return str(self).encode('utf-8')
+        payload = {
+            "kind": self.kind,
+            "module": self.module,
+            "qualname": self.qualname,
+            "source": self.source,
+            "name": self.name,
+            "imports": dict(sorted((self.imports or {}).items())),
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def function_spec(

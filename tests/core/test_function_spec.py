@@ -6,6 +6,7 @@ from dryml.core2.function_spec import FunctionSpec
 from dryml.core2.definition import Definition, ConcreteDefinition
 from dryml.core2.object import Object
 from dryml.core2.freeze import FrozenTuple
+import numpy as np
 
 
 def top_level_add1(x):
@@ -189,3 +190,30 @@ def test_concrete_definition_build_function_spec():
     o = cdef.build()
 
     assert o.fn(3) == 4
+
+
+def test_function_spec_source_captures_module_alias():
+    def f(x):
+        return np.sin(x)
+
+    spec = FunctionSpec.from_function(f)
+    assert spec.kind == "source"
+    assert spec.imports == {"np": "numpy"}
+
+    g = spec.resolve()
+    assert g(0.0) == 0.0
+
+
+def test_function_spec_source_reuses_live_main_function(monkeypatch):
+    import __main__
+
+    def f(x):
+        return x + 1
+
+    __main__.f = f
+    try:
+        spec = FunctionSpec.from_function(f)
+        assert spec.kind == "source"
+        assert spec.resolve() is f
+    finally:
+        del __main__.f
