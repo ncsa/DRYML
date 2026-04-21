@@ -45,6 +45,7 @@ class RepoStructuralVisitor(GraphVisitor):
         return None
 
     def dispatch(self, obj: Any, ctx: GraphCtx) -> None:
+        from .repo import RepoSaveError
         kind = node_kind(obj)
 
         if kind is NodeKind.OBJECT:
