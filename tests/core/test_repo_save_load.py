@@ -4,9 +4,12 @@ import glob
 import core2_objects as objects
 import pytest
 import tempfile
+import numpy as np
 
 from dryml.core2 import definition_mode
 from dryml.core2.repo import Repo, default_repo
+from dryml.core2.dtype import dtype
+from dryml.core2.tensor_spec import TensorSpec
 
 
 def test_save_1(primary_store_set):
@@ -408,6 +411,55 @@ def test_save_load_3(primary_store_set):
     assert obj2_2 is obj10_2.x.x.test
     obj3_2 = obj6_2.test
     assert obj3_2 is obj10_2.test.test.x
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(
+            (lambda: 'a', lambda a, b: a == b),
+            id='str',
+        ),
+        pytest.param(
+            (lambda: 20, lambda a, b: a == b),
+            id='int',
+        ),
+        pytest.param(
+            (lambda: 3.5, lambda a, b: a == b),
+            id='float',
+        ),
+        pytest.param(
+            (lambda: np.array([1., 2., 3.], dtype=np.float32), lambda a, b: np.all(a == b)),
+            id='np_array',
+        ),
+        pytest.param(
+            (lambda: dtype("float32"), lambda a, b: a == b),
+            id='dtype',
+        ),
+        pytest.param(
+            (lambda: TensorSpec(shape=(1, 2, 3), dtype=dtype("float32")), lambda a, b: a == b),
+            id='tensor_spec',
+        ),
+    ]
+)
+def leaf_case(request):
+    make_obj, check_equal = request.param
+    return make_obj(), check_equal
+
+
+def test_save_load_leaf_roundtrip(primary_store_set, leaf_case):
+    test_obj, test_check = leaf_case
+    # Test save/load to/from a directory
+    obj1 = objects.TestClass5(10, test=test_obj)
+
+    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
+    dryml.core2.save_object(obj1, repo=repo, main=True)
+    repo.flush()
+
+    del repo
+
+    obj1_2 = dryml.core2.load_object(obj1.definition, repo=primary_store_set.stores)
+    assert obj1_2.x == 10
+    assert test_check(test_obj, obj1_2.test)
 
 
 def test_save_load_revision_1(primary_store_set):
