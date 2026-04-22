@@ -273,7 +273,7 @@ def test_function_spec_source_nested_uses_outer_parameter_args():
 
     spec = FunctionSpec.from_function(outer)
     assert spec.kind == "source"
-    assert spec.imports == {"dtype": "dryml.core2.dtype"}
+    assert spec.imports == {"dtype": "dryml.core2.dtype:normalize_dtype"}
 
     g = spec.resolve()
     assert g(3)(10) == np.float32(30)
@@ -288,4 +288,4 @@ def test_function_spec_source_captures_kwdefault_factory():
         return f
 
     spec = FunctionSpec.from_function(outer)
-    assert spec.imports == {"dtype": "dryml.core2.dtype"}
+    assert spec.imports == {"dtype": "dryml.core2.dtype:normalize_dtype"}

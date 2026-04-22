@@ -202,6 +202,35 @@ def _source_spec_from_function(fn: FunctionType):
     )
 
 
+def _lookup_live_name_for_source(fn: FunctionType, name: str):
+    """
+    Best-effort resolution of a name referenced by function source.
+
+    Order:
+    1. function globals
+    2. active caller-frame locals, nearest first
+
+    This supports notebook/test-style nested definitions that rely on names
+    imported in an enclosing local scope.
+    """
+    if name in fn.__globals__:
+        return fn.__globals__[name]
+
+    frame = inspect.currentframe()
+    try:
+        # Skip this helper frame and walk outward.
+        frame = frame.f_back
+        while frame is not None:
+            if name in frame.f_locals:
+                return frame.f_locals[name]
+            frame = frame.f_back
+    finally:
+        # Avoid reference cycles.
+        del frame
+
+    raise KeyError(name)
+
+
 @dataclass(frozen=True)
 class _ScopeDeps:
     bound_here: set[str]
@@ -212,8 +241,10 @@ class _LexicalDependencyCollector:
     """
     Compute external global names required by a serialized scope tree.
 
-    A nested scope may use names bound in an enclosing serialized scope without
-    requiring those names to be captured externally.
+    Key rule:
+    - function header expressions (defaults, annotations, decorators, returns)
+      are evaluated in the enclosing definition scope
+    - function body expressions are evaluated in the function-local lexical scope
     """
 
     def __init__(self):
@@ -676,11 +707,12 @@ def _collect_source_imports(
     missing: list[str] = []
 
     for name in sorted(free_names):
-        if name not in fn.__globals__:
+        try:
+            obj = _lookup_live_name_for_source(fn, name)
+        except KeyError:
             missing.append(name)
             continue
 
-        obj = fn.__globals__[name]
         path = _object_import_path(obj)
         if path is None:
             missing.append(name)
