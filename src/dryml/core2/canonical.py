@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 # runtime == canonical == thawed
 from .dtype import DType
 from .tensor_spec import TensorSpec
+from .cardinality import Cardinality
 # If Backend is a real runtime type/class, include it too.
 # from .backend import Backend
 
@@ -39,6 +40,7 @@ from .function_spec import FunctionSpec, function_spec, resolve_function
 IDENTITY_VALUE_TYPES = (
     DType,
     TensorSpec,
+    Cardinality,
 )
 
 

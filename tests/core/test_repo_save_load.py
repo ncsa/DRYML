@@ -10,6 +10,7 @@ from dryml.core2 import definition_mode
 from dryml.core2.repo import Repo, default_repo
 from dryml.core2.dtype import dtype
 from dryml.core2.tensor_spec import TensorSpec
+from dryml.core2.cardinality import Cardinality
 
 
 def test_save_1(primary_store_set):
@@ -416,19 +417,20 @@ def test_save_load_3(primary_store_set):
 def f_test(x):
     return x+10
 
+default_compare = lambda a, b: a == b
 
 @pytest.fixture(
     params=[
         pytest.param(
-            (lambda: 'a', lambda a, b: a == b),
+            (lambda: 'a', default_compare),
             id='str',
         ),
         pytest.param(
-            (lambda: 20, lambda a, b: a == b),
+            (lambda: 20, default_compare),
             id='int',
         ),
         pytest.param(
-            (lambda: 3.5, lambda a, b: a == b),
+            (lambda: 3.5, default_compare),
             id='float',
         ),
         pytest.param(
@@ -436,12 +438,24 @@ def f_test(x):
             id='np_array',
         ),
         pytest.param(
-            (lambda: dtype("float32"), lambda a, b: a == b),
+            (lambda: dtype("float32"), default_compare),
             id='dtype',
         ),
         pytest.param(
             (lambda: TensorSpec(shape=(1, 2, 3), dtype=dtype("float32")), lambda a, b: a == b),
             id='tensor_spec',
+        ),
+        pytest.param(
+            (lambda: Cardinality.UNKNOWN, default_compare),
+            id='cardinality_unknown'
+        ),
+        pytest.param(
+            (lambda: Cardinality.INFINITE, default_compare),
+            id='cardinality_infinite'
+        ),
+        pytest.param(
+            (lambda: Cardinality(10), default_compare),
+            id='cardinality_infinite'
         ),
         pytest.param(
             (
