@@ -45,7 +45,7 @@ class RepoStructuralVisitor(GraphVisitor):
         return None
 
     def dispatch(self, obj: Any, ctx: GraphCtx) -> None:
-        from .repo import RepoSaveError
+        from .repo import RepoGraphError
         kind = node_kind(obj)
 
         if kind is NodeKind.OBJECT:
@@ -56,8 +56,14 @@ class RepoStructuralVisitor(GraphVisitor):
             self.visit_concrete_definition(obj, ctx)
             return
 
+        if kind is NodeKind.FUNCTION_SPEC:
+            return
+
         if kind is NodeKind.DEFINITION:
-            raise RepoSaveError("Plain Definitions aren't allowed here.")
+            raise RepoGraphError("Plain Definitions aren't allowed here.")
+
+        if kind is NodeKind.FUNCTION:
+            raise RepoGraphError("Plain functions aren't allowed here.")
 
         if kind in {
             NodeKind.LIST,
@@ -73,8 +79,8 @@ class RepoStructuralVisitor(GraphVisitor):
                 self.visit(child, ctx.child(part))
             return
 
-        raise RepoSaveError(
-            f"Cannot save object of type {type(obj).__name__} at {ctx.path_str()}!"
+        raise RepoGraphError(
+            f"Unexpected object of type {type(obj).__name__} at {ctx.path_str()}!"
         )
 
 

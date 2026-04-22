@@ -28,6 +28,10 @@ class RepoLoadError(Exception):
     pass
 
 
+class RepoGraphError(Exception):
+    pass
+
+
 SelectorType = Callable | Definition | ConcreteDefinition
 RevisionType = dict[ConcreteDefinition, str]
 

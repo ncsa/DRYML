@@ -413,6 +413,10 @@ def test_save_load_3(primary_store_set):
     assert obj3_2 is obj10_2.test.test.x
 
 
+def f_test(x):
+    return x+10
+
+
 @pytest.fixture(
     params=[
         pytest.param(
@@ -439,6 +443,18 @@ def test_save_load_3(primary_store_set):
             (lambda: TensorSpec(shape=(1, 2, 3), dtype=dtype("float32")), lambda a, b: a == b),
             id='tensor_spec',
         ),
+        pytest.param(
+            (
+                lambda: f_test,
+                lambda a, b: (
+                    a(0) == 10 and
+                    b(0) == 10 and
+                    a(15) == 25 and
+                    b(15) == 25
+                )
+            ),
+            id='function'
+        )
     ]
 )
 def leaf_case(request):
@@ -450,12 +466,7 @@ def test_save_load_leaf_roundtrip(primary_store_set, leaf_case):
     test_obj, test_check = leaf_case
     # Test save/load to/from a directory
     obj1 = objects.TestClass5(10, test=test_obj)
-
-    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
-    dryml.core2.save_object(obj1, repo=repo, main=True)
-    repo.flush()
-
-    del repo
+    obj1.save(primary_store_set.stores)
 
     obj1_2 = dryml.core2.load_object(obj1.definition, repo=primary_store_set.stores)
     assert obj1_2.x == 10
