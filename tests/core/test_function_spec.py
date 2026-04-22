@@ -260,3 +260,32 @@ def test_function_spec_source_nested_uses_outer_parameter():
 
     g = spec.resolve()
     assert g(3)(10) == 30
+
+
+def test_function_spec_source_nested_uses_outer_parameter_args():
+    from dryml.core2.dtype import dtype
+    import numpy as np
+
+    def outer(scale, dtype=dtype("float32")):
+        def f(x):
+            return dtype.np()(x * scale)
+        return f
+
+    spec = FunctionSpec.from_function(outer)
+    assert spec.kind == "source"
+    assert spec.imports == {"dtype": "dryml.core2.dtype"}
+
+    g = spec.resolve()
+    assert g(3)(10) == np.float32(30)
+
+
+def test_function_spec_source_captures_kwdefault_factory():
+    from dryml.core2.dtype import dtype
+
+    def outer(*, dt=dtype("float32")):
+        def f(x):
+            return dt.np()(x)
+        return f
+
+    spec = FunctionSpec.from_function(outer)
+    assert spec.imports == {"dtype": "dryml.core2.dtype"}

@@ -228,169 +228,406 @@ class _LexicalDependencyCollector:
         node: ast.AST,
         available_from_parents: set[str],
     ) -> _ScopeDeps:
-        bound_here = self._initial_bound_names(node)
-        used_here: set[str] = set()
         needed_globals: set[str] = set()
 
-        def walk(n: ast.AST | None):
-            nonlocal needed_globals
-            if n is None:
-                return
-
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                # Nested function name is bound in the current scope.
-                bound_here.add(n.name)
-
-                # Optional: fail early on nested decorated defs.
-                if n.decorator_list:
-                    raise ValueError(
-                        f"Decorated nested function {n.name!r} is not supported."
-                    )
-
-                child = self._collect_scope(
-                    n,
-                    available_from_parents=available_from_parents | bound_here,
-                )
-                needed_globals |= child.needed_globals
-                return
-
-            if isinstance(n, ast.ClassDef):
-                bound_here.add(n.name)
-
-                if n.decorator_list:
-                    raise ValueError(
-                        f"Decorated nested class {n.name!r} is not supported."
-                    )
-
-                child = self._collect_scope(
-                    n,
-                    available_from_parents=available_from_parents | bound_here,
-                )
-                needed_globals |= child.needed_globals
-                return
-
-            if isinstance(n, ast.Lambda):
-                child = self._collect_scope(
-                    n,
-                    available_from_parents=available_from_parents | bound_here,
-                )
-                needed_globals |= child.needed_globals
-                return
-
-            if isinstance(n, ast.Import):
-                for alias in n.names:
-                    bound_here.add(alias.asname or alias.name.split(".", 1)[0])
-                return
-
-            if isinstance(n, ast.ImportFrom):
-                for alias in n.names:
-                    bound_here.add(alias.asname or alias.name)
-                return
-
-            if isinstance(n, ast.Name):
-                if isinstance(n.ctx, ast.Load):
-                    used_here.add(n.id)
-                elif isinstance(n.ctx, (ast.Store, ast.Del)):
-                    bound_here.add(n.id)
-                return
-
-            if isinstance(n, ast.For):
-                walk(n.iter)
-                self._bind_target(n.target, bound_here)
-                for stmt in n.body:
-                    walk(stmt)
-                for stmt in n.orelse:
-                    walk(stmt)
-                return
-
-            if isinstance(n, ast.AsyncFor):
-                walk(n.iter)
-                self._bind_target(n.target, bound_here)
-                for stmt in n.body:
-                    walk(stmt)
-                for stmt in n.orelse:
-                    walk(stmt)
-                return
-
-            if isinstance(n, ast.With):
-                for item in n.items:
-                    walk(item.context_expr)
-                    if item.optional_vars is not None:
-                        self._bind_target(item.optional_vars, bound_here)
-                for stmt in n.body:
-                    walk(stmt)
-                return
-
-            if isinstance(n, ast.AsyncWith):
-                for item in n.items:
-                    walk(item.context_expr)
-                    if item.optional_vars is not None:
-                        self._bind_target(item.optional_vars, bound_here)
-                for stmt in n.body:
-                    walk(stmt)
-                return
-
-            if isinstance(n, ast.ExceptHandler):
-                if n.type is not None:
-                    walk(n.type)
-                if n.name:
-                    bound_here.add(n.name)
-                for stmt in n.body:
-                    walk(stmt)
-                return
-
-            if isinstance(n, ast.NamedExpr):
-                walk(n.value)
-                self._bind_target(n.target, bound_here)
-                return
-
-            if isinstance(n, ast.comprehension):
-                walk(n.iter)
-                self._bind_target(n.target, bound_here)
-                for if_ in n.ifs:
-                    walk(if_)
-                return
-
-            if isinstance(n, (ast.Global, ast.Nonlocal)):
-                return
-
-            for child in ast.iter_child_nodes(n):
-                walk(child)
-
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            body = node.body
-        elif isinstance(node, ast.Lambda):
-            body = [node.body]
-        else:
-            raise TypeError(f"Unsupported scope root {type(node).__name__}")
-
-        for item in body:
-            walk(item)
-
-        unresolved_here = (
-            used_here
-            - bound_here
-            - available_from_parents
-            - self._builtins
-        )
-
-        needed_globals |= unresolved_here
-        return _ScopeDeps(bound_here=bound_here, needed_globals=needed_globals)
-
-    def _initial_bound_names(self, node: ast.AST) -> set[str]:
-        bound: set[str] = set()
-
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            bound.add(node.name)
-            self._bind_arguments(node.args, bound)
+            # ----------------------------------------------------------
+            # Phase 1: header/declaration-time expressions
+            # These are evaluated in the enclosing scope, NOT in the
+            # function-local scope.
+            # ----------------------------------------------------------
+            header_bound: set[str] = set()
+            header_used: set[str] = set()
+
+            def walk_header(n: ast.AST | None):
+                if n is None:
+                    return
+                self._walk_node(
+                    n,
+                    bound_here=header_bound,
+                    used_here=header_used,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+
+            for dec in node.decorator_list:
+                walk_header(dec)
+
+            self._walk_function_header_annotations_and_defaults(
+                node,
+                walk_header,
+            )
+
+            unresolved_header = (
+                header_used
+                - header_bound
+                - available_from_parents
+                - self._builtins
+            )
+            needed_globals |= unresolved_header
+
+            # ----------------------------------------------------------
+            # Phase 2: body/local lexical scope
+            # ----------------------------------------------------------
+            body_bound: set[str] = {node.name}
+            self._bind_arguments(node.args, body_bound)
+            body_used: set[str] = set()
+
+            for stmt in node.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=body_bound,
+                    used_here=body_used,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents | body_bound,
+                )
+
+            unresolved_body = (
+                body_used
+                - body_bound
+                - available_from_parents
+                - self._builtins
+            )
+            needed_globals |= unresolved_body
+
+            return _ScopeDeps(
+                bound_here=body_bound,
+                needed_globals=needed_globals,
+            )
+
         elif isinstance(node, ast.Lambda):
-            self._bind_arguments(node.args, bound)
+            bound_here: set[str] = set()
+            self._bind_arguments(node.args, bound_here)
+            used_here: set[str] = set()
+
+            self._walk_node(
+                node.body,
+                bound_here=bound_here,
+                used_here=used_here,
+                needed_globals=needed_globals,
+                available_from_parents=available_from_parents | bound_here,
+            )
+
+            unresolved = (
+                used_here
+                - bound_here
+                - available_from_parents
+                - self._builtins
+            )
+            needed_globals |= unresolved
+
+            return _ScopeDeps(
+                bound_here=bound_here,
+                needed_globals=needed_globals,
+            )
+
         elif isinstance(node, ast.ClassDef):
-            pass
+            # Minimal class support:
+            # bases/keywords/decorators are evaluated in enclosing scope
+            header_bound: set[str] = set()
+            header_used: set[str] = set()
+
+            def walk_header(n: ast.AST | None):
+                if n is None:
+                    return
+                self._walk_node(
+                    n,
+                    bound_here=header_bound,
+                    used_here=header_used,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+
+            for dec in node.decorator_list:
+                walk_header(dec)
+            for base in node.bases:
+                walk_header(base)
+            for kw in node.keywords:
+                walk_header(kw.value)
+
+            unresolved_header = (
+                header_used
+                - header_bound
+                - available_from_parents
+                - self._builtins
+            )
+            needed_globals |= unresolved_header
+
+            body_bound: set[str] = set()
+            body_used: set[str] = set()
+
+            for stmt in node.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=body_bound,
+                    used_here=body_used,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents | body_bound,
+                )
+
+            unresolved_body = (
+                body_used
+                - body_bound
+                - available_from_parents
+                - self._builtins
+            )
+            needed_globals |= unresolved_body
+
+            return _ScopeDeps(
+                bound_here={node.name},
+                needed_globals=needed_globals,
+            )
+
         else:
             raise TypeError(f"Unsupported scope root {type(node).__name__}")
 
-        return bound
+    def _walk_function_header_annotations_and_defaults(self, node, walk_header):
+        args = node.args
+
+        for arg in args.posonlyargs:
+            walk_header(arg.annotation)
+        for arg in args.args:
+            walk_header(arg.annotation)
+        if args.vararg:
+            walk_header(args.vararg.annotation)
+        for arg in args.kwonlyargs:
+            walk_header(arg.annotation)
+        if args.kwarg:
+            walk_header(args.kwarg.annotation)
+
+        for default in args.defaults:
+            walk_header(default)
+
+        for default in args.kw_defaults:
+            walk_header(default)
+
+        walk_header(node.returns)
+
+    def _walk_node(
+        self,
+        n: ast.AST | None,
+        *,
+        bound_here: set[str],
+        used_here: set[str],
+        needed_globals: set[str],
+        available_from_parents: set[str],
+    ):
+        if n is None:
+            return
+
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            bound_here.add(n.name)
+
+            if n.decorator_list:
+                raise ValueError(
+                    f"Decorated nested function {n.name!r} is not supported."
+                )
+
+            child = self._collect_scope(
+                n,
+                available_from_parents=available_from_parents | bound_here,
+            )
+            needed_globals |= child.needed_globals
+            return
+
+        if isinstance(n, ast.ClassDef):
+            bound_here.add(n.name)
+
+            if n.decorator_list:
+                raise ValueError(
+                    f"Decorated nested class {n.name!r} is not supported."
+                )
+
+            child = self._collect_scope(
+                n,
+                available_from_parents=available_from_parents | bound_here,
+            )
+            needed_globals |= child.needed_globals
+            return
+
+        if isinstance(n, ast.Lambda):
+            child = self._collect_scope(
+                n,
+                available_from_parents=available_from_parents | bound_here,
+            )
+            needed_globals |= child.needed_globals
+            return
+
+        if isinstance(n, ast.Import):
+            for alias in n.names:
+                bound_here.add(alias.asname or alias.name.split(".", 1)[0])
+            return
+
+        if isinstance(n, ast.ImportFrom):
+            for alias in n.names:
+                bound_here.add(alias.asname or alias.name)
+            return
+
+        if isinstance(n, ast.Name):
+            if isinstance(n.ctx, ast.Load):
+                used_here.add(n.id)
+            elif isinstance(n.ctx, (ast.Store, ast.Del)):
+                bound_here.add(n.id)
+            return
+
+        if isinstance(n, ast.For):
+            self._walk_node(
+                n.iter,
+                bound_here=bound_here,
+                used_here=used_here,
+                needed_globals=needed_globals,
+                available_from_parents=available_from_parents,
+            )
+            self._bind_target(n.target, bound_here)
+            for stmt in n.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            for stmt in n.orelse:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            return
+
+        if isinstance(n, ast.AsyncFor):
+            self._walk_node(
+                n.iter,
+                bound_here=bound_here,
+                used_here=used_here,
+                needed_globals=needed_globals,
+                available_from_parents=available_from_parents,
+            )
+            self._bind_target(n.target, bound_here)
+            for stmt in n.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            for stmt in n.orelse:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            return
+
+        if isinstance(n, ast.With):
+            for item in n.items:
+                self._walk_node(
+                    item.context_expr,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+                if item.optional_vars is not None:
+                    self._bind_target(item.optional_vars, bound_here)
+            for stmt in n.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            return
+
+        if isinstance(n, ast.AsyncWith):
+            for item in n.items:
+                self._walk_node(
+                    item.context_expr,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+                if item.optional_vars is not None:
+                    self._bind_target(item.optional_vars, bound_here)
+            for stmt in n.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            return
+
+        if isinstance(n, ast.ExceptHandler):
+            if n.type is not None:
+                self._walk_node(
+                    n.type,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            if n.name:
+                bound_here.add(n.name)
+            for stmt in n.body:
+                self._walk_node(
+                    stmt,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            return
+
+        if isinstance(n, ast.NamedExpr):
+            self._walk_node(
+                n.value,
+                bound_here=bound_here,
+                used_here=used_here,
+                needed_globals=needed_globals,
+                available_from_parents=available_from_parents,
+            )
+            self._bind_target(n.target, bound_here)
+            return
+
+        if isinstance(n, ast.comprehension):
+            self._walk_node(
+                n.iter,
+                bound_here=bound_here,
+                used_here=used_here,
+                needed_globals=needed_globals,
+                available_from_parents=available_from_parents,
+            )
+            self._bind_target(n.target, bound_here)
+            for if_ in n.ifs:
+                self._walk_node(
+                    if_,
+                    bound_here=bound_here,
+                    used_here=used_here,
+                    needed_globals=needed_globals,
+                    available_from_parents=available_from_parents,
+                )
+            return
+
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            return
+
+        for child in ast.iter_child_nodes(n):
+            self._walk_node(
+                child,
+                bound_here=bound_here,
+                used_here=used_here,
+                needed_globals=needed_globals,
+                available_from_parents=available_from_parents,
+            )
 
     def _bind_arguments(self, args: ast.arguments, bound: set[str]):
         for arg in (
