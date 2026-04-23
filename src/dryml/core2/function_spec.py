@@ -926,7 +926,7 @@ class FunctionSpec:
             )
         return (
             f"FunctionSpec(kind='source', "
-            f"name={self.name!r}, source={self.source!r})"
+            f"name={self.name!r}, source={self.source!r}, imports={self.imports!r})"
         )
 
     def __stable_leaf_bytes__(self):
