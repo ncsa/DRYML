@@ -34,6 +34,9 @@ class Layout(Enum):
 
 BatchLike = int | Dim | None
 
+class BatchMode(Enum):
+    batched="batched"
+    element="element"
 
 def _normalize_dim(dim: DimLike) -> DimLike:
     if isinstance(dim, bool):
@@ -295,3 +298,13 @@ def as_tensor_spec(x: Any, *args, require_consistent_backend=True, **kwargs):
     backend = all_backends.pop()
 
     return backend.as_tensor_spec(x, *args, **kwargs)
+
+
+@dataclass(frozen=True, slots=True)
+class SpecHint:
+    batch_mode: BatchMode = "element"
+    samples: int = 2
+
+    def __post_init__(self):
+        if not isinstance(self, BatchMode):
+            object.__setattr__(self, "batch_mode", BatchMode(self.batch_mode))

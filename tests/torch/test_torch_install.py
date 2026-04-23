@@ -26,7 +26,7 @@ def test_torch_dtype_from_tensor():
 def test_torch_tensor_spec_dense_unbatched():
     x = torch.zeros((4, 32), dtype=torch.float32)
 
-    spec = dryml_torch.as_tensor_spec(x, assume_batched=False)
+    spec = dryml_torch.as_tensor_spec(x, batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (4, 32)
@@ -34,10 +34,10 @@ def test_torch_tensor_spec_dense_unbatched():
     assert spec.layout is Layout.DENSE
 
 
-def test_torch_tensor_spec_dense_assume_batched():
+def test_torch_tensor_spec_dense_batched():
     x = torch.zeros((4, 32), dtype=torch.float32)
 
-    spec = dryml_torch.as_tensor_spec(x, assume_batched=True)
+    spec = dryml_torch.as_tensor_spec(x, batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -67,7 +67,7 @@ def test_torch_tensor_spec_from_adapter():
         layout=torch.strided,
     )
 
-    spec = dryml_torch.as_tensor_spec(x, assume_batched=True)
+    spec = dryml_torch.as_tensor_spec(x, batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -120,7 +120,7 @@ def test_torch_backend_detectors():
 def test_torch_tensor_spec_auto_ingest():
     x = TorchTensorSpec((4, 32), dtype=torch.float32)
     spec = TensorSpec(dtype="float32", shape=(32,), batch=4)
-    assert spec == as_tensor_spec(x, assume_batched=True)
+    assert spec == as_tensor_spec(x, batched=True)
 
     x = torch.randn((4, 32), dtype=torch.float32)
     spec = TensorSpec(dtype="float32", shape=(4, 32,))

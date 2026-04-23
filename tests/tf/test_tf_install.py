@@ -25,7 +25,7 @@ def test_tf_dtype_from_spec():
 def test_tf_tensor_spec_dense_unbatched():
     x = tf.TensorSpec(shape=(None, 32), dtype=tf.float32)
 
-    spec = dryml_tf.as_tensor_spec(x, assume_batched=False)
+    spec = dryml_tf.as_tensor_spec(x, batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (Dynamic, 32)
@@ -33,10 +33,10 @@ def test_tf_tensor_spec_dense_unbatched():
     assert spec.layout is Layout.DENSE
 
 
-def test_tf_tensor_spec_dense_assume_batched():
+def test_tf_tensor_spec_dense_batched():
     x = tf.TensorSpec(shape=(None, 32), dtype=tf.float32)
 
-    spec = dryml_tf.as_tensor_spec(x, assume_batched=True)
+    spec = dryml_tf.as_tensor_spec(x, batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -48,7 +48,7 @@ def test_tf_tensor_spec_dense_assume_batched():
 def test_tf_tensor_spec_from_value():
     x = tf.zeros((4, 32), dtype=tf.float32)
 
-    spec = dryml_tf.as_tensor_spec(x, assume_batched=True)
+    spec = dryml_tf.as_tensor_spec(x, batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -64,7 +64,7 @@ def test_tf_tensor_spec_ragged():
         row_splits_dtype=tf.int64,
     )
 
-    spec = dryml_tf.as_tensor_spec(x, assume_batched=False)
+    spec = dryml_tf.as_tensor_spec(x, batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (Dynamic, Dynamic, 8)
@@ -77,7 +77,7 @@ def test_tf_tensor_spec_ragged():
 def test_tf_tensor_spec_sparse():
     x = tf.SparseTensorSpec(shape=(None, 16), dtype=tf.float32)
 
-    spec = dryml_tf.as_tensor_spec(x, assume_batched=False)
+    spec = dryml_tf.as_tensor_spec(x, batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (Dynamic, 16)
@@ -133,7 +133,7 @@ def test_tf_backend_detectors():
 def test_tf_tensor_spec_auto_ingest():
     x = tf.TensorSpec((4, 32), dtype=tf.float32)
     spec = TensorSpec(dtype="float32", shape=(32,), batch=4)
-    assert spec == as_tensor_spec(x, assume_batched=True)
+    assert spec == as_tensor_spec(x, batched=True)
 
     x = tf.random.uniform(shape=(4, 32), dtype=tf.float32)
     spec = TensorSpec(dtype="float32", shape=(4, 32,))

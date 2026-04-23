@@ -24,7 +24,7 @@ def test_jax_dtype_from_shape_dtype_struct():
 def test_jax_tensor_spec_from_shape_dtype_struct_unbatched():
     x = jax.ShapeDtypeStruct((4, 32), jnp.float32)
 
-    spec = dryml_jax.as_tensor_spec(x, assume_batched=False)
+    spec = dryml_jax.as_tensor_spec(x, batched=False)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (4, 32)
@@ -32,10 +32,10 @@ def test_jax_tensor_spec_from_shape_dtype_struct_unbatched():
     assert spec.layout is Layout.DENSE
 
 
-def test_jax_tensor_spec_from_shape_dtype_struct_assume_batched():
+def test_jax_tensor_spec_from_shape_dtype_struct_batched():
     x = jax.ShapeDtypeStruct((4, 32), jnp.float32)
 
-    spec = dryml_jax.as_tensor_spec(x, assume_batched=True)
+    spec = dryml_jax.as_tensor_spec(x, batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (32,)
@@ -47,7 +47,7 @@ def test_jax_tensor_spec_from_shape_dtype_struct_assume_batched():
 def test_jax_tensor_spec_from_array():
     x = jnp.zeros((3, 16), dtype=jnp.float32)
 
-    spec = dryml_jax.as_tensor_spec(x, assume_batched=True)
+    spec = dryml_jax.as_tensor_spec(x, batched=True)
 
     assert spec.dtype == DType("float", 32)
     assert spec.shape == (16,)
@@ -90,7 +90,7 @@ def test_jax_backend_detectors():
 def test_jax_tensor_spec_auto_ingest():
     x = jax.ShapeDtypeStruct((4, 32), jnp.float32)
     spec = TensorSpec(dtype="float32", shape=(32,), batch=4)
-    assert spec == as_tensor_spec(x, assume_batched=True)
+    assert spec == as_tensor_spec(x, batched=True)
 
     key = jax.random.key(0)
     x = jax.random.uniform(key, shape=(4, 32), dtype=jnp.float32)
