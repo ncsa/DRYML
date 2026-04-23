@@ -124,8 +124,6 @@ def test_tf_roundtrip_ragged_if_forward_methods_installed():
 def test_tf_backend_detectors():
     assert discover_backend(tf.constant(1)) == "tf"
     assert discover_backend(tf.constant(1.5, dtype=tf.float32)) == "tf"
-    assert discover_backend(1) == "python"
-    assert discover_backend(1.5) == "python"
     assert discover_backend(np.uint8(1)) == "numpy"
     assert discover_backend(np.float64(1.5)) == "numpy"
 

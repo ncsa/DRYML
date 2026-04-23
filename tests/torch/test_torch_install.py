@@ -111,8 +111,6 @@ def test_torch_roundtrip_sparse_if_forward_methods_installed():
 def test_torch_backend_detectors():
     assert discover_backend(torch.tensor(1)) == "torch"
     assert discover_backend(torch.tensor(1.5, dtype=torch.float32)) == "torch"
-    assert discover_backend(1) == "python"
-    assert discover_backend(1.5) == "python"
     assert discover_backend(np.uint8(1)) == "numpy"
     assert discover_backend(np.float64(1.5)) == "numpy"
 

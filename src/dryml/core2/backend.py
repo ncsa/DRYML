@@ -1,12 +1,11 @@
 from typing import Any
 from enum import Enum
 
-from dryml.core2.utils.types import is_numpy, is_python_builtin_pod
+from dryml.core2.utils.types import is_numpy
 from dryml.core2.utils.recurse import iter_leaves
 
 
 class Backend(Enum):
-    python = "python"
     numpy = "numpy"
     tf = "tf"
     torch = "torch"
@@ -42,7 +41,6 @@ class Backend(Enum):
 
 
 backend_map = {
-    "python": Backend.python,
     "numpy": Backend.numpy,
     "tf": Backend.tf,
     "torch": Backend.torch,
@@ -51,17 +49,14 @@ backend_map = {
 
 
 backend_testers = {
-    Backend.python: is_python_builtin_pod,
     Backend.numpy: is_numpy,
 }
 
 
-python_check = lambda: True
 numpy_check = lambda: True
 
 
 backend_existence_testers = {
-    Backend.python: python_check,
     Backend.numpy: numpy_check,
 }
 
@@ -71,8 +66,7 @@ def available_backends():
         Backend.jax,
         Backend.torch,
         Backend.tf,
-        Backend.numpy,
-        Backend.python]
+        Backend.numpy]
 
     backends = []
     for backend in all_backends:

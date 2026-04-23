@@ -81,8 +81,6 @@ def test_jax_dynamic_dim_rejected_if_forward_methods_installed():
 def test_jax_backend_detectors():
     assert discover_backend(jnp.array(1)) == "jax"
     assert discover_backend(jnp.float32(1.5)) == "jax"
-    assert discover_backend(1) == "python"
-    assert discover_backend(1.5) == "python"
     assert discover_backend(np.uint8(1)) == "numpy"
     assert discover_backend(np.float64(1.5)) == "numpy"
 
