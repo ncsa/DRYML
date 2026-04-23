@@ -1,6 +1,6 @@
 from contextvars import ContextVar
 from functools import wraps
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any, TypeVar
 
 from ..errors import CycleError
@@ -140,3 +140,117 @@ def leaf_values(x: Any, pred: Callable[[Any], bool]|None=None) -> list[Any]:
     Collect all leaves into a list.
     """
     return list(iter_leaves(x, pred=pred))
+
+
+def map_leaf_groups(
+        xs: Sequence[Any],
+        leaf_fn: Callable[[list[Any]], T]) -> Any:
+    """
+    Recursively combine a non-empty sequence of same-structured Python trees.
+
+    The output mirrors the input element structure, but each leaf position is
+    replaced by ``leaf_fn(...)`` applied to the list of corresponding leaf
+    values across all input trees.
+
+    Supported container nodes:
+      - dict          (matched by exact key order)
+      - list          (matched by length)
+      - tuple         (matched by length)
+      - namedtuple    (matched by exact type and length)
+
+    Everything else is treated as a leaf.
+
+    Examples
+    --------
+    >>> map_leaf_groups(
+    ...     [{'a': 1, 'b': (2, 3)}, {'a': 4, 'b': (5, 6)}],
+    ...     list)
+    {'a': [1, 4], 'b': ([2, 5], [3, 6])}
+    """
+    xs = list(xs)
+    if not xs:
+        raise ValueError("Cannot combine an empty sequence of trees.")
+
+    def rec(vals: list[Any], path: tuple[Any, ...]) -> Any:
+        x0 = vals[0]
+
+        if isinstance(x0, dict):
+            keys0 = tuple(x0.keys())
+            for x in vals[1:]:
+                if not isinstance(x, dict):
+                    raise TypeError(
+                        f"Structure mismatch at {path}: expected dict, got {type(x)!r}"
+                    )
+                if tuple(x.keys()) != keys0:
+                    raise ValueError(
+                        f"Dict key mismatch at {path}: "
+                        f"expected keys {keys0}, got {tuple(x.keys())}"
+                    )
+            return {
+                k: rec([x[k] for x in vals], path + (k,))
+                for k in keys0
+            }
+
+        if is_namedtuple(x0):
+            typ0 = type(x0)
+            n0 = len(x0)
+            for x in vals[1:]:
+                if not is_namedtuple(x):
+                    raise TypeError(
+                        f"Structure mismatch at {path}: expected namedtuple {typ0!r}, "
+                        f"got {type(x)!r}"
+                    )
+                if type(x) is not typ0:
+                    raise TypeError(
+                        f"Namedtuple type mismatch at {path}: "
+                        f"expected {typ0!r}, got {type(x)!r}"
+                    )
+                if len(x) != n0:
+                    raise ValueError(
+                        f"Namedtuple length mismatch at {path}: "
+                        f"expected {n0}, got {len(x)}"
+                    )
+            return typ0(*(rec([x[i] for x in vals], path + (i,)) for i in range(n0)))
+
+        if isinstance(x0, tuple):
+            n0 = len(x0)
+            for x in vals[1:]:
+                if is_namedtuple(x) or not isinstance(x, tuple):
+                    raise TypeError(
+                        f"Structure mismatch at {path}: expected plain tuple, got {type(x)!r}"
+                    )
+                if len(x) != n0:
+                    raise ValueError(
+                        f"Tuple length mismatch at {path}: expected {n0}, got {len(x)}"
+                    )
+            return tuple(rec([x[i] for x in vals], path + (i,)) for i in range(n0))
+
+        if isinstance(x0, list):
+            n0 = len(x0)
+            for x in vals[1:]:
+                if not isinstance(x, list):
+                    raise TypeError(
+                        f"Structure mismatch at {path}: expected list, got {type(x)!r}"
+                    )
+                if len(x) != n0:
+                    raise ValueError(
+                        f"List length mismatch at {path}: expected {n0}, got {len(x)}"
+                    )
+            return [rec([x[i] for x in vals], path + (i,)) for i in range(n0)]
+
+        return leaf_fn(vals)
+
+    return rec(xs, ())
+
+
+def zip_leaves(xs: Sequence[Any]) -> Any:
+    """
+    Recursively transpose a non-empty sequence of same-structured trees so
+    that each leaf becomes a list of corresponding leaf values.
+
+    Example
+    -------
+    >>> zip_leaves([{'a': 1, 'b': (2, 3)}, {'a': 4, 'b': (5, 6)}])
+    {'a': [1, 4], 'b': ([2, 5], [3, 6])}
+    """
+    return map_leaf_groups(xs, list)
