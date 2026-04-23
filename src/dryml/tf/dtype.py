@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from dryml.core2.dtype import DType, normalize_dtype
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
 
 
 def _dtype_tf(self):
@@ -31,45 +30,6 @@ def _dtype_tf(self):
         return table[self.name]
     except KeyError:
         raise TypeError(f"Unsupported TensorFlow dtype: {self.name}")
-
-
-def _tf_shape_to_dryml(shape: Any) -> tuple[int | object, ...] | None:
-    """
-    Convert a tf.TensorShape-like object to DRYML shape form.
-
-    Unknown rank -> None
-    Unknown dim  -> Dynamic
-    """
-    try:
-        dims = shape.as_list()
-    except ValueError:
-        return None
-
-    out = []
-    for d in dims:
-        out.append(Dynamic if d is None else int(d))
-    return tuple(out)
-
-
-def _split_batch(
-    shape: tuple[int | object, ...] | None,
-    *,
-    assume_batched: bool,
-) -> tuple[tuple[int | object, ...] | None, int | object | None]:
-    if not assume_batched:
-        return shape, None
-
-    if shape is None:
-        raise ValueError(
-            "Cannot set assume_batched=True when the TensorFlow shape has unknown rank."
-        )
-
-    if len(shape) == 0:
-        raise ValueError(
-            "Cannot set assume_batched=True for a rank-0 TensorFlow spec/value."
-        )
-
-    return shape[1:], shape[0]
 
 
 def dtype(x: Any) -> DType:
