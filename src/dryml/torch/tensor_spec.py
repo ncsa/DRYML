@@ -56,9 +56,9 @@ def _shape_to_dryml(shape: Any) -> tuple[int | object, ...] | None:
 def _split_batch(
     shape: tuple[int | object, ...] | None,
     *,
-    assume_batched: bool,
+    batched: bool,
 ) -> tuple[tuple[int | object, ...] | None, int | object | None]:
-    if not assume_batched:
+    if not batched:
         return shape, None
 
     if shape is None:
@@ -114,7 +114,7 @@ def dtype(x: Any) -> DType:
 def as_tensor_spec(
     x: Any,
     *,
-    assume_batched: bool = False,
+    batched: bool = False,
     batch_axis_name: str | None = "batch",
 ) -> TensorSpec:
     """
@@ -152,7 +152,7 @@ def as_tensor_spec(
 
             layout, sparse_format = _layout_from_torch_layout(layout_obj)
 
-        sample_shape, batch = _split_batch(full_shape, assume_batched=assume_batched)
+        sample_shape, batch = _split_batch(full_shape, batched=batched)
 
         return TensorSpec(
             dtype=out_dtype,

@@ -46,19 +46,19 @@ def _shape_to_dryml(shape: Any) -> tuple[int, ...] | None:
 def _split_batch(
     shape: tuple[int, ...] | None,
     *,
-    assume_batched: bool,
+    batched: bool,
 ) -> tuple[tuple[int, ...] | None, int | None]:
-    if not assume_batched:
+    if not batched:
         return shape, None
 
     if shape is None:
         raise ValueError(
-            "Cannot set assume_batched=True when the JAX shape has unknown rank."
+            "Cannot set batched=True when the JAX shape has unknown rank."
         )
 
     if len(shape) == 0:
         raise ValueError(
-            "Cannot set assume_batched=True for a rank-0 JAX value/spec."
+            "Cannot set batched=True for a rank-0 JAX value/spec."
         )
 
     return shape[1:], shape[0]
@@ -67,7 +67,7 @@ def _split_batch(
 def as_tensor_spec(
     x: Any,
     *,
-    assume_batched: bool = False,
+    batched: bool = False,
     batch_axis_name: str | None = "batch",
 ) -> TensorSpec:
     """
@@ -85,7 +85,7 @@ def as_tensor_spec(
             )
 
         full_shape = _shape_to_dryml(x.shape)
-        sample_shape, batch = _split_batch(full_shape, assume_batched=assume_batched)
+        sample_shape, batch = _split_batch(full_shape, batched=batched)
 
         return TensorSpec(
             dtype=dtype(x.dtype),

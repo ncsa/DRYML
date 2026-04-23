@@ -68,19 +68,19 @@ def _tf_shape_to_dryml(shape: Any) -> tuple[int | object, ...] | None:
 def _split_batch(
     shape: tuple[int | object, ...] | None,
     *,
-    assume_batched: bool,
+    batched: bool,
 ) -> tuple[tuple[int | object, ...] | None, int | object | None]:
-    if not assume_batched:
+    if not batched:
         return shape, None
 
     if shape is None:
         raise ValueError(
-            "Cannot set assume_batched=True when the TensorFlow shape has unknown rank."
+            "Cannot set batched=True when the TensorFlow shape has unknown rank."
         )
 
     if len(shape) == 0:
         raise ValueError(
-            "Cannot set assume_batched=True for a rank-0 TensorFlow spec/value."
+            "Cannot set batched=True for a rank-0 TensorFlow spec/value."
         )
 
     return shape[1:], shape[0]
@@ -89,7 +89,7 @@ def _split_batch(
 def as_tensor_spec(
     x: SpecTree,
     *,
-    assume_batched: bool = False,
+    batched: bool = False,
     batch_axis_name: str | None = "batch",
 ) -> SpecTree:
     """
@@ -97,7 +97,7 @@ def as_tensor_spec(
 
     Parameters
     ----------
-    assume_batched:
+    batched:
         TensorFlow specs do not intrinsically identify a "batch axis".
         If True, interpret the leading axis as batch.
     """
@@ -108,7 +108,7 @@ def as_tensor_spec(
 
         if isinstance(x, tf.RaggedTensorSpec):
             shape = _tf_shape_to_dryml(x.shape)
-            sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
+            sample_shape, batch = _split_batch(shape, batched=batched)
 
             return TensorSpec(
                 dtype=dtype(x.dtype),
@@ -123,7 +123,7 @@ def as_tensor_spec(
 
         if isinstance(x, tf.SparseTensorSpec):
             shape = _tf_shape_to_dryml(x.shape)
-            sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
+            sample_shape, batch = _split_batch(shape, batched=batched)
 
             return TensorSpec(
                 dtype=dtype(x.dtype),
@@ -137,7 +137,7 @@ def as_tensor_spec(
 
         if isinstance(x, tf.TensorSpec):
             shape = _tf_shape_to_dryml(x.shape)
-            sample_shape, batch = _split_batch(shape, assume_batched=assume_batched)
+            sample_shape, batch = _split_batch(shape, batched=batched)
 
             return TensorSpec(
                 dtype=dtype(x.dtype),
