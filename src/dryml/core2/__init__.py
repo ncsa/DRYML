@@ -4,6 +4,8 @@ from dryml.core2.repo import Repo, load_object, save_object
 from dryml.core2.dtype import dtype, DType
 from dryml.core2.tensor_spec import as_tensor_spec, TensorSpec
 
+import dryml.np as np
+
 __all__ = [
     load_object,
     save_object,
@@ -18,5 +20,6 @@ __all__ = [
     dtype,
     DType,
     as_tensor_spec,
-    TensorSpec
+    TensorSpec,
+    np
 ]

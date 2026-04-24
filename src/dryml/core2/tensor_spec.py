@@ -305,6 +305,15 @@ class SpecHint:
     batch_mode: BatchMode = "element"
     samples: int = 2
 
+    @staticmethod
+    def build(d: dict[str,str|int]|str|int):
+        if isinstance(d, str):
+            return SpecHint(batch_mode=d)
+        elif isinstance(d, int):
+            return SpecHint(samples=d)
+        elif isinstance(d, dict):
+            return SpecHint(**d)
+
     def __post_init__(self):
         if not isinstance(self, BatchMode):
             object.__setattr__(self, "batch_mode", BatchMode(self.batch_mode))

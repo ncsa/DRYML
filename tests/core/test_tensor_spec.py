@@ -2,6 +2,8 @@ import pickle
 
 import pytest
 
+import numpy as np
+
 from dryml.core2.dtype import DType
 from dryml.core2.tensor_spec import (
     Dynamic,
@@ -13,6 +15,7 @@ from dryml.core2.tensor_spec import (
 )
 from dryml.core2.utils.recurse import iter_leaves, map_leaves
 from dryml.core2.utils.stable_hash import stable_hash_function
+import dryml.np as dryml_np
 
 
 def test_tensor_spec_normalizes_dtype_and_shape():
@@ -248,3 +251,25 @@ def test_batch_and_unbatch_spec_tree():
 
 def test_tensor_spec_hashing():
     stable_hash_function(TensorSpec(dtype="float32", shape=(3,)))
+
+
+def test_np_tensor_spec_from_value():
+    x = np.zeros((4, 32), dtype=np.float32)
+
+    spec = dryml_np.as_tensor_spec(x, batched=True)
+
+    assert spec.dtype == DType("float", 32)
+    assert spec.shape == (32,)
+    assert spec.batch == 4
+    assert spec.layout is Layout.DENSE
+
+
+def test_np_tensor_spec_from_value():
+    x = np.zeros((4, 32), dtype=np.float32)
+
+    spec = dryml_np.as_tensor_spec(x, batched=False)
+
+    assert spec.dtype == DType("float", 32)
+    assert spec.shape == (4, 32)
+    assert spec.batch == None
+    assert spec.layout is Layout.DENSE
