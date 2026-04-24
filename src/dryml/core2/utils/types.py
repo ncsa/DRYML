@@ -73,10 +73,6 @@ def is_namedtuple(x: Any) -> bool:
     return isinstance(x, tuple) and hasattr(type(x), "_fields")
 
 
-def is_python_builtin_pod(x: Any) -> bool:
-    return type(x) in {type(None), bool, int, float, complex, str, bytes}
-
-
 def is_numpy(x: Any) -> bool:
     import numpy as np
     return isinstance(x, (np.ndarray, np.generic))
