@@ -27,12 +27,20 @@ class Backend(Enum):
             return self.value == rhs.value
 
     @property
+    def module(self):
+        from dryml.context import ContextError
+        import importlib
+        if not backend_existence_testers[self]():
+            raise ContextError("This backend is not available in this context.")
+        return importlib.import_module(f"dryml.{self.value}")
+
+    @property
     def dtype(self):
-        return backend_dtype_method_map[self]
+        return self.module.dtype
 
     @property
     def as_tensor_spec(self):
-        return backend_as_tensor_spec_method_map[self]
+        return self.module.as_tensor_spec
 
 
 backend_map = {
@@ -91,11 +99,3 @@ def discover_backends(*args, _backends: list[Backend]|None=None, **kwargs) -> se
     kwarg_backends = set(map(lambda v: discover_backends(v, _backends=_backends), iter_leaves(kwargs)))
 
     return arg_backends.union(kwarg_backends)
-
-
-backend_dtype_method_map = {
-}
-
-
-backend_as_tensor_spec_method_map = {
-}

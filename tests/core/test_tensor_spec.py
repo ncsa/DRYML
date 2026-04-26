@@ -15,7 +15,7 @@ from dryml.core2.tensor_spec import (
 )
 from dryml.core2.utils.recurse import iter_leaves, map_leaves
 from dryml.core2.utils.stable_hash import stable_hash_function
-import dryml.np as dryml_np
+import dryml.numpy as dryml_np
 
 
 def test_tensor_spec_normalizes_dtype_and_shape():
