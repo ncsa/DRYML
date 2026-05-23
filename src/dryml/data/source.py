@@ -1,0 +1,265 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
+from typing import Any, Callable
+import inspect
+
+from dryml.core2.tensor_spec import Dynamic, SpecTree, TensorSpec, SpecHint, as_tensor_spec
+from dryml.core2.cardinality import Cardinality
+from dryml.core2.utils.recurse import first_leaf, iter_leaves
+from dryml.context import check_context
+from .dataset import Dataset
+
+
+# ----------------------------------------------------------------------
+# Source datasets
+# ----------------------------------------------------------------------
+
+class SourceDataset(Dataset):
+    pass
+
+
+class GeneratorDataset(SourceDataset):
+    """
+    Dataset backed by a callable that returns a fresh iterator/generator
+    each time it is invoked.
+    """
+
+    def __init__(
+        self,
+        gen_factory: Callable[[], Iterable[Any]],
+        *factory_args,
+        cardinality: Cardinality =Cardinality.UNKNOWN,
+        spec: SpecTree|str|int|dict[str,str|int]|None=None,
+        **factory_kwargs
+    ):
+        super().__init__()
+
+        if not callable(gen_factory):
+            raise TypeError("generator_fn must be callable and return a fresh iterator.")
+
+        self.gen_factory = gen_factory
+        self.factory_args = factory_args
+        self.factory_kwargs = factory_kwargs
+        self.cardinality = cardinality
+        if spec is None:
+            self._spec = spec
+        first_leaf
+        if isinstance(spec, SpecHint):
+            self._spec = self._detect_spec(spec)
+        else:
+            leaf = first_leaf(spec)
+            if isinstance(leaf, TensorSpec):
+                self._spec = spec
+            else:
+                self._spec = self._detect_spec(SpecHint.build(spec))
+
+
+    def __iter__(self) -> Iterator[Any]:
+        it = self.gen_factory(
+            *self.factory_args,
+            **self.factory_kwargs)()
+        if not hasattr(it, "__iter__"):
+            raise TypeError(
+                f"generator_fn returned {type(it).__name__}, which is not iterable."
+            )
+        if self.cardinality.is_finite:
+            yield from itertools.isclice(it, int(self.cardinality))
+        else:
+            yield from it
+
+    def __len__(self) -> Cardinality:
+        return self.cardinality
+
+
+class ArrayDataset(SourceDataset):
+    """
+    Dataset backed by one or more aligned stacked arrays.
+
+    Examples
+    --------
+    arrays = {
+        "cart": np.zeros((100, 3), dtype=np.float32),
+        "sph": np.zeros((100, 2), dtype=np.float32),
+    }
+
+    ds = ArrayDataset(arrays)
+    x0 = ds.peek()
+    # x0["cart"].shape == (3,)
+    # x0["sph"].shape == (2,)
+    """
+
+    def __init__(
+        self,
+        arrays: Any,
+        *,
+        spec: SpecTree | None = None,
+        batched = True,
+        validate_lengths: bool = True,
+    ):
+        if validate_lengths:
+            lengths = list(map(len,iter_leaves(arrays)))
+            if not lengths:
+                raise ValueError("ArrayDataset requires at least one leaf.")
+            if len(set(lengths)) != 1:
+                raise ValueError(
+                    f"All ArrayDataset leaves must agree on leading length, got {lengths}."
+                )
+            self._length = lengths[0]
+        else:
+            self._length = len(next(iter_leaves(arrays)))
+
+        self.arrays = arrays
+
+        if spec is None:
+            spec = as_tensor_spec(arrays, batch=batched)
+
+        super().__init__(spec=spec)
+
+    def __iter__(self) -> Iterator[Any]:
+        for i in range(self._length):
+            yield _tree_index(self.arrays, i)
+
+    def __len__(self) -> int:
+        return self._length
+
+    def peek(self) -> Any:
+        if self._length == 0:
+            raise ValueError("Cannot peek an empty dataset.")
+        return _tree_index(self.arrays, 0)
+
+
+class TFDatasetAdapter(SourceDataset):
+    """
+    Adapter for tf.data.Dataset.
+
+    Notes
+    -----
+    - If `as_numpy=True`, iteration uses `dataset.as_numpy_iterator()`.
+    - If `spec` is not provided, it is derived from `dataset.element_spec`.
+    - Batch semantics are ambiguous in flat TensorFlow specs, so if the
+      TF dataset yields batches and you want that reflected in DRYML specs,
+      pass `assume_batched=True` or provide `spec` explicitly.
+    """
+
+    def __init__(
+        self,
+        dataset: Any,
+        *,
+        spec: SpecTree | None = None,
+        as_numpy: bool = False,
+        assume_batched: bool = False,
+    ):
+        check_context('tf')
+        import tensorflow as tf
+
+        if not isinstance(dataset, tf.data.Dataset):
+            raise TypeError(
+                f"dataset must be a tf.data.Dataset, got {type(dataset).__name__}."
+            )
+
+        self.dataset = dataset
+        self.as_numpy = as_numpy
+
+        import dryml.tf
+
+        if spec is None:
+            spec = dryml.tf.as_tensor_spec(
+                dataset.element_spec,
+                assume_batched=assume_batched,
+            )
+
+        super().__init__(spec=spec)
+
+    def __iter__(self) -> Iterator[Any]:
+        if self.as_numpy:
+            yield from self.dataset.as_numpy_iterator()
+        else:
+            yield from self.dataset
+
+    def __len__(self) -> int:
+        try:
+            import tensorflow as tf  # type: ignore
+        except Exception as e:
+            raise ImportError("TensorFlow is required for TFDatasetAdapter.") from e
+
+        card = self.dataset.cardinality()
+        card_val = int(card.numpy())
+
+        if card_val == tf.data.UNKNOWN_CARDINALITY:
+            return super().__len__()
+        if card_val == tf.data.INFINITE_CARDINALITY:
+            raise TypeError("TFDatasetAdapter has infinite cardinality.")
+
+        return card_val
+
+
+class TorchDatasetAdapter(SourceDataset):
+    """
+    Adapter for torch.utils.data.Dataset and IterableDataset.
+
+    Notes
+    -----
+    - For map-style datasets, iteration uses dataset[i].
+    - For iterable datasets, iteration delegates to iter(dataset).
+    - If `spec` is omitted and `infer_spec=True`, spec is inferred from `peek()`.
+      For iterable datasets this assumes the dataset is safely re-iterable.
+    """
+
+    def __init__(
+        self,
+        dataset: Any,
+        *,
+        spec: SpecTree | None = None,
+        infer_spec: bool = False,
+    ):
+        try:
+            import torch.utils.data as tud  # type: ignore
+        except Exception as e:
+            raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
+
+        if not isinstance(dataset, (tud.Dataset, tud.IterableDataset)):
+            raise TypeError(
+                "dataset must be a torch.utils.data.Dataset or IterableDataset, "
+                f"got {type(dataset).__name__}."
+            )
+
+        self.dataset = dataset
+
+        if spec is None and infer_spec:
+            spec = as_tensor_spec(self.peek())
+
+        super().__init__(spec=spec)
+
+    def __iter__(self) -> Iterator[Any]:
+        try:
+            import torch.utils.data as tud  # type: ignore
+        except Exception as e:
+            raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
+
+        if isinstance(self.datasets, tud.IterableDataset):
+            yield from iter(self.dataset)
+            return
+
+        for i in range(len(self.dataset)):
+            yield self.dataset[i]
+
+    def __len__(self) -> int:
+        if hasattr(self.dataset, "__len__"):
+            return int(len(self.dataset))
+        return super().__len__()
+
+    def peek(self) -> Any:
+        try:
+            import torch.utils.data as tud  # type: ignore
+        except Exception as e:
+            raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
+
+        if isinstance(self.dataset, tud.IterableDataset):
+            return super().peek()
+
+        n = len(self.dataset)
+        if n == 0:
+            raise ValueError("Cannot peek an empty dataset.")
+        return self.dataset[0]
+
