@@ -9,6 +9,7 @@ from io import IOBase
 from pathlib import Path
 import weakref
 from contextvars import ContextVar
+from collections.abc import Mapping
 import numpy as np
 import atexit
 
@@ -18,6 +19,7 @@ from .store.store import Store
 from .policies import InstancePolicy, CachePolicy
 from .repo_graph import RepoSaveVisitor, RepoAddObjectsVisitor, manage_revision
 from .canonical import from_canonical
+from .config import CONFIG_MISSING, ConfigError, ConfigRef
 
 
 class RepoSaveError(Exception):
@@ -62,6 +64,9 @@ class Repo:
     # Object config store
     obj_config: dict[ConcreteDefinition, Any]
 
+    # Runtime config values, intentionally not persisted by stores.
+    config: dict[str, Any]
+
     # User-facing alias index
     alias_index: dict[str, ConcreteDefinition]
 
@@ -70,7 +75,7 @@ class Repo:
 
 
     # Helper class for saving objects
-    def __init__(self, stores=None):
+    def __init__(self, stores=None, config: Mapping[str, Any] | None = None):
         # Initialize caches
         self.weak_obj_cache = weakref.WeakValueDictionary()
         self.strong_obj_cache = {}
@@ -78,6 +83,7 @@ class Repo:
         self.light_index = set()
         self.cdef_cache = weakref.WeakValueDictionary()
         self.obj_config = {}
+        self.config = dict(config or {})
         self.alias_index = {}
 
         # Some helper variables for monitoring
@@ -232,6 +238,55 @@ class Repo:
 
     def load_alias(self, alias: str, **kwargs):
         return self.load_object(self.get_alias(alias), **kwargs)
+
+    def set_config(self, key: str, value: Any) -> None:
+        if not isinstance(key, str):
+            raise TypeError("Config keys must be strings.")
+        if key == "":
+            raise ValueError("Config keys cannot be empty.")
+        self.config[key] = value
+
+    def update_config(self, values: Mapping[str, Any]) -> None:
+        for key, value in values.items():
+            self.set_config(key, value)
+
+    def get_config(self, key: str, default=CONFIG_MISSING) -> Any:
+        if not isinstance(key, str):
+            raise TypeError("Config keys must be strings.")
+        if key in self.config:
+            return self.config[key]
+
+        cur = self.config
+        found_nested = True
+        for part in key.split("."):
+            if isinstance(cur, Mapping) and part in cur:
+                cur = cur[part]
+            else:
+                found_nested = False
+                break
+        if found_nested:
+            return cur
+
+        if default is not CONFIG_MISSING:
+            return default
+        raise ConfigError(f"Repo config has no value for {key!r}.")
+
+    def resolve_config(self, value: Any) -> Any:
+        if isinstance(value, ConfigRef):
+            if value.has_default:
+                return self.get_config(value.key, default=value.default)
+            return self.get_config(value.key)
+
+        if isinstance(value, Mapping):
+            return {k: self.resolve_config(v) for k, v in value.items()}
+        if isinstance(value, tuple):
+            return tuple(self.resolve_config(v) for v in value)
+        if isinstance(value, list):
+            return [self.resolve_config(v) for v in value]
+        if isinstance(value, (set, frozenset)):
+            return type(value)(self.resolve_config(v) for v in value)
+
+        return value
 
     def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
         # do any stores have data for this cdef?

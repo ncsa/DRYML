@@ -57,6 +57,11 @@ class Dryml(type):
             # Run pre-init check
             cls.__pre_init__()
 
+            # Resolve host/runtime-specific config leaves after identity has been
+            # computed, but before the user initializer receives its arguments.
+            rt_args = sub_repo.resolve_config(rt_args)
+            rt_kwargs = sub_repo.resolve_config(rt_kwargs)
+
             # Actual object allocation
             obj = cls.__new__(cls)
 

@@ -147,6 +147,12 @@ class TestWrapper(Object):
         super().__init__()
         self.obj = validate_class(cls)(*args, **kwargs)
 
+
+class ConfigConsumer(Object):
+    def __init__(self, value, nested=None):
+        self.value = value
+        self.nested = nested
+
 # class DeepcopyAware:
 #     def __init__(self, val):
 #         self.val = val
