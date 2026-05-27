@@ -97,6 +97,9 @@ class ZipStore(Store):
     def _main_def_path(self) -> str:
         return os.path.join(self.base_dir, "def.pkl")
 
+    def _aliases_path(self) -> str:
+        return os.path.join(self.base_dir, "aliases.pkl")
+
     def read_main_def(self) -> ConcreteDefinition | None:
         # prefer cached version; fall back to on-disk if needed
         if self._main_def is not None:
@@ -110,6 +113,15 @@ class ZipStore(Store):
     def write_main_def(self) -> None:
         if self._main_def is not None:
             pickle_save(self._main_def, self._main_def_path())
+
+    def read_aliases(self) -> dict[str, ConcreteDefinition]:
+        path = self._aliases_path()
+        if os.path.exists(path):
+            return pickle_load(path)
+        return {}
+
+    def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> None:
+        pickle_save(dict(aliases), self._aliases_path())
 
     def set_main_def(self, main_def: ConcreteDefinition) -> None:
         # just cache it; actual file write happens in commit()

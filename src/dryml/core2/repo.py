@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import glob
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from contextlib import contextmanager
 from io import IOBase
 from pathlib import Path
@@ -62,6 +62,9 @@ class Repo:
     # Object config store
     obj_config: dict[ConcreteDefinition, Any]
 
+    # User-facing alias index
+    alias_index: dict[str, ConcreteDefinition]
+
     # Settings
     save_objs_on_deletion: bool = False
 
@@ -75,6 +78,7 @@ class Repo:
         self.light_index = set()
         self.cdef_cache = weakref.WeakValueDictionary()
         self.obj_config = {}
+        self.alias_index = {}
 
         # Some helper variables for monitoring
         self._num_saves = 0
@@ -108,6 +112,8 @@ class Repo:
                         break
             if main_def is not None:
                 self.set_main_def(main_def)
+
+            self._load_aliases_from_stores()
 
     # Store Methods
 
@@ -161,6 +167,72 @@ class Repo:
         if obj is not None:
             self.weak_obj_cache[cdef] = obj
 
+    def _load_aliases_from_stores(self) -> None:
+        for store in self.stores:
+            for alias, cdef in store.read_aliases().items():
+                self._validate_alias(alias)
+                if not isinstance(cdef, ConcreteDefinition):
+                    raise RepoLoadError(
+                        f"Alias {alias!r} points to {type(cdef).__name__}, not a ConcreteDefinition."
+                    )
+                existing = self.alias_index.get(alias)
+                if existing is not None and existing != cdef:
+                    raise RepoLoadError(f"Conflicting definitions found for alias {alias!r}.")
+                self.alias_index[alias] = cdef
+
+    @staticmethod
+    def _validate_alias(alias: str) -> None:
+        if not isinstance(alias, str):
+            raise TypeError("Object aliases must be strings.")
+        if alias == "":
+            raise ValueError("Object aliases cannot be empty strings.")
+
+    def _alias_target_cdef(self, target: Object | Definition | ConcreteDefinition) -> ConcreteDefinition:
+        if isinstance(target, Object):
+            return target.definition
+        if isinstance(target, ConcreteDefinition):
+            return target
+        if isinstance(target, Definition):
+            return target.concretize(repo=self)
+        raise TypeError(
+            "Alias target must be an Object, Definition, or ConcreteDefinition."
+        )
+
+    def set_alias(self, alias: str, target: Object | Definition | ConcreteDefinition, *, store=None) -> ConcreteDefinition:
+        self._validate_alias(alias)
+
+        if store is not None:
+            store = make_store(store)
+            if store not in self.stores:
+                self.add_store(store)
+
+        cdef = self._alias_target_cdef(target)
+        if isinstance(target, Object):
+            self.add_objects(target, store=store)
+
+        self.alias_index[alias] = cdef
+        return cdef
+
+    def get_alias(self, alias: str) -> ConcreteDefinition:
+        self._validate_alias(alias)
+        try:
+            return self.alias_index[alias]
+        except KeyError as e:
+            raise KeyError(f"Repo has no alias {alias!r}.") from e
+
+    def delete_alias(self, alias: str) -> ConcreteDefinition:
+        self._validate_alias(alias)
+        try:
+            return self.alias_index.pop(alias)
+        except KeyError as e:
+            raise KeyError(f"Repo has no alias {alias!r}.") from e
+
+    def aliases(self) -> dict[str, ConcreteDefinition]:
+        return dict(self.alias_index)
+
+    def load_alias(self, alias: str, **kwargs):
+        return self.load_object(self.get_alias(alias), **kwargs)
+
     def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
         # do any stores have data for this cdef?
         return any(store.has(cdef) for store in self.stores)
@@ -177,12 +249,14 @@ class Repo:
     def __len__(self):
         return len(self.strong_obj_cache)
 
-    def save_object(self, obj, main=False, store=None, revision=None):
+    def save_object(self, obj, main=False, store=None, revision=None, alias: str | None = None):
         revision = manage_revision(obj, revision)
         RepoSaveVisitor(self, store=store, revision=revision).visit(obj)
 
         if main:
             self.set_main_def(obj.definition, store=store)
+        if alias is not None:
+            self.set_alias(alias, obj, store=store)
         return True
 
     def save(self, obj: Object | None = None, store=None, revision: RevisionType|str|None=None):
@@ -561,6 +635,7 @@ class Repo:
     def flush(self):
         # Commit all stores
         for store in self.stores:
+            store.write_aliases(self.alias_index)
             store.commit()
 
     def close(self, flush=True):
@@ -711,12 +786,17 @@ def manage_repo(repo=None):
 
 
 # Saving and Loading
-def save_object(obj, repo=None, main=False, revision: RevisionType|str|None=None):
+def save_object(obj, repo=None, main=False, revision: RevisionType|str|None=None, alias: str | None = None):
     with manage_repo(repo=repo) as sub_repo:
         revision = manage_revision(obj, revision)
         main = main or ((repo is not sub_repo) and isinstance(obj, Object))
         sub_repo.add_objects(obj)
-        sub_repo.save_object(obj, main=main, revision=revision)
+        sub_repo.save_object(obj, main=main, revision=revision, alias=alias)
+
+
+def load_alias(alias: str, repo=None, **kwargs):
+    with manage_repo(repo=repo) as repo:
+        return repo.load_alias(alias, **kwargs)
 
 
 def load_object(

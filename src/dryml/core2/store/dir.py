@@ -46,6 +46,9 @@ class DirStore(Store):
     def _main_def_path(self) -> str:
         return os.path.join(self.base_dir, "def.pkl")
 
+    def _aliases_path(self) -> str:
+        return os.path.join(self.base_dir, "aliases.pkl")
+
     def read_main_def(self) -> ConcreteDefinition | None:
         path = self._main_def_path()
         if os.path.exists(path):
@@ -58,6 +61,15 @@ class DirStore(Store):
     def write_main_def(self, main_def: ConcreteDefinition) -> None:
         path = self._main_def_path()
         pickle_save(main_def, path)
+
+    def read_aliases(self) -> dict[str, ConcreteDefinition]:
+        path = self._aliases_path()
+        if os.path.exists(path):
+            return pickle_load(path)
+        return {}
+
+    def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> None:
+        pickle_save(dict(aliases), self._aliases_path())
 
     def commit(self) -> None:
         if self._main_def is not None:

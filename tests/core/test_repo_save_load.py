@@ -337,7 +337,7 @@ def test_save_load_1(primary_store_set):
     dryml.core2.save_object(obj1, repo=repo, main=True)
     repo.flush()
 
-    assert len(os.listdir(repo.stores[0].base_dir)) == 2
+    assert len(os.listdir(repo.stores[0].base_dir)) == 3
     assert len(os.listdir(repo.stores[0].object_root_dir)) == 1
 
     del repo
@@ -362,7 +362,7 @@ def test_save_load_2(primary_store_set):
     dryml.core2.save_object(obj4, repo=repo, main=True)
     repo.flush()
 
-    assert len(os.listdir(repo.stores[0].base_dir)) == 2
+    assert len(os.listdir(repo.stores[0].base_dir)) == 3
     obj_dirs = glob.glob(os.path.join(repo.stores[0].object_root_dir, '*', '*'))
     assert len(obj_dirs) == 4
     del repo
@@ -397,7 +397,7 @@ def test_save_load_3(primary_store_set):
     dryml.core2.save_object(obj11, repo=repo, main=True)
     repo.flush()
 
-    assert len(os.listdir(repo.stores[0].base_dir)) == 2
+    assert len(os.listdir(repo.stores[0].base_dir)) == 3
     obj_dirs = glob.glob(os.path.join(repo.stores[0].object_root_dir, '*', '*'))
     assert len(obj_dirs) == 11
 

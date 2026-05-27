@@ -82,6 +82,14 @@ class Store(ABC):
         """Set the store's main def"""
         pass
 
+    def read_aliases(self) -> dict[str, "ConcreteDefinition"]:
+        """Return stored object aliases, or an empty mapping if unsupported."""
+        return {}
+
+    def write_aliases(self, aliases: dict[str, "ConcreteDefinition"]) -> None:
+        """Persist object aliases. Stores may no-op if aliases are unsupported."""
+        pass
+
     def commit(self) -> None:
         """Optional; useful for zips, S3, HDF5, etc."""
         ...
