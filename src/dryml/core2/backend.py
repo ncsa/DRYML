@@ -95,7 +95,15 @@ def discover_backends(*args, _backends: list[Backend]|None=None, **kwargs) -> se
     if _backends is None:
         _backends = available_backends()
 
-    arg_backends = set(map(lambda v: discover_backends(v, _backends=_backends), iter_leaves(args)))
-    kwarg_backends = set(map(lambda v: discover_backends(v, _backends=_backends), iter_leaves(kwargs)))
+    def leaf_backend(v):
+        try:
+            return discover_backend(v, _backends=_backends)
+        except TypeError:
+            return None
+
+    arg_backends = {leaf_backend(v) for v in iter_leaves(args)}
+    kwarg_backends = {leaf_backend(v) for v in iter_leaves(kwargs)}
+    arg_backends.discard(None)
+    kwarg_backends.discard(None)
 
     return arg_backends.union(kwarg_backends)

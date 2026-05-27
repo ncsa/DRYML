@@ -13,15 +13,16 @@ from .backend import is_jax_available, is_jax_value
 
 
 def _install() -> None:
-    install_method(DType, "jax", _dtype_jax)
-    install_method(TensorSpec, "jax", _tensor_spec_jax)
+    try:
+        install_method(DType, "jax", _dtype_jax)
+        install_method(TensorSpec, "jax", _tensor_spec_jax)
+    except RuntimeError:
+        # methods already installed, so we'll exit here.
+        return
 
-    from dryml.core2.backend import backend_testers, backend_existence_testers, \
-        backend_dtype_method_map, backend_as_tensor_spec_method_map
+    from dryml.core2.backend import backend_testers, backend_existence_testers
     backend_testers[Backend.jax] = is_jax_value
     backend_existence_testers[Backend.jax] = is_jax_available
-    backend_dtype_method_map[Backend.jax] = dtype
-    backend_as_tensor_spec_method_map[Backend.jax] = as_tensor_spec
 
 
 _install()

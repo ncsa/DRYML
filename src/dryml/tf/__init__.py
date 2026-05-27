@@ -14,15 +14,16 @@ from .backend import is_tf_available, is_tf_value
 
 
 def _install() -> None:
-    install_method(DType, "tf", _dtype_tf)
-    install_method(TensorSpec, "tf", _tensor_spec_tf)
+    try:
+        install_method(DType, "tf", _dtype_tf)
+        install_method(TensorSpec, "tf", _tensor_spec_tf)
+    except RuntimeError:
+        # methods already installed, so we'll exit here.
+        return
 
-    from dryml.core2.backend import backend_testers, backend_existence_testers, \
-        backend_dtype_method_map, backend_as_tensor_spec_method_map
+    from dryml.core2.backend import backend_testers, backend_existence_testers
     backend_testers[Backend.tf] = is_tf_value
     backend_existence_testers[Backend.tf] = is_tf_available
-    backend_dtype_method_map[Backend.tf] = dtype
-    backend_as_tensor_spec_method_map[Backend.tf] = as_tensor_spec
 
 
 _install()

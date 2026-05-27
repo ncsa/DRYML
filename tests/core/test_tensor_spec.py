@@ -181,9 +181,17 @@ def test_is_spec_tree_nested():
     assert is_spec_tree(spec)
 
 
-def test_is_spec_tree_rejects_bad_dict_key():
+def test_is_spec_tree_allows_int_dict_key():
     spec = {
         0: TensorSpec(dtype="float32", shape=(3,)),
+    }
+
+    assert is_spec_tree(spec)
+
+
+def test_is_spec_tree_rejects_bad_dict_key():
+    spec = {
+        object(): TensorSpec(dtype="float32", shape=(3,)),
     }
 
     assert not is_spec_tree(spec)

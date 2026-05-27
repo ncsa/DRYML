@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from enum import Enum
-from multiprocessing.sharedctypes import Value
 from typing import Any, TypeAlias
 
 from .dtype import DType, normalize_dtype
@@ -20,6 +20,7 @@ class Dim(Enum):
 Dynamic = Dim.DYNAMIC
 DimLike = int | Dim
 AxisName = str | None
+TreeKey: TypeAlias = str | int
 
 
 class Layout(Enum):
@@ -81,83 +82,6 @@ def _normalize_axis_names(
 
 
 @dataclass(frozen=True, slots=True)
-class TensorLeafSpec:
-    dtype: DType | str | Any
-    shape: tuple[DimLike, ...] | None = ()
-    layout: Layout = Layout.DENSE
-
-    # Optional stuff
-    axis_names: tuple[AxisName, ...] | None = None
-    ragged_rank: int | None = None
-    row_splits_dtype: DType | None = None
-    sparse_format: str | None = None
-
-    def __post_init__(self):
-        object.__setattr__(self, "dtype", normalize_dtype(self.dtype))
-        object.__setattr__(self, "shape", _normalize_shape(self.shape))
-
-        rank = None if self.shape is None else len(self.shape)
-        object.__setattr__(
-            self,
-            "axis_names",
-            _normalize_axis_names(self.axis_names, rank, "axis_names"),
-        )
-
-        if self.row_splits_dtype is not None:
-            object.__setattr__(self, "row_splits_dtype", normalize_dtype(self.row_splits_dtype))
-
-        if not isinstance(self.layout, Layout):
-            raise TypeError("layout must be a Layout enum value.")
-
-    @property
-    def rank(self) -> int | None:
-        return None if self.shape is None else len(self.shape)
-
-    def with_dtype(self, dtype):
-        return replace(self, dtype=dtype)
-
-    def with_shape(self, shape):
-        return replace(self, shape=shape)
-
-    def __repr__(self) -> str:
-        cls_str = f"{type(self).__name__}"
-
-        var_strs = []
-        var_strs.append(self.dtype.name)
-        var_strs.append(f"shape={self.shape}")
-        if self.layout is not Layout.DENSE:
-            var_strs.append(f"layout={self.layout}")
-        if self.ragged_rank is not None:
-            var_strs.append(f"ragged_rank={self.ragged_rank}")
-        if self.row_splits_dtype is not None:
-            var_strs.append(f"row_splits_dtype={self.row_splits_dtype}")
-        if self.sparse_format is not None:
-            var_strs.append(f"sparse_format={self.sparse_format}")
-
-        return f"{cls_str}({",".join(var_strs)})"
-
-    def __eq__(self, rhs) -> bool:
-        if not isinstance(rhs, TensorLeafSpec):
-            raise NotImplementedError(f"TensorSpec comparison not implemented for this type ({type(rhs)})")
-
-        return (
-            self.dtype == rhs.dtype and
-            self.shape == rhs.shape and
-            self.layout == rhs.layout and
-            self.ragged_rank == rhs.ragged_rank and
-            self.row_splits_dtype == rhs.row_splits_dtype and
-            self.sparse_format == rhs.sparse_format)
-
-
-LeafSpecTree: TypeAlias = (
-    TensorLeafSpec
-    | dict[str, "LeafSpecTree"]
-    | tuple["LeafSpecTree", ...]
-    | list["LeafSpecTree"]
-)
-
-
-@dataclass(frozen=True, slots=True)
 class TensorSpec:
     """
     Backend-independent tensor interface spec.
@@ -188,53 +112,140 @@ class TensorSpec:
     backend:
         Optional name for the backend used for this tensor
     """
-    spec: LeafSpecTree
+    dtype: DType | str | Any
+    shape: tuple[DimLike, ...] | list[DimLike] | None = ()
     batch: BatchLike = None
     backend: Backend | None = None
+    layout: Layout = Layout.DENSE
+    axis_names: tuple[AxisName, ...] | list[AxisName] | None = None
     batch_axis_name: AxisName = "batch"
+    ragged_rank: int | None = None
+    row_splits_dtype: DType | str | Any | None = None
+    sparse_format: str | None = None
 
     def __post_init__(self):
+        object.__setattr__(self, "dtype", normalize_dtype(self.dtype))
+        object.__setattr__(self, "shape", _normalize_shape(self.shape))
         object.__setattr__(self, "batch", _normalize_batch(self.batch))
+
+        if not isinstance(self.layout, Layout):
+            object.__setattr__(self, "layout", Layout(self.layout))
+
+        rank = None if self.shape is None else len(self.shape)
+        object.__setattr__(
+            self,
+            "axis_names",
+            _normalize_axis_names(self.axis_names, rank, "axis_names"),
+        )
+
         if self.batch_axis_name is not None and not isinstance(self.batch_axis_name, str):
             raise TypeError("batch_axis_name must be str or None.")
 
-        if self.batch is None and self.batch_axis_name != "batch":
-            # optional: either allow this or force None when unbatched
-            pass
+        if self.batch is None and self.batch_axis_name == "batch":
+            object.__setattr__(self, "batch_axis_name", None)
+
+        if self.row_splits_dtype is not None:
+            object.__setattr__(self, "row_splits_dtype", normalize_dtype(self.row_splits_dtype))
 
         if self.backend is not None:
             if not isinstance(self.backend, Backend):
                 object.__setattr__(self, "backend", Backend(self.backend))
 
     @property
+    def rank(self) -> int | None:
+        return None if self.shape is None else len(self.shape)
+
+    @property
+    def full_shape(self) -> tuple[DimLike, ...] | None:
+        if self.shape is None:
+            return None
+        if self.batch is None:
+            return self.shape
+        return (self.batch, *self.shape)
+
+    @property
+    def full_rank(self) -> int | None:
+        shape = self.full_shape
+        return None if shape is None else len(shape)
+
+    @property
     def batched(self) -> bool:
         return self.batch is not None
 
+    def framework_shape(self, *, include_batch: bool = True) -> tuple[DimLike, ...] | None:
+        if include_batch:
+            return self.full_shape
+        return self.shape
+
     def with_batch(self, batch: int | Dim = Dynamic, axis_name: str | None = "batch") -> TensorSpec:
         return replace(self, batch=batch, batch_axis_name=axis_name)
+
     def without_batch(self) -> TensorSpec:
-        return replace(self, batch=None)
+        return replace(self, batch=None, batch_axis_name=None)
+
+    def with_dtype(self, dtype: DType | str | Any) -> TensorSpec:
+        return replace(self, dtype=dtype)
+
+    def with_shape(self, shape: tuple[DimLike, ...] | list[DimLike] | None) -> TensorSpec:
+        return replace(self, shape=shape)
+
+    def compatible_with_shape(self, shape: tuple[int, ...] | list[int], *, include_batch: bool = True) -> bool:
+        expected = self.framework_shape(include_batch=include_batch)
+        if expected is None:
+            return True
+        shape = tuple(shape)
+        if len(shape) != len(expected):
+            return False
+        return all(e is Dynamic or e == a for e, a in zip(expected, shape))
 
     def __repr__(self) -> str:
         cls_str = f"{type(self).__name__}"
 
         var_strs = []
-        var_strs.append(f"{self.spec!r}")
+        var_strs.append(self.dtype.name)
+        var_strs.append(f"shape={self.shape}")
         if self.batch is not None:
             var_strs.append(f"batch={self.batch}")
         if self.backend is not None:
             var_strs.append(f"backend={self.backend}")
+        if self.layout is not Layout.DENSE:
+            var_strs.append(f"layout={self.layout}")
+        if self.ragged_rank is not None:
+            var_strs.append(f"ragged_rank={self.ragged_rank}")
+        if self.row_splits_dtype is not None:
+            var_strs.append(f"row_splits_dtype={self.row_splits_dtype}")
+        if self.sparse_format is not None:
+            var_strs.append(f"sparse_format={self.sparse_format}")
 
-        return f"{cls_str}({",".join(var_strs)})"
+        return f"{cls_str}({','.join(var_strs)})"
 
     def __eq__(self, rhs) -> bool:
         if not isinstance(rhs, TensorSpec):
-            raise NotImplementedError(f"TensorSpec comparison not implemented for this type ({type(rhs)})")
+            return NotImplemented
 
         return (
             self.dtype == rhs.dtype and
             self.shape == rhs.shape and
-            self.batch == rhs.batch )
+            self.batch == rhs.batch and
+            self.layout == rhs.layout and
+            self.axis_names == rhs.axis_names and
+            self.batch_axis_name == rhs.batch_axis_name and
+            self.ragged_rank == rhs.ragged_rank and
+            self.row_splits_dtype == rhs.row_splits_dtype and
+            self.sparse_format == rhs.sparse_format)
+
+    def __hash__(self) -> int:
+        return hash((
+            self.dtype,
+            self.shape,
+            self.batch,
+            self.layout,
+            self.axis_names,
+            self.batch_axis_name,
+            self.ragged_rank,
+            self.row_splits_dtype,
+            self.sparse_format,
+        ))
 
     def __stable_leaf_bytes__(self):
         return str(self).encode("utf-8")
@@ -242,7 +253,7 @@ class TensorSpec:
 
 SpecTree: TypeAlias = (
     TensorSpec
-    | dict[str, "SpecTree"]
+    | dict[TreeKey, "SpecTree"]
     | tuple["SpecTree", ...]
     | list["SpecTree"]
 )
@@ -253,7 +264,7 @@ def is_spec_tree(x: Any) -> bool:
         return True
 
     if isinstance(x, dict):
-        return all(isinstance(k, str) and is_spec_tree(v) for k, v in x.items())
+        return all(isinstance(k, (str, int)) and is_spec_tree(v) for k, v in x.items())
 
     if isinstance(x, tuple):
         return all(is_spec_tree(v) for v in x)
@@ -264,12 +275,41 @@ def is_spec_tree(x: Any) -> bool:
     return False
 
 
+def iter_specs(spec: SpecTree) -> Iterator[TensorSpec]:
+    yield from iter_leaves(spec, pred=lambda x: isinstance(x, TensorSpec))
+
+
+def map_spec_tree(spec: SpecTree, fn: Callable[[TensorSpec], TensorSpec]) -> SpecTree:
+    return map_leaves(spec, fn, pred=lambda x: isinstance(x, TensorSpec))
+
+
+def _same_spec_structure(a: Any, b: Any) -> bool:
+    if isinstance(a, TensorSpec) and isinstance(b, TensorSpec):
+        return True
+    if isinstance(a, dict) and isinstance(b, dict):
+        return tuple(a.keys()) == tuple(b.keys()) and all(_same_spec_structure(a[k], b[k]) for k in a)
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        return len(a) == len(b) and all(_same_spec_structure(x, y) for x, y in zip(a, b))
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same_spec_structure(x, y) for x, y in zip(a, b))
+    return False
+
+
+def assert_same_spec_structure(*specs: SpecTree) -> None:
+    if not specs:
+        raise ValueError("At least one spec is required.")
+    base = specs[0]
+    for spec in specs[1:]:
+        if not _same_spec_structure(base, spec):
+            raise ValueError("Spec trees do not have the same structure.")
+
+
 def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batch") -> SpecTree:
-    return map_leaves(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
+    return map_spec_tree(spec, lambda s: s.with_batch(batch=batch, axis_name=axis_name))
 
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
-    return map_leaves(spec, lambda s: s.without_batch())
+    return map_spec_tree(spec, lambda s: s.without_batch())
 
 
 def as_tensor_spec(x: Any, *args, require_consistent_backend=True, **kwargs):
@@ -301,5 +341,5 @@ class SpecHint:
             return SpecHint(**d)
 
     def __post_init__(self):
-        if not isinstance(self, BatchMode):
+        if not isinstance(self.batch_mode, BatchMode):
             object.__setattr__(self, "batch_mode", BatchMode(self.batch_mode))

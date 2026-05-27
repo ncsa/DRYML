@@ -14,15 +14,16 @@ from .backend import is_torch_value, is_torch_available
 
 
 def _install() -> None:
-    install_method(DType, "torch", _dtype_torch)
-    install_method(TensorSpec, "torch", _tensor_spec_torch)
+    try:
+        install_method(DType, "torch", _dtype_torch)
+        install_method(TensorSpec, "torch", _tensor_spec_torch)
+    except RuntimeError:
+        # methods already installed, so we'll exit here.
+        return
 
-    from dryml.core2.backend import backend_testers, backend_existence_testers, \
-        backend_dtype_method_map, backend_as_tensor_spec_method_map
+    from dryml.core2.backend import backend_testers, backend_existence_testers
     backend_testers[Backend.torch] = is_torch_value
     backend_existence_testers[Backend.torch] = is_torch_available
-    backend_dtype_method_map[Backend.torch] = dtype
-    backend_as_tensor_spec_method_map[Backend.torch] = as_tensor_spec
 
 
 _install()

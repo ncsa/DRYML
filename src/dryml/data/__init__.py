@@ -1,6 +1,12 @@
-from dryml.data.dataset import Dataset
+from dryml.data.dataset import CombineDataset, Dataset, ElementwiseDataset, Map, StructuralDataset
+from dryml.data.transforms.combine import Pack
 
 
 __all__ = [
-    Dataset,
+    "Dataset",
+    "Map",
+    "ElementwiseDataset",
+    "StructuralDataset",
+    "CombineDataset",
+    "Pack",
 ]

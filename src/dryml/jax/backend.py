@@ -12,5 +12,6 @@ def is_jax_available() -> bool:
 
 
 def is_jax_value(x: Any) -> bool:
+    ic(x)
     import jax
     return isinstance(x, (jax.Array, jax.ShapeDtypeStruct))

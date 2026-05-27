@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from typing import Any, Callable
 import inspect
+import itertools
 
-from dryml.core2.tensor_spec import Dynamic, SpecTree, TensorSpec, SpecHint, as_tensor_spec
+from dryml.core2.tensor_spec import Dynamic, SpecTree, TensorSpec, SpecHint, as_tensor_spec, unbatch_spec_tree
 from dryml.core2.cardinality import Cardinality
-from dryml.core2.utils.recurse import first_leaf, iter_leaves
+from dryml.core2.utils.recurse import first_leaf, iter_leaves, map_leaves
 from dryml.context import check_context
 from .dataset import Dataset
 
@@ -17,6 +18,21 @@ from .dataset import Dataset
 
 class SourceDataset(Dataset):
     pass
+
+
+def _tree_index(x: Any, i: int) -> Any:
+    return map_leaves(x, lambda leaf: leaf[i])
+
+
+def _fresh_iterable(factory: Callable[..., Any], *args, **kwargs) -> Iterable[Any]:
+    candidate = factory(*args, **kwargs)
+    if not hasattr(candidate, "__iter__") and callable(candidate):
+        candidate = candidate()
+    if not hasattr(candidate, "__iter__"):
+        raise TypeError(
+            f"generator_fn returned {type(candidate).__name__}, which is not iterable."
+        )
+    return candidate
 
 
 class GeneratorDataset(SourceDataset):
@@ -43,9 +59,8 @@ class GeneratorDataset(SourceDataset):
         self.factory_kwargs = factory_kwargs
         self.cardinality = cardinality
         if spec is None:
-            self._spec = spec
-        first_leaf
-        if isinstance(spec, SpecHint):
+            self._spec = None
+        elif isinstance(spec, SpecHint):
             self._spec = self._detect_spec(spec)
         else:
             leaf = first_leaf(spec)
@@ -56,15 +71,12 @@ class GeneratorDataset(SourceDataset):
 
 
     def __iter__(self) -> Iterator[Any]:
-        it = self.gen_factory(
+        it = _fresh_iterable(
+            self.gen_factory,
             *self.factory_args,
-            **self.factory_kwargs)()
-        if not hasattr(it, "__iter__"):
-            raise TypeError(
-                f"generator_fn returned {type(it).__name__}, which is not iterable."
-            )
+            **self.factory_kwargs)
         if self.cardinality.is_finite:
-            yield from itertools.isclice(it, int(self.cardinality))
+            yield from itertools.islice(it, int(self.cardinality))
         else:
             yield from it
 
@@ -112,7 +124,9 @@ class ArrayDataset(SourceDataset):
         self.arrays = arrays
 
         if spec is None:
-            spec = as_tensor_spec(arrays, batch=batched)
+            spec = as_tensor_spec(arrays, batched=batched)
+            if batched:
+                spec = unbatch_spec_tree(spec)
 
         super().__init__(spec=spec)
 
@@ -129,7 +143,7 @@ class ArrayDataset(SourceDataset):
         return _tree_index(self.arrays, 0)
 
 
-class TFDatasetAdapter(SourceDataset):
+class TFDSAdapter(SourceDataset):
     """
     Adapter for tf.data.Dataset.
 
@@ -144,32 +158,38 @@ class TFDatasetAdapter(SourceDataset):
 
     def __init__(
         self,
-        dataset: Any,
+        name,
         *,
-        spec: SpecTree | None = None,
+        split: list[str]|str|None=None,
+        batch_size: int|None=None,
+        as_supervised: bool=False,
         as_numpy: bool = False,
-        assume_batched: bool = False,
     ):
+        super().__init__()
+
         check_context('tf')
-        import tensorflow as tf
+        import tensorflow_datasets as tfds
 
         if not isinstance(dataset, tf.data.Dataset):
             raise TypeError(
                 f"dataset must be a tf.data.Dataset, got {type(dataset).__name__}."
             )
 
-        self.dataset = dataset
+        # Load the dataset
+        self.ds = tfds.load(
+            name,
+            split=split,
+            batch_size=batch_size,
+            as_supervised=as_supervised)
         self.as_numpy = as_numpy
 
         import dryml.tf
 
-        if spec is None:
-            spec = dryml.tf.as_tensor_spec(
-                dataset.element_spec,
-                assume_batched=assume_batched,
-            )
+        spec = as_tensor_spec(
+            self.ds.element_spec,
+            batched=assume_batched,
+        )
 
-        super().__init__(spec=spec)
 
     def __iter__(self) -> Iterator[Any]:
         if self.as_numpy:
@@ -262,4 +282,3 @@ class TorchDatasetAdapter(SourceDataset):
         if n == 0:
             raise ValueError("Cannot peek an empty dataset.")
         return self.dataset[0]
-
