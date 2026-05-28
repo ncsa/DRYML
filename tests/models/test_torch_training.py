@@ -15,14 +15,13 @@ def test_torch_basic_training_updates_experiment_state():
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
     ds = ArrayDataset((x, y))
 
-    model = Model(torch.nn.Linear, 1, 1, device="cpu")
+    model = Model(torch.nn.Linear, 1, 1)
     optimizer = Optimizer(torch.optim.SGD, mdl=model, lr=0.01)
     train_fn = BasicTraining(
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
         batch_size=2,
-        device="cpu",
     )
     exp = Experiment(model, train_fn, train_data=ds)
 

@@ -27,6 +27,19 @@ def test_tensor_spec_normalizes_dtype_and_shape():
     assert spec.layout is Layout.DENSE
 
 
+def test_tensor_spec_dtype_string_equality_normalization():
+    assert TensorSpec("float64", shape=(10,), backend="numpy") == TensorSpec(
+        DType("float", 64),
+        shape=(10,),
+        backend="numpy",
+    )
+    assert TensorSpec("float32", shape=(10,), backend="numpy") != TensorSpec(
+        "float64",
+        shape=(10,),
+        backend="numpy",
+    )
+
+
 def test_tensor_spec_is_hashable_and_pickleable():
     spec = TensorSpec(
         dtype="float32",

@@ -29,6 +29,7 @@ def test_sklearn_basic_mnist_classifier_with_tfds_adapter():
     exp.train()
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
+    assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="numpy")
     assert exp.state.phase == "trained"
 
 
@@ -56,21 +57,18 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
     exp.train()
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
+    assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="tf")
     assert exp.state.phase == "trained"
 
 
 def test_torch_basic_mnist_classifier_with_tfds_adapter():
     torch = pytest.importorskip("torch")
-    from dryml.models.torch import BasicTraining, Model, Optimizer
+    from dryml.models.torch import BasicTraining, Optimizer, Sequential
 
     train_ds = _mnist_dataset("train[:1000]")
     val_ds = _mnist_dataset("test[:200]")
-    model = Model(
-        torch.nn.Linear,
-        28 * 28,
-        10,
-        device="cpu",
-        output_spec=TensorSpec("float32", shape=(10,), backend="torch"),
+    model = Sequential(
+        layer_defs=(("Linear", (28 * 28, 10), {}),),
     )
     optimizer = Optimizer(torch.optim.SGD, mdl=model, lr=0.5)
     train_fn = BasicTraining(
@@ -78,11 +76,11 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
         loss_cls=torch.nn.CrossEntropyLoss,
         epochs=5,
         batch_size=64,
-        device="cpu",
     )
     exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
     exp.train()
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
+    assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="torch")
     assert exp.state.phase == "trained"

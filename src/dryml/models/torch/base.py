@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 
 from dryml.core2.object import Object
+from dryml.core2.tensor_spec import TensorSpec
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
-from dryml.data import Batch, iter_xy
+from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, sample_from_spec_tree
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import (
@@ -15,9 +16,7 @@ from dryml.models.utils import (
 )
 
 
-def _resolve_device(torch, device):
-    if device is not None:
-        return torch.device(device)
+def _resolve_device(torch):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -29,6 +28,21 @@ def _tree_to_torch(value, torch, *, device=None):
         return tensor.to(device) if device is not None else tensor
 
     return map_leaves(value, leaf_to_torch)
+
+
+def _torch_spec_from_value(value):
+    def leaf_to_spec(leaf):
+        shape = tuple(int(dim) for dim in leaf.shape)
+        if shape:
+            return TensorSpec(
+                str(leaf.dtype).removeprefix("torch."),
+                shape=shape[1:],
+                batch=shape[0],
+                backend="torch",
+            )
+        return TensorSpec(str(leaf.dtype).removeprefix("torch."), shape=(), backend="torch")
+
+    return map_leaves(value, leaf_to_spec)
 
 
 class Wrapper(Object):
@@ -80,11 +94,11 @@ class Optimizer(Object):
 class Model(BaseModel):
     """Wrapper around a torch.nn.Module-style class."""
 
-    def __init__(self, cls, *args, output_spec=None, device=None, **kwargs):
+    def __init__(self, cls, *args, output_spec=None, **kwargs):
         self.cls = validate_class(cls)
         self.module_args = args
         self.module_kwargs = kwargs
-        self.device = device
+        self.device = None
         self.obj = self.cls(*args, **kwargs)
         self.module = self.obj
         self.mdl = self.obj
@@ -93,7 +107,7 @@ class Model(BaseModel):
     def __call__(self, x, *args, **kwargs):
         import torch
 
-        device = _resolve_device(torch, self.device)
+        device = _resolve_device(torch)
         x = _tree_to_torch(x, torch, device=device)
         return self.obj(x, *args, **kwargs)
 
@@ -108,7 +122,7 @@ class Model(BaseModel):
     def prep_train(self):
         import torch
 
-        device = _resolve_device(torch, self.device)
+        device = _resolve_device(torch)
         self.to_device(device)
         if hasattr(self.obj, "train"):
             self.obj.train(True)
@@ -116,7 +130,7 @@ class Model(BaseModel):
     def prep_eval(self):
         import torch
 
-        device = _resolve_device(torch, self.device)
+        device = _resolve_device(torch)
         self.to_device(device)
         if hasattr(self.obj, "eval"):
             self.obj.eval()
@@ -131,6 +145,23 @@ class Model(BaseModel):
 
         state_path = revision_path("state", "pth", src_dir, revision=revision)
         self.obj.load_state_dict(torch.load(state_path, map_location=self.device or "cpu"))
+
+    def infer_output_spec(self, input_spec):
+        if self.output_spec is not None:
+            return super().infer_output_spec(input_spec)
+
+        import torch
+
+        was_training = bool(getattr(self.obj, "training", False))
+        self.prep_eval()
+        try:
+            sample = _tree_to_torch(sample_from_spec_tree(input_spec), torch, device=_resolve_device(torch))
+            with torch.no_grad():
+                output = self.obj(sample)
+            return maybe_unbatch_output_spec(_torch_spec_from_value(output), input_spec)
+        finally:
+            if was_training:
+                self.prep_train()
 
 
 class TrainFunction(BaseTrainFunction):
@@ -159,7 +190,6 @@ class BasicTraining(TrainFunction):
         shuffle: bool = False,
         shuffle_seed=None,
         shuffle_buffer_size: int | None = None,
-        device=None,
     ):
         if epochs < 0:
             raise ValueError("epochs must be non-negative.")
@@ -183,7 +213,6 @@ class BasicTraining(TrainFunction):
         self.shuffle = shuffle
         self.shuffle_seed = shuffle_seed
         self.shuffle_buffer_size = shuffle_buffer_size
-        self.device = device
 
     def __call__(self, exp):
         import torch
@@ -198,7 +227,7 @@ class BasicTraining(TrainFunction):
         if self.batch_size is not None:
             train_data = Batch(train_data, self.batch_size)
 
-        device = _resolve_device(torch, self.device or getattr(exp.model, "device", None))
+        device = _resolve_device(torch)
         if hasattr(exp.model, "to_device"):
             exp.model.to_device(device)
         exp.model.prep_train()
@@ -269,20 +298,37 @@ class ModelWrapper(Model):
 
 
 class Sequential(Model):
-    def __init__(self, layer_defs=(), output_spec=None, device=None):
+    def __init__(self, layer_defs=(), output_spec=None):
         import torch
 
         self.layer_defs = tuple(layer_defs)
-        self.device = device
+        self.device = None
         layers = []
         for layer_def in self.layer_defs:
-            if len(layer_def) == 2:
+            if isinstance(layer_def, torch.nn.Module):
+                layers.append(layer_def)
+                continue
+
+            if isinstance(layer_def, str):
+                cls = getattr(torch.nn, layer_def)
+                args = ()
+                kwargs = {}
+            elif isinstance(layer_def, type):
+                cls = layer_def
+                args = ()
+                kwargs = {}
+            elif len(layer_def) == 2:
                 cls, kwargs = layer_def
+                cls = getattr(torch.nn, cls) if isinstance(cls, str) else cls
                 args = ()
             elif len(layer_def) == 3:
                 cls, args, kwargs = layer_def
+                cls = getattr(torch.nn, cls) if isinstance(cls, str) else cls
             else:
-                raise ValueError("Layer definitions must be (cls, kwargs) or (cls, args, kwargs).")
+                raise ValueError(
+                    "Layer definitions must be layer names, layer classes, layer instances, "
+                    "(cls, kwargs), or (cls, args, kwargs)."
+                )
             layers.append(validate_class(cls)(*args, **kwargs))
 
         self.obj = torch.nn.Sequential(*layers)
