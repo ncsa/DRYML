@@ -31,7 +31,7 @@ def _train_data():
 
 
 def test_basic_sklearn_training_updates_model_and_experiment_state():
-    model = RegressionModel(FakeRegressor, output_spec=TensorSpec("float64", shape=(), backend="numpy"))
+    model = RegressionModel(FakeRegressor)
     exp = Experiment(model, BasicTraining(), train_data=_train_data())
 
     result = exp.train()
@@ -41,12 +41,17 @@ def test_basic_sklearn_training_updates_model_and_experiment_state():
     assert exp.state.epoch == 1
     assert exp.state.step == 3
     assert exp.state.phase == "trained"
+    assert model.infer_output_spec(TensorSpec("float32", shape=(2,), backend="numpy")) == TensorSpec(
+        "float32",
+        shape=(),
+        backend="numpy",
+    )
     np.testing.assert_allclose(model.estimator.fit_x[:, 0], np.array([0.0, 1.0, 2.0]))
     np.testing.assert_allclose(model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]))
 
 
 def test_experiment_save_load_restores_train_state_and_model(tmp_path):
-    model = RegressionModel(FakeRegressor, output_spec=TensorSpec("float64", shape=(), backend="numpy"))
+    model = RegressionModel(FakeRegressor)
     exp = Experiment(model, BasicTraining(), train_data=_train_data())
     exp.train()
 

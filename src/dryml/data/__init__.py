@@ -3,7 +3,16 @@ from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TF
 from dryml.data.transforms.combine import Pack
 from dryml.data.transforms.elementwise import Cast, Pipe, Select
 from dryml.data.transforms.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
-from dryml.data.util import collect_xy, collate_xy, iter_xy
+from dryml.data.util import (
+    batch_from_spec_tree,
+    collect_xy,
+    collate_xy,
+    iter_xy,
+    match_input_batch,
+    maybe_unbatch_output_spec,
+    sample_from_spec_tree,
+    spec_tree_is_batched,
+)
 
 
 __all__ = [
@@ -30,4 +39,9 @@ __all__ = [
     "iter_xy",
     "collect_xy",
     "collate_xy",
+    "spec_tree_is_batched",
+    "batch_from_spec_tree",
+    "sample_from_spec_tree",
+    "maybe_unbatch_output_spec",
+    "match_input_batch",
 ]

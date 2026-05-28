@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dryml.core2.object import Pickleable
+from dryml.core2.tensor_spec import TensorSpec, as_tensor_spec
 from dryml.core2.utils.general import validate_class
-from dryml.data import collate_xy
+from dryml.data import collate_xy, match_input_batch, maybe_unbatch_output_spec, sample_from_spec_tree
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction
 from dryml.models.utils import (
@@ -10,7 +11,6 @@ from dryml.models.utils import (
     prepare_training_data,
     validate_num_examples,
 )
-
 
 class Wrapper(Pickleable):
     """Pickle-backed wrapper for sklearn-style Python objects."""
@@ -42,12 +42,50 @@ class Model(BaseModel, Pickleable):
     def __call__(self, x, *args, **kwargs):
         return self.predict(x, *args, **kwargs)
 
+    def infer_output_spec(self, input_spec):
+        if self.output_spec is not None:
+            return super().infer_output_spec(input_spec)
+
+        try:
+            sample = sample_from_spec_tree(input_spec)
+            output = self(sample)
+            return maybe_unbatch_output_spec(as_tensor_spec(output, batched=True), input_spec)
+        except Exception:
+            pass
+
+        n_outputs = getattr(self.estimator, "n_outputs_", None)
+        if n_outputs is not None:
+            shape = () if int(n_outputs) == 1 else (int(n_outputs),)
+            return match_input_batch(TensorSpec("float64", shape=shape, backend="numpy"), input_spec)
+
+        raise NotImplementedError(
+            f"Cannot infer output spec for {type(self).__name__}. "
+            "Fit the estimator first, use a probe-compatible input spec, or pass output_spec explicitly."
+        )
+
 
 class ClassifierModel(Model):
     def __call__(self, x, *args, **kwargs):
         if hasattr(self.estimator, "predict_proba"):
             return self.estimator.predict_proba(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
+
+    def infer_output_spec(self, input_spec):
+        if self.output_spec is not None:
+            return super().infer_output_spec(input_spec)
+
+        try:
+            return super().infer_output_spec(input_spec)
+        except NotImplementedError:
+            classes = getattr(self.estimator, "classes_", None)
+            if classes is None:
+                raise
+            if isinstance(classes, (tuple, list)):
+                raise NotImplementedError("Multi-output classifier spec inference is not implemented.")
+            return match_input_batch(
+                TensorSpec("float64", shape=(len(classes),), backend="numpy"),
+                input_spec,
+            )
 
 
 class RegressionModel(Model):
