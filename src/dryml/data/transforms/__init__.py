@@ -1,6 +1,6 @@
 from .base import CombineTransform, ElementwiseTransform, StructuralTransform, Transform
 from .combine import Pack, Zip
-from .elementwise import Cast, Pipe, Select
+from .elementwise import Cast, Flatten, Pipe, Scale, Select
 from .structural import (
     Batch,
     BatchTransform,
@@ -23,7 +23,9 @@ __all__ = [
     "StructuralTransform",
     "CombineTransform",
     "Cast",
+    "Flatten",
     "Pipe",
+    "Scale",
     "Select",
     "Batch",
     "BatchTransform",

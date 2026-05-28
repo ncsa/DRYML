@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from dryml.core2.tensor_spec import iter_specs
-from dryml.data import Batch, Map, Pack, Select
+from dryml.data import Batch, Collect, iter_xy
 
 
 def _is_batched(dataset) -> bool:
@@ -13,51 +13,59 @@ def _is_batched(dataset) -> bool:
         return False
 
 
-def _prediction_pairs(model, data, *, x_transform=None, y_transform=None, batch_size: int | None = None):
-    x_transform = Select(0) if x_transform is None else x_transform
-    y_transform = Select(1) if y_transform is None else y_transform
-
-    x_data = Map(data, x_transform)
-    y_data = Map(data, y_transform)
-
+def _prediction_pairs(model, data, *, x_path=0, y_path=1, batch_size: int | None = None):
     if batch_size is not None:
-        x_data = Batch(x_data, batch_size)
-        y_data = Batch(y_data, batch_size)
+        data = Batch(data, batch_size)
 
-    return Pack(Map(x_data, model), y_data)
+    for x, y in iter_xy(data, x_path=x_path, y_path=y_path):
+        yield model(x), y
+
+
+def _to_numpy(value):
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "numpy"):
+        return value.numpy()
+    return np.asarray(value)
+
 
 
 def _example_count(value, *, batched: bool) -> int:
-    arr = np.asarray(value)
+    arr = _to_numpy(value)
     if batched and arr.ndim > 0:
         return int(arr.shape[0])
     return 1
 
 
-def mean_squared_error(model, test_data, *, x_transform=None, y_transform=None, batch_size: int | None = None):
+def mean_squared_error(model, test_data, *, x_path=0, y_path=1, batch_size: int | None = None):
     pairs = _prediction_pairs(
         model,
         test_data,
-        x_transform=x_transform,
-        y_transform=y_transform,
+        x_path=x_path,
+        y_path=y_path,
         batch_size=batch_size,
     )
-    batched = _is_batched(pairs)
+    batched = batch_size is not None or _is_batched(test_data)
 
-    total_loss = 0.0
-    num_examples = 0
-    for y_pred, y_true in pairs:
-        diff = np.asarray(y_pred) - np.asarray(y_true)
-        total_loss += float(np.sum(diff * diff))
-        num_examples += _example_count(y_true, batched=batched)
+    def step(acc, pair):
+        total_loss, num_examples = acc
+        y_pred, y_true = pair
+        diff = _to_numpy(y_pred) - _to_numpy(y_true)
+        return (
+            total_loss + float(np.sum(diff * diff)),
+            num_examples + _example_count(y_true, batched=batched),
+        )
 
+    total_loss, num_examples = Collect(step, initial=(0.0, 0))(pairs)
     if num_examples == 0:
         raise ValueError("Cannot compute mean_squared_error on an empty dataset.")
     return total_loss / num_examples
 
 
 def _as_labels(value, *, batched: bool):
-    arr = np.asarray(value)
+    arr = _to_numpy(value)
 
     if arr.ndim == 0:
         return arr
@@ -70,25 +78,25 @@ def _as_labels(value, *, batched: bool):
     return arr
 
 
-def categorical_accuracy(model, test_data, *, x_transform=None, y_transform=None, batch_size: int | None = None):
+def categorical_accuracy(model, test_data, *, x_path=0, y_path=1, batch_size: int | None = None):
     pairs = _prediction_pairs(
         model,
         test_data,
-        x_transform=x_transform,
-        y_transform=y_transform,
+        x_path=x_path,
+        y_path=y_path,
         batch_size=batch_size,
     )
-    batched = _is_batched(pairs)
+    batched = batch_size is not None or _is_batched(test_data)
 
-    num_correct = 0
-    num_total = 0
-    for y_pred, y_true in pairs:
+    def step(acc, pair):
+        num_correct, num_total = acc
+        y_pred, y_true = pair
         pred_labels = _as_labels(y_pred, batched=batched)
         true_labels = _as_labels(y_true, batched=batched)
-        matches = np.asarray(pred_labels == true_labels)
-        num_correct += int(np.sum(matches))
-        num_total += int(matches.size)
+        matches = _to_numpy(pred_labels == true_labels)
+        return num_correct + int(np.sum(matches)), num_total + int(matches.size)
 
+    num_correct, num_total = Collect(step, initial=(0, 0))(pairs)
     if num_total == 0:
         raise ValueError("Cannot compute categorical_accuracy on an empty dataset.")
     return num_correct / num_total

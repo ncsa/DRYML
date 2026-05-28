@@ -10,7 +10,6 @@ import numpy as np
 from dryml.core2.tensor_spec import SpecTree, TensorSpec, SpecHint, as_tensor_spec, unbatch_spec_tree
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.utils.recurse import first_leaf, iter_leaves, map_leaves
-from dryml.context import check_context
 from .dataset import Dataset
 
 
@@ -216,11 +215,8 @@ class TFDSAdapter(SourceDataset):
         assume_batched: bool | None = None,
         spec: SpecTree | None = None,
     ):
-        check_context('tf')
-        import tensorflow as tf
         import tensorflow_datasets as tfds
 
-        # Load the dataset
         self.dataset = tfds.load(
             name,
             split=split,
@@ -229,13 +225,22 @@ class TFDSAdapter(SourceDataset):
         self.as_numpy = as_numpy
         self.assume_batched = (batch_size is not None) if assume_batched is None else assume_batched
 
-        import dryml.tf
-
         if spec is None:
-            spec = as_tensor_spec(
-                self.dataset.element_spec,
-                batched=self.assume_batched,
-            )
+            if as_numpy:
+                import dryml.numpy
+
+                try:
+                    first = next(self.dataset.as_numpy_iterator())
+                except StopIteration as e:
+                    raise ValueError("TFDSAdapter requires spec when the TFDS split is empty.") from e
+                spec = as_tensor_spec(first, batched=self.assume_batched)
+            else:
+                import dryml.tf
+
+                spec = as_tensor_spec(
+                    self.dataset.element_spec,
+                    batched=self.assume_batched,
+                )
 
         super().__init__(spec=spec)
 
@@ -246,17 +251,12 @@ class TFDSAdapter(SourceDataset):
             yield from self.dataset
 
     def __len__(self) -> Cardinality:
-        try:
-            import tensorflow as tf  # type: ignore
-        except Exception as e:
-            raise ImportError("TensorFlow is required for TFDatasetAdapter.") from e
-
         card = self.dataset.cardinality()
         card_val = int(card.numpy())
 
-        if card_val == tf.data.UNKNOWN_CARDINALITY:
+        if card_val == -2:
             return Cardinality.UNKNOWN
-        if card_val == tf.data.INFINITE_CARDINALITY:
+        if card_val == -1:
             return Cardinality.INFINITE
 
         return Cardinality.finite(card_val)

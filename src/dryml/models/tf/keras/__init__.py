@@ -1,6 +1,8 @@
 from dryml.models.tf.keras.base import (
     BasicEarlyStoppingTraining,
     BasicTraining,
+    Loss,
+    Metric,
     Model,
     ModelWrapper,
     Optimizer,
@@ -13,6 +15,8 @@ from dryml.models.tf.keras.base import (
 __all__ = [
     "BasicEarlyStoppingTraining",
     "BasicTraining",
+    "Loss",
+    "Metric",
     "Model",
     "ModelWrapper",
     "Optimizer",

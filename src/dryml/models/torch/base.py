@@ -91,10 +91,14 @@ class Model(BaseModel):
         self.output_spec = output_spec
 
     def __call__(self, x, *args, **kwargs):
-        return self.module(x, *args, **kwargs)
+        import torch
+
+        device = _resolve_device(torch, self.device)
+        x = _tree_to_torch(x, torch, device=device)
+        return self.obj(x, *args, **kwargs)
 
     def parameters(self):
-        return self.module.parameters()
+        return self.obj.parameters()
 
     def to_device(self, device):
         self.device = str(device)

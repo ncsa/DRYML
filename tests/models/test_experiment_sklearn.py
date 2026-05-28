@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from dryml.core2 import Repo
 from dryml.core2.tensor_spec import TensorSpec
@@ -7,21 +8,7 @@ from dryml.models import Experiment
 from dryml.models.sklearn import BasicTraining, RegressionModel
 
 
-class FakeRegressor:
-    def __init__(self):
-        self.fit_x = None
-        self.fit_y = None
-        self.bias = 0.0
-
-    def fit(self, x, y):
-        self.fit_x = np.asarray(x)
-        self.fit_y = np.asarray(y)
-        self.bias = float(np.mean(y - x[:, 0]))
-        return self
-
-    def predict(self, x):
-        x = np.asarray(x)
-        return x[..., 0] + self.bias
+linear_model = pytest.importorskip("sklearn.linear_model")
 
 
 def _train_data():
@@ -31,7 +18,7 @@ def _train_data():
 
 
 def test_basic_sklearn_training_updates_model_and_experiment_state():
-    model = RegressionModel(FakeRegressor)
+    model = RegressionModel(linear_model.LinearRegression)
     exp = Experiment(model, BasicTraining(), train_data=_train_data())
 
     result = exp.train()
@@ -46,12 +33,11 @@ def test_basic_sklearn_training_updates_model_and_experiment_state():
         shape=(),
         backend="numpy",
     )
-    np.testing.assert_allclose(model.estimator.fit_x[:, 0], np.array([0.0, 1.0, 2.0]))
-    np.testing.assert_allclose(model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]))
+    np.testing.assert_allclose(model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]), atol=1e-6)
 
 
 def test_experiment_save_load_restores_train_state_and_model(tmp_path):
-    model = RegressionModel(FakeRegressor)
+    model = RegressionModel(linear_model.LinearRegression)
     exp = Experiment(model, BasicTraining(), train_data=_train_data())
     exp.train()
 
@@ -64,4 +50,4 @@ def test_experiment_save_load_restores_train_state_and_model(tmp_path):
     assert loaded.state.epoch == 1
     assert loaded.state.step == 3
     assert loaded.state.phase == "trained"
-    np.testing.assert_allclose(loaded.model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]))
+    np.testing.assert_allclose(loaded.model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]), atol=1e-6)

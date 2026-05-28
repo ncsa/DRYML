@@ -5,7 +5,7 @@ from dryml.core2.cardinality import Cardinality
 from dryml.core2.backend import Backend
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data.dataset import Dataset, Map
-from dryml.data.transforms import Batch, Cast, Pack, Pipe, Repeat, Select, Shuffle, Skip, Take, Unbatch
+from dryml.data.transforms import Batch, Cast, Flatten, Pack, Pipe, Repeat, Scale, Select, Shuffle, Skip, Take, Unbatch
 
 
 class ListDataset(Dataset):
@@ -127,6 +127,19 @@ def test_map_accepts_multiple_transforms_as_pipe():
     assert ds.spec == TensorSpec("float32", shape=(2,), backend="numpy")
     assert [item.dtype for item in out] == [np.dtype("float32"), np.dtype("float32")]
     assert transform.dispatch_count == 1
+
+
+def test_flatten_and_scale_infer_output_spec_and_iteration():
+    src = ListDataset(
+        [np.array([[0, 255]], dtype=np.uint8)],
+        TensorSpec("uint8", shape=(1, 2), backend="numpy"),
+    )
+
+    ds = Map(src, Scale.from_range(0, 255), Flatten())
+    out = list(ds)
+
+    assert ds.spec == TensorSpec("float32", shape=(2,), backend="numpy")
+    np.testing.assert_allclose(out[0], np.array([0.0, 1.0], dtype=np.float32))
 
 
 def test_batch_infer_output_spec_and_iteration():

@@ -147,6 +147,14 @@ class Optimizer(Wrapper):
         return self._restore_status
 
 
+class Loss(Wrapper):
+    """First-class Keras loss object for experiment hyperparameters."""
+
+
+class Metric(Wrapper):
+    """First-class Keras metric object for experiment hyperparameters."""
+
+
 class Model(BaseModel):
     """Wrapper around a TensorFlow/Keras model class."""
 
@@ -304,6 +312,13 @@ class BasicTraining(TrainFunction):
         fit_kwargs = dict(self.fit_kwargs)
         callbacks = self._callbacks(tf)
         callbacks.extend(fit_kwargs.pop("callbacks", []) or [])
+        steps_per_epoch = finite_dataset_len(train_data)
+        if steps_per_epoch is not None:
+            fit_kwargs.setdefault("steps_per_epoch", steps_per_epoch)
+        if ds_val is not None:
+            validation_steps = finite_dataset_len(val_data)
+            if validation_steps is not None:
+                fit_kwargs.setdefault("validation_steps", validation_steps)
 
         try:
             history = exp.model.fit(
@@ -318,8 +333,7 @@ class BasicTraining(TrainFunction):
         finally:
             exp.model.prep_eval()
 
-        steps_per_epoch = finite_dataset_len(train_data) or 0
-        advance_train_state(exp, epochs=self.epochs, steps=steps_per_epoch * self.epochs)
+        advance_train_state(exp, epochs=self.epochs, steps=(steps_per_epoch or 0) * self.epochs)
         return history
 
     def _prepare_data(self, data, *, for_training: bool):
@@ -370,6 +384,8 @@ ModelWrapper = Model
 __all__ = [
     "BasicEarlyStoppingTraining",
     "BasicTraining",
+    "Loss",
+    "Metric",
     "Model",
     "ModelWrapper",
     "Optimizer",

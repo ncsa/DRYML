@@ -3,6 +3,8 @@ from __future__ import annotations
 from dryml.models.tf.base import (
     BasicEarlyStoppingTraining,
     BasicTraining,
+    Loss,
+    Metric,
     Model,
     ModelWrapper,
     Optimizer,
@@ -62,6 +64,8 @@ def keras_sequential_functional_class(name, input_shape, output_shape, base_clas
 __all__ = [
     "BasicEarlyStoppingTraining",
     "BasicTraining",
+    "Loss",
+    "Metric",
     "Model",
     "ModelWrapper",
     "Optimizer",

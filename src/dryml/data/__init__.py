@@ -1,10 +1,11 @@
 from dryml.data.dataset import CombineDataset, Dataset, ElementwiseDataset, Map, StructuralDataset
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.transforms.combine import Pack
-from dryml.data.transforms.elementwise import Cast, Pipe, Select
+from dryml.data.transforms.elementwise import Cast, Flatten, Pipe, Scale, Select
 from dryml.data.transforms.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
 from dryml.data.util import (
     batch_from_spec_tree,
+    Collect,
     collect_xy,
     collate_xy,
     iter_xy,
@@ -26,6 +27,8 @@ __all__ = [
     "Pipe",
     "Select",
     "Cast",
+    "Flatten",
+    "Scale",
     "ElementwiseDataset",
     "StructuralDataset",
     "CombineDataset",
@@ -39,6 +42,7 @@ __all__ = [
     "iter_xy",
     "collect_xy",
     "collate_xy",
+    "Collect",
     "spec_tree_is_batched",
     "batch_from_spec_tree",
     "sample_from_spec_tree",

@@ -1,6 +1,6 @@
 from dryml.code import traits
 from dryml.core2.dtype import normalize_dtype
-from dryml.core2.tensor_spec import SpecTree, map_spec_tree
+from dryml.core2.tensor_spec import Dynamic, SpecTree, map_spec_tree
 
 from .base import ElementwiseTransform
 
@@ -88,3 +88,81 @@ class Cast(ElementwiseTransform):
     @traits(backend="torch")
     def torch_call(self, x):
         return x.to(self.dtype.torch())
+
+
+def _flat_shape(shape):
+    if shape is None:
+        return None
+    size = 1
+    for dim in shape:
+        if dim is Dynamic:
+            return (Dynamic,)
+        size *= int(dim)
+    return (size,)
+
+
+class Flatten(ElementwiseTransform):
+    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+        return map_spec_tree(input_spec, lambda spec: spec.with_shape(_flat_shape(spec.shape)))
+
+    @traits(backend="numpy")
+    def numpy_call(self, x):
+        return x.reshape(-1)
+
+    @traits(backend="numpy", batch_mode="batched")
+    def numpy_batched(self, x):
+        return x.reshape((x.shape[0], -1))
+
+    @traits(backend="tf")
+    def tf_call(self, x):
+        import tensorflow as tf
+
+        return tf.reshape(x, [-1])
+
+    @traits(backend="tf", batch_mode="batched")
+    def tf_batched(self, x):
+        import tensorflow as tf
+
+        return tf.reshape(x, [tf.shape(x)[0], -1])
+
+    @traits(backend="torch")
+    def torch_call(self, x):
+        return x.reshape(-1)
+
+    @traits(backend="torch", batch_mode="batched")
+    def torch_batched(self, x):
+        return x.reshape((x.shape[0], -1))
+
+
+class Scale(ElementwiseTransform):
+    def __init__(self, mean=0.0, std=1.0, *, dtype="float32"):
+        if std == 0:
+            raise ValueError("std must be non-zero.")
+        self.mean = mean
+        self.std = std
+        self.dtype = normalize_dtype(dtype)
+
+    @classmethod
+    def from_range(cls, min=0.0, max=1.0, *, dtype="float32"):
+        if max == min:
+            raise ValueError("max and min must differ.")
+        return cls(mean=min, std=max - min, dtype=dtype)
+
+    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+        return map_spec_tree(input_spec, lambda spec: spec.with_dtype(self.dtype))
+
+    @traits(backend="numpy")
+    def numpy_call(self, x):
+        return (x.astype(self.dtype.np()) - self.mean) / self.std
+
+    @traits(backend="tf")
+    def tf_call(self, x):
+        import tensorflow as tf
+
+        x = tf.cast(x, self.dtype.tf())
+        return (x - self.mean) / self.std
+
+    @traits(backend="torch")
+    def torch_call(self, x):
+        x = x.to(self.dtype.torch())
+        return (x - self.mean) / self.std
