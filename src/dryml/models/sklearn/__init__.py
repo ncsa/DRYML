@@ -5,6 +5,7 @@ from dryml.models.sklearn.base import (
     Model,
     Regression,
     RegressionModel,
+    Wrapper,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "Model",
     "Regression",
     "RegressionModel",
+    "Wrapper",
 ]

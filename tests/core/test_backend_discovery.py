@@ -1,6 +1,5 @@
 import numpy as np
 
-import dryml.numpy
 from dryml.core2.backend import Backend, discover_backends
 
 

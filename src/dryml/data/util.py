@@ -5,6 +5,51 @@ Utility functions for data methods
 import inspect
 from typing import Callable
 
+from dryml.data.collate import default_collate
+from dryml.data.transforms import Select
+
+
+def _path_select(path):
+    if isinstance(path, (tuple, list)):
+        return Select(*path)
+    return Select(path)
+
+
+def iter_xy(dataset, *, x_path=0, y_path=1):
+    x_select = _path_select(x_path)
+    y_select = _path_select(y_path)
+
+    it = iter(dataset)
+    try:
+        first = next(it)
+    except StopIteration:
+        return
+
+    x_impl, first_x = x_select.bind_first(first, input_spec=dataset.spec)
+    y_impl, first_y = y_select.bind_first(first, input_spec=dataset.spec)
+    yield first_x, first_y
+
+    for item in it:
+        yield x_impl(item), y_impl(item)
+
+
+def collect_xy(dataset, *, x_path=0, y_path=1):
+    x_values = []
+    y_values = []
+
+    for x, y in iter_xy(dataset, x_path=x_path, y_path=y_path):
+        x_values.append(x)
+        y_values.append(y)
+
+    if not x_values:
+        raise ValueError("Cannot collect from an empty dataset.")
+    return x_values, y_values
+
+
+def collate_xy(dataset, *, x_path=0, y_path=1, collate=default_collate):
+    x_values, y_values = collect_xy(dataset, x_path=x_path, y_path=y_path)
+    return collate(x_values), collate(y_values), len(x_values)
+
 
 def nested_flatten(data):
     flatten_data = []

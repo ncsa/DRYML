@@ -1,6 +1,5 @@
 import numpy as np
 
-import dryml.numpy
 from dryml.core2 import Repo
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset
@@ -37,6 +36,7 @@ def test_basic_sklearn_training_updates_model_and_experiment_state():
 
     result = exp.train()
 
+    assert model.obj is model.estimator
     assert result is model.estimator
     assert exp.state.epoch == 1
     assert exp.state.step == 3

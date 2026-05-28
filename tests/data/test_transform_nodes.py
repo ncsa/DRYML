@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 
-import dryml.numpy
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.backend import Backend
 from dryml.core2.tensor_spec import TensorSpec

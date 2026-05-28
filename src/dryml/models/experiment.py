@@ -22,9 +22,6 @@ class Experiment(Object):
     def train(self):
         return self.train_fn(self)
 
-    def predict(self, x, *args, **kwargs):
-        return self.model(x, *args, **kwargs)
-
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         pickle_save(self.state, revision_path("experiment_state", "pkl", dest_dir, revision=revision))
 

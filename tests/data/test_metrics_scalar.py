@@ -1,6 +1,5 @@
 import numpy as np
 
-import dryml.numpy
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset
 from dryml.metrics import categorical_accuracy, mean_squared_error

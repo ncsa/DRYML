@@ -1,6 +1,5 @@
 import numpy as np
 
-import dryml.numpy
 from dryml.core2 import ConfigRef, Repo
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data import NpyFileDataset
