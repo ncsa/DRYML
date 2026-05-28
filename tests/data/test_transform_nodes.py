@@ -6,7 +6,7 @@ from dryml.core2.cardinality import Cardinality
 from dryml.core2.backend import Backend
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data.dataset import Dataset, Map
-from dryml.data.transforms import Batch, Cast, Pack, Pipe, Select
+from dryml.data.transforms import Batch, Cast, Pack, Pipe, Repeat, Select, Shuffle, Skip, Take, Unbatch
 
 
 class ListDataset(Dataset):
@@ -148,6 +148,65 @@ def test_batch_infer_output_spec_and_iteration():
     assert [item.shape for item in out] == [(2, 2), (1, 2)]
     assert out[0].tolist() == [[1, 2], [3, 4]]
     assert out[1].tolist() == [[5, 6]]
+
+
+def test_unbatch_infer_output_spec_and_iteration():
+    src = ListDataset(
+        [
+            np.array([[1, 2], [3, 4]], dtype=np.int32),
+            np.array([[5, 6]], dtype=np.int32),
+        ],
+        TensorSpec("int32", shape=(2,), batch=2, backend="numpy"),
+    )
+
+    ds = Unbatch(src)
+    out = list(ds)
+
+    assert ds.spec == TensorSpec("int32", shape=(2,), backend="numpy")
+    assert [item.tolist() for item in out] == [[1, 2], [3, 4], [5, 6]]
+
+
+def test_take_skip_and_repeat_cardinality_and_iteration():
+    src = ListDataset(
+        [np.array([i], dtype=np.int32) for i in range(5)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+
+    taken = Take(src, 3)
+    skipped = Skip(src, 2)
+    repeated = Repeat(Take(src, 2), 3)
+
+    assert taken.__len__() == Cardinality.finite(3)
+    assert skipped.__len__() == Cardinality.finite(3)
+    assert repeated.__len__() == Cardinality.finite(6)
+    assert [item.item() for item in taken] == [0, 1, 2]
+    assert [item.item() for item in skipped] == [2, 3, 4]
+    assert [item.item() for item in repeated] == [0, 1, 0, 1, 0, 1]
+
+
+def test_take_zero_has_zero_cardinality():
+    src = ListDataset(
+        [np.array([1], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+
+    ds = Take(src, 0)
+
+    assert ds.__len__() == Cardinality.finite(0)
+    assert list(ds) == []
+
+
+def test_shuffle_is_seeded_and_preserves_elements():
+    src = ListDataset(
+        [np.array([i], dtype=np.int32) for i in range(5)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+
+    first = [item.item() for item in Shuffle(src, 5, seed=7)]
+    second = [item.item() for item in Shuffle(src, 5, seed=7)]
+
+    assert first == second
+    assert sorted(first) == [0, 1, 2, 3, 4]
 
 
 def test_pack_positional_infer_output_spec_and_iteration():

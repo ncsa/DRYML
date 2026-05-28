@@ -306,6 +306,7 @@ class Repo:
 
     def save_object(self, obj, main=False, store=None, revision=None, alias: str | None = None):
         revision = manage_revision(obj, revision)
+        self.add_objects(obj, store=store)
         RepoSaveVisitor(self, store=store, revision=revision).visit(obj)
 
         if main:

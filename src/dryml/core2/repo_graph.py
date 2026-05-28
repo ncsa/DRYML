@@ -101,6 +101,8 @@ class RepoSaveVisitor(RepoStructuralVisitor):
     def visit_concrete_definition(self, obj: ConcreteDefinition, ctx: GraphCtx) -> None:
         linked_obj = self.repo.get_cached(obj)
         if linked_obj is None:
+            from .repo import RepoSaveError
+
             raise RepoSaveError(
                 f"Definition of object {obj} is not reachable in this repo!"
             )
@@ -175,6 +177,6 @@ class RepoAddObjectsVisitor(RepoStructuralVisitor):
         self.repo.pin(obj)
         if self.store is not None:
             self.repo.obj_default_store[obj.definition] = self.store
-        else:
+        elif obj.definition not in self.repo.obj_default_store:
             if self.repo.default_store is not None:
                 self.repo.obj_default_store[obj.definition] = self.repo.default_store

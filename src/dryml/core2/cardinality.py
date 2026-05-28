@@ -21,8 +21,8 @@ class Cardinality:
         if self.kind is CardinalityKind.FINITE:
             if self.value is None:
                 raise ValueError("Finite cardinality requires an integer value.")
-            if self.value <= 0:
-                raise ValueError("Cardinality must be a positive integer.")
+            if self.value < 0:
+                raise ValueError("Cardinality must be a non-negative integer.")
         else:
             if self.value is not None:
                 raise ValueError("Only finite cardinality may have a value.")

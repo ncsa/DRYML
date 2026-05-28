@@ -1,17 +1,14 @@
-from dryml.models.trainable import Trainable
-from dryml.models.component import Component, \
-    TrainFunction
-from dryml.models.model import Model
-from dryml.models.pipe import Pipe
-from dryml.models.train_spec import TrainSpec
-import dryml.models.utils as utils
+from .experiment import Experiment
+from .model import AutoEncoder, Model
+from .pipe import Pipe
+from .train_func import TrainFunction
+from .train_spec import TrainState
 
 __all__ = [
-    Trainable,
-    Component,
-    TrainFunction,
-    Model,
-    Pipe,
-    TrainSpec,
-    utils,
+    "AutoEncoder",
+    "Experiment",
+    "Model",
+    "Pipe",
+    "TrainFunction",
+    "TrainState",
 ]

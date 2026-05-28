@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+import os
+from pathlib import Path
 from typing import Any, Callable
-import inspect
 import itertools
+import numpy as np
 
-from dryml.core2.tensor_spec import Dynamic, SpecTree, TensorSpec, SpecHint, as_tensor_spec, unbatch_spec_tree
+from dryml.core2.tensor_spec import SpecTree, TensorSpec, SpecHint, as_tensor_spec, unbatch_spec_tree
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.utils.recurse import first_leaf, iter_leaves, map_leaves
 from dryml.context import check_context
@@ -143,6 +145,53 @@ class ArrayDataset(SourceDataset):
         return _tree_index(self.arrays, 0)
 
 
+class NpyFileDataset(SourceDataset):
+    """Dataset whose elements are loaded from sorted ``.npy`` files."""
+
+    @classmethod
+    def __prepare_args__(cls, *args, **kwargs):
+        args, kwargs = super().__prepare_args__(*args, **kwargs)
+        if args:
+            root = args[0]
+            if isinstance(root, os.PathLike):
+                args = (os.fspath(root), *args[1:])
+        elif isinstance(kwargs.get("root"), os.PathLike):
+            kwargs = kwargs.copy()
+            kwargs["root"] = os.fspath(kwargs["root"])
+        return args, kwargs
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        pattern: str = "*.npy",
+        spec: SpecTree | None = None,
+        batched: bool = False,
+        allow_pickle: bool = False,
+    ):
+        self.root = Path(root)
+        self.pattern = pattern
+        self.allow_pickle = allow_pickle
+        self.files = tuple(sorted(self.root.glob(pattern)))
+
+        if spec is None:
+            if not self.files:
+                raise ValueError("NpyFileDataset requires spec when no files match.")
+            spec = as_tensor_spec(
+                np.load(self.files[0], allow_pickle=allow_pickle),
+                batched=batched,
+            )
+
+        super().__init__(spec=spec)
+
+    def __iter__(self):
+        for path in self.files:
+            yield np.load(path, allow_pickle=self.allow_pickle)
+
+    def __len__(self) -> Cardinality:
+        return Cardinality.finite(len(self.files))
+
+
 class TFDSAdapter(SourceDataset):
     """
     Adapter for tf.data.Dataset.
@@ -164,32 +213,31 @@ class TFDSAdapter(SourceDataset):
         batch_size: int|None=None,
         as_supervised: bool=False,
         as_numpy: bool = False,
+        assume_batched: bool | None = None,
+        spec: SpecTree | None = None,
     ):
-        super().__init__()
-
         check_context('tf')
+        import tensorflow as tf
         import tensorflow_datasets as tfds
 
-        if not isinstance(dataset, tf.data.Dataset):
-            raise TypeError(
-                f"dataset must be a tf.data.Dataset, got {type(dataset).__name__}."
-            )
-
         # Load the dataset
-        self.ds = tfds.load(
+        self.dataset = tfds.load(
             name,
             split=split,
             batch_size=batch_size,
             as_supervised=as_supervised)
         self.as_numpy = as_numpy
+        self.assume_batched = (batch_size is not None) if assume_batched is None else assume_batched
 
         import dryml.tf
 
-        spec = as_tensor_spec(
-            self.ds.element_spec,
-            batched=assume_batched,
-        )
+        if spec is None:
+            spec = as_tensor_spec(
+                self.dataset.element_spec,
+                batched=self.assume_batched,
+            )
 
+        super().__init__(spec=spec)
 
     def __iter__(self) -> Iterator[Any]:
         if self.as_numpy:
@@ -197,7 +245,7 @@ class TFDSAdapter(SourceDataset):
         else:
             yield from self.dataset
 
-    def __len__(self) -> int:
+    def __len__(self) -> Cardinality:
         try:
             import tensorflow as tf  # type: ignore
         except Exception as e:
@@ -207,11 +255,11 @@ class TFDSAdapter(SourceDataset):
         card_val = int(card.numpy())
 
         if card_val == tf.data.UNKNOWN_CARDINALITY:
-            return super().__len__()
+            return Cardinality.UNKNOWN
         if card_val == tf.data.INFINITE_CARDINALITY:
-            raise TypeError("TFDatasetAdapter has infinite cardinality.")
+            return Cardinality.INFINITE
 
-        return card_val
+        return Cardinality.finite(card_val)
 
 
 class TorchDatasetAdapter(SourceDataset):
@@ -257,16 +305,16 @@ class TorchDatasetAdapter(SourceDataset):
         except Exception as e:
             raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
 
-        if isinstance(self.datasets, tud.IterableDataset):
+        if isinstance(self.dataset, tud.IterableDataset):
             yield from iter(self.dataset)
             return
 
         for i in range(len(self.dataset)):
             yield self.dataset[i]
 
-    def __len__(self) -> int:
+    def __len__(self) -> Cardinality:
         if hasattr(self.dataset, "__len__"):
-            return int(len(self.dataset))
+            return Cardinality.finite(int(len(self.dataset)))
         return super().__len__()
 
     def peek(self) -> Any:
