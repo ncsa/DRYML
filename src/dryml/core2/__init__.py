@@ -4,6 +4,7 @@ from dryml.core2.repo import Repo, load_alias, load_object, save_object
 from dryml.core2.dtype import dtype, DType
 from dryml.core2.tensor_spec import as_tensor_spec, TensorSpec
 from dryml.core2.config import CONFIG_MISSING, ConfigError, ConfigRef
+from dryml.core2.symbol import ImportRef, SourceSpec, resolve_symbol, symbol_ref
 
 __all__ = [
     load_object,
@@ -24,4 +25,8 @@ __all__ = [
     CONFIG_MISSING,
     as_tensor_spec,
     TensorSpec,
+    ImportRef,
+    SourceSpec,
+    symbol_ref,
+    resolve_symbol,
 ]

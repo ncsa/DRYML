@@ -48,6 +48,12 @@ def collide_attributes(obj, attr_list):
 
 
 def get_class_str(obj):
+    from ..symbol import ImportRef, SourceSpec
+
+    if isinstance(obj, ImportRef):
+        return obj.import_path().replace(":", ".")
+    if isinstance(obj, SourceSpec):
+        return obj.name or "<source>"
     if isinstance(obj, type):
         return '.'.join([getmodule(obj).__name__,
                          obj.__name__])

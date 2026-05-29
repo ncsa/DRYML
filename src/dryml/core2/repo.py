@@ -478,12 +478,16 @@ class Repo:
 
         # Construct a new instance (bypass re-concretization by passing __cdef__)
         try:
-            obj = cdef.cls(*rt_args, repo=self, __cdef__=cdef, **rt_kwargs)
+            from .symbol import resolve_symbol
+
+            cls = resolve_symbol(cdef.cls)
+            obj = cls(*rt_args, repo=self, __cdef__=cdef, **rt_kwargs)
 
             self._num_constructions += 1
         except Exception as e:
+            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
             raise RepoLoadError(
-                f"Error constructing {cdef.cls.__name__} at {'/'.join(map(str, path))}: {e}"
+                f"Error constructing {cls_name} at {'/'.join(map(str, path))}: {e}"
             ) from e
 
         # Memo immediately (preserve sharing inside this graph)

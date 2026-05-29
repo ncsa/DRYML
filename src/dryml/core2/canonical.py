@@ -29,7 +29,7 @@ from .config import ConfigRef
 # If Backend is a real runtime type/class, include it too.
 # from .backend import Backend
 
-from .function_spec import FunctionSpec, function_spec, resolve_function
+from .symbol import ImportRef, SourceSpec, symbol_ref, resolve_symbol
 
 
 # ----------------------------------------------------------------------
@@ -53,7 +53,7 @@ def is_identity_value(x: Any) -> bool:
 
     Important:
     - DType / TensorSpec belong here.
-    - Future represented specs like FunctionSpec should *not* go here,
+    - Future represented specs like SourceSpec should *not* go here,
       because they will decode back to a callable at runtime/thaw time.
     """
     if isinstance(x, IDENTITY_VALUE_TYPES):
@@ -193,7 +193,8 @@ class NodeKind(Enum):
     FROZEN_NDARRAY = auto()
 
     FUNCTION = auto()
-    FUNCTION_SPEC = auto()
+    IMPORT_REF = auto()
+    SOURCE_SPEC = auto()
 
     LIST = auto()
     TUPLE = auto()
@@ -216,11 +217,11 @@ def node_kind(x: Any) -> NodeKind:
     from .definition import ConcreteDefinition, Definition
     from .object import Object
 
-    if is_pod(x):
-        return NodeKind.POD
-
     if isinstance(x, type):
         return NodeKind.TYPE
+
+    if is_pod(x):
+        return NodeKind.POD
 
     if is_identity_value(x):
         return NodeKind.IDENTITY_VALUE
@@ -259,11 +260,14 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, Object):
         return NodeKind.OBJECT
 
+    if isinstance(x, ImportRef):
+        return NodeKind.IMPORT_REF
+
+    if isinstance(x, SourceSpec):
+        return NodeKind.SOURCE_SPEC
+
     if isinstance(x, Callable):
         return NodeKind.FUNCTION
-
-    if isinstance(x, FunctionSpec):
-        return NodeKind.FUNCTION_SPEC
 
     return NodeKind.UNSUPPORTED
 
@@ -271,7 +275,6 @@ def node_kind(x: Any) -> NodeKind:
 def is_canonical_value(x: Any) -> bool:
     return node_kind(x) in {
         NodeKind.POD,
-        NodeKind.TYPE,
         NodeKind.IDENTITY_VALUE,
         NodeKind.FROZEN_NDARRAY,
         NodeKind.FROZEN_LIST,
@@ -279,8 +282,13 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.FROZEN_SET,
         NodeKind.FROZEN_DICT,
         NodeKind.CONCRETE_DEFINITION,
-        NodeKind.FUNCTION_SPEC,
-    }
+        NodeKind.IMPORT_REF,
+        NodeKind.SOURCE_SPEC,
+    } or _is_naked_core_type(x)
+
+
+def _is_naked_core_type(x: Any) -> bool:
+    return isinstance(x, type) and getattr(x, "__module__", "").startswith("dryml.core2")
 
 
 def is_runtime_leaf(x: Any) -> bool:
@@ -295,6 +303,8 @@ def is_runtime_leaf(x: Any) -> bool:
         NodeKind.NDARRAY,
         NodeKind.FROZEN_NDARRAY,
         NodeKind.FUNCTION,
+        NodeKind.IMPORT_REF,
+        NodeKind.SOURCE_SPEC,
     }
 
 
@@ -579,6 +589,11 @@ class _ToCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.NDARRAY:
             return FrozenNDArray.from_array(obj)
 
+        if kind is NodeKind.TYPE:
+            if _is_naked_core_type(obj):
+                return obj
+            return symbol_ref(obj)
+
         if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
             return transform_container(
                 obj,
@@ -601,9 +616,11 @@ class _ToCanonicalTransformer(GraphTransformer):
                     f"Cannot concretize Definition with missing args at {ctx.path_str()}"
                 )
 
-            prep_args, prep_kwargs = obj.cls.__prepare_args__(*obj.args, **obj.kwargs)
+            live_cls = resolve_symbol(obj.cls)
+            prep_args, prep_kwargs = live_cls.__prepare_args__(*obj.args, **obj.kwargs)
             c_args = self.transform(prep_args, ctx.child("args"))
             c_kwargs = self.transform(prep_kwargs, ctx.child("kwargs"))
+            c_cls = self.transform(live_cls, ctx.child("cls"))
 
             if not isinstance(c_args, FrozenTuple):
                 raise TypeError(
@@ -614,10 +631,10 @@ class _ToCanonicalTransformer(GraphTransformer):
                     f"Prepared kwargs did not concretize to FrozenDict at {ctx.path_str()}"
                 )
 
-            return ConcreteDefinition(obj.cls, c_args, c_kwargs)
+            return ConcreteDefinition(c_cls, c_args, c_kwargs)
 
         if kind is NodeKind.FUNCTION:
-            return function_spec(obj)
+            return symbol_ref(obj)
 
         raise TypeError(
             f"Cannot canonicalize object of type {type(obj).__name__} at {ctx.path_str()}"
@@ -694,8 +711,8 @@ class _ThawValueTransformer(GraphTransformer):
         if kind is NodeKind.OBJECT:
             return self.transform(obj.definition, ctx)
 
-        if kind is NodeKind.FUNCTION_SPEC:
-            return resolve_function(obj)
+        if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC}:
+            return resolve_symbol(obj)
 
         if kind is NodeKind.FUNCTION:
             return obj
@@ -814,8 +831,8 @@ class _FromCanonicalTransformer(GraphTransformer):
 
             return obj
 
-        if kind is NodeKind.FUNCTION_SPEC:
-            return resolve_function(obj)
+        if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC}:
+            return resolve_symbol(obj)
 
         if kind in {
             NodeKind.FROZEN_LIST,

@@ -56,9 +56,6 @@ class RepoStructuralVisitor(GraphVisitor):
             self.visit_concrete_definition(obj, ctx)
             return
 
-        if kind is NodeKind.FUNCTION_SPEC:
-            return
-
         if kind is NodeKind.DEFINITION:
             raise RepoGraphError("Plain Definitions aren't allowed here.")
 

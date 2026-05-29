@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import builtins
 import json
-import types
 import __main__
 from dataclasses import dataclass
 import ast
@@ -10,24 +9,103 @@ import importlib
 import inspect
 import textwrap
 from types import FunctionType
-from typing import Literal
+from typing import Any, Literal
 
 
-FunctionSpecKind = Literal["import", "source"]
+SourceSpecKind = Literal["function", "class"]
 
 
-def _object_import_path(obj) -> str | None:
-    """
-    Return a stable import path for modules and importable objects.
+def _normalize_source(source: str) -> str:
+    source = textwrap.dedent(source).strip()
+    if not source:
+        raise ValueError("Source cannot be empty.")
+    return source
 
-    Forms:
-      'numpy'
-      'numpy:sin'
-      'dryml.core.function_spec:FunctionSpec'
-    """
+
+def _resolve_qualname(root, qualname: str):
+    obj = root
+    for part in qualname.split("."):
+        if part == "<locals>":
+            raise ValueError(
+                f"Cannot resolve qualname {qualname!r}; it contains <locals>."
+            )
+        obj = getattr(obj, part)
+    return obj
+
+
+@dataclass(frozen=True, slots=True)
+class ImportRef:
+    """Canonical reference to an importable Python symbol."""
+
+    module: str
+    qualname: str | None = None
+
+    def __post_init__(self):
+        if not self.module or not isinstance(self.module, str):
+            raise ValueError("ImportRef requires a non-empty module string.")
+        if self.qualname is not None and (not self.qualname or not isinstance(self.qualname, str)):
+            raise ValueError("ImportRef qualname must be a non-empty string or None.")
+
+    @classmethod
+    def from_import_path(cls, path: str) -> "ImportRef":
+        path = path.strip()
+        if not path:
+            raise ValueError("Import path cannot be empty.")
+        if ":" not in path:
+            return cls(module=path, qualname=None)
+        module, qualname = path.split(":", 1)
+        module = module.strip()
+        qualname = qualname.strip()
+        if not module or not qualname:
+            raise ValueError("Import path must be 'module' or 'module:qualname'.")
+        return cls(module=module, qualname=qualname)
+
+    @classmethod
+    def from_object(cls, obj) -> "ImportRef":
+        ref = _object_import_ref(obj)
+        if ref is None:
+            raise ValueError(
+                f"Object of type {type(obj).__name__} does not have a stable import path."
+            )
+        return ref
+
+    def import_path(self) -> str:
+        if self.qualname is None:
+            return self.module
+        return f"{self.module}:{self.qualname}"
+
+    def resolve(self):
+        module = importlib.import_module(self.module)
+        if self.qualname is None:
+            return module
+        return _resolve_qualname(module, self.qualname)
+
+    def __repr__(self) -> str:
+        if self.qualname is None:
+            return f"ImportRef(module={self.module!r})"
+        return f"ImportRef(module={self.module!r}, qualname={self.qualname!r})"
+
+    def __stable_leaf_bytes__(self):
+        payload = {
+            "kind": "import",
+            "module": self.module,
+            "qualname": self.qualname,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _coerce_import_ref(obj) -> ImportRef:
+    if isinstance(obj, ImportRef):
+        return obj
+    if isinstance(obj, str):
+        return ImportRef.from_import_path(obj)
+    return ImportRef.from_object(obj)
+
+
+def _object_import_ref(obj) -> ImportRef | None:
     if inspect.ismodule(obj):
         name = getattr(obj, "__name__", None)
-        return name if name else None
+        return ImportRef(name) if name else None
 
     module_name = getattr(obj, "__module__", None)
     qualname = getattr(obj, "__qualname__", None)
@@ -48,70 +126,101 @@ def _object_import_path(obj) -> str | None:
         return None
 
     if resolved is obj:
-        return f"{module_name}:{qualname}"
+        return ImportRef(module_name, qualname)
 
     return None
 
 
-def _resolve_import_path(path: str):
-    if ":" not in path:
-        return importlib.import_module(path)
+@dataclass(frozen=True, slots=True)
+class SourceSpec:
+    """Source-backed specification for non-importable functions and classes."""
 
-    module_name, qualname = path.split(":", 1)
-    module = importlib.import_module(module_name)
-    return _resolve_qualname(module, qualname)
+    kind: SourceSpecKind
+    source: str
+    name: str | None = None
+    imports: dict[str, ImportRef | str] | None = None
 
+    def __post_init__(self):
+        if self.kind not in ("function", "class"):
+            raise ValueError(f"Invalid SourceSpec kind {self.kind!r}.")
+        object.__setattr__(self, "source", _normalize_source(self.source))
+        if self.kind == "class" and self.name is None:
+            raise ValueError("Class SourceSpec requires a name.")
+        imports = {
+            name: _coerce_import_ref(ref)
+            for name, ref in (self.imports or {}).items()
+        }
+        object.__setattr__(self, "imports", dict(sorted(imports.items())))
 
-def _normalize_source(source: str) -> str:
-    source = textwrap.dedent(source).strip()
-    if not source:
-        raise ValueError("Function source cannot be empty.")
-    return source
+    @classmethod
+    def from_function(cls, fn: FunctionType) -> "SourceSpec":
+        if not inspect.isfunction(fn):
+            raise TypeError(f"Expected a Python function, got {type(fn).__name__}.")
+        return _source_spec_from_function(fn)
 
+    @classmethod
+    def from_class(cls, obj: type) -> "SourceSpec":
+        if not inspect.isclass(obj):
+            raise TypeError(f"Expected a Python class, got {type(obj).__name__}.")
+        return _source_spec_from_class(obj)
 
-def _resolve_qualname(root, qualname: str):
-    obj = root
-    for part in qualname.split("."):
-        if part == "<locals>":
-            raise ValueError(
-                f"Cannot resolve qualname {qualname!r}; it contains <locals>."
-            )
-        obj = getattr(obj, part)
-    return obj
+    @classmethod
+    def from_source(
+        cls,
+        source: str,
+        *,
+        kind: SourceSpecKind = "function",
+        name: str | None = None,
+        imports: dict[str, ImportRef | str] | None = None,
+    ) -> "SourceSpec":
+        if kind == "class" and name is None:
+            source_tree = ast.parse(_normalize_source(source))
+            if len(source_tree.body) == 1 and isinstance(source_tree.body[0], ast.ClassDef):
+                name = source_tree.body[0].name
+        return cls(kind=kind, source=source, name=name, imports=imports)
 
+    def resolve(self):
+        live = _matching_live_source(self)
+        if live is not None:
+            return live
 
-def _has_stable_import_path(fn: FunctionType) -> bool:
-    """
-    Conservative check for whether this function can be reconstructed by
-    importing module + qualname in another process.
+        ns: dict[str, object] = {}
+        for name, ref in (self.imports or {}).items():
+            ns[name] = ref.resolve()
 
-    This intentionally rejects many cases:
-    - __main__
-    - notebook cell defs
-    - nested defs (<locals>)
-    """
-    if not inspect.isfunction(fn):
-        return False
+        if self.kind == "function" and self.name is None:
+            obj = eval(self.source, ns, ns)
+        else:
+            exec(self.source, ns, ns)
+            if self.name not in ns:
+                raise ValueError(
+                    f"Resolved namespace does not contain symbol {self.name!r}."
+                )
+            obj = ns[self.name]
 
-    module_name = getattr(fn, "__module__", None)
-    qualname = getattr(fn, "__qualname__", None)
+        if self.kind == "class" and not inspect.isclass(obj):
+            raise TypeError("Resolved SourceSpec object is not a class.")
+        if self.kind == "function" and not callable(obj):
+            raise TypeError("Resolved SourceSpec object is not callable.")
+        return obj
 
-    if not module_name or not qualname:
-        return False
+    def __repr__(self) -> str:
+        return (
+            f"SourceSpec(kind={self.kind!r}, name={self.name!r}, "
+            f"source={self.source!r}, imports={self.imports!r})"
+        )
 
-    if module_name == "__main__":
-        return False
-
-    if "<locals>" in qualname:
-        return False
-
-    try:
-        module = importlib.import_module(module_name)
-        resolved = _resolve_qualname(module, qualname)
-    except Exception:
-        return False
-
-    return resolved is fn
+    def __stable_leaf_bytes__(self):
+        payload = {
+            "kind": self.kind,
+            "source": self.source,
+            "name": self.name,
+            "imports": {
+                name: ref.import_path()
+                for name, ref in sorted((self.imports or {}).items())
+            },
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _extract_lambda_source(source: str) -> str:
@@ -163,9 +272,9 @@ def _extract_named_function_source(fn: FunctionType, source: str) -> tuple[str, 
     )
 
 
-def _source_spec_from_function(fn: FunctionType):
+def _source_spec_from_function(fn: FunctionType) -> SourceSpec:
     """
-    Build a source-backed FunctionSpec from a live function.
+    Build a source-backed SourceSpec from a live function.
 
     This is intentionally conservative:
     - closures are rejected for now because environment capture is disabled
@@ -173,7 +282,7 @@ def _source_spec_from_function(fn: FunctionType):
     """
     if fn.__code__.co_freevars:
         raise ValueError(
-            "Cannot create source-backed FunctionSpec for a closure; "
+            "Cannot create SourceSpec for a closure; "
             "environment capture is not implemented yet."
         )
 
@@ -185,8 +294,8 @@ def _source_spec_from_function(fn: FunctionType):
     if fn.__name__ == "<lambda>":
         lambda_source = _extract_lambda_source(raw_source)
         imports = _collect_source_imports(fn, lambda_source)
-        return FunctionSpec(
-            kind="source",
+        return SourceSpec(
+            kind="function",
             source=lambda_source,
             name=None,
             imports=imports,
@@ -194,15 +303,45 @@ def _source_spec_from_function(fn: FunctionType):
 
     source, name = _extract_named_function_source(fn, raw_source)
     imports = _collect_source_imports(fn, source)
-    return FunctionSpec(
-        kind="source",
+    return SourceSpec(
+        kind="function",
         source=source,
         name=name,
         imports=imports,
     )
 
 
-def _lookup_live_name_for_source(fn: FunctionType, name: str):
+def _extract_named_class_source(cls: type, source: str) -> tuple[str, str]:
+    source = _normalize_source(source)
+    tree = ast.parse(source)
+
+    for stmt in tree.body:
+        if isinstance(stmt, ast.ClassDef) and stmt.name == cls.__name__:
+            stmt.decorator_list = []
+            return ast.unparse(stmt), stmt.name
+
+    raise ValueError(
+        f"Could not find class definition for {cls.__name__!r} in extracted source."
+    )
+
+
+def _source_spec_from_class(cls: type) -> SourceSpec:
+    try:
+        raw_source = inspect.getsource(cls)
+    except (OSError, IOError) as e:
+        raise ValueError("Could not retrieve class source.") from e
+
+    source, name = _extract_named_class_source(cls, raw_source)
+    imports = _collect_source_imports(cls, source)
+    return SourceSpec(
+        kind="class",
+        source=source,
+        name=name,
+        imports=imports,
+    )
+
+
+def _lookup_live_name_for_source(obj, name: str):
     """
     Best-effort resolution of a name referenced by function source.
 
@@ -213,8 +352,17 @@ def _lookup_live_name_for_source(fn: FunctionType, name: str):
     This supports notebook/test-style nested definitions that rely on names
     imported in an enclosing local scope.
     """
-    if name in fn.__globals__:
-        return fn.__globals__[name]
+    globals_dict = getattr(obj, "__globals__", None)
+    if globals_dict is not None and name in globals_dict:
+        return globals_dict[name]
+
+    module_name = getattr(obj, "__module__", None)
+    if module_name:
+        import sys
+
+        module = sys.modules.get(module_name)
+        if module is not None and name in vars(module):
+            return vars(module)[name]
 
     frame = inspect.currentframe()
     try:
@@ -684,46 +832,46 @@ class _LexicalDependencyCollector:
 
 
 def _collect_source_imports(
-    fn: FunctionType,
+    obj,
     source: str,
-) -> dict[str, str]:
+) -> dict[str, ImportRef]:
     tree = ast.parse(source)
 
     if len(tree.body) != 1:
-        raise ValueError("Expected a single function expression or definition.")
+        raise ValueError("Expected a single function/class expression or definition.")
 
     root = tree.body[0]
     if isinstance(root, ast.Expr) and isinstance(root.value, ast.Lambda):
         scope_node = root.value
-    elif isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    elif isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         scope_node = root
     else:
-        raise ValueError("Unsupported source form for FunctionSpec.")
+        raise ValueError("Unsupported source form for SourceSpec.")
 
     collector = _LexicalDependencyCollector()
     free_names = collector.collect(scope_node)
 
-    imports: dict[str, str] = {}
+    imports: dict[str, ImportRef] = {}
     missing: list[str] = []
 
     for name in sorted(free_names):
         try:
-            obj = _lookup_live_name_for_source(fn, name)
+            dep = _lookup_live_name_for_source(obj, name)
         except KeyError:
             missing.append(name)
             continue
 
-        path = _object_import_path(obj)
-        if path is None:
+        ref = _object_import_ref(dep)
+        if ref is None:
             missing.append(name)
             continue
 
-        imports[name] = path
+        imports[name] = ref
 
     if missing:
         raise ValueError(
-            "Could not capture stable import paths for source-backed function "
-            f"{fn.__name__!r}. Missing/unimportable globals: {missing}"
+            "Could not capture stable import paths for source-backed object "
+            f"{getattr(obj, '__name__', type(obj).__name__)!r}. Missing/unimportable globals: {missing}"
         )
 
     return imports
@@ -736,23 +884,32 @@ def _current_main_ns() -> dict[str, object]:
         return {}
 
 
-def _matching_live_function(spec: "FunctionSpec"):
-    if spec.kind != "source" or spec.name is None:
+def _matching_live_source(spec: SourceSpec):
+    if spec.name is None:
         return None
 
     ns = _current_main_ns()
     candidate = ns.get(spec.name)
 
-    if not inspect.isfunction(candidate):
-        return None
-
-    try:
-        candidate_spec = FunctionSpec.from_function(candidate)
-    except Exception:
+    if spec.kind == "function":
+        if not inspect.isfunction(candidate):
+            return None
+        try:
+            candidate_spec = SourceSpec.from_function(candidate)
+        except Exception:
+            return None
+    elif spec.kind == "class":
+        if not inspect.isclass(candidate):
+            return None
+        try:
+            candidate_spec = SourceSpec.from_class(candidate)
+        except Exception:
+            return None
+    else:
         return None
 
     if (
-        candidate_spec.kind == "source"
+        candidate_spec.kind == spec.kind
         and candidate_spec.name == spec.name
         and candidate_spec.source == spec.source
         and (candidate_spec.imports or {}) == (spec.imports or {})
@@ -761,210 +918,61 @@ def _matching_live_function(spec: "FunctionSpec"):
 
     return None
 
-@dataclass(frozen=True, slots=True)
-class FunctionSpec:
-    """
-    Canonical specification for reconstructing a function.
 
-    Modes
-    -----
-    import
-        Reconstruct by importing module + qualname.
-
-    source
-        Reconstruct by exec/eval on a source string. Since no environment is
-        captured, source-backed functions should be self-contained.
-    """
-    kind: FunctionSpecKind
-
-    # import mode
-    module: str | None = None
-    qualname: str | None = None
-
-    # source mode
-    source: str | None = None
-    name: str | None = None  # required for `def ...`; None allowed for lambda expr
-    imports: dict[str,str] | None = None
-
-    def __post_init__(self):
-        if self.kind not in ("import", "source"):
-            raise ValueError(f"Invalid FunctionSpec kind {self.kind!r}.")
-
-        if self.kind == "import":
-            if not self.module or not self.qualname:
-                raise ValueError(
-                    "Import FunctionSpec requires `module` and `qualname`."
-                )
-            if self.source is not None or self.name is not None or self.imports is not None:
-                raise ValueError(
-                    "Import FunctionSpec may not define `source`, `name`, or `imports`."
-                )
-
-        elif self.kind == "source":
-            if not self.source:
-                raise ValueError("Source FunctionSpec requires `source`.")
-            object.__setattr__(self, "source", _normalize_source(self.source))
-
-            if self.module is not None or self.qualname is not None:
-                raise ValueError(
-                    "Source FunctionSpec may not define `module` or `qualname`."
-                )
-
-            imports = self.imports or {}
-            object.__setattr__(self, "imports", dict(sorted(imports.items())))
-
-    @classmethod
-    def from_function(cls, fn: FunctionType) -> FunctionSpec:
-        """
-        Single ingest point for live functions.
-
-        Order:
-        1. stable import path
-        2. source extraction
-        """
-        if not inspect.isfunction(fn):
-            raise TypeError(
-                f"Expected a Python function, got {type(fn).__name__}."
-            )
-
-        if _has_stable_import_path(fn):
-            return cls(
-                kind="import",
-                module=fn.__module__,
-                qualname=fn.__qualname__,
-            )
-
-        return _source_spec_from_function(fn)
-
-    @classmethod
-    def from_import(cls, module: str, qualname: str) -> FunctionSpec:
-        return cls(kind="import", module=module, qualname=qualname)
-
-    @classmethod
-    def from_import_path(cls, path: str) -> FunctionSpec:
-        """
-        Parse 'package.module:qualname'
-        """
-        if ":" not in path:
-            raise ValueError(
-                "Import path must have the form 'package.module:qualname'."
-            )
-        module, qualname = path.split(":", 1)
-        module = module.strip()
-        qualname = qualname.strip()
-        if not module or not qualname:
-            raise ValueError(
-                "Import path must have the form 'package.module:qualname'."
-            )
-        return cls.from_import(module, qualname)
-
-    @classmethod
-    def from_source(cls, source: str, name: str | None = None) -> FunctionSpec:
-        """
-        Explicit source-backed FunctionSpec.
-
-        Examples
-        --------
-        FunctionSpec.from_source(
-            '''
-            def f(x):
-                return x + 1
-            ''',
-            name='f',
-        )
-
-        FunctionSpec.from_source('lambda x: x + 1')
-        """
-        return cls(kind="source", source=source, name=name)
-
-    def resolve(self):
-        """
-        Reconstruct the live function.
-        """
-        if self.kind == "import":
-            module = importlib.import_module(self.module)
-            fn = _resolve_qualname(module, self.qualname)
-
-        elif self.kind == "source":
-            live = _matching_live_function(self)
-            if live is not None:
-                return live
-
-            ns: dict[str, object] = {}
-
-            for name, path in (self.imports or {}).items():
-                ns[name] = _resolve_import_path(path)
-
-            if self.name is None:
-                fn = eval(self.source, ns, ns)
-            else:
-                exec(self.source, ns, ns)
-                if self.name not in ns:
-                    raise ValueError(
-                        f"Resolved namespace does not contain function {self.name!r}."
-                    )
-                fn = ns[self.name]
-
-        else:
-            raise RuntimeError(f"Unexpected FunctionSpec kind {self.kind!r}.")
-
-        if not callable(fn):
-            raise TypeError("Resolved object is not callable.")
-
-        return fn
-
-    def import_path(self) -> str:
-        if self.kind != "import":
-            raise ValueError("Only import FunctionSpec values have an import path.")
-        return f"{self.module}:{self.qualname}"
-
-    def __repr__(self) -> str:
-        if self.kind == "import":
-            return (
-                f"FunctionSpec(kind='import', "
-                f"module={self.module!r}, qualname={self.qualname!r})"
-            )
-        return (
-            f"FunctionSpec(kind='source', "
-            f"name={self.name!r}, source={self.source!r}, imports={self.imports!r})"
-        )
-
-    def __stable_leaf_bytes__(self):
-        payload = {
-            "kind": self.kind,
-            "module": self.module,
-            "qualname": self.qualname,
-            "source": self.source,
-            "name": self.name,
-            "imports": dict(sorted((self.imports or {}).items())),
-        }
-        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def function_spec(
-    obj: FunctionSpec | FunctionType | str,
+def symbol_ref(
+    obj: ImportRef | SourceSpec | FunctionType | type | str,
     *,
     name: str | None = None,
-) -> FunctionSpec:
-    if isinstance(obj, FunctionSpec):
+) -> ImportRef | SourceSpec:
+    if isinstance(obj, (ImportRef, SourceSpec)):
         return obj
 
     if inspect.isfunction(obj):
-        return FunctionSpec.from_function(obj)
+        ref = _object_import_ref(obj)
+        if ref is not None:
+            return ref
+        return SourceSpec.from_function(obj)
+
+    if inspect.isclass(obj):
+        ref = _object_import_ref(obj)
+        if ref is not None:
+            return ref
+        return SourceSpec.from_class(obj)
 
     if isinstance(obj, str):
-        return FunctionSpec.from_source(obj, name=name)
+        return SourceSpec.from_source(obj, kind="function", name=name)
 
     raise TypeError(
-        f"Cannot convert object of type {type(obj).__name__} to FunctionSpec."
+        f"Cannot convert object of type {type(obj).__name__} to ImportRef or SourceSpec."
     )
 
 
-def resolve_function(obj: FunctionSpec | FunctionType):
+def maybe_symbol_ref(obj: Any, *, functions: bool = True) -> ImportRef | SourceSpec | None:
+    if isinstance(obj, (ImportRef, SourceSpec)):
+        return obj
+    if inspect.isclass(obj) or (functions and inspect.isfunction(obj)):
+        try:
+            return symbol_ref(obj)
+        except Exception:
+            return None
+    return None
+
+
+def resolve_symbol(obj: Any) -> Any:
+    if isinstance(obj, ImportRef):
+        return obj.resolve()
+
+    if isinstance(obj, SourceSpec):
+        return obj.resolve()
+
+    return obj
+
+
+def resolve_function(obj: ImportRef | SourceSpec | FunctionType):
     """
-    Resolve either a FunctionSpec or a live function.
+    Resolve either a symbol reference or a live function.
     """
-    if isinstance(obj, FunctionSpec):
+    if isinstance(obj, (ImportRef, SourceSpec)):
         return obj.resolve()
 
     if inspect.isfunction(obj):
@@ -973,3 +981,13 @@ def resolve_function(obj: FunctionSpec | FunctionType):
     raise TypeError(
         f"Cannot resolve object of type {type(obj).__name__} as a function."
     )
+
+
+__all__ = [
+    "ImportRef",
+    "SourceSpec",
+    "maybe_symbol_ref",
+    "resolve_function",
+    "resolve_symbol",
+    "symbol_ref",
+]

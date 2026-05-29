@@ -132,7 +132,8 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.IDENTITY_VALUE,
             NodeKind.NDARRAY,
             NodeKind.FROZEN_NDARRAY,
-            NodeKind.FUNCTION_SPEC,
+            NodeKind.IMPORT_REF,
+            NodeKind.SOURCE_SPEC,
         }
 
     def hash_atomic(self, obj, ctx: GraphCtx) -> str:

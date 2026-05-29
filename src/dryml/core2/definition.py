@@ -23,6 +23,7 @@ from .canonical import (
     NodeKind,
     matching_container_family,
     node_kind)
+from .symbol import ImportRef, SourceSpec, maybe_symbol_ref, resolve_symbol
 
 # Special value to skip args
 SKIP_ARGS = object()
@@ -89,7 +90,7 @@ class Definition(DefInterface, Mapping):
     - Behaves like a mapping with keys: cls, (args?), kwargs
     """
 
-    _cls: Callable[..., Any] | type | None
+    _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
     _args: tuple[Any, ...] | None
     _kwargs: dict[str, Any]
 
@@ -97,13 +98,13 @@ class Definition(DefInterface, Mapping):
 
     def __init__(self, *args, **kwargs):
         if len(args) > 0:
-            if not callable(args[0]) and not isclass(args[0]):
+            if not callable(args[0]) and not isclass(args[0]) and not isinstance(args[0], (ImportRef, SourceSpec)):
                 if args[0] is SKIP_ARGS and len(args) == 1:
                     self._cls = None
                     self._args = None
                     self._kwargs = kwargs
                 else:
-                    raise ValueError("First positional argument must be a class or callable.")
+                    raise ValueError("First positional argument must be a class, callable, or symbol reference.")
             if len(args) > 1 and args[1] is SKIP_ARGS:
                 if len(args) > 2:
                     raise ValueError("SKIP_ARGS must be the only positional argument besides the class.")
@@ -240,7 +241,7 @@ class ConcreteDefinition(DefInterface, Mapping):
     - Behaves like a mapping with keys: cls, (args?), kwargs
     """
 
-    cls: type
+    cls: type | ImportRef | SourceSpec
     args: FrozenTuple[Any, ...] = field(default_factory = lambda: FrozenTuple())
     kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
 
@@ -396,12 +397,13 @@ class CategoricalDefinitionTransformer(GraphTransformer):
             defn_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
 
             temp_args = defn_args if obj.args is not None else tuple()
-            new_args, new_kwargs = obj.cls.__strip_unique_args__(
+            live_cls = resolve_symbol(obj.cls)
+            new_args, new_kwargs = live_cls.__strip_unique_args__(
                 *temp_args,
                 **defn_kwargs,
             )
 
-            new_defn_args = [obj.cls]
+            new_defn_args = [live_cls]
             if obj.args is not None:
                 new_defn_args.extend(new_args)
             else:
@@ -470,6 +472,8 @@ class SelectorMatcher(GraphMatcher):
             NodeKind.POD,
             NodeKind.TYPE,
             NodeKind.IDENTITY_VALUE,
+            NodeKind.IMPORT_REF,
+            NodeKind.SOURCE_SPEC,
             NodeKind.UNSUPPORTED,
         }
 
@@ -516,6 +520,31 @@ class SelectorMatcher(GraphMatcher):
                         f"is not a subclass of {get_class_str(selector)}",
                     )
                 return condition
+
+        selector_ref = maybe_symbol_ref(selector, functions=False)
+        target_ref = maybe_symbol_ref(target, functions=False)
+        if selector_ref is not None and target_ref is not None:
+            if not self.strict:
+                try:
+                    selector_obj = resolve_symbol(selector_ref)
+                    target_obj = resolve_symbol(target_ref)
+                except Exception:
+                    selector_obj = None
+                    target_obj = None
+                if isclass(selector_obj) and isclass(target_obj):
+                    condition = issubclass(target_obj, selector_obj)
+                    if not condition:
+                        self._print(
+                            ctx,
+                            f"Classes not subclass: {get_class_str(target_obj)} "
+                            f"is not a subclass of {get_class_str(selector_obj)}",
+                        )
+                    return condition
+
+            condition = selector_ref == target_ref
+            if not condition:
+                self._print(ctx, "Symbol refs differ")
+            return condition
 
         if self.cls_str_compare and isinstance(selector, str) and isclass(target):
             condition = selector == get_class_str(target)

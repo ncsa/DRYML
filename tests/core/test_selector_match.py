@@ -3,6 +3,7 @@ import os
 
 import core2_objects as objects
 from dryml.core2.definition import Definition, SKIP_ARGS, selector_match
+from dryml.core2.symbol import ImportRef
 import dryml.core2 as core2
 
 
@@ -357,3 +358,27 @@ def test_selector_16():
     assert sel(
         obj8.definition,
         cls_str_compare=False)
+
+
+def test_selector_matches_live_class_against_import_ref():
+    ref = ImportRef.from_object(objects.TestClass1)
+
+    assert selector_match(objects.TestClass1, ref)
+    assert selector_match(ref, objects.TestClass1)
+
+
+def test_definition_selector_matches_concrete_definition_refs():
+    selector = Definition(objects.TestClass1, 10, test="a")
+    target = selector.concretize()
+
+    assert isinstance(target.cls, ImportRef)
+    assert selector(target)
+    assert target(selector)
+
+
+def test_definition_selector_matches_class_arg_refs():
+    selector = Definition(objects.TestClass1, objects.TestClass2)
+    target = selector.concretize()
+
+    assert isinstance(target.args[0], ImportRef)
+    assert selector(target)
