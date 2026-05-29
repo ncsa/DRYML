@@ -176,6 +176,11 @@ class Model(BaseModel):
     def fit(self, *args, **kwargs):
         return self.obj.fit(*args, **kwargs)
 
+    def trainable_parameters(self, backend: str | None = None):
+        if backend not in (None, "tf"):
+            return ()
+        return tuple(self.obj.trainable_variables)
+
     def compile(self, *, optimizer=None, loss=None, metrics=None, **kwargs):
         if optimizer is not None:
             kwargs["optimizer"] = optimizer.obj if hasattr(optimizer, "obj") else optimizer

@@ -71,12 +71,15 @@ class Wrapper(Object):
 class Optimizer(Object):
     """Torch optimizer spec with runtime state bound when model parameters exist."""
 
-    def __init__(self, cls, *args, mdl, **kwargs):
+    def __init__(self, cls, *args, target, **kwargs):
         self.cls = validate_class(cls)
         self.args = args
         self.kwargs = kwargs
-        self.mdl = mdl
-        self.obj = self.cls(mdl.obj.parameters(), *args, **kwargs)
+        self.target = target
+        parameters = list(target.trainable_parameters("torch"))
+        if not parameters:
+            raise ValueError("Torch Optimizer target exposes no trainable parameters.")
+        self.obj = self.cls(parameters, *args, **kwargs)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         import torch
@@ -112,6 +115,11 @@ class Model(BaseModel):
         return self.obj(x, *args, **kwargs)
 
     def parameters(self):
+        return self.trainable_parameters("torch")
+
+    def trainable_parameters(self, backend: str | None = None):
+        if backend not in (None, "torch"):
+            return ()
         return self.obj.parameters()
 
     def to_device(self, device):
@@ -269,7 +277,7 @@ class BasicTraining(TrainFunction):
         if optimizer is not None:
             if isinstance(optimizer, type):
                 return validate_class(optimizer)(
-                    model.parameters(),
+                    model.trainable_parameters("torch"),
                     *self.optimizer_args,
                     **self.optimizer_kwargs,
                 )
@@ -277,7 +285,7 @@ class BasicTraining(TrainFunction):
 
         optimizer_cls = self.optimizer_cls or torch.optim.Adam
         return validate_class(optimizer_cls)(
-            model.parameters(),
+            model.trainable_parameters("torch"),
             *self.optimizer_args,
             **self.optimizer_kwargs,
         )

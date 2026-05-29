@@ -5,7 +5,21 @@ from dryml.core2.cardinality import Cardinality
 from dryml.core2.backend import Backend
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data.dataset import Dataset, Map
-from dryml.data.transforms import Batch, Cast, Flatten, Pack, Pipe, Repeat, Scale, Select, Shuffle, Skip, Take, Unbatch
+from dryml.data.transforms import (
+    Batch,
+    Cast,
+    ElementwiseTransform,
+    Flatten,
+    Pack,
+    Pipe,
+    Repeat,
+    Scale,
+    Select,
+    Shuffle,
+    Skip,
+    Take,
+    Unbatch,
+)
 
 
 class ListDataset(Dataset):
@@ -28,6 +42,22 @@ class CountingCast(Cast):
     def resolve_impl_for(self, *args, **kwargs):
         self.dispatch_count += 1
         return super().resolve_impl_for(*args, **kwargs)
+
+
+class TrainableProbe(ElementwiseTransform):
+    def __init__(self, *params):
+        self.params = params
+        self.backends = []
+
+    def __call__(self, x):
+        return x
+
+    def infer_output_spec(self, input_spec):
+        return input_spec
+
+    def trainable_parameters(self, backend=None):
+        self.backends.append(backend)
+        return iter(self.params)
 
 
 def test_cast_infer_output_spec_and_iteration():
@@ -109,6 +139,18 @@ def test_pipe_infer_output_spec_and_call():
     assert pipe.infer_output_spec(spec) == TensorSpec("float32", shape=(2,), backend="numpy")
     assert out.dtype == np.dtype("float32")
     assert out.tolist() == [1.0, 2.0]
+
+
+def test_pipe_chains_trainable_parameters():
+    first = TrainableProbe("w1", "b1")
+    second = TrainableProbe("w2")
+    pipe = Pipe(first, Select("x"), second)
+
+    params = list(pipe.trainable_parameters("torch"))
+
+    assert params == ["w1", "b1", "w2"]
+    assert first.backends == ["torch"]
+    assert second.backends == ["torch"]
 
 
 def test_map_accepts_multiple_transforms_as_pipe():

@@ -70,7 +70,7 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
     model = Sequential(
         layer_defs=(("Linear", (28 * 28, 10), {}),),
     )
-    optimizer = Optimizer(torch.optim.SGD, mdl=model, lr=0.5)
+    optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.5)
     train_fn = BasicTraining(
         optimizer=optimizer,
         loss_cls=torch.nn.CrossEntropyLoss,

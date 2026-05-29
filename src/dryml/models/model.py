@@ -16,6 +16,9 @@ class Model(Method):
     def prep_eval(self):
         pass
 
+    def trainable_parameters(self, backend: str | None = None):
+        return ()
+
     def infer_output_spec(self, input_spec):
         if self.output_spec is None:
             return super().infer_output_spec(input_spec)
@@ -42,6 +45,10 @@ class AutoEncoder(Model):
     def prep_eval(self):
         self.encoder.prep_eval()
         self.decoder.prep_eval()
+
+    def trainable_parameters(self, backend: str | None = None):
+        yield from self.encoder.trainable_parameters(backend)
+        yield from self.decoder.trainable_parameters(backend)
 
     def __call__(self, x):
         return self.decoder(self.encoder(x))

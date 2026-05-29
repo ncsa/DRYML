@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dryml.code import traits
 from dryml.core2.dtype import normalize_dtype
 from dryml.core2.tensor_spec import Dynamic, SpecTree, map_spec_tree
@@ -41,6 +43,11 @@ class Pipe(ElementwiseTransform):
         for transform in self.transforms:
             spec = transform.infer_output_spec(spec)
         return spec
+
+    def trainable_parameters(self, backend: str | None = None):
+        for transform in self.transforms:
+            if hasattr(transform, "trainable_parameters"):
+                yield from transform.trainable_parameters(backend)
 
     def bind_first(self, first_value, *, input_spec=None):
         bound_transforms = []
