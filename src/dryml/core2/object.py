@@ -13,6 +13,7 @@ from .definition import Definition
 
 
 _definition_mode: ContextVar[bool] = ContextVar("dryml_definition_mode", default=False)
+_definition_mode_concrete: ContextVar[bool] = ContextVar("dryml_definition_mode_concrete", default=False)
 
 if TYPE_CHECKING:
     from .repo import RevisionType
@@ -22,12 +23,18 @@ def in_definition_mode() -> bool:
     return _definition_mode.get()
 
 
+def definition_mode_concrete() -> bool:
+    return _definition_mode_concrete.get()
+
+
 @contextmanager
-def definition_mode(enabled: bool = True):
+def definition_mode(enabled: bool = True, *, concrete: bool = False):
     token = _definition_mode.set(enabled)
+    concrete_token = _definition_mode_concrete.set(bool(enabled and concrete))
     try:
         yield
     finally:
+        _definition_mode_concrete.reset(concrete_token)
         _definition_mode.reset(token)
 
 
@@ -36,7 +43,10 @@ class Dryml(type):
 
     def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
         if in_definition_mode():
-            return cls.defn(*args, **kwargs)
+            defn = cls.defn(*args, **kwargs)
+            if definition_mode_concrete():
+                return defn.concretize(repo=repo)
+            return defn
 
         from .repo import manage_repo
         with manage_repo(repo=repo) as sub_repo:

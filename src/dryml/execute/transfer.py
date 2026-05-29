@@ -8,6 +8,8 @@ from dryml.core2 import Repo
 from dryml.core2.canonical import to_canonical
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.object import Object
+from dryml.core2.utils.general import get_unique_concrete_definitions
+from dryml.core2.utils.recurse import iter_leaves
 
 from .protocol import StoreRef
 
@@ -49,6 +51,26 @@ def _target_cdef(item) -> ConcreteDefinition:
     )
 
 
+def _save_live_objects(value, source_repo, transfer_repo: Repo) -> None:
+    objects_by_cdef = {}
+
+    for leaf in iter_leaves(value):
+        if isinstance(leaf, Object):
+            objects_by_cdef[leaf.definition] = leaf
+
+    for cdef in get_unique_concrete_definitions(value):
+        if cdef in objects_by_cdef:
+            continue
+        obj = source_repo.get_cached(cdef)
+        if obj is not None:
+            objects_by_cdef[cdef] = obj
+
+    for obj in objects_by_cdef.values():
+        transfer_repo.cache_weak(obj)
+    for obj in objects_by_cdef.values():
+        transfer_repo.save_object(obj)
+
+
 def update_cdefs(update=None) -> tuple[ConcreteDefinition, ...]:
     if update is None or update is False:
         return ()
@@ -85,10 +107,14 @@ def prepare_call(
         tmp_prefix="dryml-result-",
     )
 
+    from dryml.core2.repo import manage_repo
+
     transfer_repo = Repo(stores=transfer_ref.open())
-    args_canonical = to_canonical(args, repo=transfer_repo)
-    kwargs_canonical = to_canonical(kwargs, repo=transfer_repo)
-    transfer_repo.save_object((args_canonical, kwargs_canonical))
+    with manage_repo(repo=repo) as source_repo:
+        _save_live_objects((args, kwargs), source_repo, transfer_repo)
+
+        args_canonical = to_canonical(args, repo=source_repo)
+        kwargs_canonical = to_canonical(kwargs, repo=source_repo)
     transfer_repo.flush()
 
     return PreparedCall(
@@ -128,10 +154,7 @@ def restore_updates(targets, *, result_store: StoreRef) -> None:
         return
     result_repo = Repo(stores=result_store.open())
     for target in targets:
-        result_repo.load_object(target.definition, restore_state=True, build_missing=False)
-        refreshed = result_repo.get_cached(target.definition)
-        if refreshed is not None:
-            for key, value in refreshed.__dict__.items():
-                if key in {"__cdef__", "__ws__"}:
-                    continue
-                target.__dict__[key] = value
+        store = result_repo._first_store_with(target.definition)
+        if store is None:
+            continue
+        store.restore_object(target)

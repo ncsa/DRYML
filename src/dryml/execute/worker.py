@@ -39,7 +39,10 @@ def execute_request(request) -> ExecutionResponse:
 
         updated = []
         for cdef in request.update_cdefs:
-            repo.save_object(cdef, store=result_store)
+            obj = repo.get_cached(cdef)
+            if obj is None:
+                obj = repo.load_object(cdef, restore_state=True, build_missing=False)
+            repo.save_object(obj, store=result_store)
             updated.append(cdef)
 
         repo.flush()

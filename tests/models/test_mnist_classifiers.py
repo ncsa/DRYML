@@ -1,5 +1,7 @@
 import pytest
 
+import dryml.execute as execute
+from dryml.core2 import Repo, definition_mode
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data import Map, Pack, Select, TFDSAdapter
 from dryml.data.transforms import Cast, Flatten, Scale
@@ -80,4 +82,64 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="torch")
+    assert exp.state.phase == "trained"
+
+
+def _train_experiment_and_score(exp):
+    exp.train()
+    return categorical_accuracy(exp.model, exp.val_data, batch_size=64)
+
+
+def _score_model(val_data, model):
+    return categorical_accuracy(model, val_data, batch_size=64)
+
+
+@pytest.mark.parametrize("backend", ["inline", "process"])
+def test_execute_definition_mode_mnist_train_and_score_matches_model_score(tmp_path, backend):
+    linear_model = pytest.importorskip("sklearn.linear_model")
+    from dryml.models.sklearn import BasicTraining, ClassifierModel
+
+    repo = Repo(stores=tmp_path / "repo")
+
+    with definition_mode(concrete=True):
+        train_ds = _mnist_dataset("train[:1000]")
+        val_ds = _mnist_dataset("test[:200]")
+        model = ClassifierModel(
+            linear_model.SGDClassifier,
+            loss="log_loss",
+            max_iter=20,
+            tol=None,
+            random_state=1,
+        )
+        exp_def = Experiment(
+            model,
+            BasicTraining(),
+            train_data=train_ds,
+            val_data=val_ds,
+        )
+
+    exp = repo.load_object(
+        exp_def,
+        restore_state=False,
+        build_missing=True,
+        cache="strong",
+    )
+
+    train_score = execute.run(
+        _train_experiment_and_score,
+        exp,
+        backend=backend,
+        repo=repo,
+        update=[exp, exp.model],
+    )
+    model_score = execute.run(
+        _score_model,
+        exp.val_data,
+        exp.model,
+        backend=backend,
+        repo=repo,
+    )
+
+    assert train_score == pytest.approx(model_score)
+    assert train_score > 0.1
     assert exp.state.phase == "trained"
