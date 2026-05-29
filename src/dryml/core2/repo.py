@@ -145,6 +145,14 @@ class Repo:
         else:
             self.stores.append(store)
 
+    def _ensure_store(self, store):
+        if store is None:
+            return None
+        store = make_store(store)
+        if store not in self.stores:
+            self.add_store(store)
+        return store
+
     def cache_strong(self, obj: Object) -> None:
         self.strong_obj_cache[obj.__cdef__] = obj
 
@@ -204,13 +212,54 @@ class Repo:
             "Alias target must be an Object, Definition, or ConcreteDefinition."
         )
 
+    def _object_target_cdef(self, target: Object | Definition | ConcreteDefinition) -> ConcreteDefinition:
+        if isinstance(target, Object):
+            return target.definition
+        if isinstance(target, ConcreteDefinition):
+            return target
+        if isinstance(target, Definition):
+            return target.concretize(repo=self)
+        raise TypeError(
+            "Object target must be an Object, Definition, or ConcreteDefinition."
+        )
+
+    def set_object_store(self, target: Object | Definition | ConcreteDefinition, store) -> Store:
+        store = self._ensure_store(store)
+        if store is None:
+            raise ValueError("No store provided for object store binding.")
+        cdef = self._object_target_cdef(target)
+        self.obj_default_store[cdef] = store
+        return store
+
+    def location(
+            self,
+            target: Object | Definition | ConcreteDefinition,
+            *,
+            store=None,
+            require_exists: bool = False) -> str:
+        cdef = self._object_target_cdef(target)
+
+        if store is not None:
+            store = self.set_object_store(cdef, store)
+        else:
+            store = self.obj_default_store.get(cdef)
+            if store is None:
+                store = self._first_store_with(cdef)
+                if store is not None:
+                    self.obj_default_store[cdef] = store
+            if store is None:
+                store = self.default_store
+
+        if store is None:
+            raise RuntimeError("No store available for object location.")
+        if require_exists and not store.has(cdef):
+            raise RuntimeError("Object is not saved in the selected store.")
+        return store.object_dir(cdef)
+
     def set_alias(self, alias: str, target: Object | Definition | ConcreteDefinition, *, store=None) -> ConcreteDefinition:
         self._validate_alias(alias)
 
-        if store is not None:
-            store = make_store(store)
-            if store not in self.stores:
-                self.add_store(store)
+        store = self._ensure_store(store)
 
         cdef = self._alias_target_cdef(target)
         if isinstance(target, Object):
@@ -305,6 +354,7 @@ class Repo:
         return len(self.strong_obj_cache)
 
     def save_object(self, obj, main=False, store=None, revision=None, alias: str | None = None):
+        store = self._ensure_store(store)
         revision = manage_revision(obj, revision)
         self.add_objects(obj, store=store)
         RepoSaveVisitor(self, store=store, revision=revision).visit(obj)
@@ -436,6 +486,9 @@ class Repo:
                             st.restore_object(obj, revision=revision_str)
                         except Exception as e:
                             raise RepoLoadError(f"Store can't restore requested revision ({revision_str}) for object ({cdef})") from e
+                    st = self.obj_default_store.get(cdef) or self._first_store_with(cdef)
+                    if st is not None:
+                        self.set_object_store(cdef, st)
                 return obj
 
         # Determine whether state exists somewhere
@@ -503,6 +556,7 @@ class Repo:
             else:
                 try:
                     st.restore_object(obj, revision=revision_str)
+                    self.set_object_store(cdef, st)
                 except Exception as e:
                     raise RepoLoadError(
                         f"Error restoring state for {cdef} at {'/'.join(map(str, path))}: {e}"
@@ -688,6 +742,7 @@ class Repo:
             raise ValueError("No store available to set main definition!")
 
     def add_objects(self, *args, store=None):
+        store = self._ensure_store(store)
         vis = RepoAddObjectsVisitor(self, store=store)
         for arg in args:
             vis.visit(arg)
@@ -846,12 +901,18 @@ def manage_repo(repo=None):
 
 
 # Saving and Loading
-def save_object(obj, repo=None, main=False, revision: RevisionType|str|None=None, alias: str | None = None):
+def save_object(
+        obj,
+        repo=None,
+        main=False,
+        revision: RevisionType|str|None=None,
+        store=None,
+        alias: str | None = None):
     with manage_repo(repo=repo) as sub_repo:
+        store = sub_repo._ensure_store(store)
         revision = manage_revision(obj, revision)
         main = main or ((repo is not sub_repo) and isinstance(obj, Object))
-        sub_repo.add_objects(obj)
-        sub_repo.save_object(obj, main=main, revision=revision, alias=alias)
+        sub_repo.save_object(obj, main=main, revision=revision, store=store, alias=alias)
 
 
 def load_alias(alias: str, repo=None, **kwargs):

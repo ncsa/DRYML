@@ -173,7 +173,7 @@ class RepoAddObjectsVisitor(RepoStructuralVisitor):
     def _add_object_single(self, obj: Object) -> None:
         self.repo.pin(obj)
         if self.store is not None:
-            self.repo.obj_default_store[obj.definition] = self.store
+            self.repo.set_object_store(obj, self.store)
         elif obj.definition not in self.repo.obj_default_store:
             if self.repo.default_store is not None:
-                self.repo.obj_default_store[obj.definition] = self.repo.default_store
+                self.repo.set_object_store(obj, self.repo.default_store)

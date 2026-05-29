@@ -34,8 +34,12 @@ class Store(ABC):
         Method to get the object directory for this cdef
         """
 
+    def object_dir(self, cdef: "ConcreteDefinition") -> str:
+        """Return the store-local directory for an object's definition."""
+        return self._object_dir(cdef)
+
     def _def_file(self, cdef: "ConcreteDefinition") -> str:
-        return os.path.join(self._object_dir(cdef), "def.pkl")
+        return os.path.join(self.object_dir(cdef), "def.pkl")
 
     def save_object(self, obj: Object, *, revision: str|None = None) -> None:
         """
@@ -44,7 +48,7 @@ class Store(ABC):
         or temp dir (S3/HDF5/etc.), and calling obj.save_to_dir().
         """
 
-        obj_dir = self._object_dir(obj.definition)
+        obj_dir = self.object_dir(obj.definition)
         os.makedirs(obj_dir, exist_ok=True)
 
         # Let the object serialize itself
@@ -66,7 +70,7 @@ class Store(ABC):
         if not os.path.exists(def_path):
             return
 
-        obj_dir = self._object_dir(cdef)
+        obj_dir = self.object_dir(cdef)
 
         obj.restore_state_from_dir(obj_dir, revision=revision)
 

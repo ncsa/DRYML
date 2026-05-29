@@ -124,6 +124,11 @@ class Object(metaclass=Dryml):
             raise RuntimeError("This object has no workspace")
         return self.__ws__.path()
 
+    @property
+    def location(self) -> str:
+        from .repo import get_default_repo
+        return get_default_repo().location(self)
+
 
     @property
     def definition(self) -> "ConcreteDefinition":
@@ -137,10 +142,17 @@ class Object(metaclass=Dryml):
     def __repr__(self):
         return f"<{self.definition.cls} at {hex(id(self))}>(args={self.definition.args}, kwargs={self.definition.kwargs})"
 
-    def save(self, repo=None, main=True, revision: RevisionType|str|None = None):
+    def save(
+            self,
+            repo=None,
+            main=True,
+            revision: RevisionType|str|None = None,
+            *,
+            store=None,
+            alias: str | None = None):
         from .repo import save_object, manage_revision
         revision = manage_revision(self, revision)
-        save_object(self, repo=repo, main=main, revision=revision)
+        save_object(self, repo=repo, main=main, revision=revision, store=store, alias=alias)
 
     def save_state_to_dir(self, dest_dir: str, revision: str|None = None):
         pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
@@ -165,7 +177,11 @@ class Object(metaclass=Dryml):
 
 
 class Pickleable(Object):
-    _HEAVY_EXCLUDE = {"__cdef__", "__ws__", "definition"}
+    _HEAVY_EXCLUDE = {
+        "__cdef__",
+        "__ws__",
+        "definition",
+    }
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str|None=None):
         # Grab all heavy-state data
