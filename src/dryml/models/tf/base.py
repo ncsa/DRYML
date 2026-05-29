@@ -111,11 +111,12 @@ class Wrapper(Object):
 
         ckpt_dir = revision_path("object", "ckpt", dest_dir, revision=revision)
         os.makedirs(ckpt_dir, exist_ok=True)
-        manager = tf.train.CheckpointManager(
-            tf.train.Checkpoint(obj=self.obj),
-            ckpt_dir,
-            max_to_keep=1,
-        )
+        try:
+            checkpoint = tf.train.Checkpoint(obj=self.obj)
+        except ValueError:
+            return
+
+        manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=1)
         manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
@@ -126,7 +127,10 @@ class Wrapper(Object):
         if latest is None:
             return
         self._pending_restore_path = latest
-        self._restore_checkpoint = tf.train.Checkpoint(obj=self.obj)
+        try:
+            self._restore_checkpoint = tf.train.Checkpoint(obj=self.obj)
+        except ValueError:
+            return
         self._restore_status = self._restore_checkpoint.restore(latest)
 
     def restore_pending(self):
