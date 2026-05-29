@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dryml.core2.utils.general import validate_class
 from dryml.models.tf.base import (
     BasicEarlyStoppingTraining,
     BasicTraining,
@@ -13,52 +14,46 @@ from dryml.models.tf.base import (
 )
 
 
-class SequentialFunctionalModel(Model):
-    def __init__(self, input_shape=(1,), layer_defs=(), output_spec=None):
+class Sequential(Model):
+    def __init__(self, layer_defs=(), output_spec=None):
         import tensorflow as tf
 
-        self.input_shape = input_shape
         self.layer_defs = tuple(layer_defs)
-        inp = tf.keras.layers.Input(self.input_shape)
-        last_layer = inp
-        for layer_name, layer_kwargs in self.layer_defs:
-            last_layer = getattr(tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
+        layers = []
+        for layer_def in self.layer_defs:
+            if isinstance(layer_def, tf.keras.layers.Layer):
+                layers.append(layer_def)
+                continue
 
-        self.obj = tf.keras.Model(inputs=inp, outputs=last_layer)
+            if isinstance(layer_def, str):
+                cls = getattr(tf.keras.layers, layer_def)
+                args = ()
+                kwargs = {}
+            elif isinstance(layer_def, type):
+                cls = layer_def
+                args = ()
+                kwargs = {}
+            elif len(layer_def) == 2:
+                cls, kwargs = layer_def
+                cls = getattr(tf.keras.layers, cls) if isinstance(cls, str) else cls
+                args = ()
+            elif len(layer_def) == 3:
+                cls, args, kwargs = layer_def
+                cls = getattr(tf.keras.layers, cls) if isinstance(cls, str) else cls
+            else:
+                raise ValueError(
+                    "Layer definitions must be layer names, layer classes, layer instances, "
+                    "(cls, kwargs), or (cls, args, kwargs)."
+                )
+            layers.append(validate_class(cls)(*args, **kwargs))
+
+        self.obj = tf.keras.Sequential(layers)
         self.model = self.obj
         self.mdl = self.obj
         self.output_spec = output_spec
         self._pending_restore_path = None
         self._restore_checkpoint = None
         self._restore_status = None
-
-
-def keras_sequential_functional_class(name, input_shape, output_shape, base_classes=(SequentialFunctionalModel,)):
-    def __init__(self, layer_defs, *args, out_activation="linear", output_spec=None, **kwargs):
-        import numpy as np
-        import tensorflow as tf
-
-        self.layer_defs = tuple(layer_defs)
-        self.out_activation = out_activation
-        inp = tf.keras.layers.Input(input_shape)
-        last_layer = inp
-        for layer_name, layer_kwargs in self.layer_defs:
-            last_layer = getattr(tf.keras.layers, layer_name)(**layer_kwargs)(last_layer)
-        last_layer = tf.keras.layers.Flatten()(last_layer)
-        output_units = int(np.prod(output_shape))
-        last_layer = tf.keras.layers.Dense(output_units, activation=self.out_activation)(last_layer)
-        last_layer = tf.keras.layers.Reshape(output_shape)(last_layer)
-
-        self.obj = tf.keras.Model(inputs=inp, outputs=last_layer)
-        self.model = self.obj
-        self.mdl = self.obj
-        self.output_spec = output_spec
-        self._pending_restore_path = None
-        self._restore_checkpoint = None
-        self._restore_status = None
-
-    new_cls = type(name, base_classes, {"__init__": __init__, "__module__": __name__})
-    return new_cls
 
 
 __all__ = [
@@ -69,8 +64,7 @@ __all__ = [
     "Model",
     "ModelWrapper",
     "Optimizer",
-    "SequentialFunctionalModel",
+    "Sequential",
     "TrainFunction",
     "Wrapper",
-    "keras_sequential_functional_class",
 ]

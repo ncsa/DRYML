@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from dryml.data import ArrayDataset
+from dryml.core2.tensor_spec import TensorSpec
+from dryml.data import ArrayDataset, Map
 from dryml.models import Experiment
 
 
@@ -39,3 +40,13 @@ def test_tf_basic_training_updates_experiment_state():
     assert exp.state.step == 2
     assert exp.state.phase == "trained"
     assert float(optimizer.obj.learning_rate.numpy()) == pytest.approx(0.01)
+
+
+def test_tf_sequential_infers_output_spec_without_explicit_output_spec():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((4, 3), dtype=np.float32)
+    ds = ArrayDataset(x)
+    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+
+    assert Map(ds, model).spec == TensorSpec("float32", shape=(2,), backend="tf")

@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 
 from dryml.core2.object import Object
-from dryml.core2.tensor_spec import Dynamic, Layout
+from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
-from dryml.data import Batch, iter_xy
+from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, sample_from_spec_tree
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
@@ -68,6 +68,30 @@ def _tf_dataset_from_xy(tf, dataset, *, x_path, y_path):
         lambda: iter_xy(dataset, x_path=x_path, y_path=y_path),
         output_signature=output_signature,
     )
+
+
+def _tree_to_tf(value, tf):
+    def leaf_to_tf(leaf):
+        if isinstance(leaf, tf.Tensor):
+            return leaf
+        return tf.convert_to_tensor(leaf)
+
+    return map_leaves(value, leaf_to_tf)
+
+
+def _tf_dim(dim):
+    return Dynamic if dim is None else int(dim)
+
+
+def _tf_spec_from_value(value):
+    def leaf_to_spec(leaf):
+        shape = tuple(_tf_dim(dim) for dim in leaf.shape)
+        dtype = leaf.dtype.name
+        if shape:
+            return TensorSpec(dtype, shape=shape[1:], batch=shape[0], backend="tf")
+        return TensorSpec(dtype, shape=(), backend="tf")
+
+    return map_leaves(value, leaf_to_spec)
 
 
 class Wrapper(Object):
@@ -189,6 +213,16 @@ class Model(BaseModel):
         if metrics is not None:
             kwargs["metrics"] = [metric.obj if hasattr(metric, "obj") else metric for metric in metrics]
         return self.obj.compile(**kwargs)
+
+    def infer_output_spec(self, input_spec):
+        if self.output_spec is not None:
+            return super().infer_output_spec(input_spec)
+
+        import tensorflow as tf
+
+        sample = _tree_to_tf(sample_from_spec_tree(input_spec), tf)
+        output = self.obj(sample, training=False)
+        return maybe_unbatch_output_spec(_tf_spec_from_value(output), input_spec)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         import tensorflow as tf

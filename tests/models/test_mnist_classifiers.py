@@ -35,15 +35,12 @@ def test_sklearn_basic_mnist_classifier_with_tfds_adapter():
 
 def test_tf_basic_mnist_classifier_with_tfds_adapter():
     tf = pytest.importorskip("tensorflow")
-    from dryml.models.tf import BasicTraining, Loss, Optimizer
-    from dryml.models.tf.keras import SequentialFunctionalModel
+    from dryml.models.tf import BasicTraining, Loss, Optimizer, Sequential
 
     train_ds = _mnist_dataset("train[:1000]")
     val_ds = _mnist_dataset("test[:200]")
-    model = SequentialFunctionalModel(
-        input_shape=(28 * 28,),
+    model = Sequential(
         layer_defs=(("Dense", {"units": 10}),),
-        output_spec=TensorSpec("float32", shape=(10,), backend="tf"),
     )
     optimizer = Optimizer(tf.keras.optimizers.SGD, learning_rate=0.5)
     train_fn = BasicTraining(

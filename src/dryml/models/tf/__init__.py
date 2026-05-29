@@ -11,6 +11,8 @@ from dryml.models.tf.base import (
 )
 import dryml.models.tf.keras as keras
 
+Sequential = keras.Sequential
+
 __all__ = [
     "BasicEarlyStoppingTraining",
     "BasicTraining",
@@ -19,6 +21,7 @@ __all__ = [
     "Model",
     "ModelWrapper",
     "Optimizer",
+    "Sequential",
     "TrainFunction",
     "Wrapper",
     "keras",

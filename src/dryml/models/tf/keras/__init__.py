@@ -6,10 +6,9 @@ from dryml.models.tf.keras.base import (
     Model,
     ModelWrapper,
     Optimizer,
-    SequentialFunctionalModel,
+    Sequential,
     TrainFunction,
     Wrapper,
-    keras_sequential_functional_class,
 )
 
 __all__ = [
@@ -20,8 +19,7 @@ __all__ = [
     "Model",
     "ModelWrapper",
     "Optimizer",
-    "SequentialFunctionalModel",
+    "Sequential",
     "TrainFunction",
     "Wrapper",
-    "keras_sequential_functional_class",
 ]
