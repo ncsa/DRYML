@@ -3,7 +3,7 @@ from __future__ import annotations
 from dryml.core2.object import Pickleable
 from dryml.core2.tensor_spec import TensorSpec, as_tensor_spec
 from dryml.core2.utils.general import validate_class
-from dryml.data import collate_xy, match_input_batch, maybe_unbatch_output_spec, sample_from_spec_tree
+from dryml.data import collate_xy, match_input_batch, maybe_unbatch_output_spec, fake_from_spec_tree
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction
 from dryml.models.utils import (
@@ -47,7 +47,7 @@ class Model(BaseModel, Pickleable):
             return super().infer_output_spec(input_spec)
 
         try:
-            sample = sample_from_spec_tree(input_spec)
+            sample = fake_from_spec_tree(input_spec)
             output = self(sample)
             return maybe_unbatch_output_spec(as_tensor_spec(output, batched=True), input_spec)
         except Exception:

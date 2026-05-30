@@ -6,7 +6,7 @@ from dryml.core2.object import Object
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
-from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, sample_from_spec_tree
+from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import (
@@ -163,7 +163,7 @@ class Model(BaseModel):
         was_training = bool(getattr(self.obj, "training", False))
         self.prep_eval()
         try:
-            sample = _tree_to_torch(sample_from_spec_tree(input_spec), torch, device=_resolve_device(torch))
+            sample = _tree_to_torch(fake_from_spec_tree(input_spec), torch, device=_resolve_device(torch))
             with torch.no_grad():
                 output = self.obj(sample)
             return maybe_unbatch_output_spec(_torch_spec_from_value(output), input_spec)

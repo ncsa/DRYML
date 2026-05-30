@@ -31,10 +31,10 @@ def batch_from_spec_tree(spec_tree):
     return batches.pop() if len(batches) == 1 else Dynamic
 
 
-def sample_from_spec_tree(spec_tree):
+def fake_from_spec_tree(spec_tree):
     def leaf_sample(spec: TensorSpec):
         if spec.shape is None:
-            raise ValueError("Cannot sample from an unknown-rank TensorSpec.")
+            raise ValueError("Cannot create a fake sample from an unknown-rank TensorSpec.")
         sample_shape = tuple(1 if dim is Dynamic else int(dim) for dim in spec.shape)
         shape = spec.full_shape if spec.batched else (1, *sample_shape)
         if spec.batched:

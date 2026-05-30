@@ -6,7 +6,7 @@ from dryml.core2.object import Object
 from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
-from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, sample_from_spec_tree
+from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
@@ -224,7 +224,7 @@ class Model(BaseModel):
 
         import tensorflow as tf
 
-        sample = _tree_to_tf(sample_from_spec_tree(input_spec), tf)
+        sample = _tree_to_tf(fake_from_spec_tree(input_spec), tf)
         output = self.obj(sample, training=False)
         return maybe_unbatch_output_spec(_tf_spec_from_value(output), input_spec)
 

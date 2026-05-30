@@ -11,7 +11,7 @@ from dryml.data.util import (
     iter_xy,
     match_input_batch,
     maybe_unbatch_output_spec,
-    sample_from_spec_tree,
+    fake_from_spec_tree,
     spec_tree_is_batched,
 )
 
@@ -45,7 +45,7 @@ __all__ = [
     "Collect",
     "spec_tree_is_batched",
     "batch_from_spec_tree",
-    "sample_from_spec_tree",
+    "fake_from_spec_tree",
     "maybe_unbatch_output_spec",
     "match_input_batch",
 ]
