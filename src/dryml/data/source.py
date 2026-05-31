@@ -6,7 +6,14 @@ from typing import Any, Callable
 import itertools
 import numpy as np
 
-from dryml.core2.tensor_spec import SpecTree, TensorSpec, SpecHint, as_tensor_spec, unbatch_spec_tree
+from dryml.core2.tensor_spec import (
+    SpecTree,
+    TensorSpec,
+    SpecHint,
+    as_tensor_spec,
+    detect_spec_tree,
+    unbatch_spec_tree,
+)
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.utils.recurse import first_leaf, iter_leaves, map_leaves
 from .dataset import Dataset
@@ -61,13 +68,13 @@ class GeneratorDataset(SourceDataset):
         if spec is None:
             self._spec = None
         elif isinstance(spec, SpecHint):
-            self._spec = self._detect_spec(spec)
+            self._spec = detect_spec_tree(iter(self), spec)
         else:
             leaf = first_leaf(spec)
             if isinstance(leaf, TensorSpec):
                 self._spec = spec
             else:
-                self._spec = self._detect_spec(SpecHint.build(spec))
+                self._spec = detect_spec_tree(iter(self), SpecHint.build(spec))
 
 
     def __iter__(self) -> Iterator[Any]:

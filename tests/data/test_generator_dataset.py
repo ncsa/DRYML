@@ -1,5 +1,7 @@
+import numpy as np
+
 from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core2.tensor_spec import Dynamic, TensorSpec
 from dryml.data.source import GeneratorDataset
 
 
@@ -13,6 +15,13 @@ def generator_factory(offset=0):
 
 def direct_iterable_factory(offset=0):
     return iter([offset, offset + 1])
+
+
+def variable_shape_array_factory():
+    return iter([
+        np.zeros((2,), dtype=np.float32),
+        np.zeros((5,), dtype=np.float32),
+    ])
 
 
 def test_generator_dataset_accepts_factory_returning_generator_function():
@@ -36,3 +45,13 @@ def test_generator_dataset_accepts_factory_returning_iterable():
     )
 
     assert list(ds) == [20, 21]
+
+
+def test_generator_dataset_infers_spec_from_hint():
+    ds = GeneratorDataset(
+        variable_shape_array_factory,
+        cardinality=Cardinality.finite(2),
+        spec=2,
+    )
+
+    assert ds.spec == TensorSpec("float32", shape=(Dynamic,), backend="numpy")

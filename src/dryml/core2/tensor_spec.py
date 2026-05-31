@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, TypeAlias
 
 from .dtype import DType, normalize_dtype
 from .backend import discover_backend, Backend
-from .utils.recurse import map_leaves, iter_leaves
+from .utils.recurse import map_leaf_groups, map_leaves, iter_leaves
 
 
 class Dim(Enum):
@@ -312,6 +312,58 @@ def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
     return map_spec_tree(spec, lambda s: s.without_batch())
 
 
+def merge_tensor_specs(specs: Sequence[TensorSpec]) -> TensorSpec:
+    """Merge same-position TensorSpecs, marking varying dimensions dynamic."""
+    specs = list(specs)
+    if not specs:
+        raise ValueError("At least one TensorSpec is required.")
+
+    ranks = [spec.rank for spec in specs]
+    if len(set(ranks)) > 1:
+        raise ValueError("Inconsistent TensorSpec ranks.")
+
+    def dynamic_if_mixed(values):
+        values = set(values)
+        if len(values) > 1:
+            return Dynamic
+        return values.pop()
+
+    def uniform_value(values):
+        values = set(values)
+        if len(values) > 1:
+            raise ValueError("TensorSpecs have inconsistent non-shape metadata.")
+        return values.pop()
+
+    rank = ranks[0]
+    shape = None
+    if rank is not None:
+        shape = tuple(
+            dynamic_if_mixed(spec.shape[dim] for spec in specs)
+            for dim in range(rank)
+        )
+
+    backends = [spec.backend for spec in specs if spec.backend is not None]
+    backend = uniform_value(backends) if backends else None
+
+    return TensorSpec(
+        dtype=uniform_value(spec.dtype for spec in specs),
+        shape=shape,
+        batch=dynamic_if_mixed(spec.batch for spec in specs),
+        backend=backend,
+        layout=uniform_value(spec.layout for spec in specs),
+        ragged_rank=uniform_value(spec.ragged_rank for spec in specs),
+        row_splits_dtype=uniform_value(spec.row_splits_dtype for spec in specs),
+        sparse_format=uniform_value(spec.sparse_format for spec in specs),
+        axis_names=uniform_value(spec.axis_names for spec in specs),
+        batch_axis_name=uniform_value(spec.batch_axis_name for spec in specs),
+    )
+
+
+def merge_spec_trees(specs: Sequence[SpecTree]) -> SpecTree:
+    """Merge same-structured SpecTrees leaf-wise."""
+    return map_leaf_groups(specs, merge_tensor_specs)
+
+
 def as_tensor_spec(x: Any, *args, require_consistent_backend=True, **kwargs):
     # Tensor Specs should have a consistent backend.
     all_backends = set(map(discover_backend, iter_leaves(x)))
@@ -332,14 +384,40 @@ class SpecHint:
     samples: int = 2
 
     @staticmethod
-    def build(d: dict[str,str|int]|str|int):
+    def build(d: dict[str,str|int]|str|int|SpecHint|None):
+        if d is None:
+            return SpecHint()
+        if isinstance(d, SpecHint):
+            return d
         if isinstance(d, str):
             return SpecHint(batch_mode=d)
         elif isinstance(d, int):
             return SpecHint(samples=d)
         elif isinstance(d, dict):
             return SpecHint(**d)
+        raise TypeError(f"Cannot build SpecHint from {type(d).__name__}.")
 
     def __post_init__(self):
         if not isinstance(self.batch_mode, BatchMode):
             object.__setattr__(self, "batch_mode", BatchMode(self.batch_mode))
+
+
+def detect_spec_tree(
+    samples: Iterable[Any],
+    hint: SpecHint | dict[str, str | int] | str | int | None = None,
+) -> SpecTree:
+    """Infer one SpecTree from several sample values."""
+    hint = SpecHint.build(hint)
+    batched = hint.batch_mode is BatchMode.batched
+    it = iter(samples)
+    specs = []
+    for _ in range(hint.samples):
+        try:
+            sample = next(it)
+        except StopIteration as e:
+            raise ValueError(
+                f"Cannot infer a SpecTree from fewer than {hint.samples} samples."
+            ) from e
+        specs.append(as_tensor_spec(sample, batched=batched))
+
+    return merge_spec_trees(specs)

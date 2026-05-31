@@ -9,8 +9,10 @@ from dryml.core2.tensor_spec import (
     Dynamic,
     Layout,
     TensorSpec,
+    detect_spec_tree,
     is_spec_tree,
     batch_spec_tree,
+    merge_spec_trees,
     unbatch_spec_tree,
 )
 from dryml.core2.utils.recurse import iter_leaves, map_leaves
@@ -268,6 +270,42 @@ def test_batch_and_unbatch_spec_tree():
     unbatched = unbatch_spec_tree(batched)
     assert unbatched["cart"].batch is None
     assert unbatched["sph"].batch is None
+
+
+def test_merge_spec_trees_marks_varying_dimensions_dynamic():
+    specs = [
+        TensorSpec("float32", shape=(2, 3), backend="numpy"),
+        TensorSpec("float32", shape=(5, 3), backend="numpy"),
+    ]
+
+    merged = merge_spec_trees(specs)
+
+    assert merged == TensorSpec("float32", shape=(Dynamic, 3), backend="numpy")
+
+
+def test_detect_spec_tree_from_samples():
+    samples = [
+        {"x": np.zeros((2, 3), dtype=np.float32), "y": np.zeros((4,), dtype=np.int64)},
+        {"x": np.zeros((5, 3), dtype=np.float32), "y": np.zeros((7,), dtype=np.int64)},
+    ]
+
+    spec = detect_spec_tree(samples, 2)
+
+    assert spec == {
+        "x": TensorSpec("float32", shape=(Dynamic, 3), backend="numpy"),
+        "y": TensorSpec("int64", shape=(Dynamic,), backend="numpy"),
+    }
+
+
+def test_detect_spec_tree_respects_batched_hint():
+    samples = [
+        np.zeros((4, 3), dtype=np.float32),
+        np.zeros((8, 3), dtype=np.float32),
+    ]
+
+    spec = detect_spec_tree(samples, {"batch_mode": "batched", "samples": 2})
+
+    assert spec == TensorSpec("float32", shape=(3,), batch=Dynamic, backend="numpy")
 
 
 def test_tensor_spec_hashing():
