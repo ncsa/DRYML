@@ -25,6 +25,14 @@ class RepoLoadOptions:
     revision: Any = None
 
 
+@dataclass(frozen=True, slots=True)
+class RepoSaveOptions:
+    main: bool = False
+    store: Any = None
+    revision: Any = None
+    alias: str | None = None
+
+
 RepoGraphMissingPolicy = Literal["raise", "skip", "load"]
 RepoGraphOrder = Literal["pre", "post"]
 

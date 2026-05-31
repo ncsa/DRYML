@@ -1,7 +1,7 @@
 import pytest
 
 from dryml.core2 import Object, Repo
-from dryml.core2.policies import RepoLoadOptions
+from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
 from dryml.core2.repo import RepoGraphError, default_repo, get_default_repo
 from dryml.core2.store.dir import DirStore
 
@@ -105,3 +105,25 @@ def test_get_and_apply_share_load_options():
     assert weak.definition not in selected
     assert strong.definition in selected
     assert applied == {strong.definition: "strong"}
+
+
+def test_save_object_uses_save_options(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo()
+    obj = GraphLeaf("saved", repo=repo)
+
+    repo.save_object(obj, options=RepoSaveOptions(store=store, alias="saved"))
+
+    assert store.has(obj.definition)
+    assert repo.get_alias("saved") == obj.definition
+
+
+def test_save_uses_save_options_for_loaded_objects(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo()
+    obj = GraphLeaf("saved", repo=repo)
+    repo.pin(obj)
+
+    repo.save(options=RepoSaveOptions(store=store))
+
+    assert store.has(obj.definition)

@@ -16,7 +16,7 @@ import atexit
 from .definition import Definition, ConcreteDefinition
 from .object import Object
 from .store.store import Store
-from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions
+from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions, RepoSaveOptions
 from .repo_graph import (
     RepoGraphApplyVisitor,
     RepoGraphCollectVisitor,
@@ -359,29 +359,71 @@ class Repo:
     def __len__(self):
         return len(self.strong_obj_cache)
 
-    def save_object(self, obj, main=False, store=None, revision=None, alias: str | None = None):
-        store = self._ensure_store(store)
-        revision = manage_revision(obj, revision)
+    def _save_options(
+            self,
+            *,
+            options: RepoSaveOptions | None = None,
+            main: bool = False,
+            store=None,
+            revision: RevisionType | str | None = None,
+            alias: str | None = None) -> RepoSaveOptions:
+        if options is not None:
+            return options
+        return RepoSaveOptions(
+            main=main,
+            store=store,
+            revision=revision,
+            alias=alias,
+        )
+
+    def save_object(
+            self,
+            obj,
+            main=False,
+            store=None,
+            revision=None,
+            alias: str | None = None,
+            options: RepoSaveOptions | None = None):
+        save_options = self._save_options(
+            options=options,
+            main=main,
+            store=store,
+            revision=revision,
+            alias=alias,
+        )
+        store = self._ensure_store(save_options.store)
+        revision = manage_revision(obj, save_options.revision)
         self.add_objects(obj, store=store)
         RepoSaveVisitor(self, store=store, revision=revision).visit(obj)
 
-        if main:
+        if save_options.main:
             self.set_main_def(obj.definition, store=store)
-        if alias is not None:
-            self.set_alias(alias, obj, store=store)
+        if save_options.alias is not None:
+            self.set_alias(save_options.alias, obj, store=store)
         return True
 
-    def save(self, obj: Object | None = None, store=None, revision: RevisionType|str|None=None):
+    def save(
+            self,
+            obj: Object | None = None,
+            store=None,
+            revision: RevisionType | str | None = None,
+            options: RepoSaveOptions | None = None):
+        save_options = self._save_options(
+            options=options,
+            main=False,
+            store=store,
+            revision=revision,
+        )
         if obj is None:
             # Save all loaded objects in the cache
             obj_list = []
             for _, obj in self.strong_obj_cache.items():
                 if obj is not None:
                     obj_list.append(obj)
-            self.save_object(obj_list, main=False, store=store, revision=revision)
+            self.save_object(obj_list, options=save_options)
             self.flush()
         else:
-            self.save_object(obj, main=False, store=store, revision=revision)
+            self.save_object(obj, options=save_options)
             self.flush()
 
     def _first_store_with(self, cdef):
@@ -1074,12 +1116,19 @@ def save_object(
         main=False,
         revision: RevisionType|str|None=None,
         store=None,
-        alias: str | None = None):
+        alias: str | None = None,
+        options: RepoSaveOptions | None = None):
     with manage_repo(repo=repo) as sub_repo:
-        store = sub_repo._ensure_store(store)
-        revision = manage_revision(obj, revision)
-        main = main or ((repo is not sub_repo) and isinstance(obj, Object))
-        sub_repo.save_object(obj, main=main, revision=revision, store=store, alias=alias)
+        if options is None:
+            main = main or ((repo is not sub_repo) and isinstance(obj, Object))
+        save_options = sub_repo._save_options(
+            options=options,
+            main=main,
+            store=store,
+            revision=revision,
+            alias=alias,
+        )
+        sub_repo.save_object(obj, options=save_options)
 
 
 def load_alias(alias: str, repo=None, **kwargs):
