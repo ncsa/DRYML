@@ -44,22 +44,6 @@ class CountingCast(Cast):
         return super().resolve_impl_for(*args, **kwargs)
 
 
-class TrainableProbe(ElementwiseTransform):
-    def __init__(self, *params):
-        self.params = params
-        self.backends = []
-
-    def __call__(self, x):
-        return x
-
-    def infer_output_spec(self, input_spec):
-        return input_spec
-
-    def trainable_parameters(self, backend=None):
-        self.backends.append(backend)
-        return iter(self.params)
-
-
 def test_cast_infer_output_spec_and_iteration():
     src = ListDataset(
         [np.array([1, 2], dtype=np.int32), np.array([3, 4], dtype=np.int32)],
@@ -139,18 +123,6 @@ def test_pipe_infer_output_spec_and_call():
     assert pipe.infer_output_spec(spec) == TensorSpec("float32", shape=(2,), backend="numpy")
     assert out.dtype == np.dtype("float32")
     assert out.tolist() == [1.0, 2.0]
-
-
-def test_pipe_chains_trainable_parameters():
-    first = TrainableProbe("w1", "b1")
-    second = TrainableProbe("w2")
-    pipe = Pipe(first, Select("x"), second)
-
-    params = list(pipe.trainable_parameters("torch"))
-
-    assert params == ["w1", "b1", "w2"]
-    assert first.backends == ["torch"]
-    assert second.backends == ["torch"]
 
 
 def test_map_accepts_multiple_transforms_as_pipe():

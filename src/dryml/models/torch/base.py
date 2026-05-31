@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 
 from dryml.core2.object import Object
-from dryml.core2.utils.general import revision_path, validate_class
+from dryml.core2.repo import get_default_repo
+from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
 from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
 from dryml.models import Model as BaseModel
@@ -28,6 +29,27 @@ def _tree_to_torch(value, torch, *, device=None):
         return tensor.to(device) if device is not None else tensor
 
     return map_leaves(value, leaf_to_torch)
+
+
+def _collect_trainable_parameters(target):
+    repo = get_default_repo()
+    results = repo.apply_graph(
+        target,
+        lambda obj: maybe_call_method(
+            obj,
+            "trainable_parameters",
+            "torch",
+            default=(),
+        ),
+        missing="raise",
+        order="post",
+    )
+
+    parameters = []
+    for result in results.values():
+        if result is not None:
+            parameters.extend(result)
+    return parameters
 
 
 class Wrapper(Object):
@@ -61,7 +83,7 @@ class Optimizer(Object):
         self.args = args
         self.kwargs = kwargs
         self.target = target
-        parameters = list(target.trainable_parameters("torch"))
+        parameters = _collect_trainable_parameters(target)
         if not parameters:
             raise ValueError("Torch Optimizer target exposes no trainable parameters.")
         self.obj = self.cls(parameters, *args, **kwargs)

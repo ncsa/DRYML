@@ -58,6 +58,7 @@ class DefInterface(ABC):
             instance: "InstancePolicy" = "reuse",
             restore_state: bool = True,
             build_missing: bool =True,
+            reuse_weak: bool = True,
             cache: "CachePolicy" = "weak",
             revision: "str | None" = None) -> Object:
         from .repo import manage_repo
@@ -68,6 +69,7 @@ class DefInterface(ABC):
                 instance=instance,
                 restore_state=restore_state,
                 build_missing=build_missing,
+                reuse_weak=reuse_weak,
                 cache=cache,
                 revision=revision)
 

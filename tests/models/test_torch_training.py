@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from dryml.data import ArrayDataset
+from dryml.data import ArrayDataset, Pipe
+from dryml.core2 import Repo
 from dryml.models import AutoEncoder, Experiment
 
 
@@ -78,6 +79,22 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
     actual_params = sum(len(group["params"]) for group in optimizer.obj.param_groups)
     losses = exp.train()
 
+    assert not hasattr(model, "trainable_parameters")
     assert actual_params == expected_params
     assert len(losses) == 4
     assert exp.state.phase == "trained"
+
+
+def test_torch_optimizer_targets_pipe_graph_without_pipe_trainable_parameters():
+    from dryml.models.torch import Optimizer, Sequential
+
+    repo = Repo()
+    model = Sequential(layer_defs=(("Linear", (3, 2), {}),), repo=repo)
+    pipe = Pipe(model, repo=repo)
+    optimizer = Optimizer(torch.optim.SGD, target=pipe, lr=0.05, repo=repo)
+
+    expected_params = sum(1 for _ in model.trainable_parameters("torch"))
+    actual_params = sum(len(group["params"]) for group in optimizer.obj.param_groups)
+
+    assert not hasattr(pipe, "trainable_parameters")
+    assert actual_params == expected_params

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, TypeAlias, Callable
 
@@ -15,6 +14,7 @@ from .freeze import (
 )
 from .types import is_pod
 from .utils.graph import GraphCtx, GraphTransformer
+from .policies import RepoLoadOptions
 
 if TYPE_CHECKING:
     from .definition import ConcreteDefinition
@@ -722,18 +722,8 @@ class _ThawValueTransformer(GraphTransformer):
         )
 
 
-@dataclass(slots=True)
-class _FromCanonicalConfig:
-    instance: str = "reuse"
-    restore_state: bool = True
-    build_missing: bool = False
-    reuse_weak: bool = True
-    cache: str = "weak"
-    revision: dict | str | None = None
-
-
 class _FromCanonicalTransformer(GraphTransformer):
-    def __init__(self, repo: "Repo", config: _FromCanonicalConfig):
+    def __init__(self, repo: "Repo", config: RepoLoadOptions):
         self.repo = repo
         self.config = config
 
@@ -894,6 +884,7 @@ def from_canonical(
     x: Any,
     *,
     repo: "Repo",
+    options: RepoLoadOptions | None = None,
     instance: str = "reuse",
     restore_state: bool = True,
     build_missing: bool = False,
@@ -906,7 +897,7 @@ def from_canonical(
     if memo is None:
         memo = {}
 
-    cfg = _FromCanonicalConfig(
+    cfg = options or RepoLoadOptions(
         instance=instance,
         restore_state=restore_state,
         build_missing=build_missing,

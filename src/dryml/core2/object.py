@@ -48,7 +48,7 @@ class Dryml(type):
                 return defn.concretize(repo=repo)
             return defn
 
-        from .repo import manage_repo
+        from .repo import default_repo, manage_repo
         with manage_repo(repo=repo) as sub_repo:
             if __cdef__ is None:
                 # First-time construction from a soft Definition
@@ -86,8 +86,10 @@ class Dryml(type):
             else:
                 obj.__ws__ = None
 
-            # Initialize with runtime (built) args
-            obj.__init__(*rt_args, **rt_kwargs)
+            # Initialize with runtime (built) args while exposing the construction
+            # repo to code that consults get_default_repo().
+            with default_repo(sub_repo):
+                obj.__init__(*rt_args, **rt_kwargs)
 
 
         return obj

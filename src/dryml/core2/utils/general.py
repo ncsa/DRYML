@@ -47,6 +47,13 @@ def collide_attributes(obj, attr_list):
         raise AttributeError(f"Attributes {colliding_attrs} already exist on object. Cannot create object.")
 
 
+def maybe_call_method(obj, name: str, *args, default=None, **kwargs):
+    method = getattr(obj, name, None)
+    if method is None:
+        return default
+    return method(*args, **kwargs)
+
+
 def get_class_str(obj):
     from ..symbol import ImportRef, SourceSpec
 

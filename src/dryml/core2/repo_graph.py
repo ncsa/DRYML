@@ -4,6 +4,7 @@ from typing import Any
 
 from .definition import ConcreteDefinition
 from .object import Object
+from .policies import RepoGraphOptions
 from .utils.graph import GraphCtx, GraphVisitor
 from .canonical import (
     NodeKind,
@@ -15,6 +16,9 @@ from .canonical import (
 # ----------------------------------------------------------------------
 # small helpers
 # ----------------------------------------------------------------------
+
+RevisionMapType = dict[ConcreteDefinition, str]
+
 
 def _path_part_from_key(k: Any) -> str | int:
     return k if isinstance(k, (str, int)) else str(k)
@@ -32,6 +36,14 @@ def manage_revision(obj: Any, revision: RevisionMapType | str | None):
             raise ValueError("When revision is a string, manage_revision must get a clear object or definition to create the revision dictionary.")
     else:
         return revision
+
+
+def _as_graph_options(options: RepoGraphOptions | None, **kwargs) -> RepoGraphOptions:
+    if options is not None:
+        if kwargs:
+            raise TypeError("Cannot pass graph option kwargs when options is provided.")
+        return options
+    return RepoGraphOptions(**kwargs)
 
 
 class RepoStructuralVisitor(GraphVisitor):
@@ -79,6 +91,94 @@ class RepoStructuralVisitor(GraphVisitor):
         raise RepoGraphError(
             f"Unexpected object of type {type(obj).__name__} at {ctx.path_str()}!"
         )
+
+
+class RepoObjectGraphVisitor(RepoStructuralVisitor):
+    def __init__(self, repo, *, options: RepoGraphOptions | None = None, **kwargs):
+        super().__init__(repo)
+        self.options = _as_graph_options(options, **kwargs)
+        if self.options.order not in ("pre", "post"):
+            raise ValueError("Repo graph order must be 'pre' or 'post'.")
+        if self.options.missing not in ("raise", "skip", "load"):
+            raise ValueError("Repo graph missing policy must be 'raise', 'skip', or 'load'.")
+        self._seen_cdefs: set[ConcreteDefinition] = set()
+        self._load_memo: dict[ConcreteDefinition, Object] = {}
+
+    def _should_visit_graph_object(self, ctx: GraphCtx) -> bool:
+        return self.options.include_root or bool(ctx.path)
+
+    def _resolve_cdef(self, cdef: ConcreteDefinition, ctx: GraphCtx) -> Object | None:
+        obj = self.repo.get_cached(cdef, reuse_weak=self.options.load.reuse_weak)
+        if obj is not None:
+            return obj
+
+        if self.options.missing == "skip":
+            return None
+
+        if self.options.missing == "load":
+            load = self.options.load
+            revision = manage_revision(cdef, load.revision)
+            return self.repo._materialize_cdef(
+                cdef,
+                revision,
+                instance=load.instance,
+                restore_state=load.restore_state,
+                build_missing=load.build_missing,
+                reuse_weak=load.reuse_weak,
+                cache=load.cache,
+                memo=self._load_memo,
+                path=list(ctx.path),
+            )
+
+        from .repo import RepoGraphError
+
+        raise RepoGraphError(
+            f"Definition {cdef} is not reachable as a live object in this repo at {ctx.path_str()}."
+        )
+
+    def visit_object(self, obj: Object, ctx: GraphCtx) -> None:
+        cdef = obj.definition
+        if self.options.dedupe:
+            if cdef in self._seen_cdefs:
+                return
+            self._seen_cdefs.add(cdef)
+
+        should_apply = self._should_visit_graph_object(ctx)
+        if self.options.order == "pre" and should_apply:
+            self.visit_graph_object(obj, ctx)
+
+        self.visit(cdef.args, ctx.child("args"))
+        self.visit(cdef.kwargs, ctx.child("kwargs"))
+
+        if self.options.order == "post" and should_apply:
+            self.visit_graph_object(obj, ctx)
+
+    def visit_concrete_definition(self, obj: ConcreteDefinition, ctx: GraphCtx) -> None:
+        linked_obj = self._resolve_cdef(obj, ctx)
+        if linked_obj is not None:
+            self.visit(linked_obj, ctx)
+
+    def visit_graph_object(self, obj: Object, ctx: GraphCtx) -> None:
+        pass
+
+
+class RepoGraphCollectVisitor(RepoObjectGraphVisitor):
+    def __init__(self, repo, *, options: RepoGraphOptions | None = None, **kwargs):
+        super().__init__(repo, options=options, **kwargs)
+        self.objects: list[Object] = []
+
+    def visit_graph_object(self, obj: Object, ctx: GraphCtx) -> None:
+        self.objects.append(obj)
+
+
+class RepoGraphApplyVisitor(RepoObjectGraphVisitor):
+    def __init__(self, repo, func, *, options: RepoGraphOptions | None = None, **kwargs):
+        super().__init__(repo, options=options, **kwargs)
+        self.func = func
+        self.results: dict[ConcreteDefinition, Any] = {}
+
+    def visit_graph_object(self, obj: Object, ctx: GraphCtx) -> None:
+        self.results[obj.definition] = self.func(obj)
 
 
 # ----------------------------------------------------------------------

@@ -16,8 +16,14 @@ import atexit
 from .definition import Definition, ConcreteDefinition
 from .object import Object
 from .store.store import Store
-from .policies import InstancePolicy, CachePolicy
-from .repo_graph import RepoSaveVisitor, RepoAddObjectsVisitor, manage_revision
+from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions
+from .repo_graph import (
+    RepoGraphApplyVisitor,
+    RepoGraphCollectVisitor,
+    RepoSaveVisitor,
+    RepoAddObjectsVisitor,
+    manage_revision,
+)
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
 
@@ -400,15 +406,18 @@ class Repo:
         memo: dict | None = None,
         path: list[str | int] | None = None,
     ):
-        return from_canonical(
-            x,
-            repo=self,
+        options = RepoLoadOptions(
             instance=instance,
             restore_state=restore_state,
             build_missing=build_missing,
             reuse_weak=reuse_weak,
             cache=cache,
             revision=revision,
+        )
+        return from_canonical(
+            x,
+            repo=self,
+            options=options,
             memo=memo,
             path=path,
         )
@@ -731,6 +740,102 @@ class Repo:
         return {
             obj_def: apply_func(obj) for obj_def, obj in obj_iter
         }
+
+    def _graph_options(
+            self,
+            *,
+            options: RepoGraphOptions | None = None,
+            include_root: bool = True,
+            order: str = "post",
+            missing: str = "raise",
+            dedupe: bool = True,
+            instance: InstancePolicy = "reuse",
+            restore_state: bool = True,
+            build_missing: bool = False,
+            reuse_weak: bool = True,
+            cache: CachePolicy = "weak",
+            revision: RevisionType | str | None = None) -> RepoGraphOptions:
+        if options is not None:
+            return options
+        return RepoGraphOptions(
+            load=RepoLoadOptions(
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+            ),
+            include_root=include_root,
+            order=order,
+            missing=missing,
+            dedupe=dedupe,
+        )
+
+    def iter_graph(
+            self,
+            root,
+            *,
+            options: RepoGraphOptions | None = None,
+            include_root: bool = True,
+            order: str = "post",
+            missing: str = "raise",
+            dedupe: bool = True,
+            instance: InstancePolicy = "reuse",
+            restore_state: bool = True,
+            build_missing: bool = False,
+            reuse_weak: bool = True,
+            cache: CachePolicy = "weak",
+            revision: RevisionType | str | None = None):
+        graph_options = self._graph_options(
+            options=options,
+            include_root=include_root,
+            order=order,
+            missing=missing,
+            dedupe=dedupe,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
+        visitor = RepoGraphCollectVisitor(self, options=graph_options)
+        visitor.visit(root)
+        return iter(visitor.objects)
+
+    def apply_graph(
+            self,
+            root,
+            func,
+            *,
+            options: RepoGraphOptions | None = None,
+            include_root: bool = True,
+            order: str = "post",
+            missing: str = "raise",
+            dedupe: bool = True,
+            instance: InstancePolicy = "reuse",
+            restore_state: bool = True,
+            build_missing: bool = False,
+            reuse_weak: bool = True,
+            cache: CachePolicy = "weak",
+            revision: RevisionType | str | None = None):
+        graph_options = self._graph_options(
+            options=options,
+            include_root=include_root,
+            order=order,
+            missing=missing,
+            dedupe=dedupe,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
+        visitor = RepoGraphApplyVisitor(self, func, options=graph_options)
+        visitor.visit(root)
+        return visitor.results
 
     def set_main_def(self, main_def: ConcreteDefinition, store=None):
         self.main_def = main_def

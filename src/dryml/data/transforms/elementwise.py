@@ -44,11 +44,6 @@ class Pipe(ElementwiseTransform):
             spec = transform.infer_output_spec(spec)
         return spec
 
-    def trainable_parameters(self, backend: str | None = None):
-        for transform in self.transforms:
-            if hasattr(transform, "trainable_parameters"):
-                yield from transform.trainable_parameters(backend)
-
     def bind_first(self, first_value, *, input_spec=None):
         bound_transforms = []
         value = first_value
