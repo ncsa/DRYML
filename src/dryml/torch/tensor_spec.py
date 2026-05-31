@@ -1,10 +1,11 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from typing import Any
+
 from dryml.core2.tensor_spec import TensorSpec, Dynamic, Layout
-from dryml.core2.dtype import normalize_dtype
 from dryml.core2.utils.recurse import map_leaves
 from .spec import TorchTensorSpec
 from .dtype import dtype
+
 
 def _tensor_spec_torch(
     self,
@@ -93,24 +94,6 @@ def _layout_from_torch_layout(layout: Any) -> tuple[Layout, str | None]:
     raise TypeError(f"Unsupported PyTorch layout: {layout!r}")
 
 
-def dtype(x: Any) -> DType:
-    """
-    Convert a torch.dtype, torch.Tensor, or TorchTensorSpec to a DRYML DType.
-    """
-    if hasattr(x, "dtype"):
-        x = x.dtype
-
-    if isinstance(x, str):
-        name = x.removeprefix("torch.")
-        return normalize_dtype(name)
-
-    s = str(x)
-    if not s.startswith("torch."):
-        raise TypeError(f"Unsupported PyTorch dtype-like object: {x!r}")
-
-    return normalize_dtype(s.removeprefix("torch."))
-
-
 def as_tensor_spec(
     x: Any,
     *,
@@ -122,14 +105,12 @@ def as_tensor_spec(
 
     Parameters
     ----------
-    assume_batched:
+    batched:
         PyTorch tensors carry shape, dtype, and layout, but not batch semantics.
         If True, interpret the leading axis as batch.
     """
 
-
     def leaf_to_spec(x: Any) -> TensorSpec:
-
         if isinstance(x, TorchTensorSpec):
             full_shape = _shape_to_dryml(x.shape)
             out_dtype = dtype(x.dtype)
@@ -161,7 +142,7 @@ def as_tensor_spec(
             layout=layout,
             batch_axis_name=batch_axis_name if batch is not None else None,
             sparse_format=sparse_format,
-            backend = "torch",
+            backend="torch",
         )
 
     return map_leaves(x, leaf_to_spec)

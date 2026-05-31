@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 
 from dryml.core2.object import Object
-from dryml.core2.tensor_spec import TensorSpec
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
 from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
@@ -14,6 +13,7 @@ from dryml.models.utils import (
     prepare_training_data,
     validate_num_examples,
 )
+from dryml.torch.tensor_spec import as_tensor_spec as torch_as_tensor_spec
 
 
 def _resolve_device(torch):
@@ -28,21 +28,6 @@ def _tree_to_torch(value, torch, *, device=None):
         return tensor.to(device) if device is not None else tensor
 
     return map_leaves(value, leaf_to_torch)
-
-
-def _torch_spec_from_value(value):
-    def leaf_to_spec(leaf):
-        shape = tuple(int(dim) for dim in leaf.shape)
-        if shape:
-            return TensorSpec(
-                str(leaf.dtype).removeprefix("torch."),
-                shape=shape[1:],
-                batch=shape[0],
-                backend="torch",
-            )
-        return TensorSpec(str(leaf.dtype).removeprefix("torch."), shape=(), backend="torch")
-
-    return map_leaves(value, leaf_to_spec)
 
 
 class Wrapper(Object):
@@ -166,7 +151,7 @@ class Model(BaseModel):
             sample = _tree_to_torch(fake_from_spec_tree(input_spec), torch, device=_resolve_device(torch))
             with torch.no_grad():
                 output = self.obj(sample)
-            return maybe_unbatch_output_spec(_torch_spec_from_value(output), input_spec)
+            return maybe_unbatch_output_spec(torch_as_tensor_spec(output, batched=True), input_spec)
         finally:
             if was_training:
                 self.prep_train()

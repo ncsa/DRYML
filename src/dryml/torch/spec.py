@@ -1,7 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
-import torch
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,5 +20,4 @@ class TorchTensorSpec:
 
     def __post_init__(self):
         if self.layout is None:
-            object.__setattr__(self, "layout", torch.strided)
-
+            object.__setattr__(self, "layout", "torch.strided")

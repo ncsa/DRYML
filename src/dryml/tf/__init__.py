@@ -1,7 +1,3 @@
-# Check we have the right context
-from dryml.context import check_context
-check_context('tf')
-
 from dryml.core2.utils.classes import install_method
 
 from dryml.core2.dtype import DType

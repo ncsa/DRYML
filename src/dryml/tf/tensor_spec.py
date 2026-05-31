@@ -1,4 +1,3 @@
-import tensorflow as tf
 from typing import Any
 from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, SpecTree
 from dryml.core2.utils.recurse import map_leaves
@@ -102,6 +101,7 @@ def as_tensor_spec(
         If True, interpret the leading axis as batch.
     """
     def leaf_to_spec(x: Any) -> TensorSpec:
+        import tensorflow as tf
 
         if not isinstance(x, tf.TypeSpec):
             x = tf.type_spec_from_value(x)
@@ -118,7 +118,7 @@ def as_tensor_spec(
                 batch_axis_name=batch_axis_name if batch is not None else None,
                 ragged_rank=int(x.ragged_rank),
                 row_splits_dtype=dtype(x.row_splits_dtype),
-                backend = "tf",
+                backend="tf",
             )
 
         if isinstance(x, tf.SparseTensorSpec):
@@ -132,7 +132,7 @@ def as_tensor_spec(
                 layout=Layout.SPARSE,
                 batch_axis_name=batch_axis_name if batch is not None else None,
                 sparse_format="tf_sparse",
-                backend = "tf",
+                backend="tf",
             )
 
         if isinstance(x, tf.TensorSpec):
@@ -145,7 +145,7 @@ def as_tensor_spec(
                 batch=batch,
                 layout=Layout.DENSE,
                 batch_axis_name=batch_axis_name if batch is not None else None,
-                backend = "tf",
+                backend="tf",
             )
 
         raise TypeError(f"Unsupported TensorFlow spec/value type: {type(x).__name__}")

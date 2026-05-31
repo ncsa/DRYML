@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from dryml.artifacts import CachedDataset, Scalar, ScalarAvg
-from dryml.core2 import Repo
+from dryml.core2 import ConfigRef, Repo
 from dryml.core2.repo import default_repo
 from dryml.core2.store.dir import DirStore
 from dryml.data import ArrayDataset, NpyFileDataset
@@ -47,7 +47,8 @@ def test_cached_dataset_writes_npy_files_for_npy_file_dataset(tmp_path):
     files = sorted(p.name for p in tmp_path.glob("store/objects/*/*/*.npy"))
     assert files == ["00000000.npy", "00000001.npy"]
 
-    ds = NpyFileDataset(repo.location(cached))
+    repo.set_config("cache.root", repo.location(cached))
+    ds = NpyFileDataset(ConfigRef("cache.root"), repo=repo)
     assert [item.tolist() for item in ds] == [[1, 2], [3, 4]]
 
 
@@ -60,6 +61,7 @@ def test_cached_dataset_supports_default_repo_location_flow(tmp_path):
     with default_repo(repo):
         cached.save(store=store)
         cached.compute()
-        ds = NpyFileDataset(cached.location)
+        repo.set_config("cache.root", cached.location)
+        ds = NpyFileDataset(ConfigRef("cache.root"))
 
     assert [item.tolist() for item in ds] == [[5, 6]]

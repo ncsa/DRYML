@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-import os
 from pathlib import Path
 from typing import Any, Callable
 import itertools
@@ -146,18 +145,6 @@ class ArrayDataset(SourceDataset):
 
 class NpyFileDataset(SourceDataset):
     """Dataset whose elements are loaded from sorted ``.npy`` files."""
-
-    @classmethod
-    def __prepare_args__(cls, *args, **kwargs):
-        args, kwargs = super().__prepare_args__(*args, **kwargs)
-        if args:
-            root = args[0]
-            if isinstance(root, os.PathLike):
-                args = (os.fspath(root), *args[1:])
-        elif isinstance(kwargs.get("root"), os.PathLike):
-            kwargs = kwargs.copy()
-            kwargs["root"] = os.fspath(kwargs["root"])
-        return args, kwargs
 
     def __init__(
         self,

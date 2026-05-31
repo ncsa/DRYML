@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 from dryml.core2.object import Object
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core2.tensor_spec import Dynamic
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
 from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
@@ -11,41 +11,19 @@ from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
 from dryml.data.transforms import Select
+from dryml.tf.tensor_spec import as_tensor_spec as tf_as_tensor_spec
 
 
-def _tf_shape(shape):
-    if shape is None:
-        return None
-    return tuple(None if dim is Dynamic else int(dim) for dim in shape)
-
-
-def _tf_signature_leaf(tf, spec):
+def _tf_signature_leaf(spec):
     # DRYML Batch(..., drop_remainder=False) can yield a smaller final batch,
     # so TensorFlow signatures must not pin the leading batch dimension.
     if spec.batched and spec.shape is not None:
-        shape = (None, *_tf_shape(spec.shape))
-    else:
-        shape = _tf_shape(spec.full_shape)
-    dtype = tf.as_dtype(spec.dtype.name)
-
-    if spec.layout is Layout.DENSE:
-        return tf.TensorSpec(shape=shape, dtype=dtype)
-    if spec.layout is Layout.RAGGED:
-        return tf.RaggedTensorSpec(
-            shape=shape,
-            dtype=dtype,
-            ragged_rank=spec.ragged_rank,
-            row_splits_dtype=(
-                tf.int64 if spec.row_splits_dtype is None else tf.as_dtype(spec.row_splits_dtype.name)
-            ),
-        )
-    if spec.layout is Layout.SPARSE:
-        return tf.SparseTensorSpec(shape=shape, dtype=dtype)
-    raise TypeError(f"Unsupported TensorFlow layout: {spec.layout}.")
+        spec = spec.with_batch(batch=Dynamic)
+    return spec.tf()
 
 
 def _tf_output_signature(tf, spec_tree):
-    return map_leaves(spec_tree, lambda spec: _tf_signature_leaf(tf, spec))
+    return map_leaves(spec_tree, _tf_signature_leaf)
 
 
 def _path_select(path):
@@ -68,30 +46,6 @@ def _tf_dataset_from_xy(tf, dataset, *, x_path, y_path):
         lambda: iter_xy(dataset, x_path=x_path, y_path=y_path),
         output_signature=output_signature,
     )
-
-
-def _tree_to_tf(value, tf):
-    def leaf_to_tf(leaf):
-        if isinstance(leaf, tf.Tensor):
-            return leaf
-        return tf.convert_to_tensor(leaf)
-
-    return map_leaves(value, leaf_to_tf)
-
-
-def _tf_dim(dim):
-    return Dynamic if dim is None else int(dim)
-
-
-def _tf_spec_from_value(value):
-    def leaf_to_spec(leaf):
-        shape = tuple(_tf_dim(dim) for dim in leaf.shape)
-        dtype = leaf.dtype.name
-        if shape:
-            return TensorSpec(dtype, shape=shape[1:], batch=shape[0], backend="tf")
-        return TensorSpec(dtype, shape=(), backend="tf")
-
-    return map_leaves(value, leaf_to_spec)
 
 
 class Wrapper(Object):
@@ -224,9 +178,9 @@ class Model(BaseModel):
 
         import tensorflow as tf
 
-        sample = _tree_to_tf(fake_from_spec_tree(input_spec), tf)
+        sample = map_leaves(fake_from_spec_tree(input_spec), tf.convert_to_tensor)
         output = self.obj(sample, training=False)
-        return maybe_unbatch_output_spec(_tf_spec_from_value(output), input_spec)
+        return maybe_unbatch_output_spec(tf_as_tensor_spec(output, batched=True), input_spec)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         import tensorflow as tf

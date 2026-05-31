@@ -11,11 +11,12 @@ from dryml.core2.tensor_spec import TensorSpec
 from dryml.data import TFDSAdapter, NpyFileDataset
 
 
-def test_npy_file_dataset_loads_sorted_files(tmp_path):
+def test_npy_file_dataset_loads_sorted_files_from_config_ref(tmp_path):
     np.save(tmp_path / "b.npy", np.array([2, 3], dtype=np.int32))
     np.save(tmp_path / "a.npy", np.array([0, 1], dtype=np.int32))
+    repo = Repo(config={"data.root": str(tmp_path)})
 
-    ds = NpyFileDataset(tmp_path)
+    ds = NpyFileDataset(ConfigRef("data.root"), repo=repo)
 
     assert ds.spec == TensorSpec("int32", shape=(2,), backend="numpy")
     assert [item.tolist() for item in ds] == [[0, 1], [2, 3]]

@@ -1,18 +1,15 @@
 from typing import Any
-
-from dryml.context import check_context, ContextError
+import importlib.util
+import sys
 
 
 def is_torch_available():
-    try:
-        check_context('torch')
-        return True
-    except ContextError:
-        pass
-    return False
+    return importlib.util.find_spec("torch") is not None
 
 
 def is_torch_value(x: Any) -> bool:
-    import torch
     from .spec import TorchTensorSpec
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return isinstance(x, TorchTensorSpec)
     return torch.is_tensor(x) or isinstance(x, TorchTensorSpec)
