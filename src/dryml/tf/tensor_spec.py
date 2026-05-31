@@ -46,6 +46,17 @@ def _tensor_spec_tf(self, *, include_batch: bool = True, name: str | None = None
     raise TypeError(f"Unsupported TensorFlow layout: {self.layout}")
 
 
+def output_signature(spec_tree: SpecTree, *, flexible_batch: bool = True):
+    """Convert a DRYML SpecTree into a tf.data output_signature tree."""
+    def leaf_to_tf(spec: TensorSpec):
+        # The final DRYML batch may be smaller than the nominal batch size.
+        if flexible_batch and spec.batched and spec.shape is not None:
+            spec = spec.with_batch(batch=Dynamic)
+        return spec.tf()
+
+    return map_leaves(spec_tree, leaf_to_tf, pred=lambda x: isinstance(x, TensorSpec))
+
+
 def _tf_shape_to_dryml(shape: Any) -> tuple[int | object, ...] | None:
     """
     Convert a tf.TensorShape-like object to DRYML shape form.

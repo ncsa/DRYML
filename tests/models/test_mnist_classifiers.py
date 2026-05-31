@@ -3,8 +3,7 @@ import pytest
 import dryml.execute as execute
 from dryml.core2 import Repo, definition_mode
 from dryml.core2.tensor_spec import TensorSpec
-from dryml.data import Map, Pack, Select, TFDSAdapter
-from dryml.data.transforms import Cast, Flatten, Scale
+from dryml.data import Cast, Flatten, Map, Scale, Select, TFDSAdapter, Zip
 from dryml.metrics import categorical_accuracy
 from dryml.models import Experiment
 
@@ -16,7 +15,7 @@ def _mnist_dataset(split):
     raw = TFDSAdapter("mnist", split=split, as_supervised=True, as_numpy=True)
     x = Map(raw, Select(0), Cast("float32"), Scale.from_range(0.0, 255.0), Flatten())
     y = Map(raw, Select(1))
-    return Pack(x, y)
+    return Zip(x, y)
 
 
 def test_sklearn_basic_mnist_classifier_with_tfds_adapter():

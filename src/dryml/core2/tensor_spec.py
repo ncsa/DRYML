@@ -5,6 +5,8 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, TypeAlias
 
+import numpy as np
+
 from .dtype import DType, normalize_dtype
 from .backend import discover_backend, Backend
 from .utils.recurse import map_leaf_groups, map_leaves, iter_leaves
@@ -310,6 +312,44 @@ def batch_spec_tree(spec: SpecTree, batch=Dynamic, axis_name: str | None = "batc
 
 def unbatch_spec_tree(spec: SpecTree) -> SpecTree:
     return map_spec_tree(spec, lambda s: s.without_batch())
+
+
+def spec_tree_is_batched(spec_tree: SpecTree) -> bool:
+    batches = {spec.batched for spec in iter_specs(spec_tree)}
+    return len(batches) == 1 and batches.pop()
+
+
+def batch_from_spec_tree(spec_tree: SpecTree):
+    batches = {spec.batch for spec in iter_specs(spec_tree) if spec.batched}
+    if not batches:
+        return None
+    return batches.pop() if len(batches) == 1 else Dynamic
+
+
+def fake_from_spec_tree(spec_tree: SpecTree):
+    def leaf_sample(spec: TensorSpec):
+        if spec.shape is None:
+            raise ValueError("Cannot create a fake sample from an unknown-rank TensorSpec.")
+        sample_shape = tuple(1 if dim is Dynamic else int(dim) for dim in spec.shape)
+        shape = spec.full_shape if spec.batched else (1, *sample_shape)
+        if spec.batched:
+            shape = tuple(1 if dim is Dynamic else int(dim) for dim in shape)
+        return np.zeros(shape, dtype=spec.dtype.np())
+
+    return map_leaves(spec_tree, leaf_sample, pred=lambda x: isinstance(x, TensorSpec))
+
+
+def maybe_unbatch_output_spec(output_spec: SpecTree, input_spec: SpecTree) -> SpecTree:
+    if spec_tree_is_batched(input_spec):
+        return output_spec
+    return unbatch_spec_tree(output_spec)
+
+
+def match_input_batch(spec: TensorSpec, input_spec: SpecTree) -> TensorSpec:
+    batch = batch_from_spec_tree(input_spec)
+    if batch is None:
+        return spec
+    return spec.with_batch(batch=batch)
 
 
 def merge_tensor_specs(specs: Sequence[TensorSpec]) -> TensorSpec:

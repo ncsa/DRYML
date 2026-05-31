@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dryml.code import traits
+from dryml.code import Method, traits
 from dryml.core2.tensor_spec import SpecTree, map_spec_tree
-from dryml.data.transforms import ElementwiseTransform
 
 
-class ImageNormalize(ElementwiseTransform):
+class ImageNormalize(Method):
     """Convert image tensors to float32 in the [0, 1] range."""
 
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:

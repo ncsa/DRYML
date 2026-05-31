@@ -52,21 +52,21 @@ class Dataset(Object, Generic[T]):
         raise NotImplementedError("Subclasses must implement their lengths")
 
 class Map(Dataset):
-    """Dataset node that applies one transform to each source element."""
+    """Dataset node that applies one Method to each source element."""
 
-    def __init__(self, src: Dataset, *transforms):
-        if not transforms:
-            raise ValueError("Map requires at least one transform.")
+    def __init__(self, src: Dataset, *methods):
+        if not methods:
+            raise ValueError("Map requires at least one Method.")
 
-        if len(transforms) == 1:
-            transform = transforms[0]
+        if len(methods) == 1:
+            method = methods[0]
         else:
-            from dryml.data.transforms.elementwise import Pipe
-            transform = Pipe(*transforms)
+            from dryml.data.methods import Pipe
+            method = Pipe(*methods)
 
         self.src = src
-        self.transform = transform
-        super().__init__(spec=transform.infer_output_spec(src.spec))
+        self.method = method
+        super().__init__(spec=method.infer_output_spec(src.spec))
 
     def __iter__(self):
         it = iter(self.src)
@@ -75,48 +75,10 @@ class Map(Dataset):
         except StopIteration:
             return
 
-        impl, first_out = self.transform.bind_first(first, input_spec=self.src.spec)
+        impl, first_out = self.method.bind_first(first, input_spec=self.src.spec)
         yield first_out
         for item in it:
             yield impl(item)
 
     def __len__(self) -> Cardinality:
         return self.src.__len__()
-
-
-class ElementwiseDataset(Map):
-    """Compatibility alias for the public Map dataset node."""
-
-
-class StructuralDataset(Dataset):
-    """Dataset node for one-input transforms that may change structure/cardinality."""
-
-    def __init__(self, src: Dataset, transform):
-        self.src = src
-        self.transform = transform
-        super().__init__(spec=transform.infer_output_spec(src.spec))
-
-    def __iter__(self):
-        yield from self.transform.iter_dataset(self.src)
-
-    def __len__(self) -> Cardinality:
-        if hasattr(self.transform, "infer_cardinality"):
-            return self.transform.infer_cardinality(self.src.__len__())
-        return Cardinality.UNKNOWN
-
-
-class CombineDataset(Dataset):
-    """Dataset node for transforms that consume multiple source datasets."""
-
-    def __init__(self, sources: tuple[Dataset, ...], transform):
-        self.sources = tuple(sources)
-        self.transform = transform
-        super().__init__(spec=transform.infer_output_spec(*(src.spec for src in self.sources)))
-
-    def __iter__(self):
-        yield from self.transform.iter_datasets(*self.sources)
-
-    def __len__(self) -> Cardinality:
-        if hasattr(self.transform, "infer_cardinality"):
-            return self.transform.infer_cardinality(*(src.__len__() for src in self.sources))
-        return Cardinality.UNKNOWN

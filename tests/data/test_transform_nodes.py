@@ -3,15 +3,14 @@ import pytest
 
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.backend import Backend
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core2.tensor_spec import Dynamic, TensorSpec
 from dryml.data.dataset import Dataset, Map
-from dryml.data.transforms import (
+from dryml.data import (
     Batch,
     Cast,
-    ElementwiseTransform,
     Flatten,
-    Pack,
     Pipe,
+    Project,
     Repeat,
     Scale,
     Select,
@@ -19,6 +18,8 @@ from dryml.data.transforms import (
     Skip,
     Take,
     Unbatch,
+    Zip,
+    Chain,
 )
 
 
@@ -91,6 +92,21 @@ def test_select_accepts_multiple_indices():
     assert [item.tolist() for item in ds] == [[1, 2], [3, 4]]
 
 
+def test_select_accepts_tuple_path():
+    src = ListDataset(
+        [
+            {"x": (np.array([1, 2], dtype=np.int32),)},
+            {"x": (np.array([3, 4], dtype=np.int32),)},
+        ],
+        {"x": (TensorSpec("int32", shape=(2,), backend="numpy"),)},
+    )
+
+    ds = Map(src, Select(("x", 0)))
+
+    assert ds.spec == TensorSpec("int32", shape=(2,), backend="numpy")
+    assert [item.tolist() for item in ds] == [[1, 2], [3, 4]]
+
+
 def test_elementwise_dataset_resolves_dispatch_once_per_iterator():
     transform = CountingCast("float32")
     src = ListDataset(
@@ -123,6 +139,39 @@ def test_pipe_infer_output_spec_and_call():
     assert pipe.infer_output_spec(spec) == TensorSpec("float32", shape=(2,), backend="numpy")
     assert out.dtype == np.dtype("float32")
     assert out.tolist() == [1.0, 2.0]
+
+
+def test_project_positional_branches_use_one_input_element():
+    project = Project(Select("x"), Select("y"))
+    spec = {
+        "x": TensorSpec("int32", shape=(2,), backend="numpy"),
+        "y": TensorSpec("int32", shape=(1,), backend="numpy"),
+    }
+    value = {"x": np.array([1, 2], dtype=np.int32), "y": np.array([3], dtype=np.int32)}
+
+    out = project(value)
+
+    assert project.infer_output_spec(spec) == (spec["x"], spec["y"])
+    assert out[0].tolist() == [1, 2]
+    assert out[1].tolist() == [3]
+
+
+def test_project_named_branches_use_one_input_element():
+    src = ListDataset(
+        [
+            {"x": np.array([1, 2], dtype=np.int32), "y": np.array([3], dtype=np.int32)},
+            {"x": np.array([4, 5], dtype=np.int32), "y": np.array([6], dtype=np.int32)},
+        ],
+        {
+            "x": TensorSpec("int32", shape=(2,), backend="numpy"),
+            "y": TensorSpec("int32", shape=(1,), backend="numpy"),
+        },
+    )
+
+    ds = Map(src, Project(x=Select("x"), y=Select("y")))
+
+    assert ds.spec == {"x": src.spec["x"], "y": src.spec["y"]}
+    assert [item["x"].tolist() for item in ds] == [[1, 2], [4, 5]]
 
 
 def test_map_accepts_multiple_transforms_as_pipe():
@@ -235,7 +284,7 @@ def test_shuffle_is_seeded_and_preserves_elements():
     assert sorted(first) == [0, 1, 2, 3, 4]
 
 
-def test_pack_positional_infer_output_spec_and_iteration():
+def test_zip_positional_infer_output_spec_and_iteration():
     left = ListDataset(
         [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)],
         TensorSpec("int32", shape=(1,), backend="numpy"),
@@ -245,14 +294,14 @@ def test_pack_positional_infer_output_spec_and_iteration():
         TensorSpec("float32", shape=(2,), backend="numpy"),
     )
 
-    ds = Pack(left, right)
+    ds = Zip(left, right)
     out = list(ds)
 
     assert ds.spec == (left.spec, right.spec)
     assert [(a.tolist(), b.tolist()) for a, b in out] == [([1], [3.0, 4.0]), ([2], [5.0, 6.0])]
 
 
-def test_pack_nested_tree_with_int_key():
+def test_zip_nested_tree_with_int_key():
     left = ListDataset(
         [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)],
         TensorSpec("int32", shape=(1,), backend="numpy"),
@@ -262,7 +311,7 @@ def test_pack_nested_tree_with_int_key():
         TensorSpec("float32", shape=(1,), backend="numpy"),
     )
 
-    ds = Pack({1: left, "b": {"2": right}})
+    ds = Zip({1: left, "b": {"2": right}})
     out = list(ds)
 
     assert ds.spec == {1: left.spec, "b": {"2": right.spec}}
@@ -271,7 +320,7 @@ def test_pack_nested_tree_with_int_key():
     assert out[0]["b"]["2"].tolist() == [3.0]
 
 
-def test_nested_pack_is_dataset_leaf_for_outer_pack():
+def test_nested_zip_is_dataset_leaf_for_outer_zip():
     left = ListDataset(
         [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)],
         TensorSpec("int32", shape=(1,), backend="numpy"),
@@ -281,8 +330,8 @@ def test_nested_pack_is_dataset_leaf_for_outer_pack():
         TensorSpec("float32", shape=(1,), backend="numpy"),
     )
 
-    inner = Pack({1: left, "test": right})
-    outer = Pack(inner, left)
+    inner = Zip({1: left, "test": right})
+    outer = Zip(inner, left)
     out = list(outer)
 
     assert outer.spec == (inner.spec, left.spec)
@@ -291,11 +340,28 @@ def test_nested_pack_is_dataset_leaf_for_outer_pack():
     assert out[0][1].tolist() == [1]
 
 
-def test_pack_rejects_noncanonical_dict_key():
+def test_zip_rejects_noncanonical_dict_key():
     src = ListDataset(
         [np.array([1], dtype=np.int32)],
         TensorSpec("int32", shape=(1,), backend="numpy"),
     )
 
     with pytest.raises(TypeError):
-        Pack({object(): src})
+        Zip({object(): src})
+
+
+def test_chain_merges_specs_and_concatenates_sources():
+    left = ListDataset(
+        [np.array([1], dtype=np.int32), np.array([2], dtype=np.int32)],
+        TensorSpec("int32", shape=(1,), backend="numpy"),
+    )
+    right = ListDataset(
+        [np.array([3, 4], dtype=np.int32)],
+        TensorSpec("int32", shape=(2,), backend="numpy"),
+    )
+
+    ds = Chain(left, right)
+
+    assert ds.spec == TensorSpec("int32", shape=(Dynamic,), backend="numpy")
+    assert ds.__len__() == Cardinality.finite(3)
+    assert [item.tolist() for item in ds] == [[1], [2], [3, 4]]

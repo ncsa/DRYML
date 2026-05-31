@@ -3,49 +3,15 @@ from __future__ import annotations
 import os
 
 from dryml.core2.object import Object
-from dryml.core2.tensor_spec import Dynamic
+from dryml.core2.tensor_spec import fake_from_spec_tree, maybe_unbatch_output_spec
 from dryml.core2.utils.general import revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
-from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
+from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
-from dryml.data.transforms import Select
 from dryml.tf.tensor_spec import as_tensor_spec as tf_as_tensor_spec
-
-
-def _tf_signature_leaf(spec):
-    # DRYML Batch(..., drop_remainder=False) can yield a smaller final batch,
-    # so TensorFlow signatures must not pin the leading batch dimension.
-    if spec.batched and spec.shape is not None:
-        spec = spec.with_batch(batch=Dynamic)
-    return spec.tf()
-
-
-def _tf_output_signature(tf, spec_tree):
-    return map_leaves(spec_tree, _tf_signature_leaf)
-
-
-def _path_select(path):
-    if isinstance(path, (tuple, list)):
-        return Select(*path)
-    return Select(path)
-
-
-def _tf_dataset_from_xy(tf, dataset, *, x_path, y_path):
-    x_select = _path_select(x_path)
-    y_select = _path_select(y_path)
-    x_spec = x_select.infer_output_spec(dataset.spec)
-    y_spec = y_select.infer_output_spec(dataset.spec)
-    output_signature = (
-        _tf_output_signature(tf, x_spec),
-        _tf_output_signature(tf, y_spec),
-    )
-
-    return tf.data.Dataset.from_generator(
-        lambda: iter_xy(dataset, x_path=x_path, y_path=y_path),
-        output_signature=output_signature,
-    )
+from dryml.tf.tensor_spec import output_signature as tf_output_signature
 
 
 class Wrapper(Object):
@@ -273,22 +239,14 @@ class BasicTraining(TrainFunction):
         import tensorflow as tf
 
         train_data = self._prepare_data(exp.train_data, for_training=True)
-        ds_train = _tf_dataset_from_xy(
-            tf,
-            train_data,
-            x_path=self.x_path,
-            y_path=self.y_path,
-        )
+        train_xy = self._xy_data(train_data)
+        ds_train = self._tf_dataset(tf, train_xy)
 
         ds_val = None
         if exp.val_data is not None:
             val_data = self._prepare_data(exp.val_data, for_training=False)
-            ds_val = _tf_dataset_from_xy(
-                tf,
-                val_data,
-                x_path=self.x_path,
-                y_path=self.y_path,
-            )
+            val_xy = self._xy_data(val_data)
+            ds_val = self._tf_dataset(tf, val_xy)
 
         compile_kwargs = dict(self.compile_kwargs)
         if self.optimizer is not None:
@@ -344,6 +302,15 @@ class BasicTraining(TrainFunction):
         if self.batch_size is not None:
             data = Batch(data, self.batch_size)
         return data
+
+    def _xy_data(self, data):
+        return Map(data, Project(Select(self.x_path), Select(self.y_path)))
+
+    def _tf_dataset(self, tf, data):
+        return tf.data.Dataset.from_generator(
+            lambda: iter(data),
+            output_signature=tf_output_signature(data.spec),
+        )
 
     def _callbacks(self, tf):
         return [callback.obj if hasattr(callback, "obj") else callback for callback in self.callbacks]

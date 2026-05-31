@@ -4,9 +4,10 @@ import os
 
 from dryml.core2.object import Object
 from dryml.core2.repo import get_default_repo
+from dryml.core2.tensor_spec import fake_from_spec_tree, maybe_unbatch_output_spec
 from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
-from dryml.data import Batch, iter_xy, maybe_unbatch_output_spec, fake_from_spec_tree
+from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
 from dryml.models.utils import (
@@ -241,6 +242,7 @@ class BasicTraining(TrainFunction):
         )
         if self.batch_size is not None:
             train_data = Batch(train_data, self.batch_size)
+        train_xy = Map(train_data, Project(Select(self.x_path), Select(self.y_path)))
 
         device = _resolve_device(torch)
         if hasattr(exp.model, "to_device"):
@@ -254,11 +256,7 @@ class BasicTraining(TrainFunction):
 
         try:
             for _ in range(self.epochs):
-                for x, y in iter_xy(
-                    train_data,
-                    x_path=self.x_path,
-                    y_path=self.y_path,
-                ):
+                for x, y in train_xy:
                     x = _tree_to_torch(x, torch, device=device)
                     y = _tree_to_torch(y, torch, device=device)
 

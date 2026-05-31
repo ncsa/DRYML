@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from dryml.core2.tensor_spec import iter_specs
-from dryml.data import Batch, Collect, iter_xy
+from dryml.data import Batch, Collect, Map, Project, Select
 
 
 def _is_batched(dataset) -> bool:
@@ -17,7 +17,7 @@ def _prediction_pairs(model, data, *, x_path=0, y_path=1, batch_size: int | None
     if batch_size is not None:
         data = Batch(data, batch_size)
 
-    for x, y in iter_xy(data, x_path=x_path, y_path=y_path):
+    for x, y in Map(data, Project(Select(x_path), Select(y_path))):
         yield model(x), y
 
 

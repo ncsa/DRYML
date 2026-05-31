@@ -5,74 +5,18 @@ Utility functions for data methods
 import inspect
 from typing import Callable
 
-import numpy as np
-
-from dryml.core2.tensor_spec import Dynamic, TensorSpec, iter_specs, unbatch_spec_tree
-from dryml.core2.utils.recurse import map_leaves
 from dryml.data.collate import default_collate
-from dryml.data.transforms import Select
+from dryml.data.methods import Project, Select
 
 
-def _path_select(path):
-    if isinstance(path, (tuple, list)):
-        return Select(*path)
-    return Select(path)
+def _xy_dataset(dataset, *, x_path=0, y_path=1):
+    from dryml.data.dataset import Map
 
-
-def spec_tree_is_batched(spec_tree) -> bool:
-    batches = {spec.batched for spec in iter_specs(spec_tree)}
-    return len(batches) == 1 and batches.pop()
-
-
-def batch_from_spec_tree(spec_tree):
-    batches = {spec.batch for spec in iter_specs(spec_tree) if spec.batched}
-    if not batches:
-        return None
-    return batches.pop() if len(batches) == 1 else Dynamic
-
-
-def fake_from_spec_tree(spec_tree):
-    def leaf_sample(spec: TensorSpec):
-        if spec.shape is None:
-            raise ValueError("Cannot create a fake sample from an unknown-rank TensorSpec.")
-        sample_shape = tuple(1 if dim is Dynamic else int(dim) for dim in spec.shape)
-        shape = spec.full_shape if spec.batched else (1, *sample_shape)
-        if spec.batched:
-            shape = tuple(1 if dim is Dynamic else int(dim) for dim in shape)
-        return np.zeros(shape, dtype=spec.dtype.np())
-
-    return map_leaves(spec_tree, leaf_sample, pred=lambda x: isinstance(x, TensorSpec))
-
-
-def maybe_unbatch_output_spec(output_spec, input_spec):
-    if spec_tree_is_batched(input_spec):
-        return output_spec
-    return unbatch_spec_tree(output_spec)
-
-
-def match_input_batch(spec: TensorSpec, input_spec):
-    batch = batch_from_spec_tree(input_spec)
-    if batch is None:
-        return spec
-    return spec.with_batch(batch=batch)
+    return Map(dataset, Project(Select(x_path), Select(y_path)))
 
 
 def iter_xy(dataset, *, x_path=0, y_path=1):
-    x_select = _path_select(x_path)
-    y_select = _path_select(y_path)
-
-    it = iter(dataset)
-    try:
-        first = next(it)
-    except StopIteration:
-        return
-
-    x_impl, first_x = x_select.bind_first(first, input_spec=dataset.spec)
-    y_impl, first_y = y_select.bind_first(first, input_spec=dataset.spec)
-    yield first_x, first_y
-
-    for item in it:
-        yield x_impl(item), y_impl(item)
+    yield from _xy_dataset(dataset, x_path=x_path, y_path=y_path)
 
 
 def collect_xy(dataset, *, x_path=0, y_path=1):
