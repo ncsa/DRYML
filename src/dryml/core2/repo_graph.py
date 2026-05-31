@@ -116,16 +116,9 @@ class RepoObjectGraphVisitor(RepoStructuralVisitor):
             return None
 
         if self.options.missing == "load":
-            load = self.options.load
-            revision = manage_revision(cdef, load.revision)
             return self.repo._materialize_cdef(
                 cdef,
-                revision,
-                instance=load.instance,
-                restore_state=load.restore_state,
-                build_missing=load.build_missing,
-                reuse_weak=load.reuse_weak,
-                cache=load.cache,
+                options=self.options.load,
                 memo=self._load_memo,
                 path=list(ctx.path),
             )

@@ -1,6 +1,7 @@
 import pytest
 
 from dryml.core2 import Object, Repo
+from dryml.core2.policies import RepoLoadOptions
 from dryml.core2.repo import RepoGraphError, default_repo, get_default_repo
 from dryml.core2.store.dir import DirStore
 
@@ -88,3 +89,19 @@ def test_object_init_sees_explicit_construction_repo_and_restores_outer_repo():
         obj = RepoAware(repo=construction_repo)
         assert obj.seen_repo is construction_repo
         assert get_default_repo() is outer_repo
+
+
+def test_get_and_apply_share_load_options():
+    repo = Repo()
+    weak = GraphLeaf("weak", repo=repo)
+    strong = GraphLeaf("strong", repo=repo)
+    repo.pin(strong)
+
+    options = RepoLoadOptions(reuse_weak=False)
+
+    selected = repo.get(options=options)
+    applied = repo.apply(lambda obj: obj.name, options=options)
+
+    assert weak.definition not in selected
+    assert strong.definition in selected
+    assert applied == {strong.definition: "strong"}

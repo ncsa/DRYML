@@ -766,52 +766,27 @@ class _FromCanonicalTransformer(GraphTransformer):
             return np.array(obj, copy=True)
 
         if kind is NodeKind.CONCRETE_DEFINITION:
-            from .repo import manage_revision
-
-            revision = manage_revision(obj, self.config.revision)
             return self.repo._materialize_cdef(
                 obj,
-                revision,
-                instance=self.config.instance,
-                restore_state=self.config.restore_state,
-                build_missing=self.config.build_missing,
-                reuse_weak=self.config.reuse_weak,
-                cache=self.config.cache,
+                options=self.config,
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
 
         if kind is NodeKind.DEFINITION:
-            from .repo import manage_revision
-
             cdef = to_canonical(obj, repo=self.repo)
-            revision = manage_revision(cdef, self.config.revision)
             return self.repo._materialize_cdef(
                 cdef,
-                revision,
-                instance=self.config.instance,
-                restore_state=self.config.restore_state,
-                build_missing=self.config.build_missing,
-                reuse_weak=self.config.reuse_weak,
-                cache=self.config.cache,
+                options=self.config,
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
 
         if kind is NodeKind.OBJECT:
-            from .repo import manage_revision
-
-            revision = manage_revision(obj.definition, self.config.revision)
-
             if self.config.instance == "new":
                 return self.repo._materialize_cdef(
                     obj.definition,
-                    revision,
-                    instance="new",
-                    restore_state=self.config.restore_state,
-                    build_missing=self.config.build_missing,
-                    reuse_weak=self.config.reuse_weak,
-                    cache=self.config.cache,
+                    options=self.config,
                     memo=ctx.memo,
                     path=list(ctx.path),
                 )

@@ -390,6 +390,42 @@ class Repo:
                 return st
         return None
 
+    def _load_options(
+            self,
+            *,
+            options: RepoLoadOptions | None = None,
+            instance: InstancePolicy = "reuse",
+            restore_state: bool = True,
+            build_missing: bool = False,
+            reuse_weak: bool = True,
+            cache: CachePolicy = "weak",
+            revision: RevisionType | str | None = None) -> RepoLoadOptions:
+        if options is not None:
+            return options
+        return RepoLoadOptions(
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
+
+    def _candidate_cdefs(self, *, reuse_weak: bool = True) -> set[ConcreteDefinition]:
+        cdefs = set(self.strong_obj_cache.keys())
+        if reuse_weak:
+            cdefs.update(self.weak_obj_cache.keys())
+        cdefs.update(self.light_index)
+        return cdefs
+
+    @staticmethod
+    def _selector_tuple(selector):
+        if type(selector) is list:
+            return tuple(selector)
+        if type(selector) is tuple:
+            return selector
+        return (selector,)
+
     # -------------------------------------------------------------------------
     # Core: realize arbitrary structure into runtime Python + Objects
     # -------------------------------------------------------------------------
@@ -403,10 +439,12 @@ class Repo:
         reuse_weak: bool = True,
         cache: CachePolicy = "weak",
         revision: RevisionType | None = None,
+        options: RepoLoadOptions | None = None,
         memo: dict | None = None,
         path: list[str | int] | None = None,
     ):
-        options = RepoLoadOptions(
+        load_options = self._load_options(
+            options=options,
             instance=instance,
             restore_state=restore_state,
             build_missing=build_missing,
@@ -417,7 +455,7 @@ class Repo:
         return from_canonical(
             x,
             repo=self,
-            options=options,
+            options=load_options,
             memo=memo,
             path=path,
         )
@@ -428,8 +466,9 @@ class Repo:
     def _materialize_cdef(
         self,
         cdef,
-        revision: RevisionType,
+        revision: RevisionType | str | None = None,
         *,
+        options: RepoLoadOptions | None = None,
         instance: InstancePolicy = "reuse",
         restore_state: bool = True,
         build_missing: bool = False,
@@ -443,6 +482,22 @@ class Repo:
             memo = {}
         if path is None:
             path = ["<root>"]
+
+        load_options = self._load_options(
+            options=options,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
+        instance = load_options.instance
+        restore_state = load_options.restore_state
+        build_missing = load_options.build_missing
+        reuse_weak = load_options.reuse_weak
+        cache = load_options.cache
+        revision = manage_revision(cdef, load_options.revision)
 
         # If we've already materialized this cdef in this call, return it
         if cdef in memo:
@@ -595,16 +650,21 @@ class Repo:
         reuse_weak: bool = True,
         cache: CachePolicy = "weak",
         revision: RevisionType|str | None = None,
+        options: RepoLoadOptions | None = None,
     ):
-        memo: dict[ConcreteDefinition, Object] = {}
-        return self._realize(
-            x,
+        load_options = self._load_options(
+            options=options,
             instance=instance,
             restore_state=restore_state,
             build_missing=build_missing,
             reuse_weak=reuse_weak,
             cache=cache,
             revision=revision,
+        )
+        memo: dict[ConcreteDefinition, Object] = {}
+        return self._realize(
+            x,
+            options=load_options,
             path=[""],
             memo=memo,
         )
@@ -649,33 +709,32 @@ class Repo:
             build_missing: bool = False,
             reuse_weak: bool = True,
             cache: CachePolicy = "weak",
-            revision: RevisionType | None = None,
+            revision: RevisionType | str | None = None,
+            options: RepoLoadOptions | None = None,
             verbose: bool = True) -> dict[ConcreteDefinition, Object]:
-        if type(selector) is list:
-            pass
-        elif type(selector) is not tuple:
-            selector = (selector,)
-        selectors = selector
-        if isinstance(revision, str):
+        if sel_args is None:
+            sel_args = []
+        if sel_kwargs is None:
+            sel_kwargs = {}
+        load_options = self._load_options(
+            options=options,
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
+        selectors = self._selector_tuple(selector)
+        if isinstance(load_options.revision, str):
             raise ValueError("plain string revisions aren't supported in `get`.")
-        revision = manage_revision(None, revision)
-
-        # Build list of all cdefs known in the repo
-        cached_cdefs = []
-        cached_cdefs.extend(self.strong_obj_cache.keys())
-        if reuse_weak:
-            cached_cdefs.extend(self.weak_obj_cache.keys())
-        cached_cdefs = set(cached_cdefs).union(self.light_index)
+        candidate_cdefs = self._candidate_cdefs(reuse_weak=load_options.reuse_weak)
 
         def get_obj(cdef: ConcreteDefinition) -> Object | None:
             return self._materialize_cdef(
                 cdef,
-                revision,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache)
+                options=load_options,
+            )
 
         selected_objects = {}
         for sel in selectors:
@@ -686,7 +745,7 @@ class Repo:
                 if obj is not None:
                     selected_objects[sel] = obj
             elif isinstance(sel, Definition):
-                for cdef in cached_cdefs:
+                for cdef in candidate_cdefs:
                     if sel(cdef, *sel_args, **sel_kwargs):
                         if cdef in selected_objects:
                             continue
@@ -694,12 +753,12 @@ class Repo:
                         if obj is not None:
                             selected_objects[cdef] = obj
             elif isinstance(sel, Callable):
-                for cdef in cached_cdefs:
+                for cdef in candidate_cdefs:
                     if cdef in self.strong_obj_cache:
                         if sel(self.strong_obj_cache[cdef], *sel_args, **sel_kwargs):
                             selected_objects[cdef] = self.strong_obj_cache[cdef]
             elif sel is None:
-                for cdef in cached_cdefs:
+                for cdef in candidate_cdefs:
                     obj = get_obj(cdef)
                     if obj is not None:
                         selected_objects[cdef] = obj
@@ -713,6 +772,7 @@ class Repo:
               selector: Optional[Callable] = None,
               sel_args=None, sel_kwargs=None,
               verbose: bool = False,
+              options: RepoLoadOptions | None = None,
               **kwargs):
         """
         Apply a function to all objects tracked by the repo.
@@ -732,6 +792,7 @@ class Repo:
         objs = self.get(
             selector=selector,
             sel_args=sel_args, sel_kwargs=sel_kwargs,
+            options=options,
             **kwargs)
 
         obj_iter = objs.items()
@@ -757,15 +818,16 @@ class Repo:
             revision: RevisionType | str | None = None) -> RepoGraphOptions:
         if options is not None:
             return options
+        load_options = self._load_options(
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
         return RepoGraphOptions(
-            load=RepoLoadOptions(
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-            ),
+            load=load_options,
             include_root=include_root,
             order=order,
             missing=missing,
