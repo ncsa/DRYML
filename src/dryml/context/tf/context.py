@@ -12,7 +12,7 @@ class TFComputeContext(PlainComputeContext):
     name = "tf"
 
     def check_compatible_env(self):
-        if not module_is_available('tf'):
+        if not module_is_available('tensorflow'):
             raise ContextBootstrapError("Tensorflow not available")
 
 

@@ -27,6 +27,19 @@ jobs:
         run: |
           python -m pip install .
 
+      - name: Show Dependency Versions
+        run: |
+          python - <<'PY'
+          from importlib import metadata
+
+          for package in ("tensorflow", "keras", "jax", "jaxlib", "torch", "triton"):
+              try:
+                  version = metadata.version(package)
+              except metadata.PackageNotFoundError:
+                  version = "not installed"
+              print(f"{package}: {version}")
+          PY
+
       - name: Installed Package Smoke Test
         run: |
           python - <<'PY'
