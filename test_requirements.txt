@@ -5,5 +5,5 @@ tensorflow; python_version < "3.14"
 ray; python_version < "3.14"
 scikit-learn; python_version < "3.14"
 xgboost; python_version < "3.14"
-torch; python_version < "3.14"
+torch >= 2.8.0; python_version < "3.14"
 GPUtil
