@@ -1,9 +1,9 @@
 flake8
 pytest
 pytest-cov
-tensorflow
-ray
-scikit-learn
-xgboost
-torch
+tensorflow; python_version < "3.14"
+ray; python_version < "3.14"
+scikit-learn; python_version < "3.14"
+xgboost; python_version < "3.14"
+torch; python_version < "3.14"
 GPUtil

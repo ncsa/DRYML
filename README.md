@@ -1,9 +1,7 @@
 # DRYML
 
-![Py 3.8 tests](https://github.com/ncsa/dryml/actions/workflows/test38.yaml/badge.svg)
-![Py 3.9 tests](https://github.com/ncsa/dryml/actions/workflows/test39.yaml/badge.svg)
-![Py 3.10 tests](https://github.com/ncsa/dryml/actions/workflows/test310.yaml/badge.svg)
-![Py 3.11 tests](https://github.com/ncsa/dryml/actions/workflows/test311.yaml/badge.svg)
+![Tests](https://github.com/ncsa/dryml/actions/workflows/tests.yaml/badge.svg)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 [![codecov](https://codecov.io/gh/ncsa/dryml/branch/main/graph/badge.svg?token=ELz0TSuOzo)](https://codecov.io/gh/ncsa/dryml)
 
 Don't Repeat Yourself Machine Learning: A Machine Learning library to reduce code duplication, automate testing, perform hyper paramter searches, and ease model serialization.

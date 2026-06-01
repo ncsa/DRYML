@@ -1,6 +1,10 @@
 import pytest
+import sys
 
 jax = pytest.importorskip("jax")
+if not hasattr(jax, "ShapeDtypeStruct"):
+    sys.modules.pop("jax", None)
+    pytest.skip("JAX is not installed.", allow_module_level=True)
 jnp = pytest.importorskip("jax.numpy")
 import dryml.jax as dryml_jax
 import numpy as np

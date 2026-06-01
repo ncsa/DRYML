@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import sys
 
 from dryml.data import ArrayDataset, Pipe
 from dryml.core2 import Repo
@@ -7,6 +8,9 @@ from dryml.models import AutoEncoder, Experiment
 
 
 torch = pytest.importorskip("torch")
+if not hasattr(torch, "Tensor"):
+    sys.modules.pop("torch", None)
+    pytest.skip("PyTorch is not installed.", allow_module_level=True)
 
 
 def test_torch_basic_training_updates_experiment_state():

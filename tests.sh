@@ -1,9 +1,23 @@
 #!/bin/bash
+set -euo pipefail
 
-if [ -z "$1" ]; then
-    dirs=./tests
+default_dirs=(
+    ./tests/artifacts
+    ./tests/code
+    ./tests/core
+    ./tests/data
+    ./tests/execute
+    ./tests/jax
+    ./tests/models
+    ./tests/multi_framework
+    ./tests/tf
+    ./tests/torch
+)
+
+if [ "$#" -eq 0 ]; then
+    pytest --cov=dryml "${default_dirs[@]}"
+elif [[ "$1" == -* ]]; then
+    pytest --cov=dryml "${default_dirs[@]}" "$@"
 else
-    dirs=$@
-fi;
-
-pytest --cov=dryml ${dirs}
+    pytest --cov=dryml "$@"
+fi

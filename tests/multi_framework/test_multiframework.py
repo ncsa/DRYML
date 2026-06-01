@@ -1,11 +1,18 @@
 import pytest
+import sys
 
 from dryml.core2.backend import discover_backend
 
 jax = pytest.importorskip("jax")
+if not hasattr(jax, "devices"):
+    sys.modules.pop("jax", None)
+    pytest.skip("JAX is not installed.", allow_module_level=True)
 jnp = pytest.importorskip("jax.numpy")
 tf = pytest.importorskip("tensorflow")
 torch = pytest.importorskip("torch")
+if not hasattr(torch, "Tensor"):
+    sys.modules.pop("torch", None)
+    pytest.skip("PyTorch is not installed.", allow_module_level=True)
 
 import dryml.jax
 import dryml.torch
