@@ -334,13 +334,12 @@ class BasicTraining(TrainFunction):
 
         train_data = self._prepare_data(exp.train_data, for_training=True)
         train_xy = self._xy_data(train_data)
-        ds_train = self._tf_dataset(tf, train_xy)
 
-        ds_val = None
+        val_data = None
+        val_xy = None
         if exp.val_data is not None:
             val_data = self._prepare_data(exp.val_data, for_training=False)
             val_xy = self._xy_data(val_data)
-            ds_val = self._tf_dataset(tf, val_xy)
 
         training_model = self._training_model(tf, exp.model, train_xy.spec[0])
         compile_kwargs = self._compile_kwargs(exp)
@@ -357,13 +356,26 @@ class BasicTraining(TrainFunction):
         fit_kwargs.setdefault("verbose", self.verbose)
         callbacks = self._callbacks(tf)
         callbacks.extend(fit_kwargs.pop("callbacks", []) or [])
-        steps_per_epoch = finite_dataset_len(train_data)
-        if steps_per_epoch is not None:
-            fit_kwargs.setdefault("steps_per_epoch", steps_per_epoch)
-        if ds_val is not None:
+
+        if "steps_per_epoch" not in fit_kwargs:
+            steps_per_epoch = finite_dataset_len(train_data)
+            if steps_per_epoch is not None:
+                fit_kwargs["steps_per_epoch"] = steps_per_epoch
+
+        if val_xy is not None and "validation_steps" not in fit_kwargs:
             validation_steps = finite_dataset_len(val_data)
             if validation_steps is not None:
-                fit_kwargs.setdefault("validation_steps", validation_steps)
+                fit_kwargs["validation_steps"] = validation_steps
+
+        ds_train = self._tf_dataset(tf, train_xy)
+        if fit_kwargs.get("steps_per_epoch") is not None:
+            ds_train = ds_train.repeat()
+
+        ds_val = None
+        if val_xy is not None:
+            ds_val = self._tf_dataset(tf, val_xy)
+            if fit_kwargs.get("validation_steps") is not None:
+                ds_val = ds_val.repeat()
 
         try:
             history = training_model.fit(
@@ -378,7 +390,8 @@ class BasicTraining(TrainFunction):
         finally:
             exp.model.prep_eval()
 
-        advance_train_state(exp, epochs=self.epochs, steps=(steps_per_epoch or 0) * self.epochs)
+        steps_per_epoch = fit_kwargs.get("steps_per_epoch")
+        advance_train_state(exp, epochs=self.epochs, steps=(int(steps_per_epoch) if steps_per_epoch is not None else 0) * self.epochs)
         return history
 
     def _capability(self, exp, name, default=None):

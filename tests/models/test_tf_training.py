@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -103,6 +105,29 @@ def test_tf_basic_training_builds_keras_adapter_for_autoencoder():
     assert exp.state.step == 2
     assert model.encoder.obj.trainable_variables
     assert model.decoder.obj.trainable_variables
+
+
+def test_tf_basic_training_repeats_finite_dataset_for_multiple_epochs():
+    from dryml.models.tf import BasicTraining, Wrapper
+
+    model = _autoencoder_model()
+    train_fn = BasicTraining(epochs=2, batch_size=2, verbose=0)
+    exp = Experiment(
+        model,
+        train_fn,
+        train_data=_autoencoder_data(),
+        optimizer=Wrapper(tf.keras.optimizers.SGD, learning_rate=0.01),
+        loss=Wrapper(tf.keras.losses.MeanSquaredError),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        history = exp.train()
+
+    assert len(history.epoch) == 2
+    assert exp.state.epoch == 2
+    assert exp.state.step == 4
+    assert not any("Your input ran out of data" in str(warning.message) for warning in caught)
 
 
 def test_tf_training_gradient_tape_trains_autoencoder():
