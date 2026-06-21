@@ -239,10 +239,33 @@ class Model(BaseModel, Serializable):
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 
+        import warnings
         import tensorflow as tf
 
         sample = map_leaves(fake_from_spec_tree(input_spec), tf.convert_to_tensor)
-        output = self.obj(sample, training=False)
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                output = self.obj(sample, training=False)
+        except ValueError as e:
+            message = str(e)
+            if "input" in message and ("expects" in message or "Arguments received" in message):
+                raise ValueError(
+                    "Input spec structure does not match the TensorFlow model input structure. "
+                    "If the dataset element contains both features and labels, select the feature branch first, "
+                    "for example Map(dataset, Select(0), model)."
+                ) from e
+            raise
+
+        for warning in caught:
+            message = str(warning.message)
+            if "structure of `inputs` doesn't match" in message:
+                raise ValueError(
+                    "Input spec structure does not match the TensorFlow model input structure. "
+                    "If the dataset element contains both features and labels, select the feature branch first, "
+                    "for example Map(dataset, Select(0), model)."
+                )
+
         return maybe_unbatch_output_spec(tf_as_tensor_spec(output, batched=True), input_spec)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):

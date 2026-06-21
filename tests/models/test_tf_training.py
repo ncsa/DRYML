@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from dryml.core2.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset, Map
+from dryml.data import ArrayDataset, Map, Select
 from dryml.models import AutoEncoder, Experiment
 
 
@@ -52,6 +52,20 @@ def test_tf_sequential_infers_output_spec_without_explicit_output_spec():
     model = Sequential(layer_defs=(("Dense", {"units": 2}),))
 
     assert Map(ds, model).spec == TensorSpec("float32", shape=(2,), backend="tf")
+
+
+def test_tf_model_spec_inference_rejects_dataset_element_tuple():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((4, 3), dtype=np.float32)
+    y = np.zeros((4,), dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    model = Sequential(layer_defs=(("Dense", {"units": 2}),))
+
+    with pytest.raises(ValueError, match="Input spec structure does not match"):
+        Map(ds, model)
+
+    assert Map(ds, Select(0), model).spec == TensorSpec("float32", shape=(2,), backend="tf")
 
 
 def _autoencoder_data():
