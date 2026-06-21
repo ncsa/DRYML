@@ -14,7 +14,7 @@ import numpy as np
 import atexit
 
 from .definition import Definition, ConcreteDefinition
-from .object import Object
+from .object import Object, Serializable
 from .store.store import Store
 from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions, RepoSaveOptions
 from .repo_graph import (
@@ -262,14 +262,23 @@ class Repo:
             raise RuntimeError("Object is not saved in the selected store.")
         return store.object_dir(cdef)
 
-    def set_alias(self, alias: str, target: Object | Definition | ConcreteDefinition, *, store=None) -> ConcreteDefinition:
+    def set_alias(
+            self,
+            alias: str,
+            target: Object | Definition | ConcreteDefinition,
+            *,
+            store=None,
+            save_live: bool = True) -> ConcreteDefinition:
         self._validate_alias(alias)
 
         store = self._ensure_store(store)
 
         cdef = self._alias_target_cdef(target)
         if isinstance(target, Object):
-            self.add_objects(target, store=store)
+            if save_live:
+                self.save_object(target, store=store)
+            else:
+                self.add_objects(target, store=store)
 
         self.alias_index[alias] = cdef
         return cdef
@@ -366,7 +375,8 @@ class Repo:
             main: bool = False,
             store=None,
             revision: RevisionType | str | None = None,
-            alias: str | None = None) -> RepoSaveOptions:
+            alias: str | None = None,
+            ephemeral_depth: int | None = 0) -> RepoSaveOptions:
         if options is not None:
             return options
         return RepoSaveOptions(
@@ -374,6 +384,7 @@ class Repo:
             store=store,
             revision=revision,
             alias=alias,
+            ephemeral_depth=ephemeral_depth,
         )
 
     def save_object(
@@ -383,6 +394,7 @@ class Repo:
             store=None,
             revision=None,
             alias: str | None = None,
+            ephemeral_depth: int | None = 0,
             options: RepoSaveOptions | None = None):
         save_options = self._save_options(
             options=options,
@@ -390,16 +402,22 @@ class Repo:
             store=store,
             revision=revision,
             alias=alias,
+            ephemeral_depth=ephemeral_depth,
         )
         store = self._ensure_store(save_options.store)
         revision = manage_revision(obj, save_options.revision)
         self.add_objects(obj, store=store)
-        RepoSaveVisitor(self, store=store, revision=revision).visit(obj)
+        RepoSaveVisitor(
+            self,
+            store=store,
+            revision=revision,
+            ephemeral_depth=save_options.ephemeral_depth,
+        ).visit(obj)
 
         if save_options.main:
             self.set_main_def(obj.definition, store=store)
         if save_options.alias is not None:
-            self.set_alias(save_options.alias, obj, store=store)
+            self.set_alias(save_options.alias, obj, store=store, save_live=False)
         return True
 
     def save(
@@ -407,12 +425,14 @@ class Repo:
             obj: Object | None = None,
             store=None,
             revision: RevisionType | str | None = None,
+            ephemeral_depth: int | None = 0,
             options: RepoSaveOptions | None = None):
         save_options = self._save_options(
             options=options,
             main=False,
             store=store,
             revision=revision,
+            ephemeral_depth=ephemeral_depth,
         )
         if obj is None:
             # Save all loaded objects in the cache
@@ -545,6 +565,18 @@ class Repo:
         if cdef in memo:
             return memo[cdef]
 
+        try:
+            from .symbol import resolve_symbol
+
+            cls = resolve_symbol(cdef.cls)
+        except Exception as e:
+            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
+            raise RepoLoadError(
+                f"Error resolving {cls_name} at {'/'.join(map(str, path))}: {e}"
+            ) from e
+
+        is_serializable = isinstance(cls, type) and issubclass(cls, Serializable)
+
         revision_str = revision.get(cdef, None)
 
         # Enforce sane caching semantics for "new"
@@ -587,7 +619,9 @@ class Repo:
                     if revision_str is not None:
                         st = self._first_store_with(cdef)
                         if st is None:
-                            raise RepoLoadError(f"No store has requested object ({cdef})")
+                            if is_serializable and not build_missing:
+                                raise RepoLoadError(f"No store has requested object ({cdef})")
+                            return obj
                         try:
                             st.restore_object(obj, revision=revision_str)
                         except Exception as e:
@@ -601,7 +635,7 @@ class Repo:
         in_store = self.has_cdef_light(cdef)
 
         # If caller expects state and we can't find any, respect build_missing
-        if restore_state and (not in_store) and (not build_missing):
+        if restore_state and is_serializable and (not in_store) and (not build_missing):
             raise RepoLoadError(
                 f"Missing stored state for {cdef} at {'/'.join(map(str, path))} "
                 f"(set build_missing=True to allow fresh construction)"
@@ -637,9 +671,6 @@ class Repo:
 
         # Construct a new instance (bypass re-concretization by passing __cdef__)
         try:
-            from .symbol import resolve_symbol
-
-            cls = resolve_symbol(cdef.cls)
             obj = cls(*rt_args, repo=self, __cdef__=cdef, **rt_kwargs)
 
             self._num_constructions += 1
@@ -1117,6 +1148,7 @@ def save_object(
         revision: RevisionType|str|None=None,
         store=None,
         alias: str | None = None,
+        ephemeral_depth: int | None = 0,
         options: RepoSaveOptions | None = None):
     with manage_repo(repo=repo) as sub_repo:
         if options is None:
@@ -1127,6 +1159,7 @@ def save_object(
             store=store,
             revision=revision,
             alias=alias,
+            ephemeral_depth=ephemeral_depth,
         )
         sub_repo.save_object(obj, options=save_options)
 

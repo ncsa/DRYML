@@ -188,7 +188,11 @@ class Object(metaclass=Dryml):
         pass
 
 
-class Pickleable(Object):
+class Serializable(Object):
+    """Object with repo-backed persisted state by default."""
+
+
+class Pickleable(Serializable):
     _HEAVY_EXCLUDE = {
         "__cdef__",
         "__ws__",

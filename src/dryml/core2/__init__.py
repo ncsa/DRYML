@@ -1,4 +1,4 @@
-from dryml.core2.object import Object, UniqueID, Metadata, Compute, definition_mode
+from dryml.core2.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode
 from dryml.core2.definition import Definition, SKIP_ARGS
 from dryml.core2.repo import Repo, load_alias, load_object, save_object
 from dryml.core2.dtype import dtype, DType
@@ -15,6 +15,7 @@ __all__ = [
     load_alias,
     save_object,
     Object,
+    Serializable,
     UniqueID,
     Metadata,
     Compute,

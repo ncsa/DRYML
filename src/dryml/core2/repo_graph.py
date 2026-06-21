@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .definition import ConcreteDefinition
-from .object import Object
+from .object import Object, Serializable
 from .policies import RepoGraphOptions
 from .utils.graph import GraphCtx, GraphVisitor
 from .canonical import (
@@ -179,11 +179,18 @@ class RepoGraphApplyVisitor(RepoObjectGraphVisitor):
 # ----------------------------------------------------------------------
 
 class RepoSaveVisitor(RepoStructuralVisitor):
-    def __init__(self, repo: "Repo", *, store=None, revision=None):
+    def __init__(self, repo: "Repo", *, store=None, revision=None, ephemeral_depth=0):
         super().__init__(repo)
         self.store = store
         self.revision = revision
+        self.ephemeral_depth = ephemeral_depth
         self.saved_objs: dict[int, set[ConcreteDefinition]] = {}
+
+        if ephemeral_depth is not None:
+            if not isinstance(ephemeral_depth, int):
+                raise TypeError("ephemeral_depth must be a non-negative integer or None.")
+            if ephemeral_depth < 0:
+                raise ValueError("ephemeral_depth must be a non-negative integer or None.")
 
     def visit_object(self, obj: Object, ctx: GraphCtx) -> None:
         self._save_single_object(obj, ctx)
@@ -200,15 +207,11 @@ class RepoSaveVisitor(RepoStructuralVisitor):
 
     def _save_single_object(self, obj: Object, ctx: GraphCtx) -> None:
         cdef = obj.definition
-        store = self.store
-        if store is None:
-            if cdef in self.repo.obj_default_store:
-                store = self.repo.obj_default_store[cdef]
-            else:
-                store = self.repo.default_store
+        object_depth = ctx.state.get("object_depth", 0)
+        child_ctx = ctx.with_state(object_depth=object_depth + 1)
 
-        self.visit(cdef.args, ctx.child("args"))
-        self.visit(cdef.kwargs, ctx.child("kwargs"))
+        self.visit(cdef.args, child_ctx.child("args"))
+        self.visit(cdef.kwargs, child_ctx.child("kwargs"))
 
         if cdef in self.repo.strong_obj_cache:
             if obj is not self.repo.strong_obj_cache[cdef]:
@@ -217,6 +220,16 @@ class RepoSaveVisitor(RepoStructuralVisitor):
                 )
         else:
             self.repo.pin(obj)
+
+        if not self._should_save_object(obj, ctx):
+            return
+
+        store = self.store
+        if store is None:
+            if cdef in self.repo.obj_default_store:
+                store = self.repo.obj_default_store[cdef]
+            else:
+                store = self.repo.default_store
 
         if store is None:
             raise RepoSaveError("No store available to save object!")
@@ -229,6 +242,15 @@ class RepoSaveVisitor(RepoStructuralVisitor):
             store.save_object(obj, revision=revision_str)
             self.saved_objs[id(store)].add(cdef)
             self.repo._num_saves += 1
+
+    def _should_save_object(self, obj: Object, ctx: GraphCtx) -> bool:
+        if isinstance(obj, Serializable):
+            return True
+        if "object_depth" not in ctx.state:
+            return True
+        if self.ephemeral_depth is None:
+            return True
+        return ctx.state["object_depth"] <= self.ephemeral_depth
 
 
 # ----------------------------------------------------------------------

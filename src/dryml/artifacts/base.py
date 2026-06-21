@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 
-from dryml.core2 import Object
+from dryml.core2 import Serializable
 
 
-class Artifact(Object):
+class Artifact(Serializable):
     """Base class for repo-backed computed payloads."""
 
     def _location(self, repo=None, *, store=None, require_exists: bool = False) -> str:
