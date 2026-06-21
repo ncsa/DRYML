@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from dryml.core2.object import Object
+from dryml.core2.object import Serializable
 from dryml.core2.repo import get_default_repo
 from dryml.core2.tensor_spec import fake_from_spec_tree, maybe_unbatch_output_spec
 from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
@@ -10,8 +10,10 @@ from dryml.core2.utils.recurse import map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
+from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import (
     advance_train_state,
+    finite_dataset_len,
     prepare_training_data,
     validate_num_examples,
 )
@@ -30,6 +32,47 @@ def _tree_to_torch(value, torch, *, device=None):
         return tensor.to(device) if device is not None else tensor
 
     return map_leaves(value, leaf_to_torch)
+
+
+def _unwrap_backend_obj(obj):
+    return obj.obj if hasattr(obj, "obj") else obj
+
+
+def _normalize_list(value):
+    if value is None:
+        return ()
+    if isinstance(value, dict):
+        return tuple(value.values())
+    if isinstance(value, (tuple, list)):
+        return tuple(value)
+    return (value,)
+
+
+def _reset_metric(metric):
+    reset = getattr(metric, "reset", None) or getattr(metric, "reset_state", None)
+    if reset is not None:
+        reset()
+
+
+def _metric_name(metric):
+    return getattr(metric, "name", type(metric).__name__)
+
+
+def _update_metric(metric, y_pred, y):
+    update = getattr(metric, "update", None) or getattr(metric, "update_state", None)
+    if update is not None:
+        update(y_pred, y)
+        return None
+    return metric(y_pred, y)
+
+
+def _metric_results(metrics):
+    out = {}
+    for metric in metrics:
+        compute = getattr(metric, "compute", None) or getattr(metric, "result", None)
+        if compute is not None:
+            out[_metric_name(metric)] = metric_value(compute())
+    return out
 
 
 def _collect_trainable_parameters(target):
@@ -53,7 +96,7 @@ def _collect_trainable_parameters(target):
     return parameters
 
 
-class Wrapper(Object):
+class Wrapper(Serializable):
     """Generic torch object wrapper exposing the backend object at ``.obj``."""
 
     def __init__(self, cls, *args, **kwargs):
@@ -76,7 +119,7 @@ class Wrapper(Object):
             self.obj.load_state_dict(torch.load(state_path, map_location="cpu"))
 
 
-class Optimizer(Object):
+class Optimizer(Serializable):
     """Torch optimizer spec with runtime state bound when model parameters exist."""
 
     def __init__(self, cls, *args, target, **kwargs):
@@ -102,7 +145,7 @@ class Optimizer(Object):
             self.obj.load_state_dict(torch.load(state_path, map_location="cpu"))
 
 
-class Model(BaseModel):
+class Model(BaseModel, Serializable):
     """Wrapper around a torch.nn.Module-style class."""
 
     def __init__(self, cls, *args, output_spec=None, **kwargs):
@@ -184,7 +227,7 @@ class TrainFunction(BaseTrainFunction):
     pass
 
 
-class BasicTraining(TrainFunction):
+class Training(TrainFunction):
     """Train a torch model from an Experiment's supervised train_data."""
 
     def __init__(
@@ -198,6 +241,7 @@ class BasicTraining(TrainFunction):
         loss_cls=None,
         loss_args=(),
         loss_kwargs=None,
+        metrics=(),
         epochs: int = 1,
         batch_size: int | None = 32,
         x_path=0,
@@ -206,6 +250,7 @@ class BasicTraining(TrainFunction):
         shuffle: bool = False,
         shuffle_seed=None,
         shuffle_buffer_size: int | None = None,
+        verbose: int = 1,
     ):
         if epochs < 0:
             raise ValueError("epochs must be non-negative.")
@@ -221,6 +266,7 @@ class BasicTraining(TrainFunction):
         self.loss_cls = loss_cls
         self.loss_args = tuple(loss_args)
         self.loss_kwargs = dict(loss_kwargs or {})
+        self.metrics = _normalize_list(metrics)
         self.epochs = epochs
         self.batch_size = batch_size
         self.x_path = x_path
@@ -229,6 +275,7 @@ class BasicTraining(TrainFunction):
         self.shuffle = shuffle
         self.shuffle_seed = shuffle_seed
         self.shuffle_buffer_size = shuffle_buffer_size
+        self.verbose = verbose
 
     def __call__(self, exp):
         import torch
@@ -244,18 +291,36 @@ class BasicTraining(TrainFunction):
             train_data = Batch(train_data, self.batch_size)
         train_xy = Map(train_data, Project(Select(self.x_path), Select(self.y_path)))
 
+        val_xy = None
+        if exp.val_data is not None:
+            val_data = prepare_training_data(exp.val_data)
+            if self.batch_size is not None:
+                val_data = Batch(val_data, self.batch_size)
+            val_xy = Map(val_data, Project(Select(self.x_path), Select(self.y_path)))
+
         device = _resolve_device(torch)
         if hasattr(exp.model, "to_device"):
             exp.model.to_device(device)
         exp.model.prep_train()
 
-        optimizer = self._make_optimizer(torch, exp.model)
-        loss_fn = self._make_loss(torch)
+        optimizer = self._make_optimizer(torch, exp.model, exp)
+        loss_fn = self._make_loss(torch, exp)
+        metrics = self._metric_objects(exp)
         losses = []
         steps = 0
+        steps_per_epoch = finite_dataset_len(train_data)
+        total_steps = None if steps_per_epoch is None else int(steps_per_epoch) * self.epochs
+        progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="Torch training")
 
         try:
-            for _ in range(self.epochs):
+            for epoch in range(self.epochs):
+                for metric in metrics:
+                    _reset_metric(metric)
+                metric_totals = {}
+                metric_counts = {}
+                epoch_loss = 0.0
+                epoch_steps = 0
+
                 for x, y in train_xy:
                     x = _tree_to_torch(x, torch, device=device)
                     y = _tree_to_torch(y, torch, device=device)
@@ -266,9 +331,37 @@ class BasicTraining(TrainFunction):
                     loss_value.backward()
                     optimizer.step()
 
-                    losses.append(float(loss_value.detach().cpu()))
+                    batch_metrics = self._update_metrics(metrics, y_pred, y)
+                    for name, value in batch_metrics.items():
+                        metric_totals[name] = metric_totals.get(name, 0.0) + value
+                        metric_counts[name] = metric_counts.get(name, 0) + 1
+
+                    loss_float = float(metric_value(loss_value))
+                    losses.append(loss_float)
+                    epoch_loss += loss_float
+                    epoch_steps += 1
                     steps += 1
+
+                    step_metrics = {"loss": loss_float}
+                    step_metrics.update(batch_metrics)
+                    step_metrics.update(_metric_results(metrics))
+                    progress.update(1, step_metrics)
+
+                if epoch_steps == 0:
+                    continue
+
+                epoch_metrics = {"loss": epoch_loss / epoch_steps}
+                epoch_metrics.update(_metric_results(metrics))
+                for name, total in metric_totals.items():
+                    epoch_metrics.setdefault(name, total / metric_counts[name])
+
+                if val_xy is not None:
+                    val_metrics = self._evaluate(torch, exp.model, val_xy, loss_fn, metrics, device=device)
+                    epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
+
+                progress.epoch_end(epoch + 1, epochs=self.epochs, metrics=epoch_metrics)
         finally:
+            progress.close()
             exp.model.prep_eval()
 
         if steps == 0 and self.epochs > 0:
@@ -277,12 +370,32 @@ class BasicTraining(TrainFunction):
         advance_train_state(exp, epochs=self.epochs, steps=steps)
         return losses
 
-    def _make_optimizer(self, torch, model):
-        optimizer = self.optimizer.obj if hasattr(self.optimizer, "obj") else self.optimizer
+    def _capability(self, exp, name, default=None):
+        return getattr(exp, "capabilities", {}).get(name, default)
+
+    def _optimizer(self, exp):
+        return self.optimizer if self.optimizer is not None else self._capability(exp, "optimizer")
+
+    def _loss(self, exp):
+        return self.loss if self.loss is not None else self._capability(exp, "loss")
+
+    def _metrics(self, exp):
+        if self.metrics:
+            return self.metrics
+        capability_metrics = self._capability(exp, "metrics")
+        if capability_metrics is not None:
+            return _normalize_list(capability_metrics)
+        return _normalize_list(getattr(exp, "metrics", ()))
+
+    def _make_optimizer(self, torch, model, exp):
+        optimizer = _unwrap_backend_obj(self._optimizer(exp))
+        parameters = _collect_trainable_parameters(model)
+        if not parameters:
+            raise ValueError("Torch model graph exposes no trainable parameters.")
         if optimizer is not None:
             if isinstance(optimizer, type):
                 return validate_class(optimizer)(
-                    model.trainable_parameters("torch"),
+                    parameters,
                     *self.optimizer_args,
                     **self.optimizer_kwargs,
                 )
@@ -290,13 +403,13 @@ class BasicTraining(TrainFunction):
 
         optimizer_cls = self.optimizer_cls or torch.optim.Adam
         return validate_class(optimizer_cls)(
-            model.trainable_parameters("torch"),
+            parameters,
             *self.optimizer_args,
             **self.optimizer_kwargs,
         )
 
-    def _make_loss(self, torch):
-        loss = self.loss.obj if hasattr(self.loss, "obj") else self.loss
+    def _make_loss(self, torch, exp):
+        loss = _unwrap_backend_obj(self._loss(exp))
         if loss is not None:
             if isinstance(loss, type):
                 return validate_class(loss)(*self.loss_args, **self.loss_kwargs)
@@ -304,6 +417,46 @@ class BasicTraining(TrainFunction):
 
         loss_cls = self.loss_cls or torch.nn.MSELoss
         return validate_class(loss_cls)(*self.loss_args, **self.loss_kwargs)
+
+    def _metric_objects(self, exp):
+        return [_unwrap_backend_obj(metric) for metric in self._metrics(exp)]
+
+    def _update_metrics(self, metrics, y_pred, y):
+        out = {}
+        for metric in metrics:
+            value = _update_metric(metric, y_pred, y)
+            if value is not None:
+                out[_metric_name(metric)] = float(metric_value(value))
+        return out
+
+    def _evaluate(self, torch, model, val_xy, loss_fn, metrics, *, device):
+        for metric in metrics:
+            _reset_metric(metric)
+        metric_totals = {}
+        metric_counts = {}
+        total_loss = 0.0
+        steps = 0
+        with torch.no_grad():
+            for x, y in val_xy:
+                x = _tree_to_torch(x, torch, device=device)
+                y = _tree_to_torch(y, torch, device=device)
+                y_pred = model(x)
+                loss_value = loss_fn(y_pred, y)
+                total_loss += float(metric_value(loss_value))
+                steps += 1
+                batch_metrics = self._update_metrics(metrics, y_pred, y)
+                for name, value in batch_metrics.items():
+                    metric_totals[name] = metric_totals.get(name, 0.0) + value
+                    metric_counts[name] = metric_counts.get(name, 0) + 1
+
+        if steps == 0:
+            return {}
+
+        results = {"loss": total_loss / steps}
+        results.update(_metric_results(metrics))
+        for name, total in metric_totals.items():
+            results.setdefault(name, total / metric_counts[name])
+        return results
 
 
 class ModelWrapper(Model):
@@ -351,11 +504,11 @@ class Sequential(Model):
 
 
 __all__ = [
-    "BasicTraining",
     "Model",
     "ModelWrapper",
     "Optimizer",
     "Sequential",
+    "Training",
     "TrainFunction",
     "Wrapper",
 ]

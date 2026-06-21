@@ -14,7 +14,7 @@ if not hasattr(torch, "Tensor"):
 
 
 def test_torch_basic_training_updates_experiment_state():
-    from dryml.models.torch import BasicTraining, Model, Optimizer
+    from dryml.models.torch import Model, Optimizer, Training
 
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
@@ -22,11 +22,12 @@ def test_torch_basic_training_updates_experiment_state():
 
     model = Model(torch.nn.Linear, 1, 1)
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.01)
-    train_fn = BasicTraining(
+    train_fn = Training(
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
         batch_size=2,
+        verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=ds)
 
@@ -41,7 +42,7 @@ def test_torch_basic_training_updates_experiment_state():
 
 
 def test_torch_autoencoder_optimizer_targets_composite_model():
-    from dryml.models.torch import BasicTraining, Optimizer, Sequential
+    from dryml.models.torch import Optimizer, Sequential, Training
 
     x = np.array(
         [
@@ -69,11 +70,12 @@ def test_torch_autoencoder_optimizer_targets_composite_model():
     )
     model = AutoEncoder(encoder=encoder, decoder=decoder)
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.05)
-    train_fn = BasicTraining(
+    train_fn = Training(
         optimizer=optimizer,
         loss_cls=torch.nn.MSELoss,
         epochs=2,
         batch_size=2,
+        verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=ds)
 

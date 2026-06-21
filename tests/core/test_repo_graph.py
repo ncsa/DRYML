@@ -1,9 +1,10 @@
 import pytest
 
-from dryml.core2 import Object, Repo
+from dryml.core2 import Object, Repo, Serializable
 from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
 from dryml.core2.repo import RepoGraphError, default_repo, get_default_repo
 from dryml.core2.store.dir import DirStore
+from dryml.core2.utils.general import pickle_load, pickle_save
 
 
 class GraphLeaf(Object):
@@ -23,6 +24,26 @@ class RepoAware(Object):
     def __init__(self):
         super().__init__()
         self.seen_repo = get_default_repo()
+
+
+class PersistentLeaf(Serializable):
+    def __init__(self, name, *, value=0):
+        super().__init__()
+        self.name = name
+        self.value = value
+
+    def save_state_to_dir_imp(self, dest_dir, revision=None):
+        pickle_save(self.value, f"{dest_dir}/value.pkl")
+
+    def restore_state_from_dir_imp(self, src_dir, revision=None):
+        self.value = pickle_load(f"{src_dir}/value.pkl")
+
+
+class PersistentNode(Serializable):
+    def __init__(self, name, child):
+        super().__init__()
+        self.name = name
+        self.child = child
 
 
 def test_iter_graph_walks_rooted_object_graph_postorder():
@@ -127,3 +148,77 @@ def test_save_uses_save_options_for_loaded_objects(tmp_path):
     repo.save(options=RepoSaveOptions(store=store))
 
     assert store.has(obj.definition)
+
+
+def test_save_skips_ephemeral_child_under_serializable_parent(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = GraphLeaf("child", repo=repo)
+    parent = PersistentNode("parent", child, repo=repo)
+
+    repo.save_object(parent)
+
+    assert store.has(parent.definition)
+    assert not store.has(child.definition)
+
+    repo2 = Repo(stores=DirStore(store.base_dir))
+    loaded = repo2.load_object(parent.definition)
+
+    assert loaded.child.name == "child"
+
+
+def test_save_traverses_skipped_ephemeral_to_save_serializable_descendant(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    leaf = PersistentLeaf("leaf", repo=repo)
+    leaf.value = 42
+    child = GraphNode("ephemeral", leaf, repo=repo)
+    parent = PersistentNode("parent", child, repo=repo)
+
+    repo.save_object(parent)
+
+    assert store.has(parent.definition)
+    assert not store.has(child.definition)
+    assert store.has(leaf.definition)
+
+    leaf.value = 0
+    repo2 = Repo(stores=DirStore(store.base_dir))
+    loaded = repo2.load_object(parent.definition)
+
+    assert loaded.child.children[0].value == 42
+
+
+def test_explicit_ephemeral_root_save_creates_object_dir(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = GraphLeaf("root", repo=repo)
+
+    repo.save_object(obj)
+
+    assert store.has(obj.definition)
+
+
+def test_live_ephemeral_alias_forces_save(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = GraphLeaf("aliased", repo=repo)
+
+    repo.set_alias("leaf", obj)
+    repo.close(flush=True)
+
+    assert store.has(obj.definition)
+    repo2 = Repo(stores=DirStore(store.base_dir))
+    loaded = repo2.load_alias("leaf")
+    assert loaded.name == "aliased"
+
+
+def test_ephemeral_depth_none_saves_all_ephemeral_descendants(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = GraphLeaf("child", repo=repo)
+    parent = GraphNode("parent", child, repo=repo)
+
+    repo.save_object(parent, options=RepoSaveOptions(store=store, ephemeral_depth=None))
+
+    assert store.has(parent.definition)
+    assert store.has(child.definition)

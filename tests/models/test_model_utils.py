@@ -23,8 +23,18 @@ def test_backend_model_packages_import_without_backend_runtime():
     import dryml.models.torch as torch_models
 
     assert hasattr(tf_models, "BasicTraining")
+    assert hasattr(tf_models, "Training")
     assert hasattr(tf_models, "Optimizer")
     assert hasattr(tf_models, "Wrapper")
-    assert hasattr(torch_models, "BasicTraining")
+    assert hasattr(torch_models, "Training")
+    assert not hasattr(torch_models, "BasicTraining")
     assert hasattr(torch_models, "Optimizer")
     assert hasattr(torch_models, "Wrapper")
+
+
+def test_tf_keras_package_only_exports_keras_specific_symbols():
+    import dryml.models.tf.keras as keras_models
+
+    assert hasattr(keras_models, "Sequential")
+    assert not hasattr(keras_models, "BasicTraining")
+    assert not hasattr(keras_models, "Optimizer")

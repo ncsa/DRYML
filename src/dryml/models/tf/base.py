@@ -2,19 +2,116 @@ from __future__ import annotations
 
 import os
 
-from dryml.core2.object import Object
-from dryml.core2.tensor_spec import fake_from_spec_tree, maybe_unbatch_output_spec
-from dryml.core2.utils.general import revision_path, validate_class
+from dryml.core2.object import Serializable
+from dryml.core2.repo import get_default_repo
+from dryml.core2.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec
+from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
+from dryml.models.progress import TrainingProgress, metric_value
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
 from dryml.tf.tensor_spec import as_tensor_spec as tf_as_tensor_spec
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
 
 
-class Wrapper(Object):
+def _unwrap_backend_obj(obj):
+    return obj.obj if hasattr(obj, "obj") else obj
+
+
+def _normalize_list(value):
+    if value is None:
+        return ()
+    if isinstance(value, dict):
+        return tuple(value.values())
+    if isinstance(value, (tuple, list)):
+        return tuple(value)
+    return (value,)
+
+
+def _collect_trainable_parameters(target):
+    repo = get_default_repo()
+    results = repo.apply_graph(
+        target,
+        lambda obj: maybe_call_method(
+            obj,
+            "trainable_parameters",
+            "tf",
+            default=(),
+        ),
+        missing="raise",
+        order="post",
+    )
+
+    parameters = []
+    for result in results.values():
+        if result is not None:
+            parameters.extend(result)
+    return parameters
+
+
+def _dims_to_keras_shape(shape):
+    if shape is None:
+        return None
+    return tuple(None if dim is Dynamic else int(dim) for dim in shape)
+
+
+def _keras_inputs_from_spec(tf, spec_tree):
+    def build(spec, path):
+        if isinstance(spec, TensorSpec):
+            suffix = "_".join(map(str, path)) if path else "0"
+            return tf.keras.Input(
+                shape=_dims_to_keras_shape(spec.shape),
+                dtype=spec.dtype.tf(),
+                name=f"input_{suffix}",
+            )
+        if isinstance(spec, dict):
+            return {k: build(v, (*path, k)) for k, v in spec.items()}
+        if isinstance(spec, tuple):
+            return tuple(build(v, (*path, i)) for i, v in enumerate(spec))
+        if isinstance(spec, list):
+            return [build(v, (*path, i)) for i, v in enumerate(spec)]
+        raise TypeError(f"Expected TensorSpec leaves, got {type(spec).__name__}.")
+
+    return build(spec_tree, ())
+
+
+def _tree_to_tf(tf, value):
+    def leaf_to_tf(leaf):
+        if tf.is_tensor(leaf):
+            return leaf
+        return tf.convert_to_tensor(leaf)
+
+    return map_leaves(value, leaf_to_tf)
+
+
+def _reset_metric(metric):
+    reset = getattr(metric, "reset_state", None) or getattr(metric, "reset_states", None)
+    if reset is not None:
+        reset()
+
+
+def _update_metric(metric, y, y_pred):
+    update = getattr(metric, "update_state", None)
+    if update is not None:
+        update(y, y_pred)
+        return None
+    return metric(y, y_pred)
+
+
+def _metric_results(metrics):
+    out = {}
+    for metric in metrics:
+        result = getattr(metric, "result", None)
+        if result is None:
+            continue
+        name = getattr(metric, "name", type(metric).__name__)
+        out[name] = metric_value(result())
+    return out
+
+
+class Wrapper(Serializable):
     """Generic TensorFlow object wrapper exposing the backend object at ``.obj``."""
 
     def __init__(self, cls, *args, **kwargs):
@@ -103,7 +200,7 @@ class Metric(Wrapper):
     """First-class Keras metric object for experiment hyperparameters."""
 
 
-class Model(BaseModel):
+class Model(BaseModel, Serializable):
     """Wrapper around a TensorFlow/Keras model class."""
 
     def __init__(self, cls, *args, output_spec=None, **kwargs):
@@ -202,6 +299,7 @@ class BasicTraining(TrainFunction):
         callbacks=(),
         fit_args=(),
         fit_kwargs=None,
+        verbose: int = 1,
     ):
         if epochs < 0:
             raise ValueError("epochs must be non-negative.")
@@ -211,12 +309,7 @@ class BasicTraining(TrainFunction):
 
         self.optimizer = optimizer
         self.loss = loss
-        if metrics is None:
-            self.metrics = ()
-        elif isinstance(metrics, (tuple, list)):
-            self.metrics = tuple(metrics)
-        else:
-            self.metrics = (metrics,)
+        self.metrics = _normalize_list(metrics)
         self.compile_kwargs = dict(compile_kwargs or {})
         self.epochs = epochs
         self.batch_size = batch_size
@@ -234,6 +327,7 @@ class BasicTraining(TrainFunction):
             self.callbacks = (callbacks,)
         self.fit_args = tuple(fit_args)
         self.fit_kwargs = dict(fit_kwargs or {})
+        self.verbose = verbose
 
     def __call__(self, exp):
         import tensorflow as tf
@@ -248,16 +342,11 @@ class BasicTraining(TrainFunction):
             val_xy = self._xy_data(val_data)
             ds_val = self._tf_dataset(tf, val_xy)
 
-        compile_kwargs = dict(self.compile_kwargs)
-        if self.optimizer is not None:
-            compile_kwargs["optimizer"] = self.optimizer
-        if self.loss is not None:
-            compile_kwargs["loss"] = self.loss
-        if self.metrics:
-            compile_kwargs["metrics"] = self.metrics
+        training_model = self._training_model(tf, exp.model, train_xy.spec[0])
+        compile_kwargs = self._compile_kwargs(exp)
         if compile_kwargs:
-            exp.model.compile(**compile_kwargs)
-            optimizer = compile_kwargs.get("optimizer")
+            training_model.compile(**compile_kwargs)
+            optimizer = self._optimizer(exp)
             if hasattr(optimizer, "restore_pending"):
                 optimizer.restore_pending()
 
@@ -265,6 +354,7 @@ class BasicTraining(TrainFunction):
         if hasattr(exp.model, "restore_pending"):
             exp.model.restore_pending()
         fit_kwargs = dict(self.fit_kwargs)
+        fit_kwargs.setdefault("verbose", self.verbose)
         callbacks = self._callbacks(tf)
         callbacks.extend(fit_kwargs.pop("callbacks", []) or [])
         steps_per_epoch = finite_dataset_len(train_data)
@@ -276,7 +366,7 @@ class BasicTraining(TrainFunction):
                 fit_kwargs.setdefault("validation_steps", validation_steps)
 
         try:
-            history = exp.model.fit(
+            history = training_model.fit(
                 ds_train,
                 *self.fit_args,
                 validation_data=ds_val,
@@ -290,6 +380,44 @@ class BasicTraining(TrainFunction):
 
         advance_train_state(exp, epochs=self.epochs, steps=(steps_per_epoch or 0) * self.epochs)
         return history
+
+    def _capability(self, exp, name, default=None):
+        return getattr(exp, "capabilities", {}).get(name, default)
+
+    def _optimizer(self, exp):
+        return self.optimizer if self.optimizer is not None else self._capability(exp, "optimizer")
+
+    def _loss(self, exp):
+        return self.loss if self.loss is not None else self._capability(exp, "loss")
+
+    def _metrics(self, exp):
+        if self.metrics:
+            return self.metrics
+        capability_metrics = self._capability(exp, "metrics")
+        if capability_metrics is not None:
+            return _normalize_list(capability_metrics)
+        return _normalize_list(getattr(exp, "metrics", ()))
+
+    def _compile_kwargs(self, exp):
+        compile_kwargs = dict(self.compile_kwargs)
+        optimizer = self._optimizer(exp)
+        loss = self._loss(exp)
+        metrics = self._metrics(exp)
+        if optimizer is not None:
+            compile_kwargs["optimizer"] = _unwrap_backend_obj(optimizer)
+        if loss is not None:
+            compile_kwargs["loss"] = _unwrap_backend_obj(loss)
+        if metrics:
+            compile_kwargs["metrics"] = [_unwrap_backend_obj(metric) for metric in metrics]
+        return compile_kwargs
+
+    def _training_model(self, tf, model, x_spec):
+        if hasattr(model, "compile") and hasattr(model, "fit"):
+            return model
+
+        inputs = _keras_inputs_from_spec(tf, x_spec)
+        outputs = model(inputs)
+        return tf.keras.Model(inputs=inputs, outputs=outputs)
 
     def _prepare_data(self, data, *, for_training: bool):
         data = prepare_training_data(
@@ -314,6 +442,135 @@ class BasicTraining(TrainFunction):
 
     def _callbacks(self, tf):
         return [callback.obj if hasattr(callback, "obj") else callback for callback in self.callbacks]
+
+
+class Training(BasicTraining):
+    """Low-level TensorFlow training loop for arbitrary TF-callable DRYML models."""
+
+    def __call__(self, exp):
+        import tensorflow as tf
+
+        train_data = self._prepare_data(exp.train_data, for_training=True)
+        train_xy = self._xy_data(train_data)
+
+        val_xy = None
+        if exp.val_data is not None:
+            val_data = self._prepare_data(exp.val_data, for_training=False)
+            val_xy = self._xy_data(val_data)
+
+        optimizer = self._make_optimizer(tf, exp)
+        loss_fn = self._make_loss(tf, exp)
+        metrics = self._metric_objects(exp)
+        trainable_variables = None
+        losses = []
+        steps = 0
+        steps_per_epoch = finite_dataset_len(train_data)
+        total_steps = None if steps_per_epoch is None else steps_per_epoch * self.epochs
+        progress = TrainingProgress(total=total_steps, verbose=self.verbose, desc="TF training")
+
+        exp.model.prep_train()
+        try:
+            for epoch in range(self.epochs):
+                for metric in metrics:
+                    _reset_metric(metric)
+                epoch_loss = 0.0
+                epoch_steps = 0
+
+                for x, y in train_xy:
+                    x = _tree_to_tf(tf, x)
+                    y = _tree_to_tf(tf, y)
+
+                    with tf.GradientTape() as tape:
+                        y_pred = exp.model(x)
+                        loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+
+                    if trainable_variables is None:
+                        trainable_variables = _collect_trainable_parameters(exp.model)
+                        if not trainable_variables:
+                            raise ValueError("TensorFlow model graph exposes no trainable parameters.")
+
+                    grads = tape.gradient(loss_value, trainable_variables)
+                    grad_pairs = [
+                        (grad, var)
+                        for grad, var in zip(grads, trainable_variables)
+                        if grad is not None
+                    ]
+                    optimizer.apply_gradients(grad_pairs)
+
+                    for metric in metrics:
+                        _update_metric(metric, y, y_pred)
+
+                    loss_float = float(metric_value(loss_value))
+                    losses.append(loss_float)
+                    epoch_loss += loss_float
+                    epoch_steps += 1
+                    steps += 1
+
+                    step_metrics = {"loss": loss_float}
+                    step_metrics.update(_metric_results(metrics))
+                    progress.update(1, step_metrics)
+
+                if epoch_steps == 0:
+                    continue
+
+                epoch_metrics = {"loss": epoch_loss / epoch_steps}
+                epoch_metrics.update(_metric_results(metrics))
+
+                if val_xy is not None:
+                    val_metrics = self._evaluate(tf, exp.model, val_xy, loss_fn, metrics)
+                    epoch_metrics.update({f"val_{name}": value for name, value in val_metrics.items()})
+
+                progress.epoch_end(epoch + 1, epochs=self.epochs, metrics=epoch_metrics)
+        finally:
+            progress.close()
+            exp.model.prep_eval()
+
+        if steps == 0 and self.epochs > 0:
+            raise ValueError("Cannot train on an empty dataset.")
+
+        advance_train_state(exp, epochs=self.epochs, steps=steps)
+        return losses
+
+    def _make_optimizer(self, tf, exp):
+        optimizer = _unwrap_backend_obj(self._optimizer(exp))
+        if optimizer is not None:
+            if isinstance(optimizer, type):
+                return validate_class(optimizer)()
+            return optimizer
+        return tf.keras.optimizers.Adam()
+
+    def _make_loss(self, tf, exp):
+        loss = _unwrap_backend_obj(self._loss(exp))
+        if loss is not None:
+            if isinstance(loss, type):
+                return validate_class(loss)()
+            return loss
+        return tf.keras.losses.MeanSquaredError()
+
+    def _metric_objects(self, exp):
+        return [_unwrap_backend_obj(metric) for metric in self._metrics(exp)]
+
+    def _evaluate(self, tf, model, val_xy, loss_fn, metrics):
+        for metric in metrics:
+            _reset_metric(metric)
+        total_loss = 0.0
+        steps = 0
+        for x, y in val_xy:
+            x = _tree_to_tf(tf, x)
+            y = _tree_to_tf(tf, y)
+            y_pred = model(x)
+            loss_value = tf.reduce_mean(loss_fn(y, y_pred))
+            total_loss += float(metric_value(loss_value))
+            steps += 1
+            for metric in metrics:
+                _update_metric(metric, y, y_pred)
+
+        if steps == 0:
+            return {}
+
+        results = {"loss": total_loss / steps}
+        results.update(_metric_results(metrics))
+        return results
 
 
 class BasicEarlyStoppingTraining(BasicTraining):
@@ -353,6 +610,7 @@ __all__ = [
     "Model",
     "ModelWrapper",
     "Optimizer",
+    "Training",
     "TrainFunction",
     "Wrapper",
 ]

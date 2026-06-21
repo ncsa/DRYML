@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dryml.core2.object import Object
+from dryml.core2.object import Serializable
 from dryml.core2.utils.general import pickle_load, pickle_save, revision_path
 
 from .train_spec import TrainState
 
 
-class Experiment(Object):
+class Experiment(Serializable):
     """Runtime training aggregate centered on a model, data, and train function."""
 
     def __init__(self, model, train_fn, train_data=None, val_data=None, metrics=None, **capabilities):

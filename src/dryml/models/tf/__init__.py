@@ -6,6 +6,7 @@ from dryml.models.tf.base import (
     Model,
     ModelWrapper,
     Optimizer,
+    Training,
     TrainFunction,
     Wrapper,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "ModelWrapper",
     "Optimizer",
     "Sequential",
+    "Training",
     "TrainFunction",
     "Wrapper",
     "keras",

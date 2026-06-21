@@ -61,7 +61,7 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
 
 def test_torch_basic_mnist_classifier_with_tfds_adapter():
     torch = pytest.importorskip("torch")
-    from dryml.models.torch import BasicTraining, Optimizer, Sequential
+    from dryml.models.torch import Optimizer, Sequential, Training
 
     train_ds = _mnist_dataset("train[:1000]")
     val_ds = _mnist_dataset("test[:200]")
@@ -69,11 +69,12 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
         layer_defs=(("Linear", (28 * 28, 10), {}),),
     )
     optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.5)
-    train_fn = BasicTraining(
+    train_fn = Training(
         optimizer=optimizer,
         loss_cls=torch.nn.CrossEntropyLoss,
         epochs=5,
         batch_size=64,
+        verbose=0,
     )
     exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
@@ -137,7 +138,7 @@ def tf_mnist_experiment():
 
 def torch_mnist_experiment():
     torch = pytest.importorskip("torch")
-    from dryml.models.torch import BasicTraining, Optimizer, Sequential
+    from dryml.models.torch import Optimizer, Sequential, Training
 
     with definition_mode(concrete=True):
         train_ds = _mnist_dataset("train[:1000]")
@@ -146,11 +147,12 @@ def torch_mnist_experiment():
             layer_defs=(("Linear", (28 * 28, 10), {}),),
         )
         optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.5)
-        train_fn = BasicTraining(
+        train_fn = Training(
             optimizer=optimizer,
             loss_cls=torch.nn.CrossEntropyLoss,
             epochs=5,
             batch_size=64,
+            verbose=0,
         )
         return Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
