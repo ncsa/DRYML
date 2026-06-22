@@ -46,6 +46,16 @@ class AutoEncoder(Model):
     def __call__(self, x):
         return self.decoder(self.encoder(x))
 
+    def bind_first(self, first_value, *, input_spec=None):
+        encoder_impl, encoded = self.encoder.bind_first(first_value, input_spec=input_spec)
+        encoded_spec = self.encoder.infer_output_spec(input_spec) if input_spec is not None else None
+        decoder_impl, decoded = self.decoder.bind_first(encoded, input_spec=encoded_spec)
+
+        def bound_autoencoder(x):
+            return decoder_impl(encoder_impl(x))
+
+        return bound_autoencoder, decoded
+
     def infer_output_spec(self, input_spec):
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)

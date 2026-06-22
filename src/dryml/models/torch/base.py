@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 
+from dryml.core2.factory import FactorySpec
 from dryml.core2.object import Serializable
 from dryml.core2.repo import get_default_repo
-from dryml.core2.tensor_spec import fake_from_spec_tree, maybe_unbatch_output_spec
+from dryml.core2.tensor_spec import TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
-from dryml.core2.utils.recurse import map_leaves
+from dryml.core2.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
@@ -32,6 +33,25 @@ def _tree_to_torch(value, torch, *, device=None):
         return tensor.to(device) if device is not None else tensor
 
     return map_leaves(value, leaf_to_torch)
+
+
+def _tree_to_torch_model_batch(value, torch, input_spec, *, device=None):
+    def leaf_to_torch(values):
+        leaf, spec = values
+        if not isinstance(spec, TensorSpec):
+            raise TypeError(f"Expected TensorSpec leaves, got {type(spec).__name__}.")
+        if isinstance(leaf, torch.Tensor):
+            tensor = leaf.to(device) if device is not None else leaf
+        else:
+            tensor = torch.as_tensor(leaf)
+            tensor = tensor.to(device) if device is not None else tensor
+        return tensor if spec.batched else tensor.unsqueeze(0)
+
+    return map_leaf_groups((value, input_spec), leaf_to_torch)
+
+
+def _unbatch_tree(value):
+    return map_leaves(value, lambda leaf: leaf[0])
 
 
 def _unwrap_backend_obj(obj):
@@ -164,6 +184,20 @@ class Model(BaseModel, Serializable):
         device = _resolve_device(torch)
         x = _tree_to_torch(x, torch, device=device)
         return self.obj(x, *args, **kwargs)
+
+    def bind_first(self, first_value, *, input_spec=None):
+        if input_spec is None or spec_tree_is_batched(input_spec):
+            return self, self(first_value)
+
+        import torch
+
+        device = _resolve_device(torch)
+
+        def bound_model(x):
+            batched = _tree_to_torch_model_batch(x, torch, input_spec, device=device)
+            return _unbatch_tree(self.obj(batched))
+
+        return bound_model, bound_model(first_value)
 
     def parameters(self):
         return self.trainable_parameters("torch")
@@ -464,6 +498,14 @@ class ModelWrapper(Model):
 
 
 class Sequential(Model):
+    @classmethod
+    def __prepare_args__(cls, layer_defs=(), output_spec=None):
+        args = (FactorySpec.coerce_many(layer_defs),)
+        kwargs = {}
+        if output_spec is not None:
+            kwargs["output_spec"] = output_spec
+        return args, kwargs
+
     def __init__(self, layer_defs=(), output_spec=None):
         import torch
 
@@ -471,31 +513,19 @@ class Sequential(Model):
         self.device = None
         layers = []
         for layer_def in self.layer_defs:
-            if isinstance(layer_def, torch.nn.Module):
-                layers.append(layer_def)
+            if isinstance(layer_def, FactorySpec):
+                layers.append(
+                    layer_def.build(
+                        namespace=torch.nn,
+                        instance_type=torch.nn.Module,
+                    )
+                )
                 continue
 
-            if isinstance(layer_def, str):
-                cls = getattr(torch.nn, layer_def)
-                args = ()
-                kwargs = {}
-            elif isinstance(layer_def, type):
-                cls = layer_def
-                args = ()
-                kwargs = {}
-            elif len(layer_def) == 2:
-                cls, kwargs = layer_def
-                cls = getattr(torch.nn, cls) if isinstance(cls, str) else cls
-                args = ()
-            elif len(layer_def) == 3:
-                cls, args, kwargs = layer_def
-                cls = getattr(torch.nn, cls) if isinstance(cls, str) else cls
-            else:
-                raise ValueError(
-                    "Layer definitions must be layer names, layer classes, layer instances, "
-                    "(cls, kwargs), or (cls, args, kwargs)."
-                )
-            layers.append(validate_class(cls)(*args, **kwargs))
+            raise TypeError(
+                "Sequential layer definitions must be FactorySpec values. "
+                "Tuple and string shorthands should be normalized by __prepare_args__."
+            )
 
         self.obj = torch.nn.Sequential(*layers)
         self.module = self.obj

@@ -1,41 +1,37 @@
 from __future__ import annotations
 
-from dryml.core2.utils.general import validate_class
+from dryml.core2.factory import FactorySpec
 from dryml.models.tf.base import Model
 
 
 class Sequential(Model):
+    @classmethod
+    def __prepare_args__(cls, layer_defs=(), output_spec=None):
+        args = (FactorySpec.coerce_many(layer_defs),)
+        kwargs = {}
+        if output_spec is not None:
+            kwargs["output_spec"] = output_spec
+        return args, kwargs
+
     def __init__(self, layer_defs=(), output_spec=None):
         import tensorflow as tf
 
         self.layer_defs = tuple(layer_defs)
         layers = []
         for layer_def in self.layer_defs:
-            if isinstance(layer_def, tf.keras.layers.Layer):
-                layers.append(layer_def)
+            if isinstance(layer_def, FactorySpec):
+                layers.append(
+                    layer_def.build(
+                        namespace=tf.keras.layers,
+                        instance_type=tf.keras.layers.Layer,
+                    )
+                )
                 continue
 
-            if isinstance(layer_def, str):
-                cls = getattr(tf.keras.layers, layer_def)
-                args = ()
-                kwargs = {}
-            elif isinstance(layer_def, type):
-                cls = layer_def
-                args = ()
-                kwargs = {}
-            elif len(layer_def) == 2:
-                cls, kwargs = layer_def
-                cls = getattr(tf.keras.layers, cls) if isinstance(cls, str) else cls
-                args = ()
-            elif len(layer_def) == 3:
-                cls, args, kwargs = layer_def
-                cls = getattr(tf.keras.layers, cls) if isinstance(cls, str) else cls
-            else:
-                raise ValueError(
-                    "Layer definitions must be layer names, layer classes, layer instances, "
-                    "(cls, kwargs), or (cls, args, kwargs)."
-                )
-            layers.append(validate_class(cls)(*args, **kwargs))
+            raise TypeError(
+                "Sequential layer definitions must be FactorySpec values. "
+                "Tuple and string shorthands should be normalized by __prepare_args__."
+            )
 
         self.obj = tf.keras.Sequential(layers)
         self.model = self.obj

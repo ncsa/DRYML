@@ -3,8 +3,9 @@ import warnings
 import numpy as np
 import pytest
 
+from dryml.core2 import FactorySpec
 from dryml.core2.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset, Map, Select
+from dryml.data import ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import AutoEncoder, Experiment
 
 
@@ -52,6 +53,88 @@ def test_tf_sequential_infers_output_spec_without_explicit_output_spec():
     model = Sequential(layer_defs=(("Dense", {"units": 2}),))
 
     assert Map(ds, model).spec == TensorSpec("float32", shape=(2,), backend="tf")
+
+
+def test_tf_sequential_accepts_factory_spec_and_constructor_tuple_shorthand():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((4, 32, 32, 1), dtype=np.float32)
+    ds = ArrayDataset(x)
+    encoder = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Dense", 32, {"activation": "relu"}),
+        FactorySpec("Dense", 2, activation="linear"),
+    ])
+
+    decoder = Sequential(layer_defs=[
+        ("Dense", 32 * 32, {"activation": "linear"}),
+        ("Reshape", ((32, 32, 1),), {}),
+    ])
+
+    assert Map(ds, encoder).spec == TensorSpec("float32", shape=(2,), backend="tf")
+    assert decoder.infer_output_spec(TensorSpec("float32", shape=(2,), backend="tf")) == TensorSpec(
+        "float32",
+        shape=(32, 32, 1),
+        backend="tf",
+    )
+
+
+def test_tf_model_map_unbatched_image_uses_backend_batch_axis():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((2, 28, 28, 1), dtype=np.float32)
+    ds = ArrayDataset(x)
+    model = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Dense", 2),
+    ])
+    mapped = Map(ds, model)
+
+    out = list(mapped)
+
+    assert mapped.spec == TensorSpec("float32", shape=(2,), backend="tf")
+    assert [tuple(item.shape) for item in out] == [(2,), (2,)]
+
+
+def test_tf_model_project_pipe_maps_unbatched_images_and_preserves_labels():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((2, 28, 28, 1), dtype=np.float32)
+    y = np.array([3, 7], dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    model = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Dense", 2),
+    ])
+    mapped = Map(ds, Project(Pipe(Select(0), model), Select(1)))
+
+    out = list(mapped)
+
+    assert mapped.spec[0] == TensorSpec("float32", shape=(2,), backend="tf")
+    assert [tuple(latent.shape) for latent, _ in out] == [(2,), (2,)]
+    assert [int(label) for _, label in out] == [3, 7]
+
+
+def test_tf_autoencoder_map_unbatched_image_uses_child_model_bindings():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((2, 28, 28, 1), dtype=np.float32)
+    ds = ArrayDataset(x)
+    encoder = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Dense", 2),
+    ])
+    decoder = Sequential(layer_defs=[
+        ("Dense", 28 * 28),
+        ("Reshape", (28, 28, 1)),
+    ])
+    model = AutoEncoder(encoder=encoder, decoder=decoder)
+    mapped = Map(ds, model)
+
+    out = list(mapped)
+
+    assert mapped.spec == TensorSpec("float32", shape=(28, 28, 1), backend="tf")
+    assert [tuple(item.shape) for item in out] == [(28, 28, 1), (28, 28, 1)]
 
 
 def test_tf_model_spec_inference_rejects_dataset_element_tuple():

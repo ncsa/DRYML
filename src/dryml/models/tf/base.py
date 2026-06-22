@@ -4,9 +4,9 @@ import os
 
 from dryml.core2.object import Serializable
 from dryml.core2.repo import get_default_repo
-from dryml.core2.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec
+from dryml.core2.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
-from dryml.core2.utils.recurse import map_leaves
+from dryml.core2.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
@@ -84,6 +84,21 @@ def _tree_to_tf(tf, value):
         return tf.convert_to_tensor(leaf)
 
     return map_leaves(value, leaf_to_tf)
+
+
+def _tree_to_tf_model_batch(tf, value, input_spec):
+    def leaf_to_tf(values):
+        leaf, spec = values
+        if not isinstance(spec, TensorSpec):
+            raise TypeError(f"Expected TensorSpec leaves, got {type(spec).__name__}.")
+        tensor = leaf if tf.is_tensor(leaf) else tf.convert_to_tensor(leaf)
+        return tensor if spec.batched else tf.expand_dims(tensor, axis=0)
+
+    return map_leaf_groups((value, input_spec), leaf_to_tf)
+
+
+def _unbatch_tree(value):
+    return map_leaves(value, lambda leaf: leaf[0])
 
 
 def _reset_metric(metric):
@@ -217,6 +232,18 @@ class Model(BaseModel, Serializable):
 
     def __call__(self, x, *args, **kwargs):
         return self.obj(x, *args, **kwargs)
+
+    def bind_first(self, first_value, *, input_spec=None):
+        if input_spec is None or spec_tree_is_batched(input_spec):
+            return self, self(first_value)
+
+        import tensorflow as tf
+
+        def bound_model(x):
+            batched = _tree_to_tf_model_batch(tf, x, input_spec)
+            return _unbatch_tree(self.obj(batched))
+
+        return bound_model, bound_model(first_value)
 
     def fit(self, *args, **kwargs):
         return self.obj.fit(*args, **kwargs)

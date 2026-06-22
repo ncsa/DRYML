@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import sys
 
-from dryml.data import ArrayDataset, Pipe
+from dryml.data import ArrayDataset, Map, Pipe, Project, Select
 from dryml.core2 import Repo
 from dryml.models import AutoEncoder, Experiment
 
@@ -39,6 +39,59 @@ def test_torch_basic_training_updates_experiment_state():
     assert exp.state.phase == "trained"
     assert optimizer.obj is not None
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
+
+
+def test_torch_sequential_accepts_constructor_tuple_shorthand():
+    from dryml.models.torch import Sequential
+
+    x = np.zeros((4, 3), dtype=np.float32)
+    ds = ArrayDataset(x)
+    model = Sequential(layer_defs=[
+        ("Linear", 3, 8),
+        ("ReLU",),
+        ("Linear", 8, 2),
+    ])
+
+    assert Map(ds, model).spec.backend.value == "torch"
+    assert Map(ds, model).spec.shape == (2,)
+
+
+def test_torch_model_map_unbatched_tensor_uses_backend_batch_axis():
+    from dryml.models.torch import Sequential
+
+    x = np.zeros((2, 3, 4), dtype=np.float32)
+    ds = ArrayDataset(x)
+    model = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Linear", 12, 2),
+    ])
+    mapped = Map(ds, model)
+
+    out = list(mapped)
+
+    assert mapped.spec.backend.value == "torch"
+    assert mapped.spec.shape == (2,)
+    assert [tuple(item.shape) for item in out] == [(2,), (2,)]
+
+
+def test_torch_model_project_pipe_maps_unbatched_tensors_and_preserves_labels():
+    from dryml.models.torch import Sequential
+
+    x = np.zeros((2, 3, 4), dtype=np.float32)
+    y = np.array([1, 0], dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    model = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Linear", 12, 2),
+    ])
+    mapped = Map(ds, Project(Pipe(Select(0), model), Select(1)))
+
+    out = list(mapped)
+
+    assert mapped.spec[0].backend.value == "torch"
+    assert mapped.spec[0].shape == (2,)
+    assert [tuple(latent.shape) for latent, _ in out] == [(2,), (2,)]
+    assert [int(label) for _, label in out] == [1, 0]
 
 
 def test_torch_autoencoder_optimizer_targets_composite_model():
