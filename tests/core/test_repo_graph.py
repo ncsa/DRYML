@@ -2,7 +2,7 @@ import pytest
 
 from dryml.core2 import Object, Repo, Serializable
 from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
-from dryml.core2.repo import RepoGraphError, default_repo, get_default_repo
+from dryml.core2.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
 from dryml.core2.store.dir import DirStore
 from dryml.core2.utils.general import pickle_load, pickle_save
 
@@ -137,6 +137,14 @@ def test_save_object_uses_save_options(tmp_path):
 
     assert store.has(obj.definition)
     assert repo.get_alias("saved") == obj.definition
+
+
+def test_save_object_without_store_raises_repo_save_error():
+    repo = Repo()
+    obj = GraphLeaf("unsaved", repo=repo)
+
+    with pytest.raises(RepoSaveError, match="No store available"):
+        repo.save_object(obj)
 
 
 def test_save_uses_save_options_for_loaded_objects(tmp_path):

@@ -232,6 +232,8 @@ class RepoSaveVisitor(RepoStructuralVisitor):
                 store = self.repo.default_store
 
         if store is None:
+            from .repo import RepoSaveError
+
             raise RepoSaveError("No store available to save object!")
 
         if id(store) not in self.saved_objs:
