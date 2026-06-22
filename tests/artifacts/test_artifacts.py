@@ -35,6 +35,44 @@ def test_scalar_avg_computes_dataset_mean(tmp_path):
     assert avg.read(repo=repo) == pytest.approx(2.0)
 
 
+def test_accuracy_computes_projected_argmax_pipeline(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    x = np.array([0, 1, 2, 3], dtype=np.int64)
+    y = np.array([0, 1, 0, 0], dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    predictions = Map(
+        ds,
+        Project(
+            Pipe(Select(0), ParityClassifier(), ArgMax()),
+            Select(1),
+        ),
+    )
+    accuracy = Accuracy(predictions, path_x=0, path_y=1)
+
+    repo.save_object(accuracy)
+
+    assert accuracy.compute(repo=repo) == pytest.approx(0.75)
+    assert accuracy.read(repo=repo) == pytest.approx(0.75)
+
+
+def test_accuracy_compute_without_store_caches_value():
+    x = np.array([0, 1, 2, 3], dtype=np.int64)
+    y = np.array([0, 1, 0, 0], dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    predictions = Map(
+        ds,
+        Project(
+            Pipe(Select(0), ParityClassifier(), ArgMax()),
+            Select(1),
+        ),
+    )
+    accuracy = Accuracy(predictions, path_x=0, path_y=1)
+
+    assert accuracy.compute(repo=Repo()) == pytest.approx(0.75)
+    assert accuracy.read(repo=Repo()) == pytest.approx(0.75)
+
+
 def test_cached_dataset_writes_npy_files_for_npy_file_dataset(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)

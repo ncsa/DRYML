@@ -1,7 +1,7 @@
 from dryml.data.dataset import Dataset, Map
 from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TFDSAdapter, TorchDatasetAdapter
 from dryml.data.combine import Chain, Zip
-from dryml.data.methods import Cast, Flatten, Pipe, Project, Scale, Select
+from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
 from dryml.data.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
 from dryml.data.util import (
     Collect,
@@ -22,6 +22,7 @@ __all__ = [
     "Pipe",
     "Project",
     "Select",
+    "ArgMax",
     "Cast",
     "Flatten",
     "Scale",

@@ -5,7 +5,7 @@ import pytest
 
 from dryml.core2 import FactorySpec
 from dryml.core2.tensor_spec import TensorSpec
-from dryml.data import ArrayDataset, Map, Pipe, Project, Select
+from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import AutoEncoder, Experiment
 
 
@@ -112,6 +112,28 @@ def test_tf_model_project_pipe_maps_unbatched_images_and_preserves_labels():
 
     assert mapped.spec[0] == TensorSpec("float32", shape=(2,), backend="tf")
     assert [tuple(latent.shape) for latent, _ in out] == [(2,), (2,)]
+    assert [int(label) for _, label in out] == [3, 7]
+
+
+def test_tf_argmax_pipeline_after_model_output():
+    from dryml.models.tf import Sequential
+
+    x = np.zeros((2, 28, 28, 1), dtype=np.float32)
+    y = np.array([3, 7], dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    encoder = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Dense", 2),
+    ])
+    classifier = Sequential(layer_defs=[
+        ("Dense", 10),
+    ])
+    mapped = Map(ds, Project(Pipe(Select(0), encoder, classifier, ArgMax()), Select(1)))
+
+    out = list(mapped)
+
+    assert mapped.spec[0] == TensorSpec("int64", shape=(), backend="tf")
+    assert [tuple(pred.shape) for pred, _ in out] == [(), ()]
     assert [int(label) for _, label in out] == [3, 7]
 
 

@@ -6,6 +6,7 @@ from dryml.core2.backend import Backend
 from dryml.core2.tensor_spec import Dynamic, TensorSpec
 from dryml.data.dataset import Dataset, Map
 from dryml.data import (
+    ArgMax,
     Batch,
     Cast,
     Flatten,
@@ -203,6 +204,38 @@ def test_flatten_and_scale_infer_output_spec_and_iteration():
 
     assert ds.spec == TensorSpec("float32", shape=(2,), backend="numpy")
     np.testing.assert_allclose(out[0], np.array([0.0, 1.0], dtype=np.float32))
+
+
+def test_argmax_infer_output_spec_and_iteration():
+    src = ListDataset(
+        [
+            np.array([0.1, 0.9, 0.0], dtype=np.float32),
+            np.array([0.8, 0.1, 0.1], dtype=np.float32),
+        ],
+        TensorSpec("float32", shape=(3,), backend="numpy"),
+    )
+
+    ds = Map(src, ArgMax())
+    out = list(ds)
+
+    assert ds.spec == TensorSpec("int64", shape=(), backend="numpy")
+    assert [int(item) for item in out] == [1, 0]
+
+
+def test_argmax_batched_preserves_batch_axis():
+    src = ListDataset(
+        [
+            np.array([0.1, 0.9, 0.0], dtype=np.float32),
+            np.array([0.8, 0.1, 0.1], dtype=np.float32),
+        ],
+        TensorSpec("float32", shape=(3,), backend="numpy"),
+    )
+
+    ds = Map(Batch(src, 2), ArgMax())
+    out = list(ds)
+
+    assert ds.spec == TensorSpec("int64", shape=(), batch=2, backend="numpy")
+    assert [item.tolist() for item in out] == [[1, 0]]
 
 
 def test_batch_infer_output_spec_and_iteration():

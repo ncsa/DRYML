@@ -202,6 +202,71 @@ def _flat_shape(shape):
     return (size,)
 
 
+def _argmax_shape(shape, axis):
+    if shape is None:
+        return None
+    rank = len(shape)
+    if rank == 0:
+        raise ValueError("ArgMax requires a non-scalar input shape.")
+    if axis < 0:
+        axis += rank
+    if axis < 0 or axis >= rank:
+        raise ValueError(f"ArgMax axis {axis} is out of bounds for rank {rank}.")
+    return (*shape[:axis], *shape[axis + 1:])
+
+
+class ArgMax(Method):
+    def __init__(self, axis: int = -1):
+        if not isinstance(axis, int):
+            raise TypeError("ArgMax axis must be an int.")
+        self.axis = axis
+
+    def _runtime_axis(self, *, batched: bool):
+        return self.axis + 1 if batched and self.axis >= 0 else self.axis
+
+    def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
+        return map_spec_tree(
+            input_spec,
+            lambda spec: spec.with_dtype("int64").with_shape(_argmax_shape(spec.shape, self.axis)),
+        )
+
+    @traits(backend="numpy")
+    def numpy_call(self, x):
+        import numpy as np
+
+        return np.argmax(x, axis=self.axis)
+
+    @traits(backend="numpy", batch_mode="batched")
+    def numpy_batched(self, x):
+        import numpy as np
+
+        return np.argmax(x, axis=self._runtime_axis(batched=True))
+
+    @traits(backend="tf")
+    def tf_call(self, x):
+        import tensorflow as tf
+
+        return tf.argmax(x, axis=self.axis, output_type=tf.int64)
+
+    @traits(backend="tf", batch_mode="batched")
+    def tf_batched(self, x):
+        import tensorflow as tf
+
+        return tf.argmax(x, axis=self._runtime_axis(batched=True), output_type=tf.int64)
+
+    @traits(backend="torch")
+    def torch_call(self, x):
+        import torch
+
+        return torch.argmax(x, dim=self.axis)
+
+    @traits(backend="torch", batch_mode="batched")
+    def torch_batched(self, x):
+        import torch
+
+        return torch.argmax(x, dim=self._runtime_axis(batched=True))
+
+
 class Flatten(Method):
     def infer_output_spec(self, input_spec: SpecTree) -> SpecTree:
         return map_spec_tree(input_spec, lambda spec: spec.with_shape(_flat_shape(spec.shape)))

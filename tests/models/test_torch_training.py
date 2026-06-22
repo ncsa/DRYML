@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 import sys
 
-from dryml.data import ArrayDataset, Map, Pipe, Project, Select
+from dryml.core2.tensor_spec import TensorSpec
+from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.core2 import Repo
 from dryml.models import AutoEncoder, Experiment
 
@@ -91,6 +92,28 @@ def test_torch_model_project_pipe_maps_unbatched_tensors_and_preserves_labels():
     assert mapped.spec[0].backend.value == "torch"
     assert mapped.spec[0].shape == (2,)
     assert [tuple(latent.shape) for latent, _ in out] == [(2,), (2,)]
+    assert [int(label) for _, label in out] == [1, 0]
+
+
+def test_torch_argmax_pipeline_after_model_output():
+    from dryml.models.torch import Sequential
+
+    x = np.zeros((2, 3, 4), dtype=np.float32)
+    y = np.array([1, 0], dtype=np.int64)
+    ds = ArrayDataset((x, y))
+    encoder = Sequential(layer_defs=[
+        ("Flatten",),
+        ("Linear", 12, 2),
+    ])
+    classifier = Sequential(layer_defs=[
+        ("Linear", 2, 3),
+    ])
+    mapped = Map(ds, Project(Pipe(Select(0), encoder, classifier, ArgMax()), Select(1)))
+
+    out = list(mapped)
+
+    assert mapped.spec[0] == TensorSpec("int64", shape=(), backend="torch")
+    assert [tuple(pred.shape) for pred, _ in out] == [(), ()]
     assert [int(label) for _, label in out] == [1, 0]
 
 
