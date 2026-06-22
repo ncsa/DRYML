@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import glob
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 from contextlib import contextmanager
@@ -742,6 +743,12 @@ class Repo:
             memo=memo,
         )
 
+    def load_or_build(self, x: object, **kwargs):
+        if kwargs.get("options") is not None:
+            kwargs["options"] = replace(kwargs["options"], build_missing=True)
+        kwargs["build_missing"] = True
+        return self.load_object(x, **kwargs)
+
 
     def __contains__(
             self, item: Object | ConcreteDefinition, weak=True):
@@ -1052,6 +1059,9 @@ _global_repo: "Repo" = Repo()
 def global_repo_cleanup():
     global _global_repo
     global _current_repo
+    from .session import close_configured_repo
+
+    close_configured_repo()
     _global_repo.close()
     del _global_repo
     r = _current_repo.get()
@@ -1064,6 +1074,12 @@ atexit.register(global_repo_cleanup)
 # Get the current default repo
 def get_default_repo() -> "Repo":
     r = _current_repo.get()
+    if r is not None:
+        return r
+
+    from .session import current_repo
+
+    r = current_repo()
     return r if r is not None else _global_repo
 
 

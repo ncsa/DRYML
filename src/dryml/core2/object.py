@@ -5,51 +5,67 @@ from typing import TYPE_CHECKING
 import uuid
 import time
 import os
-from contextvars import ContextVar
 from contextlib import contextmanager
 
 from .utils.general import pickle_save, pickle_load, revision_path
 from .definition import Definition
-
-
-_definition_mode: ContextVar[bool] = ContextVar("dryml_definition_mode", default=False)
-_definition_mode_concrete: ContextVar[bool] = ContextVar("dryml_definition_mode_concrete", default=False)
 
 if TYPE_CHECKING:
     from .repo import RevisionType
 
 
 def in_definition_mode() -> bool:
-    return _definition_mode.get()
+    from .session import current_object_mode
+
+    return current_object_mode() in {"definition", "concrete"}
 
 
 def definition_mode_concrete() -> bool:
-    return _definition_mode_concrete.get()
+    from .session import current_object_mode
+
+    return current_object_mode() == "concrete"
 
 
 @contextmanager
 def definition_mode(enabled: bool = True, *, concrete: bool = False):
-    token = _definition_mode.set(enabled)
-    concrete_token = _definition_mode_concrete.set(bool(enabled and concrete))
-    try:
+    from .session import config
+
+    if not enabled:
+        with config(object_mode="fresh"):
+            yield
+        return
+
+    object_mode = "concrete" if concrete else "definition"
+    with config(object_mode=object_mode):
         yield
-    finally:
-        _definition_mode_concrete.reset(concrete_token)
-        _definition_mode.reset(token)
 
 
 class Dryml(type):
     # Support metaclass to enable capture of input arguments
 
     def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
-        if in_definition_mode():
+        from .session import get_config
+
+        session_config = get_config()
+        object_mode = session_config.object_mode
+        active_repo = repo if repo is not None else session_config.repo
+
+        if __cdef__ is None and object_mode == "definition":
             defn = cls.defn(*args, **kwargs)
-            if definition_mode_concrete():
-                return defn.concretize(repo=repo)
             return defn
 
+        if __cdef__ is None and object_mode == "concrete":
+            return cls.defn(*args, **kwargs).concretize(repo=active_repo)
+
+        if __cdef__ is None and object_mode == "load_or_build":
+            from .repo import manage_repo
+
+            with manage_repo(repo=active_repo) as sub_repo:
+                cdef = Definition(cls, *args, **kwargs).concretize(repo=sub_repo)
+                return sub_repo.load_or_build(cdef, cache=session_config.cache)
+
         from .repo import default_repo, manage_repo
-        with manage_repo(repo=repo) as sub_repo:
+        with manage_repo(repo=active_repo) as sub_repo:
             if __cdef__ is None:
                 # First-time construction from a soft Definition
                 defn = Definition(cls, *args, **kwargs)
