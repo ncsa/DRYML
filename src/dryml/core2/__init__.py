@@ -8,6 +8,7 @@ from dryml.core2.tensor_spec import (
     as_tensor_spec,
 )
 from dryml.core2.config import CONFIG_MISSING, ConfigError, ConfigRef
+from dryml.core2.factory import FactorySpec
 from dryml.core2.symbol import ImportRef, SourceSpec, resolve_symbol, symbol_ref
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     dtype,
     DType,
     ConfigRef,
+    FactorySpec,
     ConfigError,
     CONFIG_MISSING,
     as_tensor_spec,

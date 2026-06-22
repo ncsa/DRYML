@@ -26,6 +26,7 @@ from .dtype import DType
 from .tensor_spec import TensorSpec
 from .cardinality import Cardinality
 from .config import ConfigRef
+from .factory import FactorySpec
 # If Backend is a real runtime type/class, include it too.
 # from .backend import Backend
 
@@ -43,6 +44,7 @@ IDENTITY_VALUE_TYPES = (
     TensorSpec,
     Cardinality,
     ConfigRef,
+    FactorySpec,
 )
 
 
