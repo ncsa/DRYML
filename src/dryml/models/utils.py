@@ -6,6 +6,7 @@ from typing import Any
 
 from dryml.core2.tensor_spec import iter_specs
 from dryml.data import Shuffle, Take, Unbatch
+from dryml.models.train_spec import TrainState
 
 expected_context_errors = (NoContextError, WrongContextError, ContextIncompatibilityError)
 
@@ -62,7 +63,7 @@ def prepare_training_data(
     return train_data
 
 
-def advance_train_state(exp, *, epochs: int = 0, steps: int = 0, phase: str = "trained"):
+def advance_train_state(exp, *, epochs: int = 0, steps: int = 0, phase: str = TrainState.trained):
     if epochs:
         exp.state.advance_epoch(epochs)
     if steps:

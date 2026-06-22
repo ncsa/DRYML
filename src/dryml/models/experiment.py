@@ -20,7 +20,15 @@ class Experiment(Serializable):
         self.state = TrainState()
 
     def train(self):
-        return self.train_fn(self)
+        self.state.phase = TrainState.training
+        try:
+            result = self.train_fn(self)
+        except Exception:
+            self.state.phase = TrainState.failed
+            raise
+        if self.state.phase == TrainState.training:
+            self.state.phase = TrainState.trained
+        return result
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         pickle_save(self.state, revision_path("experiment_state", "pkl", dest_dir, revision=revision))
