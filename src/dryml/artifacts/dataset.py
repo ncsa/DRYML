@@ -50,14 +50,4 @@ class CachedDataset(Artifact):
         pickle_save({"count": count}, root / _CACHE_META_FILENAME)
         return location
 
-    def read(self, repo=None, *, store=None, **kwargs):
-        from dryml.data import NpyFileDataset
-
-        kwargs.setdefault("allow_pickle", self.allow_pickle)
-        location = self._location(repo, store=store, require_exists=True)
-        return NpyFileDataset(location, **kwargs)
-
-    as_dataset = read
-
-
 CachedDataset.__module__ = "dryml.artifacts"

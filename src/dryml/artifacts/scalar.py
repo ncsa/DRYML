@@ -27,6 +27,13 @@ def _read_scalar(location: str) -> Any:
     return pickle_load(_scalar_path(location))
 
 
+def _read_scalar_if_present(location: str):
+    path = _scalar_path(location)
+    if not os.path.exists(path):
+        return None, False
+    return _read_scalar(location), True
+
+
 def _as_numpy(value: Any) -> np.ndarray:
     if hasattr(value, "detach"):
         value = value.detach()
@@ -37,24 +44,33 @@ def _as_numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
+def _normalize_path(path):
+    if isinstance(path, (tuple, list)):
+        return tuple(path)
+    return (path,)
+
+
+def _select_path(value: Any, path) -> Any:
+    result = value
+    for idx in _normalize_path(path):
+        result = result[idx]
+    return result
+
+
 class Scalar(Artifact):
     def __init__(self, value: Any):
         super().__init__()
         self.value = value
 
-    def compute(self, repo=None, *, store=None):
-        location = self._location(repo, store=store, require_exists=True)
-        _write_scalar(location, self.value)
-        return self.value
+    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+        _write_scalar(dest_dir, self.value)
 
-    def read(self, repo=None, *, store=None):
-        try:
-            location = self._location(repo, store=store)
-        except RuntimeError:
-            return self.value
-        path = _scalar_path(location)
-        if os.path.exists(path):
-            return _read_scalar(location)
+    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None = None):
+        value, exists = _read_scalar_if_present(src_dir)
+        if exists:
+            self.value = value
+
+    def compute(self, repo=None, *, store=None):
         return self.value
 
 
@@ -66,13 +82,19 @@ class ScalarAgg(Artifact):
     def aggregate(self, values: Iterable[Any]):
         raise NotImplementedError
 
+    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+        if hasattr(self, "value"):
+            _write_scalar(dest_dir, self.value)
+
+    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None = None):
+        value, exists = _read_scalar_if_present(src_dir)
+        if exists:
+            self.value = value
+
     def compute(self, repo=None, *, store=None):
         value = self.aggregate(iter(self.src))
-        _write_scalar(self._location(repo, store=store, require_exists=True), value)
+        self.value = value
         return value
-
-    def read(self, repo=None, *, store=None):
-        return _read_scalar(self._location(repo, store=store, require_exists=True))
 
 
 class ScalarAvg(ScalarAgg):
@@ -92,6 +114,33 @@ class ScalarAvg(ScalarAgg):
         return total / count
 
 
+class Accuracy(ScalarAgg):
+    def __init__(self, src, *, path_x=0, path_y=1):
+        super().__init__(src)
+        self.path_x = path_x
+        self.path_y = path_y
+
+    def aggregate(self, values: Iterable[Any]) -> float:
+        num_correct = 0
+        num_total = 0
+        for item in values:
+            x = _as_numpy(_select_path(item, self.path_x))
+            y = _as_numpy(_select_path(item, self.path_y))
+            if x.shape != y.shape:
+                raise ValueError(
+                    f"Accuracy requires matching shapes, got {x.shape} and {y.shape}."
+                )
+
+            matches = np.asarray(x == y)
+            num_correct += int(np.sum(matches))
+            num_total += int(matches.size)
+
+        if num_total == 0:
+            raise ValueError("Cannot compute Accuracy on an empty source.")
+        return num_correct / num_total
+
+
 Scalar.__module__ = "dryml.artifacts"
 ScalarAgg.__module__ = "dryml.artifacts"
 ScalarAvg.__module__ = "dryml.artifacts"
+Accuracy.__module__ = "dryml.artifacts"
