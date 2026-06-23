@@ -50,6 +50,17 @@ class DefinitionCatalog:
             return store.catalog_key()
         return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
 
+    def _unique_repo_stores(self) -> list[Any]:
+        stores = []
+        seen = set()
+        for store in self.repo.stores:
+            sid = self._store_key(store)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            stores.append(store)
+        return stores
+
     def sync_caches(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
         with self.lock:
             ids: set[DefinitionId] = set()
@@ -68,7 +79,7 @@ class DefinitionCatalog:
             return
 
         with self.lock:
-            stores = list(self.repo.stores)
+            stores = self._unique_repo_stores()
             seen = set()
             unseen = []
             for store in stores:
@@ -83,8 +94,9 @@ class DefinitionCatalog:
 
     def ensure_exact_stored(self, cdef: ConcreteDefinition, *, stats: QueryStats | None = None) -> bool:
         found = False
-        for store in self.repo.stores:
-            if store.has(cdef):
+        for store in self._unique_repo_stores():
+            persisted = store.read_definition(cdef) if hasattr(store, "read_definition") else None
+            if persisted is not None and persisted == cdef:
                 self.register_stored_graph(cdef, store)
                 found = True
         if found and stats is not None:
@@ -237,7 +249,7 @@ class DefinitionCatalog:
             raise
 
     def _rebuild_from_stores(self, *, stats: QueryStats | None = None) -> None:
-        stores = list(self.repo.stores)
+        stores = self._unique_repo_stores()
         cached_cdefs = list(self.repo.strong_obj_cache.keys()) + list(self.repo.weak_obj_cache.keys())
         with self.lock:
             snapshot = self._snapshot_locked()
@@ -265,6 +277,7 @@ class DefinitionCatalog:
                 self.occurrences_by_owner.clear()
                 self.occurrence_by_key.clear()
                 self.postings.clear()
+                self.store_by_id.clear()
                 self.hydrated_stores.clear()
                 self.repo.light_index.clear()
                 self.generation += 1

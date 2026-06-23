@@ -133,3 +133,32 @@ def test_resultset_replica_metadata_is_snapshotted(tmp_path):
 
     assert len(snapshot.replicas(obj.definition)) == 1
     assert len(current.replicas(obj.definition)) == 2
+
+
+def test_resultset_union_and_intersection_replica_metadata_is_commutative(tmp_path):
+    store1 = DirStore(tmp_path / "store1")
+    store2 = DirStore(tmp_path / "store2")
+    repo = Repo(stores=[store1, store2])
+    obj = ResultLeaf("snap", repo=repo)
+    repo.save_object(obj, store=store1)
+    one_replica = repo.find_defs(None)
+    repo.save_object(obj, store=store2)
+    two_replicas = repo.find_defs(None, refresh=False)
+
+    assert len(one_replica.union(two_replicas).replicas(obj.definition)) == 2
+    assert len(two_replicas.union(one_replica).replicas(obj.definition)) == 2
+    assert one_replica.union(two_replicas).replicas(obj.definition) == two_replicas.union(one_replica).replicas(obj.definition)
+    assert one_replica.intersection(two_replicas).replicas(obj.definition) == two_replicas.intersection(one_replica).replicas(obj.definition)
+
+
+def test_fixed_resultset_universe_rejects_domain_switch(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = ResultLeaf("child", repo=repo)
+    parent = ResultParent(child, repo=repo)
+    repo.save_object(parent)
+
+    nested_defs = repo.query(Definition(ResultLeaf, SKIP_ARGS)).nested().definitions().defs()
+
+    with pytest.raises(QueryDomainError, match="Cannot switch"):
+        nested_defs.query(Definition(ResultLeaf, SKIP_ARGS)).stored().defs()

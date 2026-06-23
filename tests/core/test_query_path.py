@@ -2,6 +2,7 @@ import core2_objects as objects
 import pytest
 
 from dryml.core2 import Definition, Repo
+from dryml.core2.freeze import FrozenList
 from dryml.core2.query import Arg, DefinitionPath, Index, Key, Kwarg, QueryPathError, normalize_path
 
 
@@ -71,3 +72,16 @@ def test_chained_query_methods_return_independent_queries():
     assert "uid" in q1.selector.kwargs["child"].kwargs
     assert "uid" not in q2.selector.kwargs["child"].kwargs
     assert q3.selector.kwargs["child"] == source.kwargs["child"]
+
+
+def test_restore_frozen_list_branch_preserves_query_soundness():
+    repo = Repo()
+    source = objects.TestNest3(items=[1, 2], repo=repo).definition
+    match = objects.TestNest3(items=[1, 2], repo=repo)
+    other = objects.TestNest3(items=[1, 3], repo=repo)
+    repo.add_objects(match, other)
+
+    query = repo.query(source).categorical(recursive=True).restore(path="items")
+
+    assert isinstance(query.selector.kwargs["items"], FrozenList)
+    assert list(query.known(refresh=False).defs()) == [match.definition]

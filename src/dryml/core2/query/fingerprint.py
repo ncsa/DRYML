@@ -178,8 +178,8 @@ def _fingerprint_selector_value(
         return
 
     families = _selector_container_families(value)
-    if families:
-        primary_family = families[0]
+    if families or isinstance(value, FrozenList):
+        primary_family = families[0] if families else "list"
         for family in families:
             _add(counts, "CONTAINER_KIND", path, family)
         if primary_family in {"list", "tuple", "set"}:

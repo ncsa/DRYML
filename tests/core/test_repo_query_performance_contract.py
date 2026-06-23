@@ -48,6 +48,10 @@ class CountingStore(Store):
         self.restore_count += 1
         return self.store.restore_object(obj, revision=revision)
 
+    def read_definition(self, cdef):
+        self.has_count += 1
+        return self.store.read_definition(cdef)
+
     def read_main_def(self):
         return self.store.read_main_def()
 
@@ -120,6 +124,21 @@ def test_exact_root_lookup_avoids_broad_hydration(tmp_path):
     assert repo2.query(obj.definition).stored().count() == 1
     assert counting.has_count >= 1
     assert counting.hydrate_count == 0
+
+
+def test_exact_query_refresh_false_performs_no_store_io(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = PerfLeaf("x", repo=repo)
+    repo.save_object(obj)
+
+    counting = CountingStore(DirStore(store.base_dir))
+    repo2 = Repo(stores=counting)
+
+    assert repo2.query(obj.definition).stored(refresh=False).count() == 0
+    assert counting.has_count == 0
+    assert counting.hydrate_count == 0
+    assert counting.restore_count == 0
 
 
 def test_nested_owner_query_does_not_materialize(tmp_path):

@@ -3,6 +3,7 @@ import pytest
 import core2_objects as objects
 from dryml.core2 import Definition, Repo, SKIP_ARGS
 from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenSet
 from dryml.core2.query.fingerprint import collect_exact_constraints
 from dryml.core2.query.query import _exact_constraints_match
 
@@ -131,3 +132,69 @@ def test_class_match_exact_applies_inside_set_members():
     results = repo.query(selector).class_match("exact").known(refresh=False).defs()
 
     assert list(results) == [base_parent.definition]
+
+
+def test_exact_cdef_inside_tuple_inside_set_remains_exact():
+    repo = Repo()
+    exact_child = objects.TestNest3(a=1, repo=repo)
+    compatible_child = objects.TestNest3(a=1, b=2, repo=repo)
+    exact_parent = objects.TestNest3(members={(exact_child.definition,)}, repo=repo)
+    compatible_parent = objects.TestNest3(members={(compatible_child.definition,)}, repo=repo)
+    repo.add_objects(exact_parent, compatible_parent)
+
+    selector = Definition(objects.TestNest3, SKIP_ARGS, members={(exact_child.definition,)})
+    results = repo.query(selector).known(refresh=False).defs()
+
+    assert list(results) == [exact_parent.definition]
+
+
+def test_exact_cdef_inside_frozenset_inside_set_remains_exact():
+    repo = Repo()
+    exact_child = objects.TestNest3(a=1, repo=repo)
+    compatible_child = objects.TestNest3(a=1, b=2, repo=repo)
+    template = objects.TestNest3().definition
+    exact_parent = ConcreteDefinition(
+        template.cls,
+        template.args,
+        FrozenDict({"members": FrozenSet({FrozenSet({exact_child.definition})})}),
+    )
+    compatible_parent = ConcreteDefinition(
+        template.cls,
+        template.args,
+        FrozenDict({"members": FrozenSet({FrozenSet({compatible_child.definition})})}),
+    )
+
+    class FakeStore:
+        def __init__(self, name):
+            self.name = name
+
+        def catalog_key(self):
+            return self.name
+
+    repo._query_catalog.register_stored_graph(exact_parent, FakeStore("exact"))
+    repo._query_catalog.register_stored_graph(compatible_parent, FakeStore("compatible"))
+
+    selector = Definition(objects.TestNest3, SKIP_ARGS, members={FrozenSet({exact_child.definition})})
+    results = repo.query(selector).stored(refresh=False).defs()
+
+    assert list(results) == [exact_parent]
+
+
+def test_unordered_matching_backtracks_for_ambiguous_members():
+    repo = Repo()
+    target = objects.TestNest({objects.TestClassA, objects.TestClassB}, repo=repo)
+    repo.add_objects(target)
+
+    selector = Definition(objects.TestNest, {objects.TestBase, objects.TestClassA})
+
+    assert list(repo.query(selector).known(refresh=False).defs()) == [target.definition]
+
+
+def test_exact_class_unordered_matching_backtracks():
+    repo = Repo()
+    target = objects.TestNest({objects.TestClassA, objects.TestClassB}, repo=repo)
+    repo.add_objects(target)
+
+    selector = Definition(objects.TestNest, {objects.TestClassA, objects.TestClassB})
+
+    assert list(repo.query(selector).class_match("exact").known(refresh=False).defs()) == [target.definition]

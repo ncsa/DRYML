@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from typing import Iterable
 import os
 
+from ..utils.general import pickle_load
+
 class Store(ABC):
     @property
     def base_dir(self) -> str:
@@ -73,6 +75,12 @@ class Store(ABC):
         obj_dir = self.object_dir(cdef)
 
         obj.restore_state_from_dir(obj_dir, revision=revision)
+
+    def read_definition(self, cdef: "ConcreteDefinition") -> "ConcreteDefinition | None":
+        def_path = self._def_file(cdef)
+        if not os.path.exists(def_path):
+            return None
+        return pickle_load(def_path)
 
     def read_main_def(self) -> "ConcreteDefinition" | None:
         """Return the stored main ConcreteDefinition, or None if not present."""

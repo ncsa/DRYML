@@ -45,6 +45,10 @@ class CountingStore(Store):
         self.restore_count += 1
         return self.store.restore_object(obj, revision=revision)
 
+    def read_definition(self, cdef):
+        self.has_count += 1
+        return self.store.read_definition(cdef)
+
     def read_main_def(self):
         return self.store.read_main_def()
 

@@ -27,6 +27,25 @@ def _sort_occurrences(occurrences: Iterable[DefinitionOccurrence]) -> tuple[Defi
     ))
 
 
+def _store_key(store) -> str:
+    if hasattr(store, "catalog_key"):
+        return store.catalog_key()
+    return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
+
+
+def _merge_replica_maps(*maps: Mapping[ConcreteDefinition, tuple[Any, ...]]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
+    merged: dict[ConcreteDefinition, dict[str, Any]] = {}
+    for replica_map in maps:
+        for cdef, stores in replica_map.items():
+            bucket = merged.setdefault(cdef, {})
+            for store in stores:
+                bucket.setdefault(_store_key(store), store)
+    return {
+        cdef: tuple(bucket[key] for key in sorted(bucket))
+        for cdef, bucket in merged.items()
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class DefinitionResultSet:
     repo: Any
@@ -110,17 +129,19 @@ class DefinitionResultSet:
             tuple(self._definitions) + tuple(other._definitions),
             materializable=self.materializable and other.materializable,
             domain=self.domain,
-            replicas={**other._replicas, **self._replicas},
+            replicas=_merge_replica_maps(self._replicas, other._replicas),
         )
 
     def intersection(self, other: "DefinitionResultSet") -> "DefinitionResultSet":
         self._check_compatible(other)
+        kept = [cdef for cdef in self._definitions if cdef in other]
+        merged_replicas = _merge_replica_maps(self._replicas, other._replicas)
         return DefinitionResultSet(
             self.repo,
-            [cdef for cdef in self._definitions if cdef in other],
+            kept,
             materializable=self.materializable and other.materializable,
             domain=self.domain,
-            replicas={cdef: self._replicas.get(cdef, ()) for cdef in self._definitions if cdef in other},
+            replicas={cdef: merged_replicas.get(cdef, ()) for cdef in kept},
         )
 
     def objects(

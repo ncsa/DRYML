@@ -2,6 +2,7 @@ import pytest
 import shutil
 
 from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.query import QueryIndexError
 from dryml.core2.store.dir import DirStore
 from dryml.core2.store.store import Store
@@ -160,6 +161,20 @@ def test_forced_refresh_removes_deleted_root_and_occurrences(tmp_path):
 
     assert repo2.find_defs(None, refresh=True).count() == 0
     assert repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS), refresh=False).count() == 0
+
+
+def test_exact_store_probe_confirms_persisted_definition_after_hash_hit(tmp_path, monkeypatch):
+    monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "collision")
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    stored = IndexLeaf("stored", repo=repo)
+    queried = IndexLeaf("queried", repo=repo)
+    repo.save_object(stored)
+
+    repo2 = Repo(stores=DirStore(store.base_dir))
+
+    assert repo2.query(queried.definition).stored().count() == 0
+    assert repo2.query(stored.definition).stored().count() == 1
 
 
 def catalog_state(repo):

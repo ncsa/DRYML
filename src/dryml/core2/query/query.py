@@ -4,8 +4,12 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ..canonical import matching_container_family
 from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
+from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
+from ..symbol import maybe_symbol_ref, resolve_symbol
+from ..utils.types import is_nonclass_callable
 from .fingerprint import collect_exact_constraints, selector_requirements
 from .model import (
     ClassMatchPolicy,
@@ -101,20 +105,32 @@ class DefinitionQuery:
         return replace(self, reuse_weak_policy=bool(enabled))
 
     def stored(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._check_universe_domain_switch("stored")
         q = replace(self, domain="stored", projection=None)
         return q if refresh is None else q.refresh(refresh)
 
     def cached(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._check_universe_domain_switch("cached")
         q = replace(self, domain="cached", projection=None)
         return q if refresh is None else q.refresh(refresh)
 
     def known(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._check_universe_domain_switch("known")
         q = replace(self, domain="known", projection=None)
         return q if refresh is None else q.refresh(refresh)
 
     def nested(self, *, refresh: RefreshPolicy | None = None) -> "DefinitionQuery":
+        self._check_universe_domain_switch("nested")
         q = replace(self, domain="nested", projection=None)
         return q if refresh is None else q.refresh(refresh)
+
+    def _check_universe_domain_switch(self, requested: str) -> None:
+        if self.universe is None:
+            return
+        if requested != self.universe.domain:
+            raise QueryDomainError(
+                f"Cannot switch a fixed ResultSet universe from domain {self.universe.domain!r} to {requested!r}."
+            )
 
     def definitions(self) -> "DefinitionQuery":
         if self.domain != "nested":
@@ -201,7 +217,7 @@ class DefinitionQuery:
         exact_root = self.selector if isinstance(self.selector, ConcreteDefinition) else None
         if self.refresh_policy is True:
             catalog.refresh(True, stats=stats)
-        elif exact_root is not None and self.domain in {"stored", "known"}:
+        elif exact_root is not None and self.domain in {"stored", "known"} and self.refresh_policy is not False:
             catalog.ensure_exact_stored(exact_root, stats=stats)
         elif self.domain in {"stored", "known"}:
             catalog.refresh(self.refresh_policy, stats=stats)
@@ -290,10 +306,148 @@ def _snapshot_source(source):
 
 
 def _structural_match(selector, cdef: ConcreteDefinition, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
-    if not selector_match(selector, cdef, strict=strict):
+    if not _query_match(selector, cdef, strict=strict, class_match=class_match):
         return False
-    if class_match == "exact" and not _exact_class_match(selector, cdef):
+    return True
+
+
+def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
+    """Query-layer verifier: selector semantics plus exact ConcreteDefinition anchors."""
+    if isinstance(selector, Object):
+        selector = selector.definition
+    if isinstance(target, Object):
+        target = target.definition
+
+    if isinstance(selector, ConcreteDefinition):
+        return isinstance(target, ConcreteDefinition) and selector.stable_hash() == target.stable_hash() and selector == target
+
+    if isinstance(selector, Definition):
+        if not isinstance(target, (Definition, ConcreteDefinition)):
+            return False
+        if selector.cls is not None:
+            if not _query_match_class(selector.cls, target.cls, strict=strict, class_match=class_match):
+                return False
+        if selector.args is not None:
+            if target.args is None:
+                return False
+            if not _query_match(selector.args, target.args, strict=strict, class_match=class_match):
+                return False
+        for key, child in selector.kwargs.items():
+            if key not in target.kwargs:
+                return False
+            if not _query_match(child, target.kwargs[key], strict=strict, class_match=class_match):
+                return False
+        return True
+
+    if isinstance(selector, (dict, FrozenDict)):
+        if not isinstance(target, (dict, FrozenDict)):
+            return False
+        for key, child in selector.items():
+            if key not in target:
+                return False
+            if not _query_match(child, target[key], strict=strict, class_match=class_match):
+                return False
+        return True
+
+    family = matching_container_family(selector, target)
+    if family in {"list", "tuple"}:
+        if len(selector) != len(target):
+            return False
+        return all(
+            _query_match(sel_child, tgt_child, strict=strict, class_match=class_match)
+            for sel_child, tgt_child in zip(selector, target)
+        )
+
+    if family == "set":
+        return _unordered_match(selector, target, lambda sel_child, tgt_child: _query_match(
+            sel_child,
+            tgt_child,
+            strict=strict,
+            class_match=class_match,
+        ))
+
+    return _query_match_leaf(selector, target, strict=strict, class_match=class_match)
+
+
+def _query_match_class(selector, target, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
+    selector_ref = maybe_symbol_ref(selector, functions=False)
+    target_ref = maybe_symbol_ref(target, functions=False)
+    if selector_ref is not None and target_ref is not None:
+        if selector_ref == target_ref:
+            return True
+        if strict or class_match == "exact":
+            return False
+        try:
+            selector_obj = resolve_symbol(selector_ref)
+            target_obj = resolve_symbol(target_ref)
+        except Exception:
+            return False
+        if isinstance(selector_obj, type) and isinstance(target_obj, type):
+            return issubclass(target_obj, selector_obj)
         return False
+
+    if isinstance(selector, type) and isinstance(target, type):
+        if strict or class_match == "exact":
+            return selector is target
+        return issubclass(target, selector)
+
+    return _query_match_leaf(selector, target, strict=strict, class_match=class_match)
+
+
+def _query_match_leaf(selector, target, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
+    if is_nonclass_callable(selector):
+        if strict:
+            raise TypeError("Callable selectors are not allowed in strict query matching.")
+        return bool(selector(target))
+
+    selector_ref = maybe_symbol_ref(selector, functions=False)
+    target_ref = maybe_symbol_ref(target, functions=False)
+    if selector_ref is not None and target_ref is not None:
+        if selector_ref == target_ref:
+            return True
+        if strict or class_match == "exact":
+            return False
+        try:
+            selector_obj = resolve_symbol(selector_ref)
+            target_obj = resolve_symbol(target_ref)
+        except Exception:
+            return False
+        if isinstance(selector_obj, type) and isinstance(target_obj, type):
+            return issubclass(target_obj, selector_obj)
+        return False
+
+    try:
+        return selector_match(selector, target, strict=strict)
+    except TypeError:
+        return False
+
+
+def _unordered_match(selector_values, target_values, edge_predicate) -> bool:
+    selector_list = list(selector_values)
+    target_list = list(target_values)
+    if len(selector_list) != len(target_list):
+        return False
+
+    edges = [
+        [idx for idx, tgt in enumerate(target_list) if edge_predicate(sel, tgt)]
+        for sel in selector_list
+    ]
+    order = sorted(range(len(selector_list)), key=lambda idx: len(edges[idx]))
+    matched_to_selector: dict[int, int] = {}
+
+    def augment(sel_idx: int, seen: set[int]) -> bool:
+        for tgt_idx in edges[sel_idx]:
+            if tgt_idx in seen:
+                continue
+            seen.add(tgt_idx)
+            if tgt_idx not in matched_to_selector or augment(matched_to_selector[tgt_idx], seen):
+                matched_to_selector[tgt_idx] = sel_idx
+                return True
+        return False
+
+    for sel_idx in order:
+        if not augment(sel_idx, set()):
+            return False
     return True
 
 
@@ -363,19 +517,11 @@ def _exact_class_match(selector, target) -> bool:
     if isinstance(selector, (set, frozenset, FrozenSet)):
         if not isinstance(target, (set, frozenset, FrozenSet)):
             return False
-        if len(selector) != len(target):
-            return False
-        unmatched = list(target)
-        for sel_child in selector:
-            found_idx = None
-            for idx, tgt_child in enumerate(unmatched):
-                if selector_match(sel_child, tgt_child, strict=False) and _exact_class_match(sel_child, tgt_child):
-                    found_idx = idx
-                    break
-            if found_idx is None:
-                return False
-            unmatched.pop(found_idx)
-        return True
+        return _unordered_match(selector, target, lambda sel_child, tgt_child: selector_match(
+            sel_child,
+            tgt_child,
+            strict=False,
+        ) and _exact_class_match(sel_child, tgt_child))
 
     return True
 

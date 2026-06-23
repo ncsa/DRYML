@@ -87,3 +87,70 @@ assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
         """
     )
+
+
+def test_exact_query_with_candidate_does_not_import_tensorflow():
+    _run_import_probe(
+        """
+import sys
+
+assert "tensorflow" not in sys.modules
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.symbol import ImportRef
+
+class FakeStore:
+    def catalog_key(self):
+        return "fake-tf-store"
+
+cdef = ConcreteDefinition(
+    ImportRef("dryml.models.tf.keras.base", "Sequential"),
+    FrozenTuple(()),
+    FrozenDict({"layer_defs": FrozenTuple(())}),
+)
+repo = Repo()
+repo._query_catalog.register_stored_graph(cdef, FakeStore())
+
+assert repo.query(cdef).class_match("exact").stored(refresh=False).count() == 1
+selector = Definition(ImportRef("dryml.models.tf.keras.base", "Sequential"), SKIP_ARGS)
+assert repo.query(selector).class_match("exact").stored(refresh=False).count() == 1
+repo.query(selector).class_match("exact").stored(refresh=False).explain()
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )
+
+
+def test_exact_query_with_candidate_does_not_import_torch():
+    _run_import_probe(
+        """
+import sys
+
+assert "torch" not in sys.modules
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.symbol import ImportRef
+
+class FakeStore:
+    def catalog_key(self):
+        return "fake-torch-store"
+
+cdef = ConcreteDefinition(
+    ImportRef("dryml.models.torch.base", "Sequential"),
+    FrozenTuple(()),
+    FrozenDict({"layer_defs": FrozenTuple(())}),
+)
+repo = Repo()
+repo._query_catalog.register_stored_graph(cdef, FakeStore())
+
+selector = Definition(ImportRef("dryml.models.torch.base", "Sequential"), SKIP_ARGS)
+assert repo.query(cdef).class_match("exact").stored(refresh=False).count() == 1
+assert repo.query(selector).class_match("exact").stored(refresh=False).count() == 1
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )

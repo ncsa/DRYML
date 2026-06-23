@@ -650,24 +650,31 @@ class SelectorMatcher(GraphMatcher):
             )
             return False
 
-        unmatched = list(target)
-        compare_failed = False
+        selector_items = list(selector)
+        target_items = list(target)
+        edges = [
+            [j for j, tgt_v in enumerate(target_items) if self.match(sel_v, tgt_v, ctx.child(i))]
+            for i, sel_v in enumerate(selector_items)
+        ]
+        order = sorted(range(len(selector_items)), key=lambda idx: len(edges[idx]))
+        matched_to_selector: dict[int, int] = {}
 
-        for i, sel_v in enumerate(selector):
-            found = None
-            for j, tgt_v in enumerate(unmatched):
-                if self.match(sel_v, tgt_v, ctx.child(i)):
-                    found = j
-                    break
-            if found is None:
-                compare_failed = True
-                self._print(ctx.child(i), "No matching set element found")
-                if not self.full_diagnostic:
-                    return False
-            else:
-                unmatched.pop(found)
+        def augment(sel_idx: int, seen: set[int]) -> bool:
+            for tgt_idx in edges[sel_idx]:
+                if tgt_idx in seen:
+                    continue
+                seen.add(tgt_idx)
+                if tgt_idx not in matched_to_selector or augment(matched_to_selector[tgt_idx], seen):
+                    matched_to_selector[tgt_idx] = sel_idx
+                    return True
+            return False
 
-        return not compare_failed
+        for sel_idx in order:
+            if not augment(sel_idx, set()):
+                self._print(ctx.child(sel_idx), "No matching set element found")
+                return False
+
+        return True
 
     def match_dict(self, selector, target, ctx: GraphCtx) -> bool:
         # Selector semantics: only keys mentioned in selector must match.

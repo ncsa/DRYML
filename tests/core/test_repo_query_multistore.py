@@ -22,6 +22,14 @@ class MultiState(Serializable):
         self.value = pickle_load(f"{src_dir}/value.pkl")
 
 
+class CountingDirStore(DirStore):
+    calls = 0
+
+    def hydrate_index(self):
+        type(self).calls += 1
+        return super().hydrate_index()
+
+
 def test_distinct_cdefs_in_two_stores_produce_two_logical_results(tmp_path):
     store1 = DirStore(tmp_path / "store1")
     store2 = DirStore(tmp_path / "store2")
@@ -62,6 +70,36 @@ def test_equivalent_store_instances_share_physical_identity(tmp_path):
 
     assert list(results) == [obj.definition]
     assert len(results.replicas(obj.definition)) == 1
+
+
+def test_forced_refresh_deduplicates_equivalent_store_instances(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MultiLeaf("same", repo=repo)
+    repo.save_object(obj)
+
+    CountingDirStore.calls = 0
+    repo2 = Repo(stores=[CountingDirStore(store.base_dir), CountingDirStore(store.base_dir)])
+
+    assert repo2.find_defs(None, refresh=True).count() == 1
+    assert CountingDirStore.calls == 1
+
+
+def test_forced_refresh_replaces_stale_store_reference(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MultiLeaf("same", repo=repo)
+    repo.save_object(obj)
+
+    old_store = DirStore(store.base_dir)
+    repo2 = Repo(stores=old_store)
+    assert repo2.find_defs(None).count() == 1
+
+    new_store = DirStore(store.base_dir)
+    repo2.stores = [new_store]
+    refreshed = repo2.find_defs(None, refresh=True)
+
+    assert refreshed.replicas(obj.definition) == (new_store,)
 
 
 def test_materialization_uses_store_priority_for_replicated_cdef(tmp_path):
