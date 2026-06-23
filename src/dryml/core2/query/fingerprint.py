@@ -233,7 +233,13 @@ def _collect_exact_constraints(value: Any, path: DefinitionPath, out: list[Exact
             _collect_exact_constraints(child, path.child(Index(idx)), out)
         return
 
-    # Set paths are intentionally not addressable because set iteration is not stable.
+    if isinstance(value, (set, frozenset, FrozenSet)):
+        for child in value:
+            if isinstance(child, Object):
+                child = child.definition
+            if isinstance(child, ConcreteDefinition):
+                out.append(ExactSubtreeConstraint(path, child, unordered_member=True))
+        return
 
 
 def requirements_satisfied(fingerprint: DefinitionFingerprint, requirements: tuple[FeatureRequirement, ...]) -> bool:

@@ -105,3 +105,29 @@ def test_exact_constraint_confirms_equality_after_hash_match(monkeypatch):
 
     assert _exact_constraints_match(parent_a.definition, constraints)
     assert not _exact_constraints_match(parent_b.definition, constraints)
+
+
+def test_concrete_definition_inside_set_is_exact():
+    repo = Repo()
+    exact_child = objects.TestNest3(a=1, repo=repo)
+    compatible_child = objects.TestNest3(a=1, b=2, repo=repo)
+    exact_parent = objects.TestNest3(members={exact_child}, repo=repo)
+    compatible_parent = objects.TestNest3(members={compatible_child}, repo=repo)
+    repo.add_objects(exact_parent, compatible_parent)
+
+    selector = Definition(objects.TestNest3, SKIP_ARGS, members={exact_child.definition})
+    results = repo.query(selector).known(refresh=False).defs()
+
+    assert list(results) == [exact_parent.definition]
+
+
+def test_class_match_exact_applies_inside_set_members():
+    repo = Repo()
+    base_parent = objects.TestNest({objects.TestBase}, repo=repo)
+    subclass_parent = objects.TestNest({objects.TestClassA}, repo=repo)
+    repo.add_objects(base_parent, subclass_parent)
+
+    selector = Definition(objects.TestNest, {objects.TestBase})
+    results = repo.query(selector).class_match("exact").known(refresh=False).defs()
+
+    assert list(results) == [base_parent.definition]

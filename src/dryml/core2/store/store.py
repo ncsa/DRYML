@@ -98,6 +98,16 @@ class Store(ABC):
         """Optional; useful for zips, S3, HDF5, etc."""
         ...
 
+    def catalog_key(self) -> str:
+        """Stable logical identity for query-catalog replica deduplication."""
+        try:
+            base_dir = getattr(self, "base_dir", None)
+        except Exception:
+            base_dir = None
+        if base_dir is not None and base_dir is not Ellipsis:
+            return f"{type(self).__module__}.{type(self).__qualname__}:{os.path.abspath(os.fspath(base_dir))}"
+        return f"{type(self).__module__}.{type(self).__qualname__}:id:{id(self)}"
+
     def close(self) -> None:
         """Cleanup (temp dirs, handles, etc.)"""
         ...

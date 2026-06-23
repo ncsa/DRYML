@@ -145,12 +145,16 @@ class DefinitionQuery:
         if self.universe is not None:
             materializable = self.universe.materializable
             domain = self.universe.domain
+        replicas = None
+        if self.universe is not None and self.universe.replicas is not None:
+            replicas = {cdef: self.universe.replicas.get(cdef, ()) for cdef in cdefs}
         return DefinitionResultSet(
             self.repo,
             cdefs,
             materializable=materializable,
             domain=domain,
             explanation=explanation,
+            replicas=replicas,
         )
 
     def defs(self):
@@ -295,12 +299,21 @@ def _structural_match(selector, cdef: ConcreteDefinition, *, strict: bool, class
 
 def _exact_class_match(selector, target) -> bool:
     from .fingerprint import canonical_class_key
-    from ..freeze import FrozenDict, FrozenList, FrozenTuple
+    from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+    from ..symbol import maybe_symbol_ref
 
     if isinstance(selector, Object):
         selector = selector.definition
     if isinstance(target, Object):
         target = target.definition
+
+    selector_ref = maybe_symbol_ref(selector, functions=False)
+    target_ref = maybe_symbol_ref(target, functions=False)
+    if selector_ref is not None and target_ref is not None:
+        try:
+            return canonical_class_key(selector) == canonical_class_key(target)
+        except TypeError:
+            return True
 
     if isinstance(selector, ConcreteDefinition):
         return True
@@ -347,8 +360,23 @@ def _exact_class_match(selector, target) -> bool:
                 return False
         return True
 
-    # Set selectors are matched unordered by selector_match; no path-stable class
-    # constraint can be derived here without reimplementing the set matcher.
+    if isinstance(selector, (set, frozenset, FrozenSet)):
+        if not isinstance(target, (set, frozenset, FrozenSet)):
+            return False
+        if len(selector) != len(target):
+            return False
+        unmatched = list(target)
+        for sel_child in selector:
+            found_idx = None
+            for idx, tgt_child in enumerate(unmatched):
+                if selector_match(sel_child, tgt_child, strict=False) and _exact_class_match(sel_child, tgt_child):
+                    found_idx = idx
+                    break
+            if found_idx is None:
+                return False
+            unmatched.pop(found_idx)
+        return True
+
     return True
 
 
@@ -358,6 +386,10 @@ def _exact_constraints_match(cdef: ConcreteDefinition, constraints) -> bool:
             candidate = get_subtree(cdef, constraint.path)
         except QueryPathError:
             return False
+        if constraint.unordered_member:
+            if not _unordered_set_contains_exact(candidate, constraint.cdef):
+                return False
+            continue
         if not isinstance(candidate, ConcreteDefinition):
             return False
         if candidate.stable_hash() != constraint.cdef.stable_hash():
@@ -365,3 +397,18 @@ def _exact_constraints_match(cdef: ConcreteDefinition, constraints) -> bool:
         if candidate != constraint.cdef:
             return False
     return True
+
+
+def _unordered_set_contains_exact(candidate, expected: ConcreteDefinition) -> bool:
+    from ..freeze import FrozenSet
+
+    if not isinstance(candidate, (set, frozenset, FrozenSet)):
+        return False
+    for member in candidate:
+        if isinstance(member, Object):
+            member = member.definition
+        if not isinstance(member, ConcreteDefinition):
+            continue
+        if member.stable_hash() == expected.stable_hash() and member == expected:
+            return True
+    return False

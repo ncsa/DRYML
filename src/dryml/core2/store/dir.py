@@ -77,3 +77,6 @@ class DirStore(Store):
 
     def __repr__(self) -> str:
         return f"{type(self)}(dir: {self.base_dir})"
+
+    def catalog_key(self) -> str:
+        return f"{type(self).__module__}.{type(self).__qualname__}:{os.path.abspath(self.base_dir)}"

@@ -41,9 +41,14 @@ class DefinitionCatalog:
         self.generation = 0
 
     def store_id(self, store) -> StoreId:
-        sid = str(id(store))
-        self.store_by_id[sid] = store
+        sid = self._store_key(store)
+        self.store_by_id.setdefault(sid, store)
         return sid
+
+    def _store_key(self, store) -> StoreId:
+        if hasattr(store, "catalog_key"):
+            return store.catalog_key()
+        return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
 
     def sync_caches(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
         with self.lock:
@@ -64,7 +69,14 @@ class DefinitionCatalog:
 
         with self.lock:
             stores = list(self.repo.stores)
-            unseen = [store for store in stores if self.store_id(store) not in self.hydrated_stores]
+            seen = set()
+            unseen = []
+            for store in stores:
+                sid = self._store_key(store)
+                if sid in seen or sid in self.hydrated_stores:
+                    continue
+                seen.add(sid)
+                unseen.append(store)
         if not unseen:
             return
         self._hydrate_stores(unseen, stats=stats)
@@ -143,8 +155,14 @@ class DefinitionCatalog:
             if did is None:
                 return ()
             store_ids = self.replicas_by_definition.get(did, set())
-            stores = [store for store in self.repo.stores if self.store_id(store) in store_ids]
-            extras = [self.store_by_id[sid] for sid in sorted(store_ids) if self.store_by_id[sid] not in stores]
+            seen: set[StoreId] = set()
+            stores = []
+            for store in self.repo.stores:
+                sid = self.store_id(store)
+                if sid in store_ids and sid not in seen:
+                    seen.add(sid)
+                    stores.append(store)
+            extras = [self.store_by_id[sid] for sid in sorted(store_ids - seen)]
             return tuple(stores + extras)
 
     def candidate_ids(
@@ -189,23 +207,24 @@ class DefinitionCatalog:
             return candidates
 
     def _hydrate_stores(self, stores, *, stats: QueryStats | None = None) -> None:
-        collected = []
-        for store in stores:
-            sid = self.store_id(store)
-            try:
-                cdefs = tuple(store.hydrate_index())
-            except Exception as e:
-                raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
-            for cdef in cdefs:
-                if not isinstance(cdef, ConcreteDefinition):
-                    raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
-            collected.append((store, sid, cdefs))
-
         with self.lock:
             snapshot = self._snapshot_locked()
+        collected = []
         try:
+            for store in stores:
+                sid = self._store_key(store)
+                try:
+                    cdefs = tuple(store.hydrate_index())
+                except Exception as e:
+                    raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
+                for cdef in cdefs:
+                    if not isinstance(cdef, ConcreteDefinition):
+                        raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
+                collected.append((store, sid, cdefs))
+
             for store, sid, cdefs in collected:
                 with self.lock:
+                    self.store_by_id.setdefault(sid, store)
                     self.hydrated_stores.add(sid)
                 if stats is not None:
                     stats.store_scan_count += 1
@@ -220,38 +239,41 @@ class DefinitionCatalog:
     def _rebuild_from_stores(self, *, stats: QueryStats | None = None) -> None:
         stores = list(self.repo.stores)
         cached_cdefs = list(self.repo.strong_obj_cache.keys()) + list(self.repo.weak_obj_cache.keys())
-        collected = []
-        for store in stores:
-            sid = self.store_id(store)
-            try:
-                cdefs = tuple(store.hydrate_index())
-            except Exception as e:
-                raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
-            for cdef in cdefs:
-                if not isinstance(cdef, ConcreteDefinition):
-                    raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
-            collected.append((store, sid, cdefs))
-
         with self.lock:
             snapshot = self._snapshot_locked()
-            self.definitions_by_id.clear()
-            self.ids_by_cdef.clear()
-            self.ids_by_stable_hash.clear()
-            self.replicas_by_definition.clear()
-            self.stored_definitions_by_store.clear()
-            self.occurrences_by_nested.clear()
-            self.occurrences_by_owner.clear()
-            self.occurrence_by_key.clear()
-            self.postings.clear()
-            self.hydrated_stores.clear()
-            self.repo.light_index.clear()
-            self.generation += 1
 
+        collected = []
         try:
+            for store in stores:
+                sid = self._store_key(store)
+                try:
+                    cdefs = tuple(store.hydrate_index())
+                except Exception as e:
+                    raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
+                for cdef in cdefs:
+                    if not isinstance(cdef, ConcreteDefinition):
+                        raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
+                collected.append((store, sid, cdefs))
+
+            with self.lock:
+                self.definitions_by_id.clear()
+                self.ids_by_cdef.clear()
+                self.ids_by_stable_hash.clear()
+                self.replicas_by_definition.clear()
+                self.stored_definitions_by_store.clear()
+                self.occurrences_by_nested.clear()
+                self.occurrences_by_owner.clear()
+                self.occurrence_by_key.clear()
+                self.postings.clear()
+                self.hydrated_stores.clear()
+                self.repo.light_index.clear()
+                self.generation += 1
+
             for cdef in cached_cdefs:
                 self.register_cached(cdef)
             for store, sid, cdefs in collected:
                 with self.lock:
+                    self.store_by_id.setdefault(sid, store)
                     self.hydrated_stores.add(sid)
                 if stats is not None:
                     stats.store_scan_count += 1

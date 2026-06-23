@@ -94,6 +94,11 @@ class ZipStore(Store):
     def close(self) -> None:
         self._tmp.cleanup()
 
+    def catalog_key(self) -> str:
+        if isinstance(self.zip_dest, IOBase):
+            return f"{type(self).__module__}.{type(self).__qualname__}:buffer:{id(self.zip_dest)}"
+        return f"{type(self).__module__}.{type(self).__qualname__}:{os.path.abspath(os.fspath(self.zip_dest))}"
+
     def _main_def_path(self) -> str:
         return os.path.join(self.base_dir, "def.pkl")
 

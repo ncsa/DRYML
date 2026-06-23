@@ -34,6 +34,7 @@ class DefinitionResultSet:
     materializable: bool = True
     domain: str = "stored"
     explanation: QueryExplanation | None = None
+    _replicas: dict[ConcreteDefinition, tuple[Any, ...]] | None = None
 
     def __init__(
             self,
@@ -42,12 +43,17 @@ class DefinitionResultSet:
             *,
             materializable: bool = True,
             domain: str = "stored",
-            explanation: QueryExplanation | None = None):
+            explanation: QueryExplanation | None = None,
+            replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None):
         object.__setattr__(self, "repo", repo)
-        object.__setattr__(self, "_definitions", _sort_cdefs(dict.fromkeys(definitions).keys()))
+        definitions_t = _sort_cdefs(dict.fromkeys(definitions).keys())
+        object.__setattr__(self, "_definitions", definitions_t)
         object.__setattr__(self, "materializable", materializable)
         object.__setattr__(self, "domain", domain)
         object.__setattr__(self, "explanation", explanation)
+        if replicas is None:
+            replicas = {cdef: repo._query_catalog.stores_for_cdef(cdef) for cdef in definitions_t}
+        object.__setattr__(self, "_replicas", dict(replicas))
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
         return iter(self._definitions)
@@ -88,6 +94,7 @@ class DefinitionResultSet:
             definitions=self._definitions,
             materializable=self.materializable,
             domain=self.domain,
+            replicas=dict(self._replicas),
         )
         return DefinitionQuery.from_source(
             self.repo,
@@ -103,6 +110,7 @@ class DefinitionResultSet:
             tuple(self._definitions) + tuple(other._definitions),
             materializable=self.materializable and other.materializable,
             domain=self.domain,
+            replicas={**other._replicas, **self._replicas},
         )
 
     def intersection(self, other: "DefinitionResultSet") -> "DefinitionResultSet":
@@ -112,6 +120,7 @@ class DefinitionResultSet:
             [cdef for cdef in self._definitions if cdef in other],
             materializable=self.materializable and other.materializable,
             domain=self.domain,
+            replicas={cdef: self._replicas.get(cdef, ()) for cdef in self._definitions if cdef in other},
         )
 
     def objects(
@@ -140,11 +149,15 @@ class DefinitionResultSet:
         return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
 
     def replicas(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:
-        return self.repo._query_catalog.stores_for_cdef(cdef)
+        return self._replicas.get(cdef, ())
 
     def _check_compatible(self, other: "DefinitionResultSet") -> None:
         if self.repo is not other.repo:
             raise ValueError("Cannot combine result sets from different repos.")
+        if self.domain != other.domain or self.materializable != other.materializable:
+            raise ValueError(
+                "Cannot combine DefinitionResultSets with different domains or materialization semantics."
+            )
 
 
 @dataclass(frozen=True, slots=True)

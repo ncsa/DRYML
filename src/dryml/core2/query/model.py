@@ -32,6 +32,7 @@ class QueryIndexError(QueryError):
 class ExactSubtreeConstraint:
     path: DefinitionPath
     cdef: Any
+    unordered_member: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +124,7 @@ class ResultUniverse:
     occurrences: tuple[DefinitionOccurrence, ...] = ()
     materializable: bool = False
     domain: str = "stored"
+    replicas: dict[Any, tuple[Any, ...]] | None = None
 
 
 @dataclass(slots=True)

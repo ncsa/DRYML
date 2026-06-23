@@ -100,3 +100,36 @@ def test_union_and_intersection_are_deterministic_and_deduplicate(tmp_path):
 
     assert first_rs.union(first_rs).count() == 1
     assert list(all_rs.intersection(first_rs)) == [first.definition]
+
+
+def test_union_rejects_incompatible_result_domains(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = ResultLeaf("child", repo=repo)
+    parent = ResultParent(child, repo=repo)
+    repo.save_object(parent)
+
+    stored = repo.find_defs(None, scope="stored")
+    nested = repo.query(Definition(ResultLeaf, SKIP_ARGS)).nested().definitions().defs()
+
+    with pytest.raises(ValueError, match="different domains"):
+        stored.union(nested)
+    with pytest.raises(ValueError, match="different domains"):
+        nested.intersection(stored)
+
+
+def test_resultset_replica_metadata_is_snapshotted(tmp_path):
+    store1 = DirStore(tmp_path / "store1")
+    store2 = DirStore(tmp_path / "store2")
+    repo = Repo(stores=[store1, store2])
+    obj = ResultLeaf("snap", repo=repo)
+    repo.save_object(obj, store=store1)
+
+    snapshot = repo.find_defs(None)
+    assert len(snapshot.replicas(obj.definition)) == 1
+
+    repo.save_object(obj, store=store2)
+    current = repo.find_defs(None, refresh=False)
+
+    assert len(snapshot.replicas(obj.definition)) == 1
+    assert len(current.replicas(obj.definition)) == 2

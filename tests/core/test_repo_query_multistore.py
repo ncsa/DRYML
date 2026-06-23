@@ -51,6 +51,19 @@ def test_same_cdef_in_two_stores_deduplicates_and_tracks_replicas(tmp_path):
     assert len(results.replicas(obj.definition)) == 2
 
 
+def test_equivalent_store_instances_share_physical_identity(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MultiLeaf("same", repo=repo)
+    repo.save_object(obj)
+
+    repo2 = Repo(stores=[DirStore(store.base_dir), DirStore(store.base_dir)])
+    results = repo2.find_defs(None)
+
+    assert list(results) == [obj.definition]
+    assert len(results.replicas(obj.definition)) == 1
+
+
 def test_materialization_uses_store_priority_for_replicated_cdef(tmp_path):
     store1 = DirStore(tmp_path / "store1")
     store2 = DirStore(tmp_path / "store2")

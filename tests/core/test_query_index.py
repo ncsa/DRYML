@@ -1,4 +1,5 @@
 import pytest
+import shutil
 
 from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core2.query import QueryIndexError
@@ -117,11 +118,16 @@ def test_refresh_failure_rolls_back_catalog_atomically(tmp_path):
     assert list(old_results) == [good.definition]
 
     repo.add_store(BadIndexStore([good.definition, "not-a-cdef"]))
+    before = catalog_state(repo)
 
     with pytest.raises(QueryIndexError):
         repo.find_defs(None, refresh=True)
 
+    assert catalog_state(repo) == before
     assert list(repo.find_defs(None, refresh=False)) == [good.definition]
+
+    repo.stores = [good_store]
+    assert list(repo.find_defs(None, refresh=True)) == [good.definition]
 
 
 def test_nested_definition_inside_set_is_indexed_with_defined_path(tmp_path):
@@ -137,3 +143,35 @@ def test_nested_definition_inside_set_is_indexed_with_defined_path(tmp_path):
     assert occurrences.count() == 1
     assert occurrences.one().definition == child.definition
     assert str(occurrences.one().path) == "$.args[0][0]"
+
+
+def test_forced_refresh_removes_deleted_root_and_occurrences(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    repo2 = Repo(stores=DirStore(store.base_dir))
+    assert repo2.find_defs(None).count() == 1
+    assert repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS)).count() == 1
+
+    shutil.rmtree(store.object_dir(parent.definition))
+
+    assert repo2.find_defs(None, refresh=True).count() == 0
+    assert repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS), refresh=False).count() == 0
+
+
+def catalog_state(repo):
+    catalog = repo._query_catalog
+    return {
+        "definitions": tuple(sorted(catalog.definitions_by_id.keys())),
+        "replicas": tuple(sorted((k, tuple(sorted(v))) for k, v in catalog.replicas_by_definition.items())),
+        "stored_by_store": tuple(sorted((k, tuple(sorted(v))) for k, v in catalog.stored_definitions_by_store.items())),
+        "occurrences": tuple(sorted((k[0], str(k[1]), k[2]) for k in catalog.occurrence_by_key.keys())),
+        "postings": tuple(sorted((repr(k), tuple(sorted(v.items()))) for k, v in catalog.postings.items())),
+        "hydrated": tuple(sorted(catalog.hydrated_stores)),
+        "store_by_id": tuple(sorted(catalog.store_by_id.keys())),
+        "light_index": tuple(sorted(cdef.stable_hash() for cdef in repo.light_index)),
+        "generation": catalog.generation,
+    }
