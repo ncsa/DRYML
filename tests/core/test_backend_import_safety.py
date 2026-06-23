@@ -54,3 +54,36 @@ assert torch_spec.layout == "torch.strided"
 assert "torch" not in sys.modules
         """
     )
+
+
+def test_query_indexing_canonical_refs_does_not_import_backends():
+    _run_import_probe(
+        """
+import sys
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+
+from dryml.core2 import Repo
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query.fingerprint import target_fingerprint
+from dryml.core2.symbol import ImportRef
+
+cdef = ConcreteDefinition(
+    ImportRef("dryml.models.tf.keras.base", "Sequential"),
+    FrozenTuple(()),
+    FrozenDict({"layer_defs": FrozenTuple(())}),
+)
+
+repo = Repo()
+repo._query_catalog.register_cached(cdef)
+target_fingerprint(cdef)
+assert repo._query_catalog.cdef_id(cdef) is not None
+assert repo.query(cdef).cached().count() == 0
+repo.query(cdef).cached().explain()
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )

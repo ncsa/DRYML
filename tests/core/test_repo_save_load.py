@@ -26,10 +26,13 @@ def test_save_1(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.get(restore_state=False)) == 0
+    assert len(repo.find_defs(None, refresh=False)) == 0
+    assert repo._num_constructions == 0
 
-    # But storage *does* have content; hydrate index into cache
-    repo.hydrate_from_stores()
+    # Auto discovery finds definitions without materializing objects.
+    defs = repo.find_defs(None)
+    assert len(defs) == 1
+    assert repo._num_constructions == 0
     assert len(repo.light_index) == 1
 
     # Save again should be no-op-ish and not corrupt anything
@@ -40,8 +43,7 @@ def test_save_1(primary_store_set):
 
     # Still exactly one stored object after reopening again
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
-    repo.hydrate_from_stores()
-    assert len(repo.light_index) == 1
+    assert len(repo.find_defs(None)) == 1
 
     # Test that we can load a single object
     objs_loaded = repo.get(restore_state=True)
@@ -66,11 +68,9 @@ def test_save_2(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    try:
-        result = repo.get(build_missing=False)
-        assert len(result) == 0
-    except KeyError:
-        pass
+    assert len(repo.find_defs(None, refresh=False)) == 0
+    result = repo.get(build_missing=False)
+    assert len(result) == 1
 
     repo.save()
 
@@ -93,11 +93,9 @@ def test_save_3(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    try:
-        result = repo.get(build_missing=False)
-        assert len(result) == 0
-    except KeyError:
-        pass
+    assert len(repo.find_defs(None, refresh=False)) == 0
+    result = repo.get(build_missing=False)
+    assert len(result) == 1
 
     repo.save()
 
@@ -136,21 +134,21 @@ def test_save_4(prep_and_clean_test_dir2):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(dir1)
 
-    try:
-        results = repo.get(build_missing=True)
-        assert len(results) == 0
-    except KeyError:
-        pass
+    assert len(repo.find_defs(None)) == 1
+    with pytest.raises(ValueError, match="load_or_build"):
+        repo.get(build_missing=True)
 
     del repo
 
     repo = dryml.core2.Repo(dir2)
 
-    try:
-        results = repo.get(build_missing=True)
-        assert len(results) == 0
-    except KeyError:
-        pass
+    assert len(repo.find_defs(None)) == 1
+    with pytest.raises(ValueError, match="load_or_build"):
+        repo.get(build_missing=True)
+
+    repo = dryml.core2.Repo([dir1, dir2])
+    assert len(repo.find_defs(None)) == 2
+    assert len(repo.get()) == 2
 
     assert len(dryml.core2.Repo.dir_store_inspect(dir1)) == 1
     assert len(dryml.core2.Repo.dir_store_inspect(dir2)) == 1

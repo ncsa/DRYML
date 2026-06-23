@@ -243,6 +243,7 @@ class RepoSaveVisitor(RepoStructuralVisitor):
             revision_str = self.revision.get(cdef, None)
             store.save_object(obj, revision=revision_str)
             self.saved_objs[id(store)].add(cdef)
+            self.repo._query_catalog.register_stored_graph(cdef, store)
             self.repo._num_saves += 1
 
     def _should_save_object(self, obj: Object, ctx: GraphCtx) -> bool:

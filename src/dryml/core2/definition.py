@@ -64,11 +64,11 @@ class DefInterface(ABC):
         from .repo import manage_repo
         with manage_repo(repo=repo) as sub_repo:
             concrete_def = self.concretize(repo=sub_repo)
-            return sub_repo.load_object(
+            loader = sub_repo.load_or_build if build_missing else sub_repo.load
+            return loader(
                 concrete_def,
                 instance=instance,
                 restore_state=restore_state,
-                build_missing=build_missing,
                 reuse_weak=reuse_weak,
                 cache=cache,
                 revision=revision)

@@ -27,6 +27,8 @@ from .repo_graph import (
 )
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
+from .query.index import DefinitionCatalog
+from .query.result import ObjectResultSet
 
 
 class RepoSaveError(Exception):
@@ -92,6 +94,7 @@ class Repo:
         self.obj_config = {}
         self.config = dict(config or {})
         self.alias_index = {}
+        self._query_catalog = DefinitionCatalog(self)
 
         # Some helper variables for monitoring
         self._num_saves = 0
@@ -162,9 +165,11 @@ class Repo:
 
     def cache_strong(self, obj: Object) -> None:
         self.strong_obj_cache[obj.__cdef__] = obj
+        self._query_catalog.register_cached(obj.__cdef__)
 
     def cache_weak(self, obj: Object) -> None:
         self.weak_obj_cache[obj.__cdef__] = obj
+        self._query_catalog.register_cached(obj.__cdef__)
 
     # --- helpers you already have ---
     def get_cached(self, cdef, *, reuse_weak: bool = True):
@@ -180,6 +185,7 @@ class Repo:
         cdef = obj.__cdef__
         self.strong_obj_cache[cdef] = obj
         self.weak_obj_cache.pop(cdef, None)
+        self._query_catalog.register_cached(cdef)
 
     def unpin(self, obj_or_cdef):
         """Demote to weak cache."""
@@ -187,6 +193,7 @@ class Repo:
         obj = self.strong_obj_cache.pop(cdef, None)
         if obj is not None:
             self.weak_obj_cache[cdef] = obj
+            self._query_catalog.register_cached(cdef)
 
     def _load_aliases_from_stores(self) -> None:
         for store in self.stores:
@@ -362,9 +369,11 @@ class Repo:
         Ask each store to enumerate all cdefs it has.
         Populate obj_cache[cdef] = None for those not already present.
         """
-        for store in self.stores:
-            for cdef in store.hydrate_index():
-                self.light_index.add(cdef)
+        self._query_catalog.refresh(True)
+
+    def refresh_index(self, *, force: bool = True):
+        self._query_catalog.refresh(True if force else "auto")
+        return self
 
     def __len__(self):
         return len(self.strong_obj_cache)
@@ -743,7 +752,21 @@ class Repo:
             memo=memo,
         )
 
+    def load(self, cdef: ConcreteDefinition, **kwargs) -> Object:
+        if not isinstance(cdef, ConcreteDefinition):
+            raise TypeError("Repo.load requires an exact ConcreteDefinition.")
+        if kwargs.get("options") is not None:
+            kwargs["options"] = replace(kwargs["options"], build_missing=False)
+        kwargs["build_missing"] = False
+        return self.load_object(cdef, **kwargs)
+
     def load_or_build(self, x: object, **kwargs):
+        if isinstance(x, Object):
+            x = x.definition
+        elif isinstance(x, Definition):
+            x = x.concretize(repo=self)
+        elif not isinstance(x, ConcreteDefinition):
+            raise TypeError("Repo.load_or_build requires a Definition, ConcreteDefinition, or Object.")
         if kwargs.get("options") is not None:
             kwargs["options"] = replace(kwargs["options"], build_missing=True)
         kwargs["build_missing"] = True
@@ -765,7 +788,7 @@ class Repo:
         in_cache = cdef in self.strong_obj_cache
         if not in_cache and weak:
             in_cache = cdef in self.weak_obj_cache
-        in_store = cdef in self.light_index
+        in_store = cdef in self.light_index or bool(self._query_catalog.stores_for_cdef(cdef))
         return in_cache or in_store
 
     def __getitem__(
@@ -775,11 +798,86 @@ class Repo:
 
         if unpack is true, plain objects are returned
         """
-        result = self.get(key)
+        if not isinstance(key, ConcreteDefinition):
+            raise TypeError("Repo.__getitem__ requires a ConcreteDefinition key.")
+        result = self.query(key).known().objects()
         if len(result) == 0:
             raise KeyError(f"Repo doesn't contain an object with definition {key}")
+        return result.one()
+
+    def query(self, selector=None):
+        from .query import DefinitionQuery
+
+        return DefinitionQuery.from_source(self, selector)
+
+    def find_defs(
+            self,
+            selector=None,
+            *,
+            scope: str = "stored",
+            refresh="auto",
+            class_match: str = "selector"):
+        q = self.query(selector).class_match(class_match).refresh(refresh)
+        if scope == "stored":
+            return q.stored().defs()
+        if scope == "known":
+            return q.known().defs()
+        if scope == "cached":
+            return q.cached().defs()
+        if scope == "nested":
+            return q.nested().definitions().defs()
+        raise ValueError("scope must be 'stored', 'known', 'cached', or 'nested'.")
+
+    def find_occurrences(
+            self,
+            selector=None,
+            *,
+            refresh="auto",
+            class_match: str = "selector"):
+        return self.query(selector).class_match(class_match).refresh(refresh).nested().execute()
+
+    def find_owner_defs(
+            self,
+            selector=None,
+            *,
+            refresh="auto",
+            class_match: str = "selector"):
+        return self.query(selector).class_match(class_match).refresh(refresh).nested().owners().defs()
+
+    def find(
+            self,
+            selector=None,
+            *,
+            scope: str = "stored",
+            refresh="auto",
+            class_match: str = "selector",
+            **load_options):
+        q = self.query(selector).class_match(class_match).refresh(refresh)
+        if scope == "stored":
+            q = q.stored()
+        elif scope == "known":
+            q = q.known()
+        elif scope == "cached":
+            q = q.cached()
         else:
-            return list(self.get(key).values())[0]
+            raise ValueError("scope must be 'stored', 'known', or 'cached'.")
+        return q.objects(**load_options)
+
+    def find_owners(
+            self,
+            selector=None,
+            *,
+            refresh="auto",
+            class_match: str = "selector",
+            **load_options):
+        return (
+            self.query(selector)
+            .class_match(class_match)
+            .refresh(refresh)
+            .nested()
+            .owners()
+            .objects(**load_options)
+        )
 
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
@@ -791,7 +889,7 @@ class Repo:
             cache: CachePolicy = "weak",
             revision: RevisionType | str | None = None,
             options: RepoLoadOptions | None = None,
-            verbose: bool = True) -> dict[ConcreteDefinition, Object]:
+            verbose: bool = True) -> ObjectResultSet:
         if sel_args is None:
             sel_args = []
         if sel_kwargs is None:
@@ -805,47 +903,28 @@ class Repo:
             cache=cache,
             revision=revision,
         )
+        if load_options.build_missing:
+            raise ValueError("Repo.get selects existing objects only; use Repo.load_or_build for construction.")
         selectors = self._selector_tuple(selector)
         if isinstance(load_options.revision, str):
             raise ValueError("plain string revisions aren't supported in `get`.")
-        candidate_cdefs = self._candidate_cdefs(reuse_weak=load_options.reuse_weak)
-
-        def get_obj(cdef: ConcreteDefinition) -> Object | None:
-            return self._materialize_cdef(
-                cdef,
-                options=load_options,
-            )
-
-        selected_objects = {}
+        selected_objects: dict[ConcreteDefinition, Object] = {}
         for sel in selectors:
-            if isinstance(sel, ConcreteDefinition):
-                if sel in selected_objects:
-                    continue
-                obj = get_obj(sel)
-                if obj is not None:
-                    selected_objects[sel] = obj
-            elif isinstance(sel, Definition):
-                for cdef in candidate_cdefs:
-                    if sel(cdef, *sel_args, **sel_kwargs):
-                        if cdef in selected_objects:
-                            continue
-                        obj = get_obj(cdef)
-                        if obj is not None:
-                            selected_objects[cdef] = obj
-            elif isinstance(sel, Callable):
-                for cdef in candidate_cdefs:
-                    if cdef in self.strong_obj_cache:
-                        if sel(self.strong_obj_cache[cdef], *sel_args, **sel_kwargs):
-                            selected_objects[cdef] = self.strong_obj_cache[cdef]
-            elif sel is None:
-                for cdef in candidate_cdefs:
-                    obj = get_obj(cdef)
-                    if obj is not None:
+            if isinstance(sel, Callable) and not isinstance(sel, (Definition, ConcreteDefinition)):
+                for cdef, obj in self.strong_obj_cache.items():
+                    if sel(obj, *sel_args, **sel_kwargs):
                         selected_objects[cdef] = obj
-            else:
-                raise TypeError("sel is of incorrect type.")
+                continue
 
-        return selected_objects
+            objs = (
+                self.query(sel)
+                .known()
+                .reuse_weak(load_options.reuse_weak)
+                .objects(options=load_options)
+            )
+            selected_objects.update(objs)
+
+        return ObjectResultSet(self, selected_objects, domain="known")
 
     def apply(self,
               func, func_args=None, func_kwargs=None,
