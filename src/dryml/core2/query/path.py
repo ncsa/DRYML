@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from ..definition import ConcreteDefinition, Definition, SKIP_ARGS
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from ..utils.stable_hash import stable_hash_function
 
 
 class QueryPathError(Exception):
@@ -290,6 +291,11 @@ def _get_child(obj: Any, seg: PathSegment) -> Any:
         if isinstance(seg, Index):
             return obj[seg.index]
         raise TypeError(f"{seg!s} is not valid on a sequence.")
+
+    if isinstance(obj, (set, frozenset, FrozenSet)):
+        if isinstance(seg, Index):
+            return sorted(obj, key=lambda value: (stable_hash_function(value), repr(value)))[seg.index]
+        raise TypeError(f"{seg!s} is not valid on a set.")
 
     raise TypeError(f"Cannot traverse into {type(obj).__name__}.")
 

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from inspect import isclass
 from typing import Any
 
-from ..canonical import NodeKind, matching_container_family, node_kind
 from ..definition import ConcreteDefinition, Definition
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
@@ -63,15 +61,42 @@ def _add(counts: Counter[FeatureToken], kind: str, path: DefinitionPath | None, 
 
 
 def _container_family(value: Any) -> str | None:
-    if isinstance(value, (list, FrozenList)):
-        return "list"
+    families = _target_container_families(value)
+    return families[0] if families else None
+
+
+def _target_container_families(value: Any) -> tuple[str, ...]:
+    if isinstance(value, FrozenList):
+        # FrozenList is a tuple subclass. Current selector matching lets both
+        # list and tuple selectors match it, so target fingerprints must expose
+        # both families to avoid false negatives.
+        return ("list", "tuple")
+    if isinstance(value, list):
+        return ("list",)
     if isinstance(value, (tuple, FrozenTuple)):
-        return "tuple"
+        return ("tuple",)
     if isinstance(value, (set, frozenset, FrozenSet)):
-        return "set"
+        return ("set",)
     if isinstance(value, (dict, FrozenDict)):
-        return "dict"
-    return None
+        return ("dict",)
+    return ()
+
+
+def _selector_container_families(value: Any) -> tuple[str, ...]:
+    if isinstance(value, FrozenList):
+        # A FrozenList selector is compatible with multiple sequence families
+        # through Python tuple subclassing. The current inverted index only
+        # supports conjunctive requirements, so no single family token is safe.
+        return ()
+    if isinstance(value, list):
+        return ("list",)
+    if isinstance(value, (tuple, FrozenTuple)):
+        return ("tuple",)
+    if isinstance(value, (set, frozenset, FrozenSet)):
+        return ("set",)
+    if isinstance(value, (dict, FrozenDict)):
+        return ("dict",)
+    return ()
 
 
 def _mapping_items(value: Any):
@@ -100,18 +125,20 @@ def _fingerprint_target_value(value: Any, path: DefinitionPath, counts: Counter[
             _fingerprint_target_value(child, path.child(Kwarg(key)), counts)
         return
 
-    family = _container_family(value)
-    if family is not None:
-        _add(counts, "CONTAINER_KIND", path, family)
-        if family in {"list", "tuple", "set"}:
+    families = _target_container_families(value)
+    if families:
+        for family in families:
+            _add(counts, "CONTAINER_KIND", path, family)
+        primary_family = families[0]
+        if primary_family in {"list", "tuple", "set"}:
             _add(counts, "SEQUENCE_LENGTH", path, len(value))
-        if family == "dict":
+        if primary_family == "dict":
             for key, child in _mapping_items(value):
                 key_hash = scalar_key(key)
                 if key_hash is not None:
                     _add(counts, "HAS_MAPPING_KEY", path, key_hash)
                 _fingerprint_target_value(child, path.child(Key(key)), counts)
-        elif family != "set":
+        elif primary_family != "set":
             for idx, child in _sequence_items(value):
                 _fingerprint_target_value(child, path.child(Index(idx)), counts)
         return
@@ -150,18 +177,20 @@ def _fingerprint_selector_value(
             _fingerprint_selector_value(child, path.child(Kwarg(key)), counts, class_match=class_match)
         return
 
-    family = _container_family(value)
-    if family is not None:
-        _add(counts, "CONTAINER_KIND", path, family)
-        if family in {"list", "tuple", "set"}:
+    families = _selector_container_families(value)
+    if families:
+        primary_family = families[0]
+        for family in families:
+            _add(counts, "CONTAINER_KIND", path, family)
+        if primary_family in {"list", "tuple", "set"}:
             _add(counts, "SEQUENCE_LENGTH", path, len(value))
-        if family == "dict":
+        if primary_family == "dict":
             for key, child in _mapping_items(value):
                 key_hash = scalar_key(key)
                 if key_hash is not None:
                     _add(counts, "HAS_MAPPING_KEY", path, key_hash)
                 _fingerprint_selector_value(child, path.child(Key(key)), counts, class_match=class_match)
-        elif family != "set":
+        elif primary_family != "set":
             for idx, child in _sequence_items(value):
                 _fingerprint_selector_value(child, path.child(Index(idx)), counts, class_match=class_match)
         return

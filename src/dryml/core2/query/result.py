@@ -92,7 +92,7 @@ class DefinitionResultSet:
         return DefinitionQuery.from_source(
             self.repo,
             selector,
-            domain="stored",
+            domain=self.domain,
             universe=universe,
         )
 

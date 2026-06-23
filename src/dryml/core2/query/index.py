@@ -6,6 +6,7 @@ from typing import Any
 
 from ..definition import ConcreteDefinition
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from ..utils.stable_hash import stable_hash_function
 from .fingerprint import canonical_class_key, target_fingerprint
 from .model import (
     DefinitionId,
@@ -188,26 +189,51 @@ class DefinitionCatalog:
             return candidates
 
     def _hydrate_stores(self, stores, *, stats: QueryStats | None = None) -> None:
+        collected = []
         for store in stores:
             sid = self.store_id(store)
             try:
                 cdefs = tuple(store.hydrate_index())
             except Exception as e:
                 raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
-            with self.lock:
-                self.hydrated_stores.add(sid)
-            if stats is not None:
-                stats.store_scan_count += 1
-                stats.refresh_action = "hydrate"
             for cdef in cdefs:
                 if not isinstance(cdef, ConcreteDefinition):
                     raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
-                self.register_stored_graph(cdef, store)
+            collected.append((store, sid, cdefs))
+
+        with self.lock:
+            snapshot = self._snapshot_locked()
+        try:
+            for store, sid, cdefs in collected:
+                with self.lock:
+                    self.hydrated_stores.add(sid)
+                if stats is not None:
+                    stats.store_scan_count += 1
+                    stats.refresh_action = "hydrate"
+                for cdef in cdefs:
+                    self.register_stored_graph(cdef, store)
+        except Exception:
+            with self.lock:
+                self._restore_locked(snapshot)
+            raise
 
     def _rebuild_from_stores(self, *, stats: QueryStats | None = None) -> None:
         stores = list(self.repo.stores)
         cached_cdefs = list(self.repo.strong_obj_cache.keys()) + list(self.repo.weak_obj_cache.keys())
+        collected = []
+        for store in stores:
+            sid = self.store_id(store)
+            try:
+                cdefs = tuple(store.hydrate_index())
+            except Exception as e:
+                raise QueryIndexError(f"Failed to hydrate query index from store {store!r}: {e}") from e
+            for cdef in cdefs:
+                if not isinstance(cdef, ConcreteDefinition):
+                    raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
+            collected.append((store, sid, cdefs))
+
         with self.lock:
+            snapshot = self._snapshot_locked()
             self.definitions_by_id.clear()
             self.ids_by_cdef.clear()
             self.ids_by_stable_hash.clear()
@@ -221,11 +247,22 @@ class DefinitionCatalog:
             self.repo.light_index.clear()
             self.generation += 1
 
-        for cdef in cached_cdefs:
-            self.register_cached(cdef)
-        self._hydrate_stores(stores, stats=stats)
-        if stats is not None:
-            stats.refresh_action = "forced-refresh"
+        try:
+            for cdef in cached_cdefs:
+                self.register_cached(cdef)
+            for store, sid, cdefs in collected:
+                with self.lock:
+                    self.hydrated_stores.add(sid)
+                if stats is not None:
+                    stats.store_scan_count += 1
+                for cdef in cdefs:
+                    self.register_stored_graph(cdef, store)
+            if stats is not None:
+                stats.refresh_action = "forced-refresh"
+        except Exception:
+            with self.lock:
+                self._restore_locked(snapshot)
+            raise
 
     def _register_definition_locked(self, cdef: ConcreteDefinition) -> DefinitionId:
         existing = self.ids_by_cdef.get(cdef)
@@ -303,5 +340,48 @@ class DefinitionCatalog:
             return
 
         if isinstance(value, (FrozenSet, set, frozenset)):
-            # Set occurrence paths are intentionally omitted because set order is unstable.
+            for idx, child in enumerate(_sorted_set_values(value)):
+                self._walk_nested_locked(owner_id, child, path.child(Index(idx)), stack=stack)
             return
+
+    def _snapshot_locked(self):
+        return {
+            "definitions_by_id": dict(self.definitions_by_id),
+            "ids_by_cdef": dict(self.ids_by_cdef),
+            "ids_by_stable_hash": defaultdict(set, {k: set(v) for k, v in self.ids_by_stable_hash.items()}),
+            "replicas_by_definition": defaultdict(set, {k: set(v) for k, v in self.replicas_by_definition.items()}),
+            "stored_definitions_by_store": defaultdict(set, {k: set(v) for k, v in self.stored_definitions_by_store.items()}),
+            "occurrences_by_nested": defaultdict(set, {k: set(v) for k, v in self.occurrences_by_nested.items()}),
+            "occurrences_by_owner": defaultdict(set, {k: set(v) for k, v in self.occurrences_by_owner.items()}),
+            "occurrence_by_key": dict(self.occurrence_by_key),
+            "postings": defaultdict(dict, {k: dict(v) for k, v in self.postings.items()}),
+            "store_by_id": dict(self.store_by_id),
+            "hydrated_stores": set(self.hydrated_stores),
+            "generation": self.generation,
+            "light_index": set(self.repo.light_index),
+        }
+
+    def _restore_locked(self, snapshot) -> None:
+        self.definitions_by_id = dict(snapshot["definitions_by_id"])
+        self.ids_by_cdef = dict(snapshot["ids_by_cdef"])
+        self.ids_by_stable_hash = defaultdict(set, {k: set(v) for k, v in snapshot["ids_by_stable_hash"].items()})
+        self.replicas_by_definition = defaultdict(set, {k: set(v) for k, v in snapshot["replicas_by_definition"].items()})
+        self.stored_definitions_by_store = defaultdict(set, {k: set(v) for k, v in snapshot["stored_definitions_by_store"].items()})
+        self.occurrences_by_nested = defaultdict(set, {k: set(v) for k, v in snapshot["occurrences_by_nested"].items()})
+        self.occurrences_by_owner = defaultdict(set, {k: set(v) for k, v in snapshot["occurrences_by_owner"].items()})
+        self.occurrence_by_key = dict(snapshot["occurrence_by_key"])
+        self.postings = defaultdict(dict, {k: dict(v) for k, v in snapshot["postings"].items()})
+        self.store_by_id = dict(snapshot["store_by_id"])
+        self.hydrated_stores = set(snapshot["hydrated_stores"])
+        self.generation = snapshot["generation"]
+        self.repo.light_index.clear()
+        self.repo.light_index.update(snapshot["light_index"])
+
+
+def _sorted_set_values(values):
+    try:
+        return sorted(values, key=lambda value: (stable_hash_function(value), repr(value)))
+    except TypeError as e:
+        raise QueryIndexError(
+            "Cannot index nested definitions inside a set containing non-stably-hashable values."
+        ) from e

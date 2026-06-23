@@ -6,7 +6,7 @@ from typing import Any
 
 from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
 from ..object import Object
-from .fingerprint import collect_exact_constraints, requirements_satisfied, selector_requirements
+from .fingerprint import collect_exact_constraints, selector_requirements
 from .model import (
     ClassMatchPolicy,
     DefinitionOccurrence,
@@ -140,11 +140,16 @@ class DefinitionQuery:
 
         cdefs, stats = self._execute_definition_domain()
         explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+        materializable = True
+        domain = self.domain or "stored"
+        if self.universe is not None:
+            materializable = self.universe.materializable
+            domain = self.universe.domain
         return DefinitionResultSet(
             self.repo,
             cdefs,
-            materializable=True,
-            domain=self.domain or "stored",
+            materializable=materializable,
+            domain=domain,
             explanation=explanation,
         )
 
@@ -281,17 +286,70 @@ def _snapshot_source(source):
 
 
 def _structural_match(selector, cdef: ConcreteDefinition, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
-    if class_match == "exact" and isinstance(selector, Definition) and selector.cls is not None:
-        # The fingerprint exact-class filter is the fast path, but refinement over
-        # a snapshot may bypass the catalog. Confirm the root class key here.
-        from .fingerprint import canonical_class_key
+    if not selector_match(selector, cdef, strict=strict):
+        return False
+    if class_match == "exact" and not _exact_class_match(selector, cdef):
+        return False
+    return True
 
-        try:
-            if canonical_class_key(selector.cls) != canonical_class_key(cdef.cls):
+
+def _exact_class_match(selector, target) -> bool:
+    from .fingerprint import canonical_class_key
+    from ..freeze import FrozenDict, FrozenList, FrozenTuple
+
+    if isinstance(selector, Object):
+        selector = selector.definition
+    if isinstance(target, Object):
+        target = target.definition
+
+    if isinstance(selector, ConcreteDefinition):
+        return True
+
+    if isinstance(selector, Definition):
+        if not isinstance(target, (Definition, ConcreteDefinition)):
+            return False
+        if selector.cls is not None:
+            try:
+                if canonical_class_key(selector.cls) != canonical_class_key(target.cls):
+                    return False
+            except TypeError:
+                pass
+        if selector.args is not None:
+            if target.args is None or len(selector.args) != len(target.args):
                 return False
-        except TypeError:
-            pass
-    return selector_match(selector, cdef, strict=strict)
+            for sel_child, tgt_child in zip(selector.args, target.args):
+                if not _exact_class_match(sel_child, tgt_child):
+                    return False
+        for key, sel_child in selector.kwargs.items():
+            if key not in target.kwargs:
+                return False
+            if not _exact_class_match(sel_child, target.kwargs[key]):
+                return False
+        return True
+
+    if isinstance(selector, (dict, FrozenDict)):
+        if not isinstance(target, (dict, FrozenDict)):
+            return False
+        for key, sel_child in selector.items():
+            if key not in target:
+                return False
+            if not _exact_class_match(sel_child, target[key]):
+                return False
+        return True
+
+    if isinstance(selector, (list, tuple, FrozenList, FrozenTuple)):
+        if not isinstance(target, (list, tuple, FrozenList, FrozenTuple)):
+            return False
+        if len(selector) != len(target):
+            return False
+        for sel_child, tgt_child in zip(selector, target):
+            if not _exact_class_match(sel_child, tgt_child):
+                return False
+        return True
+
+    # Set selectors are matched unordered by selector_match; no path-stable class
+    # constraint can be derived here without reimplementing the set matcher.
+    return True
 
 
 def _exact_constraints_match(cdef: ConcreteDefinition, constraints) -> bool:
