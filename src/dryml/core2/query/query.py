@@ -11,6 +11,7 @@ from ..object import Object
 from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..utils.types import is_nonclass_callable
 from .fingerprint import collect_exact_constraints, selector_requirements
+from .graph_plan import graph_candidate_ids
 from .model import (
     ClassMatchPolicy,
     DefinitionOccurrence,
@@ -24,6 +25,7 @@ from .model import (
 )
 from .path import DefinitionPathLike, QueryPathError, get_subtree, normalize_path, replace_subtree
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
+from .selector_graph import compile_selector_graph
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,8 +234,12 @@ class DefinitionQuery:
             raise QueryDomainError(f"Unsupported definition domain {self.domain!r}.")
 
         stats.universe_size = len(universe_ids)
-        requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-        candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
+        selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
+        if selector_graph is not None:
+            candidate_ids = graph_candidate_ids(catalog, selector_graph, universe_ids, stats=stats)
+        else:
+            requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
+            candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         stats.result_count = len(matches)
@@ -258,8 +264,12 @@ class DefinitionQuery:
         catalog.refresh(self.refresh_policy, stats=stats)
         universe_ids = catalog.nested_ids()
         stats.universe_size = len(universe_ids)
-        requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-        candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
+        selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
+        if selector_graph is not None:
+            candidate_ids = graph_candidate_ids(catalog, selector_graph, universe_ids, stats=stats)
+        else:
+            requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
+            candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         match_ids = {catalog.cdef_id(cdef) for cdef in matches}

@@ -154,3 +154,51 @@ assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
         """
     )
+
+
+def test_graph_building_and_planning_canonical_refs_does_not_import_backends():
+    _run_import_probe(
+        """
+import sys
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query.fingerprint import target_local_fingerprint
+from dryml.core2.query.selector_graph import compile_selector_graph
+from dryml.core2.symbol import ImportRef
+
+child = ConcreteDefinition(
+    ImportRef("dryml.models.tf.keras.base", "Sequential"),
+    FrozenTuple(()),
+    FrozenDict({"layer_defs": FrozenTuple(())}),
+)
+root = ConcreteDefinition(
+    ImportRef("dryml.models.torch.base", "Model"),
+    FrozenTuple(()),
+    FrozenDict({"child": child}),
+)
+
+class FakeStore:
+    def catalog_key(self):
+        return "fake-graph-store"
+
+graph = ConcreteDefinitionGraph.from_root(root)
+assert len(graph.nodes()) == 2
+target_local_fingerprint(root)
+compile_selector_graph(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child))
+
+repo = Repo()
+repo._query_catalog.register_stored_graph(root, FakeStore())
+assert repo.query(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child)).stored(refresh=False).count() == 1
+assert repo.query(child).nested(refresh=False).owners().defs().count() == 1
+repo.query(child).nested(refresh=False).owners().defs().explanation.format()
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )

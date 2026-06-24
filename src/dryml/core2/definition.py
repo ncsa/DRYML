@@ -457,6 +457,8 @@ class SelectorMatcher(GraphMatcher):
     # ------------------------------------------------------------------
 
     def _render(self, ctx: GraphCtx) -> str:
+        if hasattr(ctx.path, "legacy_tuple"):
+            return render_path(list(ctx.path.legacy_tuple()), None)
         return render_path(list(ctx.path), None)
 
     def _print(self, ctx: GraphCtx, msg: str) -> None:

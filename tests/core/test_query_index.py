@@ -3,10 +3,13 @@ import shutil
 
 from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.query import QueryIndexError
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query import QueryIndexError, SetMember
+from dryml.core2.query.path import get_subtree
 from dryml.core2.store.dir import DirStore
 from dryml.core2.store.store import Store
 from dryml.core2.utils.general import pickle_load, pickle_save
+from dryml.core2.utils.stable_hash import stable_hash_function
 
 
 class IndexLeaf(Object):
@@ -94,6 +97,63 @@ def test_same_cdef_in_two_stores_has_one_record_and_two_replicas(tmp_path):
     assert len(results.replicas(obj.definition)) == 2
 
 
+def test_graph_registration_records_direct_edges_once():
+    repo = Repo()
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+
+    repo._query_catalog.register_cached(parent.definition)
+    repo._query_catalog.register_cached(parent.definition)
+
+    catalog = repo._query_catalog
+    parent_id = catalog.cdef_id(parent.definition)
+    child_id = catalog.cdef_id(child.definition)
+
+    assert len(catalog.edge_by_key) == 1
+    edge = next(iter(catalog.edge_by_key.values()))
+    assert edge.parent_id == parent_id
+    assert edge.child_id == child_id
+    assert str(edge.path) == "$.args[0]"
+
+
+def test_shared_child_local_fingerprint_compiled_once(monkeypatch):
+    from dryml.core2.query import index as index_mod
+
+    repo = Repo()
+    child_cdef = ConcreteDefinition(IndexLeaf, FrozenTuple(("shared",)), FrozenDict({}))
+    left_cdef = ConcreteDefinition(IndexPersistent, FrozenTuple((child_cdef,)), FrozenDict({"state": 1}))
+    right_cdef = ConcreteDefinition(IndexPersistent, FrozenTuple((child_cdef,)), FrozenDict({"state": 2}))
+    calls = []
+    original = index_mod.target_local_fingerprint
+
+    def spy(cdef):
+        calls.append(cdef)
+        return original(cdef)
+
+    monkeypatch.setattr(index_mod, "target_local_fingerprint", spy)
+
+    repo._query_catalog.register_cached(left_cdef)
+    repo._query_catalog.register_cached(right_cdef)
+
+    assert calls.count(child_cdef) == 1
+
+
+def test_parent_local_postings_do_not_contain_child_interior_features():
+    repo = Repo()
+    child = IndexLeaf("needle", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+
+    repo._query_catalog.register_cached(parent.definition)
+    parent_id = repo._query_catalog.cdef_id(parent.definition)
+    parent_record = repo._query_catalog.definitions_by_id[parent_id]
+    child_name_hash = stable_hash_function(child.definition.args[0])
+
+    assert all(
+        not (token.kind == "SCALAR_VALUE" and token.payload == child_name_hash)
+        for token in parent_record.local_fingerprint.counts
+    )
+
+
 def test_repeated_nested_cdef_keeps_every_owner_path_occurrence(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
@@ -143,7 +203,8 @@ def test_nested_definition_inside_set_is_indexed_with_defined_path(tmp_path):
 
     assert occurrences.count() == 1
     assert occurrences.one().definition == child.definition
-    assert str(occurrences.one().path) == "$.args[0][0]"
+    assert isinstance(occurrences.one().path[-1], SetMember)
+    assert get_subtree(parent.definition, occurrences.one().path) == child.definition
 
 
 def test_forced_refresh_removes_deleted_root_and_occurrences(tmp_path):

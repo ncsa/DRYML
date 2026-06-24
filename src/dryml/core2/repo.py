@@ -10,7 +10,7 @@ from io import IOBase
 from pathlib import Path
 import weakref
 from contextvars import ContextVar
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import numpy as np
 import atexit
 
@@ -809,6 +809,24 @@ class Repo:
         from .query import DefinitionQuery
 
         return DefinitionQuery.from_source(self, selector)
+
+    def definition_graph(self, value) -> "ConcreteDefinitionGraph":
+        from .cdef_graph import ConcreteDefinitionGraph
+
+        def cdef_from(item):
+            if isinstance(item, Object):
+                return item.definition
+            if isinstance(item, ConcreteDefinition):
+                return item
+            if isinstance(item, Definition):
+                raise TypeError("definition_graph() requires exact ConcreteDefinition values; concretize Definitions first.")
+            raise TypeError(f"definition_graph() cannot inspect {type(item).__name__}.")
+
+        if isinstance(value, (Object, ConcreteDefinition, Definition)):
+            return ConcreteDefinitionGraph.from_root(cdef_from(value))
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+            return ConcreteDefinitionGraph.from_roots(cdef_from(item) for item in value)
+        raise TypeError(f"definition_graph() cannot inspect {type(value).__name__}.")
 
     def find_defs(
             self,

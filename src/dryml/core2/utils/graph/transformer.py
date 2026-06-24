@@ -4,9 +4,10 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Hashable, TypeAlias
 
 from ..types import is_namedtuple
+from .path import GraphPath, PathSegment, normalize_ctx_path
 
 
-PathPart: TypeAlias = str | int
+PathPart: TypeAlias = str | int | PathSegment
 
 
 @dataclass(slots=True, frozen=True)
@@ -21,13 +22,16 @@ class GraphCtx:
     - `state` is intentionally untyped here so callers can stash whatever
       operation-specific data they need without baking policy into utils.
     """
-    path: tuple[PathPart, ...] = ()
+    path: GraphPath | tuple[PathPart, ...] = ()
     memo: dict[Hashable, Any] = field(default_factory=dict)
     active_ids: set[int] = field(default_factory=set)
     state: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", normalize_ctx_path(self.path))
+
     def child(self, part: PathPart) -> "GraphCtx":
-        return replace(self, path=self.path + (part,))
+        return replace(self, path=self.path.child(part))
 
     def with_state(self, **kwargs: Any) -> "GraphCtx":
         new_state = dict(self.state)
@@ -37,7 +41,7 @@ class GraphCtx:
     def path_str(self) -> str:
         if not self.path:
             return "<root>"
-        return "/".join(map(str, self.path))
+        return self.path.legacy_str()
 
 
 class GraphTransformError(Exception):

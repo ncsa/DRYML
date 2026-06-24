@@ -15,7 +15,7 @@ from .model import (
     FeatureRequirement,
     FeatureToken,
 )
-from .path import Arg, DefinitionPath, Index, Key, Kwarg
+from .path import Arg, DefinitionPath, Index, Key, Kwarg, SetMember, iter_set_members
 
 
 def canonical_class_key(cls: Any) -> str:
@@ -38,12 +38,30 @@ def target_fingerprint(cdef: ConcreteDefinition) -> DefinitionFingerprint:
     return DefinitionFingerprint(dict(counts))
 
 
+def target_local_fingerprint(cdef: ConcreteDefinition) -> DefinitionFingerprint:
+    counts: Counter[FeatureToken] = Counter()
+    _fingerprint_target_cdef_local(cdef, DefinitionPath(), counts)
+    return DefinitionFingerprint(dict(counts))
+
+
 def selector_requirements(
         selector: Any,
         *,
         class_match: ClassMatchPolicy = "selector") -> tuple[FeatureRequirement, ...]:
     counts: Counter[FeatureToken] = Counter()
     _fingerprint_selector_value(selector, DefinitionPath(), counts, class_match=class_match)
+    return tuple(
+        FeatureRequirement(token, count)
+        for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
+    )
+
+
+def selector_local_requirements(
+        selector: Any,
+        *,
+        class_match: ClassMatchPolicy = "selector") -> tuple[FeatureRequirement, ...]:
+    counts: Counter[FeatureToken] = Counter()
+    _fingerprint_selector_value(selector, DefinitionPath(), counts, class_match=class_match, local=True)
     return tuple(
         FeatureRequirement(token, count)
         for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
@@ -148,19 +166,71 @@ def _fingerprint_target_value(value: Any, path: DefinitionPath, counts: Counter[
         _add(counts, "SCALAR_VALUE", path, key)
 
 
+def _fingerprint_target_cdef_local(cdef: ConcreteDefinition, path: DefinitionPath, counts: Counter[FeatureToken]) -> None:
+    _add(counts, "EXACT_NODE", path, cdef.stable_hash())
+    _add(counts, "EXACT_SUBTREE", path, cdef.stable_hash())
+    _add(counts, "CLASS_KEY", path, canonical_class_key(cdef.cls))
+    for idx, child in enumerate(cdef.args):
+        _fingerprint_target_local_value(child, path.child(Arg(idx)), counts)
+    for key, child in cdef.kwargs.items():
+        _add(counts, "HAS_KWARG", path, key)
+        _fingerprint_target_local_value(child, path.child(Kwarg(key)), counts)
+
+
+def _fingerprint_target_local_value(value: Any, path: DefinitionPath, counts: Counter[FeatureToken]) -> None:
+    if isinstance(value, Object):
+        value = value.definition
+
+    if isinstance(value, ConcreteDefinition):
+        _add(counts, "CDEF_EDGE_AT_PATH", path, None)
+        _add(counts, "CDEF_EDGE_EXACT", path, value.stable_hash())
+        _add(counts, "CDEF_EDGE_CLASS", path, canonical_class_key(value.cls))
+        return
+
+    families = _target_container_families(value)
+    if families:
+        for family in families:
+            _add(counts, "CONTAINER_KIND", path, family)
+        primary_family = families[0]
+        if primary_family in {"list", "tuple", "set"}:
+            _add(counts, "SEQUENCE_LENGTH", path, len(value))
+        if primary_family == "dict":
+            for key, child in _mapping_items(value):
+                key_hash = scalar_key(key)
+                if key_hash is not None:
+                    _add(counts, "HAS_MAPPING_KEY", path, key_hash)
+                _fingerprint_target_local_value(child, path.child(Key(key)), counts)
+        elif primary_family == "set":
+            for seg, child in iter_set_members(value):
+                _fingerprint_target_local_value(child, path.child(seg), counts)
+        else:
+            for idx, child in _sequence_items(value):
+                _fingerprint_target_local_value(child, path.child(Index(idx)), counts)
+        return
+
+    key = scalar_key(value)
+    if key is not None:
+        _add(counts, "SCALAR_VALUE", path, key)
+
+
 def _fingerprint_selector_value(
         value: Any,
         path: DefinitionPath,
         counts: Counter[FeatureToken],
         *,
-        class_match: ClassMatchPolicy) -> None:
+        class_match: ClassMatchPolicy,
+        local: bool = False) -> None:
     from ..utils.types import is_nonclass_callable
 
     if isinstance(value, Object):
         value = value.definition
 
     if isinstance(value, ConcreteDefinition):
-        _add(counts, "EXACT_SUBTREE", path, value.stable_hash())
+        if local and path:
+            _add(counts, "CDEF_EDGE_AT_PATH", path, None)
+            _add(counts, "CDEF_EDGE_EXACT", path, value.stable_hash())
+        else:
+            _add(counts, "EXACT_SUBTREE", path, value.stable_hash())
         return
 
     if isinstance(value, Definition):
@@ -171,10 +241,10 @@ def _fingerprint_selector_value(
                 pass
         if value.args is not None:
             for idx, child in enumerate(value.args):
-                _fingerprint_selector_value(child, path.child(Arg(idx)), counts, class_match=class_match)
+                _fingerprint_selector_value(child, path.child(Arg(idx)), counts, class_match=class_match, local=local)
         for key, child in value.kwargs.items():
             _add(counts, "HAS_KWARG", path, key)
-            _fingerprint_selector_value(child, path.child(Kwarg(key)), counts, class_match=class_match)
+            _fingerprint_selector_value(child, path.child(Kwarg(key)), counts, class_match=class_match, local=local)
         return
 
     families = _selector_container_families(value)
@@ -189,10 +259,16 @@ def _fingerprint_selector_value(
                 key_hash = scalar_key(key)
                 if key_hash is not None:
                     _add(counts, "HAS_MAPPING_KEY", path, key_hash)
-                _fingerprint_selector_value(child, path.child(Key(key)), counts, class_match=class_match)
+                _fingerprint_selector_value(child, path.child(Key(key)), counts, class_match=class_match, local=local)
         elif primary_family != "set":
             for idx, child in _sequence_items(value):
-                _fingerprint_selector_value(child, path.child(Index(idx)), counts, class_match=class_match)
+                _fingerprint_selector_value(child, path.child(Index(idx)), counts, class_match=class_match, local=local)
+        elif local:
+            for seg, child in iter_set_members(value):
+                if isinstance(child, Object):
+                    child = child.definition
+                if isinstance(child, (ConcreteDefinition, Definition)):
+                    _fingerprint_selector_value(child, path.child(seg), counts, class_match=class_match, local=local)
         return
 
     if is_nonclass_callable(value):

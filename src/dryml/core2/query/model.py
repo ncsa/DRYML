@@ -60,6 +60,7 @@ class DefinitionFingerprint:
 DefinitionId = str
 StoreId = str
 OccurrenceKey = tuple[DefinitionId, DefinitionPath, DefinitionId]
+EdgeKey = tuple[DefinitionId, DefinitionPath, DefinitionId]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,15 @@ class DefinitionRecord:
     cdef: Any
     class_key: str
     fingerprint: DefinitionFingerprint
+    local_fingerprint: DefinitionFingerprint | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DefinitionEdgeRecord:
+    edge_key: EdgeKey
+    parent_id: DefinitionId
+    path: DefinitionPath
+    child_id: DefinitionId
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +106,11 @@ class QueryExplanation:
     verified_count: int = 0
     result_count: int = 0
     fast_path: str | None = None
+    graph_node_count: int = 0
+    graph_edge_count: int = 0
+    graph_anchor_path: DefinitionPath | None = None
+    graph_anchor_mode: str | None = None
+    graph_candidate_count: int = 0
 
     def format(self) -> str:
         lines = [
@@ -111,6 +126,15 @@ class QueryExplanation:
         ]
         if self.fast_path is not None:
             lines.append(f"fast path: {self.fast_path}")
+        if self.graph_node_count or self.graph_edge_count:
+            lines.append(f"graph nodes: {self.graph_node_count}")
+            lines.append(f"graph edges: {self.graph_edge_count}")
+        if self.graph_anchor_path is not None:
+            lines.append(f"graph anchor: {self.graph_anchor_path!s}")
+        if self.graph_anchor_mode is not None:
+            lines.append(f"graph anchor mode: {self.graph_anchor_mode}")
+        if self.graph_candidate_count:
+            lines.append(f"graph candidates: {self.graph_candidate_count}")
         return "\n".join(lines)
 
     def __str__(self) -> str:
@@ -138,6 +162,11 @@ class QueryStats:
     verified_count: int = 0
     result_count: int = 0
     fast_path: str | None = None
+    graph_node_count: int = 0
+    graph_edge_count: int = 0
+    graph_anchor_path: DefinitionPath | None = None
+    graph_anchor_mode: str | None = None
+    graph_candidate_count: int = 0
 
     def explanation(self, *, domain: str, refresh: RefreshPolicy) -> QueryExplanation:
         return QueryExplanation(
@@ -152,4 +181,9 @@ class QueryStats:
             verified_count=self.verified_count,
             result_count=self.result_count,
             fast_path=self.fast_path,
+            graph_node_count=self.graph_node_count,
+            graph_edge_count=self.graph_edge_count,
+            graph_anchor_path=self.graph_anchor_path,
+            graph_anchor_mode=self.graph_anchor_mode,
+            graph_candidate_count=self.graph_candidate_count,
         )

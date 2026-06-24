@@ -8,7 +8,9 @@ from dryml.core2.query.fingerprint import (
     requirements_satisfied,
     selector_requirements,
     target_fingerprint,
+    target_local_fingerprint,
 )
+from dryml.core2.utils.stable_hash import stable_hash_function
 
 
 def assert_no_fingerprint_false_negative(selector, target, *, class_match="selector"):
@@ -112,3 +114,26 @@ def test_fingerprint_filter_never_rejects_structural_match_matrix(selector, targ
         requirements = selector_requirements(selector)
         fingerprint = target_fingerprint(target)
         assert requirements_satisfied(fingerprint, requirements)
+
+
+def test_local_fingerprint_stops_at_nested_cdef_boundary():
+    child = objects.TestNest2("needle")
+    parent = objects.TestNest3(child=child).definition
+
+    fingerprint = target_local_fingerprint(parent)
+    child_scalar = stable_hash_function("needle")
+
+    assert any(token.kind == "CDEF_EDGE_AT_PATH" and str(token.path) == "$.child" for token in fingerprint.counts)
+    assert all(
+        not (token.kind == "SCALAR_VALUE" and token.payload == child_scalar)
+        for token in fingerprint.counts
+    )
+
+
+def test_child_local_fingerprint_contains_child_interior():
+    child = objects.TestNest2("needle").definition
+
+    fingerprint = target_local_fingerprint(child)
+    child_scalar = stable_hash_function("needle")
+
+    assert any(token.kind == "SCALAR_VALUE" and token.payload == child_scalar for token in fingerprint.counts)

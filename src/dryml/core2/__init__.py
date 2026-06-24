@@ -11,6 +11,15 @@ from dryml.core2.config import CONFIG_MISSING, ConfigError, ConfigRef
 from dryml.core2.factory import FactorySpec
 from dryml.core2.session import configure, reset_config, status
 from dryml.core2.symbol import ImportRef, SourceSpec, resolve_symbol, symbol_ref
+from dryml.core2.cdef_graph import (
+    CDefEdge,
+    CDefNode,
+    CDefOccurrence,
+    ConcreteDefinitionGraph,
+    ConcreteDefinitionGraphCycleError,
+    ConcreteDefinitionGraphError,
+    iter_direct_cdef_edges,
+)
 from dryml.core2.query import (
     Arg,
     DefinitionPath,
@@ -27,6 +36,7 @@ from dryml.core2.query import (
     QueryExplanation,
     QueryIndexError,
     QueryPathError,
+    SetMember,
 )
 
 __all__ = [
@@ -58,6 +68,13 @@ __all__ = [
     "SourceSpec",
     "symbol_ref",
     "resolve_symbol",
+    "CDefEdge",
+    "CDefNode",
+    "CDefOccurrence",
+    "ConcreteDefinitionGraph",
+    "ConcreteDefinitionGraphCycleError",
+    "ConcreteDefinitionGraphError",
+    "iter_direct_cdef_edges",
     "Arg",
     "DefinitionPath",
     "DefinitionQuery",
@@ -73,4 +90,5 @@ __all__ = [
     "QueryExplanation",
     "QueryIndexError",
     "QueryPathError",
+    "SetMember",
 ]

@@ -2,6 +2,21 @@ from .transformer import GraphCtx, GraphTransformError, GraphTransformer
 from .visitor import GraphVisitor
 from .matcher import GraphMatcher, GraphMatchError
 from .hasher import GraphHasher
+from .path import (
+    GRAPH_PATH_SCHEMA_VERSION,
+    Arg,
+    DefinitionPath,
+    Field,
+    GraphPath,
+    Index,
+    Key,
+    Kwarg,
+    PathSegment,
+    QueryPathError,
+    SetMember,
+    normalize_path,
+    parse_path,
+)
 
 __all__ = [
     "GraphCtx",
@@ -11,4 +26,17 @@ __all__ = [
     "GraphMatcher",
     "GraphMatchError",
     "GraphHasher",
+    "GRAPH_PATH_SCHEMA_VERSION",
+    "Arg",
+    "DefinitionPath",
+    "Field",
+    "GraphPath",
+    "Index",
+    "Key",
+    "Kwarg",
+    "PathSegment",
+    "QueryPathError",
+    "SetMember",
+    "normalize_path",
+    "parse_path",
 ]
