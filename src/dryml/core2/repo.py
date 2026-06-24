@@ -417,12 +417,16 @@ class Repo:
         store = self._ensure_store(save_options.store)
         revision = manage_revision(obj, save_options.revision)
         self.add_objects(obj, store=store)
-        RepoSaveVisitor(
+        from .repo_plan import build_save_plan, execute_save_plan
+
+        plan = build_save_plan(
             self,
+            obj,
             store=store,
             revision=revision,
             ephemeral_depth=save_options.ephemeral_depth,
-        ).visit(obj)
+        )
+        execute_save_plan(self, plan)
 
         if save_options.main:
             self.set_main_def(obj.definition, store=store)
@@ -564,163 +568,23 @@ class Repo:
             cache=cache,
             revision=revision,
         )
-        instance = load_options.instance
-        restore_state = load_options.restore_state
-        build_missing = load_options.build_missing
-        reuse_weak = load_options.reuse_weak
-        cache = load_options.cache
         revision = manage_revision(cdef, load_options.revision)
+        from .materialization import build_materialization_plan, execute_materialization_plan
 
-        # If we've already materialized this cdef in this call, return it
-        if cdef in memo:
-            return memo[cdef]
-
-        try:
-            from .symbol import resolve_symbol
-
-            cls = resolve_symbol(cdef.cls)
-        except Exception as e:
-            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
-            raise RepoLoadError(
-                f"Error resolving {cls_name} at {'/'.join(map(str, path))}: {e}"
-            ) from e
-
-        is_serializable = isinstance(cls, type) and issubclass(cls, Serializable)
-
-        revision_str = revision.get(cdef, None)
-
-        # Enforce sane caching semantics for "new"
-        if instance == "new" and cache != "none":
-            # caches are keyed ONLY by cdef, so caching a "new" instance would overwrite.
-            raise ValueError("instance='new' requires cache='none' (caches are keyed by cdef)")
-
-        # Reuse path: consult caches
-        if instance == "reuse":
-            obj = self.get_cached(cdef, reuse_weak=reuse_weak)
-            if obj is not None:
-                if restore_state:
-                    # Descend into args and kwargs and restore them as well.
-                    # TODO: Do we need to change build_missing or other options here?
-                    #       I suspect not, but worth double-checking.
-                    #       cache options is changed from below for example.
-                    _ = self._realize(
-                        cdef.args,
-                        instance=instance,
-                        restore_state=restore_state,
-                        build_missing=build_missing,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision,
-                        memo=memo,
-                        path=path + ["args"],
-                    )
-                    _ = rt_kwargs = self._realize(
-                        cdef.kwargs,
-                        instance=instance,
-                        restore_state=restore_state,
-                        build_missing=build_missing,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision,
-                        memo=memo,
-                        path=path + ["kwargs"],
-                    )
-                    # Restore this object
-                    if revision_str is not None:
-                        st = self._first_store_with(cdef)
-                        if st is None:
-                            if is_serializable and not build_missing:
-                                raise RepoLoadError(f"No store has requested object ({cdef})")
-                            return obj
-                        try:
-                            st.restore_object(obj, revision=revision_str)
-                        except Exception as e:
-                            raise RepoLoadError(f"Store can't restore requested revision ({revision_str}) for object ({cdef})") from e
-                    st = self.obj_default_store.get(cdef) or self._first_store_with(cdef)
-                    if st is not None:
-                        self.set_object_store(cdef, st)
-                return obj
-
-        # Determine whether state exists somewhere
-        in_store = self.has_cdef_light(cdef)
-
-        # If caller expects state and we can't find any, respect build_missing
-        if restore_state and is_serializable and (not in_store) and (not build_missing):
-            raise RepoLoadError(
-                f"Missing stored state for {cdef} at {'/'.join(map(str, path))} "
-                f"(set build_missing=True to allow fresh construction)"
-            )
-
-        # Realize constructor args/kwargs (objects inside become objects)
-        # NOTE: pass cache="none" while constructing dependencies when instance="new"
-        # to avoid overwriting caches as well.
-        sub_cache = cache if instance == "reuse" else "none"
-
-        rt_args = self._realize(
-            cdef.args,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=sub_cache,
-            revision=revision,
+        plan = build_materialization_plan(
+            self,
+            cdef,
+            load_options,
             memo=memo,
-            path=path + ["args"],
+            path=path,
         )
-        rt_kwargs = self._realize(
-            cdef.kwargs,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=sub_cache,
-            revision=revision,
+        return execute_materialization_plan(
+            self,
+            plan,
             memo=memo,
-            path=path + ["kwargs"],
+            revision=revision,
+            root=cdef,
         )
-
-        # Construct a new instance (bypass re-concretization by passing __cdef__)
-        try:
-            obj = cls(*rt_args, repo=self, __cdef__=cdef, **rt_kwargs)
-
-            self._num_constructions += 1
-        except Exception as e:
-            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
-            raise RepoLoadError(
-                f"Error constructing {cls_name} at {'/'.join(map(str, path))}: {e}"
-            ) from e
-
-        # Memo immediately (preserve sharing inside this graph)
-        memo[cdef] = obj
-
-        # Optionally restore heavy state from store
-        if restore_state and in_store:
-            st = self._first_store_with(cdef)
-            if st is None:
-                # has_cdef_light said True but we didn't find it; treat as missing
-                if not build_missing:
-                    raise RepoLoadError(f"Inconsistent store index for {cdef}")
-            else:
-                try:
-                    st.restore_object(obj, revision=revision_str)
-                    self.set_object_store(cdef, st)
-                except Exception as e:
-                    raise RepoLoadError(
-                        f"Error restoring state for {cdef} at {'/'.join(map(str, path))}: {e}"
-                    ) from e
-
-        # Cache result (only meaningful for instance='reuse')
-        if instance == "reuse":
-            if cache == "strong":
-                self.cache_strong(obj)
-            elif cache == "weak":
-                self.cache_weak(obj)
-            elif cache == "none":
-                pass
-            else:
-                raise ValueError(f"Unknown cache policy: {cache!r}")
-
-        return obj
 
 
     def load_object(
@@ -1039,9 +903,9 @@ class Repo:
             cache=cache,
             revision=revision,
         )
-        visitor = RepoGraphCollectVisitor(self, options=graph_options)
-        visitor.visit(root)
-        return iter(visitor.objects)
+        from .repo_plan import iter_graph_objects
+
+        return iter(iter_graph_objects(self, root, graph_options))
 
     def apply_graph(
             self,
@@ -1072,9 +936,9 @@ class Repo:
             cache=cache,
             revision=revision,
         )
-        visitor = RepoGraphApplyVisitor(self, func, options=graph_options)
-        visitor.visit(root)
-        return visitor.results
+        from .repo_plan import apply_graph_objects
+
+        return apply_graph_objects(self, root, func, graph_options)
 
     def set_main_def(self, main_def: ConcreteDefinition, store=None):
         self.main_def = main_def
@@ -1087,9 +951,9 @@ class Repo:
 
     def add_objects(self, *args, store=None):
         store = self._ensure_store(store)
-        vis = RepoAddObjectsVisitor(self, store=store)
-        for arg in args:
-            vis.visit(arg)
+        from .repo_plan import add_objects
+
+        add_objects(self, args, store=store)
 
     def flush(self):
         # Commit all stores

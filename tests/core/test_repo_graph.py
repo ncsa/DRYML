@@ -63,6 +63,23 @@ def test_iter_graph_can_exclude_root_and_dedupes_shared_children():
     assert [obj.name for obj in repo.iter_graph(root, include_root=False)] == ["leaf"]
 
 
+def test_iter_graph_occurrence_mode_visits_shared_child_twice():
+    repo = Repo()
+    leaf = GraphLeaf("leaf", repo=repo)
+    root = GraphNode("root", leaf, leaf, repo=repo)
+
+    assert [obj.name for obj in repo.iter_graph(root, include_root=False, dedupe=False)] == ["leaf", "leaf"]
+
+
+def test_iter_graph_preorder_visits_parent_before_children():
+    repo = Repo()
+    left = GraphLeaf("left", repo=repo)
+    right = GraphLeaf("right", repo=repo)
+    root = GraphNode("root", left, right, repo=repo)
+
+    assert [obj.name for obj in repo.iter_graph(root, order="pre")] == ["root", "left", "right"]
+
+
 def test_apply_graph_returns_results_by_definition_in_visit_order():
     repo = Repo()
     left = GraphLeaf("left", repo=repo)
@@ -72,6 +89,28 @@ def test_apply_graph_returns_results_by_definition_in_visit_order():
     results = repo.apply_graph(root, lambda obj: obj.name)
 
     assert list(results.values()) == ["left", "right", "root"]
+
+
+def test_add_objects_rejects_conflicting_instance_same_cdef():
+    repo = Repo()
+    first = GraphLeaf("same", repo=repo)
+    second = GraphLeaf("same")
+    repo.add_objects(first)
+
+    with pytest.raises(KeyError, match="different object"):
+        repo.add_objects(second)
+
+
+def test_add_objects_assigns_store_to_unique_graph_nodes(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo()
+    child = GraphLeaf("child", repo=repo)
+    root = GraphNode("root", child, repo=repo)
+
+    repo.add_objects(root, store=store)
+
+    assert repo.obj_default_store[root.definition] is store
+    assert repo.obj_default_store[child.definition] is store
 
 
 def test_iter_graph_missing_cdef_raises_by_default():

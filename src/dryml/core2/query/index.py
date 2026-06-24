@@ -135,6 +135,20 @@ class DefinitionCatalog:
             self.generation += 1
             return did
 
+    def register_stored_graph_view(
+            self,
+            graph: ConcreteDefinitionGraph,
+            cdef: ConcreteDefinition,
+            store) -> DefinitionId:
+        with self.lock:
+            sid = self.store_id(store)
+            did = self._register_graph_locked(graph, root=cdef)
+            self.replicas_by_definition[did].add(sid)
+            self.stored_definitions_by_store[sid].add(did)
+            self.repo.light_index.add(cdef)
+            self.generation += 1
+            return did
+
     def cdef_id(self, cdef: ConcreteDefinition) -> DefinitionId | None:
         with self.lock:
             return self.ids_by_cdef.get(cdef)
