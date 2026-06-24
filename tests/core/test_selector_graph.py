@@ -1,5 +1,15 @@
+import pytest
+
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.query.selector_graph import compile_selector_graph
+from dryml.core2.query.path import DefinitionPath, Kwarg
+from dryml.core2.query.selector_graph import (
+    SelectorGraph,
+    SelectorGraphCycleError,
+    SelectorGraphEdge,
+    SelectorGraphError,
+    SelectorGraphNode,
+    compile_selector_graph,
+)
 
 
 class SelectorLeaf(Object):
@@ -68,3 +78,35 @@ def test_nested_exact_cdef_inside_set_has_path_edge():
     assert len(graph.edges) == 1
     assert graph.edges[0].unordered is False
     assert str(graph.edges[0].path).startswith('$.args[0][@set("')
+
+
+def test_selector_graph_rejects_cycle_with_source_path():
+    selector = Definition(SelectorParent, SKIP_ARGS)
+    selector.kwargs["child"] = selector
+
+    with pytest.raises(SelectorGraphCycleError, match=r"\$\.child"):
+        compile_selector_graph(selector)
+
+
+def test_selector_graph_rejects_invalid_edge_endpoint():
+    selector = Definition(SelectorLeaf, SKIP_ARGS)
+    node = SelectorGraphNode(0, DefinitionPath(), selector, ())
+
+    with pytest.raises(SelectorGraphError, match="child"):
+        SelectorGraph(0, (node,), (SelectorGraphEdge(0, DefinitionPath((Kwarg("x"),)), 1),))
+
+
+def test_selector_graph_rejects_direct_cycle():
+    parent = Definition(SelectorParent, SKIP_ARGS)
+    child = Definition(SelectorLeaf, SKIP_ARGS)
+    nodes = (
+        SelectorGraphNode(0, DefinitionPath(), parent, ()),
+        SelectorGraphNode(1, DefinitionPath((Kwarg("child"),)), child, ()),
+    )
+    edges = (
+        SelectorGraphEdge(0, DefinitionPath((Kwarg("child"),)), 1),
+        SelectorGraphEdge(1, DefinitionPath((Kwarg("parent"),)), 0),
+    )
+
+    with pytest.raises(SelectorGraphCycleError, match="cycle"):
+        SelectorGraph(0, nodes, edges)

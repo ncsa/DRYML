@@ -7,8 +7,11 @@ from typing import Any, Iterable
 GRAPH_PATH_SCHEMA_VERSION = 1
 
 
-class QueryPathError(Exception):
+class GraphPathError(Exception):
     pass
+
+
+QueryPathError = GraphPathError
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +91,6 @@ class GraphPath:
     def __eq__(self, other: object) -> bool:
         if isinstance(other, GraphPath):
             return self.segments == other.segments
-        if isinstance(other, tuple):
-            return tuple(_legacy_segment_value(seg) for seg in self.segments) == other
-        if isinstance(other, list):
-            return list(_legacy_segment_value(seg) for seg in self.segments) == other
         return False
 
     def child(self, segment: PathSegment | str | int) -> "GraphPath":
@@ -134,6 +133,9 @@ class GraphPath:
     def legacy_tuple(self) -> tuple[str | int, ...]:
         return tuple(_legacy_segment_value(seg) for seg in self.segments)
 
+    def to_legacy_tuple(self) -> tuple[str | int, ...]:
+        return self.legacy_tuple()
+
     def legacy_str(self) -> str:
         if not self.segments:
             return "<root>"
@@ -174,6 +176,9 @@ def normalize_path(path: GraphPathLike = "$") -> GraphPath:
     for part in path:
         segments.append(_normalize_segment(part))
     return GraphPath(tuple(segments))
+
+
+normalize_graph_path = normalize_path
 
 
 def normalize_ctx_path(path: GraphPathLike | None = None) -> GraphPath:

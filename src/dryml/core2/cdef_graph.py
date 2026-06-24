@@ -86,7 +86,8 @@ class ConcreteDefinitionGraph:
             edges: Iterable[CDefEdge]):
         self._roots = tuple(dict.fromkeys(roots))
         self._nodes = tuple(nodes)
-        self._edges = tuple(edges)
+        self._edges = tuple(dict.fromkeys(edges))
+        _validate_graph_parts(self._roots, self._nodes, self._edges)
         self._node_by_cdef = {node.definition: node for node in self._nodes}
         outgoing: dict[ConcreteDefinition, list[CDefEdge]] = defaultdict(list)
         incoming: dict[ConcreteDefinition, list[CDefEdge]] = defaultdict(list)
@@ -156,7 +157,8 @@ class ConcreteDefinitionGraph:
             roots: Iterable[ConcreteDefinition] | None = None,
             include_roots: bool = False,
             target: ConcreteDefinition | None = None,
-            max_occurrences: int | None = None) -> Iterator[CDefOccurrence]:
+            max_occurrences: int | None = None,
+            limit: int | None = None) -> Iterator[CDefOccurrence]:
         count = 0
         selected_roots = tuple(roots) if roots is not None else self.roots
         for root in selected_roots:
@@ -167,6 +169,8 @@ class ConcreteDefinitionGraph:
                         f"Occurrence limit {max_occurrences} exceeded while walking {root.stable_hash()}."
                     )
                 yield CDefOccurrence(root, GraphPath(), root)
+                if limit is not None and count >= limit:
+                    return
             stack = [(edge, edge.path) for edge in reversed(self.outgoing(root))]
             while stack:
                 edge, path = stack.pop()
@@ -177,6 +181,8 @@ class ConcreteDefinitionGraph:
                             f"Occurrence limit {max_occurrences} exceeded while walking {root.stable_hash()}."
                         )
                     yield CDefOccurrence(root, path, edge.child)
+                    if limit is not None and count >= limit:
+                        return
                 for child_edge in reversed(self.outgoing(edge.child)):
                     stack.append((child_edge, path.join(child_edge.path)))
 
@@ -197,13 +203,13 @@ class ConcreteDefinitionGraph:
         return tuple(occ.path for occ in self.iter_occurrences(
             roots=(root,),
             target=target,
-            max_occurrences=max_paths,
+            limit=max_paths,
         ))
 
     def contains(self, root: ConcreteDefinition, target: ConcreteDefinition) -> bool:
         if _same_cdef(root, target):
             return True
-        return any(True for _ in self.iter_occurrences(roots=(root,), target=target, max_occurrences=1))
+        return any(True for _ in self.iter_occurrences(roots=(root,), target=target, limit=1))
 
     def primary_path(self, root: ConcreteDefinition, target: ConcreteDefinition) -> GraphPath | None:
         paths = self.paths_to(root, target, max_paths=1)
@@ -321,6 +327,74 @@ class ConcreteDefinitionGraphBuilder:
         for root in self._roots:
             visit(root)
         return tuple(out)
+
+
+def _validate_graph_parts(
+        roots: tuple[ConcreteDefinition, ...],
+        nodes: tuple[CDefNode, ...],
+        edges: tuple[CDefEdge, ...]) -> None:
+    node_defs: set[ConcreteDefinition] = set()
+    for node in nodes:
+        if not isinstance(node, CDefNode):
+            raise TypeError(f"Graph nodes must be CDefNode instances, got {type(node).__name__}.")
+        if not isinstance(node.definition, ConcreteDefinition):
+            raise TypeError(f"Graph node definitions must be ConcreteDefinitions, got {type(node.definition).__name__}.")
+        if node.definition in node_defs:
+            raise ConcreteDefinitionGraphError(f"Duplicate graph node for {node.definition}.")
+        if node.stable_hash != node.definition.stable_hash():
+            raise ConcreteDefinitionGraphError(
+                f"Graph node stable_hash {node.stable_hash!r} does not match its definition."
+            )
+        node_defs.add(node.definition)
+
+    for root in roots:
+        if not isinstance(root, ConcreteDefinition):
+            raise TypeError(f"Graph roots must be ConcreteDefinitions, got {type(root).__name__}.")
+        if root not in node_defs:
+            raise ConcreteDefinitionGraphError(f"Graph root {root} is missing from nodes.")
+
+    for edge in edges:
+        if not isinstance(edge, CDefEdge):
+            raise TypeError(f"Graph edges must be CDefEdge instances, got {type(edge).__name__}.")
+        if not isinstance(edge.parent, ConcreteDefinition):
+            raise TypeError(f"Graph edge parents must be ConcreteDefinitions, got {type(edge.parent).__name__}.")
+        if not isinstance(edge.child, ConcreteDefinition):
+            raise TypeError(f"Graph edge children must be ConcreteDefinitions, got {type(edge.child).__name__}.")
+        if not isinstance(edge.path, GraphPath):
+            raise TypeError(f"Graph edge paths must be GraphPath instances, got {type(edge.path).__name__}.")
+        if edge.parent not in node_defs:
+            raise ConcreteDefinitionGraphError(f"Graph edge parent {edge.parent} is missing from nodes.")
+        if edge.child not in node_defs:
+            raise ConcreteDefinitionGraphError(f"Graph edge child {edge.child} is missing from nodes.")
+
+    outgoing: dict[ConcreteDefinition, list[ConcreteDefinition]] = defaultdict(list)
+    for edge in edges:
+        outgoing[edge.parent].append(edge.child)
+
+    visited: set[ConcreteDefinition] = set()
+    active: set[ConcreteDefinition] = set()
+
+    def visit(cdef: ConcreteDefinition) -> None:
+        if cdef in visited:
+            return
+        if cdef in active:
+            raise ConcreteDefinitionGraphCycleError(
+                f"ConcreteDefinition graph cycle detected at hash={cdef.stable_hash()}."
+            )
+        active.add(cdef)
+        try:
+            for child in outgoing.get(cdef, ()):
+                visit(child)
+        finally:
+            active.remove(cdef)
+        visited.add(cdef)
+
+    for root in roots:
+        visit(root)
+
+    for node in nodes:
+        visit(node.definition)
+
 
 def _same_cdef(left: ConcreteDefinition, right: ConcreteDefinition) -> bool:
     if left is right:

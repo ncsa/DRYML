@@ -6,6 +6,7 @@ from ..utils.graph.path import (
     DefinitionPath,
     DefinitionPathLike,
     Field,
+    GraphPathError,
     GraphPath,
     GraphPathLike,
     Index,
@@ -15,6 +16,7 @@ from ..utils.graph.path import (
     QueryPathError,
     SetMember,
     normalize_path,
+    normalize_graph_path,
     parse_path,
 )
 from ..utils.graph.value import (
@@ -31,6 +33,7 @@ __all__ = [
     "DefinitionPath",
     "DefinitionPathLike",
     "Field",
+    "GraphPathError",
     "GraphPath",
     "GraphPathLike",
     "Index",
@@ -42,6 +45,7 @@ __all__ = [
     "get_subtree",
     "iter_set_members",
     "normalize_path",
+    "normalize_graph_path",
     "parse_path",
     "replace_subtree",
     "resolve_set_member",

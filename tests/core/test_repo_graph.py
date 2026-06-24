@@ -3,6 +3,7 @@ import pytest
 from dryml.core2 import Object, Repo, Serializable
 from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
 from dryml.core2.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
+from dryml.core2.repo_plan import GraphApplyResult, RuntimeBindingConflict
 from dryml.core2.store.dir import DirStore
 from dryml.core2.utils.general import pickle_load, pickle_save
 
@@ -91,6 +92,18 @@ def test_apply_graph_returns_results_by_definition_in_visit_order():
     assert list(results.values()) == ["left", "right", "root"]
 
 
+def test_apply_graph_occurrence_mode_preserves_repeated_results():
+    repo = Repo()
+    leaf = GraphLeaf("leaf", repo=repo)
+    root = GraphNode("root", leaf, leaf, repo=repo)
+
+    results = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)
+
+    assert all(isinstance(result, GraphApplyResult) for result in results)
+    assert [result.value for result in results] == ["leaf", "leaf"]
+    assert [str(result.path) for result in results] == ["$.args[1]", "$.args[2]"]
+
+
 def test_add_objects_rejects_conflicting_instance_same_cdef():
     repo = Repo()
     first = GraphLeaf("same", repo=repo)
@@ -99,6 +112,15 @@ def test_add_objects_rejects_conflicting_instance_same_cdef():
 
     with pytest.raises(KeyError, match="different object"):
         repo.add_objects(second)
+
+
+def test_binding_rejects_two_live_instances_with_same_cdef_in_one_input():
+    repo = Repo()
+    first = GraphLeaf("same")
+    second = GraphLeaf("same")
+
+    with pytest.raises(RuntimeBindingConflict, match="different object"):
+        repo.add_objects([first, second])
 
 
 def test_add_objects_assigns_store_to_unique_graph_nodes(tmp_path):

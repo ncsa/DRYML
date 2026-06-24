@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..definition import ConcreteDefinition, Definition
@@ -14,6 +14,14 @@ from .path import Arg, DefinitionPath, Index, Key, Kwarg, iter_set_members
 
 
 SelectorNodeId = int
+
+
+class SelectorGraphError(Exception):
+    pass
+
+
+class SelectorGraphCycleError(SelectorGraphError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,15 +46,41 @@ class SelectorGraph:
     root: SelectorNodeId
     nodes: tuple[SelectorGraphNode, ...]
     edges: tuple[SelectorGraphEdge, ...]
+    _outgoing: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]] = field(init=False, repr=False, compare=False)
+    _incoming: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        node_ids = [node.node_id for node in self.nodes]
+        expected_ids = set(range(len(self.nodes)))
+        if set(node_ids) != expected_ids or len(node_ids) != len(set(node_ids)):
+            raise SelectorGraphError("SelectorGraph node IDs must be unique contiguous tuple indexes.")
+        if self.root not in expected_ids:
+            raise SelectorGraphError(f"SelectorGraph root {self.root!r} is not a graph node.")
+
+        outgoing: dict[SelectorNodeId, list[SelectorGraphEdge]] = defaultdict(list)
+        incoming: dict[SelectorNodeId, list[SelectorGraphEdge]] = defaultdict(list)
+        for edge in self.edges:
+            if edge.parent not in expected_ids:
+                raise SelectorGraphError(f"SelectorGraph edge parent {edge.parent!r} is not a graph node.")
+            if edge.child not in expected_ids:
+                raise SelectorGraphError(f"SelectorGraph edge child {edge.child!r} is not a graph node.")
+            outgoing[edge.parent].append(edge)
+            incoming[edge.child].append(edge)
+
+        outgoing_t = {node_id: tuple(edges) for node_id, edges in outgoing.items()}
+        incoming_t = {node_id: tuple(edges) for node_id, edges in incoming.items()}
+        _validate_acyclic(self.root, expected_ids, outgoing_t)
+        object.__setattr__(self, "_outgoing", outgoing_t)
+        object.__setattr__(self, "_incoming", incoming_t)
 
     def node(self, node_id: SelectorNodeId) -> SelectorGraphNode:
         return self.nodes[node_id]
 
     def outgoing(self, node_id: SelectorNodeId) -> tuple[SelectorGraphEdge, ...]:
-        return tuple(edge for edge in self.edges if edge.parent == node_id)
+        return self._outgoing.get(node_id, ())
 
     def incoming(self, node_id: SelectorNodeId) -> tuple[SelectorGraphEdge, ...]:
-        return tuple(edge for edge in self.edges if edge.child == node_id)
+        return self._incoming.get(node_id, ())
 
 
 def compile_selector_graph(
@@ -69,22 +103,36 @@ class _SelectorGraphCompiler:
         self.class_match = class_match
         self.nodes: list[SelectorGraphNode] = []
         self.edges: list[SelectorGraphEdge] = []
+        self.active: dict[int, DefinitionPath] = {}
 
     def add_node(self, selector: Definition | ConcreteDefinition, source_path: DefinitionPath) -> SelectorNodeId:
+        active_id = id(selector) if isinstance(selector, Definition) else None
+        if active_id is not None:
+            first_path = self.active.get(active_id)
+            if first_path is not None:
+                raise SelectorGraphCycleError(
+                    f"Selector Definition cycle detected at {source_path!s}; first active path was {first_path!s}."
+                )
+            self.active[active_id] = source_path
+
         node_id = len(self.nodes)
         self.nodes.append(SelectorGraphNode(node_id, source_path, selector, (), None))
-        counts: Counter[FeatureToken] = Counter()
-        exact = selector if isinstance(selector, ConcreteDefinition) else None
-        if exact is not None:
-            counts[FeatureToken("EXACT_SUBTREE", DefinitionPath(), exact.stable_hash())] += 1
-        else:
-            self._local_requirements(selector, DefinitionPath(), counts, parent_id=node_id, source_path=source_path)
-        requirements = tuple(
-            FeatureRequirement(token, count)
-            for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
-        )
-        self.nodes[node_id] = SelectorGraphNode(node_id, source_path, selector, requirements, exact)
-        return node_id
+        try:
+            counts: Counter[FeatureToken] = Counter()
+            exact = selector if isinstance(selector, ConcreteDefinition) else None
+            if exact is not None:
+                counts[FeatureToken("EXACT_SUBTREE", DefinitionPath(), exact.stable_hash())] += 1
+            else:
+                self._local_requirements(selector, DefinitionPath(), counts, parent_id=node_id, source_path=source_path)
+            requirements = tuple(
+                FeatureRequirement(token, count)
+                for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
+            )
+            self.nodes[node_id] = SelectorGraphNode(node_id, source_path, selector, requirements, exact)
+            return node_id
+        finally:
+            if active_id is not None:
+                self.active.pop(active_id, None)
 
     def _add(self, counts: Counter[FeatureToken], kind: str, path: DefinitionPath | None, payload: Any = None) -> None:
         counts[FeatureToken(kind, path, payload)] += 1
@@ -178,3 +226,28 @@ def _container_families(value: Any) -> tuple[str, ...]:
     if isinstance(value, (dict, FrozenDict)):
         return ("dict",)
     return ()
+
+
+def _validate_acyclic(
+        root: SelectorNodeId,
+        node_ids: set[SelectorNodeId],
+        outgoing: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]]) -> None:
+    visited: set[SelectorNodeId] = set()
+    active: set[SelectorNodeId] = set()
+
+    def visit(node_id: SelectorNodeId) -> None:
+        if node_id in visited:
+            return
+        if node_id in active:
+            raise SelectorGraphCycleError(f"SelectorGraph cycle detected at node {node_id}.")
+        active.add(node_id)
+        try:
+            for edge in outgoing.get(node_id, ()):
+                visit(edge.child)
+        finally:
+            active.remove(node_id)
+        visited.add(node_id)
+
+    visit(root)
+    for node_id in node_ids:
+        visit(node_id)

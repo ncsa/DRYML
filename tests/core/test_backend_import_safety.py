@@ -110,7 +110,7 @@ cdef = ConcreteDefinition(
     FrozenDict({"layer_defs": FrozenTuple(())}),
 )
 repo = Repo()
-repo._query_catalog.register_stored_graph(cdef, FakeStore())
+repo._query_catalog.register_stored(cdef, FakeStore())
 
 assert repo.query(cdef).class_match("exact").stored(refresh=False).count() == 1
 selector = Definition(ImportRef("dryml.models.tf.keras.base", "Sequential"), SKIP_ARGS)
@@ -144,7 +144,7 @@ cdef = ConcreteDefinition(
     FrozenDict({"layer_defs": FrozenTuple(())}),
 )
 repo = Repo()
-repo._query_catalog.register_stored_graph(cdef, FakeStore())
+repo._query_catalog.register_stored(cdef, FakeStore())
 
 selector = Definition(ImportRef("dryml.models.torch.base", "Sequential"), SKIP_ARGS)
 assert repo.query(cdef).class_match("exact").stored(refresh=False).count() == 1
@@ -193,7 +193,7 @@ target_local_fingerprint(root)
 compile_selector_graph(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child))
 
 repo = Repo()
-repo._query_catalog.register_stored_graph(root, FakeStore())
+repo._query_catalog.register_stored(root, FakeStore())
 assert repo.query(Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, child=child)).stored(refresh=False).count() == 1
 assert repo.query(child).nested(refresh=False).owners().defs().count() == 1
 repo.query(child).nested(refresh=False).owners().defs().explanation.format()

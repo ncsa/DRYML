@@ -65,7 +65,17 @@ def test_catalog_registering_same_definition_is_idempotent():
 
     assert first == second
     assert len(repo._query_catalog.definitions_by_id) == 1
-    assert all(list(posting).count(first) == 1 for posting in repo._query_catalog.postings.values())
+    assert all(list(posting).count(first) == 1 for posting in repo._query_catalog.local_postings.values())
+
+
+def test_catalog_exposes_only_graph_native_index_state():
+    repo = Repo()
+    catalog = repo._query_catalog
+
+    assert not hasattr(catalog, "postings")
+    assert not hasattr(catalog, "occurrences_by_nested")
+    assert not hasattr(catalog, "occurrences_by_owner")
+    assert not hasattr(catalog, "occurrence_by_key")
 
 
 def test_cached_only_definition_is_known_not_stored_then_save_promotes(tmp_path):
@@ -114,6 +124,44 @@ def test_graph_registration_records_direct_edges_once():
     assert edge.parent_id == parent_id
     assert edge.child_id == child_id
     assert str(edge.path) == "$.args[0]"
+
+
+def test_repeated_stored_registration_does_not_change_generation(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = IndexLeaf("stored", repo=repo)
+    catalog = repo._query_catalog
+
+    catalog.register_stored(obj.definition, store)
+    generation = catalog.generation
+    catalog.register_stored(obj.definition, store)
+
+    assert catalog.generation == generation
+
+
+def test_cache_sync_registers_union_graph_once(monkeypatch):
+    from dryml.core2.query import index as index_mod
+
+    repo = Repo()
+    child = IndexLeaf("shared", repo=repo)
+    left = IndexPersistent(child, state=1, repo=repo)
+    right = IndexPersistent(child, state=2, repo=repo)
+    repo.pin(left)
+    repo.pin(right)
+    calls = []
+    original = index_mod.ConcreteDefinitionGraph.from_roots
+
+    def spy_from_roots(cls, cdefs):
+        cdefs = tuple(cdefs)
+        calls.append(cdefs)
+        return original(cdefs)
+
+    monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "from_roots", classmethod(spy_from_roots))
+
+    repo._query_catalog.sync_caches()
+
+    assert len(calls) == 1
+    assert set(calls[0]) >= {left.definition, right.definition}
 
 
 def test_shared_child_local_fingerprint_compiled_once(monkeypatch):
@@ -244,8 +292,12 @@ def catalog_state(repo):
         "definitions": tuple(sorted(catalog.definitions_by_id.keys())),
         "replicas": tuple(sorted((k, tuple(sorted(v))) for k, v in catalog.replicas_by_definition.items())),
         "stored_by_store": tuple(sorted((k, tuple(sorted(v))) for k, v in catalog.stored_definitions_by_store.items())),
-        "occurrences": tuple(sorted((k[0], str(k[1]), k[2]) for k in catalog.occurrence_by_key.keys())),
-        "postings": tuple(sorted((repr(k), tuple(sorted(v.items()))) for k, v in catalog.postings.items())),
+        "local_postings": tuple(sorted((repr(k), tuple(sorted(v.items()))) for k, v in catalog.local_postings.items())),
+        "edges": tuple(sorted((k[0], str(k[1]), k[2]) for k in catalog.edge_by_key.keys())),
+        "outgoing_edges": tuple(sorted((k, tuple(sorted((edge[0], str(edge[1]), edge[2]) for edge in v))) for k, v in catalog.outgoing_edges.items())),
+        "incoming_edges": tuple(sorted((k, tuple(sorted((edge[0], str(edge[1]), edge[2]) for edge in v))) for k, v in catalog.incoming_edges.items())),
+        "child_by_parent_path": tuple(sorted(((k[0], str(k[1])), tuple(sorted(v))) for k, v in catalog.child_by_parent_path.items())),
+        "parents_by_child_path": tuple(sorted(((k[0], str(k[1])), tuple(sorted(v))) for k, v in catalog.parents_by_child_path.items())),
         "hydrated": tuple(sorted(catalog.hydrated_stores)),
         "store_by_id": tuple(sorted(catalog.store_by_id.keys())),
         "light_index": tuple(sorted(cdef.stable_hash() for cdef in repo.light_index)),

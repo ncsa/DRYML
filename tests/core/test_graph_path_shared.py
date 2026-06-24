@@ -18,11 +18,21 @@ def test_query_path_types_are_shared_graph_types():
     assert normalize_path("model.encoder") == GraphPath((Kwarg("model"), Kwarg("encoder")))
 
 
+def test_graph_path_equality_and_hash_contract():
+    a = GraphPath((Kwarg("model"),))
+    b = GraphPath((Kwarg("model"),))
+
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a != ("model",)
+    assert a.to_legacy_tuple() == ("model",)
+
+
 def test_graph_ctx_accepts_graph_path_and_legacy_children():
     ctx = GraphCtx(path=GraphPath((Kwarg("root"),)))
     child = ctx.child("items").child(2)
 
-    assert child.path == ("root", "items", 2)
+    assert child.path.to_legacy_tuple() == ("root", "items", 2)
     assert child.path_str() == "root/items/2"
 
 

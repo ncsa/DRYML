@@ -1,9 +1,10 @@
 import pytest
 
 from dryml.core2 import Definition, Object, Repo, Serializable
-from dryml.core2.materialization import build_materialization_plan
+from dryml.core2.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan
 from dryml.core2.policies import RepoLoadOptions
 from dryml.core2.repo import RepoLoadError
+from dryml.core2.store.dir import DirStore
 
 
 class MaterialLeaf(Object):
@@ -26,6 +27,25 @@ class MaterialSerializable(Serializable):
     def __init__(self, name):
         super().__init__()
         self.name = name
+
+
+class BadRestoreSerializable(Serializable):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, revision=None):
+        pass
+
+    def restore_state_from_dir_imp(self, src_dir, revision=None):
+        raise RuntimeError("restore boom")
+
+
+class FailingMaterial(Object):
+    def __init__(self, child=None):
+        super().__init__()
+        self.child = child
+        raise RuntimeError("construct boom")
 
 
 def test_materialization_plan_does_not_construct():
@@ -99,3 +119,76 @@ def test_cached_parent_restore_state_true_processes_missing_child():
 
     with pytest.raises(RepoLoadError, match="Missing stored state"):
         repo.load_object(parent.definition, restore_state=True, build_missing=False)
+
+
+def test_restore_failure_does_not_pollute_memo(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = BadRestoreSerializable("bad", repo=repo)
+    repo.save_object(obj)
+    cdef = obj.definition
+    repo.clear_cache(strong=True, weak=True)
+    memo = {}
+
+    with pytest.raises(RepoLoadError, match="Error restoring state"):
+        repo._materialize_cdef(cdef, memo=memo)
+
+    assert cdef not in memo
+    assert cdef not in repo.strong_obj_cache
+    assert cdef not in repo.weak_obj_cache
+
+
+def test_constructor_failure_does_not_publish_cache_entry():
+    repo = Repo()
+    cdef = Definition(FailingMaterial).concretize(repo=repo)
+
+    with pytest.raises(RepoLoadError, match="Error constructing"):
+        repo.load_object(cdef, build_missing=True, cache="strong")
+
+    assert cdef not in repo.strong_obj_cache
+    assert cdef not in repo.weak_obj_cache
+
+
+def test_cached_reuse_does_not_resolve_backend_class(monkeypatch):
+    from dryml.core2 import materialization as materialization_mod
+
+    repo = Repo()
+    obj = MaterialLeaf("cached", repo=repo)
+    repo.pin(obj)
+
+    def fail_resolve(_):
+        raise AssertionError("resolve_symbol should not be called for cached reuse")
+
+    monkeypatch.setattr(materialization_mod, "resolve_symbol", fail_resolve)
+
+    assert repo.load_object(obj.definition, restore_state=False) is obj
+
+
+def test_executor_honors_materialization_action_kind():
+    repo = Repo()
+    cdef = Definition(MaterialLeaf, "planned").concretize(repo=repo)
+    memo = {}
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        RepoLoadOptions(build_missing=True),
+        memo=memo,
+        path=[""],
+    )
+    plan.actions[cdef] = MaterializationAction(cdef, "reuse", "$")
+
+    with pytest.raises(RepoLoadError, match="cached reuse"):
+        execute_materialization_plan(repo, plan, memo=memo, revision={}, root=cdef)
+
+
+def test_parent_failure_leaves_successful_child_cached():
+    repo = Repo()
+    child_def = Definition(MaterialLeaf, "child")
+    parent_def = Definition(FailingMaterial, child_def).concretize(repo=repo)
+    child_cdef = parent_def.args[0]
+
+    with pytest.raises(RepoLoadError, match="Error constructing"):
+        repo.load_object(parent_def, build_missing=True, cache="strong")
+
+    assert child_cdef in repo.strong_obj_cache
+    assert parent_def not in repo.strong_obj_cache

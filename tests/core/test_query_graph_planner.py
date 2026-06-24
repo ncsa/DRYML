@@ -33,6 +33,35 @@ def test_planner_can_choose_nested_exact_anchor():
     assert results.explanation.verified_count == 2
 
 
+def test_nested_exact_anchor_does_not_enumerate_full_root_domain(monkeypatch):
+    repo = Repo()
+    rare = PlannerLeaf("rare", repo=repo)
+    owners = []
+    for idx in range(12):
+        child = rare if idx in {3, 9} else PlannerLeaf(f"common-{idx}", repo=repo)
+        owners.append(PlannerParent(child=child, name=f"owner-{idx}", repo=repo))
+    repo.add_objects(*owners)
+
+    catalog = repo._query_catalog
+    full_domain_size = len(catalog.definitions_by_id)
+    local_candidate_universe_sizes = []
+    original = catalog.local_candidate_ids
+
+    def spy_local_candidate_ids(universe_ids, requirements, *, stats=None):
+        local_candidate_universe_sizes.append(len(universe_ids))
+        return original(universe_ids, requirements, stats=stats)
+
+    monkeypatch.setattr(catalog, "local_candidate_ids", spy_local_candidate_ids)
+
+    selector = Definition(PlannerParent, SKIP_ARGS, child=rare.definition)
+    results = repo.query(selector).known(refresh=False).defs()
+
+    assert list(results) == sorted([owners[3].definition, owners[9].definition], key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
+    assert str(results.explanation.graph_anchor_path) == "$.child"
+    assert local_candidate_universe_sizes
+    assert max(local_candidate_universe_sizes) < full_domain_size
+
+
 def test_planner_propagates_child_scalar_candidates_to_parent():
     repo = Repo()
     wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)

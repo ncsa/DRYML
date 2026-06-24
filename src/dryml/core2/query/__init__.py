@@ -1,4 +1,4 @@
-from .path import Arg, DefinitionPath, GraphPath, Index, Key, Kwarg, QueryPathError, SetMember, normalize_path
+from .path import Arg, DefinitionPath, GraphPath, GraphPathError, Index, Key, Kwarg, QueryPathError, SetMember, normalize_path
 from .model import (
     ExactSubtreeConstraint,
     QueryCardinalityError,
@@ -17,6 +17,7 @@ __all__ = [
     "DefinitionResultSet",
     "ExactSubtreeConstraint",
     "GraphPath",
+    "GraphPathError",
     "Index",
     "Key",
     "Kwarg",

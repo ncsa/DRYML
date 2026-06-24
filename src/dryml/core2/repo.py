@@ -18,13 +18,7 @@ from .definition import Definition, ConcreteDefinition
 from .object import Object, Serializable
 from .store.store import Store
 from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions, RepoSaveOptions
-from .repo_graph import (
-    RepoGraphApplyVisitor,
-    RepoGraphCollectVisitor,
-    RepoSaveVisitor,
-    RepoAddObjectsVisitor,
-    manage_revision,
-)
+from .repo_graph import manage_revision
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
 from .query.index import DefinitionCatalog

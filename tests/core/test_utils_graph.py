@@ -143,8 +143,8 @@ def test_graph_ctx_child_and_with_state():
     ctx2 = ctx.child("a").child(3)
     ctx3 = ctx2.with_state(mode="x", enabled=True)
 
-    assert ctx.path == ()
-    assert ctx2.path == ("a", 3)
+    assert ctx.path.to_legacy_tuple() == ()
+    assert ctx2.path.to_legacy_tuple() == ("a", 3)
     assert ctx2.path_str() == "a/3"
 
     assert ctx.state == {}
@@ -242,7 +242,7 @@ def test_visitor_collects_atomic_values_with_paths():
     vis = CollectInts()
     vis.visit(x)
 
-    assert vis.items == [
+    assert _legacy_items(vis.items) == [
         (("a", 0), 1),
         (("a", 1), 2),
         (("b", 0), 3),
@@ -256,7 +256,7 @@ def test_visitor_does_not_visit_dict_keys_by_default():
     vis = CollectInts()
     vis.visit(x)
 
-    assert vis.items == [
+    assert _legacy_items(vis.items) == [
         ((1,), 2),
         ((3,), 4),
     ]
@@ -268,7 +268,7 @@ def test_visitor_can_opt_in_to_visit_dict_keys():
     vis = CollectIntsIncludingDictKeys()
     vis.visit(x)
 
-    assert vis.items == [
+    assert _legacy_items(vis.items) == [
         (("<key>",), 1),
         ((1,), 2),
         (("<key>",), 3),
@@ -300,10 +300,14 @@ def test_visitor_supports_custom_object_graphs():
     vis = NodeVisitor()
     vis.visit(x)
 
-    assert vis.values == [
+    assert _legacy_items(vis.values) == [
         (("value",), 1),
         (("child", "value"), 2),
     ]
+
+
+def _legacy_items(items):
+    return [(path.to_legacy_tuple(), value) for path, value in items]
 
 
 def test_visitor_detects_cycles_in_custom_object_graphs():

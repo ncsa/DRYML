@@ -1,10 +1,16 @@
 import pytest
 
 from dryml.core2 import ConcreteDefinitionGraph, Definition, Object, Repo, SKIP_ARGS, SetMember
-from dryml.core2.cdef_graph import ConcreteDefinitionGraphCycleError, iter_direct_cdef_edges
+from dryml.core2.cdef_graph import (
+    CDefEdge,
+    CDefNode,
+    ConcreteDefinitionGraphCycleError,
+    ConcreteDefinitionGraphError,
+    iter_direct_cdef_edges,
+)
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.path import get_subtree
+from dryml.core2.query.path import GraphPath, Kwarg, get_subtree
 
 
 class GraphLeaf(Object):
@@ -83,6 +89,16 @@ def test_same_child_at_two_paths_has_one_node_and_two_edges():
     assert {str(occ.path) for occ in occurrences} == {"$.args[0][0]", "$.args[0][1]"}
 
 
+def test_primary_path_of_repeated_child_returns_first_path():
+    repo = Repo()
+    child = GraphLeaf("shared", repo=repo)
+    parent = GraphContainer([child, child], repo=repo)
+
+    graph = ConcreteDefinitionGraph.from_root(parent.definition)
+
+    assert str(graph.primary_path(parent.definition, child.definition)) == "$.args[0][0]"
+
+
 def test_multi_root_graph_deduplicates_shared_nodes():
     repo = Repo()
     shared = GraphLeaf("shared", repo=repo)
@@ -145,3 +161,44 @@ def test_exact_graph_builder_rejects_plain_definition_in_cdef():
 
     with pytest.raises(Exception, match="Plain Definition"):
         ConcreteDefinitionGraph.from_root(cdef)
+
+
+def test_graph_rejects_missing_root_node():
+    cdef = ConcreteDefinition(GraphLeaf, FrozenTuple(("x",)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphError, match="root"):
+        ConcreteDefinitionGraph((cdef,), (), ())
+
+
+def test_graph_rejects_missing_edge_endpoint():
+    parent = ConcreteDefinition(GraphParent, FrozenTuple(()), FrozenDict({}))
+    child = ConcreteDefinition(GraphLeaf, FrozenTuple(("x",)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphError, match="child"):
+        ConcreteDefinitionGraph(
+            (parent,),
+            (CDefNode(parent, parent.stable_hash()),),
+            (CDefEdge(parent, GraphPath((Kwarg("child"),)), child),),
+        )
+
+
+def test_graph_rejects_direct_cycle():
+    left = ConcreteDefinition(GraphLeaf, FrozenTuple(("left",)), FrozenDict({}))
+    right = ConcreteDefinition(GraphLeaf, FrozenTuple(("right",)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphCycleError, match="cycle"):
+        ConcreteDefinitionGraph(
+            (left,),
+            (CDefNode(left, left.stable_hash()), CDefNode(right, right.stable_hash())),
+            (
+                CDefEdge(left, GraphPath((Kwarg("right"),)), right),
+                CDefEdge(right, GraphPath((Kwarg("left"),)), left),
+            ),
+        )
+
+
+def test_graph_rejects_inconsistent_node_key():
+    cdef = ConcreteDefinition(GraphLeaf, FrozenTuple(("x",)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphError, match="stable_hash"):
+        ConcreteDefinitionGraph((cdef,), (CDefNode(cdef, "wrong"),), ())

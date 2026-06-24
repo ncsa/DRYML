@@ -7,6 +7,7 @@ from .path import (
     Arg,
     DefinitionPath,
     Field,
+    GraphPathError,
     GraphPath,
     Index,
     Key,
@@ -15,6 +16,7 @@ from .path import (
     QueryPathError,
     SetMember,
     normalize_path,
+    normalize_graph_path,
     parse_path,
 )
 
@@ -30,6 +32,7 @@ __all__ = [
     "Arg",
     "DefinitionPath",
     "Field",
+    "GraphPathError",
     "GraphPath",
     "Index",
     "Key",
@@ -38,5 +41,6 @@ __all__ = [
     "QueryPathError",
     "SetMember",
     "normalize_path",
+    "normalize_graph_path",
     "parse_path",
 ]

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal
+from typing import Any, Callable, Generic, Iterable, Iterator, Literal, TypeVar
 
 from .canonical import NodeKind, is_runtime_leaf, iter_value_children, node_kind
 from .cdef_graph import CDefEdge, ConcreteDefinitionGraph
@@ -9,6 +10,20 @@ from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions, RepoLoadOptions
 from .utils.graph.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
+
+
+T = TypeVar("T")
+
+
+class RuntimeBindingConflict(KeyError):
+    def __init__(self, *, definition: ConcreteDefinition, first: Object, second: Object, path: GraphPath):
+        self.definition = definition
+        self.first = first
+        self.second = second
+        self.path = path
+        super().__init__(
+            f"Repo already has a different object matching {definition} at {path.legacy_str()}!"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +39,20 @@ class RuntimeGraphBinding:
     roots: tuple[RuntimeRoot, ...]
     objects: dict[ConcreteDefinition, Object]
     missing: frozenset[ConcreteDefinition] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class GraphObjectOccurrence:
+    path: GraphPath
+    definition: ConcreteDefinition
+    obj: Object
+
+
+@dataclass(frozen=True, slots=True)
+class GraphApplyResult(Generic[T]):
+    path: GraphPath
+    definition: ConcreteDefinition
+    value: T
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,21 +88,37 @@ def build_runtime_binding(
     objects: dict[ConcreteDefinition, Object] = {}
     for root in roots:
         if root.obj is not None:
-            objects.setdefault(root.definition, root.obj)
+            bind_runtime_object(objects, root.definition, root.obj, path=root.path)
     for node in graph.nodes():
         if node.definition in objects:
             continue
         obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
         if obj is not None:
-            objects.setdefault(node.definition, obj)
+            path = _node_primary_path(graph, roots, node.definition)
+            bind_runtime_object(objects, node.definition, obj, path=path)
     missing = frozenset(node.definition for node in graph.nodes() if node.definition not in objects)
     return RuntimeGraphBinding(graph=graph, roots=roots, objects=objects, missing=missing)
 
 
-def iter_graph_objects(repo, root: Any, options: RepoGraphOptions) -> tuple[Object, ...]:
+def bind_runtime_object(
+        bindings: dict[ConcreteDefinition, Object],
+        cdef: ConcreteDefinition,
+        obj: Object,
+        *,
+        path: GraphPath) -> None:
+    existing = bindings.get(cdef)
+    if existing is None:
+        bindings[cdef] = obj
+        return
+    if existing is not obj:
+        raise RuntimeBindingConflict(definition=cdef, first=existing, second=obj, path=path)
+
+
+def iter_graph_objects(repo, root: Any, options: RepoGraphOptions) -> Iterator[Object]:
     _validate_graph_options(options)
     binding = build_runtime_binding(repo, root)
-    return _iter_bound_graph_objects(repo, binding, options)
+    for occurrence in _iter_bound_graph_object_occurrences(repo, binding, options):
+        yield occurrence.obj
 
 
 def _iter_bound_graph_objects(
@@ -82,7 +127,24 @@ def _iter_bound_graph_objects(
         options: RepoGraphOptions,
         *,
         resolve_global: bool = False) -> tuple[Object, ...]:
-    out: list[Object] = []
+    return tuple(
+        occurrence.obj
+        for occurrence in _iter_bound_graph_object_occurrences(
+            repo,
+            binding,
+            options,
+            resolve_global=resolve_global,
+        )
+    )
+
+
+def _iter_bound_graph_object_occurrences(
+        repo,
+        binding: RuntimeGraphBinding,
+        options: RepoGraphOptions,
+        *,
+        resolve_global: bool = False) -> tuple[GraphObjectOccurrence, ...]:
+    out: list[GraphObjectOccurrence] = []
     load_memo: dict[ConcreteDefinition, Object] = {}
     seen: set[ConcreteDefinition] = set()
 
@@ -94,7 +156,7 @@ def _iter_bound_graph_objects(
             obj = _resolve_missing_for_traversal(repo, cdef, path, options, load_memo)
             if obj is None:
                 return
-            binding.objects[cdef] = obj
+            bind_runtime_object(binding.objects, cdef, obj, path=path)
 
         if options.dedupe:
             if cdef in seen:
@@ -103,23 +165,35 @@ def _iter_bound_graph_objects(
 
         should_apply = options.include_root or bool(path)
         if options.order == "pre" and should_apply:
-            out.append(obj)
+            out.append(GraphObjectOccurrence(path, cdef, obj))
 
         for edge in binding.graph.outgoing(cdef):
             visit(edge.child, _repo_child_path(path, edge))
 
         if options.order == "post" and should_apply:
-            out.append(obj)
+            out.append(GraphObjectOccurrence(path, cdef, obj))
 
     for root_occ in binding.roots:
         visit(root_occ.definition, root_occ.path, root_occ.obj)
     return tuple(out)
 
 
-def apply_graph_objects(repo, root: Any, func: Callable[[Object], Any], options: RepoGraphOptions) -> dict[ConcreteDefinition, Any]:
-    results: dict[ConcreteDefinition, Any] = {}
-    for obj in iter_graph_objects(repo, root, options):
-        results[obj.definition] = func(obj)
+def apply_graph_objects(
+        repo,
+        root: Any,
+        func: Callable[[Object], T],
+        options: RepoGraphOptions) -> dict[ConcreteDefinition, T] | tuple[GraphApplyResult[T], ...]:
+    _validate_graph_options(options)
+    binding = build_runtime_binding(repo, root)
+    occurrences = _iter_bound_graph_object_occurrences(repo, binding, options)
+    if not options.dedupe:
+        return tuple(
+            GraphApplyResult(occ.path, occ.definition, func(occ.obj))
+            for occ in occurrences
+        )
+    results: dict[ConcreteDefinition, T] = {}
+    for occ in occurrences:
+        results[occ.definition] = func(occ.obj)
     return results
 
 
@@ -180,18 +254,19 @@ def build_save_plan(
 
 
 def execute_save_plan(repo, plan: SavePlan) -> None:
-    saved_objs: dict[int, set[ConcreteDefinition]] = {}
+    saved_objs: dict[str, set[ConcreteDefinition]] = {}
+    graph_registered = False
     for action in plan.actions:
-        store_key = id(action.store)
+        store_key = repo._query_catalog.store_id(action.store)
         saved = saved_objs.setdefault(store_key, set())
         if action.definition in saved:
             continue
         action.store.save_object(action.obj, revision=action.revision)
         saved.add(action.definition)
-        if hasattr(repo._query_catalog, "register_stored_graph_view"):
-            repo._query_catalog.register_stored_graph_view(plan.graph, action.definition, action.store)
-        else:
-            repo._query_catalog.register_stored_graph(action.definition, action.store)
+        if not graph_registered:
+            repo._query_catalog.register_graph(plan.graph)
+            graph_registered = True
+        repo._query_catalog.register_stored_root(action.definition, action.store)
         repo._num_saves += 1
 
 
@@ -282,6 +357,17 @@ def _repo_child_path(path: GraphPath, edge: CDefEdge) -> GraphPath:
     return out
 
 
+def _node_primary_path(
+        graph: ConcreteDefinitionGraph,
+        roots: tuple[RuntimeRoot, ...],
+        cdef: ConcreteDefinition) -> GraphPath:
+    for root in roots:
+        rel_path = graph.primary_path(root.definition, cdef)
+        if rel_path is not None:
+            return root.path.join(rel_path)
+    return GraphPath()
+
+
 def _add_object_single(repo, obj: Object, *, store=None) -> None:
     cdef = obj.definition
     if cdef in repo.strong_obj_cache and (obj is not repo.strong_obj_cache[cdef]):
@@ -296,9 +382,9 @@ def _add_object_single(repo, obj: Object, *, store=None) -> None:
 
 def _minimum_depths(graph: ConcreteDefinitionGraph, roots: tuple[RuntimeRoot, ...]) -> dict[ConcreteDefinition, int]:
     depths: dict[ConcreteDefinition, int] = {}
-    queue: list[tuple[ConcreteDefinition, int]] = [(root.definition, 0) for root in roots]
+    queue = deque((root.definition, 0) for root in roots)
     while queue:
-        cdef, depth = queue.pop(0)
+        cdef, depth = queue.popleft()
         old = depths.get(cdef)
         if old is not None and old <= depth:
             continue

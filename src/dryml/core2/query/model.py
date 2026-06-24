@@ -59,7 +59,6 @@ class DefinitionFingerprint:
 
 DefinitionId = str
 StoreId = str
-OccurrenceKey = tuple[DefinitionId, DefinitionPath, DefinitionId]
 EdgeKey = tuple[DefinitionId, DefinitionPath, DefinitionId]
 
 
@@ -68,8 +67,7 @@ class DefinitionRecord:
     definition_id: DefinitionId
     cdef: Any
     class_key: str
-    fingerprint: DefinitionFingerprint
-    local_fingerprint: DefinitionFingerprint | None = None
+    local_fingerprint: DefinitionFingerprint
 
 
 @dataclass(frozen=True, slots=True)

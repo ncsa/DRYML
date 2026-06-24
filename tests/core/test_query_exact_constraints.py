@@ -171,8 +171,8 @@ def test_exact_cdef_inside_frozenset_inside_set_remains_exact():
         def catalog_key(self):
             return self.name
 
-    repo._query_catalog.register_stored_graph(exact_parent, FakeStore("exact"))
-    repo._query_catalog.register_stored_graph(compatible_parent, FakeStore("compatible"))
+    repo._query_catalog.register_stored(exact_parent, FakeStore("exact"))
+    repo._query_catalog.register_stored(compatible_parent, FakeStore("compatible"))
 
     selector = Definition(objects.TestNest3, SKIP_ARGS, members={FrozenSet({exact_child.definition})})
     results = repo.query(selector).stored(refresh=False).defs()

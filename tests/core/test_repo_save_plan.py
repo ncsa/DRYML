@@ -68,6 +68,27 @@ def test_save_plan_shared_child_saved_once_per_store(tmp_path):
     assert store.has(parent.definition)
 
 
+def test_save_execution_registers_graph_structure_once(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = SavePlanSerializable(name="child", repo=repo)
+    parent = SavePlanSerializable(child, name="parent", repo=repo)
+    repo.add_objects(parent)
+    calls = []
+    original = repo._query_catalog.register_graph
+
+    def spy_register_graph(graph):
+        calls.append(graph)
+        return original(graph)
+
+    monkeypatch.setattr(repo._query_catalog, "register_graph", spy_register_graph)
+
+    plan = build_save_plan(repo, parent, store=store, revision={}, ephemeral_depth=0)
+    execute_save_plan(repo, plan)
+
+    assert calls == [plan.graph]
+
+
 def test_save_plan_explicit_store_wins(tmp_path):
     default_store = DirStore(tmp_path / "default")
     explicit_store = DirStore(tmp_path / "explicit")
