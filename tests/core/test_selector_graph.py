@@ -2,6 +2,7 @@ import pytest
 
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
 from dryml.core2.query.path import DefinitionPath, Kwarg
+from dryml.core2.query.fingerprint import selector_local_requirements
 from dryml.core2.query.selector_graph import (
     SelectorGraph,
     SelectorGraphCycleError,
@@ -78,6 +79,15 @@ def test_nested_exact_cdef_inside_set_has_path_edge():
     assert len(graph.edges) == 1
     assert graph.edges[0].unordered is False
     assert str(graph.edges[0].path).startswith('$.args[0][@set("')
+
+
+def test_selector_graph_local_requirements_use_shared_walker():
+    selector = Definition(SelectorParent, SKIP_ARGS, child=Definition(SelectorLeaf, SKIP_ARGS, name="x"))
+
+    graph = compile_selector_graph(selector)
+
+    assert graph is not None
+    assert graph.node(graph.root).local_requirements == selector_local_requirements(selector)
 
 
 def test_selector_graph_rejects_cycle_with_source_path():

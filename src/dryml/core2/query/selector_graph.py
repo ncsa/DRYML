@@ -5,12 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..definition import ConcreteDefinition, Definition
-from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
-from ..utils.types import is_nonclass_callable
-from .fingerprint import canonical_class_key, scalar_key
+from .local_structure import walk_local_structure
 from .model import ClassMatchPolicy, FeatureRequirement, FeatureToken
-from .path import Arg, DefinitionPath, Index, Key, Kwarg, iter_set_members
+from .path import DefinitionPath
 
 
 SelectorNodeId = int
@@ -123,7 +121,13 @@ class _SelectorGraphCompiler:
             if exact is not None:
                 counts[FeatureToken("EXACT_SUBTREE", DefinitionPath(), exact.stable_hash())] += 1
             else:
-                self._local_requirements(selector, DefinitionPath(), counts, parent_id=node_id, source_path=source_path)
+                walk_local_structure(
+                    selector,
+                    _GraphLocalConsumer(self, counts, parent_id=node_id, source_path=source_path),
+                    mode="selector-local",
+                    class_match=self.class_match,
+                    unordered_set_boundaries=True,
+                )
             requirements = tuple(
                 FeatureRequirement(token, count)
                 for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
@@ -137,95 +141,34 @@ class _SelectorGraphCompiler:
     def _add(self, counts: Counter[FeatureToken], kind: str, path: DefinitionPath | None, payload: Any = None) -> None:
         counts[FeatureToken(kind, path, payload)] += 1
 
-    def _local_requirements(
+
+class _GraphLocalConsumer:
+    def __init__(
             self,
-            value: Any,
-            path: DefinitionPath,
+            compiler: _SelectorGraphCompiler,
             counts: Counter[FeatureToken],
             *,
             parent_id: SelectorNodeId,
-            source_path: DefinitionPath) -> None:
-        if isinstance(value, Object):
-            value = value.definition
+            source_path: DefinitionPath):
+        self.compiler = compiler
+        self.counts = counts
+        self.parent_id = parent_id
+        self.source_path = source_path
 
-        if isinstance(value, ConcreteDefinition):
-            child_id = self.add_node(value, source_path.join(path))
-            self._add(counts, "CDEF_EDGE_AT_PATH", path, None)
-            self._add(counts, "CDEF_EDGE_EXACT", path, value.stable_hash())
-            self.edges.append(SelectorGraphEdge(parent_id, path, child_id))
-            return
+    def feature(self, kind: str, path: DefinitionPath | None, payload: Any = None) -> None:
+        self.compiler._add(self.counts, kind, path, payload)
 
-        if isinstance(value, Definition):
-            if path:
-                child_id = self.add_node(value, source_path.join(path))
-                self._add(counts, "CDEF_EDGE_AT_PATH", path, None)
-                self.edges.append(SelectorGraphEdge(parent_id, path, child_id))
-                return
-            if value.cls is not None and self.class_match == "exact" and not is_nonclass_callable(value.cls):
-                try:
-                    self._add(counts, "CLASS_KEY", path, canonical_class_key(value.cls))
-                except TypeError:
-                    pass
-            if value.args is not None:
-                for idx, child in enumerate(value.args):
-                    self._local_requirements(child, path.child(Arg(idx)), counts, parent_id=parent_id, source_path=source_path)
-            for key, child in value.kwargs.items():
-                self._add(counts, "HAS_KWARG", path, key)
-                self._local_requirements(child, path.child(Kwarg(key)), counts, parent_id=parent_id, source_path=source_path)
-            return
-
-        families = _container_families(value)
-        if families or isinstance(value, FrozenList):
-            primary_family = families[0] if families else "list"
-            for family in families:
-                self._add(counts, "CONTAINER_KIND", path, family)
-            if primary_family in {"list", "tuple", "set"}:
-                self._add(counts, "SEQUENCE_LENGTH", path, len(value))
-            if primary_family == "dict":
-                for key, child in value.items():
-                    key_hash = scalar_key(key)
-                    if key_hash is not None:
-                        self._add(counts, "HAS_MAPPING_KEY", path, key_hash)
-                    self._local_requirements(child, path.child(Key(key)), counts, parent_id=parent_id, source_path=source_path)
-            elif primary_family == "set":
-                for member_path, child in iter_set_members(value):
-                    member_abs = path.child(member_path)
-                    if isinstance(child, Object):
-                        child = child.definition
-                    if isinstance(child, ConcreteDefinition):
-                        child_id = self.add_node(child, source_path.join(member_abs))
-                        self._add(counts, "CDEF_EDGE_AT_PATH", member_abs, None)
-                        self._add(counts, "CDEF_EDGE_EXACT", member_abs, child.stable_hash())
-                        self.edges.append(SelectorGraphEdge(parent_id, member_abs, child_id))
-                    elif isinstance(child, Definition):
-                        child_id = self.add_node(child, source_path.join(path))
-                        self._add(counts, "CDEF_EDGE_AT_PATH", path, None)
-                        self.edges.append(SelectorGraphEdge(parent_id, path, child_id, unordered=True))
-            else:
-                for idx, child in enumerate(value):
-                    self._local_requirements(child, path.child(Index(idx)), counts, parent_id=parent_id, source_path=source_path)
-            return
-
-        if is_nonclass_callable(value):
-            return
-
-        key = scalar_key(value)
-        if key is not None:
-            self._add(counts, "SCALAR_VALUE", path, key)
-
-
-def _container_families(value: Any) -> tuple[str, ...]:
-    if isinstance(value, FrozenList):
-        return ()
-    if isinstance(value, list):
-        return ("list",)
-    if isinstance(value, (tuple, FrozenTuple)):
-        return ("tuple",)
-    if isinstance(value, (set, frozenset, FrozenSet)):
-        return ("set",)
-    if isinstance(value, (dict, FrozenDict)):
-        return ("dict",)
-    return ()
+    def definition_boundary(
+            self,
+            path: DefinitionPath,
+            definition: Definition | ConcreteDefinition,
+            *,
+            unordered: bool = False) -> None:
+        child_id = self.compiler.add_node(definition, self.source_path.join(path))
+        self.feature("CDEF_EDGE_AT_PATH", path, None)
+        if isinstance(definition, ConcreteDefinition):
+            self.feature("CDEF_EDGE_EXACT", path, definition.stable_hash())
+        self.compiler.edges.append(SelectorGraphEdge(self.parent_id, path, child_id, unordered=unordered))
 
 
 def _validate_acyclic(

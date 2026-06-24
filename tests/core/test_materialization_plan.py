@@ -66,6 +66,55 @@ def test_materialization_plan_does_not_construct():
     assert repo._num_constructions == 0
 
 
+def test_materialization_action_captures_realization_policy(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MaterialSerializable("stored", repo=repo)
+    repo.save_object(obj)
+    cdef = obj.definition
+    repo.clear_cache(strong=True, weak=True)
+
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        RepoLoadOptions(restore_state=True, build_missing=False, cache="strong"),
+        revision={cdef: "requested"},
+        memo={},
+        path=[""],
+    )
+
+    action = plan.actions[cdef]
+    assert action.kind == "construct"
+    assert action.restore_state is True
+    assert action.store is store
+    assert action.revision == "requested"
+    assert action.build_missing is False
+    assert action.cache == "strong"
+
+
+def test_executor_uses_planned_store_for_cached_reuse(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = MaterialSerializable("cached", repo=repo)
+    repo.save_object(obj)
+    repo.pin(obj)
+    cdef = obj.definition
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        RepoLoadOptions(restore_state=True),
+        memo={},
+        path=[""],
+    )
+
+    def fail_store_lookup(_):
+        raise AssertionError("executor should use MaterializationAction.store")
+
+    monkeypatch.setattr(repo, "_first_store_with", fail_store_lookup)
+
+    assert execute_materialization_plan(repo, plan, memo={}, revision={}, root=cdef) is obj
+
+
 def test_materialization_shared_child_constructed_once():
     repo = Repo()
     child_def = Definition(MaterialLeaf, "shared")

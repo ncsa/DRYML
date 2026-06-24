@@ -569,6 +569,7 @@ class Repo:
             self,
             cdef,
             load_options,
+            revision=revision,
             memo=memo,
             path=path,
         )

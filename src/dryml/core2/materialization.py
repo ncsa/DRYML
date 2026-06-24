@@ -23,6 +23,12 @@ class MaterializationAction:
     kind: MaterializationActionKind
     primary_path: str
     obj: Object | None = None
+    restore_state: bool = True
+    store: Any | None = None
+    revision: str | None = None
+    build_missing: bool = False
+    cache: CachePolicy = "weak"
+    instance: str = "reuse"
 
 
 @dataclass(slots=True)
@@ -38,6 +44,7 @@ def build_materialization_plan(
         cdef: ConcreteDefinition,
         options: RepoLoadOptions,
         *,
+        revision: dict[ConcreteDefinition, str] | None = None,
         memo: dict | None = None,
         path: list[str | int] | None = None) -> MaterializationPlan:
     if memo is None:
@@ -51,16 +58,24 @@ def build_materialization_plan(
     primary_paths = _primary_paths(graph)
     root_path = _format_error_path(path)
     actions = {}
+    revision = {} if revision is None else revision
     for node in order:
         cached_obj = repo.get_cached(node, reuse_weak=options.reuse_weak) if options.instance == "reuse" else None
         memo_obj = memo.get(node)
         reuse_obj = memo_obj if memo_obj is not None else cached_obj
         kind: MaterializationActionKind = "reuse" if reuse_obj is not None else "construct"
+        selected_store = repo._first_store_with(node) if options.restore_state else None
         actions[node] = MaterializationAction(
             definition=node,
             kind=kind,
             primary_path=root_path if node == cdef else str(primary_paths.get(node, "<unknown>")),
             obj=reuse_obj,
+            restore_state=options.restore_state,
+            store=selected_store,
+            revision=revision.get(node),
+            build_missing=options.build_missing,
+            cache=options.cache,
+            instance=options.instance,
         )
     return MaterializationPlan(graph=graph, actions=actions, order=order, options=options)
 
@@ -80,7 +95,7 @@ def execute_materialization_plan(
             continue
 
         action = plan.actions[cdef]
-        revision_str = revision.get(cdef, None)
+        revision_str = action.revision if action.revision is not None else revision.get(cdef, None)
 
         if action.kind == "reuse":
             obj = action.obj if action.obj is not None else repo.get_cached(cdef, reuse_weak=plan.options.reuse_weak)
@@ -89,14 +104,15 @@ def execute_materialization_plan(
                     f"Materialization plan requested cached reuse for {cdef} at {action.primary_path}, "
                     "but no cached object is available."
                 )
-            if plan.options.restore_state:
+            if action.restore_state:
                 _restore_cached_if_needed(
                     repo,
                     cdef,
                     obj,
                     is_serializable=isinstance(obj, Serializable),
+                    store=action.store,
                     revision_str=revision_str,
-                    build_missing=plan.options.build_missing,
+                    build_missing=action.build_missing,
                 )
             local_memo[cdef] = obj
             memo[cdef] = obj
@@ -113,8 +129,8 @@ def execute_materialization_plan(
 
         is_serializable = isinstance(cls, type) and issubclass(cls, Serializable)
 
-        in_store = repo.has_cdef_light(cdef)
-        if plan.options.restore_state and is_serializable and (not in_store) and (not plan.options.build_missing):
+        in_store = action.store is not None
+        if action.restore_state and is_serializable and (not in_store) and (not action.build_missing):
             raise RepoLoadError(
                 f"Missing stored state for {cdef} at {action.primary_path} "
                 f"(set build_missing=True to allow fresh construction)"
@@ -130,10 +146,10 @@ def execute_materialization_plan(
             cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
             raise RepoLoadError(f"Error constructing {cls_name} at {action.primary_path}: {e}") from e
 
-        if plan.options.restore_state and in_store:
-            st = repo._first_store_with(cdef)
+        if action.restore_state and in_store:
+            st = action.store
             if st is None:
-                if not plan.options.build_missing:
+                if not action.build_missing:
                     raise RepoLoadError(f"Inconsistent store index for {cdef}")
             else:
                 try:
@@ -144,7 +160,7 @@ def execute_materialization_plan(
 
         local_memo[cdef] = obj
         memo[cdef] = obj
-        _publish_cache(repo, obj, plan.options.cache, plan.options.instance)
+        _publish_cache(repo, obj, action.cache, action.instance)
 
     return local_memo[root]
 
@@ -222,12 +238,13 @@ def _restore_cached_if_needed(
         obj: Object,
         *,
         is_serializable: bool,
+        store,
         revision_str: str | None,
         build_missing: bool) -> None:
     from .repo import RepoLoadError
 
     if revision_str is not None:
-        st = repo._first_store_with(cdef)
+        st = store
         if st is None:
             if is_serializable and not build_missing:
                 raise RepoLoadError(f"No store has requested object ({cdef})")
@@ -236,7 +253,7 @@ def _restore_cached_if_needed(
             st.restore_object(obj, revision=revision_str)
         except Exception as e:
             raise RepoLoadError(f"Store can't restore requested revision ({revision_str}) for object ({cdef})") from e
-    st = repo.obj_default_store.get(cdef) or repo._first_store_with(cdef)
+    st = repo.obj_default_store.get(cdef) or store
     if st is not None:
         repo.set_object_store(cdef, st)
 
