@@ -77,6 +77,63 @@ def test_exact_root_query_does_not_construct_stored_universe(tmp_path, monkeypat
     assert list(results) == [obj.definition]
 
 
+def test_selective_stored_query_never_constructs_stored_id_set(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)
+    repo.save_object(wanted)
+    for idx in range(6):
+        repo.save_object(PlannerParent(child=PlannerLeaf(name=f"other-{idx}", repo=repo), repo=repo))
+
+    monkeypatch.setattr(
+        repo._query_catalog,
+        "stored_ids",
+        lambda: (_ for _ in ()).throw(AssertionError("eager stored universe")),
+    )
+
+    selector = Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="wanted"))
+    results = repo.query(selector).stored(refresh=False).defs()
+
+    assert list(results) == [wanted.definition]
+
+
+def test_selective_known_query_never_constructs_known_id_set(monkeypatch):
+    repo = Repo()
+    wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)
+    repo.add_objects(wanted)
+    for idx in range(6):
+        repo.add_objects(PlannerParent(child=PlannerLeaf(name=f"other-{idx}", repo=repo), repo=repo))
+
+    monkeypatch.setattr(
+        repo._query_catalog,
+        "known_ids",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("eager known universe")),
+    )
+
+    selector = Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="wanted"))
+    results = repo.query(selector).known(refresh=False).defs()
+
+    assert list(results) == [wanted.definition]
+
+
+def test_selective_cached_query_never_constructs_cached_id_set(monkeypatch):
+    repo = Repo()
+    wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)
+    repo.add_objects(wanted)
+    for idx in range(6):
+        repo.add_objects(PlannerParent(child=PlannerLeaf(name=f"other-{idx}", repo=repo), repo=repo))
+
+    monkeypatch.setattr(
+        repo._query_catalog,
+        "cached_ids",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("eager cached universe")),
+    )
+
+    selector = Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="wanted"))
+    results = repo.query(selector).cached(refresh=False).defs()
+
+    assert list(results) == [wanted.definition]
+
+
 def test_planner_propagates_child_scalar_candidates_to_parent():
     repo = Repo()
     wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)
@@ -117,6 +174,45 @@ def test_nonexact_nested_anchor_does_not_enumerate_all_definition_ids(monkeypatc
     assert results.explanation.graph_anchor_mode == "local-posting"
     assert bounded_universe_sizes
     assert max(bounded_universe_sizes) < full_domain_size
+
+
+def test_anchor_selection_estimates_every_node_and_materializes_only_chosen(monkeypatch):
+    repo = Repo()
+    wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), name="wanted-root", repo=repo)
+    for idx in range(8):
+        repo.add_objects(PlannerParent(child=PlannerLeaf(name=f"other-{idx}", repo=repo), name="common-root", repo=repo))
+    repo.add_objects(wanted)
+
+    catalog = repo._query_catalog
+    estimate_calls = []
+    materialize_calls = []
+    original_estimate = catalog.estimate_local_candidates
+    original_materialize = catalog.local_candidate_ids_unbounded
+
+    def spy_estimate(requirements):
+        estimate_calls.append(requirements)
+        if len(estimate_calls) == 1:
+            return 1000
+        return original_estimate(requirements)
+
+    def spy_materialize(requirements, *, stats=None):
+        materialize_calls.append(requirements)
+        return original_materialize(requirements, stats=stats)
+
+    monkeypatch.setattr(catalog, "estimate_local_candidates", spy_estimate)
+    monkeypatch.setattr(catalog, "local_candidate_ids_unbounded", spy_materialize)
+
+    selector = Definition(
+        PlannerParent,
+        SKIP_ARGS,
+        child=Definition(PlannerLeaf, SKIP_ARGS, name="wanted"),
+        name="wanted-root",
+    )
+    results = repo.query(selector).known(refresh=False).defs()
+
+    assert list(results) == [wanted.definition]
+    assert len(estimate_calls) >= 2
+    assert len(materialize_calls) == 1
 
 
 def test_nested_owner_query_uses_graph_edges_without_materializing(tmp_path):
@@ -162,6 +258,40 @@ def test_nested_exact_anchor_does_not_construct_nested_universe(tmp_path, monkey
     defs = repo.query(child.definition).nested(refresh=False).definitions().defs()
 
     assert list(defs) == [child.definition]
+
+
+def test_nested_definition_filter_does_not_call_stored_ids(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(parent)
+
+    monkeypatch.setattr(
+        repo._query_catalog,
+        "stored_ids",
+        lambda: (_ for _ in ()).throw(AssertionError("nested filter scanned stored roots")),
+    )
+
+    defs = repo.query(child.definition).nested(refresh=False).definitions().defs()
+
+    assert list(defs) == [child.definition]
+
+
+def test_owner_projection_does_not_call_stored_ids(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(parent)
+
+    monkeypatch.setattr(
+        repo._query_catalog,
+        "stored_ids",
+        lambda: (_ for _ in ()).throw(AssertionError("owner projection scanned stored roots")),
+    )
+
+    owners = repo.query(child.definition).nested(refresh=False).owners().defs()
+
+    assert list(owners) == [parent.definition]
 
 
 def test_nested_filter_keeps_definition_that_is_also_stored_root(tmp_path):

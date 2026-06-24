@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..canonical import matching_container_family
+from ..cdef_identity import same_cdef
 from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
@@ -12,6 +13,7 @@ from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..utils.types import is_nonclass_callable
 from .fingerprint import collect_exact_constraints, selector_requirements
 from .graph_plan import graph_candidate_ids
+from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
     ClassMatchPolicy,
     DefinitionOccurrence,
@@ -253,26 +255,28 @@ class DefinitionQuery:
             stats.result_count = len(matches)
             return matches, stats
 
-        if self.domain == "stored":
-            universe_ids = catalog.stored_ids()
-        elif self.domain == "cached":
-            universe_ids = catalog.cached_ids(reuse_weak=self.reuse_weak_policy)
-        elif self.domain == "known":
-            universe_ids = catalog.known_ids(reuse_weak=self.reuse_weak_policy)
-        else:
-            raise QueryDomainError(f"Unsupported definition domain {self.domain!r}.")
-
-        stats.universe_size = len(universe_ids)
+        domain = self._definition_domain(catalog)
+        domain.prepare(stats=stats)
+        stats.universe_size = domain.estimate_size() or 0
         selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
         if selector_graph is not None:
-            candidate_ids = graph_candidate_ids(catalog, selector_graph, universe_ids, stats=stats)
+            candidate_ids = graph_candidate_ids(catalog, selector_graph, domain, stats=stats)
         else:
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-            candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
+            candidate_ids = catalog.candidate_ids_for_domain(domain, requirements, stats=stats)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         stats.result_count = len(matches)
         return matches, stats
+
+    def _definition_domain(self, catalog):
+        if self.domain == "stored":
+            return StoredDomain(catalog)
+        if self.domain == "cached":
+            return CachedDomain(catalog, reuse_weak=self.reuse_weak_policy)
+        if self.domain == "known":
+            return KnownDomain(catalog, reuse_weak=self.reuse_weak_policy)
+        raise QueryDomainError(f"Unsupported definition domain {self.domain!r}.")
 
     def _exact_domain_candidate_ids(self, catalog, exact_root: ConcreteDefinition) -> set[str]:
         if self.domain in {"cached", "known"} and self.repo.get_cached(exact_root, reuse_weak=self.reuse_weak_policy) is not None:
@@ -283,11 +287,11 @@ class DefinitionQuery:
                 return set()
             return exact_ids
         if self.domain == "stored":
-            return {did for did in exact_ids if catalog.replicas_by_definition.get(did)}
+            return catalog.filter_stored_ids(exact_ids)
         return {
             did
             for did in exact_ids
-            if catalog.replicas_by_definition.get(did)
+            if catalog.is_stored_id(did)
             or self.repo.get_cached(catalog.definition_for_id(did), reuse_weak=self.reuse_weak_policy) is not None
         }
 
@@ -315,15 +319,19 @@ class DefinitionQuery:
             stats.universe_size = len(candidate_ids)
             stats.candidate_count = len(candidate_ids)
         else:
-            universe_ids = catalog.nested_ids()
-            stats.universe_size = len(universe_ids)
+            domain = NestedDomain(catalog)
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-            candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
+            if requirements:
+                candidate_ids = catalog.candidate_ids_for_domain(domain, requirements, stats=stats)
+            else:
+                candidate_ids = domain.all_ids()
+                stats.candidate_count = len(candidate_ids)
+            stats.universe_size = domain.estimate_size() or len(candidate_ids)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         match_ids = {catalog.cdef_id(cdef) for cdef in matches}
         match_ids.discard(None)
-        occurrences = catalog.occurrences_for_nested_ids(match_ids)
+        occurrences = tuple(catalog.iter_occurrences_for_nested_ids(match_ids))
         stats.result_count = len(occurrences)
         return occurrences, stats
 
@@ -351,10 +359,14 @@ class DefinitionQuery:
             stats.universe_size = len(candidate_ids)
             stats.candidate_count = len(candidate_ids)
         else:
-            universe_ids = catalog.nested_ids()
-            stats.universe_size = len(universe_ids)
+            domain = NestedDomain(catalog)
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-            candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
+            if requirements:
+                candidate_ids = catalog.candidate_ids_for_domain(domain, requirements, stats=stats)
+            else:
+                candidate_ids = domain.all_ids()
+                stats.candidate_count = len(candidate_ids)
+            stats.universe_size = domain.estimate_size() or len(candidate_ids)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         match_ids = {catalog.cdef_id(cdef) for cdef in matches}
@@ -412,7 +424,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         target = target.definition
 
     if isinstance(selector, ConcreteDefinition):
-        return isinstance(target, ConcreteDefinition) and selector.stable_hash() == target.stable_hash() and selector == target
+        return isinstance(target, ConcreteDefinition) and same_cdef(selector, target)
 
     if isinstance(selector, Definition):
         if not isinstance(target, (Definition, ConcreteDefinition)):
@@ -648,6 +660,6 @@ def _unordered_set_contains_exact(candidate, expected: ConcreteDefinition) -> bo
             member = member.definition
         if not isinstance(member, ConcreteDefinition):
             continue
-        if member.stable_hash() == expected.stable_hash() and member == expected:
+        if same_cdef(member, expected):
             return True
     return False

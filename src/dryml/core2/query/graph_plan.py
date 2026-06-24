@@ -1,20 +1,88 @@
 from __future__ import annotations
 
 from collections import deque
+from typing import Any, Protocol
 
-from .model import DefinitionId, QueryStats
+from ..definition import ConcreteDefinition
+from .domain import DefinitionDomain
+from .model import DefinitionId, FeatureRequirement, QueryStats
+from .path import DefinitionPath
 from .selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 
 
+class DefinitionGraphIndex(Protocol):
+    lock: Any
+
+    def all_definition_ids(self) -> set[DefinitionId]:
+        ...
+
+    def estimate_exact_ids(self, cdef: ConcreteDefinition) -> int:
+        ...
+
+    def estimate_local_candidates(self, requirements: tuple[FeatureRequirement, ...]) -> int:
+        ...
+
+    def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
+        ...
+
+    def local_candidate_ids(
+            self,
+            universe_ids: set[DefinitionId],
+            requirements: tuple[FeatureRequirement, ...],
+            *,
+            stats: QueryStats | None = None) -> set[DefinitionId]:
+        ...
+
+    def local_candidate_ids_unbounded(
+            self,
+            requirements: tuple[FeatureRequirement, ...],
+            *,
+            stats: QueryStats | None = None) -> set[DefinitionId]:
+        ...
+
+    def parent_ids_for_children(
+            self,
+            child_ids: set[DefinitionId],
+            path: DefinitionPath,
+            *,
+            unordered: bool) -> set[DefinitionId]:
+        ...
+
+    def child_ids_for_parents(
+            self,
+            parent_ids: set[DefinitionId],
+            path: DefinitionPath,
+            *,
+            unordered: bool) -> set[DefinitionId]:
+        ...
+
+    def parent_ids_with_matching_child(
+            self,
+            parent_ids: set[DefinitionId],
+            child_ids: set[DefinitionId],
+            path: DefinitionPath,
+            *,
+            unordered: bool) -> set[DefinitionId]:
+        ...
+
+    def child_ids_with_matching_parent(
+            self,
+            parent_ids: set[DefinitionId],
+            child_ids: set[DefinitionId],
+            path: DefinitionPath,
+            *,
+            unordered: bool) -> set[DefinitionId]:
+        ...
+
+
 def graph_candidate_ids(
-        catalog,
+        catalog: DefinitionGraphIndex,
         selector_graph: SelectorGraph | None,
-        universe_ids: set[DefinitionId] | None,
+        domain: DefinitionDomain | None,
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
     if selector_graph is None:
-        if universe_ids is None:
-            universe_ids = set(catalog.definitions_by_id.keys())
+        universe_ids = domain.all_ids() if domain is not None else catalog.all_definition_ids()
         if stats is not None:
             stats.candidate_count = len(universe_ids)
         return set(universe_ids)
@@ -22,37 +90,33 @@ def graph_candidate_ids(
     with catalog.lock:
         anchor = _choose_anchor(catalog, selector_graph)
         if anchor is not None:
-            anchor_id, anchor_candidates, anchor_mode = anchor
+            anchor_id, anchor_mode = anchor
+            anchor_candidates = _anchor_candidate_ids(catalog, selector_graph.node(anchor_id), anchor_mode)
             return _graph_candidate_ids_from_anchor(
                 catalog,
                 selector_graph,
-                universe_ids,
+                domain,
                 anchor_id,
                 anchor_candidates,
                 anchor_mode,
                 stats=stats,
             )
-        return _graph_candidate_ids_full(catalog, selector_graph, universe_ids, stats=stats)
+        return _graph_candidate_ids_full(catalog, selector_graph, domain, stats=stats)
 
 
 def _graph_candidate_ids_full(
         catalog,
         selector_graph: SelectorGraph,
-        universe_ids: set[DefinitionId] | None,
+        domain: DefinitionDomain | None,
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
-    all_ids = set(catalog.definitions_by_id.keys())
+    all_ids = catalog.all_definition_ids()
     candidates: dict[int, set[DefinitionId]] = {}
     initial_sizes: dict[int, int] = {}
 
     for node in selector_graph.nodes:
         if node.exact_definition is not None:
-            digest = node.exact_definition.stable_hash()
-            ids = {
-                did
-                for did in catalog.ids_by_stable_hash.get(digest, set())
-                if catalog.definitions_by_id[did].cdef == node.exact_definition
-            }
+            ids = catalog.exact_ids(node.exact_definition)
         else:
             ids = catalog.local_candidate_ids(all_ids, node.local_requirements)
         candidates[node.node_id] = ids
@@ -81,7 +145,7 @@ def _graph_candidate_ids_full(
                 candidates[edge.child] = child_after
                 changed = True
 
-    root_candidates = _apply_universe(candidates[selector_graph.root], universe_ids)
+    root_candidates = _apply_domain(candidates[selector_graph.root], domain)
     if stats is not None:
         stats.graph_candidate_count = len(root_candidates)
         stats.candidate_count = len(root_candidates)
@@ -91,7 +155,7 @@ def _graph_candidate_ids_full(
 def _graph_candidate_ids_from_anchor(
         catalog,
         selector_graph: SelectorGraph,
-        universe_ids: set[DefinitionId] | None,
+        domain: DefinitionDomain | None,
         anchor_id: int,
         anchor_candidates: set[DefinitionId],
         anchor_mode: str,
@@ -127,37 +191,44 @@ def _graph_candidate_ids_from_anchor(
             if _merge_candidates(candidates, edge.child, child_ids):
                 queue.append(edge.child)
 
-    root_candidates = _apply_universe(candidates.get(selector_graph.root, set()), universe_ids)
+    root_candidates = _apply_domain(candidates.get(selector_graph.root, set()), domain)
     if stats is not None:
         stats.graph_candidate_count = len(root_candidates)
         stats.candidate_count = len(root_candidates)
     return root_candidates
 
 
-def _apply_universe(ids: set[DefinitionId], universe_ids: set[DefinitionId] | None) -> set[DefinitionId]:
-    return set(ids) if universe_ids is None else ids & universe_ids
+def _apply_domain(ids: set[DefinitionId], domain: DefinitionDomain | None) -> set[DefinitionId]:
+    return set(ids) if domain is None else domain.filter(ids)
 
 
-def _choose_anchor(catalog, selector_graph: SelectorGraph) -> tuple[int, set[DefinitionId], str] | None:
-    anchor_data: list[tuple[int, set[DefinitionId], str]] = []
+def _choose_anchor(catalog, selector_graph: SelectorGraph) -> tuple[int, str] | None:
+    anchor_data: list[tuple[int, int, str]] = []
     for node in selector_graph.nodes:
         if node.exact_definition is not None:
-            anchor_data.append((node.node_id, _exact_candidate_ids(catalog, node), "exact"))
+            anchor_data.append((node.node_id, catalog.estimate_exact_ids(node.exact_definition), "exact"))
         elif node.local_requirements:
             anchor_data.append((
                 node.node_id,
-                catalog.local_candidate_ids_unbounded(node.local_requirements),
+                catalog.estimate_local_candidates(node.local_requirements),
                 "local-posting",
             ))
     if not anchor_data:
         return None
-    return min(
+    node_id, _, mode = min(
         anchor_data,
         key=lambda item: (
-            len(item[1]),
+            item[1],
             str(selector_graph.node(item[0]).source_path),
         ),
     )
+    return node_id, mode
+
+
+def _anchor_candidate_ids(catalog, node: SelectorGraphNode, mode: str) -> set[DefinitionId]:
+    if mode == "exact":
+        return _exact_candidate_ids(catalog, node)
+    return catalog.local_candidate_ids_unbounded(node.local_requirements)
 
 
 def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -> set[DefinitionId]:
@@ -171,12 +242,7 @@ def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -
 def _exact_candidate_ids(catalog, node: SelectorGraphNode) -> set[DefinitionId]:
     if node.exact_definition is None:
         return set()
-    digest = node.exact_definition.stable_hash()
-    return {
-        did
-        for did in catalog.ids_by_stable_hash.get(digest, set())
-        if catalog.definitions_by_id[did].cdef == node.exact_definition
-    }
+    return catalog.exact_ids(node.exact_definition)
 
 
 def _merge_candidates(candidates: dict[int, set[DefinitionId]], node_id: int, ids: set[DefinitionId]) -> bool:
@@ -198,20 +264,7 @@ def _parents_with_matching_child(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids or not child_ids:
         return set()
-    out = set()
-    if edge.unordered:
-        for parent_id in parent_ids:
-            for edge_key in catalog.outgoing_edges.get(parent_id, ()):
-                record = catalog.edge_by_key[edge_key]
-                if record.child_id in child_ids and record.path.startswith(edge.path):
-                    out.add(parent_id)
-                    break
-        return out
-
-    for parent_id in parent_ids:
-        if catalog.child_by_parent_path.get((parent_id, edge.path), set()) & child_ids:
-            out.add(parent_id)
-    return out
+    return catalog.parent_ids_with_matching_child(parent_ids, child_ids, edge.path, unordered=edge.unordered)
 
 
 def _parents_for_children(
@@ -220,18 +273,7 @@ def _parents_for_children(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not child_ids:
         return set()
-    out = set()
-    if edge.unordered:
-        for child_id in child_ids:
-            for edge_key in catalog.incoming_edges.get(child_id, ()):
-                record = catalog.edge_by_key[edge_key]
-                if record.path.startswith(edge.path):
-                    out.add(record.parent_id)
-        return out
-
-    for child_id in child_ids:
-        out.update(catalog.parents_by_child_path.get((child_id, edge.path), set()))
-    return out
+    return catalog.parent_ids_for_children(child_ids, edge.path, unordered=edge.unordered)
 
 
 def _children_with_matching_parent(
@@ -241,20 +283,7 @@ def _children_with_matching_parent(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids or not child_ids:
         return set()
-    out = set()
-    if edge.unordered:
-        for child_id in child_ids:
-            for edge_key in catalog.incoming_edges.get(child_id, ()):
-                record = catalog.edge_by_key[edge_key]
-                if record.parent_id in parent_ids and record.path.startswith(edge.path):
-                    out.add(child_id)
-                    break
-        return out
-
-    for child_id in child_ids:
-        if catalog.parents_by_child_path.get((child_id, edge.path), set()) & parent_ids:
-            out.add(child_id)
-    return out
+    return catalog.child_ids_with_matching_parent(parent_ids, child_ids, edge.path, unordered=edge.unordered)
 
 
 def _children_for_parents(
@@ -263,15 +292,4 @@ def _children_for_parents(
         parent_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids:
         return set()
-    out = set()
-    if edge.unordered:
-        for parent_id in parent_ids:
-            for edge_key in catalog.outgoing_edges.get(parent_id, ()):
-                record = catalog.edge_by_key[edge_key]
-                if record.path.startswith(edge.path):
-                    out.add(record.child_id)
-        return out
-
-    for parent_id in parent_ids:
-        out.update(catalog.child_by_parent_path.get((parent_id, edge.path), set()))
-    return out
+    return catalog.child_ids_for_parents(parent_ids, edge.path, unordered=edge.unordered)

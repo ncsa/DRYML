@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 
@@ -43,7 +45,9 @@ class Key:
     key: Any
 
     def __str__(self) -> str:
-        return f"[{self.key!r}]"
+        if isinstance(self.key, str):
+            return f"[{self.key!r}]"
+        return f"[@key({self.key!r})]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +137,17 @@ class GraphPath:
             return "<root>"
         return "/".join(map(str, self.legacy_tuple()))
 
+    def to_data(self) -> dict[str, Any]:
+        return {
+            "schema_version": GRAPH_PATH_SCHEMA_VERSION,
+            "segments": [_segment_to_data(seg) for seg in self.segments],
+        }
+
+    @classmethod
+    def from_data(cls, data: Any) -> "GraphPath":
+        segments_data = _segments_from_path_data(data)
+        return cls(tuple(_segment_from_data(seg_data) for seg_data in segments_data))
+
     def __str__(self) -> str:
         if not self.segments:
             return "$"
@@ -146,7 +161,10 @@ class GraphPath:
             elif isinstance(seg, Index):
                 out += f"[{seg.index}]"
             elif isinstance(seg, Key):
-                out += f"[{seg.key!r}]"
+                if isinstance(seg.key, str):
+                    out += f"[{seg.key!r}]"
+                else:
+                    out += f"[@key({seg.key!r})]"
             elif isinstance(seg, SetMember):
                 out += f'[@set("{seg.fingerprint}", {seg.ordinal})]'
         return out
@@ -230,6 +248,49 @@ def _legacy_segment_value(seg: PathSegment) -> str | int:
     raise TypeError(seg)
 
 
+def _segment_to_data(seg: PathSegment) -> dict[str, Any]:
+    if isinstance(seg, Kwarg):
+        return {"kind": "kwarg", "name": seg.name}
+    if isinstance(seg, Arg):
+        return {"kind": "arg", "index": seg.index}
+    if isinstance(seg, Index):
+        return {"kind": "index", "index": seg.index}
+    if isinstance(seg, Key):
+        return {"kind": "key", "value": seg.key}
+    if isinstance(seg, SetMember):
+        return {"kind": "set_member", "fingerprint": seg.fingerprint, "ordinal": seg.ordinal}
+    raise TypeError(seg)
+
+
+def _segments_from_path_data(data: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(data, Mapping):
+        version = data.get("schema_version")
+        if version != GRAPH_PATH_SCHEMA_VERSION:
+            raise QueryPathError(f"Unsupported graph path schema version {version!r}.")
+        segments = data.get("segments")
+        if segments is None:
+            raise QueryPathError("Graph path data is missing 'segments'.")
+        return segments
+    return data
+
+
+def _segment_from_data(data: Mapping[str, Any]) -> PathSegment:
+    if not isinstance(data, Mapping):
+        raise QueryPathError(f"Graph path segment data must be a mapping, got {type(data).__name__}.")
+    kind = data.get("kind")
+    if kind == "kwarg":
+        return Kwarg(data["name"])
+    if kind == "arg":
+        return Arg(data["index"])
+    if kind == "index":
+        return Index(data["index"])
+    if kind == "key":
+        return Key(data["value"])
+    if kind == "set_member":
+        return SetMember(data["fingerprint"], data.get("ordinal", 0))
+    raise QueryPathError(f"Unknown graph path segment kind {kind!r}.")
+
+
 def _split_path_tokens(text: str) -> list[str]:
     tokens: list[str] = []
     cur: list[str] = []
@@ -301,6 +362,9 @@ def _parse_token(token: str) -> list[PathSegment]:
         if inside.startswith("@set("):
             value = _parse_set_member(inside)
             segments.append(value)
+        elif inside.startswith("@key("):
+            value = _parse_key_member(inside)
+            segments.append(Key(value))
         else:
             value = _parse_bracket_value(inside)
             if base_text == "args" and bracket_count == 0:
@@ -370,6 +434,16 @@ def _parse_set_member(text: str) -> SetMember:
         raise QueryPathError(f"Set-member fingerprint must be a string in {text!r}.")
     ordinal = int(parts[1].strip()) if len(parts) == 2 else 0
     return SetMember(fp, ordinal)
+
+
+def _parse_key_member(text: str) -> Any:
+    if not text.endswith(")"):
+        raise QueryPathError(f"Invalid mapping-key segment {text!r}.")
+    inner = text[len("@key("):-1].strip()
+    try:
+        return ast.literal_eval(inner)
+    except Exception as e:
+        raise QueryPathError(f"Invalid mapping-key literal in {text!r}.") from e
 
 
 def _split_call_args(text: str) -> list[str]:

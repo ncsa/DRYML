@@ -4,6 +4,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
+from .cdef_identity import same_cdef
 from .definition import ConcreteDefinition, Definition
 from .object import Object
 from .utils.graph.path import GraphPath
@@ -147,7 +148,7 @@ class ConcreteDefinitionGraph:
         count = 0
         selected_roots = tuple(roots) if roots is not None else self.roots
         for root in selected_roots:
-            if include_roots and (target is None or _same_cdef(root, target)):
+            if include_roots and (target is None or same_cdef(root, target)):
                 count += 1
                 if max_occurrences is not None and count > max_occurrences:
                     raise ConcreteDefinitionGraphOccurrenceLimitError(
@@ -159,7 +160,7 @@ class ConcreteDefinitionGraph:
             stack = [(edge, edge.path) for edge in reversed(self.outgoing(root))]
             while stack:
                 edge, path = stack.pop()
-                if target is None or _same_cdef(edge.child, target):
+                if target is None or same_cdef(edge.child, target):
                     count += 1
                     if max_occurrences is not None and count > max_occurrences:
                         raise ConcreteDefinitionGraphOccurrenceLimitError(
@@ -192,7 +193,7 @@ class ConcreteDefinitionGraph:
         ))
 
     def contains(self, root: ConcreteDefinition, target: ConcreteDefinition) -> bool:
-        if _same_cdef(root, target):
+        if same_cdef(root, target):
             return True
         return any(True for _ in self.iter_occurrences(roots=(root,), target=target, limit=1))
 
@@ -227,7 +228,7 @@ class ConcreteDefinitionGraph:
         return tuple(out)
 
     def roots_containing(self, cdef: ConcreteDefinition) -> tuple[ConcreteDefinition, ...]:
-        return tuple(root for root in self.roots if not _same_cdef(root, cdef) and self.contains(root, cdef))
+        return tuple(root for root in self.roots if not same_cdef(root, cdef) and self.contains(root, cdef))
 
     def explain(self) -> str:
         return "\n".join((
@@ -249,7 +250,7 @@ class ConcreteDefinitionGraphBuilder:
     def add_root(self, cdef: ConcreteDefinition) -> None:
         if not isinstance(cdef, ConcreteDefinition):
             raise TypeError(f"Graph roots must be ConcreteDefinitions, got {type(cdef).__name__}.")
-        if not any(_same_cdef(cdef, root) for root in self._roots):
+        if not any(same_cdef(cdef, root) for root in self._roots):
             self._roots.append(cdef)
         self._visit(cdef, GraphPath())
 
@@ -361,7 +362,7 @@ def _validate_graph_parts(
             raise ConcreteDefinitionGraphError(
                 f"Graph edge path {edge.path!s} does not resolve to a ConcreteDefinition boundary."
             )
-        if not _same_cdef(resolved, edge.child):
+        if not same_cdef(resolved, edge.child):
             raise ConcreteDefinitionGraphError(
                 f"Graph edge path {edge.path!s} resolves to a different child definition."
             )
@@ -394,14 +395,3 @@ def _validate_graph_parts(
     for node in nodes:
         if node.definition not in visited:
             raise ConcreteDefinitionGraphError(f"Graph node {node.definition} is not reachable from any root.")
-
-
-def _same_cdef(left: ConcreteDefinition, right: ConcreteDefinition) -> bool:
-    if left is right:
-        return True
-    if left.stable_hash() != right.stable_hash():
-        return False
-    try:
-        return left == right
-    except TypeError:
-        return False

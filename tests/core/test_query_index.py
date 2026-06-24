@@ -248,6 +248,76 @@ def test_repeated_nested_cdef_keeps_every_owner_path_occurrence(tmp_path):
     assert occurrences.definitions().count() == 1
 
 
+def test_occurrence_iteration_is_lazy(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    catalog = repo._query_catalog
+    child_id = catalog.cdef_id(child.definition)
+    calls = 0
+    original = catalog._iter_occurrences_for_nested_ids_locked
+
+    def spy_iter(ids, *, max_occurrences=None):
+        nonlocal calls
+        calls += 1
+        yield from original(ids, max_occurrences=max_occurrences)
+
+    monkeypatch.setattr(catalog, "_iter_occurrences_for_nested_ids_locked", spy_iter)
+
+    iterator = catalog.iter_occurrences_for_nested_ids({child_id})
+
+    assert calls == 0
+    assert next(iterator).definition == child.definition
+    assert calls == 1
+
+
+def test_occurrence_limit_stops_before_full_path_enumeration(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("shared", repo=repo)
+    parent = IndexPersistent([child, child, child], repo=repo)
+    repo.save_object(parent)
+
+    catalog = repo._query_catalog
+    child_id = catalog.cdef_id(child.definition)
+    occurrence_calls = 0
+    original = catalog._occurrence_locked
+
+    def spy_occurrence(owner_id, path, definition_id):
+        nonlocal occurrence_calls
+        occurrence_calls += 1
+        return original(owner_id, path, definition_id)
+
+    monkeypatch.setattr(catalog, "_occurrence_locked", spy_occurrence)
+
+    occurrences = tuple(catalog.iter_occurrences_for_nested_ids({child_id}, max_occurrences=1))
+
+    assert len(occurrences) == 1
+    assert occurrence_calls == 1
+
+
+def test_selective_occurrence_query_does_not_scan_unrelated_roots(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    wanted = IndexLeaf("wanted", repo=repo)
+    repo.save_object(IndexPersistent(wanted, repo=repo))
+    for idx in range(6):
+        repo.save_object(IndexPersistent(IndexLeaf(f"other-{idx}", repo=repo), repo=repo))
+
+    def fail_root_scan(*args, **kwargs):
+        raise AssertionError("selective occurrences should not scan stored roots")
+
+    monkeypatch.setattr(repo._query_catalog, "_iter_occurrences_locked", fail_root_scan)
+
+    occurrences = repo.query(Definition(IndexLeaf, "wanted")).nested(refresh=False).execute()
+
+    assert occurrences.count() == 1
+    assert occurrences.one().definition == wanted.definition
+
+
 def test_refresh_failure_rolls_back_catalog_atomically(tmp_path):
     good_store = DirStore(tmp_path / "good")
     repo = Repo(stores=good_store)

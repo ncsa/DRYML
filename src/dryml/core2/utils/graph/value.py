@@ -44,6 +44,14 @@ def iter_set_members(values: Iterable[Any]) -> tuple[tuple[SetMember, Any], ...]
 
     out: list[tuple[SetMember, Any]] = []
     for fp in sorted(buckets):
+        repr_groups: dict[str, list[Any]] = defaultdict(list)
+        for value in buckets[fp]:
+            repr_groups[repr(value)].append(value)
+        ambiguous = [values for values in repr_groups.values() if len(values) > 1 and any(value != values[0] for value in values[1:])]
+        if ambiguous:
+            raise QueryPathError(
+                "Cannot build deterministic set paths for unequal members with the same stable hash and repr."
+            )
         bucket = sorted(buckets[fp], key=repr)
         for ordinal, value in enumerate(bucket):
             out.append((SetMember(fp, ordinal), value))
@@ -132,7 +140,7 @@ def _get_child(obj: Any, seg: PathSegment) -> Any:
         if isinstance(seg, Index):
             # Compatibility for old user-authored paths. Graph-generated paths
             # use SetMember because numeric set positions are not semantic.
-            return sorted(obj, key=lambda value: (stable_hash_function(value), repr(value)))[seg.index]
+            return iter_set_members(obj)[seg.index][1]
         raise TypeError(f"{seg!s} is not valid on a set.")
 
     raise TypeError(f"Cannot traverse into {type(obj).__name__}.")

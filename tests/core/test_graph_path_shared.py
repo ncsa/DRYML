@@ -1,9 +1,12 @@
+import pytest
+
 from dryml.core2.query.path import (
     Arg,
     DefinitionPath,
     Index,
     Key,
     Kwarg,
+    QueryPathError,
     SetMember,
     get_subtree,
     iter_set_members,
@@ -72,3 +75,41 @@ def test_set_member_path_resolves_stably():
             break
 
     assert get_subtree(value, path) == member
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        GraphPath((Arg(0),)),
+        GraphPath((Kwarg("model"),)),
+        GraphPath((Index(5),)),
+        GraphPath((Key("name"),)),
+        GraphPath((Key(5),)),
+        GraphPath((SetMember("abc", 2),)),
+    ],
+)
+def test_graph_path_canonical_roundtrip(path):
+    assert GraphPath.from_data(path.to_data()) == path
+
+
+def test_integer_mapping_key_string_roundtrip_does_not_become_index():
+    path = GraphPath((Key(5),))
+
+    assert str(path) == "$[@key(5)]"
+    assert parse_path(str(path)) == path
+
+
+def test_set_member_collision_order_is_rejected(monkeypatch):
+    from dryml.core2.utils.graph import value as value_mod
+
+    class Ambiguous:
+        def __repr__(self):
+            return "Ambiguous()"
+
+    left = Ambiguous()
+    right = Ambiguous()
+
+    monkeypatch.setattr(value_mod, "stable_hash_function", lambda value: "collision")
+
+    with pytest.raises(QueryPathError):
+        iter_set_members({left, right})
