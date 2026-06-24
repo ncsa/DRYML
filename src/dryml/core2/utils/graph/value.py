@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from ...definition import ConcreteDefinition, Definition, SKIP_ARGS
@@ -18,6 +19,12 @@ from .path import (
     SetMember,
     normalize_path,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ValueEdge:
+    segment: PathSegment
+    value: Any
 
 
 def set_member_segment(value: Any, *, ordinal: int = 0) -> SetMember:
@@ -50,6 +57,28 @@ def resolve_set_member(values: Iterable[Any], segment: SetMember) -> Any:
     if len(matches) > 1:
         raise QueryPathError(f"Set member {segment!s} is ambiguous.")
     return matches[0]
+
+
+def iter_value_edges(value: Any) -> tuple[ValueEdge, ...]:
+    if isinstance(value, (Definition, ConcreteDefinition)):
+        edges: list[ValueEdge] = []
+        if value.args is not None:
+            for idx, child in enumerate(value.args):
+                edges.append(ValueEdge(Arg(idx), child))
+        for key, child in value.kwargs.items():
+            edges.append(ValueEdge(Kwarg(key), child))
+        return tuple(edges)
+
+    if isinstance(value, (FrozenDict, dict)):
+        return tuple(ValueEdge(Key(key), child) for key, child in value.items())
+
+    if isinstance(value, (FrozenList, FrozenTuple, list, tuple)):
+        return tuple(ValueEdge(Index(idx), child) for idx, child in enumerate(value))
+
+    if isinstance(value, (FrozenSet, set, frozenset)):
+        return tuple(ValueEdge(seg, child) for seg, child in iter_set_members(value))
+
+    return ()
 
 
 def get_subtree(obj: Any, path: DefinitionPathLike = "$") -> Any:

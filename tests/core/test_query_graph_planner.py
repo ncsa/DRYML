@@ -62,6 +62,21 @@ def test_nested_exact_anchor_does_not_enumerate_full_root_domain(monkeypatch):
     assert max(local_candidate_universe_sizes) < full_domain_size
 
 
+def test_exact_root_query_does_not_construct_stored_universe(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    obj = PlannerLeaf("exact", repo=repo)
+    repo.save_object(obj)
+
+    def fail_stored_ids():
+        raise AssertionError("stored_ids should not be called for exact-root queries")
+
+    monkeypatch.setattr(repo._query_catalog, "stored_ids", fail_stored_ids)
+
+    results = repo.query(obj.definition).stored(refresh=False).defs()
+
+    assert list(results) == [obj.definition]
+
+
 def test_planner_propagates_child_scalar_candidates_to_parent():
     repo = Repo()
     wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)
@@ -77,6 +92,33 @@ def test_planner_propagates_child_scalar_candidates_to_parent():
     assert results.explanation.verified_count == 1
 
 
+def test_nonexact_nested_anchor_does_not_enumerate_all_definition_ids(monkeypatch):
+    repo = Repo()
+    wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), repo=repo)
+    for idx in range(20):
+        repo.add_objects(PlannerParent(child=PlannerLeaf(name=f"other-{idx}", repo=repo), repo=repo))
+    repo.add_objects(wanted)
+
+    catalog = repo._query_catalog
+    full_domain_size = len(catalog.definitions_by_id)
+    bounded_universe_sizes = []
+    original = catalog.local_candidate_ids
+
+    def spy_local_candidate_ids(universe_ids, requirements, *, stats=None):
+        bounded_universe_sizes.append(len(universe_ids))
+        return original(universe_ids, requirements, stats=stats)
+
+    monkeypatch.setattr(catalog, "local_candidate_ids", spy_local_candidate_ids)
+
+    selector = Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="wanted"))
+    results = repo.query(selector).known(refresh=False).defs()
+
+    assert list(results) == [wanted.definition]
+    assert results.explanation.graph_anchor_mode == "local-posting"
+    assert bounded_universe_sizes
+    assert max(bounded_universe_sizes) < full_domain_size
+
+
 def test_nested_owner_query_uses_graph_edges_without_materializing(tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
     child = PlannerLeaf(name="child", repo=repo)
@@ -87,3 +129,65 @@ def test_nested_owner_query_uses_graph_edges_without_materializing(tmp_path):
 
     assert list(owners) == [parent.definition]
     assert repo._num_constructions == 0
+
+
+def test_nested_definitions_does_not_enumerate_occurrence_paths(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(parent)
+
+    def fail_occurrences(*args, **kwargs):
+        raise AssertionError("nested definitions should not enumerate occurrence paths")
+
+    monkeypatch.setattr(repo._query_catalog, "occurrences_for_nested_ids", fail_occurrences)
+    monkeypatch.setattr(repo._query_catalog, "all_occurrences", fail_occurrences)
+
+    defs = repo.query(Definition(PlannerLeaf, SKIP_ARGS, name="child")).nested(refresh=False).definitions().defs()
+
+    assert list(defs) == [child.definition]
+
+
+def test_nested_exact_anchor_does_not_construct_nested_universe(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(parent)
+
+    def fail_nested_ids():
+        raise AssertionError("nested_ids should not be called for exact nested anchors")
+
+    monkeypatch.setattr(repo._query_catalog, "nested_ids", fail_nested_ids)
+
+    defs = repo.query(child.definition).nested(refresh=False).definitions().defs()
+
+    assert list(defs) == [child.definition]
+
+
+def test_nested_filter_keeps_definition_that_is_also_stored_root(tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(child)
+    repo.save_object(parent)
+
+    defs = repo.query(child.definition).nested(refresh=False).definitions().defs()
+
+    assert list(defs) == [child.definition]
+
+
+def test_nested_owners_uses_reverse_edges_without_occurrence_expansion(tmp_path, monkeypatch):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = PlannerLeaf(name="child", repo=repo)
+    parent = PlannerParent(child=child, repo=repo)
+    repo.save_object(parent)
+
+    def fail_occurrences(*args, **kwargs):
+        raise AssertionError("nested owners should not enumerate occurrence paths")
+
+    monkeypatch.setattr(repo._query_catalog, "occurrences_for_nested_ids", fail_occurrences)
+    monkeypatch.setattr(repo._query_catalog, "all_occurrences", fail_occurrences)
+
+    owners = repo.query(Definition(PlannerLeaf, SKIP_ARGS, name="child")).nested(refresh=False).owners().defs()
+
+    assert list(owners) == [parent.definition]

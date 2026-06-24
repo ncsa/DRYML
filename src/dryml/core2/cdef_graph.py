@@ -5,10 +5,9 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 
 from .definition import ConcreteDefinition, Definition
-from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from .object import Object
-from .utils.graph.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
-from .utils.graph.value import get_subtree, iter_set_members
+from .utils.graph.path import GraphPath
+from .utils.graph.value import get_subtree, iter_value_edges
 
 
 class ConcreteDefinitionGraphError(Exception):
@@ -47,10 +46,8 @@ def iter_direct_cdef_edges(cdef: ConcreteDefinition) -> Iterator[tuple[GraphPath
     if not isinstance(cdef, ConcreteDefinition):
         raise TypeError(f"Expected ConcreteDefinition, got {type(cdef).__name__}.")
 
-    for idx, child in enumerate(cdef.args):
-        yield from _iter_direct_edges_from_value(child, GraphPath((Arg(idx),)))
-    for key, child in cdef.kwargs.items():
-        yield from _iter_direct_edges_from_value(child, GraphPath((Kwarg(key),)))
+    for edge in iter_value_edges(cdef):
+        yield from _iter_direct_edges_from_value(edge.value, GraphPath((edge.segment,)))
 
 
 def _iter_direct_edges_from_value(value: Any, path: GraphPath) -> Iterator[tuple[GraphPath, ConcreteDefinition]]:
@@ -62,20 +59,8 @@ def _iter_direct_edges_from_value(value: Any, path: GraphPath) -> Iterator[tuple
         yield path, value
         return
 
-    if isinstance(value, (FrozenDict, dict)):
-        for key, child in value.items():
-            yield from _iter_direct_edges_from_value(child, path.child(Key(key)))
-        return
-
-    if isinstance(value, (FrozenList, FrozenTuple, list, tuple)):
-        for idx, child in enumerate(value):
-            yield from _iter_direct_edges_from_value(child, path.child(Index(idx)))
-        return
-
-    if isinstance(value, (FrozenSet, set, frozenset)):
-        for seg, child in iter_set_members(value):
-            yield from _iter_direct_edges_from_value(child, path.child(seg))
-        return
+    for edge in iter_value_edges(value):
+        yield from _iter_direct_edges_from_value(edge.value, path.child(edge.segment))
 
 
 class ConcreteDefinitionGraph:
@@ -366,6 +351,20 @@ def _validate_graph_parts(
             raise ConcreteDefinitionGraphError(f"Graph edge parent {edge.parent} is missing from nodes.")
         if edge.child not in node_defs:
             raise ConcreteDefinitionGraphError(f"Graph edge child {edge.child} is missing from nodes.")
+        try:
+            resolved = get_subtree(edge.parent, edge.path)
+        except Exception as e:
+            raise ConcreteDefinitionGraphError(
+                f"Graph edge path {edge.path!s} cannot be resolved on parent {edge.parent}."
+            ) from e
+        if not isinstance(resolved, ConcreteDefinition):
+            raise ConcreteDefinitionGraphError(
+                f"Graph edge path {edge.path!s} does not resolve to a ConcreteDefinition boundary."
+            )
+        if not _same_cdef(resolved, edge.child):
+            raise ConcreteDefinitionGraphError(
+                f"Graph edge path {edge.path!s} resolves to a different child definition."
+            )
 
     outgoing: dict[ConcreteDefinition, list[ConcreteDefinition]] = defaultdict(list)
     for edge in edges:
@@ -393,7 +392,8 @@ def _validate_graph_parts(
         visit(root)
 
     for node in nodes:
-        visit(node.definition)
+        if node.definition not in visited:
+            raise ConcreteDefinitionGraphError(f"Graph node {node.definition} is not reachable from any root.")
 
 
 def _same_cdef(left: ConcreteDefinition, right: ConcreteDefinition) -> bool:

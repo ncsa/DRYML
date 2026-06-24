@@ -2,8 +2,9 @@ import pytest
 
 from dryml.core2 import Object, Repo, Serializable
 from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
+from dryml.core2.query.path import Arg, GraphPath, Key, SetMember, get_subtree
 from dryml.core2.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
-from dryml.core2.repo_plan import GraphApplyResult, RuntimeBindingConflict
+from dryml.core2.repo_plan import GraphApplyResult, RuntimeBindingConflict, collect_runtime_roots
 from dryml.core2.store.dir import DirStore
 from dryml.core2.utils.general import pickle_load, pickle_save
 
@@ -102,6 +103,59 @@ def test_apply_graph_occurrence_mode_preserves_repeated_results():
     assert all(isinstance(result, GraphApplyResult) for result in results)
     assert [result.value for result in results] == ["leaf", "leaf"]
     assert [str(result.path) for result in results] == ["$.args[1]", "$.args[2]"]
+
+
+def test_repo_occurrence_path_preserves_arg_segment():
+    repo = Repo()
+    leaf = GraphLeaf("leaf", repo=repo)
+    root = GraphNode("root", leaf, repo=repo)
+
+    result = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)[0]
+
+    assert isinstance(result.path[0], Arg)
+    assert get_subtree(root.definition, result.path) == leaf.definition
+
+
+def test_repo_occurrence_path_preserves_mapping_key_segment():
+    repo = Repo()
+    leaf = GraphLeaf("leaf", repo=repo)
+    root = GraphNode("root", {5: leaf}, repo=repo)
+
+    result = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)[0]
+
+    assert isinstance(result.path[0], Arg)
+    assert result.path[1] == Key(5)
+    assert get_subtree(root.definition, result.path) == leaf.definition
+
+
+def test_repo_occurrence_path_preserves_set_member_segment():
+    repo = Repo()
+    leaf = GraphLeaf("leaf", repo=repo)
+    root = GraphNode("root", {leaf}, repo=repo)
+
+    result = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)[0]
+
+    assert isinstance(result.path[0], Arg)
+    assert isinstance(result.path[1], SetMember)
+    assert get_subtree(root.definition, result.path) == leaf.definition
+
+
+def test_runtime_root_path_for_integer_dict_key_is_key_not_index():
+    leaf = GraphLeaf("leaf")
+
+    roots = collect_runtime_roots({5: leaf})
+
+    assert roots[0].path == GraphPath((Key(5),))
+
+
+def test_runtime_root_set_paths_are_stable_set_members():
+    leaf = GraphLeaf("leaf")
+
+    first = collect_runtime_roots({leaf})
+    second = collect_runtime_roots({leaf})
+
+    assert isinstance(first[0].path[0], SetMember)
+    assert first[0].path == second[0].path
 
 
 def test_add_objects_rejects_conflicting_instance_same_cdef():

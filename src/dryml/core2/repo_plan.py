@@ -4,12 +4,13 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Iterable, Iterator, Literal, TypeVar
 
-from .canonical import NodeKind, is_runtime_leaf, iter_value_children, node_kind
-from .cdef_graph import CDefEdge, ConcreteDefinitionGraph
+from .canonical import NodeKind, is_runtime_leaf, node_kind
+from .cdef_graph import ConcreteDefinitionGraph
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions, RepoLoadOptions
-from .utils.graph.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
+from .utils.graph.path import GraphPath
+from .utils.graph.value import iter_value_edges
 
 
 T = TypeVar("T")
@@ -168,7 +169,7 @@ def _iter_bound_graph_object_occurrences(
             out.append(GraphObjectOccurrence(path, cdef, obj))
 
         for edge in binding.graph.outgoing(cdef):
-            visit(edge.child, _repo_child_path(path, edge))
+            visit(edge.child, path.join(edge.path))
 
         if options.order == "post" and should_apply:
             out.append(GraphObjectOccurrence(path, cdef, obj))
@@ -294,8 +295,8 @@ def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]
         NodeKind.FROZEN_SET,
         NodeKind.FROZEN_DICT,
     }:
-        for part, child in iter_value_children(value):
-            _collect_runtime_roots(child, path.child(part), roots)
+        for edge in iter_value_edges(value):
+            _collect_runtime_roots(edge.value, path.child(edge.segment), roots)
         return
     from .repo import RepoGraphError
 
@@ -337,24 +338,6 @@ def _resolve_missing_for_traversal(
     raise RepoGraphError(
         f"Definition {cdef} is not reachable as a live object in this repo at {path.legacy_str()}."
     )
-
-
-def _repo_child_path(path: GraphPath, edge: CDefEdge) -> GraphPath:
-    out = path
-    for seg in edge.path:
-        if isinstance(seg, Arg):
-            out = out.child("args").child(seg.index)
-        elif isinstance(seg, Kwarg):
-            out = out.child("kwargs").child(seg.name)
-        elif isinstance(seg, Index):
-            out = out.child(seg.index)
-        elif isinstance(seg, Key):
-            out = out.child(seg.key if isinstance(seg.key, (str, int)) else repr(seg.key))
-        elif isinstance(seg, SetMember):
-            out = out.child(str(seg))
-        else:
-            out = out.child(str(seg))
-    return out
 
 
 def _node_primary_path(

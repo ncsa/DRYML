@@ -72,8 +72,9 @@ class DefinitionCatalog:
             cdefs = list(dict.fromkeys(cdefs))
             if cdefs:
                 graph = ConcreteDefinitionGraph.from_roots(cdefs)
+                self._register_graph_structure_locked(graph)
                 for cdef in graph.roots:
-                    ids.add(self._register_graph_locked(graph, root=cdef))
+                    ids.add(self.ids_by_cdef[cdef])
             return ids
 
     def refresh(self, policy: RefreshPolicy, *, stats: QueryStats | None = None) -> None:
@@ -110,16 +111,15 @@ class DefinitionCatalog:
 
     def register_cached(self, cdef: ConcreteDefinition) -> DefinitionId:
         with self.lock:
-            return self._register_graph_locked(ConcreteDefinitionGraph.from_root(cdef))
+            graph = ConcreteDefinitionGraph.from_root(cdef)
+            self._register_graph_structure_locked(graph)
+            return self.ids_by_cdef[cdef]
 
     def register_graph(self, graph: ConcreteDefinitionGraph) -> tuple[DefinitionId, ...]:
         with self.lock:
-            before = (len(self.definitions_by_id), len(self.edge_by_key))
-            ids = []
-            for root in graph.roots:
-                ids.append(self._register_graph_locked(graph, root=root))
-            after = (len(self.definitions_by_id), len(self.edge_by_key))
-            if after != before:
+            changed = self._register_graph_structure_locked(graph)
+            ids = [self.ids_by_cdef[root] for root in graph.roots]
+            if changed:
                 self.generation += 1
             return tuple(ids)
 
@@ -133,8 +133,8 @@ class DefinitionCatalog:
             sid = self.store_id(store)
             if graph is None:
                 graph = ConcreteDefinitionGraph.from_root(cdef)
-            before = (len(self.definitions_by_id), len(self.edge_by_key))
-            did = self._register_graph_locked(graph, root=cdef)
+            changed = self._register_graph_structure_locked(graph)
+            did = self.ids_by_cdef[cdef]
             membership_changed = (
                 sid not in self.replicas_by_definition.get(did, set())
                 or did not in self.stored_definitions_by_store.get(sid, set())
@@ -143,8 +143,7 @@ class DefinitionCatalog:
             self.replicas_by_definition[did].add(sid)
             self.stored_definitions_by_store[sid].add(did)
             self.repo.light_index.add(cdef)
-            after = (len(self.definitions_by_id), len(self.edge_by_key))
-            if membership_changed or after != before:
+            if membership_changed or changed:
                 self.generation += 1
             return did
 
@@ -168,6 +167,10 @@ class DefinitionCatalog:
     def cdef_id(self, cdef: ConcreteDefinition) -> DefinitionId | None:
         with self.lock:
             return self.ids_by_cdef.get(cdef)
+
+    def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
+        with self.lock:
+            return self._exact_ids_locked(cdef)
 
     def record_for_cdef(self, cdef: ConcreteDefinition) -> DefinitionRecord | None:
         with self.lock:
@@ -199,6 +202,32 @@ class DefinitionCatalog:
     def occurrences_for_nested_ids(self, ids: set[DefinitionId]) -> tuple[DefinitionOccurrence, ...]:
         with self.lock:
             return tuple(occ for occ in self._iter_occurrences_locked(target_ids=ids))
+
+    def owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
+        with self.lock:
+            stored_roots = self.stored_ids()
+            owners: set[DefinitionId] = set()
+            seen: set[DefinitionId] = set(ids)
+            stack = list(ids)
+            while stack:
+                cur = stack.pop()
+                for edge_key in self.incoming_edges.get(cur, ()):
+                    parent_id = self.edge_by_key[edge_key].parent_id
+                    if parent_id in stored_roots:
+                        owners.add(parent_id)
+                    if parent_id not in seen:
+                        seen.add(parent_id)
+                        stack.append(parent_id)
+            return owners
+
+    def filter_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
+        with self.lock:
+            stored_roots = self.stored_ids()
+            return {
+                did
+                for did in ids
+                if self._has_stored_ancestor_locked(did, stored_roots)
+            }
 
     def definition_for_id(self, did: DefinitionId) -> ConcreteDefinition:
         return self.definitions_by_id[did].cdef
@@ -245,6 +274,18 @@ class DefinitionCatalog:
             stats: QueryStats | None = None) -> set[DefinitionId]:
         return self._candidate_ids_from_postings(
             universe_ids,
+            requirements,
+            self.local_postings,
+            stats=stats,
+        )
+
+    def local_candidate_ids_unbounded(
+            self,
+            requirements: tuple[FeatureRequirement, ...],
+            *,
+            stats: QueryStats | None = None) -> set[DefinitionId]:
+        return self._candidate_ids_from_postings(
+            None,
             requirements,
             self.local_postings,
             stats=stats,
@@ -364,17 +405,21 @@ class DefinitionCatalog:
             self.local_postings[token][did] = count
         return did
 
-    def _register_graph_locked(
-            self,
-            graph: ConcreteDefinitionGraph,
-            *,
-            root: ConcreteDefinition | None = None) -> DefinitionId:
-        root = root or graph.roots[0]
+    def _exact_ids_locked(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
+        digest = cdef.stable_hash()
+        return {
+            did
+            for did in self.ids_by_stable_hash.get(digest, set())
+            if self.definitions_by_id[did].cdef == cdef
+        }
+
+    def _register_graph_structure_locked(self, graph: ConcreteDefinitionGraph) -> bool:
+        before = (len(self.definitions_by_id), len(self.edge_by_key))
         for node in graph.nodes():
             self._register_definition_locked(node.definition)
         for edge in graph.edges():
-            parent_id = self._register_definition_locked(edge.parent)
-            child_id = self._register_definition_locked(edge.child)
+            parent_id = self.ids_by_cdef[edge.parent]
+            child_id = self.ids_by_cdef[edge.child]
             key: EdgeKey = (parent_id, edge.path, child_id)
             if key not in self.edge_by_key:
                 self.edge_by_key[key] = DefinitionEdgeRecord(key, parent_id, edge.path, child_id)
@@ -382,19 +427,19 @@ class DefinitionCatalog:
                 self.incoming_edges[child_id].add(key)
                 self.child_by_parent_path[(parent_id, edge.path)].add(child_id)
                 self.parents_by_child_path[(child_id, edge.path)].add(parent_id)
-        return self.ids_by_cdef[root]
+        return (len(self.definitions_by_id), len(self.edge_by_key)) != before
 
     def _candidate_ids_from_postings(
             self,
-            universe_ids: set[DefinitionId],
+            universe_ids: set[DefinitionId] | None,
             requirements: tuple[FeatureRequirement, ...],
             postings: dict[FeatureToken, dict[DefinitionId, int]],
             *,
             stats: QueryStats | None = None) -> set[DefinitionId]:
         if not requirements:
             if stats is not None:
-                stats.candidate_count = len(universe_ids)
-            return set(universe_ids)
+                stats.candidate_count = len(universe_ids) if universe_ids is not None else len(self.definitions_by_id)
+            return set(universe_ids) if universe_ids is not None else set(self.definitions_by_id)
 
         posting_data = []
         for req in requirements:
@@ -406,20 +451,21 @@ class DefinitionCatalog:
             stats.selected_features = tuple(req for req, _, _ in posting_data)
             stats.posting_sizes = tuple(size for _, _, size in posting_data)
 
-        candidates: set[DefinitionId] | None = None
-        for req, posting, _ in posting_data:
-            ids = {did for did, count in posting.items() if count >= req.count}
-            if candidates is None:
-                candidates = ids
-            else:
-                candidates &= ids
+        anchor_req, anchor_posting, _ = posting_data[0]
+        candidates = {
+            did
+            for did, count in anchor_posting.items()
+            if count >= anchor_req.count and (universe_ids is None or did in universe_ids)
+        }
+
+        for req, posting, _ in posting_data[1:]:
+            candidates = {
+                did
+                for did in candidates
+                if posting.get(did, 0) >= req.count
+            }
             if not candidates:
                 break
-
-        if candidates is None:
-            candidates = set(universe_ids)
-        else:
-            candidates &= universe_ids
 
         if stats is not None:
             stats.candidate_count = len(candidates)
@@ -442,6 +488,19 @@ class DefinitionCatalog:
             )
             stack.extend(self.edge_by_key[key].child_id for key in reversed(child_edges))
         return seen
+
+    def _has_stored_ancestor_locked(self, did: DefinitionId, stored_roots: set[DefinitionId]) -> bool:
+        seen: set[DefinitionId] = set()
+        stack = [self.edge_by_key[key].parent_id for key in self.incoming_edges.get(did, ())]
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            if cur in stored_roots:
+                return True
+            seen.add(cur)
+            stack.extend(self.edge_by_key[key].parent_id for key in self.incoming_edges.get(cur, ()))
+        return False
 
     def _iter_occurrences_locked(
             self,

@@ -2,6 +2,7 @@ import pytest
 import shutil
 
 from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.query import QueryIndexError, SetMember
@@ -162,6 +163,36 @@ def test_cache_sync_registers_union_graph_once(monkeypatch):
 
     assert len(calls) == 1
     assert set(calls[0]) >= {left.definition, right.definition}
+
+
+def test_multiroot_graph_registration_visits_nodes_and_edges_once(monkeypatch):
+    repo = Repo()
+    child = IndexLeaf("shared", repo=repo)
+    left = IndexPersistent(child, state=1, repo=repo)
+    right = IndexPersistent(child, state=2, repo=repo)
+    graph = ConcreteDefinitionGraph.from_roots((left.definition, right.definition))
+    catalog = repo._query_catalog
+    node_calls = []
+    edge_visits = []
+    original_register = catalog._register_definition_locked
+    original_edges = graph.edges
+
+    def spy_register(cdef):
+        node_calls.append(cdef)
+        return original_register(cdef)
+
+    def spy_edges():
+        edges = original_edges()
+        edge_visits.extend(edges)
+        return edges
+
+    monkeypatch.setattr(catalog, "_register_definition_locked", spy_register)
+    monkeypatch.setattr(graph, "edges", spy_edges)
+
+    catalog.register_graph(graph)
+
+    assert len(node_calls) == len(graph.nodes())
+    assert len(edge_visits) == len(original_edges())
 
 
 def test_shared_child_local_fingerprint_compiled_once(monkeypatch):

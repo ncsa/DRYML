@@ -147,6 +147,26 @@ class DefinitionQuery:
     def execute(self):
         self._require_domain()
         if self.domain == "nested":
+            if self.universe is None and self.projection == "definitions":
+                cdefs, stats = self._execute_nested_definitions()
+                explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+                return DefinitionResultSet(
+                    self.repo,
+                    cdefs,
+                    materializable=False,
+                    domain="nested-definitions",
+                    explanation=explanation,
+                )
+            if self.universe is None and self.projection == "owners":
+                cdefs, stats = self._execute_nested_owners()
+                explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+                return DefinitionResultSet(
+                    self.repo,
+                    cdefs,
+                    materializable=True,
+                    domain="owners",
+                    explanation=explanation,
+                )
             occs, stats = self._execute_nested_occurrences()
             explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
             raw = OccurrenceResultSet(self.repo, occs, explanation=explanation)
@@ -224,6 +244,15 @@ class DefinitionQuery:
         elif self.domain in {"stored", "known"}:
             catalog.refresh(self.refresh_policy, stats=stats)
 
+        if exact_root is not None and self.domain in {"stored", "cached", "known"}:
+            candidate_ids = self._exact_domain_candidate_ids(catalog, exact_root)
+            stats.universe_size = len(candidate_ids)
+            stats.candidate_count = len(candidate_ids)
+            cdefs = catalog.ids_to_cdefs(candidate_ids)
+            matches = self._verify_cdefs(cdefs, stats=stats)
+            stats.result_count = len(matches)
+            return matches, stats
+
         if self.domain == "stored":
             universe_ids = catalog.stored_ids()
         elif self.domain == "cached":
@@ -245,6 +274,23 @@ class DefinitionQuery:
         stats.result_count = len(matches)
         return matches, stats
 
+    def _exact_domain_candidate_ids(self, catalog, exact_root: ConcreteDefinition) -> set[str]:
+        if self.domain in {"cached", "known"} and self.repo.get_cached(exact_root, reuse_weak=self.reuse_weak_policy) is not None:
+            catalog.register_cached(exact_root)
+        exact_ids = catalog.exact_ids(exact_root)
+        if self.domain == "cached":
+            if self.repo.get_cached(exact_root, reuse_weak=self.reuse_weak_policy) is None:
+                return set()
+            return exact_ids
+        if self.domain == "stored":
+            return {did for did in exact_ids if catalog.replicas_by_definition.get(did)}
+        return {
+            did
+            for did in exact_ids
+            if catalog.replicas_by_definition.get(did)
+            or self.repo.get_cached(catalog.definition_for_id(did), reuse_weak=self.reuse_weak_policy) is not None
+        }
+
     def _execute_nested_occurrences(self) -> tuple[tuple[DefinitionOccurrence, ...], QueryStats]:
         stats = QueryStats()
         if self.universe is not None:
@@ -262,12 +308,15 @@ class DefinitionQuery:
 
         catalog = self.repo._query_catalog
         catalog.refresh(self.refresh_policy, stats=stats)
-        universe_ids = catalog.nested_ids()
-        stats.universe_size = len(universe_ids)
         selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
         if selector_graph is not None:
-            candidate_ids = graph_candidate_ids(catalog, selector_graph, universe_ids, stats=stats)
+            candidate_ids = graph_candidate_ids(catalog, selector_graph, None, stats=stats)
+            candidate_ids = catalog.filter_nested_ids(candidate_ids)
+            stats.universe_size = len(candidate_ids)
+            stats.candidate_count = len(candidate_ids)
         else:
+            universe_ids = catalog.nested_ids()
+            stats.universe_size = len(universe_ids)
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
             candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
@@ -277,6 +326,40 @@ class DefinitionQuery:
         occurrences = catalog.occurrences_for_nested_ids(match_ids)
         stats.result_count = len(occurrences)
         return occurrences, stats
+
+    def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
+        matches, _, stats = self._execute_nested_definition_matches()
+        stats.result_count = len(matches)
+        return matches, stats
+
+    def _execute_nested_owners(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
+        matches, match_ids, stats = self._execute_nested_definition_matches()
+        catalog = self.repo._query_catalog
+        owner_ids = catalog.owner_ids_for_nested_ids(match_ids)
+        owners = catalog.ids_to_cdefs(owner_ids)
+        stats.result_count = len(owners)
+        return tuple(sorted(owners, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))), stats
+
+    def _execute_nested_definition_matches(self) -> tuple[tuple[ConcreteDefinition, ...], set[str], QueryStats]:
+        stats = QueryStats()
+        catalog = self.repo._query_catalog
+        catalog.refresh(self.refresh_policy, stats=stats)
+        selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
+        if selector_graph is not None:
+            candidate_ids = graph_candidate_ids(catalog, selector_graph, None, stats=stats)
+            candidate_ids = catalog.filter_nested_ids(candidate_ids)
+            stats.universe_size = len(candidate_ids)
+            stats.candidate_count = len(candidate_ids)
+        else:
+            universe_ids = catalog.nested_ids()
+            stats.universe_size = len(universe_ids)
+            requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
+            candidate_ids = catalog.candidate_ids(universe_ids, requirements, stats=stats)
+        cdefs = catalog.ids_to_cdefs(candidate_ids)
+        matches = self._verify_cdefs(cdefs, stats=stats)
+        match_ids = {catalog.cdef_id(cdef) for cdef in matches}
+        match_ids.discard(None)
+        return matches, match_ids, stats
 
     def _verify_cdefs(
             self,

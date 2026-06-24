@@ -55,15 +55,7 @@ class SetMember:
         return f'@set("{self.fingerprint}", {self.ordinal})'
 
 
-@dataclass(frozen=True, slots=True)
-class Field:
-    name: str
-
-    def __str__(self) -> str:
-        return self.name
-
-
-PathSegment = Kwarg | Arg | Index | Key | SetMember | Field
+PathSegment = Kwarg | Arg | Index | Key | SetMember
 GraphPathLike = str | Iterable[PathSegment | str | int] | "GraphPath"
 
 
@@ -149,8 +141,6 @@ class GraphPath:
         for seg in self.segments:
             if isinstance(seg, Kwarg):
                 out += f".{seg.name}"
-            elif isinstance(seg, Field):
-                out += f".{seg.name}"
             elif isinstance(seg, Arg):
                 out += f".args[{seg.index}]"
             elif isinstance(seg, Index):
@@ -211,7 +201,7 @@ def parse_path(text: str) -> GraphPath:
 
 
 def _normalize_segment(part: PathSegment | str | int) -> PathSegment:
-    if isinstance(part, (Kwarg, Arg, Index, Key, SetMember, Field)):
+    if isinstance(part, (Kwarg, Arg, Index, Key, SetMember)):
         return part
     if isinstance(part, str):
         return Kwarg(part)
@@ -228,8 +218,6 @@ def _normalize_legacy_segment(part: str | int) -> PathSegment:
 
 def _legacy_segment_value(seg: PathSegment) -> str | int:
     if isinstance(seg, Kwarg):
-        return seg.name
-    if isinstance(seg, Field):
         return seg.name
     if isinstance(seg, Arg):
         return f"args[{seg.index}]"

@@ -9,22 +9,27 @@ from .selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 def graph_candidate_ids(
         catalog,
         selector_graph: SelectorGraph | None,
-        universe_ids: set[DefinitionId],
+        universe_ids: set[DefinitionId] | None,
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
     if selector_graph is None:
+        if universe_ids is None:
+            universe_ids = set(catalog.definitions_by_id.keys())
         if stats is not None:
             stats.candidate_count = len(universe_ids)
         return set(universe_ids)
 
     with catalog.lock:
-        exact_anchor = _choose_exact_anchor(catalog, selector_graph)
-        if exact_anchor is not None:
-            return _graph_candidate_ids_from_exact_anchor(
+        anchor = _choose_anchor(catalog, selector_graph)
+        if anchor is not None:
+            anchor_id, anchor_candidates, anchor_mode = anchor
+            return _graph_candidate_ids_from_anchor(
                 catalog,
                 selector_graph,
                 universe_ids,
-                exact_anchor,
+                anchor_id,
+                anchor_candidates,
+                anchor_mode,
                 stats=stats,
             )
         return _graph_candidate_ids_full(catalog, selector_graph, universe_ids, stats=stats)
@@ -33,7 +38,7 @@ def graph_candidate_ids(
 def _graph_candidate_ids_full(
         catalog,
         selector_graph: SelectorGraph,
-        universe_ids: set[DefinitionId],
+        universe_ids: set[DefinitionId] | None,
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
     all_ids = set(catalog.definitions_by_id.keys())
@@ -76,28 +81,28 @@ def _graph_candidate_ids_full(
                 candidates[edge.child] = child_after
                 changed = True
 
-    root_candidates = candidates[selector_graph.root] & universe_ids
+    root_candidates = _apply_universe(candidates[selector_graph.root], universe_ids)
     if stats is not None:
         stats.graph_candidate_count = len(root_candidates)
         stats.candidate_count = len(root_candidates)
     return root_candidates
 
 
-def _graph_candidate_ids_from_exact_anchor(
+def _graph_candidate_ids_from_anchor(
         catalog,
         selector_graph: SelectorGraph,
-        universe_ids: set[DefinitionId],
+        universe_ids: set[DefinitionId] | None,
         anchor_id: int,
+        anchor_candidates: set[DefinitionId],
+        anchor_mode: str,
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
     if stats is not None:
         stats.graph_node_count = len(selector_graph.nodes)
         stats.graph_edge_count = len(selector_graph.edges)
         stats.graph_anchor_path = selector_graph.node(anchor_id).source_path
-        stats.graph_anchor_mode = "exact"
+        stats.graph_anchor_mode = anchor_mode
 
-    anchor_node = selector_graph.node(anchor_id)
-    anchor_candidates = _exact_candidate_ids(catalog, anchor_node)
     if not anchor_candidates:
         if stats is not None:
             stats.graph_candidate_count = 0
@@ -122,24 +127,37 @@ def _graph_candidate_ids_from_exact_anchor(
             if _merge_candidates(candidates, edge.child, child_ids):
                 queue.append(edge.child)
 
-    root_candidates = candidates.get(selector_graph.root, set()) & universe_ids
+    root_candidates = _apply_universe(candidates.get(selector_graph.root, set()), universe_ids)
     if stats is not None:
         stats.graph_candidate_count = len(root_candidates)
         stats.candidate_count = len(root_candidates)
     return root_candidates
 
 
-def _choose_exact_anchor(catalog, selector_graph: SelectorGraph) -> int | None:
-    exact_nodes = [node for node in selector_graph.nodes if node.exact_definition is not None]
-    if not exact_nodes:
+def _apply_universe(ids: set[DefinitionId], universe_ids: set[DefinitionId] | None) -> set[DefinitionId]:
+    return set(ids) if universe_ids is None else ids & universe_ids
+
+
+def _choose_anchor(catalog, selector_graph: SelectorGraph) -> tuple[int, set[DefinitionId], str] | None:
+    anchor_data: list[tuple[int, set[DefinitionId], str]] = []
+    for node in selector_graph.nodes:
+        if node.exact_definition is not None:
+            anchor_data.append((node.node_id, _exact_candidate_ids(catalog, node), "exact"))
+        elif node.local_requirements:
+            anchor_data.append((
+                node.node_id,
+                catalog.local_candidate_ids_unbounded(node.local_requirements),
+                "local-posting",
+            ))
+    if not anchor_data:
         return None
     return min(
-        exact_nodes,
-        key=lambda node: (
-            len(_exact_candidate_ids(catalog, node)),
-            str(node.source_path),
+        anchor_data,
+        key=lambda item: (
+            len(item[1]),
+            str(selector_graph.node(item[0]).source_path),
         ),
-    ).node_id
+    )
 
 
 def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -> set[DefinitionId]:

@@ -10,7 +10,7 @@ from dryml.core2.cdef_graph import (
 )
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.path import GraphPath, Kwarg, get_subtree
+from dryml.core2.query.path import Arg, GraphPath, Kwarg, get_subtree
 
 
 class GraphLeaf(Object):
@@ -184,16 +184,12 @@ def test_graph_rejects_missing_edge_endpoint():
 
 def test_graph_rejects_direct_cycle():
     left = ConcreteDefinition(GraphLeaf, FrozenTuple(("left",)), FrozenDict({}))
-    right = ConcreteDefinition(GraphLeaf, FrozenTuple(("right",)), FrozenDict({}))
 
     with pytest.raises(ConcreteDefinitionGraphCycleError, match="cycle"):
         ConcreteDefinitionGraph(
             (left,),
-            (CDefNode(left, left.stable_hash()), CDefNode(right, right.stable_hash())),
-            (
-                CDefEdge(left, GraphPath((Kwarg("right"),)), right),
-                CDefEdge(right, GraphPath((Kwarg("left"),)), left),
-            ),
+            (CDefNode(left, left.stable_hash()),),
+            (CDefEdge(left, GraphPath(), left),),
         )
 
 
@@ -202,3 +198,44 @@ def test_graph_rejects_inconsistent_node_key():
 
     with pytest.raises(ConcreteDefinitionGraphError, match="stable_hash"):
         ConcreteDefinitionGraph((cdef,), (CDefNode(cdef, "wrong"),), ())
+
+
+def test_graph_rejects_edge_whose_path_resolves_to_different_child():
+    child1 = ConcreteDefinition(GraphLeaf, FrozenTuple(("one",)), FrozenDict({}))
+    child2 = ConcreteDefinition(GraphLeaf, FrozenTuple(("two",)), FrozenDict({}))
+    parent = ConcreteDefinition(GraphParent, FrozenTuple((child1,)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphError, match="different child"):
+        ConcreteDefinitionGraph(
+            (parent,),
+            (
+                CDefNode(parent, parent.stable_hash()),
+                CDefNode(child1, child1.stable_hash()),
+                CDefNode(child2, child2.stable_hash()),
+            ),
+            (CDefEdge(parent, GraphPath((Arg(0),)), child2),),
+        )
+
+
+def test_graph_rejects_edge_path_resolving_to_scalar():
+    child = ConcreteDefinition(GraphLeaf, FrozenTuple(("child",)), FrozenDict({}))
+    parent = ConcreteDefinition(GraphParent, FrozenTuple(("scalar",)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphError, match="ConcreteDefinition boundary"):
+        ConcreteDefinitionGraph(
+            (parent,),
+            (CDefNode(parent, parent.stable_hash()), CDefNode(child, child.stable_hash())),
+            (CDefEdge(parent, GraphPath((Arg(0),)), child),),
+        )
+
+
+def test_graph_rejects_node_unreachable_from_all_roots():
+    root = ConcreteDefinition(GraphLeaf, FrozenTuple(("root",)), FrozenDict({}))
+    unreachable = ConcreteDefinition(GraphLeaf, FrozenTuple(("unreachable",)), FrozenDict({}))
+
+    with pytest.raises(ConcreteDefinitionGraphError, match="not reachable"):
+        ConcreteDefinitionGraph(
+            (root,),
+            (CDefNode(root, root.stable_hash()), CDefNode(unreachable, unreachable.stable_hash())),
+            (),
+        )
