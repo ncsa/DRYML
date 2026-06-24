@@ -15,6 +15,10 @@ from .path import DefinitionPath, Key, Kwarg, SetMember, iter_value_edges
 LocalStructureMode = Literal["target-full", "target-local", "selector-full", "selector-local"]
 
 
+class LocalStructureCycleError(Exception):
+    pass
+
+
 class LocalStructureConsumer(Protocol):
     def feature(self, kind: str, path: DefinitionPath | None, payload: Any = None) -> None:
         ...
@@ -55,6 +59,7 @@ def walk_local_structure(
         value,
         path,
         consumer,
+        active={},
         mode=mode,
         class_match=class_match,
         unordered_set_boundaries=unordered_set_boundaries,
@@ -66,11 +71,46 @@ def _walk(
         path: DefinitionPath,
         consumer: LocalStructureConsumer,
         *,
+        active: dict[int, DefinitionPath],
         mode: LocalStructureMode,
         class_match: ClassMatchPolicy,
         unordered_set_boundaries: bool) -> None:
     if isinstance(value, Object):
         value = value.definition
+
+    active_id = id(value) if _tracks_cycles(value) else None
+    if active_id is not None:
+        first_path = active.get(active_id)
+        if first_path is not None:
+            raise LocalStructureCycleError(
+                f"Selector structure cycle at {path!s}; container first became active at {first_path!s}."
+            )
+        active[active_id] = path
+
+    try:
+        _walk_checked(
+            value,
+            path,
+            consumer,
+            active=active,
+            mode=mode,
+            class_match=class_match,
+            unordered_set_boundaries=unordered_set_boundaries,
+        )
+    finally:
+        if active_id is not None:
+            active.pop(active_id, None)
+
+
+def _walk_checked(
+        value: Any,
+        path: DefinitionPath,
+        consumer: LocalStructureConsumer,
+        *,
+        active: dict[int, DefinitionPath],
+        mode: LocalStructureMode,
+        class_match: ClassMatchPolicy,
+        unordered_set_boundaries: bool) -> None:
 
     is_target = mode.startswith("target")
     is_selector = mode.startswith("selector")
@@ -89,6 +129,7 @@ def _walk(
                 value,
                 path,
                 consumer,
+                active=active,
                 mode=mode,
                 class_match=class_match,
                 unordered_set_boundaries=unordered_set_boundaries,
@@ -114,6 +155,7 @@ def _walk(
             value,
             path,
             consumer,
+            active=active,
             mode=mode,
             class_match=class_match,
             unordered_set_boundaries=unordered_set_boundaries,
@@ -132,6 +174,7 @@ def _walk(
                 value,
                 path,
                 consumer,
+                active=active,
                 mode=mode,
                 class_match=class_match,
                 unordered_set_boundaries=unordered_set_boundaries,
@@ -141,6 +184,7 @@ def _walk(
                 value,
                 path,
                 consumer,
+                active=active,
                 mode=mode,
                 class_match=class_match,
                 unordered_set_boundaries=unordered_set_boundaries,
@@ -150,6 +194,7 @@ def _walk(
                 value,
                 path,
                 consumer,
+                active=active,
                 mode=mode,
                 class_match=class_match,
                 unordered_set_boundaries=unordered_set_boundaries,
@@ -169,6 +214,7 @@ def _walk_definition_children(
         path: DefinitionPath,
         consumer: LocalStructureConsumer,
         *,
+        active: dict[int, DefinitionPath],
         mode: LocalStructureMode,
         class_match: ClassMatchPolicy,
         unordered_set_boundaries: bool) -> None:
@@ -179,6 +225,7 @@ def _walk_definition_children(
             edge.value,
             path.child(edge.segment),
             consumer,
+            active=active,
             mode=mode,
             class_match=class_match,
             unordered_set_boundaries=unordered_set_boundaries,
@@ -190,6 +237,7 @@ def _walk_mapping(
         path: DefinitionPath,
         consumer: LocalStructureConsumer,
         *,
+        active: dict[int, DefinitionPath],
         mode: LocalStructureMode,
         class_match: ClassMatchPolicy,
         unordered_set_boundaries: bool) -> None:
@@ -202,6 +250,7 @@ def _walk_mapping(
             edge.value,
             path.child(edge.segment),
             consumer,
+            active=active,
             mode=mode,
             class_match=class_match,
             unordered_set_boundaries=unordered_set_boundaries,
@@ -213,6 +262,7 @@ def _walk_children(
         path: DefinitionPath,
         consumer: LocalStructureConsumer,
         *,
+        active: dict[int, DefinitionPath],
         mode: LocalStructureMode,
         class_match: ClassMatchPolicy,
         unordered_set_boundaries: bool) -> None:
@@ -221,6 +271,7 @@ def _walk_children(
             edge.value,
             path.child(edge.segment),
             consumer,
+            active=active,
             mode=mode,
             class_match=class_match,
             unordered_set_boundaries=unordered_set_boundaries,
@@ -232,6 +283,7 @@ def _walk_set(
         path: DefinitionPath,
         consumer: LocalStructureConsumer,
         *,
+        active: dict[int, DefinitionPath],
         mode: LocalStructureMode,
         class_match: ClassMatchPolicy,
         unordered_set_boundaries: bool) -> None:
@@ -242,6 +294,7 @@ def _walk_set(
             value,
             path,
             consumer,
+            active=active,
             mode=mode,
             class_match=class_match,
             unordered_set_boundaries=unordered_set_boundaries,
@@ -275,3 +328,19 @@ def _container_families(value: Any, *, mode: LocalStructureMode) -> tuple[str, .
     if isinstance(value, (dict, FrozenDict)):
         return ("dict",)
     return ()
+
+
+def _tracks_cycles(value: Any) -> bool:
+    return isinstance(value, (
+        Definition,
+        ConcreteDefinition,
+        list,
+        tuple,
+        set,
+        frozenset,
+        dict,
+        FrozenList,
+        FrozenTuple,
+        FrozenSet,
+        FrozenDict,
+    ))

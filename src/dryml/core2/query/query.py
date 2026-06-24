@@ -11,7 +11,7 @@ from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
 from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..utils.types import is_nonclass_callable
-from .fingerprint import collect_exact_constraints, selector_requirements
+from .fingerprint import selector_requirements
 from .graph_plan import graph_candidate_ids
 from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
@@ -42,6 +42,7 @@ class DefinitionQuery:
     refresh_policy: RefreshPolicy = "auto"
     reuse_weak_policy: bool = True
     universe: ResultUniverse | None = None
+    occurrence_limit: int | None = None
 
     @classmethod
     def from_source(
@@ -146,6 +147,11 @@ class DefinitionQuery:
             raise QueryDomainError("owners() is only valid for nested queries.")
         return replace(self, projection="owners")
 
+    def max_occurrences(self, limit: int | None) -> "DefinitionQuery":
+        if limit is not None and limit < 0:
+            raise ValueError("max_occurrences limit must be non-negative or None.")
+        return replace(self, occurrence_limit=limit)
+
     def execute(self):
         self._require_domain()
         if self.domain == "nested":
@@ -171,7 +177,10 @@ class DefinitionQuery:
                 )
             occs, stats = self._execute_nested_occurrences()
             explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
-            raw = OccurrenceResultSet(self.repo, occs, explanation=explanation)
+            if callable(occs):
+                raw = OccurrenceResultSet(self.repo, occurrence_factory=occs, explanation=explanation)
+            else:
+                raw = OccurrenceResultSet(self.repo, occs, explanation=explanation)
             if self.projection == "definitions":
                 return raw.definitions()
             if self.projection == "owners":
@@ -257,13 +266,15 @@ class DefinitionQuery:
 
         domain = self._definition_domain(catalog)
         domain.prepare(stats=stats)
-        stats.universe_size = domain.estimate_size() or 0
+        stats.universe_size = domain.estimate_size()
         selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
         if selector_graph is not None:
             candidate_ids = graph_candidate_ids(catalog, selector_graph, domain, stats=stats)
         else:
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-            candidate_ids = catalog.candidate_ids_for_domain(domain, requirements, stats=stats)
+            candidate_ids = catalog.local_candidates(requirements, domain=domain, stats=stats)
+            if not requirements:
+                stats.universe_size = len(candidate_ids)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         stats.result_count = len(matches)
@@ -295,7 +306,7 @@ class DefinitionQuery:
             or self.repo.get_cached(catalog.definition_for_id(did), reuse_weak=self.reuse_weak_policy) is not None
         }
 
-    def _execute_nested_occurrences(self) -> tuple[tuple[DefinitionOccurrence, ...], QueryStats]:
+    def _execute_nested_occurrences(self):
         stats = QueryStats()
         if self.universe is not None:
             if self.universe.kind != "occurrences":
@@ -307,6 +318,8 @@ class DefinitionQuery:
             )
             verified = set(verified_nested)
             out = tuple(occ for occ in self.universe.occurrences if occ.definition in verified)
+            if self.occurrence_limit is not None:
+                out = out[:self.occurrence_limit]
             stats.result_count = len(out)
             return out, stats
 
@@ -316,24 +329,29 @@ class DefinitionQuery:
         if selector_graph is not None:
             candidate_ids = graph_candidate_ids(catalog, selector_graph, None, stats=stats)
             candidate_ids = catalog.filter_nested_ids(candidate_ids)
-            stats.universe_size = len(candidate_ids)
             stats.candidate_count = len(candidate_ids)
         else:
             domain = NestedDomain(catalog)
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
             if requirements:
-                candidate_ids = catalog.candidate_ids_for_domain(domain, requirements, stats=stats)
+                candidate_ids = catalog.local_candidates(requirements, domain=domain, stats=stats)
             else:
                 candidate_ids = domain.all_ids()
                 stats.candidate_count = len(candidate_ids)
-            stats.universe_size = domain.estimate_size() or len(candidate_ids)
+                stats.universe_size = len(candidate_ids)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         match_ids = {catalog.cdef_id(cdef) for cdef in matches}
         match_ids.discard(None)
-        occurrences = tuple(catalog.iter_occurrences_for_nested_ids(match_ids))
-        stats.result_count = len(occurrences)
-        return occurrences, stats
+        frozen_match_ids = frozenset(match_ids)
+
+        def occurrence_factory():
+            return catalog.iter_occurrences_for_nested_ids(
+                set(frozen_match_ids),
+                max_occurrences=self.occurrence_limit,
+            )
+
+        return occurrence_factory, stats
 
     def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
         matches, _, stats = self._execute_nested_definition_matches()
@@ -356,17 +374,16 @@ class DefinitionQuery:
         if selector_graph is not None:
             candidate_ids = graph_candidate_ids(catalog, selector_graph, None, stats=stats)
             candidate_ids = catalog.filter_nested_ids(candidate_ids)
-            stats.universe_size = len(candidate_ids)
             stats.candidate_count = len(candidate_ids)
         else:
             domain = NestedDomain(catalog)
             requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
             if requirements:
-                candidate_ids = catalog.candidate_ids_for_domain(domain, requirements, stats=stats)
+                candidate_ids = catalog.local_candidates(requirements, domain=domain, stats=stats)
             else:
                 candidate_ids = domain.all_ids()
                 stats.candidate_count = len(candidate_ids)
-            stats.universe_size = domain.estimate_size() or len(candidate_ids)
+                stats.universe_size = len(candidate_ids)
         cdefs = catalog.ids_to_cdefs(candidate_ids)
         matches = self._verify_cdefs(cdefs, stats=stats)
         match_ids = {catalog.cdef_id(cdef) for cdef in matches}
@@ -382,7 +399,6 @@ class DefinitionQuery:
             stats.verified_count += len(cdefs)
             return tuple(sorted(cdefs, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
 
-        constraints = collect_exact_constraints(self.selector)
         out: list[ConcreteDefinition] = []
         for cdef in cdefs:
             stats.verified_count += 1
@@ -391,8 +407,6 @@ class DefinitionQuery:
                     cdef,
                     strict=self.strict_policy,
                     class_match=self.class_match_policy):
-                continue
-            if not _exact_constraints_match(cdef, constraints):
                 continue
             out.append(cdef)
         return tuple(sorted(out, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
@@ -554,112 +568,3 @@ def _unordered_match(selector_values, target_values, edge_predicate) -> bool:
         if not augment(sel_idx, set()):
             return False
     return True
-
-
-def _exact_class_match(selector, target) -> bool:
-    from .fingerprint import canonical_class_key
-    from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
-    from ..symbol import maybe_symbol_ref
-
-    if isinstance(selector, Object):
-        selector = selector.definition
-    if isinstance(target, Object):
-        target = target.definition
-
-    selector_ref = maybe_symbol_ref(selector, functions=False)
-    target_ref = maybe_symbol_ref(target, functions=False)
-    if selector_ref is not None and target_ref is not None:
-        try:
-            return canonical_class_key(selector) == canonical_class_key(target)
-        except TypeError:
-            return True
-
-    if isinstance(selector, ConcreteDefinition):
-        return True
-
-    if isinstance(selector, Definition):
-        if not isinstance(target, (Definition, ConcreteDefinition)):
-            return False
-        if selector.cls is not None:
-            try:
-                if canonical_class_key(selector.cls) != canonical_class_key(target.cls):
-                    return False
-            except TypeError:
-                pass
-        if selector.args is not None:
-            if target.args is None or len(selector.args) != len(target.args):
-                return False
-            for sel_child, tgt_child in zip(selector.args, target.args):
-                if not _exact_class_match(sel_child, tgt_child):
-                    return False
-        for key, sel_child in selector.kwargs.items():
-            if key not in target.kwargs:
-                return False
-            if not _exact_class_match(sel_child, target.kwargs[key]):
-                return False
-        return True
-
-    if isinstance(selector, (dict, FrozenDict)):
-        if not isinstance(target, (dict, FrozenDict)):
-            return False
-        for key, sel_child in selector.items():
-            if key not in target:
-                return False
-            if not _exact_class_match(sel_child, target[key]):
-                return False
-        return True
-
-    if isinstance(selector, (list, tuple, FrozenList, FrozenTuple)):
-        if not isinstance(target, (list, tuple, FrozenList, FrozenTuple)):
-            return False
-        if len(selector) != len(target):
-            return False
-        for sel_child, tgt_child in zip(selector, target):
-            if not _exact_class_match(sel_child, tgt_child):
-                return False
-        return True
-
-    if isinstance(selector, (set, frozenset, FrozenSet)):
-        if not isinstance(target, (set, frozenset, FrozenSet)):
-            return False
-        return _unordered_match(selector, target, lambda sel_child, tgt_child: selector_match(
-            sel_child,
-            tgt_child,
-            strict=False,
-        ) and _exact_class_match(sel_child, tgt_child))
-
-    return True
-
-
-def _exact_constraints_match(cdef: ConcreteDefinition, constraints) -> bool:
-    for constraint in constraints:
-        try:
-            candidate = get_subtree(cdef, constraint.path)
-        except QueryPathError:
-            return False
-        if constraint.unordered_member:
-            if not _unordered_set_contains_exact(candidate, constraint.cdef):
-                return False
-            continue
-        if not isinstance(candidate, ConcreteDefinition):
-            return False
-        if candidate.stable_hash() != constraint.cdef.stable_hash():
-            return False
-        if candidate != constraint.cdef:
-            return False
-    return True
-
-
-def _unordered_set_contains_exact(candidate, expected: ConcreteDefinition) -> bool:
-    from ..freeze import FrozenSet
-
-    if not isinstance(candidate, (set, frozenset, FrozenSet)):
-        return False
-    for member in candidate:
-        if isinstance(member, Object):
-            member = member.definition
-        if not isinstance(member, ConcreteDefinition):
-            continue
-        if same_cdef(member, expected):
-            return True
-    return False

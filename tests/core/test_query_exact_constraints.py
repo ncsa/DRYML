@@ -4,8 +4,7 @@ import core2_objects as objects
 from dryml.core2 import Definition, Repo, SKIP_ARGS
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenSet
-from dryml.core2.query.fingerprint import collect_exact_constraints
-from dryml.core2.query.query import _exact_constraints_match
+from dryml.core2.query.query import _query_match
 
 
 def test_exact_root_rejects_structurally_compatible_extra_kwargs():
@@ -100,12 +99,11 @@ def test_exact_constraint_confirms_equality_after_hash_match(monkeypatch):
     parent_b = objects.TestNest3(child=child_b, repo=repo)
 
     selector = repo.query(parent_a.definition).categorical(recursive=True).exact(path="child").selector
-    constraints = collect_exact_constraints(selector)
 
     monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "collision")
 
-    assert _exact_constraints_match(parent_a.definition, constraints)
-    assert not _exact_constraints_match(parent_b.definition, constraints)
+    assert _query_match(selector, parent_a.definition, strict=False, class_match="selector")
+    assert not _query_match(selector, parent_b.definition, strict=False, class_match="selector")
 
 
 def test_concrete_definition_inside_set_is_exact():

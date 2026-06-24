@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -184,57 +184,72 @@ class DefinitionResultSet:
 @dataclass(frozen=True, slots=True)
 class OccurrenceResultSet:
     repo: Any
-    _occurrences: tuple[DefinitionOccurrence, ...]
+    _occurrences: tuple[DefinitionOccurrence, ...] | None
+    _occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None
     explanation: QueryExplanation | None = None
 
     def __init__(
             self,
             repo,
-            occurrences: Iterable[DefinitionOccurrence],
+            occurrences: Iterable[DefinitionOccurrence] | None = None,
             *,
+            occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None = None,
             explanation: QueryExplanation | None = None):
+        if occurrences is None and occurrence_factory is None:
+            occurrences = ()
+        if occurrences is not None and occurrence_factory is not None:
+            raise ValueError("Provide occurrences or occurrence_factory, not both.")
         object.__setattr__(self, "repo", repo)
-        object.__setattr__(self, "_occurrences", _sort_occurrences(occurrences))
+        object.__setattr__(self, "_occurrences", None if occurrences is None else _sort_occurrences(occurrences))
+        object.__setattr__(self, "_occurrence_factory", occurrence_factory)
         object.__setattr__(self, "explanation", explanation)
 
     def __iter__(self) -> Iterator[DefinitionOccurrence]:
-        return iter(self._occurrences)
+        if self._occurrences is not None:
+            return iter(self._occurrences)
+        return iter(self._occurrence_factory())
 
     def __len__(self) -> int:
-        return len(self._occurrences)
+        return len(self._materialize())
 
     def count(self) -> int:
-        return len(self)
+        if self._occurrences is not None:
+            return len(self._occurrences)
+        return sum(1 for _ in self)
 
     def exists(self) -> bool:
-        return len(self) > 0
+        return next(iter(self), None) is not None
 
     def one(self) -> DefinitionOccurrence:
-        if len(self) != 1:
-            raise QueryCardinalityError(f"Expected exactly one occurrence, found {len(self)}.")
-        return self._occurrences[0]
+        occurrences = self._materialize()
+        if len(occurrences) != 1:
+            raise QueryCardinalityError(f"Expected exactly one occurrence, found {len(occurrences)}.")
+        return occurrences[0]
 
     def one_or_none(self) -> DefinitionOccurrence | None:
-        if len(self) > 1:
-            raise QueryCardinalityError(f"Expected zero or one occurrence, found {len(self)}.")
-        return self._occurrences[0] if self._occurrences else None
+        occurrences = self._materialize()
+        if len(occurrences) > 1:
+            raise QueryCardinalityError(f"Expected zero or one occurrence, found {len(occurrences)}.")
+        return occurrences[0] if occurrences else None
 
     def first(self) -> DefinitionOccurrence | None:
-        return self._occurrences[0] if self._occurrences else None
+        return next(iter(self), None)
 
     def definitions(self) -> DefinitionResultSet:
+        occurrences = self._materialize()
         return DefinitionResultSet(
             self.repo,
-            [occ.definition for occ in self._occurrences],
+            [occ.definition for occ in occurrences],
             materializable=False,
             domain="nested-definitions",
             explanation=self.explanation,
         )
 
     def owners(self) -> DefinitionResultSet:
+        occurrences = self._materialize()
         return DefinitionResultSet(
             self.repo,
-            [occ.owner for occ in self._occurrences],
+            [occ.owner for occ in occurrences],
             materializable=True,
             domain="owners",
             explanation=self.explanation,
@@ -249,9 +264,10 @@ class OccurrenceResultSet:
     def query(self, selector=None):
         from .query import DefinitionQuery
 
+        occurrences = self._materialize()
         universe = ResultUniverse(
             kind="occurrences",
-            occurrences=self._occurrences,
+            occurrences=occurrences,
             materializable=False,
             domain="nested",
         )
@@ -266,7 +282,7 @@ class OccurrenceResultSet:
         self._check_compatible(other)
         seen = set()
         out = []
-        for occ in tuple(self._occurrences) + tuple(other._occurrences):
+        for occ in self._materialize() + other._materialize():
             key = (occ.owner, occ.path, occ.definition)
             if key not in seen:
                 seen.add(key)
@@ -275,15 +291,21 @@ class OccurrenceResultSet:
 
     def intersection(self, other: "OccurrenceResultSet") -> "OccurrenceResultSet":
         self._check_compatible(other)
-        other_keys = {(occ.owner, occ.path, occ.definition) for occ in other._occurrences}
+        other_keys = {(occ.owner, occ.path, occ.definition) for occ in other._materialize()}
         return OccurrenceResultSet(
             self.repo,
-            [occ for occ in self._occurrences if (occ.owner, occ.path, occ.definition) in other_keys],
+            [occ for occ in self._materialize() if (occ.owner, occ.path, occ.definition) in other_keys],
         )
 
     def _check_compatible(self, other: "OccurrenceResultSet") -> None:
         if self.repo is not other.repo:
             raise ValueError("Cannot combine result sets from different repos.")
+
+    def _materialize(self) -> tuple[DefinitionOccurrence, ...]:
+        if self._occurrences is None:
+            object.__setattr__(self, "_occurrences", _sort_occurrences(self._occurrence_factory()))
+            object.__setattr__(self, "_occurrence_factory", None)
+        return self._occurrences
 
 
 @dataclass(frozen=True, slots=True)

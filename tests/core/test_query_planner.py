@@ -1,7 +1,5 @@
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.definition import selector_match
-from dryml.core2.query.query import _exact_constraints_match
-from dryml.core2.query.fingerprint import collect_exact_constraints
+from dryml.core2.query.query import _query_match
 
 
 class PlanBase(Object):
@@ -23,12 +21,10 @@ class PlanRoot(Object):
 
 
 def brute_force(selector, candidates):
-    constraints = collect_exact_constraints(selector) if selector is not None else ()
     out = []
     for cdef in candidates:
-        if selector is None or selector_match(selector, cdef, strict=False):
-            if _exact_constraints_match(cdef, constraints):
-                out.append(cdef)
+        if selector is None or _query_match(selector, cdef, strict=False, class_match="selector"):
+            out.append(cdef)
     return sorted(out, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
 
 
@@ -69,8 +65,8 @@ def test_selective_fingerprint_query_verifies_fewer_candidates_than_domain():
     result = repo.query(Definition(PlanBase, SKIP_ARGS, name="n3")).known(refresh=False).defs()
 
     assert result.count() == 1
-    assert result.explanation.universe_size == 10
-    assert result.explanation.verified_count < result.explanation.universe_size
+    assert result.explanation.universe_size is None
+    assert result.explanation.verified_count == 1
 
 
 def test_refine_exact_class_matches_one_shot_query():

@@ -98,6 +98,33 @@ def test_selector_graph_rejects_cycle_with_source_path():
         compile_selector_graph(selector)
 
 
+def test_selector_graph_rejects_self_referential_list():
+    items = []
+    items.append(items)
+    selector = Definition(SelectorParent, SKIP_ARGS, child=items)
+
+    with pytest.raises(SelectorGraphCycleError, match=r"\$\.child\[0\]"):
+        compile_selector_graph(selector)
+
+
+def test_selector_graph_rejects_self_referential_mapping():
+    mapping = {}
+    mapping["self"] = mapping
+    selector = Definition(SelectorParent, SKIP_ARGS, child=mapping)
+
+    with pytest.raises(SelectorGraphCycleError, match=r"\$\.child\['self'\]"):
+        compile_selector_graph(selector)
+
+
+def test_shared_acyclic_container_is_allowed():
+    shared = ["x"]
+    selector = Definition(SelectorParent, [shared, shared])
+
+    graph = compile_selector_graph(selector)
+
+    assert graph is not None
+
+
 def test_selector_graph_rejects_invalid_edge_endpoint():
     selector = Definition(SelectorLeaf, SKIP_ARGS)
     node = SelectorGraphNode(0, DefinitionPath(), selector, ())

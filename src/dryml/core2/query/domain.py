@@ -40,7 +40,7 @@ class StoredDomain:
         return self.catalog.filter_stored_ids(definition_ids)
 
     def estimate_size(self) -> int | None:
-        return self.catalog.stored_count()
+        return None
 
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.all_stored_ids()
@@ -62,7 +62,7 @@ class CachedDomain:
         return {did for did in definition_ids if self.contains(did)}
 
     def estimate_size(self) -> int | None:
-        return self.catalog.cached_count(reuse_weak=self.reuse_weak)
+        return None
 
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.all_cached_ids(reuse_weak=self.reuse_weak)
@@ -87,7 +87,7 @@ class KnownDomain:
         return {did for did in definition_ids if self.contains(did)}
 
     def estimate_size(self) -> int | None:
-        return self.catalog.known_count(reuse_weak=self.reuse_weak)
+        return None
 
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.all_known_ids(reuse_weak=self.reuse_weak)

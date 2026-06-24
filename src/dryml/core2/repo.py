@@ -710,8 +710,16 @@ class Repo:
             selector=None,
             *,
             refresh="auto",
-            class_match: str = "selector"):
-        return self.query(selector).class_match(class_match).refresh(refresh).nested().execute()
+            class_match: str = "selector",
+            max_occurrences: int | None = None):
+        return (
+            self.query(selector)
+            .class_match(class_match)
+            .refresh(refresh)
+            .nested()
+            .max_occurrences(max_occurrences)
+            .execute()
+        )
 
     def find_owner_defs(
             self,

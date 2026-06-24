@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Protocol
+from typing import Protocol
 
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
@@ -11,7 +11,8 @@ from .selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 
 
 class DefinitionGraphIndex(Protocol):
-    lock: Any
+    def snapshot(self) -> "DefinitionGraphIndex":
+        ...
 
     def all_definition_ids(self) -> set[DefinitionId]:
         ...
@@ -25,18 +26,12 @@ class DefinitionGraphIndex(Protocol):
     def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
         ...
 
-    def local_candidate_ids(
-            self,
-            universe_ids: set[DefinitionId],
-            requirements: tuple[FeatureRequirement, ...],
-            *,
-            stats: QueryStats | None = None) -> set[DefinitionId]:
-        ...
-
-    def local_candidate_ids_unbounded(
+    def local_candidates(
             self,
             requirements: tuple[FeatureRequirement, ...],
             *,
+            within: set[DefinitionId] | None = None,
+            domain: DefinitionDomain | None = None,
             stats: QueryStats | None = None) -> set[DefinitionId]:
         ...
 
@@ -82,26 +77,27 @@ def graph_candidate_ids(
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
     if selector_graph is None:
-        universe_ids = domain.all_ids() if domain is not None else catalog.all_definition_ids()
+        snapshot = catalog.snapshot()
+        universe_ids = domain.all_ids() if domain is not None else snapshot.all_definition_ids()
         if stats is not None:
             stats.candidate_count = len(universe_ids)
         return set(universe_ids)
 
-    with catalog.lock:
-        anchor = _choose_anchor(catalog, selector_graph)
-        if anchor is not None:
-            anchor_id, anchor_mode = anchor
-            anchor_candidates = _anchor_candidate_ids(catalog, selector_graph.node(anchor_id), anchor_mode)
-            return _graph_candidate_ids_from_anchor(
-                catalog,
-                selector_graph,
-                domain,
-                anchor_id,
-                anchor_candidates,
-                anchor_mode,
-                stats=stats,
-            )
-        return _graph_candidate_ids_full(catalog, selector_graph, domain, stats=stats)
+    snapshot = catalog.snapshot()
+    anchor = _choose_anchor(snapshot, selector_graph)
+    if anchor is not None:
+        anchor_id, anchor_mode = anchor
+        anchor_candidates = _anchor_candidate_ids(snapshot, selector_graph.node(anchor_id), anchor_mode)
+        return _graph_candidate_ids_from_anchor(
+            snapshot,
+            selector_graph,
+            domain,
+            anchor_id,
+            anchor_candidates,
+            anchor_mode,
+            stats=stats,
+        )
+    return _graph_candidate_ids_full(snapshot, selector_graph, domain, stats=stats)
 
 
 def _graph_candidate_ids_full(
@@ -118,7 +114,7 @@ def _graph_candidate_ids_full(
         if node.exact_definition is not None:
             ids = catalog.exact_ids(node.exact_definition)
         else:
-            ids = catalog.local_candidate_ids(all_ids, node.local_requirements)
+            ids = catalog.local_candidates(node.local_requirements, within=all_ids)
         candidates[node.node_id] = ids
         initial_sizes[node.node_id] = len(ids)
 
@@ -147,6 +143,8 @@ def _graph_candidate_ids_full(
 
     root_candidates = _apply_domain(candidates[selector_graph.root], domain)
     if stats is not None:
+        if stats.universe_size is None:
+            stats.universe_size = len(root_candidates)
         stats.graph_candidate_count = len(root_candidates)
         stats.candidate_count = len(root_candidates)
     return root_candidates
@@ -228,7 +226,7 @@ def _choose_anchor(catalog, selector_graph: SelectorGraph) -> tuple[int, str] | 
 def _anchor_candidate_ids(catalog, node: SelectorGraphNode, mode: str) -> set[DefinitionId]:
     if mode == "exact":
         return _exact_candidate_ids(catalog, node)
-    return catalog.local_candidate_ids_unbounded(node.local_requirements)
+    return catalog.local_candidates(node.local_requirements)
 
 
 def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -> set[DefinitionId]:
@@ -236,7 +234,7 @@ def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -
         return set()
     if node.exact_definition is not None:
         return ids & _exact_candidate_ids(catalog, node)
-    return catalog.local_candidate_ids(ids, node.local_requirements)
+    return catalog.local_candidates(node.local_requirements, within=ids)
 
 
 def _exact_candidate_ids(catalog, node: SelectorGraphNode) -> set[DefinitionId]:

@@ -6,7 +6,7 @@ from typing import Any
 
 from ..definition import ConcreteDefinition, Definition
 from ..object import Object
-from .local_structure import walk_local_structure
+from .local_structure import LocalStructureCycleError, walk_local_structure
 from .model import ClassMatchPolicy, FeatureRequirement, FeatureToken
 from .path import DefinitionPath
 
@@ -121,13 +121,16 @@ class _SelectorGraphCompiler:
             if exact is not None:
                 counts[FeatureToken("EXACT_SUBTREE", DefinitionPath(), exact.stable_hash())] += 1
             else:
-                walk_local_structure(
-                    selector,
-                    _GraphLocalConsumer(self, counts, parent_id=node_id, source_path=source_path),
-                    mode="selector-local",
-                    class_match=self.class_match,
-                    unordered_set_boundaries=True,
-                )
+                try:
+                    walk_local_structure(
+                        selector,
+                        _GraphLocalConsumer(self, counts, parent_id=node_id, source_path=source_path),
+                        mode="selector-local",
+                        class_match=self.class_match,
+                        unordered_set_boundaries=True,
+                    )
+                except LocalStructureCycleError as e:
+                    raise SelectorGraphCycleError(str(e)) from e
             requirements = tuple(
                 FeatureRequirement(token, count)
                 for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))

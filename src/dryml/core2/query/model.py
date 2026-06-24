@@ -29,13 +29,6 @@ class QueryIndexError(QueryError):
 
 
 @dataclass(frozen=True, slots=True)
-class ExactSubtreeConstraint:
-    path: DefinitionPath
-    cdef: Any
-    unordered_member: bool = False
-
-
-@dataclass(frozen=True, slots=True)
 class FeatureToken:
     kind: str
     path: DefinitionPath | None
@@ -97,12 +90,12 @@ class QueryExplanation:
     refresh: RefreshPolicy
     refresh_action: str = "none"
     store_scan_count: int = 0
-    universe_size: int = 0
+    universe_size: int | None = None
     selected_features: tuple[FeatureRequirement, ...] = ()
     posting_sizes: tuple[int, ...] = ()
     candidate_count: int = 0
     verified_count: int = 0
-    result_count: int = 0
+    result_count: int | None = None
     fast_path: str | None = None
     graph_node_count: int = 0
     graph_edge_count: int = 0
@@ -116,11 +109,11 @@ class QueryExplanation:
             f"refresh: {self.refresh!r}",
             f"refresh action: {self.refresh_action}",
             f"store scans: {self.store_scan_count}",
-            f"universe size: {self.universe_size}",
+            f"universe size: {self.universe_size if self.universe_size is not None else 'unknown'}",
             f"features: {len(self.selected_features)}",
             f"candidates: {self.candidate_count}",
             f"verified: {self.verified_count}",
-            f"results: {self.result_count}",
+            f"results: {self.result_count if self.result_count is not None else 'unknown'}",
         ]
         if self.fast_path is not None:
             lines.append(f"fast path: {self.fast_path}")
@@ -153,12 +146,12 @@ class ResultUniverse:
 class QueryStats:
     refresh_action: str = "none"
     store_scan_count: int = 0
-    universe_size: int = 0
+    universe_size: int | None = None
     selected_features: tuple[FeatureRequirement, ...] = ()
     posting_sizes: tuple[int, ...] = ()
     candidate_count: int = 0
     verified_count: int = 0
-    result_count: int = 0
+    result_count: int | None = None
     fast_path: str | None = None
     graph_node_count: int = 0
     graph_edge_count: int = 0
