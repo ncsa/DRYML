@@ -21,6 +21,7 @@ from .model import (
     QueryDomain,
     QueryDomainError,
     QueryExplanation,
+    QueryIndexError,
     QueryProjection,
     QueryStats,
     RefreshPolicy,
@@ -33,8 +34,16 @@ from .selector_graph import compile_selector_graph
 
 @dataclass(frozen=True, slots=True)
 class CapturedNestedCandidates:
+    generation: int
     cdefs_by_id: dict[DefinitionId, ConcreteDefinition]
     stats: QueryStats
+
+
+class _QueryGenerationChanged(Exception):
+    pass
+
+
+_MAX_NESTED_QUERY_RETRIES = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,8 +318,8 @@ class DefinitionQuery:
         raise QueryDomainError(f"Unsupported definition domain {self.domain!r}.")
 
     def _execute_nested_occurrences(self):
-        stats = QueryStats()
         if self.universe is not None:
+            stats = QueryStats()
             if self.universe.kind != "occurrences":
                 raise QueryDomainError("A nested query cannot execute over a definition universe.")
             stats.universe_size = len(self.universe.occurrences)
@@ -326,25 +335,41 @@ class DefinitionQuery:
             return out, stats, self.universe.replicas
 
         catalog = self.repo._query_catalog
-        captured = self._capture_nested_candidates(catalog, stats)
-        _, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
-        traversal = self._capture_occurrence_traversal(catalog, match_ids)
-        _, _, owner_replicas = traversal.project_owners(match_ids)
+        for _ in range(_MAX_NESTED_QUERY_RETRIES):
+            stats = QueryStats()
+            captured = self._capture_nested_candidates(catalog, stats)
+            _, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
+            try:
+                traversal = self._capture_occurrence_traversal(catalog, match_ids, captured.generation)
+                break
+            except _QueryGenerationChanged:
+                continue
+        else:
+            raise QueryIndexError("Catalog generation changed repeatedly during nested occurrence query.")
 
         def occurrence_factory():
             return traversal.iter_occurrences(max_occurrences=self.occurrence_limit)
 
-        return occurrence_factory, stats, owner_replicas
+        return occurrence_factory, stats, traversal.owner_replicas
 
     def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
-        matches, _, stats = self._execute_nested_definition_matches()
+        matches, _, stats, _ = self._execute_nested_definition_matches()
         stats.result_count = len(matches)
         return matches, stats
 
     def _execute_nested_owners(self):
-        matches, match_ids, stats = self._execute_nested_definition_matches()
-        traversal = self._capture_occurrence_traversal(self.repo._query_catalog, match_ids)
-        _, owners, owner_replicas = traversal.project_owners(match_ids)
+        catalog = self.repo._query_catalog
+        for _ in range(_MAX_NESTED_QUERY_RETRIES):
+            matches, match_ids, stats, generation = self._execute_nested_definition_matches()
+            try:
+                projection = self._project_owners(catalog, match_ids, generation)
+                break
+            except _QueryGenerationChanged:
+                continue
+        else:
+            raise QueryIndexError("Catalog generation changed repeatedly during nested owner query.")
+        owners = projection.cdefs
+        owner_replicas = projection.replicas
         stats.result_count = len(owners)
         owners = tuple(sorted(owners, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
         return owners, stats, {cdef: owner_replicas.get(cdef, ()) for cdef in owners}
@@ -354,7 +379,7 @@ class DefinitionQuery:
         catalog = self.repo._query_catalog
         captured = self._capture_nested_candidates(catalog, stats)
         matches, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
-        return matches, match_ids, stats
+        return matches, match_ids, stats, captured.generation
 
     def _capture_nested_candidates(self, catalog, stats: QueryStats) -> CapturedNestedCandidates:
         catalog.refresh(self.refresh_policy, stats=stats)
@@ -374,11 +399,28 @@ class DefinitionQuery:
                     stats.candidate_count = len(candidate_ids)
                     stats.universe_size = None
             cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
-        return CapturedNestedCandidates(cdefs_by_id=cdefs_by_id, stats=stats)
+            generation = snapshot.generation
+        return CapturedNestedCandidates(generation=generation, cdefs_by_id=cdefs_by_id, stats=stats)
 
-    def _capture_occurrence_traversal(self, catalog, ids: set[DefinitionId] | frozenset[DefinitionId]):
+    def _capture_occurrence_traversal(
+            self,
+            catalog,
+            ids: set[DefinitionId] | frozenset[DefinitionId],
+            generation: int):
         with catalog.read_view(include_cached=False) as snapshot:
+            if snapshot.generation != generation:
+                raise _QueryGenerationChanged
             return snapshot.occurrence_snapshot_for_nested_ids(set(ids))
+
+    def _project_owners(
+            self,
+            catalog,
+            ids: set[DefinitionId] | frozenset[DefinitionId],
+            generation: int):
+        with catalog.read_view(include_cached=False) as snapshot:
+            if snapshot.generation != generation:
+                raise _QueryGenerationChanged
+            return snapshot.project_owners(set(ids))
 
     def _verify_cdefs_by_id(
             self,

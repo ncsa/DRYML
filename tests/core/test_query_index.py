@@ -6,7 +6,7 @@ from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query import QueryDomainError, QueryIndexError, SetMember
+from dryml.core2.query import DefinitionQuery, QueryDomainError, QueryIndexError, SetMember
 from dryml.core2.query.index import MemoryDefinitionGraphReadView, OccurrenceTraversalSnapshot
 from dryml.core2.query.path import get_subtree
 from dryml.core2.query.result import DefinitionResultSet, OccurrenceResultSet
@@ -806,19 +806,171 @@ def test_owner_query_performs_one_reverse_traversal(monkeypatch, tmp_path):
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
     calls = 0
-    original = OccurrenceTraversalSnapshot.owner_ids_for_nested_ids
+    original = MemoryDefinitionGraphReadView._owner_ids_for_nested_ids
+
+    def fail_occurrence_snapshot(*args, **kwargs):
+        raise AssertionError("owner terminal must not build an occurrence snapshot")
 
     def spy_owner_ids(self, ids):
         nonlocal calls
         calls += 1
         return original(self, ids)
 
-    monkeypatch.setattr(OccurrenceTraversalSnapshot, "owner_ids_for_nested_ids", spy_owner_ids)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "occurrence_snapshot_for_nested_ids", fail_occurrence_snapshot)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "_owner_ids_for_nested_ids", spy_owner_ids)
 
     owners = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).owners().defs()
 
     assert list(owners)
     assert calls == 1
+
+
+def test_owner_query_retries_if_generation_changes_between_phases(monkeypatch):
+    child = IndexLeaf("child")
+    owner1 = IndexPersistent(child, state=1)
+    owner2 = IndexPersistent(child, state=2)
+    store = BadIndexStore([owner1.definition])
+    repo = Repo(stores=store)
+    original_capture = DefinitionQuery._capture_nested_candidates
+    captures = 0
+
+    def capture_then_add_owner_once(self, catalog, stats):
+        nonlocal captures
+        captured = original_capture(self, catalog, stats)
+        captures += 1
+        if captures == 1:
+            store.values = [owner1.definition, owner2.definition]
+            catalog.refresh(True)
+        return captured
+
+    monkeypatch.setattr(DefinitionQuery, "_capture_nested_candidates", capture_then_add_owner_once)
+
+    owners = repo.query(Definition(IndexLeaf, "child")).nested(refresh=True).owners().defs()
+
+    assert set(owners) == {owner1.definition, owner2.definition}
+    assert captures == 2
+
+
+def test_occurrence_query_retries_if_generation_changes_between_phases(monkeypatch):
+    child = IndexLeaf("child")
+    owner1 = IndexPersistent(child, state=1)
+    owner2 = IndexPersistent(child, state=2)
+    store = BadIndexStore([owner1.definition])
+    repo = Repo(stores=store)
+    original_capture = DefinitionQuery._capture_nested_candidates
+    original_occurrences = MemoryDefinitionGraphReadView.occurrence_snapshot_for_nested_ids
+    captures = 0
+    occurrence_captures = 0
+
+    def capture_then_add_owner_once(self, catalog, stats):
+        nonlocal captures
+        captured = original_capture(self, catalog, stats)
+        captures += 1
+        if captures == 1:
+            store.values = [owner1.definition, owner2.definition]
+            catalog.refresh(True)
+        return captured
+
+    def spy_occurrence_capture(self, ids):
+        nonlocal occurrence_captures
+        occurrence_captures += 1
+        return original_occurrences(self, ids)
+
+    monkeypatch.setattr(DefinitionQuery, "_capture_nested_candidates", capture_then_add_owner_once)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "occurrence_snapshot_for_nested_ids", spy_occurrence_capture)
+
+    occurrences = tuple(repo.query(Definition(IndexLeaf, "child")).nested(refresh=True).execute())
+
+    assert {occ.owner for occ in occurrences} == {owner1.definition, owner2.definition}
+    assert captures == 2
+    assert occurrence_captures == 1
+
+
+def test_old_definition_ids_are_never_used_after_forced_refresh(monkeypatch):
+    child = IndexLeaf("child")
+    owner = IndexPersistent(child, state=1)
+    unrelated = IndexPersistent(IndexLeaf("other"), state=2)
+    store = BadIndexStore([owner.definition])
+    repo = Repo(stores=store)
+    original_capture = DefinitionQuery._capture_nested_candidates
+    original_occurrences = MemoryDefinitionGraphReadView.occurrence_snapshot_for_nested_ids
+    captures = 0
+    occurrence_captures = 0
+
+    def capture_then_reorder_store_once(self, catalog, stats):
+        nonlocal captures
+        captured = original_capture(self, catalog, stats)
+        captures += 1
+        if captures == 1:
+            store.values = [unrelated.definition, owner.definition]
+            catalog.refresh(True)
+        return captured
+
+    def spy_occurrence_capture(self, ids):
+        nonlocal occurrence_captures
+        occurrence_captures += 1
+        return original_occurrences(self, ids)
+
+    monkeypatch.setattr(DefinitionQuery, "_capture_nested_candidates", capture_then_reorder_store_once)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "occurrence_snapshot_for_nested_ids", spy_occurrence_capture)
+
+    occurrences = tuple(repo.query(Definition(IndexLeaf, "child")).nested(refresh=True).execute())
+
+    assert [occ.owner for occ in occurrences] == [owner.definition]
+    assert captures == 2
+    assert occurrence_captures == 1
+
+
+def test_owner_addition_between_capture_and_projection_is_not_mixed(monkeypatch):
+    child = IndexLeaf("child")
+    owner1 = IndexPersistent(child, state=1)
+    owner2 = IndexPersistent(child, state=2)
+    store = BadIndexStore([owner1.definition])
+    repo = Repo(stores=store)
+    original_capture = DefinitionQuery._capture_nested_candidates
+    captures = 0
+
+    def capture_then_add_owner_once(self, catalog, stats):
+        nonlocal captures
+        captured = original_capture(self, catalog, stats)
+        captures += 1
+        if captures == 1:
+            store.values = [owner1.definition, owner2.definition]
+            catalog.refresh(True)
+        return captured
+
+    monkeypatch.setattr(DefinitionQuery, "_capture_nested_candidates", capture_then_add_owner_once)
+
+    owners = repo.query(Definition(IndexLeaf, "child")).nested(refresh=True).owners().defs()
+
+    assert set(owners) == {owner1.definition, owner2.definition}
+    assert captures == 2
+
+
+def test_owner_deletion_between_capture_and_projection_is_not_mixed(monkeypatch):
+    child = IndexLeaf("child")
+    owner1 = IndexPersistent(child, state=1)
+    owner2 = IndexPersistent(child, state=2)
+    store = BadIndexStore([owner1.definition, owner2.definition])
+    repo = Repo(stores=store)
+    original_capture = DefinitionQuery._capture_nested_candidates
+    captures = 0
+
+    def capture_then_delete_owner_once(self, catalog, stats):
+        nonlocal captures
+        captured = original_capture(self, catalog, stats)
+        captures += 1
+        if captures == 1:
+            store.values = [owner1.definition]
+            catalog.refresh(True)
+        return captured
+
+    monkeypatch.setattr(DefinitionQuery, "_capture_nested_candidates", capture_then_delete_owner_once)
+
+    owners = repo.query(Definition(IndexLeaf, "child")).nested(refresh=True).owners().defs()
+
+    assert set(owners) == {owner1.definition}
+    assert captures == 2
 
 
 def test_resultset_replica_metadata_survives_refresh_after_execute(tmp_path):

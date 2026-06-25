@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
+from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
@@ -34,6 +35,13 @@ class _CatalogBuildRepo:
         self.light_index: set[ConcreteDefinition] = set()
 
 
+@dataclass(frozen=True, slots=True)
+class OwnerProjection:
+    owner_ids: frozenset[DefinitionId]
+    cdefs: tuple[ConcreteDefinition, ...]
+    replicas: dict[ConcreteDefinition, tuple[Any, ...]]
+
+
 class OccurrenceTraversalSnapshot:
     def __init__(
             self,
@@ -60,7 +68,7 @@ class OccurrenceTraversalSnapshot:
             copy_data=False,
         )
 
-    def owner_ids_for_nested_ids(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> set[DefinitionId]:
+    def _owner_ids_for_nested_ids(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> set[DefinitionId]:
         owners: set[DefinitionId] = set()
         seen: set[DefinitionId] = set(ids)
         stack = list(ids)
@@ -75,19 +83,11 @@ class OccurrenceTraversalSnapshot:
                     stack.append(parent_id)
         return owners
 
-    def owner_replicas_for_nested_ids(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
-        owners = {
-            self.cdefs[owner_id]
-            for owner_id in self.owner_ids_for_nested_ids(ids)
-            if owner_id in self.cdefs
-        }
-        return {owner: self.owner_replicas.get(owner, ()) for owner in owners}
-
-    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]):
-        owner_ids = self.owner_ids_for_nested_ids(ids)
+    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> OwnerProjection:
+        owner_ids = self._owner_ids_for_nested_ids(ids)
         owners = tuple(self.cdefs[owner_id] for owner_id in owner_ids if owner_id in self.cdefs)
         replicas = {owner: self.owner_replicas.get(owner, ()) for owner in owners}
-        return owner_ids, owners, replicas
+        return OwnerProjection(frozenset(owner_ids), owners, replicas)
 
     def iter_occurrences(self, *, max_occurrences: int | None = None):
         yielded = 0
@@ -347,7 +347,7 @@ class MemoryDefinitionGraphReadView:
             stack.extend(self._edge_by_key[key].parent_id for key in self._incoming_edges.get(cur, ()))
         return False
 
-    def owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
+    def _owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
         self._check_active()
         owners: set[DefinitionId] = set()
         seen: set[DefinitionId] = set(ids)
@@ -363,84 +363,74 @@ class MemoryDefinitionGraphReadView:
                     stack.append(parent_id)
         return owners
 
-    def parent_ids_for_children(self, child_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
+    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> OwnerProjection:
         self._check_active()
-        if not child_ids:
-            return set()
-        out = set()
-        if unordered:
-            for child_id in child_ids:
-                for edge_key in self._incoming_edges.get(child_id, ()):
-                    record = self._edge_by_key[edge_key]
-                    if record.path.startswith(path):
-                        out.add(record.parent_id)
-            return out
-        for child_id in child_ids:
-            out.update(self._parents_by_child_path.get((child_id, path), frozenset()))
-        return out
+        owner_ids = self._owner_ids_for_nested_ids(set(ids))
+        owners = tuple(
+            self._definitions_by_id[owner_id].cdef
+            for owner_id in owner_ids
+            if owner_id in self._definitions_by_id
+        )
+        replicas = self.replica_map(owner_ids)
+        return OwnerProjection(
+            owner_ids=frozenset(owner_ids),
+            cdefs=owners,
+            replicas={owner: replicas.get(owner, ()) for owner in owners},
+        )
 
-    def child_ids_for_parents(self, parent_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
-        self._check_active()
-        if not parent_ids:
-            return set()
-        out = set()
-        if unordered:
-            for parent_id in parent_ids:
-                for edge_key in self._outgoing_edges.get(parent_id, ()):
-                    record = self._edge_by_key[edge_key]
-                    if record.path.startswith(path):
-                        out.add(record.child_id)
-            return out
-        for parent_id in parent_ids:
-            out.update(self._child_by_parent_path.get((parent_id, path), frozenset()))
-        return out
-
-    def parent_ids_with_matching_child(
+    def parents(
             self,
-            parent_ids: set[DefinitionId],
             child_ids: set[DefinitionId],
             path: DefinitionPath,
             *,
-            unordered: bool) -> set[DefinitionId]:
+            unordered: bool,
+            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         self._check_active()
-        if not parent_ids or not child_ids:
+        if not child_ids or (within is not None and not within):
             return set()
         out = set()
         if unordered:
-            for parent_id in parent_ids:
+            if within is None:
+                for child_id in child_ids:
+                    for edge_key in self._incoming_edges.get(child_id, ()):
+                        record = self._edge_by_key[edge_key]
+                        if record.path.startswith(path):
+                            out.add(record.parent_id)
+                return out
+            child_filter = set(child_ids)
+            for parent_id in within:
                 for edge_key in self._outgoing_edges.get(parent_id, ()):
                     record = self._edge_by_key[edge_key]
-                    if record.child_id in child_ids and record.path.startswith(path):
+                    if record.child_id in child_filter and record.path.startswith(path):
                         out.add(parent_id)
                         break
             return out
-        for parent_id in parent_ids:
-            if self._child_by_parent_path.get((parent_id, path), frozenset()) & child_ids:
-                out.add(parent_id)
+        for child_id in child_ids:
+            parents = self._parents_by_child_path.get((child_id, path), frozenset())
+            out.update(parents if within is None else parents & within)
         return out
 
-    def child_ids_with_matching_parent(
+    def children(
             self,
             parent_ids: set[DefinitionId],
-            child_ids: set[DefinitionId],
             path: DefinitionPath,
             *,
-            unordered: bool) -> set[DefinitionId]:
+            unordered: bool,
+            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         self._check_active()
-        if not parent_ids or not child_ids:
+        if not parent_ids or (within is not None and not within):
             return set()
         out = set()
         if unordered:
-            for child_id in child_ids:
-                for edge_key in self._incoming_edges.get(child_id, ()):
+            for parent_id in parent_ids:
+                for edge_key in self._outgoing_edges.get(parent_id, ()):
                     record = self._edge_by_key[edge_key]
-                    if record.parent_id in parent_ids and record.path.startswith(path):
-                        out.add(child_id)
-                        break
+                    if (within is None or record.child_id in within) and record.path.startswith(path):
+                        out.add(record.child_id)
             return out
-        for child_id in child_ids:
-            if self._parents_by_child_path.get((child_id, path), frozenset()) & parent_ids:
-                out.add(child_id)
+        for parent_id in parent_ids:
+            children = self._child_by_parent_path.get((parent_id, path), frozenset())
+            out.update(children if within is None else children & within)
         return out
 
     def occurrence_snapshot_for_nested_ids(self, target_ids: set[DefinitionId]) -> OccurrenceTraversalSnapshot:
@@ -791,10 +781,6 @@ class DefinitionCatalog:
             traversal = snapshot.occurrence_snapshot_for_nested_ids(ids)
         return traversal.iter_occurrences(max_occurrences=max_occurrences)
 
-    def owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
-        with self.read_view(include_cached=False) as view:
-            return view.owner_ids_for_nested_ids(ids)
-
     def filter_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
         with self.read_view(include_cached=False) as view:
             return view.filter_nested_ids(ids)
@@ -840,33 +826,25 @@ class DefinitionCatalog:
         with self.read_view(include_cached=False) as view:
             return view.estimate_exact_ids(cdef)
 
-    def parent_ids_for_children(self, child_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
-        with self.read_view(include_cached=False) as view:
-            return view.parent_ids_for_children(child_ids, path, unordered=unordered)
-
-    def child_ids_for_parents(self, parent_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
-        with self.read_view(include_cached=False) as view:
-            return view.child_ids_for_parents(parent_ids, path, unordered=unordered)
-
-    def parent_ids_with_matching_child(
+    def parents(
             self,
-            parent_ids: set[DefinitionId],
             child_ids: set[DefinitionId],
             path: DefinitionPath,
             *,
-            unordered: bool) -> set[DefinitionId]:
+            unordered: bool,
+            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         with self.read_view(include_cached=False) as view:
-            return view.parent_ids_with_matching_child(parent_ids, child_ids, path, unordered=unordered)
+            return view.parents(child_ids, path, unordered=unordered, within=within)
 
-    def child_ids_with_matching_parent(
+    def children(
             self,
             parent_ids: set[DefinitionId],
-            child_ids: set[DefinitionId],
             path: DefinitionPath,
             *,
-            unordered: bool) -> set[DefinitionId]:
+            unordered: bool,
+            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         with self.read_view(include_cached=False) as view:
-            return view.child_ids_with_matching_parent(parent_ids, child_ids, path, unordered=unordered)
+            return view.children(parent_ids, path, unordered=unordered, within=within)
 
     def _hydrate_stores(self, stores, *, stats: QueryStats | None = None) -> None:
         build_repo = _CatalogBuildRepo(self.repo)

@@ -292,17 +292,13 @@ def test_planner_runs_against_backend_without_lock_or_internal_dicts():
                 candidates &= set(within)
             return candidates
 
-        def parent_ids_for_children(self, child_ids, path, *, unordered):
-            return {"root"} if "child" in child_ids else set()
+        def parents(self, child_ids, path, *, unordered, within=None):
+            out = {"root"} if "child" in child_ids else set()
+            return out if within is None else out & set(within)
 
-        def child_ids_for_parents(self, parent_ids, path, *, unordered):
-            return {"child"} if "root" in parent_ids else set()
-
-        def parent_ids_with_matching_child(self, parent_ids, child_ids, path, *, unordered):
-            return set(parent_ids) & {"root"} if "child" in child_ids else set()
-
-        def child_ids_with_matching_parent(self, parent_ids, child_ids, path, *, unordered):
-            return set(child_ids) & {"child"} if "root" in parent_ids else set()
+        def children(self, parent_ids, path, *, unordered, within=None):
+            out = {"child"} if "root" in parent_ids else set()
+            return out if within is None else out & set(within)
 
     index = FakeIndex()
     stats = QueryStats()

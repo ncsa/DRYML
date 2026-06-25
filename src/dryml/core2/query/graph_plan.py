@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Protocol
+from contextlib import AbstractContextManager
+from typing import Any, Protocol
 
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
-from .model import DefinitionId, FeatureRequirement, QueryStats
+from .model import DefinitionId, FeatureRequirement, QueryStats, RefreshPolicy
 from .path import DefinitionPath
 from .selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 
@@ -32,38 +33,51 @@ class DefinitionGraphIndex(Protocol):
             stats: QueryStats | None = None) -> set[DefinitionId]:
         ...
 
-    def parent_ids_for_children(
+    def parents(
             self,
             child_ids: set[DefinitionId],
             path: DefinitionPath,
             *,
-            unordered: bool) -> set[DefinitionId]:
+            unordered: bool,
+            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         ...
 
-    def child_ids_for_parents(
+    def children(
             self,
             parent_ids: set[DefinitionId],
             path: DefinitionPath,
             *,
-            unordered: bool) -> set[DefinitionId]:
+            unordered: bool,
+            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         ...
 
-    def parent_ids_with_matching_child(
-            self,
-            parent_ids: set[DefinitionId],
-            child_ids: set[DefinitionId],
-            path: DefinitionPath,
-            *,
-            unordered: bool) -> set[DefinitionId]:
+
+class QueryIndexReadView(DefinitionGraphIndex, Protocol):
+    @property
+    def generation(self) -> int:
         ...
 
-    def child_ids_with_matching_parent(
-            self,
-            parent_ids: set[DefinitionId],
-            child_ids: set[DefinitionId],
-            path: DefinitionPath,
-            *,
-            unordered: bool) -> set[DefinitionId]:
+    def filter_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
+        ...
+
+    def cdefs_by_id(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[DefinitionId, ConcreteDefinition]:
+        ...
+
+    def replica_map(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
+        ...
+
+    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> Any:
+        ...
+
+    def occurrence_snapshot_for_nested_ids(self, target_ids: set[DefinitionId]) -> Any:
+        ...
+
+
+class StoreQueryIndex(Protocol):
+    def read_view(self, *, include_cached: bool = True) -> AbstractContextManager[QueryIndexReadView]:
+        ...
+
+    def refresh(self, policy: RefreshPolicy, *, stats: QueryStats | None = None) -> None:
         ...
 
 
@@ -257,7 +271,7 @@ def _parents_with_matching_child(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids or not child_ids:
         return set()
-    return catalog.parent_ids_with_matching_child(parent_ids, child_ids, edge.path, unordered=edge.unordered)
+    return catalog.parents(child_ids, edge.path, unordered=edge.unordered, within=parent_ids)
 
 
 def _parents_for_children(
@@ -266,7 +280,7 @@ def _parents_for_children(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not child_ids:
         return set()
-    return catalog.parent_ids_for_children(child_ids, edge.path, unordered=edge.unordered)
+    return catalog.parents(child_ids, edge.path, unordered=edge.unordered)
 
 
 def _children_with_matching_parent(
@@ -276,7 +290,7 @@ def _children_with_matching_parent(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids or not child_ids:
         return set()
-    return catalog.child_ids_with_matching_parent(parent_ids, child_ids, edge.path, unordered=edge.unordered)
+    return catalog.children(parent_ids, edge.path, unordered=edge.unordered, within=child_ids)
 
 
 def _children_for_parents(
@@ -285,4 +299,4 @@ def _children_for_parents(
         parent_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids:
         return set()
-    return catalog.child_ids_for_parents(parent_ids, edge.path, unordered=edge.unordered)
+    return catalog.children(parent_ids, edge.path, unordered=edge.unordered)
