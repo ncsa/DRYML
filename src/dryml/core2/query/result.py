@@ -187,6 +187,7 @@ class OccurrenceResultSet:
     _occurrences: tuple[DefinitionOccurrence, ...] | None
     _occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None
     explanation: QueryExplanation | None = None
+    _owner_replicas: dict[ConcreteDefinition, tuple[Any, ...]] | None = None
 
     def __init__(
             self,
@@ -194,7 +195,8 @@ class OccurrenceResultSet:
             occurrences: Iterable[DefinitionOccurrence] | None = None,
             *,
             occurrence_factory: Callable[[], Iterable[DefinitionOccurrence]] | None = None,
-            explanation: QueryExplanation | None = None):
+            explanation: QueryExplanation | None = None,
+            owner_replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None):
         if occurrences is None and occurrence_factory is None:
             occurrences = ()
         if occurrences is not None and occurrence_factory is not None:
@@ -203,6 +205,7 @@ class OccurrenceResultSet:
         object.__setattr__(self, "_occurrences", None if occurrences is None else _sort_occurrences(occurrences))
         object.__setattr__(self, "_occurrence_factory", occurrence_factory)
         object.__setattr__(self, "explanation", explanation)
+        object.__setattr__(self, "_owner_replicas", None if owner_replicas is None else dict(owner_replicas))
 
     def __iter__(self) -> Iterator[DefinitionOccurrence]:
         if self._occurrences is not None:
@@ -253,6 +256,7 @@ class OccurrenceResultSet:
             materializable=True,
             domain="owners",
             explanation=self.explanation,
+            replicas=self._owner_replicas,
         )
 
     def objects(self, **kwargs):

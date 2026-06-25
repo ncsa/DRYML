@@ -59,6 +59,57 @@ class BadIndexStore(Store):
         pass
 
 
+class BlockingIndexStore(BadIndexStore):
+    def __init__(self, values, *, started, resume):
+        super().__init__(values)
+        self.started = started
+        self.resume = resume
+
+    def hydrate_index(self):
+        self.started.set()
+        assert self.resume.wait(timeout=5)
+        return tuple(self.values)
+
+
+class NoFullIterationDict(dict):
+    def __init__(self, *args, default_factory=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.default_factory = default_factory
+
+    def __missing__(self, key):
+        if self.default_factory is None:
+            raise KeyError(key)
+        value = self.default_factory()
+        self[key] = value
+        return value
+
+    def __iter__(self):
+        raise AssertionError("query should not iterate this complete mapping")
+
+    def items(self):
+        raise AssertionError("query should not copy this complete mapping")
+
+    def keys(self):
+        raise AssertionError("query should not enumerate this complete mapping")
+
+    def values(self):
+        raise AssertionError("query should not enumerate this complete mapping")
+
+    def copy(self):
+        raise AssertionError("query should not copy this complete mapping")
+
+
+def guard_full_index_iteration(catalog):
+    catalog.definitions_by_id = NoFullIterationDict(catalog.definitions_by_id)
+    catalog.ids_by_stable_hash = NoFullIterationDict(catalog.ids_by_stable_hash)
+    catalog.local_postings = NoFullIterationDict(catalog.local_postings)
+    catalog.edge_by_key = NoFullIterationDict(catalog.edge_by_key)
+    catalog.outgoing_edges = NoFullIterationDict(catalog.outgoing_edges)
+    catalog.incoming_edges = NoFullIterationDict(catalog.incoming_edges)
+    catalog.child_by_parent_path = NoFullIterationDict(catalog.child_by_parent_path)
+    catalog.parents_by_child_path = NoFullIterationDict(catalog.parents_by_child_path)
+
+
 def test_catalog_registering_same_definition_is_idempotent():
     repo = Repo()
     cdef = IndexLeaf("x").definition
@@ -469,35 +520,127 @@ def test_forced_refresh_failure_keeps_live_catalog_without_snapshot(tmp_path):
     assert list(repo.find_defs(None, refresh=False)) == [good.definition]
 
 
-def test_catalog_snapshot_is_stable_across_registration():
+def test_query_result_is_stable_across_registration():
     repo = Repo()
     first = IndexLeaf("first", repo=repo)
     repo.add_objects(first)
-    snapshot = repo._query_catalog.snapshot()
-    before_ids = snapshot.all_definition_ids()
+    results = repo.query(Definition(IndexLeaf, SKIP_ARGS)).known(refresh=False).defs()
 
     second = IndexLeaf("second", repo=repo)
     repo.add_objects(second)
-    second_id = repo._query_catalog.cdef_id(second.definition)
 
-    assert snapshot.all_definition_ids() == before_ids
-    assert second_id not in snapshot.all_definition_ids()
-    assert snapshot.ids_to_cdefs({second_id}) == ()
+    assert list(results) == [first.definition]
+    assert second.definition not in results
 
 
-def test_catalog_snapshot_is_stable_across_forced_refresh(tmp_path):
+def test_query_result_is_stable_across_forced_refresh(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = IndexLeaf("stored", repo=repo)
     repo.save_object(obj)
-    repo.find_defs(None, refresh=True)
-    snapshot = repo._query_catalog.snapshot()
-    obj_id = snapshot.cdef_id(obj.definition)
+    results = repo.find_defs(None, refresh=True)
 
     shutil.rmtree(store.object_dir(obj.definition))
     assert repo.find_defs(None, refresh=True).count() == 0
 
-    assert snapshot.ids_to_cdefs({obj_id}) == (obj.definition,)
+    assert list(results) == [obj.definition]
+
+
+def test_exact_stored_query_does_not_iterate_complete_catalog(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    wanted = IndexLeaf("wanted", repo=repo)
+    repo.save_object(wanted)
+    for idx in range(12):
+        repo.save_object(IndexLeaf(f"other-{idx}", repo=repo))
+
+    guard_full_index_iteration(repo._query_catalog)
+
+    assert list(repo.query(wanted.definition).stored(refresh=False).defs()) == [wanted.definition]
+
+
+def test_selective_query_does_not_iterate_complete_posting_index(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    wanted = IndexPersistent(IndexLeaf("wanted", repo=repo), repo=repo)
+    repo.save_object(wanted)
+    for idx in range(12):
+        repo.save_object(IndexPersistent(IndexLeaf(f"other-{idx}", repo=repo), repo=repo))
+
+    catalog = repo._query_catalog
+    catalog.local_postings = NoFullIterationDict(catalog.local_postings)
+
+    selector = Definition(IndexPersistent, Definition(IndexLeaf, "wanted"))
+    assert list(repo.query(selector).stored(refresh=False).defs()) == [wanted.definition]
+
+
+def test_exact_cached_query_uses_snapshot_cache_membership(monkeypatch):
+    repo = Repo()
+    obj = IndexLeaf("cached", repo=repo)
+    repo.add_objects(obj)
+
+    def fail_get_cached(*args, **kwargs):
+        raise AssertionError("exact cached filtering should use snapshot cache IDs")
+
+    monkeypatch.setattr(repo, "get_cached", fail_get_cached)
+
+    assert list(repo.query(obj.definition).cached(refresh=False).defs()) == [obj.definition]
+
+
+def test_resultset_replica_metadata_survives_refresh_after_execute(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = IndexLeaf("stored", repo=repo)
+    repo.save_object(obj)
+
+    results = repo.find_defs(None, refresh=False)
+    shutil.rmtree(store.object_dir(obj.definition))
+    assert repo.find_defs(None, refresh=True).count() == 0
+
+    assert results.replicas(obj.definition) == (store,)
+
+
+def test_auto_hydration_preserves_concurrent_registration():
+    started = threading.Event()
+    resume = threading.Event()
+    hydrated = IndexLeaf("hydrated")
+    concurrent = IndexLeaf("concurrent")
+    store = BlockingIndexStore([hydrated.definition], started=started, resume=resume)
+    repo = Repo(stores=store)
+    errors = []
+
+    def hydrate():
+        try:
+            list(repo.find_defs(Definition(IndexLeaf, "hydrated")))
+        except Exception as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    thread = threading.Thread(target=hydrate)
+    thread.start()
+    assert started.wait(timeout=5)
+    repo.add_objects(concurrent)
+    resume.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert set(repo.query(Definition(IndexLeaf, SKIP_ARGS)).known(refresh=False).defs()) == {
+        hydrated.definition,
+        concurrent.definition,
+    }
+
+
+def test_auto_hydration_does_not_clone_existing_postings():
+    existing = IndexLeaf("existing")
+    hydrated = IndexLeaf("hydrated")
+    repo = Repo(stores=BadIndexStore([hydrated.definition]))
+    repo.add_objects(existing)
+    catalog = repo._query_catalog
+    catalog.local_postings = NoFullIterationDict(catalog.local_postings, default_factory=dict)
+    catalog.ids_by_stable_hash = NoFullIterationDict(catalog.ids_by_stable_hash, default_factory=set)
+
+    assert list(repo.find_defs(Definition(IndexLeaf, "hydrated"))) == [hydrated.definition]
+    assert list(repo.query(existing.definition).known(refresh=False).defs()) == [existing.definition]
 
 
 def test_occurrence_result_does_not_gain_new_owner_after_execute(tmp_path):
