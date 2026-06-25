@@ -21,6 +21,7 @@ from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOpt
 from .repo_graph import manage_revision
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
+from .query.federation import RepoQueryIndex
 from .query.index import DefinitionCatalog
 from .query.result import ObjectResultSet
 
@@ -108,6 +109,7 @@ class Repo:
                     self.stores.append(make_store(store))
                 else:
                     self.stores.append(store)
+        self._query_index = RepoQueryIndex(self)
 
         # Try to read main def from first store
         if len(self.stores) > 0:
@@ -140,6 +142,7 @@ class Repo:
             # Find and move to front
             store_idx = self.stores.index(store)
             self.stores.insert(0, self.stores.pop(store_idx))
+        self._query_index.refresh_bindings()
 
     def add_store(self, store: "Store", make_default=False):
         if not isinstance(store, Store):
@@ -148,6 +151,7 @@ class Repo:
             self.stores.insert(0, store)
         else:
             self.stores.append(store)
+        self._query_index.refresh_bindings()
 
     def _ensure_store(self, store):
         if store is None:
@@ -366,7 +370,19 @@ class Repo:
         self._query_catalog.refresh(True)
 
     def refresh_index(self, *, force: bool = True):
+        self._query_index.refresh(True if force else "auto")
         self._query_catalog.refresh(True if force else "auto")
+        return self
+
+    def index_status(self, store=None):
+        if store is not None:
+            store = make_store(store)
+        return self._query_index.index_status(store=store)
+
+    def rebuild_index(self, store=None):
+        if store is not None:
+            store = make_store(store)
+        self._query_index.rebuild(store=store)
         return self
 
     def __len__(self):
@@ -967,6 +983,7 @@ class Repo:
     def close(self, flush=True):
         if flush:
             self.flush()
+        self._query_index.close()
 
     def __del__(self):
         if self.save_objs_on_deletion:

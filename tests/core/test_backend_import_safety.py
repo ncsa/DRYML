@@ -202,3 +202,84 @@ assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
         """
     )
+
+
+def test_query_protocol_and_planner_imports_do_not_import_sqlite():
+    _run_import_probe(
+        """
+import sys
+
+assert "sqlite3" not in sys.modules
+
+from dryml.core2.query.graph_plan import graph_candidate_ids
+from dryml.core2.query.protocols import DefinitionGraphIndex, QueryIndexReadView, StoreQueryIndex
+
+assert graph_candidate_ids is not None
+assert DefinitionGraphIndex is not None
+assert QueryIndexReadView is not None
+assert StoreQueryIndex is not None
+assert "sqlite3" not in sys.modules
+        """
+    )
+
+
+def test_sqlite_backend_package_import_does_not_import_sqlite3():
+    _run_import_probe(
+        """
+import sys
+
+assert "sqlite3" not in sys.modules
+from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.query.sqlite.connection import SQLiteConnectionManager
+from dryml.core2.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
+from dryml.core2.query.sqlite.utils import wal_runtime_is_known_safe
+
+assert SQLiteQueryIndexConfig is not None
+assert SQLiteConnectionManager is not None
+assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 1
+assert wal_runtime_is_known_safe((3, 51, 3))
+assert "sqlite3" not in sys.modules
+        """
+    )
+
+
+def test_dirstore_construction_does_not_import_sqlite3_or_open_index():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "sqlite3" not in sys.modules
+from dryml.core2.store.dir import DirStore
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index="auto")
+    assert store.query_index_policy == "auto"
+    assert not Path(store.dryml_dir).exists()
+
+assert "sqlite3" not in sys.modules
+        """
+    )
+
+
+def test_repo_construction_does_not_import_sqlite3_or_open_index():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "sqlite3" not in sys.modules
+from dryml.core2 import Repo
+from dryml.core2.store.dir import DirStore
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index="auto")
+    repo = Repo(stores=store)
+    assert repo._query_index.store_bindings[0].store is store
+    assert not Path(store.dryml_dir).exists()
+
+assert "sqlite3" not in sys.modules
+        """
+    )

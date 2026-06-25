@@ -5,7 +5,6 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..canonical import matching_container_family
-from ..cdef_identity import same_cdef
 from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
@@ -29,6 +28,7 @@ from .model import (
 from .path import DefinitionPathLike, QueryPathError, get_subtree, normalize_path, replace_subtree
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
 from .selector_graph import compile_selector_graph
+from .utils import cdef_equal
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +308,9 @@ class DefinitionQuery:
                 replicas = {cdef: self.universe.replicas.get(cdef, ()) for cdef in matches}
             return matches, stats, replicas
 
+        if self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
+            return self.repo._query_index.execute_definition_domain(self)
+
         catalog = self.repo._query_catalog
         exact_root = self.selector if isinstance(self.selector, ConcreteDefinition) else None
         if self.refresh_policy is True:
@@ -368,6 +371,9 @@ class DefinitionQuery:
             stats.result_count = len(out)
             return out, stats, self.universe.replicas
 
+        if self.repo._query_index.can_execute_query_domain("nested"):
+            return self.repo._query_index.execute_nested_occurrences(self)
+
         catalog = self.repo._query_catalog
         for _ in range(_MAX_NESTED_QUERY_RETRIES):
             stats = QueryStats()
@@ -387,11 +393,15 @@ class DefinitionQuery:
         return occurrence_factory, stats, traversal.owner_replicas
 
     def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
+        if self.universe is None and self.repo._query_index.can_execute_query_domain("nested"):
+            return self.repo._query_index.execute_nested_definitions(self)
         matches, _, stats, _ = self._execute_nested_definition_matches()
         stats.result_count = len(matches)
         return matches, stats
 
     def _execute_nested_owners(self):
+        if self.universe is None and self.repo._query_index.can_execute_query_domain("nested"):
+            return self.repo._query_index.execute_nested_owners(self)
         catalog = self.repo._query_catalog
         for _ in range(_MAX_NESTED_QUERY_RETRIES):
             matches, match_ids, stats, generation = self._execute_nested_definition_matches()
@@ -510,7 +520,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         target = target.definition
 
     if isinstance(selector, ConcreteDefinition):
-        return isinstance(target, ConcreteDefinition) and same_cdef(selector, target)
+            return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
 
     if isinstance(selector, Definition):
         if not isinstance(target, (Definition, ConcreteDefinition)):

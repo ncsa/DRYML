@@ -1,84 +1,11 @@
 from __future__ import annotations
 
 from collections import deque
-from contextlib import AbstractContextManager
-from typing import Any, Protocol
 
-from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
-from .model import DefinitionId, FeatureRequirement, QueryStats, RefreshPolicy
-from .path import DefinitionPath
+from .model import DefinitionId, QueryStats
+from .protocols import DefinitionGraphIndex
 from .selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
-
-
-class DefinitionGraphIndex(Protocol):
-    def all_definition_ids(self) -> set[DefinitionId]:
-        ...
-
-    def estimate_exact_ids(self, cdef: ConcreteDefinition) -> int:
-        ...
-
-    def estimate_local_candidates(self, requirements: tuple[FeatureRequirement, ...]) -> int:
-        ...
-
-    def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
-        ...
-
-    def local_candidates(
-            self,
-            requirements: tuple[FeatureRequirement, ...],
-            *,
-            within: set[DefinitionId] | None = None,
-            domain: DefinitionDomain | None = None,
-            stats: QueryStats | None = None) -> set[DefinitionId]:
-        ...
-
-    def parents(
-            self,
-            child_ids: set[DefinitionId],
-            path: DefinitionPath,
-            *,
-            unordered: bool,
-            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
-        ...
-
-    def children(
-            self,
-            parent_ids: set[DefinitionId],
-            path: DefinitionPath,
-            *,
-            unordered: bool,
-            within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
-        ...
-
-
-class QueryIndexReadView(DefinitionGraphIndex, Protocol):
-    @property
-    def generation(self) -> int:
-        ...
-
-    def filter_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
-        ...
-
-    def cdefs_by_id(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[DefinitionId, ConcreteDefinition]:
-        ...
-
-    def replica_map(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
-        ...
-
-    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> Any:
-        ...
-
-    def occurrence_snapshot_for_nested_ids(self, target_ids: set[DefinitionId]) -> Any:
-        ...
-
-
-class StoreQueryIndex(Protocol):
-    def read_view(self, *, include_cached: bool = True) -> AbstractContextManager[QueryIndexReadView]:
-        ...
-
-    def refresh(self, policy: RefreshPolicy, *, stats: QueryStats | None = None) -> None:
-        ...
 
 
 def graph_candidate_ids(

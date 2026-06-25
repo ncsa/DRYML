@@ -256,6 +256,7 @@ def build_save_plan(
 
 def execute_save_plan(repo, plan: SavePlan) -> None:
     saved_objs: dict[str, set[ConcreteDefinition]] = {}
+    saved_roots_by_store: dict[Any, set[ConcreteDefinition]] = {}
     graph_registered = False
     for action in plan.actions:
         store_key = repo._query_catalog.store_id(action.store)
@@ -264,11 +265,14 @@ def execute_save_plan(repo, plan: SavePlan) -> None:
             continue
         action.store.save_object(action.obj, revision=action.revision)
         saved.add(action.definition)
+        saved_roots_by_store.setdefault(action.store, set()).add(action.definition)
         if not graph_registered:
             repo._query_catalog.register_graph(plan.graph)
             graph_registered = True
         repo._query_catalog.register_stored_root(action.definition, action.store)
         repo._num_saves += 1
+    if saved_roots_by_store:
+        repo._query_index.register_saved_graph(plan.graph, saved_roots_by_store)
 
 
 def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]) -> None:

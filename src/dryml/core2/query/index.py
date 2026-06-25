@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-from ..cdef_identity import same_cdef
 from ..cdef_graph import ConcreteDefinitionGraph
 from ..definition import ConcreteDefinition
 from .fingerprint import canonical_class_key, target_local_fingerprint
@@ -19,11 +18,13 @@ from .model import (
     FeatureRequirement,
     FeatureToken,
     QueryIndexError,
+    QueryIndexUnavailable,
     QueryStats,
     RefreshPolicy,
     StoreId,
 )
 from .path import DefinitionPath, GraphPath
+from .utils import cdef_equal
 
 
 class _CatalogBuildRepo:
@@ -160,8 +161,10 @@ class MemoryDefinitionGraphReadView:
             parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath], frozenset[DefinitionId]],
             strong_cached_ids: set[DefinitionId],
             weak_cached_ids: set[DefinitionId],
+            source_key: str = "memory-catalog",
             repo=None,
             store_by_id: dict[StoreId, Any] | None = None):
+        self.source_key = source_key
         self.generation = generation
         self._definitions_by_id = definitions_by_id
         self._ids_by_cdef = ids_by_cdef
@@ -231,7 +234,7 @@ class MemoryDefinitionGraphReadView:
         return {
             did
             for did in self._ids_by_stable_hash.get(digest, frozenset())
-            if same_cdef(self._definitions_by_id[did].cdef, cdef)
+            if cdef_equal(self._definitions_by_id[did].cdef, cdef)
         }
 
     def estimate_exact_ids(self, cdef: ConcreteDefinition) -> int:
@@ -566,9 +569,17 @@ class DefinitionCatalog:
             parents_by_child_path=self.parents_by_child_path,
             strong_cached_ids=strong_cached_ids,
             weak_cached_ids=weak_cached_ids,
+            source_key="memory-catalog",
             repo=self.repo,
             store_by_id=self.store_by_id,
         )
+
+    @property
+    def source_key(self) -> str:
+        return "memory-catalog"
+
+    def current_generation(self) -> int:
+        return self.generation
 
     def _cached_id_sets_locked(self) -> tuple[set[DefinitionId], set[DefinitionId]]:
         strong_cached_ids = {
@@ -609,6 +620,8 @@ class DefinitionCatalog:
             seen = set()
             unseen = []
             for store in stores:
+                if not self._auto_hydrates_store(store):
+                    continue
                 sid = self._store_key(store)
                 if sid in seen or sid in self.hydrated_stores:
                     continue
@@ -873,7 +886,8 @@ class DefinitionCatalog:
                 replacement.register_graph(ConcreteDefinitionGraph.from_roots(cached_cdefs))
             store_scan_count = 0
             for store in stores:
-                sid, cdefs = self._hydrate_store_definitions(store)
+                self._check_memory_hydration_allowed(store, explicit=True)
+                sid, cdefs = self._hydrate_store_definitions(store, explicit=True)
                 replacement.store_by_id.setdefault(sid, store)
                 replacement.hydrated_stores.add(sid)
                 replacement.register_stored_roots(cdefs, store)
@@ -883,7 +897,8 @@ class DefinitionCatalog:
             stats.store_scan_count += store_scan_count
             stats.refresh_action = "forced-refresh"
 
-    def _hydrate_store_definitions(self, store) -> tuple[StoreId, tuple[ConcreteDefinition, ...]]:
+    def _hydrate_store_definitions(self, store, *, explicit: bool = False) -> tuple[StoreId, tuple[ConcreteDefinition, ...]]:
+        self._check_memory_hydration_allowed(store, explicit=explicit)
         sid = self._store_key(store)
         try:
             cdefs = tuple(store.hydrate_index())
@@ -893,6 +908,24 @@ class DefinitionCatalog:
             if not isinstance(cdef, ConcreteDefinition):
                 raise QueryIndexError(f"Store {store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
         return sid, cdefs
+
+    def _auto_hydrates_store(self, store) -> bool:
+        policy = getattr(store, "query_index_policy", "memory")
+        if policy == "none":
+            return False
+        self._check_memory_hydration_allowed(store, explicit=False)
+        return True
+
+    def _check_memory_hydration_allowed(self, store, *, explicit: bool) -> None:
+        policy = getattr(store, "query_index_policy", "memory")
+        if policy == "sqlite":
+            raise QueryIndexUnavailable(
+                f"Store {store!r} is configured with query_index='sqlite', but SQLite query execution is not implemented yet."
+            )
+        if policy == "none" and not explicit:
+            raise QueryIndexUnavailable(
+                f"Store {store!r} is configured with query_index='none'; use refresh=True for an explicit scan."
+            )
 
     def _replace_with_locked(self, replacement: "DefinitionCatalog", *, light_index: set[ConcreteDefinition]) -> None:
         self.definitions_by_id = replacement.definitions_by_id
@@ -968,7 +1001,7 @@ class DefinitionCatalog:
         digest = cdef.stable_hash()
         for did in self.ids_by_stable_hash.get(digest, set()):
             record = self.definitions_by_id[did]
-            if same_cdef(record.cdef, cdef):
+            if cdef_equal(record.cdef, cdef):
                 self.ids_by_cdef[cdef] = did
                 return did
 
@@ -1000,7 +1033,7 @@ class DefinitionCatalog:
         digest = cdef.stable_hash()
         for did in self.ids_by_stable_hash.get(digest, set()):
             existing_record = self.definitions_by_id[did]
-            if same_cdef(existing_record.cdef, cdef):
+            if cdef_equal(existing_record.cdef, cdef):
                 self.ids_by_cdef[cdef] = did
                 return did, False
 

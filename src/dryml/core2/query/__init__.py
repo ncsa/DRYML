@@ -5,6 +5,8 @@ from .model import (
     QueryError,
     QueryExplanation,
     QueryIndexError,
+    QueryIndexStatus,
+    QueryIndexUnavailable,
 )
 from .query import DefinitionQuery
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
@@ -26,6 +28,8 @@ __all__ = [
     "QueryError",
     "QueryExplanation",
     "QueryIndexError",
+    "QueryIndexStatus",
+    "QueryIndexUnavailable",
     "QueryPathError",
     "SetMember",
     "normalize_path",

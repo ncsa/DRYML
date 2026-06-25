@@ -116,6 +116,10 @@ class Store(ABC):
             return f"{type(self).__module__}.{type(self).__qualname__}:{os.path.abspath(os.fspath(base_dir))}"
         return f"{type(self).__module__}.{type(self).__qualname__}:id:{id(self)}"
 
+    def open_query_index(self):
+        """Return this Store's optional query index, or None for memory/no index modes."""
+        return None
+
     def close(self) -> None:
         """Cleanup (temp dirs, handles, etc.)"""
         ...

@@ -2,20 +2,91 @@ from __future__ import annotations
 
 import os
 import glob
+from dataclasses import replace
+from typing import Literal
 
 from .store import Store
+from ..query.model import QueryIndexUnavailable
+from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
+from ..query.sqlite.index import SQLiteStoreQueryIndex
 from ..utils.general import pickle_save, pickle_load
+
+
+QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
 
 class DirStore(Store):
     """
     Store that keeps objects in a directory tree:
       base_dir/objects/<hh>/<full_hash>/...
     """
-    def __init__(self, base_dir: str):
+    def __init__(self, base_dir: str, *, query_index: QueryIndexPolicy | SQLiteQueryIndexConfig | object = "auto"):
         self._base_dir = os.fspath(base_dir)
+        self.query_index = query_index
+        self._query_index_policy, self._query_index_config, self._query_index_instance = self._normalize_query_index(query_index)
         self.obj_dir = os.path.join(self.base_dir, "objects")
         os.makedirs(self.obj_dir, exist_ok=True)
         self.set_main_def(self.read_main_def())
+
+    @property
+    def dryml_dir(self) -> str:
+        return os.path.join(self.base_dir, ".dryml")
+
+    @property
+    def query_index_path(self) -> str:
+        return os.path.join(self.dryml_dir, "query-index-v1.sqlite")
+
+    @property
+    def query_index_dirty_path(self) -> str:
+        return os.path.join(self.dryml_dir, "query-index.dirty")
+
+    @property
+    def query_index_policy(self) -> QueryIndexPolicy | str:
+        return self._query_index_policy
+
+    def open_query_index(self):
+        if self._query_index_instance is not None:
+            if self._query_index_policy == "custom" and callable(self._query_index_instance):
+                return self._call_query_index_factory(self._query_index_instance)
+            return self._query_index_instance
+        if self._query_index_policy in {"memory", "none"}:
+            return None
+        if self._query_index_policy == "auto" and not sqlite_available():
+            return None
+        if self._query_index_policy not in {"auto", "sqlite"}:
+            return self._query_index_instance
+        if self._query_index_policy == "sqlite" and not sqlite_available():
+            raise QueryIndexUnavailable("DirStore query_index='sqlite' requires Python's optional sqlite3 module.")
+        config = self._query_index_config
+        path = self.query_index_path
+        if config is None:
+            config = SQLiteQueryIndexConfig(path=path)
+        elif config.path is None:
+            config = replace(config, path=path)
+        else:
+            path = os.fspath(config.path)
+        return SQLiteStoreQueryIndex(
+            source_key=self.catalog_key(),
+            path=path,
+            config=config,
+            store=self,
+            dirty_path=self.query_index_dirty_path,
+        )
+
+    def mark_query_index_dirty(self) -> None:
+        os.makedirs(self.dryml_dir, exist_ok=True)
+        tmp_path = f"{self.query_index_dirty_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write("dirty\n")
+        os.replace(tmp_path, self.query_index_dirty_path)
+
+    def clear_query_index_dirty(self) -> None:
+        try:
+            os.remove(self.query_index_dirty_path)
+        except FileNotFoundError:
+            pass
+
+    def query_index_is_dirty(self) -> bool:
+        return os.path.exists(self.query_index_dirty_path)
 
     def _object_dir(self, cdef: "ConcreteDefinition") -> str:
         digest = cdef.stable_hash()
@@ -80,3 +151,22 @@ class DirStore(Store):
 
     def catalog_key(self) -> str:
         return f"{type(self).__module__}.{type(self).__qualname__}:{os.path.abspath(self.base_dir)}"
+
+    @staticmethod
+    def _normalize_query_index(query_index):
+        if isinstance(query_index, str):
+            if query_index not in {"auto", "sqlite", "memory", "none"}:
+                raise ValueError("DirStore query_index must be 'auto', 'sqlite', 'memory', 'none', or a query-index config/object.")
+            return query_index, None, None
+        if isinstance(query_index, SQLiteQueryIndexConfig):
+            return "sqlite", query_index, None
+        return "custom", None, query_index
+
+    def _call_query_index_factory(self, factory):
+        try:
+            return factory(self)
+        except TypeError as original:
+            try:
+                return factory()
+            except TypeError:
+                raise original

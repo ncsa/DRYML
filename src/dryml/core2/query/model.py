@@ -28,6 +28,54 @@ class QueryIndexError(QueryError):
     pass
 
 
+class QueryIndexUnavailable(QueryIndexError):
+    pass
+
+
+class QueryIndexIncompatible(QueryIndexError):
+    pass
+
+
+class QueryIndexCorrupt(QueryIndexError):
+    pass
+
+
+class QueryIndexBusy(QueryIndexError):
+    pass
+
+
+class QueryIndexDirty(QueryIndexError):
+    pass
+
+
+class QueryIndexGenerationChanged(QueryIndexError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class QueryIndexStatus:
+    backend: str
+    store_key: str
+    generation: int | None
+    schema_version: int | None
+    semantic_versions: dict[str, int]
+    state: Literal["ready", "missing", "dirty", "incompatible", "corrupt", "disabled", "unavailable"]
+    journal_mode: str | None = None
+    sqlite_version: tuple[int, int, int] | None = None
+    path: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IndexWriteResult:
+    generation: int
+    changed: bool
+    definitions_added: int = 0
+    edges_added: int = 0
+    postings_added: int = 0
+    roots_added: int = 0
+    roots_removed: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureToken:
     kind: str
