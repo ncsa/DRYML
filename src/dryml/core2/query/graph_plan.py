@@ -11,9 +11,6 @@ from .selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 
 
 class DefinitionGraphIndex(Protocol):
-    def snapshot(self) -> "DefinitionGraphIndex":
-        ...
-
     def all_definition_ids(self) -> set[DefinitionId]:
         ...
 
@@ -77,19 +74,17 @@ def graph_candidate_ids(
         *,
         stats: QueryStats | None = None) -> set[DefinitionId]:
     if selector_graph is None:
-        snapshot = catalog.snapshot()
-        universe_ids = domain.all_ids() if domain is not None else snapshot.all_definition_ids()
+        universe_ids = domain.all_ids() if domain is not None else catalog.all_definition_ids()
         if stats is not None:
             stats.candidate_count = len(universe_ids)
         return set(universe_ids)
 
-    snapshot = catalog.snapshot()
-    anchor = _choose_anchor(snapshot, selector_graph)
+    anchor = _choose_anchor(catalog, selector_graph)
     if anchor is not None:
         anchor_id, anchor_mode = anchor
-        anchor_candidates = _anchor_candidate_ids(snapshot, selector_graph.node(anchor_id), anchor_mode)
+        anchor_candidates = _anchor_candidate_ids(catalog, selector_graph.node(anchor_id), anchor_mode)
         return _graph_candidate_ids_from_anchor(
-            snapshot,
+            catalog,
             selector_graph,
             domain,
             anchor_id,
@@ -97,7 +92,7 @@ def graph_candidate_ids(
             anchor_mode,
             stats=stats,
         )
-    return _graph_candidate_ids_full(snapshot, selector_graph, domain, stats=stats)
+    return _graph_candidate_ids_full(catalog, selector_graph, domain, stats=stats)
 
 
 def _graph_candidate_ids_full(

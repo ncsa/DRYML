@@ -9,6 +9,7 @@ from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.query import QueryIndexError, SetMember
 from dryml.core2.query.index import OccurrenceTraversalSnapshot
 from dryml.core2.query.path import get_subtree
+from dryml.core2.query.result import DefinitionResultSet
 from dryml.core2.store.dir import DirStore
 from dryml.core2.store.store import Store
 from dryml.core2.utils.general import pickle_load, pickle_save
@@ -108,6 +109,21 @@ def guard_full_index_iteration(catalog):
     catalog.incoming_edges = NoFullIterationDict(catalog.incoming_edges)
     catalog.child_by_parent_path = NoFullIterationDict(catalog.child_by_parent_path)
     catalog.parents_by_child_path = NoFullIterationDict(catalog.parents_by_child_path)
+
+
+def catalog_lock_available(catalog) -> bool:
+    acquired = []
+
+    def try_acquire():
+        locked = catalog.lock.acquire(timeout=1)
+        acquired.append(locked)
+        if locked:
+            catalog.lock.release()
+
+    thread = threading.Thread(target=try_acquire)
+    thread.start()
+    thread.join(timeout=2)
+    return acquired == [True]
 
 
 def test_catalog_registering_same_definition_is_idempotent():
@@ -559,6 +575,19 @@ def test_exact_stored_query_does_not_iterate_complete_catalog(tmp_path):
     assert list(repo.query(wanted.definition).stored(refresh=False).defs()) == [wanted.definition]
 
 
+def test_stored_query_does_not_enumerate_cache_keys(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    wanted = IndexLeaf("stored", repo=repo)
+    cached = IndexLeaf("cached", repo=repo)
+    repo.save_object(wanted)
+    repo.add_objects(cached)
+    repo.strong_obj_cache = NoFullIterationDict(repo.strong_obj_cache)
+    repo.weak_obj_cache = NoFullIterationDict(repo.weak_obj_cache)
+
+    assert list(repo.query(wanted.definition).stored(refresh=False).defs()) == [wanted.definition]
+
+
 def test_selective_query_does_not_iterate_complete_posting_index(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
@@ -585,6 +614,127 @@ def test_exact_cached_query_uses_snapshot_cache_membership(monkeypatch):
     monkeypatch.setattr(repo, "get_cached", fail_get_cached)
 
     assert list(repo.query(obj.definition).cached(refresh=False).defs()) == [obj.definition]
+
+
+def test_read_view_is_context_bound():
+    repo = Repo()
+    obj = IndexLeaf("x", repo=repo)
+    repo.add_objects(obj)
+
+    with repo._query_catalog.read_snapshot() as view:
+        assert view.all_definition_ids()
+
+    with pytest.raises(QueryIndexError):
+        view.all_definition_ids()
+
+
+def test_structural_verification_does_not_hold_catalog_lock(monkeypatch):
+    from dryml.core2.query import query as query_mod
+
+    repo = Repo()
+    obj = IndexLeaf("x", repo=repo)
+    repo.add_objects(obj)
+    original = query_mod._structural_match
+
+    def spy(selector, cdef, *, strict, class_match):
+        assert catalog_lock_available(repo._query_catalog)
+        return original(selector, cdef, strict=strict, class_match=class_match)
+
+    monkeypatch.setattr(query_mod, "_structural_match", spy)
+
+    assert list(repo.query(Definition(IndexLeaf, "x")).known(refresh=False).defs()) == [obj.definition]
+
+
+def test_callable_selector_does_not_run_under_catalog_lock():
+    repo = Repo()
+    obj = IndexLeaf("x", repo=repo)
+    repo.add_objects(obj)
+
+    def predicate(value):
+        assert catalog_lock_available(repo._query_catalog)
+        return value == "x"
+
+    assert list(repo.query(Definition(IndexLeaf, predicate)).known(refresh=False).defs()) == [obj.definition]
+
+
+def test_slow_verification_does_not_block_registration():
+    repo = Repo()
+    obj = IndexLeaf("x", repo=repo)
+    repo.add_objects(obj)
+    started = threading.Event()
+    resume = threading.Event()
+    errors = []
+
+    def predicate(value):
+        started.set()
+        assert resume.wait(timeout=5)
+        return value == "x"
+
+    def query():
+        try:
+            list(repo.query(Definition(IndexLeaf, predicate)).known(refresh=False).defs())
+        except Exception as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    query_thread = threading.Thread(target=query)
+    query_thread.start()
+    assert started.wait(timeout=5)
+
+    registered = []
+
+    def register():
+        repo.add_objects(IndexLeaf("new", repo=repo))
+        registered.append(True)
+
+    register_thread = threading.Thread(target=register)
+    register_thread.start()
+    register_thread.join(timeout=2)
+    resume.set()
+    query_thread.join(timeout=5)
+
+    assert registered == [True]
+    assert errors == []
+
+
+def test_definition_resultset_requires_explicit_replicas():
+    repo = Repo()
+    cdef = IndexLeaf("x").definition
+
+    with pytest.raises(ValueError):
+        DefinitionResultSet(repo, [cdef])
+
+
+def test_nested_definition_result_does_not_lookup_live_replicas(monkeypatch, tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = IndexLeaf("child", repo=repo)
+    repo.save_object(IndexPersistent(child, repo=repo))
+
+    def fail_lookup(*args, **kwargs):
+        raise AssertionError("nested definitions should not query live replicas")
+
+    monkeypatch.setattr(repo._query_catalog, "stores_for_cdef", fail_lookup)
+
+    results = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).definitions().defs()
+
+    assert list(results) == [child.definition]
+    assert results.replicas(child.definition) == ()
+
+
+def test_occurrence_definitions_do_not_query_live_catalog(monkeypatch, tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = IndexLeaf("child", repo=repo)
+    repo.save_object(IndexPersistent(child, repo=repo))
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+
+    def fail_lookup(*args, **kwargs):
+        raise AssertionError("occurrence definitions should not query live replicas")
+
+    monkeypatch.setattr(repo._query_catalog, "stores_for_cdef", fail_lookup)
+
+    results = occurrences.definitions()
+
+    assert list(results) == [child.definition]
+    assert results.replicas(child.definition) == ()
 
 
 def test_resultset_replica_metadata_survives_refresh_after_execute(tmp_path):

@@ -1,6 +1,6 @@
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
 from dryml.core2.query.graph_plan import graph_candidate_ids
-from dryml.core2.query.index import MemoryDefinitionGraphSnapshot
+from dryml.core2.query.index import MemoryDefinitionGraphReadView
 from dryml.core2.query.model import FeatureRequirement, FeatureToken, QueryStats
 from dryml.core2.query.path import DefinitionPath, Kwarg
 from dryml.core2.query.query import _query_match
@@ -65,14 +65,14 @@ def test_nested_exact_anchor_does_not_enumerate_full_root_domain(monkeypatch):
     catalog = repo._query_catalog
     full_domain_size = len(catalog.definitions_by_id)
     local_candidate_universe_sizes = []
-    original = MemoryDefinitionGraphSnapshot.local_candidates
+    original = MemoryDefinitionGraphReadView.local_candidates
 
     def spy_local_candidates(self, requirements, *, within=None, domain=None, stats=None):
         if within is not None:
             local_candidate_universe_sizes.append(len(within))
         return original(self, requirements, within=within, domain=domain, stats=stats)
 
-    monkeypatch.setattr(MemoryDefinitionGraphSnapshot, "local_candidates", spy_local_candidates)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "local_candidates", spy_local_candidates)
 
     selector = Definition(PlannerParent, SKIP_ARGS, child=rare.definition)
     results = repo.query(selector).known(refresh=False).defs()
@@ -198,14 +198,14 @@ def test_nonexact_nested_anchor_does_not_enumerate_all_definition_ids(monkeypatc
     catalog = repo._query_catalog
     full_domain_size = len(catalog.definitions_by_id)
     bounded_universe_sizes = []
-    original = MemoryDefinitionGraphSnapshot.local_candidates
+    original = MemoryDefinitionGraphReadView.local_candidates
 
     def spy_local_candidates(self, requirements, *, within=None, domain=None, stats=None):
         if within is not None:
             bounded_universe_sizes.append(len(within))
         return original(self, requirements, within=within, domain=domain, stats=stats)
 
-    monkeypatch.setattr(MemoryDefinitionGraphSnapshot, "local_candidates", spy_local_candidates)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "local_candidates", spy_local_candidates)
 
     selector = Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="wanted"))
     results = repo.query(selector).known(refresh=False).defs()
@@ -226,8 +226,8 @@ def test_anchor_selection_estimates_every_node_and_materializes_only_chosen(monk
     catalog = repo._query_catalog
     estimate_calls = []
     materialize_calls = []
-    original_estimate = MemoryDefinitionGraphSnapshot.estimate_local_candidates
-    original_materialize = MemoryDefinitionGraphSnapshot.local_candidates
+    original_estimate = MemoryDefinitionGraphReadView.estimate_local_candidates
+    original_materialize = MemoryDefinitionGraphReadView.local_candidates
 
     def spy_estimate(self, requirements):
         estimate_calls.append(requirements)
@@ -240,8 +240,8 @@ def test_anchor_selection_estimates_every_node_and_materializes_only_chosen(monk
             materialize_calls.append(requirements)
         return original_materialize(self, requirements, within=within, domain=domain, stats=stats)
 
-    monkeypatch.setattr(MemoryDefinitionGraphSnapshot, "estimate_local_candidates", spy_estimate)
-    monkeypatch.setattr(MemoryDefinitionGraphSnapshot, "local_candidates", spy_materialize)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "estimate_local_candidates", spy_estimate)
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "local_candidates", spy_materialize)
 
     selector = Definition(
         PlannerParent,
@@ -271,9 +271,6 @@ def test_planner_runs_against_backend_without_lock_or_internal_dicts():
     class FakeIndex:
         def __init__(self):
             self.materialized = []
-
-        def snapshot(self):
-            return self
 
         def all_definition_ids(self):
             raise AssertionError("planner should not request all IDs when an anchor exists")

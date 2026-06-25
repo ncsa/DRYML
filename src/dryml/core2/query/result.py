@@ -64,14 +64,14 @@ class DefinitionResultSet:
             domain: str = "stored",
             explanation: QueryExplanation | None = None,
             replicas: Mapping[ConcreteDefinition, tuple[Any, ...]] | None = None):
+        if replicas is None:
+            raise ValueError("DefinitionResultSet requires explicit replica metadata; use {} for nonmaterializable results.")
         object.__setattr__(self, "repo", repo)
         definitions_t = _sort_cdefs(dict.fromkeys(definitions).keys())
         object.__setattr__(self, "_definitions", definitions_t)
         object.__setattr__(self, "materializable", materializable)
         object.__setattr__(self, "domain", domain)
         object.__setattr__(self, "explanation", explanation)
-        if replicas is None:
-            replicas = {cdef: repo._query_catalog.stores_for_cdef(cdef) for cdef in definitions_t}
         object.__setattr__(self, "_replicas", dict(replicas))
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
@@ -246,6 +246,7 @@ class OccurrenceResultSet:
             materializable=False,
             domain="nested-definitions",
             explanation=self.explanation,
+            replicas={},
         )
 
     def owners(self) -> DefinitionResultSet:
@@ -256,7 +257,7 @@ class OccurrenceResultSet:
             materializable=True,
             domain="owners",
             explanation=self.explanation,
-            replicas=self._owner_replicas,
+            replicas={} if self._owner_replicas is None else self._owner_replicas,
         )
 
     def objects(self, **kwargs):

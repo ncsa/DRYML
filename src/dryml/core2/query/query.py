@@ -164,6 +164,7 @@ class DefinitionQuery:
                     materializable=False,
                     domain="nested-definitions",
                     explanation=explanation,
+                    replicas={},
                 )
             if self.universe is None and self.projection == "owners":
                 cdefs, stats, replicas = self._execute_nested_owners()
@@ -200,7 +201,7 @@ class DefinitionQuery:
         if self.universe is not None:
             materializable = self.universe.materializable
             domain = self.universe.domain
-        replicas = query_replicas
+        replicas = {} if query_replicas is None else query_replicas
         if self.universe is not None and self.universe.replicas is not None:
             replicas = {cdef: self.universe.replicas.get(cdef, ()) for cdef in cdefs}
         return DefinitionResultSet(
@@ -250,7 +251,7 @@ class DefinitionQuery:
             stats.universe_size = len(self.universe.definitions)
             matches = self._verify_cdefs(tuple(self.universe.definitions), stats=stats)
             stats.result_count = len(matches)
-            replicas = None
+            replicas = {}
             if self.universe.replicas is not None:
                 replicas = {cdef: self.universe.replicas.get(cdef, ()) for cdef in matches}
             return matches, stats, replicas
@@ -266,7 +267,7 @@ class DefinitionQuery:
 
         live_domain = self._definition_domain(catalog)
         live_domain.prepare(stats=stats)
-        with catalog.read_snapshot() as snapshot:
+        with catalog.read_snapshot(include_cached=self.domain in {"cached", "known"}) as snapshot:
             domain = live_domain.with_catalog(snapshot)
             if exact_root is not None and self.domain in {"stored", "cached", "known"}:
                 candidate_ids = domain.filter(snapshot.exact_ids(exact_root))
@@ -318,7 +319,7 @@ class DefinitionQuery:
 
         catalog = self.repo._query_catalog
         catalog.refresh(self.refresh_policy, stats=stats)
-        with catalog.read_snapshot() as snapshot:
+        with catalog.read_snapshot(include_cached=False) as snapshot:
             selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
             if selector_graph is not None:
                 candidate_ids = graph_candidate_ids(snapshot, selector_graph, None, stats=stats)
@@ -364,7 +365,7 @@ class DefinitionQuery:
         stats = QueryStats()
         catalog = self.repo._query_catalog
         catalog.refresh(self.refresh_policy, stats=stats)
-        with catalog.read_snapshot() as snapshot:
+        with catalog.read_snapshot(include_cached=False) as snapshot:
             selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
             if selector_graph is not None:
                 candidate_ids = graph_candidate_ids(snapshot, selector_graph, None, stats=stats)

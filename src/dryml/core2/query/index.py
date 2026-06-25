@@ -124,7 +124,7 @@ class AllOccurrenceTraversalSnapshot:
                     stack.append((edge.child_id, path.join(edge.path)))
 
 
-class MemoryDefinitionGraphSnapshot:
+class MemoryDefinitionGraphReadView:
     def __init__(
             self,
             *,
@@ -158,26 +158,37 @@ class MemoryDefinitionGraphSnapshot:
         self.weak_cached_ids = frozenset(weak_cached_ids)
         self.repo = repo
         self.store_by_id = {} if store_by_id is None else store_by_id
+        self._active = True
 
-    def snapshot(self):
-        return self
+    def close(self) -> None:
+        self._active = False
+
+    def _check_active(self) -> None:
+        if not self._active:
+            raise QueryIndexError("Catalog read view is only valid inside DefinitionCatalog.read_snapshot().")
 
     def all_definition_ids(self) -> set[DefinitionId]:
+        self._check_active()
         return set(self.definitions_by_id)
 
     def cdef_id(self, cdef: ConcreteDefinition) -> DefinitionId | None:
+        self._check_active()
         return self.ids_by_cdef.get(cdef)
 
     def definition_for_id(self, did: DefinitionId) -> ConcreteDefinition:
+        self._check_active()
         return self.definitions_by_id[did].cdef
 
     def ids_to_cdefs(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> tuple[ConcreteDefinition, ...]:
+        self._check_active()
         return tuple(self.definitions_by_id[did].cdef for did in ids if did in self.definitions_by_id)
 
     def cdefs_by_id(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[DefinitionId, ConcreteDefinition]:
+        self._check_active()
         return {did: self.definitions_by_id[did].cdef for did in ids if did in self.definitions_by_id}
 
     def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
+        self._check_active()
         digest = cdef.stable_hash()
         return {
             did
@@ -186,9 +197,11 @@ class MemoryDefinitionGraphSnapshot:
         }
 
     def estimate_exact_ids(self, cdef: ConcreteDefinition) -> int:
+        self._check_active()
         return len(self.exact_ids(cdef))
 
     def estimate_local_candidates(self, requirements: tuple[FeatureRequirement, ...]) -> int:
+        self._check_active()
         if not requirements:
             return len(self.definitions_by_id)
         return min(len(self.local_postings.get(req.token, {})) for req in requirements)
@@ -200,6 +213,7 @@ class MemoryDefinitionGraphSnapshot:
             within: set[DefinitionId] | None = None,
             domain=None,
             stats: QueryStats | None = None) -> set[DefinitionId]:
+        self._check_active()
         return _candidate_ids_from_postings_data(
             self.definitions_by_id,
             within,
@@ -210,29 +224,36 @@ class MemoryDefinitionGraphSnapshot:
         )
 
     def is_stored_id(self, did: DefinitionId) -> bool:
+        self._check_active()
         return bool(self.replicas_by_definition.get(did))
 
     def filter_stored_ids(self, ids) -> set[DefinitionId]:
+        self._check_active()
         return {did for did in ids if self.is_stored_id(did)}
 
     def all_stored_ids(self) -> set[DefinitionId]:
+        self._check_active()
         return {did for did, stores in self.replicas_by_definition.items() if stores}
 
     def is_cached_id(self, did: DefinitionId, *, reuse_weak: bool = True) -> bool:
+        self._check_active()
         if did in self.strong_cached_ids:
             return True
         return reuse_weak and did in self.weak_cached_ids
 
     def all_cached_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
+        self._check_active()
         ids = set(self.strong_cached_ids)
         if reuse_weak:
             ids.update(self.weak_cached_ids)
         return ids
 
     def all_known_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
+        self._check_active()
         return self.all_stored_ids() | self.all_cached_ids(reuse_weak=reuse_weak)
 
     def replica_map(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
+        self._check_active()
         if self.repo is None:
             return {
                 self.definitions_by_id[did].cdef: ()
@@ -264,15 +285,18 @@ class MemoryDefinitionGraphSnapshot:
         return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
 
     def nested_ids(self) -> set[DefinitionId]:
+        self._check_active()
         nested: set[DefinitionId] = set()
         for owner_id in self.all_stored_ids():
             nested.update(self._descendant_ids(owner_id))
         return nested
 
     def filter_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
+        self._check_active()
         return {did for did in ids if self.has_stored_ancestor(did)}
 
     def has_stored_ancestor(self, did: DefinitionId) -> bool:
+        self._check_active()
         seen: set[DefinitionId] = set()
         stack = [self.edge_by_key[key].parent_id for key in self.incoming_edges.get(did, ())]
         while stack:
@@ -286,6 +310,7 @@ class MemoryDefinitionGraphSnapshot:
         return False
 
     def owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
+        self._check_active()
         owners: set[DefinitionId] = set()
         seen: set[DefinitionId] = set(ids)
         stack = list(ids)
@@ -301,6 +326,7 @@ class MemoryDefinitionGraphSnapshot:
         return owners
 
     def parent_ids_for_children(self, child_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
+        self._check_active()
         if not child_ids:
             return set()
         out = set()
@@ -316,6 +342,7 @@ class MemoryDefinitionGraphSnapshot:
         return out
 
     def child_ids_for_parents(self, parent_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
+        self._check_active()
         if not parent_ids:
             return set()
         out = set()
@@ -337,6 +364,7 @@ class MemoryDefinitionGraphSnapshot:
             path: DefinitionPath,
             *,
             unordered: bool) -> set[DefinitionId]:
+        self._check_active()
         if not parent_ids or not child_ids:
             return set()
         out = set()
@@ -360,6 +388,7 @@ class MemoryDefinitionGraphSnapshot:
             path: DefinitionPath,
             *,
             unordered: bool) -> set[DefinitionId]:
+        self._check_active()
         if not parent_ids or not child_ids:
             return set()
         out = set()
@@ -377,6 +406,7 @@ class MemoryDefinitionGraphSnapshot:
         return out
 
     def occurrence_snapshot_for_nested_ids(self, target_ids: set[DefinitionId]) -> OccurrenceTraversalSnapshot:
+        self._check_active()
         incoming: dict[DefinitionId, list[DefinitionEdgeRecord]] = defaultdict(list)
         cdefs: dict[DefinitionId, ConcreteDefinition] = {}
         stored_ids: set[DefinitionId] = set()
@@ -408,9 +438,11 @@ class MemoryDefinitionGraphSnapshot:
         )
 
     def iter_all_occurrences(self, *, max_occurrences: int | None = None):
+        self._check_active()
         return self.all_occurrence_snapshot().iter_occurrences(max_occurrences=max_occurrences)
 
     def all_occurrence_snapshot(self) -> AllOccurrenceTraversalSnapshot:
+        self._check_active()
         return AllOccurrenceTraversalSnapshot(
             cdefs={did: record.cdef for did, record in self.definitions_by_id.items()},
             stored_ids=self.all_stored_ids(),
@@ -421,6 +453,7 @@ class MemoryDefinitionGraphSnapshot:
         )
 
     def _descendant_ids(self, owner_id: DefinitionId) -> set[DefinitionId]:
+        self._check_active()
         seen: set[DefinitionId] = set()
         stack = [self.edge_by_key[key].child_id for key in sorted(
             self.outgoing_edges.get(owner_id, ()),
@@ -479,18 +512,18 @@ class DefinitionCatalog:
             stores.append(store)
         return stores
 
-    def snapshot(self):
-        with self.lock:
-            return self._read_view_locked()
-
     @contextmanager
-    def read_snapshot(self):
+    def read_snapshot(self, *, include_cached: bool = True):
         with self.lock:
-            yield self._read_view_locked()
+            view = self._read_view_locked(include_cached=include_cached)
+            try:
+                yield view
+            finally:
+                view.close()
 
-    def _read_view_locked(self) -> MemoryDefinitionGraphSnapshot:
-        strong_cached_ids, weak_cached_ids = self._cached_id_sets_locked()
-        return MemoryDefinitionGraphSnapshot(
+    def _read_view_locked(self, *, include_cached: bool) -> MemoryDefinitionGraphReadView:
+        strong_cached_ids, weak_cached_ids = self._cached_id_sets_locked() if include_cached else (set(), set())
+        return MemoryDefinitionGraphReadView(
             generation=self.generation,
             definitions_by_id=self.definitions_by_id,
             ids_by_cdef=self.ids_by_cdef,
@@ -713,7 +746,7 @@ class DefinitionCatalog:
         return tuple(self.iter_all_occurrences())
 
     def iter_all_occurrences(self, *, max_occurrences: int | None = None):
-        with self.read_snapshot() as snapshot:
+        with self.read_snapshot(include_cached=False) as snapshot:
             traversal = snapshot.all_occurrence_snapshot()
         return traversal.iter_occurrences(max_occurrences=max_occurrences)
 
@@ -725,7 +758,7 @@ class DefinitionCatalog:
             ids: set[DefinitionId],
             *,
             max_occurrences: int | None = None):
-        with self.read_snapshot() as snapshot:
+        with self.read_snapshot(include_cached=False) as snapshot:
             traversal = snapshot.occurrence_snapshot_for_nested_ids(ids)
         return traversal.iter_occurrences(max_occurrences=max_occurrences)
 
