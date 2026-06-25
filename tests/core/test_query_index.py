@@ -7,6 +7,7 @@ from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.query import QueryIndexError, SetMember
+from dryml.core2.query.index import OccurrenceTraversalSnapshot
 from dryml.core2.query.path import get_subtree
 from dryml.core2.store.dir import DirStore
 from dryml.core2.store.store import Store
@@ -259,15 +260,15 @@ def test_occurrence_iteration_is_lazy(tmp_path, monkeypatch):
     catalog = repo._query_catalog
     child_id = catalog.cdef_id(child.definition)
     yields = 0
-    original = catalog._iter_occurrences_for_nested_snapshot
+    original = OccurrenceTraversalSnapshot.iter_occurrences
 
-    def spy_iter(snapshot, *, max_occurrences=None):
+    def spy_iter(self, *, max_occurrences=None):
         nonlocal yields
-        for occ in original(snapshot, max_occurrences=max_occurrences):
+        for occ in original(self, max_occurrences=max_occurrences):
             yields += 1
             yield occ
 
-    monkeypatch.setattr(catalog, "_iter_occurrences_for_nested_snapshot", spy_iter)
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
 
     iterator = catalog.iter_occurrences_for_nested_ids({child_id})
 
@@ -286,15 +287,15 @@ def test_occurrence_limit_stops_before_full_path_enumeration(tmp_path, monkeypat
     catalog = repo._query_catalog
     child_id = catalog.cdef_id(child.definition)
     yields = 0
-    original = catalog._iter_occurrences_for_nested_snapshot
+    original = OccurrenceTraversalSnapshot.iter_occurrences
 
-    def spy_iter(snapshot, *, max_occurrences=None):
+    def spy_iter(self, *, max_occurrences=None):
         nonlocal yields
-        for occ in original(snapshot, max_occurrences=max_occurrences):
+        for occ in original(self, max_occurrences=max_occurrences):
             yields += 1
             yield occ
 
-    monkeypatch.setattr(catalog, "_iter_occurrences_for_nested_snapshot", spy_iter)
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
 
     occurrences = tuple(catalog.iter_occurrences_for_nested_ids({child_id}, max_occurrences=1))
 
@@ -333,22 +334,22 @@ def test_occurrence_result_is_lazy(tmp_path, monkeypatch):
     repo = Repo(stores=store)
     child = IndexLeaf("wanted", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
-    catalog = repo._query_catalog
-    calls = 0
-    original = catalog.iter_occurrences_for_nested_ids
+    yields = 0
+    original = OccurrenceTraversalSnapshot.iter_occurrences
 
-    def spy_iter(ids, *, max_occurrences=None):
-        nonlocal calls
-        calls += 1
-        return original(ids, max_occurrences=max_occurrences)
+    def spy_iter(self, *, max_occurrences=None):
+        nonlocal yields
+        for occ in original(self, max_occurrences=max_occurrences):
+            yields += 1
+            yield occ
 
-    monkeypatch.setattr(catalog, "iter_occurrences_for_nested_ids", spy_iter)
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
 
     occurrences = repo.query(Definition(IndexLeaf, "wanted")).nested(refresh=False).execute()
 
-    assert calls == 0
+    assert yields == 0
     assert occurrences.first().definition == child.definition
-    assert calls == 1
+    assert yields == 1
 
 
 def test_first_occurrence_does_not_enumerate_remaining_paths(tmp_path, monkeypatch):
@@ -356,17 +357,16 @@ def test_first_occurrence_does_not_enumerate_remaining_paths(tmp_path, monkeypat
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     repo.save_object(IndexPersistent([child, child, child], repo=repo))
-    catalog = repo._query_catalog
     yields = 0
-    original = catalog._iter_occurrences_for_nested_snapshot
+    original = OccurrenceTraversalSnapshot.iter_occurrences
 
-    def spy_iter(snapshot, *, max_occurrences=None):
+    def spy_iter(self, *, max_occurrences=None):
         nonlocal yields
-        for occ in original(snapshot, max_occurrences=max_occurrences):
+        for occ in original(self, max_occurrences=max_occurrences):
             yields += 1
             yield occ
 
-    monkeypatch.setattr(catalog, "_iter_occurrences_for_nested_snapshot", spy_iter)
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
 
     occurrences = repo.query(Definition(IndexLeaf, "shared")).nested(refresh=False).execute()
 
@@ -379,17 +379,16 @@ def test_query_max_occurrences_stops_path_generation(tmp_path, monkeypatch):
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     repo.save_object(IndexPersistent([child, child, child], repo=repo))
-    catalog = repo._query_catalog
     yields = 0
-    original = catalog._iter_occurrences_for_nested_snapshot
+    original = OccurrenceTraversalSnapshot.iter_occurrences
 
-    def spy_iter(snapshot, *, max_occurrences=None):
+    def spy_iter(self, *, max_occurrences=None):
         nonlocal yields
-        for occ in original(snapshot, max_occurrences=max_occurrences):
+        for occ in original(self, max_occurrences=max_occurrences):
             yields += 1
             yield occ
 
-    monkeypatch.setattr(catalog, "_iter_occurrences_for_nested_snapshot", spy_iter)
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
 
     occurrences = (
         repo.query(Definition(IndexLeaf, "shared"))
@@ -413,7 +412,7 @@ def test_selective_occurrence_query_does_not_scan_unrelated_roots(tmp_path, monk
     def fail_root_scan(*args, **kwargs):
         raise AssertionError("selective occurrences should not scan stored roots")
 
-    monkeypatch.setattr(repo._query_catalog, "_iter_occurrences_locked", fail_root_scan)
+    monkeypatch.setattr(repo._query_catalog, "iter_all_occurrences", fail_root_scan)
 
     occurrences = repo.query(Definition(IndexLeaf, "wanted")).nested(refresh=False).execute()
 
@@ -468,6 +467,164 @@ def test_forced_refresh_failure_keeps_live_catalog_without_snapshot(tmp_path):
 
     assert catalog_state(repo) == before
     assert list(repo.find_defs(None, refresh=False)) == [good.definition]
+
+
+def test_catalog_snapshot_is_stable_across_registration():
+    repo = Repo()
+    first = IndexLeaf("first", repo=repo)
+    repo.add_objects(first)
+    snapshot = repo._query_catalog.snapshot()
+    before_ids = snapshot.all_definition_ids()
+
+    second = IndexLeaf("second", repo=repo)
+    repo.add_objects(second)
+    second_id = repo._query_catalog.cdef_id(second.definition)
+
+    assert snapshot.all_definition_ids() == before_ids
+    assert second_id not in snapshot.all_definition_ids()
+    assert snapshot.ids_to_cdefs({second_id}) == ()
+
+
+def test_catalog_snapshot_is_stable_across_forced_refresh(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = IndexLeaf("stored", repo=repo)
+    repo.save_object(obj)
+    repo.find_defs(None, refresh=True)
+    snapshot = repo._query_catalog.snapshot()
+    obj_id = snapshot.cdef_id(obj.definition)
+
+    shutil.rmtree(store.object_dir(obj.definition))
+    assert repo.find_defs(None, refresh=True).count() == 0
+
+    assert snapshot.ids_to_cdefs({obj_id}) == (obj.definition,)
+
+
+def test_occurrence_result_does_not_gain_new_owner_after_execute(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    first_parent = IndexPersistent(child, state=1, repo=repo)
+    repo.save_object(first_parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+    second_parent = IndexPersistent(child, state=2, repo=repo)
+    repo.save_object(second_parent)
+
+    assert {occ.owner for occ in occurrences} == {first_parent.definition}
+
+
+def test_occurrence_result_survives_owner_deletion_after_execute(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+    shutil.rmtree(store.object_dir(parent.definition))
+    assert repo.find_defs(None, refresh=True).count() == 0
+
+    assert occurrences.count() == 1
+    assert occurrences.one().owner == parent.definition
+
+
+def test_occurrence_result_repeated_iteration_is_stable(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent([child, child], repo=repo)
+    repo.save_object(parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+
+    first = tuple(occ.path for occ in occurrences)
+    second = tuple(occ.path for occ in occurrences)
+
+    assert first == second
+    assert len(first) == 2
+
+
+def test_occurrence_first_count_and_iteration_use_same_snapshot(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent([child, child], repo=repo)
+    repo.save_object(parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+    first = occurrences.first()
+    repo.save_object(IndexPersistent(child, state=99, repo=repo))
+
+    assert first.owner == parent.definition
+    assert occurrences.count() == 2
+    assert {occ.owner for occ in occurrences} == {parent.definition}
+
+
+def test_auto_hydration_failure_leaves_catalog_unchanged_and_retries(tmp_path):
+    good_store = DirStore(tmp_path / "good")
+    good_repo = Repo(stores=good_store)
+    good = IndexLeaf("good", repo=good_repo)
+    good_repo.save_object(good)
+
+    bad_store = BadIndexStore(["not-a-cdef"])
+    repo = Repo(stores=[DirStore(good_store.base_dir), bad_store])
+    before = catalog_state(repo)
+
+    with pytest.raises(QueryIndexError):
+        repo.find_defs(None)
+
+    assert catalog_state(repo) == before
+    assert repo._query_catalog.hydrated_stores == set()
+
+    repo.stores = [DirStore(good_store.base_dir)]
+    assert list(repo.find_defs(None)) == [good.definition]
+
+
+def test_auto_hydration_fingerprints_each_new_cdef_once(tmp_path, monkeypatch):
+    from dryml.core2.query import index as index_mod
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    calls = []
+    original = index_mod.target_local_fingerprint
+
+    def spy(cdef):
+        calls.append(cdef)
+        return original(cdef)
+
+    monkeypatch.setattr(index_mod, "target_local_fingerprint", spy)
+    repo2 = Repo(stores=DirStore(store.base_dir))
+
+    assert list(repo2.find_defs(None)) == [parent.definition]
+    assert calls.count(parent.definition) == 1
+    assert calls.count(child.definition) == 1
+
+
+def test_auto_hydration_builds_each_store_graph_once(tmp_path, monkeypatch):
+    from dryml.core2.query import index as index_mod
+
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    parent = IndexPersistent(IndexLeaf("child", repo=repo), repo=repo)
+    repo.save_object(parent)
+    calls = []
+    original = index_mod.ConcreteDefinitionGraph.from_roots
+
+    def spy_from_roots(cls, cdefs):
+        cdefs = tuple(cdefs)
+        calls.append(cdefs)
+        return original(cdefs)
+
+    monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "from_roots", classmethod(spy_from_roots))
+    repo2 = Repo(stores=DirStore(store.base_dir))
+
+    assert list(repo2.find_defs(None)) == [parent.definition]
+    assert len(calls) == 1
 
 
 def test_nested_definition_inside_set_is_indexed_with_defined_path(tmp_path):

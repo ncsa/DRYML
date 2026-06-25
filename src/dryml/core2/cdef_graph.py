@@ -11,6 +11,9 @@ from .utils.graph.path import GraphPath
 from .utils.graph.value import get_subtree, iter_value_edges
 
 
+CDEF_GRAPH_SCHEMA_VERSION = 1
+
+
 class ConcreteDefinitionGraphError(Exception):
     pass
 

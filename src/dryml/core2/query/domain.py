@@ -24,6 +24,9 @@ class DefinitionDomain(Protocol):
     def all_ids(self) -> set[DefinitionId]:
         ...
 
+    def with_catalog(self, catalog: Any) -> "DefinitionDomain":
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class StoredDomain:
@@ -44,6 +47,9 @@ class StoredDomain:
 
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.all_stored_ids()
+
+    def with_catalog(self, catalog: Any) -> "StoredDomain":
+        return StoredDomain(catalog)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +72,9 @@ class CachedDomain:
 
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.all_cached_ids(reuse_weak=self.reuse_weak)
+
+    def with_catalog(self, catalog: Any) -> "CachedDomain":
+        return CachedDomain(catalog, reuse_weak=self.reuse_weak)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +101,9 @@ class KnownDomain:
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.all_known_ids(reuse_weak=self.reuse_weak)
 
+    def with_catalog(self, catalog: Any) -> "KnownDomain":
+        return KnownDomain(catalog, reuse_weak=self.reuse_weak)
+
 
 @dataclass(frozen=True, slots=True)
 class NestedDomain:
@@ -112,3 +124,6 @@ class NestedDomain:
 
     def all_ids(self) -> set[DefinitionId]:
         return self.catalog.nested_ids()
+
+    def with_catalog(self, catalog: Any) -> "NestedDomain":
+        return NestedDomain(catalog)
