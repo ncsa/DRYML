@@ -72,6 +72,10 @@ class DefinitionResultSet:
         object.__setattr__(self, "materializable", materializable)
         object.__setattr__(self, "domain", domain)
         object.__setattr__(self, "explanation", explanation)
+        if materializable:
+            missing = set(definitions_t) - set(replicas)
+            if missing:
+                raise ValueError("Materializable DefinitionResultSet requires a replica entry for every definition.")
         object.__setattr__(self, "_replicas", dict(replicas))
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
@@ -257,7 +261,7 @@ class OccurrenceResultSet:
             materializable=True,
             domain="owners",
             explanation=self.explanation,
-            replicas={} if self._owner_replicas is None else self._owner_replicas,
+            replicas=self._require_owner_replicas(),
         )
 
     def objects(self, **kwargs):
@@ -275,6 +279,7 @@ class OccurrenceResultSet:
             occurrences=occurrences,
             materializable=False,
             domain="nested",
+            replicas=dict(self._owner_replicas or {}),
         )
         return DefinitionQuery.from_source(
             self.repo,
@@ -292,7 +297,12 @@ class OccurrenceResultSet:
             if key not in seen:
                 seen.add(key)
                 out.append(occ)
-        return OccurrenceResultSet(self.repo, out)
+        return OccurrenceResultSet(
+            self.repo,
+            out,
+            explanation=self.explanation,
+            owner_replicas=_merge_replica_maps(self._owner_replicas or {}, other._owner_replicas or {}),
+        )
 
     def intersection(self, other: "OccurrenceResultSet") -> "OccurrenceResultSet":
         self._check_compatible(other)
@@ -300,11 +310,22 @@ class OccurrenceResultSet:
         return OccurrenceResultSet(
             self.repo,
             [occ for occ in self._materialize() if (occ.owner, occ.path, occ.definition) in other_keys],
+            explanation=self.explanation,
+            owner_replicas=_merge_replica_maps(self._owner_replicas or {}, other._owner_replicas or {}),
         )
 
     def _check_compatible(self, other: "OccurrenceResultSet") -> None:
         if self.repo is not other.repo:
             raise ValueError("Cannot combine result sets from different repos.")
+
+    def _require_owner_replicas(self) -> dict[ConcreteDefinition, tuple[Any, ...]]:
+        if self._owner_replicas is None:
+            raise QueryDomainError("Owner replica metadata was not captured for this occurrence result.")
+        occurrences = self._materialize()
+        missing = {occ.owner for occ in occurrences} - set(self._owner_replicas)
+        if missing:
+            raise QueryDomainError("Owner replica metadata is incomplete for this occurrence result.")
+        return dict(self._owner_replicas)
 
     def _materialize(self) -> tuple[DefinitionOccurrence, ...]:
         if self._occurrences is None:

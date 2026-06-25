@@ -41,18 +41,23 @@ class OccurrenceTraversalSnapshot:
             targets: set[DefinitionId],
             cdefs: dict[DefinitionId, ConcreteDefinition],
             stored_ids: set[DefinitionId],
-            incoming: dict[DefinitionId, tuple[DefinitionEdgeRecord, ...]]):
+            incoming: dict[DefinitionId, tuple[DefinitionEdgeRecord, ...]],
+            owner_replicas: dict[ConcreteDefinition, tuple[Any, ...]] | None = None,
+            copy_data: bool = True):
         self.targets = frozenset(targets)
-        self.cdefs = dict(cdefs)
-        self.stored_ids = frozenset(stored_ids)
-        self.incoming = dict(incoming)
+        self.cdefs = dict(cdefs) if copy_data else cdefs
+        self.stored_ids = frozenset(stored_ids) if copy_data else stored_ids
+        self.incoming = dict(incoming) if copy_data else incoming
+        self.owner_replicas = {} if owner_replicas is None else (dict(owner_replicas) if copy_data else owner_replicas)
 
     def restrict_targets(self, targets: set[DefinitionId] | frozenset[DefinitionId]) -> "OccurrenceTraversalSnapshot":
         return OccurrenceTraversalSnapshot(
             targets=set(targets) & set(self.targets),
             cdefs=self.cdefs,
-            stored_ids=set(self.stored_ids),
+            stored_ids=self.stored_ids,
             incoming=self.incoming,
+            owner_replicas=self.owner_replicas,
+            copy_data=False,
         )
 
     def owner_ids_for_nested_ids(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> set[DefinitionId]:
@@ -69,6 +74,14 @@ class OccurrenceTraversalSnapshot:
                     seen.add(parent_id)
                     stack.append(parent_id)
         return owners
+
+    def owner_replicas_for_nested_ids(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
+        owners = {
+            self.cdefs[owner_id]
+            for owner_id in self.owner_ids_for_nested_ids(ids)
+            if owner_id in self.cdefs
+        }
+        return {owner: self.owner_replicas.get(owner, ()) for owner in owners}
 
     def iter_occurrences(self, *, max_occurrences: int | None = None):
         yielded = 0
@@ -144,20 +157,20 @@ class MemoryDefinitionGraphReadView:
             repo=None,
             store_by_id: dict[StoreId, Any] | None = None):
         self.generation = generation
-        self.definitions_by_id = definitions_by_id
-        self.ids_by_cdef = ids_by_cdef
-        self.ids_by_stable_hash = ids_by_stable_hash
-        self.replicas_by_definition = replicas_by_definition
-        self.local_postings = local_postings
-        self.edge_by_key = edge_by_key
-        self.outgoing_edges = outgoing_edges
-        self.incoming_edges = incoming_edges
-        self.child_by_parent_path = child_by_parent_path
-        self.parents_by_child_path = parents_by_child_path
-        self.strong_cached_ids = frozenset(strong_cached_ids)
-        self.weak_cached_ids = frozenset(weak_cached_ids)
-        self.repo = repo
-        self.store_by_id = {} if store_by_id is None else store_by_id
+        self._definitions_by_id = definitions_by_id
+        self._ids_by_cdef = ids_by_cdef
+        self._ids_by_stable_hash = ids_by_stable_hash
+        self._replicas_by_definition = replicas_by_definition
+        self._local_postings = local_postings
+        self._edge_by_key = edge_by_key
+        self._outgoing_edges = outgoing_edges
+        self._incoming_edges = incoming_edges
+        self._child_by_parent_path = child_by_parent_path
+        self._parents_by_child_path = parents_by_child_path
+        self._strong_cached_ids = frozenset(strong_cached_ids)
+        self._weak_cached_ids = frozenset(weak_cached_ids)
+        self._repo = repo
+        self._store_by_id = {} if store_by_id is None else store_by_id
         self._active = True
 
     def close(self) -> None:
@@ -165,35 +178,54 @@ class MemoryDefinitionGraphReadView:
 
     def _check_active(self) -> None:
         if not self._active:
-            raise QueryIndexError("Catalog read view is only valid inside DefinitionCatalog.read_snapshot().")
+            raise QueryIndexError("Catalog read view is only valid inside DefinitionCatalog.read_view().")
+
+    def _private_data_error(self):
+        raise AttributeError("MemoryDefinitionGraphReadView backing data is private; use read-view methods.")
+
+    definitions_by_id = property(lambda self: self._private_data_error())
+    ids_by_cdef = property(lambda self: self._private_data_error())
+    ids_by_stable_hash = property(lambda self: self._private_data_error())
+    replicas_by_definition = property(lambda self: self._private_data_error())
+    local_postings = property(lambda self: self._private_data_error())
+    edge_by_key = property(lambda self: self._private_data_error())
+    outgoing_edges = property(lambda self: self._private_data_error())
+    incoming_edges = property(lambda self: self._private_data_error())
+    child_by_parent_path = property(lambda self: self._private_data_error())
+    parents_by_child_path = property(lambda self: self._private_data_error())
 
     def all_definition_ids(self) -> set[DefinitionId]:
         self._check_active()
-        return set(self.definitions_by_id)
+        return set(self._definitions_by_id)
 
     def cdef_id(self, cdef: ConcreteDefinition) -> DefinitionId | None:
         self._check_active()
-        return self.ids_by_cdef.get(cdef)
+        return self._ids_by_cdef.get(cdef)
 
     def definition_for_id(self, did: DefinitionId) -> ConcreteDefinition:
         self._check_active()
-        return self.definitions_by_id[did].cdef
+        return self._definitions_by_id[did].cdef
+
+    def record_for_cdef(self, cdef: ConcreteDefinition) -> DefinitionRecord | None:
+        self._check_active()
+        did = self._ids_by_cdef.get(cdef)
+        return self._definitions_by_id.get(did) if did is not None else None
 
     def ids_to_cdefs(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> tuple[ConcreteDefinition, ...]:
         self._check_active()
-        return tuple(self.definitions_by_id[did].cdef for did in ids if did in self.definitions_by_id)
+        return tuple(self._definitions_by_id[did].cdef for did in ids if did in self._definitions_by_id)
 
     def cdefs_by_id(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[DefinitionId, ConcreteDefinition]:
         self._check_active()
-        return {did: self.definitions_by_id[did].cdef for did in ids if did in self.definitions_by_id}
+        return {did: self._definitions_by_id[did].cdef for did in ids if did in self._definitions_by_id}
 
     def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
         self._check_active()
         digest = cdef.stable_hash()
         return {
             did
-            for did in self.ids_by_stable_hash.get(digest, frozenset())
-            if same_cdef(self.definitions_by_id[did].cdef, cdef)
+            for did in self._ids_by_stable_hash.get(digest, frozenset())
+            if same_cdef(self._definitions_by_id[did].cdef, cdef)
         }
 
     def estimate_exact_ids(self, cdef: ConcreteDefinition) -> int:
@@ -203,8 +235,8 @@ class MemoryDefinitionGraphReadView:
     def estimate_local_candidates(self, requirements: tuple[FeatureRequirement, ...]) -> int:
         self._check_active()
         if not requirements:
-            return len(self.definitions_by_id)
-        return min(len(self.local_postings.get(req.token, {})) for req in requirements)
+            return len(self._definitions_by_id)
+        return min(len(self._local_postings.get(req.token, {})) for req in requirements)
 
     def local_candidates(
             self,
@@ -215,17 +247,17 @@ class MemoryDefinitionGraphReadView:
             stats: QueryStats | None = None) -> set[DefinitionId]:
         self._check_active()
         return _candidate_ids_from_postings_data(
-            self.definitions_by_id,
+            self._definitions_by_id,
             within,
             requirements,
-            self.local_postings,
+            self._local_postings,
             domain=domain,
             stats=stats,
         )
 
     def is_stored_id(self, did: DefinitionId) -> bool:
         self._check_active()
-        return bool(self.replicas_by_definition.get(did))
+        return bool(self._replicas_by_definition.get(did))
 
     def filter_stored_ids(self, ids) -> set[DefinitionId]:
         self._check_active()
@@ -233,19 +265,19 @@ class MemoryDefinitionGraphReadView:
 
     def all_stored_ids(self) -> set[DefinitionId]:
         self._check_active()
-        return {did for did, stores in self.replicas_by_definition.items() if stores}
+        return {did for did, stores in self._replicas_by_definition.items() if stores}
 
     def is_cached_id(self, did: DefinitionId, *, reuse_weak: bool = True) -> bool:
         self._check_active()
-        if did in self.strong_cached_ids:
+        if did in self._strong_cached_ids:
             return True
-        return reuse_weak and did in self.weak_cached_ids
+        return reuse_weak and did in self._weak_cached_ids
 
     def all_cached_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
         self._check_active()
-        ids = set(self.strong_cached_ids)
+        ids = set(self._strong_cached_ids)
         if reuse_weak:
-            ids.update(self.weak_cached_ids)
+            ids.update(self._weak_cached_ids)
         return ids
 
     def all_known_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
@@ -254,25 +286,25 @@ class MemoryDefinitionGraphReadView:
 
     def replica_map(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> dict[ConcreteDefinition, tuple[Any, ...]]:
         self._check_active()
-        if self.repo is None:
+        if self._repo is None:
             return {
-                self.definitions_by_id[did].cdef: ()
+                self._definitions_by_id[did].cdef: ()
                 for did in ids
-                if did in self.definitions_by_id
+                if did in self._definitions_by_id
             }
         repo_store_by_id = {
             self._store_key(store): store
-            for store in self.repo.stores
+            for store in self._repo.stores
         }
         out: dict[ConcreteDefinition, tuple[Any, ...]] = {}
         for did in ids:
-            record = self.definitions_by_id.get(did)
+            record = self._definitions_by_id.get(did)
             if record is None:
                 continue
             stores = []
             seen: set[StoreId] = set()
-            for sid in sorted(self.replicas_by_definition.get(did, ())):
-                store = repo_store_by_id.get(sid, self.store_by_id.get(sid))
+            for sid in sorted(self._replicas_by_definition.get(did, ())):
+                store = repo_store_by_id.get(sid, self._store_by_id.get(sid))
                 if store is not None and sid not in seen:
                     seen.add(sid)
                     stores.append(store)
@@ -298,7 +330,7 @@ class MemoryDefinitionGraphReadView:
     def has_stored_ancestor(self, did: DefinitionId) -> bool:
         self._check_active()
         seen: set[DefinitionId] = set()
-        stack = [self.edge_by_key[key].parent_id for key in self.incoming_edges.get(did, ())]
+        stack = [self._edge_by_key[key].parent_id for key in self._incoming_edges.get(did, ())]
         while stack:
             cur = stack.pop()
             if cur in seen:
@@ -306,7 +338,7 @@ class MemoryDefinitionGraphReadView:
             if self.is_stored_id(cur):
                 return True
             seen.add(cur)
-            stack.extend(self.edge_by_key[key].parent_id for key in self.incoming_edges.get(cur, ()))
+            stack.extend(self._edge_by_key[key].parent_id for key in self._incoming_edges.get(cur, ()))
         return False
 
     def owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
@@ -316,8 +348,8 @@ class MemoryDefinitionGraphReadView:
         stack = list(ids)
         while stack:
             cur = stack.pop()
-            for edge_key in self.incoming_edges.get(cur, ()):
-                parent_id = self.edge_by_key[edge_key].parent_id
+            for edge_key in self._incoming_edges.get(cur, ()):
+                parent_id = self._edge_by_key[edge_key].parent_id
                 if self.is_stored_id(parent_id):
                     owners.add(parent_id)
                 if parent_id not in seen:
@@ -332,13 +364,13 @@ class MemoryDefinitionGraphReadView:
         out = set()
         if unordered:
             for child_id in child_ids:
-                for edge_key in self.incoming_edges.get(child_id, ()):
-                    record = self.edge_by_key[edge_key]
+                for edge_key in self._incoming_edges.get(child_id, ()):
+                    record = self._edge_by_key[edge_key]
                     if record.path.startswith(path):
                         out.add(record.parent_id)
             return out
         for child_id in child_ids:
-            out.update(self.parents_by_child_path.get((child_id, path), frozenset()))
+            out.update(self._parents_by_child_path.get((child_id, path), frozenset()))
         return out
 
     def child_ids_for_parents(self, parent_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
@@ -348,13 +380,13 @@ class MemoryDefinitionGraphReadView:
         out = set()
         if unordered:
             for parent_id in parent_ids:
-                for edge_key in self.outgoing_edges.get(parent_id, ()):
-                    record = self.edge_by_key[edge_key]
+                for edge_key in self._outgoing_edges.get(parent_id, ()):
+                    record = self._edge_by_key[edge_key]
                     if record.path.startswith(path):
                         out.add(record.child_id)
             return out
         for parent_id in parent_ids:
-            out.update(self.child_by_parent_path.get((parent_id, path), frozenset()))
+            out.update(self._child_by_parent_path.get((parent_id, path), frozenset()))
         return out
 
     def parent_ids_with_matching_child(
@@ -370,14 +402,14 @@ class MemoryDefinitionGraphReadView:
         out = set()
         if unordered:
             for parent_id in parent_ids:
-                for edge_key in self.outgoing_edges.get(parent_id, ()):
-                    record = self.edge_by_key[edge_key]
+                for edge_key in self._outgoing_edges.get(parent_id, ()):
+                    record = self._edge_by_key[edge_key]
                     if record.child_id in child_ids and record.path.startswith(path):
                         out.add(parent_id)
                         break
             return out
         for parent_id in parent_ids:
-            if self.child_by_parent_path.get((parent_id, path), frozenset()) & child_ids:
+            if self._child_by_parent_path.get((parent_id, path), frozenset()) & child_ids:
                 out.add(parent_id)
         return out
 
@@ -394,14 +426,14 @@ class MemoryDefinitionGraphReadView:
         out = set()
         if unordered:
             for child_id in child_ids:
-                for edge_key in self.incoming_edges.get(child_id, ()):
-                    record = self.edge_by_key[edge_key]
+                for edge_key in self._incoming_edges.get(child_id, ()):
+                    record = self._edge_by_key[edge_key]
                     if record.parent_id in parent_ids and record.path.startswith(path):
                         out.add(child_id)
                         break
             return out
         for child_id in child_ids:
-            if self.parents_by_child_path.get((child_id, path), frozenset()) & parent_ids:
+            if self._parents_by_child_path.get((child_id, path), frozenset()) & parent_ids:
                 out.add(child_id)
         return out
 
@@ -411,20 +443,20 @@ class MemoryDefinitionGraphReadView:
         cdefs: dict[DefinitionId, ConcreteDefinition] = {}
         stored_ids: set[DefinitionId] = set()
         seen: set[DefinitionId] = set()
-        stack = [did for did in target_ids if did in self.definitions_by_id]
+        stack = [did for did in target_ids if did in self._definitions_by_id]
         for did in stack:
-            cdefs[did] = self.definitions_by_id[did].cdef
+            cdefs[did] = self._definitions_by_id[did].cdef
 
         while stack:
             cur = stack.pop()
             if cur in seen:
                 continue
             seen.add(cur)
-            for edge_key in self.incoming_edges.get(cur, ()):
-                edge = self.edge_by_key[edge_key]
+            for edge_key in self._incoming_edges.get(cur, ()):
+                edge = self._edge_by_key[edge_key]
                 incoming[edge.child_id].append(edge)
-                cdefs.setdefault(edge.child_id, self.definitions_by_id[edge.child_id].cdef)
-                cdefs.setdefault(edge.parent_id, self.definitions_by_id[edge.parent_id].cdef)
+                cdefs.setdefault(edge.child_id, self._definitions_by_id[edge.child_id].cdef)
+                cdefs.setdefault(edge.parent_id, self._definitions_by_id[edge.parent_id].cdef)
                 if self.is_stored_id(edge.parent_id):
                     stored_ids.add(edge.parent_id)
                 if edge.parent_id not in seen:
@@ -435,6 +467,7 @@ class MemoryDefinitionGraphReadView:
             cdefs=cdefs,
             stored_ids=stored_ids,
             incoming={child_id: tuple(edges) for child_id, edges in incoming.items()},
+            owner_replicas=self.replica_map(stored_ids),
         )
 
     def iter_all_occurrences(self, *, max_occurrences: int | None = None):
@@ -444,20 +477,20 @@ class MemoryDefinitionGraphReadView:
     def all_occurrence_snapshot(self) -> AllOccurrenceTraversalSnapshot:
         self._check_active()
         return AllOccurrenceTraversalSnapshot(
-            cdefs={did: record.cdef for did, record in self.definitions_by_id.items()},
+            cdefs={did: record.cdef for did, record in self._definitions_by_id.items()},
             stored_ids=self.all_stored_ids(),
             outgoing={
-                parent_id: tuple(self.edge_by_key[key] for key in keys)
-                for parent_id, keys in self.outgoing_edges.items()
+                parent_id: tuple(self._edge_by_key[key] for key in keys)
+                for parent_id, keys in self._outgoing_edges.items()
             },
         )
 
     def _descendant_ids(self, owner_id: DefinitionId) -> set[DefinitionId]:
         self._check_active()
         seen: set[DefinitionId] = set()
-        stack = [self.edge_by_key[key].child_id for key in sorted(
-            self.outgoing_edges.get(owner_id, ()),
-            key=lambda key: str(self.edge_by_key[key].path),
+        stack = [self._edge_by_key[key].child_id for key in sorted(
+            self._outgoing_edges.get(owner_id, ()),
+            key=lambda key: str(self._edge_by_key[key].path),
         )]
         while stack:
             cur = stack.pop()
@@ -465,10 +498,10 @@ class MemoryDefinitionGraphReadView:
                 continue
             seen.add(cur)
             child_edges = sorted(
-                self.outgoing_edges.get(cur, ()),
-                key=lambda key: str(self.edge_by_key[key].path),
+                self._outgoing_edges.get(cur, ()),
+                key=lambda key: str(self._edge_by_key[key].path),
             )
-            stack.extend(self.edge_by_key[key].child_id for key in reversed(child_edges))
+            stack.extend(self._edge_by_key[key].child_id for key in reversed(child_edges))
         return seen
 
 
@@ -513,7 +546,7 @@ class DefinitionCatalog:
         return stores
 
     @contextmanager
-    def read_snapshot(self, *, include_cached: bool = True):
+    def read_view(self, *, include_cached: bool = True):
         with self.lock:
             view = self._read_view_locked(include_cached=include_cached)
             try:
@@ -681,72 +714,62 @@ class DefinitionCatalog:
             return tuple(ids)
 
     def cdef_id(self, cdef: ConcreteDefinition) -> DefinitionId | None:
-        with self.lock:
-            return self.ids_by_cdef.get(cdef)
+        with self.read_view(include_cached=False) as view:
+            return view.cdef_id(cdef)
 
     def exact_ids(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
-        with self.lock:
-            return self._exact_ids_locked(cdef)
+        with self.read_view(include_cached=False) as view:
+            return view.exact_ids(cdef)
 
     def record_for_cdef(self, cdef: ConcreteDefinition) -> DefinitionRecord | None:
-        with self.lock:
-            did = self.ids_by_cdef.get(cdef)
-            return self.definitions_by_id.get(did) if did is not None else None
+        with self.read_view(include_cached=False) as view:
+            return view.record_for_cdef(cdef)
 
     def all_stored_ids(self) -> set[DefinitionId]:
-        with self.lock:
-            return {did for did, stores in self.replicas_by_definition.items() if stores}
+        with self.read_view(include_cached=False) as view:
+            return view.all_stored_ids()
 
     def stored_count(self) -> int:
-        with self.lock:
-            return sum(1 for stores in self.replicas_by_definition.values() if stores)
+        return len(self.all_stored_ids())
 
     def is_stored_id(self, did: DefinitionId) -> bool:
-        with self.lock:
-            return self._is_stored_id_locked(did)
+        with self.read_view(include_cached=False) as view:
+            return view.is_stored_id(did)
 
     def filter_stored_ids(self, ids) -> set[DefinitionId]:
-        with self.lock:
-            return {did for did in ids if self._is_stored_id_locked(did)}
+        with self.read_view(include_cached=False) as view:
+            return view.filter_stored_ids(ids)
 
     def all_known_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
-        cached = self.sync_caches(reuse_weak=reuse_weak)
-        return self.all_stored_ids() | cached
+        self.sync_caches(reuse_weak=reuse_weak)
+        with self.read_view(include_cached=True) as view:
+            return view.all_known_ids(reuse_weak=reuse_weak)
 
     def known_count(self, *, reuse_weak: bool = True) -> int:
-        with self.lock:
-            ids = {did for did, stores in self.replicas_by_definition.items() if stores}
-            for cdef in self._cached_cdefs(reuse_weak=reuse_weak):
-                did = self.ids_by_cdef.get(cdef)
-                if did is not None:
-                    ids.add(did)
-            return len(ids)
+        return len(self.all_known_ids(reuse_weak=reuse_weak))
 
     def all_cached_ids(self, *, reuse_weak: bool = True) -> set[DefinitionId]:
-        return self.sync_caches(reuse_weak=reuse_weak)
+        self.sync_caches(reuse_weak=reuse_weak)
+        with self.read_view(include_cached=True) as view:
+            return view.all_cached_ids(reuse_weak=reuse_weak)
 
     def cached_count(self, *, reuse_weak: bool = True) -> int:
-        return len(self._cached_cdefs(reuse_weak=reuse_weak))
+        return len(self.all_cached_ids(reuse_weak=reuse_weak))
 
     def is_cached_id(self, did: DefinitionId, *, reuse_weak: bool = True) -> bool:
-        with self.lock:
-            record = self.definitions_by_id.get(did)
-        if record is None:
-            return False
-        return self.repo.get_cached(record.cdef, reuse_weak=reuse_weak) is not None
+        self.sync_caches(reuse_weak=reuse_weak)
+        with self.read_view(include_cached=True) as view:
+            return view.is_cached_id(did, reuse_weak=reuse_weak)
 
     def nested_ids(self) -> set[DefinitionId]:
-        with self.lock:
-            nested: set[DefinitionId] = set()
-            for owner_id in self._stored_ids_locked():
-                nested.update(self._descendant_ids_locked(owner_id))
-            return nested
+        with self.read_view(include_cached=False) as view:
+            return view.nested_ids()
 
     def all_occurrences(self) -> tuple[DefinitionOccurrence, ...]:
         return tuple(self.iter_all_occurrences())
 
     def iter_all_occurrences(self, *, max_occurrences: int | None = None):
-        with self.read_snapshot(include_cached=False) as snapshot:
+        with self.read_view(include_cached=False) as snapshot:
             traversal = snapshot.all_occurrence_snapshot()
         return traversal.iter_occurrences(max_occurrences=max_occurrences)
 
@@ -758,64 +781,40 @@ class DefinitionCatalog:
             ids: set[DefinitionId],
             *,
             max_occurrences: int | None = None):
-        with self.read_snapshot(include_cached=False) as snapshot:
+        with self.read_view(include_cached=False) as snapshot:
             traversal = snapshot.occurrence_snapshot_for_nested_ids(ids)
         return traversal.iter_occurrences(max_occurrences=max_occurrences)
 
     def owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
-        with self.lock:
-            owners: set[DefinitionId] = set()
-            seen: set[DefinitionId] = set(ids)
-            stack = list(ids)
-            while stack:
-                cur = stack.pop()
-                for edge_key in self.incoming_edges.get(cur, ()):
-                    parent_id = self.edge_by_key[edge_key].parent_id
-                    if self._is_stored_id_locked(parent_id):
-                        owners.add(parent_id)
-                    if parent_id not in seen:
-                        seen.add(parent_id)
-                        stack.append(parent_id)
-            return owners
+        with self.read_view(include_cached=False) as view:
+            return view.owner_ids_for_nested_ids(ids)
 
     def filter_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
-        with self.lock:
-            return {
-                did
-                for did in ids
-                if self._has_stored_ancestor_locked(did)
-            }
+        with self.read_view(include_cached=False) as view:
+            return view.filter_nested_ids(ids)
 
     def has_stored_ancestor(self, did: DefinitionId) -> bool:
-        with self.lock:
-            return self._has_stored_ancestor_locked(did)
+        with self.read_view(include_cached=False) as view:
+            return view.has_stored_ancestor(did)
 
     def all_definition_ids(self) -> set[DefinitionId]:
-        with self.lock:
-            return set(self.definitions_by_id)
+        with self.read_view(include_cached=False) as view:
+            return view.all_definition_ids()
 
     def definition_for_id(self, did: DefinitionId) -> ConcreteDefinition:
-        return self.definitions_by_id[did].cdef
+        with self.read_view(include_cached=False) as view:
+            return view.definition_for_id(did)
 
     def ids_to_cdefs(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> tuple[ConcreteDefinition, ...]:
-        with self.lock:
-            return tuple(self.definitions_by_id[did].cdef for did in ids if did in self.definitions_by_id)
+        with self.read_view(include_cached=False) as view:
+            return view.ids_to_cdefs(ids)
 
     def stores_for_cdef(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:
-        with self.lock:
-            did = self.ids_by_cdef.get(cdef)
+        with self.read_view(include_cached=False) as view:
+            did = view.cdef_id(cdef)
             if did is None:
                 return ()
-            store_ids = self.replicas_by_definition.get(did, set())
-            seen: set[StoreId] = set()
-            stores = []
-            for store in self.repo.stores:
-                sid = self.store_id(store)
-                if sid in store_ids and sid not in seen:
-                    seen.add(sid)
-                    stores.append(store)
-            extras = [self.store_by_id[sid] for sid in sorted(store_ids - seen)]
-            return tuple(stores + extras)
+            return view.replica_map({did}).get(cdef, ())
 
     def local_candidates(
             self,
@@ -824,61 +823,24 @@ class DefinitionCatalog:
             within: set[DefinitionId] | None = None,
             domain=None,
             stats: QueryStats | None = None) -> set[DefinitionId]:
-        with self.lock:
-            return self._candidate_ids_from_postings(
-                within,
-                requirements,
-                self.local_postings,
-                domain=domain,
-                stats=stats,
-            )
+        with self.read_view(include_cached=False) as view:
+            return view.local_candidates(requirements, within=within, domain=domain, stats=stats)
 
     def estimate_local_candidates(self, requirements: tuple[FeatureRequirement, ...]) -> int:
-        with self.lock:
-            if not requirements:
-                return len(self.definitions_by_id)
-            return min(len(self.local_postings.get(req.token, {})) for req in requirements)
+        with self.read_view(include_cached=False) as view:
+            return view.estimate_local_candidates(requirements)
 
     def estimate_exact_ids(self, cdef: ConcreteDefinition) -> int:
-        with self.lock:
-            digest = cdef.stable_hash()
-            return sum(
-                1
-                for did in self.ids_by_stable_hash.get(digest, set())
-                if same_cdef(self.definitions_by_id[did].cdef, cdef)
-            )
+        with self.read_view(include_cached=False) as view:
+            return view.estimate_exact_ids(cdef)
 
     def parent_ids_for_children(self, child_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
-        with self.lock:
-            if not child_ids:
-                return set()
-            out = set()
-            if unordered:
-                for child_id in child_ids:
-                    for edge_key in self.incoming_edges.get(child_id, ()):
-                        record = self.edge_by_key[edge_key]
-                        if record.path.startswith(path):
-                            out.add(record.parent_id)
-                return out
-            for child_id in child_ids:
-                out.update(self.parents_by_child_path.get((child_id, path), set()))
-            return out
+        with self.read_view(include_cached=False) as view:
+            return view.parent_ids_for_children(child_ids, path, unordered=unordered)
 
     def child_ids_for_parents(self, parent_ids: set[DefinitionId], path: DefinitionPath, *, unordered: bool) -> set[DefinitionId]:
-        with self.lock:
-            if not parent_ids:
-                return set()
-            out = set()
-            if unordered:
-                for parent_id in parent_ids:
-                    for edge_key in self.outgoing_edges.get(parent_id, ()):
-                        record = self.edge_by_key[edge_key]
-                        if record.path.startswith(path):
-                            out.add(record.child_id)
-                return out
-            for parent_id in parent_ids:
-                out.update(self.child_by_parent_path.get((parent_id, path), set()))
-            return out
+        with self.read_view(include_cached=False) as view:
+            return view.child_ids_for_parents(parent_ids, path, unordered=unordered)
 
     def parent_ids_with_matching_child(
             self,
@@ -887,22 +849,8 @@ class DefinitionCatalog:
             path: DefinitionPath,
             *,
             unordered: bool) -> set[DefinitionId]:
-        with self.lock:
-            if not parent_ids or not child_ids:
-                return set()
-            out = set()
-            if unordered:
-                for parent_id in parent_ids:
-                    for edge_key in self.outgoing_edges.get(parent_id, ()):
-                        record = self.edge_by_key[edge_key]
-                        if record.child_id in child_ids and record.path.startswith(path):
-                            out.add(parent_id)
-                            break
-                return out
-            for parent_id in parent_ids:
-                if self.child_by_parent_path.get((parent_id, path), set()) & child_ids:
-                    out.add(parent_id)
-            return out
+        with self.read_view(include_cached=False) as view:
+            return view.parent_ids_with_matching_child(parent_ids, child_ids, path, unordered=unordered)
 
     def child_ids_with_matching_parent(
             self,
@@ -911,22 +859,8 @@ class DefinitionCatalog:
             path: DefinitionPath,
             *,
             unordered: bool) -> set[DefinitionId]:
-        with self.lock:
-            if not parent_ids or not child_ids:
-                return set()
-            out = set()
-            if unordered:
-                for child_id in child_ids:
-                    for edge_key in self.incoming_edges.get(child_id, ()):
-                        record = self.edge_by_key[edge_key]
-                        if record.parent_id in parent_ids and record.path.startswith(path):
-                            out.add(child_id)
-                            break
-                return out
-            for child_id in child_ids:
-                if self.parents_by_child_path.get((child_id, path), set()) & parent_ids:
-                    out.add(child_id)
-            return out
+        with self.read_view(include_cached=False) as view:
+            return view.child_ids_with_matching_parent(parent_ids, child_ids, path, unordered=unordered)
 
     def _hydrate_stores(self, stores, *, stats: QueryStats | None = None) -> None:
         build_repo = _CatalogBuildRepo(self.repo)
@@ -1103,14 +1037,6 @@ class DefinitionCatalog:
             self.local_postings[token][did] = count
         return did, True
 
-    def _exact_ids_locked(self, cdef: ConcreteDefinition) -> set[DefinitionId]:
-        digest = cdef.stable_hash()
-        return {
-            did
-            for did in self.ids_by_stable_hash.get(digest, set())
-            if same_cdef(self.definitions_by_id[did].cdef, cdef)
-        }
-
     def _register_graph_structure_locked(self, graph: ConcreteDefinitionGraph) -> bool:
         before = (len(self.definitions_by_id), len(self.edge_by_key))
         for node in graph.nodes():
@@ -1127,65 +1053,11 @@ class DefinitionCatalog:
                 self.parents_by_child_path[(child_id, edge.path)].add(parent_id)
         return (len(self.definitions_by_id), len(self.edge_by_key)) != before
 
-    def _candidate_ids_from_postings(
-            self,
-            universe_ids: set[DefinitionId] | None,
-            requirements: tuple[FeatureRequirement, ...],
-            postings: dict[FeatureToken, dict[DefinitionId, int]],
-            *,
-            domain=None,
-            stats: QueryStats | None = None) -> set[DefinitionId]:
-        return _candidate_ids_from_postings_data(
-            self.definitions_by_id,
-            universe_ids,
-            requirements,
-            postings,
-            domain=domain,
-            stats=stats,
-        )
-
     def _cached_cdefs(self, *, reuse_weak: bool = True) -> tuple[ConcreteDefinition, ...]:
         cdefs = list(self.repo.strong_obj_cache.keys())
         if reuse_weak:
             cdefs.extend(self.repo.weak_obj_cache.keys())
         return tuple(dict.fromkeys(cdefs))
-
-    def _stored_ids_locked(self) -> set[DefinitionId]:
-        return {did for did, stores in self.replicas_by_definition.items() if stores}
-
-    def _is_stored_id_locked(self, did: DefinitionId) -> bool:
-        return bool(self.replicas_by_definition.get(did))
-
-    def _descendant_ids_locked(self, owner_id: DefinitionId) -> set[DefinitionId]:
-        seen: set[DefinitionId] = set()
-        stack = [self.edge_by_key[key].child_id for key in sorted(
-            self.outgoing_edges.get(owner_id, ()),
-            key=lambda key: str(self.edge_by_key[key].path),
-        )]
-        while stack:
-            cur = stack.pop()
-            if cur in seen:
-                continue
-            seen.add(cur)
-            child_edges = sorted(
-                self.outgoing_edges.get(cur, ()),
-                key=lambda key: str(self.edge_by_key[key].path),
-            )
-            stack.extend(self.edge_by_key[key].child_id for key in reversed(child_edges))
-        return seen
-
-    def _has_stored_ancestor_locked(self, did: DefinitionId) -> bool:
-        seen: set[DefinitionId] = set()
-        stack = [self.edge_by_key[key].parent_id for key in self.incoming_edges.get(did, ())]
-        while stack:
-            cur = stack.pop()
-            if cur in seen:
-                continue
-            if self._is_stored_id_locked(cur):
-                return True
-            seen.add(cur)
-            stack.extend(self.edge_by_key[key].parent_id for key in self.incoming_edges.get(cur, ()))
-        return False
 
 def _candidate_ids_from_postings_data(
         definitions_by_id: dict[DefinitionId, DefinitionRecord],

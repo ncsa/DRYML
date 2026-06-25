@@ -16,6 +16,7 @@ from .graph_plan import graph_candidate_ids
 from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
     ClassMatchPolicy,
+    DefinitionId,
     DefinitionOccurrence,
     QueryDomain,
     QueryDomainError,
@@ -28,6 +29,13 @@ from .model import (
 from .path import DefinitionPathLike, QueryPathError, get_subtree, normalize_path, replace_subtree
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
 from .selector_graph import compile_selector_graph
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedNestedCandidates:
+    cdefs_by_id: dict[DefinitionId, ConcreteDefinition]
+    traversal: Any
+    stats: QueryStats
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,7 +275,7 @@ class DefinitionQuery:
 
         live_domain = self._definition_domain(catalog)
         live_domain.prepare(stats=stats)
-        with catalog.read_snapshot(include_cached=self.domain in {"cached", "known"}) as snapshot:
+        with catalog.read_view(include_cached=self.domain in {"cached", "known"}) as snapshot:
             domain = live_domain.with_catalog(snapshot)
             if exact_root is not None and self.domain in {"stored", "cached", "known"}:
                 candidate_ids = domain.filter(snapshot.exact_ids(exact_root))
@@ -315,33 +323,16 @@ class DefinitionQuery:
             if self.occurrence_limit is not None:
                 out = out[:self.occurrence_limit]
             stats.result_count = len(out)
-            return out, stats, None
+            return out, stats, self.universe.replicas
 
         catalog = self.repo._query_catalog
-        catalog.refresh(self.refresh_policy, stats=stats)
-        with catalog.read_snapshot(include_cached=False) as snapshot:
-            selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
-            if selector_graph is not None:
-                candidate_ids = graph_candidate_ids(snapshot, selector_graph, None, stats=stats)
-                candidate_ids = snapshot.filter_nested_ids(candidate_ids)
-                stats.candidate_count = len(candidate_ids)
-            else:
-                domain = NestedDomain(snapshot)
-                requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-                if requirements:
-                    candidate_ids = snapshot.local_candidates(requirements, domain=domain, stats=stats)
-                else:
-                    candidate_ids = domain.all_ids()
-                    stats.candidate_count = len(candidate_ids)
-                    stats.universe_size = len(candidate_ids)
-            cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
-            traversal = snapshot.occurrence_snapshot_for_nested_ids(candidate_ids)
-            owner_replicas = snapshot.replica_map(traversal.owner_ids_for_nested_ids(candidate_ids))
-        cdefs = tuple(cdefs_by_id.values())
+        captured = self._capture_nested_candidates(catalog, stats)
+        cdefs = tuple(captured.cdefs_by_id.values())
         matches = self._verify_cdefs(cdefs, stats=stats)
         match_set = set(matches)
-        match_ids = {did for did, cdef in cdefs_by_id.items() if cdef in match_set}
-        traversal = traversal.restrict_targets(match_ids)
+        match_ids = {did for did, cdef in captured.cdefs_by_id.items() if cdef in match_set}
+        traversal = captured.traversal.restrict_targets(match_ids)
+        owner_replicas = traversal.owner_replicas_for_nested_ids(match_ids)
 
         def occurrence_factory():
             return traversal.iter_occurrences(max_occurrences=self.occurrence_limit)
@@ -349,23 +340,32 @@ class DefinitionQuery:
         return occurrence_factory, stats, owner_replicas
 
     def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
-        matches, _, stats, _, _ = self._execute_nested_definition_matches()
+        matches, _, stats, _ = self._execute_nested_definition_matches()
         stats.result_count = len(matches)
         return matches, stats
 
     def _execute_nested_owners(self):
-        matches, match_ids, stats, traversal, owner_replicas = self._execute_nested_definition_matches()
+        matches, match_ids, stats, traversal = self._execute_nested_definition_matches()
         owner_ids = traversal.owner_ids_for_nested_ids(match_ids)
         owners = tuple(traversal.cdefs[owner_id] for owner_id in owner_ids if owner_id in traversal.cdefs)
         stats.result_count = len(owners)
         owners = tuple(sorted(owners, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+        owner_replicas = traversal.owner_replicas_for_nested_ids(match_ids)
         return owners, stats, {cdef: owner_replicas.get(cdef, ()) for cdef in owners}
 
     def _execute_nested_definition_matches(self):
         stats = QueryStats()
         catalog = self.repo._query_catalog
+        captured = self._capture_nested_candidates(catalog, stats)
+        cdefs = tuple(captured.cdefs_by_id.values())
+        matches = self._verify_cdefs(cdefs, stats=stats)
+        match_set = set(matches)
+        match_ids = {did for did, cdef in captured.cdefs_by_id.items() if cdef in match_set}
+        return matches, match_ids, stats, captured.traversal
+
+    def _capture_nested_candidates(self, catalog, stats: QueryStats) -> CapturedNestedCandidates:
         catalog.refresh(self.refresh_policy, stats=stats)
-        with catalog.read_snapshot(include_cached=False) as snapshot:
+        with catalog.read_view(include_cached=False) as snapshot:
             selector_graph = compile_selector_graph(self.selector, class_match=self.class_match_policy)
             if selector_graph is not None:
                 candidate_ids = graph_candidate_ids(snapshot, selector_graph, None, stats=stats)
@@ -382,12 +382,7 @@ class DefinitionQuery:
                     stats.universe_size = len(candidate_ids)
             cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
             traversal = snapshot.occurrence_snapshot_for_nested_ids(candidate_ids)
-            owner_replicas = snapshot.replica_map(traversal.owner_ids_for_nested_ids(candidate_ids))
-        cdefs = tuple(cdefs_by_id.values())
-        matches = self._verify_cdefs(cdefs, stats=stats)
-        match_set = set(matches)
-        match_ids = {did for did, cdef in cdefs_by_id.items() if cdef in match_set}
-        return matches, match_ids, stats, traversal, owner_replicas
+        return CapturedNestedCandidates(cdefs_by_id=cdefs_by_id, traversal=traversal, stats=stats)
 
     def _verify_cdefs(
             self,

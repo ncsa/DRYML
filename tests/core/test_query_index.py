@@ -6,10 +6,10 @@ from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query import QueryIndexError, SetMember
-from dryml.core2.query.index import OccurrenceTraversalSnapshot
+from dryml.core2.query import QueryDomainError, QueryIndexError, SetMember
+from dryml.core2.query.index import MemoryDefinitionGraphReadView, OccurrenceTraversalSnapshot
 from dryml.core2.query.path import get_subtree
-from dryml.core2.query.result import DefinitionResultSet
+from dryml.core2.query.result import DefinitionResultSet, OccurrenceResultSet
 from dryml.core2.store.dir import DirStore
 from dryml.core2.store.store import Store
 from dryml.core2.utils.general import pickle_load, pickle_save
@@ -621,11 +621,39 @@ def test_read_view_is_context_bound():
     obj = IndexLeaf("x", repo=repo)
     repo.add_objects(obj)
 
-    with repo._query_catalog.read_snapshot() as view:
+    with repo._query_catalog.read_view() as view:
         assert view.all_definition_ids()
 
     with pytest.raises(QueryIndexError):
         view.all_definition_ids()
+
+
+def test_read_view_backing_state_is_private():
+    repo = Repo()
+    repo.add_objects(IndexLeaf("x", repo=repo))
+
+    with repo._query_catalog.read_view() as view:
+        with pytest.raises(AttributeError):
+            view.definitions_by_id
+        with pytest.raises(AttributeError):
+            view.local_postings
+
+
+def test_catalog_read_wrappers_delegate_to_memory_view(monkeypatch):
+    repo = Repo()
+    obj = IndexLeaf("x", repo=repo)
+    repo.add_objects(obj)
+    calls = []
+    original = MemoryDefinitionGraphReadView.exact_ids
+
+    def spy_exact_ids(self, cdef):
+        calls.append(cdef)
+        return original(self, cdef)
+
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "exact_ids", spy_exact_ids)
+
+    assert repo._query_catalog.exact_ids(obj.definition)
+    assert calls == [obj.definition]
 
 
 def test_structural_verification_does_not_hold_catalog_lock(monkeypatch):
@@ -702,6 +730,17 @@ def test_definition_resultset_requires_explicit_replicas():
 
     with pytest.raises(ValueError):
         DefinitionResultSet(repo, [cdef])
+
+
+def test_materializable_result_requires_replica_entry_for_every_definition():
+    repo = Repo()
+    cdef = IndexLeaf("x").definition
+
+    with pytest.raises(ValueError):
+        DefinitionResultSet(repo, [cdef], materializable=True, replicas={})
+
+    result = DefinitionResultSet(repo, [cdef], materializable=True, replicas={cdef: ()})
+    assert result.replicas(cdef) == ()
 
 
 def test_nested_definition_result_does_not_lookup_live_replicas(monkeypatch, tmp_path):
@@ -838,6 +877,24 @@ def test_occurrence_result_repeated_iteration_is_stable(tmp_path):
     assert len(first) == 2
 
 
+def test_occurrence_restrict_targets_shares_traversal_backing():
+    child = IndexLeaf("child")
+    other = IndexLeaf("other")
+    snapshot = OccurrenceTraversalSnapshot(
+        targets={"child", "other"},
+        cdefs={"child": child.definition, "other": other.definition},
+        stored_ids=set(),
+        incoming={},
+    )
+
+    restricted = snapshot.restrict_targets({"child"})
+
+    assert restricted.targets == frozenset({"child"})
+    assert restricted.cdefs is snapshot.cdefs
+    assert restricted.incoming is snapshot.incoming
+    assert restricted.owner_replicas is snapshot.owner_replicas
+
+
 def test_occurrence_first_count_and_iteration_use_same_snapshot(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
@@ -852,6 +909,82 @@ def test_occurrence_first_count_and_iteration_use_same_snapshot(tmp_path):
     assert first.owner == parent.definition
     assert occurrences.count() == 2
     assert {occ.owner for occ in occurrences} == {parent.definition}
+
+
+def test_occurrence_refine_preserves_owner_replicas(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, SKIP_ARGS)).nested(refresh=False).execute()
+    refined = occurrences.refine(Definition(IndexLeaf, "child"))
+    owners = refined.owners()
+
+    assert list(owners) == [parent.definition]
+    assert owners.replicas(parent.definition) == (store,)
+
+
+def test_occurrence_refined_owners_retain_snapshot_after_refresh(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    owners = (
+        repo.query(Definition(IndexLeaf, SKIP_ARGS))
+        .nested(refresh=False)
+        .execute()
+        .refine(Definition(IndexLeaf, "child"))
+        .owners()
+    )
+    shutil.rmtree(store.object_dir(parent.definition))
+    assert repo.find_defs(None, refresh=True).count() == 0
+
+    assert list(owners) == [parent.definition]
+    assert owners.replicas(parent.definition) == (store,)
+
+
+def test_occurrence_union_preserves_owner_replicas(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+    owners = occurrences.union(OccurrenceResultSet(repo, [])).owners()
+
+    assert list(owners) == [parent.definition]
+    assert owners.replicas(parent.definition) == (store,)
+
+
+def test_occurrence_intersection_preserves_owner_replicas(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    repo.save_object(parent)
+
+    occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
+    owners = occurrences.intersection(occurrences).owners()
+
+    assert list(owners) == [parent.definition]
+    assert owners.replicas(parent.definition) == (store,)
+
+
+def test_occurrence_owners_require_replica_metadata():
+    repo = Repo()
+    child = IndexLeaf("child")
+    parent = IndexPersistent(child)
+    from dryml.core2.query.model import DefinitionOccurrence
+    from dryml.core2.query.path import GraphPath
+
+    occurrence = DefinitionOccurrence(parent.definition, GraphPath(), child.definition)
+    with pytest.raises(QueryDomainError):
+        OccurrenceResultSet(repo, [occurrence]).owners()
 
 
 def test_auto_hydration_failure_leaves_catalog_unchanged_and_retries(tmp_path):
