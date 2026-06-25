@@ -725,9 +725,10 @@ class _ThawValueTransformer(GraphTransformer):
 
 
 class _FromCanonicalTransformer(GraphTransformer):
-    def __init__(self, repo: "Repo", config: RepoLoadOptions):
+    def __init__(self, repo: "Repo", config: RepoLoadOptions, *, resolve_cdef=None):
         self.repo = repo
         self.config = config
+        self.resolve_cdef = resolve_cdef
 
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
         return node_kind(obj) in {
@@ -768,6 +769,8 @@ class _FromCanonicalTransformer(GraphTransformer):
             return np.array(obj, copy=True)
 
         if kind is NodeKind.CONCRETE_DEFINITION:
+            if self.resolve_cdef is not None:
+                return self.resolve_cdef(obj)
             return self.repo._materialize_cdef(
                 obj,
                 options=self.config,
@@ -777,6 +780,8 @@ class _FromCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.DEFINITION:
             cdef = to_canonical(obj, repo=self.repo)
+            if self.resolve_cdef is not None:
+                return self.resolve_cdef(cdef)
             return self.repo._materialize_cdef(
                 cdef,
                 options=self.config,
@@ -785,6 +790,8 @@ class _FromCanonicalTransformer(GraphTransformer):
             )
 
         if kind is NodeKind.OBJECT:
+            if self.resolve_cdef is not None:
+                return self.resolve_cdef(obj.definition)
             if self.config.instance == "new":
                 return self.repo._materialize_cdef(
                     obj.definition,
@@ -870,6 +877,7 @@ def from_canonical(
     revision=None,
     memo: dict | None = None,
     path: list[str | int] | tuple[str | int, ...] | None = None,
+    resolve_cdef=None,
 ):
     if memo is None:
         memo = {}
@@ -887,4 +895,4 @@ def from_canonical(
         path=tuple(path) if path is not None else (),
         memo=memo,
     )
-    return _FromCanonicalTransformer(repo, cfg).transform(x, ctx)
+    return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)

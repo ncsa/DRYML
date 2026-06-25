@@ -11,7 +11,6 @@ from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
 from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..utils.types import is_nonclass_callable
-from .fingerprint import selector_requirements
 from .graph_plan import graph_candidate_ids
 from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
@@ -243,13 +242,49 @@ class DefinitionQuery:
         return result.objects(**load_options)
 
     def count(self) -> int:
-        return self.execute().count()
+        return self._execute_count()
 
     def exists(self) -> bool:
-        return self.count() > 0
+        if self.domain == "nested" and self.projection is None and self.universe is None:
+            occurrences, _, _ = self._execute_nested_occurrences()
+            if callable(occurrences):
+                return next(iter(occurrences()), None) is not None
+            return bool(occurrences)
+        return self._execute_count() > 0
 
     def explain(self) -> QueryExplanation:
-        return self.execute().explanation
+        return self._execute_explanation()
+
+    def _execute_count(self) -> int:
+        self._require_domain()
+        if self.domain == "nested":
+            if self.universe is None and self.projection == "definitions":
+                cdefs, _ = self._execute_nested_definitions()
+                return len(cdefs)
+            if self.universe is None and self.projection == "owners":
+                cdefs, _, _ = self._execute_nested_owners()
+                return len(cdefs)
+            occurrences, _, _ = self._execute_nested_occurrences()
+            if callable(occurrences):
+                return sum(1 for _ in occurrences())
+            return len(occurrences)
+
+        cdefs, _, _ = self._execute_definition_domain()
+        return len(cdefs)
+
+    def _execute_explanation(self) -> QueryExplanation:
+        self._require_domain()
+        if self.domain == "nested":
+            if self.universe is None and self.projection == "definitions":
+                _, stats = self._execute_nested_definitions()
+            elif self.universe is None and self.projection == "owners":
+                _, stats, _ = self._execute_nested_owners()
+            else:
+                _, stats, _ = self._execute_nested_occurrences()
+            return stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+
+        _, stats, _ = self._execute_definition_domain()
+        return stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
 
     def _require_domain(self) -> None:
         if self.domain is None:
@@ -296,10 +331,9 @@ class DefinitionQuery:
                 if selector_graph is not None:
                     candidate_ids = graph_candidate_ids(snapshot, selector_graph, domain, stats=stats)
                 else:
-                    requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-                    candidate_ids = snapshot.local_candidates(requirements, domain=domain, stats=stats)
-                    if not requirements:
-                        stats.universe_size = len(candidate_ids)
+                    candidate_ids = domain.all_ids()
+                    stats.candidate_count = len(candidate_ids)
+                    stats.universe_size = len(candidate_ids)
             cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
             replicas = snapshot.replica_map(candidate_ids)
         cdefs = tuple(cdefs_by_id.values())
@@ -391,13 +425,9 @@ class DefinitionQuery:
                 stats.candidate_count = len(candidate_ids)
             else:
                 domain = NestedDomain(snapshot)
-                requirements = selector_requirements(self.selector, class_match=self.class_match_policy) if self.selector is not None else ()
-                if requirements:
-                    candidate_ids = snapshot.local_candidates(requirements, domain=domain, stats=stats)
-                else:
-                    candidate_ids = domain.all_ids()
-                    stats.candidate_count = len(candidate_ids)
-                    stats.universe_size = None
+                candidate_ids = domain.all_ids()
+                stats.candidate_count = len(candidate_ids)
+                stats.universe_size = None
             cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
             generation = snapshot.generation
         return CapturedNestedCandidates(generation=generation, cdefs_by_id=cdefs_by_id, stats=stats)

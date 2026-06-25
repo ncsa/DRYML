@@ -14,7 +14,8 @@ from .model import (
 from .path import DefinitionPath
 
 
-def target_fingerprint(cdef: ConcreteDefinition) -> DefinitionFingerprint:
+def legacy_target_fingerprint(cdef: ConcreteDefinition) -> DefinitionFingerprint:
+    """Legacy recursive fingerprint retained as a scan-only test oracle."""
     counts: Counter[FeatureToken] = Counter()
     walk_local_structure(cdef, _FeatureCounter(counts), mode="target-full")
     return DefinitionFingerprint(dict(counts))
@@ -26,10 +27,11 @@ def target_local_fingerprint(cdef: ConcreteDefinition) -> DefinitionFingerprint:
     return DefinitionFingerprint(dict(counts))
 
 
-def selector_requirements(
+def legacy_selector_requirements(
         selector: Any,
         *,
         class_match: ClassMatchPolicy = "selector") -> tuple[FeatureRequirement, ...]:
+    """Legacy recursive selector requirements retained as a scan-only test oracle."""
     counts: Counter[FeatureToken] = Counter()
     walk_local_structure(selector, _FeatureCounter(counts), mode="selector-full", class_match=class_match)
     return tuple(
@@ -74,7 +76,7 @@ class _FeatureCounter:
             if self.include_edge_class:
                 _add(self.counts, "CDEF_EDGE_CLASS", path, canonical_class_key(definition.cls))
 
-def requirements_satisfied(fingerprint: DefinitionFingerprint, requirements: tuple[FeatureRequirement, ...]) -> bool:
+def legacy_requirements_satisfied(fingerprint: DefinitionFingerprint, requirements: tuple[FeatureRequirement, ...]) -> bool:
     for req in requirements:
         if fingerprint.counts.get(req.token, 0) < req.count:
             return False

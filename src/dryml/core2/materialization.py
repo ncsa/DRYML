@@ -3,12 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import numpy as np
-
-from .canonical import NodeKind, node_kind, transform_container
+from .canonical import from_canonical
 from .cdef_graph import ConcreteDefinitionGraph
 from .definition import ConcreteDefinition, Definition
-from .freeze import FrozenNDArray
 from .object import Object, Serializable
 from .policies import CachePolicy, RepoLoadOptions
 from .symbol import resolve_symbol
@@ -166,38 +163,7 @@ def execute_materialization_plan(
 
 
 def from_canonical_local(value: Any, *, resolve_cdef, repo):
-    kind = node_kind(value)
-    if kind in {NodeKind.POD, NodeKind.TYPE, NodeKind.IDENTITY_VALUE}:
-        return value
-    if kind is NodeKind.FROZEN_NDARRAY:
-        return value.thaw() if hasattr(value, "thaw") else np.array(value, copy=True)
-    if kind is NodeKind.NDARRAY:
-        return np.array(value, copy=True)
-    if kind is NodeKind.CONCRETE_DEFINITION:
-        return resolve_cdef(value)
-    if kind is NodeKind.DEFINITION:
-        cdef = value.concretize(repo=repo)
-        return resolve_cdef(cdef)
-    if kind is NodeKind.OBJECT:
-        return resolve_cdef(value.definition)
-    if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC}:
-        return resolve_symbol(value)
-    if kind in {
-        NodeKind.FROZEN_LIST,
-        NodeKind.FROZEN_TUPLE,
-        NodeKind.FROZEN_SET,
-        NodeKind.FROZEN_DICT,
-        NodeKind.LIST,
-        NodeKind.TUPLE,
-        NodeKind.SET,
-        NodeKind.DICT,
-    }:
-        return transform_container(
-            value,
-            lambda _, child: from_canonical_local(child, resolve_cdef=resolve_cdef, repo=repo),
-            target="runtime",
-        )
-    raise TypeError(f"Cannot de-canonicalize value of type {type(value).__name__}")
+    return from_canonical(value, repo=repo, resolve_cdef=resolve_cdef, restore_state=False)
 
 
 def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefinition, options: RepoLoadOptions, memo: dict) -> set[ConcreteDefinition]:

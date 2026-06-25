@@ -67,7 +67,7 @@ assert "torch" not in sys.modules
 from dryml.core2 import Repo
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.fingerprint import target_fingerprint
+from dryml.core2.query.fingerprint import legacy_target_fingerprint
 from dryml.core2.symbol import ImportRef
 
 cdef = ConcreteDefinition(
@@ -78,7 +78,7 @@ cdef = ConcreteDefinition(
 
 repo = Repo()
 repo._query_catalog.register_cached(cdef)
-target_fingerprint(cdef)
+legacy_target_fingerprint(cdef)
 assert repo._query_catalog.cdef_id(cdef) is not None
 assert repo.query(cdef).cached().count() == 0
 repo.query(cdef).cached().explain()

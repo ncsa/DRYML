@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import pytest
 import shutil
 import threading
@@ -98,6 +99,100 @@ class NoFullIterationDict(dict):
 
     def copy(self):
         raise AssertionError("query should not copy this complete mapping")
+
+
+class ProtocolOnlyCatalog:
+    def __init__(self, catalog):
+        self._catalog = catalog
+
+    @contextmanager
+    def read_view(self, *, include_cached=True):
+        with self._catalog.read_view(include_cached=include_cached) as view:
+            yield ProtocolOnlyReadView(view)
+
+    def refresh(self, policy, *, stats=None):
+        return self._catalog.refresh(policy, stats=stats)
+
+    def ensure_exact_stored(self, cdef, *, stats=None):
+        return self._catalog.ensure_exact_stored(cdef, stats=stats)
+
+    def sync_caches(self, *, reuse_weak=True):
+        return self._catalog.sync_caches(reuse_weak=reuse_weak)
+
+    def __getattr__(self, name):
+        raise AssertionError(f"query backend contract does not expose {name}")
+
+
+class ProtocolOnlyReadView:
+    def __init__(self, view):
+        self._view = view
+
+    @property
+    def generation(self):
+        return self._view.generation
+
+    def all_definition_ids(self):
+        return self._view.all_definition_ids()
+
+    def estimate_exact_ids(self, cdef):
+        return self._view.estimate_exact_ids(cdef)
+
+    def estimate_local_candidates(self, requirements):
+        return self._view.estimate_local_candidates(requirements)
+
+    def exact_ids(self, cdef):
+        return self._view.exact_ids(cdef)
+
+    def local_candidates(self, requirements, *, within=None, domain=None, stats=None):
+        return self._view.local_candidates(requirements, within=within, domain=domain, stats=stats)
+
+    def parents(self, child_ids, path, *, unordered, within=None):
+        return self._view.parents(child_ids, path, unordered=unordered, within=within)
+
+    def children(self, parent_ids, path, *, unordered, within=None):
+        return self._view.children(parent_ids, path, unordered=unordered, within=within)
+
+    def is_stored_id(self, did):
+        return self._view.is_stored_id(did)
+
+    def filter_stored_ids(self, ids):
+        return self._view.filter_stored_ids(ids)
+
+    def all_stored_ids(self):
+        return self._view.all_stored_ids()
+
+    def is_cached_id(self, did, *, reuse_weak=True):
+        return self._view.is_cached_id(did, reuse_weak=reuse_weak)
+
+    def all_cached_ids(self, *, reuse_weak=True):
+        return self._view.all_cached_ids(reuse_weak=reuse_weak)
+
+    def all_known_ids(self, *, reuse_weak=True):
+        return self._view.all_known_ids(reuse_weak=reuse_weak)
+
+    def nested_ids(self):
+        return self._view.nested_ids()
+
+    def filter_nested_ids(self, ids):
+        return self._view.filter_nested_ids(ids)
+
+    def has_stored_ancestor(self, did):
+        return self._view.has_stored_ancestor(did)
+
+    def cdefs_by_id(self, ids):
+        return self._view.cdefs_by_id(ids)
+
+    def replica_map(self, ids):
+        return self._view.replica_map(ids)
+
+    def project_owners(self, ids):
+        return self._view.project_owners(ids)
+
+    def occurrence_snapshot_for_nested_ids(self, target_ids):
+        return self._view.occurrence_snapshot_for_nested_ids(target_ids)
+
+    def __getattr__(self, name):
+        raise AssertionError(f"query read-view contract does not expose {name}")
 
 
 def guard_full_index_iteration(catalog):
@@ -784,6 +879,43 @@ def test_nested_definition_explanation_does_not_report_candidate_count_as_univer
     assert explanation.universe_size is None
 
 
+def test_count_and_explain_do_not_construct_definition_resultset(monkeypatch, tmp_path):
+    import dryml.core2.query.query as query_mod
+
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    obj = IndexLeaf("stored", repo=repo)
+    repo.save_object(obj)
+
+    def fail_resultset(*args, **kwargs):
+        raise AssertionError("terminal helper should not build a DefinitionResultSet")
+
+    monkeypatch.setattr(query_mod, "DefinitionResultSet", fail_resultset)
+
+    query = repo.query(Definition(IndexLeaf, "stored")).stored(refresh=False)
+
+    assert query.count() == 1
+    assert query.explain().candidate_count == 1
+
+
+def test_raw_occurrence_exists_stops_at_first_occurrence(monkeypatch, tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = IndexLeaf("child", repo=repo)
+    repo.save_object(IndexPersistent(child, repo=repo))
+    original = OccurrenceTraversalSnapshot.iter_occurrences
+    yielded = 0
+
+    def spy_iter(self, *, max_occurrences=None):
+        nonlocal yielded
+        for occ in original(self, max_occurrences=max_occurrences):
+            yielded += 1
+            yield occ
+
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
+
+    assert repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).exists() is True
+    assert yielded == 1
+
+
 def test_occurrence_definitions_do_not_query_live_catalog(monkeypatch, tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
     child = IndexLeaf("child", repo=repo)
@@ -971,6 +1103,37 @@ def test_owner_deletion_between_capture_and_projection_is_not_mixed(monkeypatch)
 
     assert set(owners) == {owner1.definition}
     assert captures == 2
+
+
+def test_repo_query_path_uses_protocol_only_backend_contract(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    child = IndexLeaf("child", repo=repo)
+    parent = IndexPersistent(child, repo=repo)
+    cached = IndexLeaf("cached", repo=repo)
+    repo.add_objects(cached)
+    repo.save_object(parent)
+    repo._query_catalog = ProtocolOnlyCatalog(repo._query_catalog)
+
+    parent_selector = Definition(IndexPersistent, Definition(IndexLeaf, "child"))
+    child_selector = Definition(IndexLeaf, "child")
+
+    assert list(repo.query(parent.definition).stored(refresh=False).defs()) == [parent.definition]
+    assert list(repo.query(parent_selector).stored(refresh=False).defs()) == [parent.definition]
+    assert list(repo.query(cached.definition).cached(refresh=False).defs()) == [cached.definition]
+    assert set(repo.query(None).known(refresh=False).defs()) >= {parent.definition, cached.definition}
+
+    nested_defs = repo.query(child_selector).nested(refresh=False).definitions().defs()
+    assert list(nested_defs) == [child.definition]
+
+    owners = repo.query(child_selector).nested(refresh=False).owners().defs()
+    assert list(owners) == [parent.definition]
+    assert owners.replicas(parent.definition) == (store,)
+
+    occurrences = tuple(repo.query(child_selector).nested(refresh=False).execute())
+    assert len(occurrences) == 1
+    assert occurrences[0].owner == parent.definition
+    assert occurrences[0].definition == child.definition
 
 
 def test_resultset_replica_metadata_survives_refresh_after_execute(tmp_path):

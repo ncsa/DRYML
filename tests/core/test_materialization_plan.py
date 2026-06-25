@@ -1,7 +1,8 @@
 import pytest
 
 from dryml.core2 import Definition, Object, Repo, Serializable
-from dryml.core2.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan, from_canonical_local
 from dryml.core2.policies import RepoLoadOptions
 from dryml.core2.repo import RepoLoadError
 from dryml.core2.store.dir import DirStore
@@ -241,3 +242,14 @@ def test_parent_failure_leaves_successful_child_cached():
 
     assert child_cdef in repo.strong_obj_cache
     assert parent_def not in repo.strong_obj_cache
+
+
+def test_from_canonical_local_uses_shared_decoder_resolver():
+    repo = Repo()
+    child = MaterialLeaf("child")
+    replacement = object()
+    value = FrozenDict({"child": child.definition, "items": FrozenTuple((child.definition,))})
+
+    decoded = from_canonical_local(value, resolve_cdef=lambda cdef: replacement, repo=repo)
+
+    assert decoded == {"child": replacement, "items": (replacement,)}

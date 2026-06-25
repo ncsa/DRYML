@@ -5,9 +5,9 @@ from dryml.core2 import Definition, SKIP_ARGS
 from dryml.core2.definition import selector_match
 from dryml.core2.freeze import FrozenList
 from dryml.core2.query.fingerprint import (
-    requirements_satisfied,
-    selector_requirements,
-    target_fingerprint,
+    legacy_requirements_satisfied,
+    legacy_selector_requirements,
+    legacy_target_fingerprint,
     target_local_fingerprint,
 )
 from dryml.core2.utils.stable_hash import stable_hash_function
@@ -15,9 +15,9 @@ from dryml.core2.utils.stable_hash import stable_hash_function
 
 def assert_no_fingerprint_false_negative(selector, target, *, class_match="selector"):
     assert selector_match(selector, target, strict=False)
-    requirements = selector_requirements(selector, class_match=class_match)
-    fingerprint = target_fingerprint(target)
-    assert requirements_satisfied(fingerprint, requirements)
+    requirements = legacy_selector_requirements(selector, class_match=class_match)
+    fingerprint = legacy_target_fingerprint(target)
+    assert legacy_requirements_satisfied(fingerprint, requirements)
 
 
 def test_fingerprint_never_rejects_container_compatible_target():
@@ -111,9 +111,9 @@ def target_corpus():
 @pytest.mark.parametrize("target", target_corpus())
 def test_fingerprint_filter_never_rejects_structural_match_matrix(selector, target):
     if selector_match(selector, target, strict=False):
-        requirements = selector_requirements(selector)
-        fingerprint = target_fingerprint(target)
-        assert requirements_satisfied(fingerprint, requirements)
+        requirements = legacy_selector_requirements(selector)
+        fingerprint = legacy_target_fingerprint(target)
+        assert legacy_requirements_satisfied(fingerprint, requirements)
 
 
 def test_local_fingerprint_stops_at_nested_cdef_boundary():

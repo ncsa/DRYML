@@ -1,4 +1,7 @@
+from collections.abc import Mapping
+
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
+from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.query.graph_plan import graph_candidate_ids
 from dryml.core2.query.index import MemoryDefinitionGraphReadView
 from dryml.core2.query.model import FeatureRequirement, FeatureToken, QueryStats
@@ -33,6 +36,51 @@ def brute_force_known(repo, selector):
         [cdef for cdef in repo.strong_obj_cache if _query_match(selector, cdef, strict=False, class_match="selector")],
         key=lambda cdef: (cdef.stable_hash(), repr(cdef)),
     )
+
+
+def nested_cdefs_by_owner(owner):
+    out = []
+    seen = set()
+
+    def visit(value):
+        if isinstance(value, ConcreteDefinition):
+            if value in seen:
+                return
+            seen.add(value)
+            out.append(value)
+            visit(value.args)
+            visit(value.kwargs)
+            return
+        if isinstance(value, Mapping):
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for child in value:
+                visit(child)
+
+    visit(owner.args)
+    visit(owner.kwargs)
+    return tuple(out)
+
+
+def brute_force_nested_definitions(owners, selector):
+    matches = {
+        nested
+        for owner in owners
+        for nested in nested_cdefs_by_owner(owner)
+        if _query_match(selector, nested, strict=False, class_match="selector")
+    }
+    return sorted(matches, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
+
+
+def brute_force_owners(owners, selector):
+    matches = {
+        owner
+        for owner in owners
+        if any(_query_match(selector, nested, strict=False, class_match="selector") for nested in nested_cdefs_by_owner(owner))
+    }
+    return sorted(matches, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))
 
 
 def test_planner_can_choose_nested_exact_anchor():
@@ -321,7 +369,7 @@ def test_graph_planner_matches_independent_bruteforce_matrix():
     ]
     repo.add_objects(*objects)
     selectors = [
-        Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="shared")),
+        Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, "shared")),
         Definition(PlannerParent, SKIP_ARGS, child=rare.definition),
         Definition(PlannerParent, SKIP_ARGS, child=[shared.definition, shared.definition]),
         Definition(PlannerSetParent, SKIP_ARGS, members={rare.definition}),
@@ -330,6 +378,52 @@ def test_graph_planner_matches_independent_bruteforce_matrix():
 
     for selector in selectors:
         assert list(repo.query(selector).known(refresh=False).defs()) == brute_force_known(repo, selector)
+
+
+def test_graph_query_matches_bruteforce_across_domains_and_replicas(tmp_path):
+    store1 = DirStore(tmp_path / "store1")
+    store2 = DirStore(tmp_path / "store2")
+    repo = Repo(stores=[store1, store2])
+    shared = PlannerLeaf("shared", repo=repo)
+    rare = PlannerLeaf("rare", repo=repo)
+    cached_only = PlannerParent(child=shared, name="cached-only", repo=repo)
+    stored_a = PlannerParent(child=shared, name="stored-a", repo=repo)
+    stored_b = PlannerParent(child=rare, name="stored-b", repo=repo)
+    stored_set = PlannerSetParent(members={rare}, name="stored-set", repo=repo)
+    repo.add_objects(cached_only)
+    repo.save_object(stored_a, store=store1)
+    repo.save_object(stored_a, store=store2)
+    repo.save_object(stored_b, store=store1)
+    repo.save_object(stored_set, store=store2)
+    stored_roots = [stored_a.definition, stored_b.definition, stored_set.definition]
+
+    selectors = [
+        Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="shared")),
+        Definition(PlannerParent, SKIP_ARGS, child=rare.definition),
+        Definition(PlannerSetParent, SKIP_ARGS, members={rare.definition}),
+        repo.query(stored_a.definition).categorical(path="child", recursive=True).selector,
+        repo.query(stored_a.definition).categorical(recursive=True).selector,
+    ]
+
+    for selector in selectors:
+        expected_known = brute_force_known(repo, selector)
+        assert list(repo.query(selector).known(refresh=False).defs()) == expected_known
+
+        expected_stored = [cdef for cdef in expected_known if cdef in stored_roots]
+        assert list(repo.query(selector).stored(refresh=False).defs()) == expected_stored
+
+    child_selector = Definition(PlannerLeaf, "shared")
+    expected_nested = brute_force_nested_definitions(stored_roots, child_selector)
+    expected_owners = brute_force_owners(stored_roots, child_selector)
+
+    assert list(repo.query(child_selector).nested(refresh=False).definitions().defs()) == expected_nested
+    owners = repo.query(child_selector).nested(refresh=False).owners().defs()
+    assert list(owners) == expected_owners
+    assert owners.replicas(stored_a.definition) == (store1, store2)
+
+    occurrences = tuple(repo.query(child_selector).nested(refresh=False).execute())
+    assert {occ.owner for occ in occurrences} == set(expected_owners)
+    assert {occ.definition for occ in occurrences} == set(expected_nested)
 
 
 def test_nested_owner_query_uses_graph_edges_without_materializing(tmp_path):
