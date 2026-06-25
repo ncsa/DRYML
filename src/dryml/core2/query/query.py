@@ -34,7 +34,6 @@ from .selector_graph import compile_selector_graph
 @dataclass(frozen=True, slots=True)
 class CapturedNestedCandidates:
     cdefs_by_id: dict[DefinitionId, ConcreteDefinition]
-    traversal: Any
     stats: QueryStats
 
 
@@ -158,6 +157,7 @@ class DefinitionQuery:
     def max_occurrences(self, limit: int | None) -> "DefinitionQuery":
         if limit is not None and limit < 0:
             raise ValueError("max_occurrences limit must be non-negative or None.")
+        # This bounds path enumeration. Capturing the candidate ancestor subgraph is terminal-specific.
         return replace(self, occurrence_limit=limit)
 
     def execute(self):
@@ -327,12 +327,9 @@ class DefinitionQuery:
 
         catalog = self.repo._query_catalog
         captured = self._capture_nested_candidates(catalog, stats)
-        cdefs = tuple(captured.cdefs_by_id.values())
-        matches = self._verify_cdefs(cdefs, stats=stats)
-        match_set = set(matches)
-        match_ids = {did for did, cdef in captured.cdefs_by_id.items() if cdef in match_set}
-        traversal = captured.traversal.restrict_targets(match_ids)
-        owner_replicas = traversal.owner_replicas_for_nested_ids(match_ids)
+        _, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
+        traversal = self._capture_occurrence_traversal(catalog, match_ids)
+        _, _, owner_replicas = traversal.project_owners(match_ids)
 
         def occurrence_factory():
             return traversal.iter_occurrences(max_occurrences=self.occurrence_limit)
@@ -340,28 +337,24 @@ class DefinitionQuery:
         return occurrence_factory, stats, owner_replicas
 
     def _execute_nested_definitions(self) -> tuple[tuple[ConcreteDefinition, ...], QueryStats]:
-        matches, _, stats, _ = self._execute_nested_definition_matches()
+        matches, _, stats = self._execute_nested_definition_matches()
         stats.result_count = len(matches)
         return matches, stats
 
     def _execute_nested_owners(self):
-        matches, match_ids, stats, traversal = self._execute_nested_definition_matches()
-        owner_ids = traversal.owner_ids_for_nested_ids(match_ids)
-        owners = tuple(traversal.cdefs[owner_id] for owner_id in owner_ids if owner_id in traversal.cdefs)
+        matches, match_ids, stats = self._execute_nested_definition_matches()
+        traversal = self._capture_occurrence_traversal(self.repo._query_catalog, match_ids)
+        _, owners, owner_replicas = traversal.project_owners(match_ids)
         stats.result_count = len(owners)
         owners = tuple(sorted(owners, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
-        owner_replicas = traversal.owner_replicas_for_nested_ids(match_ids)
         return owners, stats, {cdef: owner_replicas.get(cdef, ()) for cdef in owners}
 
     def _execute_nested_definition_matches(self):
         stats = QueryStats()
         catalog = self.repo._query_catalog
         captured = self._capture_nested_candidates(catalog, stats)
-        cdefs = tuple(captured.cdefs_by_id.values())
-        matches = self._verify_cdefs(cdefs, stats=stats)
-        match_set = set(matches)
-        match_ids = {did for did, cdef in captured.cdefs_by_id.items() if cdef in match_set}
-        return matches, match_ids, stats, captured.traversal
+        matches, match_ids = self._verify_cdefs_by_id(captured.cdefs_by_id, stats=stats)
+        return matches, match_ids, stats
 
     def _capture_nested_candidates(self, catalog, stats: QueryStats) -> CapturedNestedCandidates:
         catalog.refresh(self.refresh_policy, stats=stats)
@@ -379,10 +372,23 @@ class DefinitionQuery:
                 else:
                     candidate_ids = domain.all_ids()
                     stats.candidate_count = len(candidate_ids)
-                    stats.universe_size = len(candidate_ids)
+                    stats.universe_size = None
             cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
-            traversal = snapshot.occurrence_snapshot_for_nested_ids(candidate_ids)
-        return CapturedNestedCandidates(cdefs_by_id=cdefs_by_id, traversal=traversal, stats=stats)
+        return CapturedNestedCandidates(cdefs_by_id=cdefs_by_id, stats=stats)
+
+    def _capture_occurrence_traversal(self, catalog, ids: set[DefinitionId] | frozenset[DefinitionId]):
+        with catalog.read_view(include_cached=False) as snapshot:
+            return snapshot.occurrence_snapshot_for_nested_ids(set(ids))
+
+    def _verify_cdefs_by_id(
+            self,
+            cdefs_by_id: dict[DefinitionId, ConcreteDefinition],
+            *,
+            stats: QueryStats) -> tuple[tuple[ConcreteDefinition, ...], set[DefinitionId]]:
+        matches = self._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
+        match_set = set(matches)
+        match_ids = {did for did, cdef in cdefs_by_id.items() if cdef in match_set}
+        return matches, match_ids
 
     def _verify_cdefs(
             self,

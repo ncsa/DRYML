@@ -759,6 +759,31 @@ def test_nested_definition_result_does_not_lookup_live_replicas(monkeypatch, tmp
     assert results.replicas(child.definition) == ()
 
 
+def test_nested_definitions_do_not_capture_occurrence_snapshot(monkeypatch, tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = IndexLeaf("child", repo=repo)
+    repo.save_object(IndexPersistent(child, repo=repo))
+
+    def fail_occurrence_capture(*args, **kwargs):
+        raise AssertionError("definition terminal must not capture owner paths")
+
+    monkeypatch.setattr(MemoryDefinitionGraphReadView, "occurrence_snapshot_for_nested_ids", fail_occurrence_capture)
+
+    results = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).definitions().defs()
+
+    assert list(results) == [child.definition]
+
+
+def test_nested_definition_explanation_does_not_report_candidate_count_as_universe(tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = IndexLeaf("child", repo=repo)
+    repo.save_object(IndexPersistent(child, repo=repo))
+
+    explanation = repo.query(None).nested(refresh=False).definitions().explain()
+
+    assert explanation.universe_size is None
+
+
 def test_occurrence_definitions_do_not_query_live_catalog(monkeypatch, tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
     child = IndexLeaf("child", repo=repo)
@@ -774,6 +799,26 @@ def test_occurrence_definitions_do_not_query_live_catalog(monkeypatch, tmp_path)
 
     assert list(results) == [child.definition]
     assert results.replicas(child.definition) == ()
+
+
+def test_owner_query_performs_one_reverse_traversal(monkeypatch, tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    child = IndexLeaf("child", repo=repo)
+    repo.save_object(IndexPersistent(child, repo=repo))
+    calls = 0
+    original = OccurrenceTraversalSnapshot.owner_ids_for_nested_ids
+
+    def spy_owner_ids(self, ids):
+        nonlocal calls
+        calls += 1
+        return original(self, ids)
+
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "owner_ids_for_nested_ids", spy_owner_ids)
+
+    owners = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).owners().defs()
+
+    assert list(owners)
+    assert calls == 1
 
 
 def test_resultset_replica_metadata_survives_refresh_after_execute(tmp_path):

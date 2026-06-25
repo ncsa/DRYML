@@ -83,6 +83,12 @@ class OccurrenceTraversalSnapshot:
         }
         return {owner: self.owner_replicas.get(owner, ()) for owner in owners}
 
+    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]):
+        owner_ids = self.owner_ids_for_nested_ids(ids)
+        owners = tuple(self.cdefs[owner_id] for owner_id in owner_ids if owner_id in self.cdefs)
+        replicas = {owner: self.owner_replicas.get(owner, ()) for owner in owners}
+        return owner_ids, owners, replicas
+
     def iter_occurrences(self, *, max_occurrences: int | None = None):
         yielded = 0
         if max_occurrences is not None and max_occurrences <= 0:
