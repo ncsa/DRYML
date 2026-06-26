@@ -253,6 +253,66 @@ def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
     assert [plan.backend for plan in results.explanation.source_plans] == ["sqlite", "sqlite"]
 
 
+def test_sqlite_federated_known_includes_cached_only_definition(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="cached-only", repo=repo)
+    repo.add_objects(obj)
+    selector = Definition(FederationLeaf, SKIP_ARGS, name="cached-only")
+
+    cached = repo.query(selector).cached().defs()
+    known = repo.query(selector).known().defs()
+    stored = repo.query(selector).stored().defs()
+
+    assert list(cached) == [obj.definition]
+    assert list(known) == [obj.definition]
+    assert list(stored) == []
+    assert known.replicas(obj.definition) == ()
+    assert known.explanation.generation_vector[CACHE_SOURCE_KEY] == repo._query_catalog.generation
+    assert CACHE_SOURCE_KEY in [plan.source_key for plan in known.explanation.source_plans]
+
+
+def test_sqlite_federated_known_deduplicates_cached_and_stored_cdef(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="cached-and-stored", repo=repo)
+    repo.save_object(obj)
+    selector = Definition(FederationLeaf, SKIP_ARGS, name="cached-and-stored")
+
+    results = repo.query(selector).known().defs()
+
+    assert list(results) == [obj.definition]
+    assert results.replicas(obj.definition) == (store,)
+    assert set(results.explanation.generation_vector) == {store.catalog_key(), CACHE_SOURCE_KEY}
+    assert [plan.source_key for plan in results.explanation.source_plans] == [store.catalog_key(), CACHE_SOURCE_KEY]
+
+
+def test_sqlite_federated_replica_removal_preserves_remaining_replicas(tmp_path):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    obj = FederationLeaf(name="replica-removal", repo=repo)
+    repo.save_object(obj, store=store1)
+    repo.save_object(obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    selector = Definition(FederationLeaf, SKIP_ARGS, name="replica-removal")
+
+    repo2.stores[0].open_query_index().remove_stored_roots([obj.definition])
+    after_one_removed = repo2.query(selector).stored().defs()
+
+    assert list(after_one_removed) == [obj.definition]
+    assert tuple(store.base_dir for store in after_one_removed.replicas(obj.definition)) == (store1.base_dir,)
+
+    repo2.stores[1].open_query_index().remove_stored_roots([obj.definition])
+    after_all_removed = repo2.query(selector).stored().defs()
+
+    assert list(after_all_removed) == []
+
+
 def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -277,6 +337,43 @@ def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
     assert str(occurrences[0].path) == "$.child"
     assert definitions.explanation.generation_vector == {repo2_store.catalog_key(): 1}
     assert owners.explanation.source_plans[0].result_count == 1
+
+
+def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    leaf1 = FederationLeaf(name="source-local-1", repo=repo)
+    owner1 = FederationParent(child=leaf1, name="owner-1", repo=repo)
+    leaf2 = FederationLeaf(name="source-local-2", repo=repo)
+    owner2 = FederationParent(child=leaf2, name="owner-2", repo=repo)
+    repo.save_object(owner1, store=store1)
+    repo.save_object(owner2, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    original = repo2._query_index._capture_nested_candidates
+    counts = {store.catalog_key(): 0 for store in repo2.stores}
+    churn_source = repo2.stores[0].catalog_key()
+
+    def capture_then_churn(query, binding, stats):
+        captured = original(query, binding, stats)
+        counts[binding.source_key] += 1
+        if binding.source_key == churn_source and counts[binding.source_key] == 1:
+            churn = FederationLeaf(name="source-local-churn", repo=repo2).definition
+            index = repo2._query_index._source_index_for_binding(binding)
+            index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
+        return captured
+
+    monkeypatch.setattr(repo2._query_index, "_capture_nested_candidates", capture_then_churn)
+
+    owners = repo2.query(Definition(FederationLeaf, SKIP_ARGS)).nested().owners().defs()
+
+    assert set(owners) == {owner1.definition, owner2.definition}
+    assert counts[repo2.stores[0].catalog_key()] == 2
+    assert counts[repo2.stores[1].catalog_key()] == 1
 
 
 def test_sqlite_nested_owner_projection_retries_after_generation_change(tmp_path, monkeypatch):

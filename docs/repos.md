@@ -147,6 +147,24 @@ repo = Repo(stores=store)
 
 The index is acceleration metadata. Object files remain authoritative.
 
+### Index Administration
+
+Repos and directory stores expose backend-neutral maintenance hooks:
+
+```python
+status = repo.index_status(store=store)
+reports = repo.validate_index(store=store, thorough=True)
+
+repo.rebuild_index(store=store)
+store.reconcile_query_index()
+```
+
+Use `index_status()` for lightweight diagnostics. Use `validate_index(thorough=True)` when you want filesystem-level checks, including stored-root files and hash-path consistency. Use `rebuild_index()` to explicitly recreate the persistent index from object files.
+
+`reconcile_query_index()` compares the SQLite sidecar with the authoritative Store contents. In the current v1 policy, missing, dirty, corrupt, incompatible, stale, or divergent indexes are repaired by an exclusive rebuild from Store roots. Concurrent initial rebuild attempts coordinate through a build claim so only one process performs the Store scan.
+
+Corrupt SQLite sidecars are quarantined before rebuild. A changed or misplaced `def.pkl` is reported as Store corruption instead of being silently indexed under the wrong identity.
+
 ## Failure Model
 
 Object state is published before persistent query-index root activation. If object publication succeeds and index update fails, the store can be marked dirty and reconciled later.

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from collections import defaultdict
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import time
 
@@ -28,6 +29,7 @@ from ..model import (
     QueryIndexStatus,
     QueryIndexUnavailable,
     QueryStats,
+    ReconcileReport,
     ValidationIssue,
     ValidationReport,
 )
@@ -39,6 +41,9 @@ from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 
 
 _CODEC = QueryIndexCodec()
+_REBUILD_BATCH_SIZE = 500
+_BUILD_CLAIM_STALE_SECONDS = 300.0
+_BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
 class SQLiteStoreQueryIndex:
@@ -140,7 +145,7 @@ class SQLiteStoreQueryIndex:
                 generation=None,
                 schema_version=SQLITE_QUERY_INDEX_SCHEMA_VERSION,
                 semantic_versions={},
-                state="incompatible",
+                state="corrupt" if _is_sqlite_corrupt_exception(exc) else "incompatible",
                 sqlite_version=sqlite3.sqlite_version_info,
                 path=str(self.path),
                 row_counts=_empty_row_counts(),
@@ -196,16 +201,11 @@ class SQLiteStoreQueryIndex:
             diagnostics.update(_status_diagnostics(con, journal_mode))
             if build_state != "ready":
                 issues.append(ValidationIssue("error", "SQLite query index is not ready.", f"build_state={build_state!r}"))
-            quick = con.execute("PRAGMA quick_check").fetchall()
-            for row in quick:
-                if row[0] != "ok":
-                    issues.append(ValidationIssue("error", "SQLite quick_check failed.", str(row[0])))
-            fk_rows = con.execute("PRAGMA foreign_key_check").fetchall()
-            for row in fk_rows:
-                issues.append(ValidationIssue("error", "SQLite foreign_key_check failed.", repr(row)))
+            _validate_sqlite_integrity(con, issues)
             if thorough:
                 self._validate_decodable_rows(con, issues)
                 self._validate_stored_roots(con, issues)
+                self._validate_store_roots(con, issues)
             counts = _row_counts(con)
         except Exception as exc:
             issues.append(ValidationIssue("error", "SQLite query index validation failed.", repr(exc)))
@@ -236,28 +236,106 @@ class SQLiteStoreQueryIndex:
         if policy is True:
             self.rebuild(stats=stats)
             return
-        if not self.path.exists() or self._is_dirty():
-            self.rebuild(stats=stats)
+        status = self.status()
+        if status.state in {"missing", "dirty", "building", "incompatible", "corrupt"}:
+            self.rebuild(stats=stats, quarantine_existing=status.state in {"corrupt", "incompatible"})
             return
         self._ensure_ready()
 
-    def rebuild(self, *, stats: QueryStats | None = None) -> None:
+    def rebuild(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
+        """Recreate this SQLite index from the owning Store's root definitions.
+
+        Rebuilds acquire a sidecar build claim so concurrent callers do not all
+        scan the Store. Roots are registered in bounded batches, the new index is
+        validated while still marked `building`, and only then is it marked
+        `ready`. When `quarantine_existing` is true, the previous database file
+        is renamed aside instead of unlinked before rebuilding.
+        """
+
+        with self._build_claim() as acquired:
+            if not acquired:
+                if stats is not None:
+                    stats.refresh_action = "sqlite-rebuild-wait"
+                return
+            self._rebuild_owned(stats=stats, quarantine_existing=quarantine_existing)
+
+    def reconcile(self) -> ReconcileReport:
+        """Validate this Store index against object files and rebuild if needed.
+
+        SQLite v1 uses an exclusive rebuild policy for missing, dirty, corrupt,
+        incompatible, stale, or divergent indexes. Object files remain the source
+        of truth. If Store files are themselves inconsistent, reconciliation
+        reports validation issues and leaves the existing index unmodified.
+        """
+
+        before = self.status()
+        if before.state in {"missing", "dirty", "building", "incompatible", "corrupt"}:
+            return self._reconcile_by_rebuild(before, (), quarantine_existing=before.state in {"corrupt", "incompatible"})
+        report = self.validate(thorough=True)
+        if report.ok:
+            return ReconcileReport(
+                backend=before.backend,
+                store_key=before.store_key,
+                changed=False,
+                action="validate",
+                generation_before=before.generation,
+                generation_after=before.generation,
+                definitions_scanned=(report.row_counts or {}).get("stored_roots", 0),
+                validated=True,
+                issues=report.issues,
+                diagnostics=report.diagnostics,
+            )
+        return self._reconcile_by_rebuild(before, report.issues)
+
+    def _reconcile_by_rebuild(
+            self,
+            before: QueryIndexStatus,
+            issues: tuple[ValidationIssue, ...],
+            *,
+            quarantine_existing: bool = False) -> ReconcileReport:
+        try:
+            self.rebuild(quarantine_existing=quarantine_existing)
+        except Exception as exc:
+            return ReconcileReport(
+                backend=before.backend,
+                store_key=before.store_key,
+                changed=False,
+                action="validate",
+                generation_before=before.generation,
+                generation_after=before.generation,
+                validated=True,
+                issues=(*issues, ValidationIssue("error", "SQLite query-index rebuild failed.", repr(exc))),
+            )
+        after = self.status()
+        return ReconcileReport(
+            backend=after.backend,
+            store_key=after.store_key,
+            changed=True,
+            action="rebuild",
+            generation_before=before.generation,
+            generation_after=after.generation,
+            definitions_scanned=(after.row_counts or {}).get("stored_roots", 0),
+            validated=True,
+            issues=issues,
+            diagnostics=after.diagnostics,
+        )
+
+    def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
         if self.store is None or not hasattr(self.store, "hydrate_index"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
-        cdefs = tuple(self.store.hydrate_index())
-        for cdef in cdefs:
-            if not isinstance(cdef, ConcreteDefinition):
-                raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
 
         self._connections.close_all_current_process()
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+        self._remove_existing_index(quarantine=quarantine_existing)
         self.initialize_empty(build_state="building")
-        if cdefs:
+        scanned = 0
+        for cdefs in chunked(self.store.hydrate_index(), _REBUILD_BATCH_SIZE):
+            for cdef in cdefs:
+                if not isinstance(cdef, ConcreteDefinition):
+                    raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
+            scanned += len(cdefs)
             graph = ConcreteDefinitionGraph.from_roots(cdefs)
             self._register_stored_roots(graph, cdefs, require_ready=False)
+        self._validate_rebuild_before_ready()
         self._set_build_state("ready")
         self._clear_dirty()
         con = self._connections.connection(readonly=False)
@@ -265,6 +343,7 @@ class SQLiteStoreQueryIndex:
         if stats is not None:
             stats.store_scan_count += 1
             stats.refresh_action = "sqlite-rebuild"
+            stats.result_count = scanned
 
     def register_stored_roots(self, graph, roots):
         return self._register_stored_roots(graph, roots, require_ready=True)
@@ -446,6 +525,18 @@ class SQLiteStoreQueryIndex:
             return None, None
         return stat.st_size, stat.st_mtime_ns
 
+    def _validate_rebuild_before_ready(self) -> None:
+        con = self._connections.connection(readonly=True)
+        issues: list[ValidationIssue] = []
+        validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
+        _validate_sqlite_integrity(con, issues)
+        self._validate_decodable_rows(con, issues)
+        self._validate_stored_roots(con, issues)
+        errors = tuple(issue for issue in issues if issue.severity == "error")
+        if errors:
+            detail = "; ".join(issue.message for issue in errors[:3])
+            raise QueryIndexError(f"SQLite query-index rebuild validation failed before ready: {detail}")
+
     def _validate_decodable_rows(self, con, issues: list[ValidationIssue]) -> None:
         for did, cdef_blob in con.execute("SELECT def_id, cdef_blob FROM definitions"):
             try:
@@ -505,6 +596,90 @@ class SQLiteStoreQueryIndex:
                 issues.append(ValidationIssue("error", "Stored root def.pkl size mismatch.", f"{did}: stored={def_size}, actual={stat.st_size}"))
             if def_mtime_ns is not None and def_mtime_ns != stat.st_mtime_ns:
                 issues.append(ValidationIssue("warning", "Stored root def.pkl mtime changed.", f"{did}: stored={def_mtime_ns}, actual={stat.st_mtime_ns}"))
+
+    def _validate_store_roots(self, con, issues: list[ValidationIssue]) -> None:
+        if self.store is None or not hasattr(self.store, "hydrate_index"):
+            return
+        try:
+            roots = tuple(self.store.hydrate_index())
+        except Exception as exc:
+            issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
+            return
+        for cdef in roots:
+            if not isinstance(cdef, ConcreteDefinition):
+                issues.append(ValidationIssue("error", "Store scan yielded non-CDef root.", type(cdef).__name__))
+                continue
+            root_ids = _exact_ids_for_cdef(con, cdef)
+            if not root_ids:
+                issues.append(ValidationIssue("error", "Store root is missing from SQLite query index.", cdef.stable_hash()))
+                continue
+            stored = con.execute(
+                f"SELECT 1 FROM stored_roots WHERE def_id IN ({', '.join('?' for _ in root_ids)}) LIMIT 1",
+                root_ids,
+            ).fetchone()
+            if stored is None:
+                issues.append(ValidationIssue("error", "Store root is indexed but not active as a stored root.", cdef.stable_hash()))
+
+    @contextmanager
+    def _build_claim(self):
+        claim_path = self._build_claim_path()
+        start = time.monotonic()
+        saw_existing_claim = False
+        while True:
+            if saw_existing_claim and self.path.exists() and not self._is_dirty():
+                self._connections.close_all_current_process()
+                if self.status().state == "ready":
+                    yield False
+                    return
+            try:
+                claim_path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                saw_existing_claim = True
+                if self._claim_is_stale(claim_path):
+                    try:
+                        claim_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                self._connections.close_all_current_process()
+                if self.path.exists() and not self._is_dirty() and self.status().state == "ready":
+                    yield False
+                    return
+                if time.monotonic() - start > _BUILD_CLAIM_WAIT_SECONDS:
+                    raise QueryIndexBusy("Timed out waiting for another SQLite query-index rebuild to finish.")
+                time.sleep(0.01)
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(f"pid={os.getpid()}\ncreated={datetime.now(timezone.utc).isoformat()}\n")
+            try:
+                yield True
+            finally:
+                try:
+                    claim_path.unlink()
+                except FileNotFoundError:
+                    pass
+            return
+
+    def _build_claim_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.building")
+
+    def _claim_is_stale(self, claim_path: Path) -> bool:
+        try:
+            age = time.time() - claim_path.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        return age > _BUILD_CLAIM_STALE_SECONDS
+
+    def _remove_existing_index(self, *, quarantine: bool) -> None:
+        if not self.path.exists():
+            return
+        if not quarantine:
+            self.path.unlink()
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
+        self.path.replace(target)
 
     def _set_build_state(self, state: str) -> None:
         if state not in {"building", "ready", "dirty"}:
@@ -1086,6 +1261,21 @@ def _status_diagnostics(con, journal_mode: str) -> dict[str, object]:
         except Exception as exc:
             diagnostics["wal_checkpoint_error"] = repr(exc)
     return diagnostics
+
+
+def _validate_sqlite_integrity(con, issues: list[ValidationIssue]) -> None:
+    quick = con.execute("PRAGMA quick_check").fetchall()
+    for row in quick:
+        if row[0] != "ok":
+            issues.append(ValidationIssue("error", "SQLite quick_check failed.", str(row[0])))
+    fk_rows = con.execute("PRAGMA foreign_key_check").fetchall()
+    for row in fk_rows:
+        issues.append(ValidationIssue("error", "SQLite foreign_key_check failed.", repr(row)))
+
+
+def _is_sqlite_corrupt_exception(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "file is not a database" in text or "database disk image is malformed" in text
 
 
 def _bump_generation(con, generation: int) -> int:

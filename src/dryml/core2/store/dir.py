@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Literal
 
 from .store import Store
-from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
+from ..query.model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
 from ..utils.general import pickle_save, pickle_load
@@ -64,13 +64,14 @@ class DirStore(Store):
             config = replace(config, path=path)
         else:
             path = os.fspath(config.path)
-        return SQLiteStoreQueryIndex(
+        self._query_index_instance = SQLiteStoreQueryIndex(
             source_key=self.catalog_key(),
             path=path,
             config=config,
             store=self,
             dirty_path=self.query_index_dirty_path,
         )
+        return self._query_index_instance
 
     def mark_query_index_dirty(self) -> None:
         os.makedirs(self.dryml_dir, exist_ok=True)
@@ -170,6 +171,9 @@ class DirStore(Store):
         exclusive rebuild for missing, dirty, corrupt, or incompatible indexes.
         """
         index = self._open_rebuildable_query_index()
+        reconcile = getattr(index, "reconcile", None)
+        if reconcile is not None:
+            return reconcile()
         before = index.status()
         if before.state in {"missing", "dirty", "incompatible", "corrupt"}:
             return self.rebuild_query_index()
@@ -234,11 +238,24 @@ class DirStore(Store):
         return os.path.exists(self._def_file(cdef))
 
     def hydrate_index(self) -> Iterable["ConcreteDefinition"]:
+        """Yield stored root definitions after validating their hash paths.
+
+        The directory name is part of the Store's stable-hash layout. A loaded
+        `def.pkl` whose CDef hash does not match that directory is treated as
+        Store corruption and rejected instead of being indexed silently.
+        """
+
         # Walk the objects tree, load def.pkl for each, and yield cdef
         pattern = os.path.join(self.obj_dir, "[0-9a-f][0-9a-f]", "*", "def.pkl")
         for def_path in glob.glob(pattern):
             cdef = pickle_load(def_path)
-            # TODO: Optional: sanity check hash matches directory name
+            expected_hash = os.path.basename(os.path.dirname(def_path))
+            actual_hash = cdef.stable_hash()
+            if actual_hash != expected_hash:
+                raise QueryIndexError(
+                    "Store def.pkl is stored under the wrong stable-hash directory."
+                    f" path={def_path!r}, expected={expected_hash!r}, actual={actual_hash!r}"
+                )
             yield cdef
 
     def _main_def_path(self) -> str:

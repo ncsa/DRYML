@@ -23,6 +23,7 @@ from .model import (
     QueryIndexError,
     QueryIndexUnavailable,
     QueryProjection,
+    SourceQueryPlan,
     QueryStats,
     RefreshPolicy,
     ResultUniverse,
@@ -382,6 +383,8 @@ class DefinitionQuery:
         return matches, stats, replicas
 
     def _execute_federated_known_domain(self, *, stop_after: int | None = None):
+        from .federation import CACHE_SOURCE_KEY
+
         stored_query = replace(self, domain="stored")
         stored_cdefs, stored_stats, stored_replicas = self.repo._query_index.execute_definition_domain(stored_query, stop_after=stop_after)
 
@@ -398,6 +401,7 @@ class DefinitionQuery:
 
         cached_query = replace(self, domain="cached")
         cached_cdefs, cached_stats, cached_replicas = cached_query._execute_definition_domain()
+        cache_generation = self.repo._query_catalog.current_generation()
 
         merged = {cdef: cdef for cdef in stored_cdefs}
         for cdef in cached_cdefs:
@@ -420,7 +424,16 @@ class DefinitionQuery:
         stats.result_count = len(out)
         stats.universe_size = None
         stats.generation_vector = dict(stored_stats.generation_vector or {})
-        stats.source_plans = stored_stats.source_plans
+        stats.generation_vector[CACHE_SOURCE_KEY] = cache_generation
+        stats.source_plans = (*stored_stats.source_plans, SourceQueryPlan(
+            source_key=CACHE_SOURCE_KEY,
+            backend="memory-cache",
+            generation=cache_generation,
+            candidate_count=cached_stats.candidate_count,
+            verified_count=cached_stats.verified_count,
+            result_count=cached_stats.result_count,
+            refresh_action=cached_stats.refresh_action,
+        ))
         return out, stats, replicas
 
     def _execute_terminal_items(self, *, stop_after: int):
