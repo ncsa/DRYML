@@ -707,6 +707,10 @@ class SQLiteQueryIndexReadView:
             ))
         return out
 
+    def filter_domain(self, domain, ids) -> set[DefinitionId]:
+        self._check_active()
+        return domain.with_catalog(self).filter(ids)
+
     def has_stored_ancestor(self, did: DefinitionId) -> bool:
         self._check_active()
         return did in self.filter_nested_ids({did})
@@ -842,6 +846,14 @@ class SQLiteQueryIndexReadView:
             incoming={child_id: tuple(edges) for child_id, edges in incoming.items()},
             owner_replicas=self.replica_map(stored_ids),
         )
+
+    def capture_occurrences(self, target_ids=None, *, max_occurrences: int | None = None):
+        self._check_active()
+        if target_ids is None:
+            snapshot = self.all_occurrence_snapshot()
+        else:
+            snapshot = self.occurrence_snapshot_for_nested_ids(target_ids)
+        return tuple(snapshot.iter_occurrences(max_occurrences=max_occurrences))
 
     def all_occurrence_snapshot(self) -> AllOccurrenceTraversalSnapshot:
         outgoing = defaultdict(list)

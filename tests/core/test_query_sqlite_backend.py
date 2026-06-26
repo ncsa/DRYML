@@ -5,7 +5,7 @@ import pytest
 from dryml.core2 import Definition, Object, SKIP_ARGS
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty
+from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats
 from dryml.core2.query.domain import StoredDomain
 from dryml.core2.query.graph_plan import graph_candidate_ids
 from dryml.core2.query.path import GraphPath
@@ -190,6 +190,81 @@ def test_exact_and_local_candidate_lookup(tmp_path):
         cdefs = tuple(view.cdefs_by_id(ids).values())
 
     assert cdefs == (wanted.definition,)
+
+
+def test_read_view_estimates_candidates_and_query_stats(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteParent(child=SQLiteLeaf(name="wanted"), name="target")
+    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="target")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+    requirements = tuple(
+        FeatureRequirement(token, count)
+        for token, count in target_local_fingerprint(wanted.definition).counts.items()
+    )
+    stats = QueryStats()
+
+    with index.read_view() as view:
+        domain = StoredDomain(view)
+        exact_ids = view.exact_ids(wanted.definition)
+        candidate_ids = view.local_candidates(requirements, domain=domain, stats=stats)
+
+        assert view.estimate_exact_ids(wanted.definition) >= len(exact_ids) == 1
+        assert view.estimate_local_candidates(requirements) >= len(candidate_ids) == 1
+        assert tuple(view.cdefs_by_id(candidate_ids).values()) == (wanted.definition,)
+
+    assert stats.selected_features
+    assert stats.posting_sizes
+    assert stats.candidate_count == 1
+
+
+def test_read_view_filter_domain_replica_map_and_capture_occurrences(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf("phase4")
+    owner = SQLiteParent(child=leaf, name="owner")
+    graph = ConcreteDefinitionGraph.from_root(owner.definition)
+    index.register_stored_roots(graph, [owner.definition])
+
+    with index.read_view() as view:
+        owner_id = view.cdef_id(owner.definition)
+        leaf_id = view.cdef_id(leaf.definition)
+        stored_domain = StoredDomain(view)
+
+        assert view.filter_domain(stored_domain, {owner_id, leaf_id}) == {owner_id}
+        assert view.filter_nested_ids({owner_id, leaf_id}) == {leaf_id}
+        assert view.replica_map({owner_id, leaf_id}) == {owner.definition: (index.source_key,)}
+
+        projection = view.project_owners({leaf_id})
+        occurrences = view.capture_occurrences({leaf_id})
+        all_occurrences = view.capture_occurrences(max_occurrences=1)
+
+    assert projection.owner_ids == frozenset({owner_id})
+    assert projection.cdefs == (owner.definition,)
+    assert len(occurrences) == 1
+    assert occurrences[0].owner == owner.definition
+    assert occurrences[0].definition == leaf.definition
+    assert all_occurrences[0].owner == owner.definition
+
+
+def test_read_view_generation_snapshot_and_closed_view_contract(tmp_path):
+    index = sqlite_index(tmp_path)
+    first = SQLiteLeaf("first")
+    second = SQLiteLeaf("second")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(first.definition), [first.definition])
+
+    with index.read_view() as view:
+        generation = view.generation
+        assert generation == 1
+        assert view.generation == generation
+        assert view.exact_ids(second.definition) == set()
+
+    with pytest.raises(QueryIndexError, match="closed"):
+        view.all_definition_ids()
+
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(second.definition), [second.definition])
+    with index.read_view() as new_view:
+        assert new_view.generation == 2
+        assert len(new_view.exact_ids(second.definition)) == 1
 
 
 def test_definition_hash_collision_confirms_full_cdef_equality(monkeypatch, tmp_path):
