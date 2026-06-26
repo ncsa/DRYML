@@ -15,6 +15,15 @@ class QueryIndexDirLeaf(Object):
         self.name = name
 
 
+class FailingSaveDirLeaf(Object):
+    def __init__(self, name="fail"):
+        super().__init__()
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, revision=None):
+        raise RuntimeError("object save failed")
+
+
 def test_dirstore_query_index_default_is_auto_and_lazy(tmp_path):
     store = DirStore(tmp_path / "store")
 
@@ -271,6 +280,92 @@ def test_repo_rebuild_index_rebuilds_sqlite_sidecar(tmp_path):
     assert repo.query(selector).stored().count() == 0
     repo.rebuild_index(store=store)
     assert repo.query(selector).stored().count() == 1
+
+
+def test_dirstore_query_index_status_rebuild_and_reconcile(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("store-admin", repo=repo)
+    repo.save_object(obj)
+
+    status = store.query_index_status()
+    assert status.backend == "sqlite"
+    assert status.state == "ready"
+    assert status.row_counts["stored_roots"] == 1
+
+    validate = store.reconcile_query_index()
+    assert validate.changed is False
+    assert validate.action == "validate"
+    assert validate.generation_before == validate.generation_after == 1
+
+    index = store.open_query_index()
+    index.remove_stored_roots([obj.definition])
+    assert repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count() == 0
+
+    rebuilt = store.rebuild_query_index()
+    assert rebuilt.changed
+    assert rebuilt.action == "rebuild"
+    assert rebuilt.generation_after == 1
+    assert store.query_index_status().row_counts["stored_roots"] == 1
+
+
+def test_dirstore_reconcile_repairs_dirty_index(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("dirty-admin", repo=repo)
+    repo.save_object(obj)
+    store.mark_query_index_dirty()
+
+    assert store.query_index_status().state == "dirty"
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert not store.query_index_is_dirty()
+    assert store.query_index_status().state == "ready"
+
+
+def test_failed_object_save_does_not_update_query_index(tmp_path):
+    opened = []
+
+    class RecordingIndex:
+        def register_stored_roots(self, graph, roots):
+            raise AssertionError("failed object save should not register roots")
+
+    def factory(store):
+        index = RecordingIndex()
+        opened.append(index)
+        return index
+
+    store = DirStore(tmp_path / "store", query_index=factory)
+    repo = Repo(stores=store)
+    obj = FailingSaveDirLeaf("failed", repo=repo)
+
+    with pytest.raises(RuntimeError, match="object save failed"):
+        repo.save_object(obj)
+
+    assert opened == []
+
+
+def test_object_files_publish_before_index_root_activation(tmp_path):
+    checks = []
+
+    class AssertingIndex:
+        def __init__(self, store):
+            self.store = store
+
+        def register_stored_roots(self, graph, roots):
+            roots = tuple(roots)
+            checks.append(tuple(self.store.has(root) for root in roots))
+
+    store = DirStore(tmp_path / "store", query_index=lambda store: AssertingIndex(store))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("ordering", repo=repo)
+
+    repo.save_object(obj)
+
+    assert checks == [(True,)]
 
 
 def test_sqlite_stored_root_metadata_records_def_file_stat(tmp_path):

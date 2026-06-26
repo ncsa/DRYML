@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Literal
 
 from .store import Store
-from ..query.model import QueryIndexUnavailable
+from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
 from ..utils.general import pickle_save, pickle_load
@@ -88,6 +88,133 @@ class DirStore(Store):
     def query_index_is_dirty(self) -> bool:
         return os.path.exists(self.query_index_dirty_path)
 
+    def query_index_status(self) -> QueryIndexStatus:
+        """Return status for this directory Store's configured query index.
+
+        The method is Store-owned so callers do not need to know the sidecar
+        path, backend policy, or SQLite implementation type.
+        """
+        if self._query_index_policy == "none":
+            return QueryIndexStatus(
+                backend="none",
+                store_key=self.catalog_key(),
+                generation=None,
+                schema_version=None,
+                semantic_versions={},
+                state="disabled",
+            )
+        if self._query_index_policy == "memory":
+            return QueryIndexStatus(
+                backend="memory",
+                store_key=self.catalog_key(),
+                generation=None,
+                schema_version=None,
+                semantic_versions={},
+                state="ready",
+            )
+        try:
+            index = self.open_query_index()
+        except QueryIndexUnavailable:
+            if self._query_index_policy == "auto":
+                return QueryIndexStatus(
+                    backend="memory",
+                    store_key=self.catalog_key(),
+                    generation=None,
+                    schema_version=None,
+                    semantic_versions={},
+                    state="ready",
+                )
+            raise
+        if index is None:
+            return QueryIndexStatus(
+                backend="memory" if self._query_index_policy == "auto" else str(self._query_index_policy),
+                store_key=self.catalog_key(),
+                generation=None,
+                schema_version=None,
+                semantic_versions={},
+                state="ready" if self._query_index_policy == "auto" else "disabled",
+            )
+        status = getattr(index, "status", None)
+        if status is None:
+            return QueryIndexStatus(
+                backend=type(index).__name__,
+                store_key=self.catalog_key(),
+                generation=None,
+                schema_version=None,
+                semantic_versions={},
+                state="ready",
+            )
+        return status()
+
+    def rebuild_query_index(self) -> ReconcileReport:
+        """Rebuild this Store's persistent query index from stored roots."""
+        index = self._open_rebuildable_query_index()
+        before = index.status()
+        index.rebuild()
+        after = index.status()
+        return ReconcileReport(
+            backend=after.backend,
+            store_key=after.store_key,
+            changed=True,
+            action="rebuild",
+            generation_before=before.generation,
+            generation_after=after.generation,
+            definitions_scanned=(after.row_counts or {}).get("stored_roots", 0),
+            validated=True,
+        )
+
+    def reconcile_query_index(self) -> ReconcileReport:
+        """Reconcile this Store's query index with authoritative object files.
+
+        The current v1 reconciliation policy validates ready indexes and uses an
+        exclusive rebuild for missing, dirty, corrupt, or incompatible indexes.
+        """
+        index = self._open_rebuildable_query_index()
+        before = index.status()
+        if before.state in {"missing", "dirty", "incompatible", "corrupt"}:
+            return self.rebuild_query_index()
+        validate = getattr(index, "validate", None)
+        if validate is None:
+            return ReconcileReport(
+                backend=before.backend,
+                store_key=before.store_key,
+                changed=False,
+                action="none",
+                generation_before=before.generation,
+                generation_after=before.generation,
+            )
+        report = validate(thorough=False)
+        if not report.ok:
+            rebuilt = self.rebuild_query_index()
+            return ReconcileReport(
+                backend=rebuilt.backend,
+                store_key=rebuilt.store_key,
+                changed=True,
+                action="rebuild",
+                generation_before=before.generation,
+                generation_after=rebuilt.generation_after,
+                definitions_scanned=rebuilt.definitions_scanned,
+                validated=True,
+                issues=report.issues,
+            )
+        return ReconcileReport(
+            backend=before.backend,
+            store_key=before.store_key,
+            changed=False,
+            action="validate",
+            generation_before=before.generation,
+            generation_after=before.generation,
+            validated=True,
+            issues=report.issues,
+        )
+
+    def validate_query_index(self, *, thorough: bool = False):
+        """Validate this Store's configured query index."""
+        index = self.open_query_index()
+        if index is None or not hasattr(index, "validate"):
+            return super().validate_query_index(thorough=thorough)
+        return index.validate(thorough=thorough)
+
     def _object_dir(self, cdef: "ConcreteDefinition") -> str:
         digest = cdef.stable_hash()
         sub = digest[:2]
@@ -161,6 +288,12 @@ class DirStore(Store):
         if isinstance(query_index, SQLiteQueryIndexConfig):
             return "sqlite", query_index, None
         return "custom", None, query_index
+
+    def _open_rebuildable_query_index(self):
+        index = self.open_query_index()
+        if index is None or not hasattr(index, "rebuild"):
+            raise QueryIndexUnavailable(f"DirStore query_index={self._query_index_policy!r} does not provide a rebuildable persistent index.")
+        return index
 
     def _call_query_index_factory(self, factory):
         try:

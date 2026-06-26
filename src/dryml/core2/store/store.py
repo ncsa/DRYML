@@ -5,6 +5,7 @@ from typing import Iterable
 import os
 
 from ..utils.general import pickle_load
+from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
 
 class Store(ABC):
     @property
@@ -119,6 +120,37 @@ class Store(ABC):
     def open_query_index(self):
         """Return this Store's optional query index, or None for memory/no index modes."""
         return None
+
+    def query_index_status(self) -> QueryIndexStatus:
+        """Return backend-neutral status for this Store's own query index.
+
+        Stores that do not own a persistent query index report a disabled index.
+        Concrete Store implementations may return richer backend-specific status.
+        """
+        return QueryIndexStatus(
+            backend="none",
+            store_key=self.catalog_key(),
+            generation=None,
+            schema_version=None,
+            semantic_versions={},
+            state="disabled",
+        )
+
+    def rebuild_query_index(self) -> ReconcileReport:
+        """Rebuild this Store's query index from authoritative object state.
+
+        The base Store has no persistent query index, so callers receive a clear
+        unavailability error instead of a silent no-op.
+        """
+        raise QueryIndexUnavailable(f"Store {self!r} does not own a rebuildable query index.")
+
+    def reconcile_query_index(self) -> ReconcileReport:
+        """Repair this Store's query index against authoritative object state."""
+        return self.rebuild_query_index()
+
+    def validate_query_index(self, *, thorough: bool = False) -> ValidationReport:
+        """Validate this Store's query index without exposing backend internals."""
+        return ValidationReport("none", self.catalog_key(), True)
 
     def close(self) -> None:
         """Cleanup (temp dirs, handles, etc.)"""
