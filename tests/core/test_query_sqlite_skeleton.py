@@ -1,11 +1,17 @@
+import threading
+
 import pytest
 
-from dryml.core2.query.model import QueryIndexIncompatible
+from dryml.core2.query.model import QueryIndexDirty, QueryIndexIncompatible
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core2.query.sqlite.connection as connection_module
 from dryml.core2.query.sqlite.connection import SQLiteConnectionManager
 from dryml.core2.query.sqlite.schema import (
+    IndexSemanticVersion,
     SQLITE_QUERY_INDEX_APPLICATION_ID,
     SQLITE_QUERY_INDEX_SCHEMA_VERSION,
+    compatibility_decision,
+    expected_semantic_version,
     initialize_schema,
     validate_schema,
 )
@@ -34,17 +40,73 @@ def test_busy_error_classifier():
 
 
 def test_connection_manager_is_process_thread_local(tmp_path):
-    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete", busy_timeout=1.25))
     first = manager.connection()
     second = manager.connection()
 
     assert first is second
     assert first.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert first.execute("PRAGMA busy_timeout").fetchone()[0] == 1250
 
     manager.close_current()
     third = manager.connection()
     assert third is not first
     manager.close_all_current_process()
+
+
+def test_connection_is_opened_lazily(tmp_path):
+    path = tmp_path / "index.sqlite"
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(path, journal_mode="delete"))
+
+    assert not path.exists()
+
+    manager.connection()
+
+    assert path.exists()
+    manager.close_all_current_process()
+
+
+def test_different_thread_uses_different_connection(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    main_con = manager.connection()
+    results = []
+
+    def open_in_thread():
+        thread_con = manager.connection()
+        try:
+            results.append((thread_con is main_con, thread_con.execute("PRAGMA foreign_keys").fetchone()[0]))
+        finally:
+            manager.close_current()
+
+    thread = threading.Thread(target=open_in_thread)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    assert not thread.is_alive()
+    assert results == [(False, 1)]
+    manager.close_current()
+
+
+def test_auto_journal_mode_uses_delete_when_wal_runtime_is_not_known_safe(monkeypatch, tmp_path):
+    monkeypatch.setattr(connection_module, "wal_runtime_is_known_safe", lambda version: False)
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="auto"))
+
+    con = manager.connection()
+
+    assert con.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+    manager.close_all_current_process()
+
+
+def test_durability_setting_applies_synchronous_pragma(tmp_path):
+    normal = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "normal.sqlite", journal_mode="delete", durability="normal"))
+    full = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "full.sqlite", journal_mode="delete", durability="full"))
+
+    try:
+        assert normal.connection().execute("PRAGMA synchronous").fetchone()[0] == 1
+        assert full.connection().execute("PRAGMA synchronous").fetchone()[0] == 2
+    finally:
+        normal.close_all_current_process()
+        full.close_all_current_process()
 
 
 def test_schema_initialization_and_validation(tmp_path):
@@ -60,6 +122,76 @@ def test_schema_initialization_and_validation(tmp_path):
     assert state == (0, "ready", "store-a")
     for table in {"definitions", "feature_tokens", "postings", "definition_edges", "stored_roots"}:
         assert con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+    manager.close_all_current_process()
+
+
+def test_index_semantic_version_and_compatibility_decision():
+    expected = expected_semantic_version(store_key="store-a", canonical_version=1)
+    actual = expected.catalog_state()
+
+    assert isinstance(expected, IndexSemanticVersion)
+    assert compatibility_decision(actual, expected=expected) == "compatible"
+
+    needs_migration = dict(actual)
+    needs_migration["schema_version"] = SQLITE_QUERY_INDEX_SCHEMA_VERSION - 1
+    assert compatibility_decision(needs_migration, expected=expected) == "migrate"
+
+    future = dict(actual)
+    future["schema_version"] = SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1
+    assert compatibility_decision(future, expected=expected) == "future-unsupported"
+
+
+def test_codec_version_mismatch_requests_rebuild():
+    expected = expected_semantic_version(store_key="store-a", canonical_version=1)
+    actual = expected.catalog_state()
+    actual["cdef_codec_version"] = expected.cdef_codec_version + 1
+
+    assert compatibility_decision(actual, expected=expected) == "rebuild"
+
+
+def test_schema_initialization_is_idempotent_and_has_one_catalog_row(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a")
+    initialize_schema(con, store_key="store-a")
+
+    assert con.execute("SELECT COUNT(*) FROM catalog_state").fetchone()[0] == 1
+    assert con.execute("SELECT generation, build_state, store_key FROM catalog_state").fetchone() == (0, "ready", "store-a")
+    manager.close_all_current_process()
+
+
+def test_required_schema_indexes_exist(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a")
+
+    indexes = {
+        row[0]
+        for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        if row[0] is not None
+    }
+    assert {
+        "definitions_by_stable_hash",
+        "definitions_by_class_key",
+        "feature_tokens_by_hash",
+        "postings_by_definition",
+        "definition_edges_by_child",
+        "definition_edges_by_parent_path",
+    } <= indexes
+    manager.close_all_current_process()
+
+
+def test_build_state_blocks_partial_index(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a", build_state="building")
+
+    validate_schema(con, store_key="store-a", require_ready=False)
+    with pytest.raises(QueryIndexDirty, match="not ready"):
+        validate_schema(con, store_key="store-a")
     manager.close_all_current_process()
 
 
@@ -80,3 +212,26 @@ def test_schema_rejects_unknown_application_id(tmp_path):
     with pytest.raises(QueryIndexIncompatible):
         validate_schema(con, store_key="store-a")
     con.close()
+
+
+def test_schema_rejects_future_user_version(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a")
+    con.execute(f"PRAGMA user_version = {SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1}")
+
+    with pytest.raises(QueryIndexIncompatible, match="schema version"):
+        validate_schema(con, store_key="store-a")
+    manager.close_all_current_process()
+
+
+def test_schema_rejects_semantic_version_mismatch(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a", canonical_version=1)
+
+    with pytest.raises(QueryIndexIncompatible, match="canonical_version"):
+        validate_schema(con, store_key="store-a", canonical_version=2)
+    manager.close_all_current_process()

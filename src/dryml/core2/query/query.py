@@ -19,7 +19,9 @@ from .model import (
     QueryDomain,
     QueryDomainError,
     QueryExplanation,
+    QueryCardinalityError,
     QueryIndexError,
+    QueryIndexUnavailable,
     QueryProjection,
     QueryStats,
     RefreshPolicy,
@@ -245,24 +247,52 @@ class DefinitionQuery:
         return self._execute_count()
 
     def exists(self) -> bool:
-        if self.domain == "nested" and self.projection is None and self.universe is None:
-            occurrences, _, _ = self._execute_nested_occurrences()
-            if callable(occurrences):
-                return next(iter(occurrences()), None) is not None
-            return bool(occurrences)
+        if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
+            count, _ = self.repo._query_index.count_definition_domain(self, stop_after=1)
+            return count > 0
+        if self.universe is None and self.domain == "known" and self.repo._query_index.can_execute_query_domain("stored"):
+            return bool(self._execute_federated_known_domain(stop_after=1)[0])
+        if self.universe is None and self.domain == "nested":
+            return bool(self._execute_terminal_items(stop_after=1))
         return self._execute_count() > 0
+
+    def one(self):
+        items = self._execute_terminal_items(stop_after=2)
+        if len(items) != 1:
+            label = "occurrence" if self.domain == "nested" and self.projection is None else "result"
+            raise QueryCardinalityError(f"Expected exactly one {label}, found {len(items)}.")
+        return items[0]
+
+    def one_or_none(self):
+        items = self._execute_terminal_items(stop_after=2)
+        if len(items) > 1:
+            label = "occurrence" if self.domain == "nested" and self.projection is None else "result"
+            raise QueryCardinalityError(f"Expected zero or one {label}, found {len(items)}.")
+        return items[0] if items else None
 
     def explain(self) -> QueryExplanation:
         return self._execute_explanation()
 
     def _execute_count(self) -> int:
         self._require_domain()
+        if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
+            count, _ = self.repo._query_index.count_definition_domain(self)
+            return count
+        if self.universe is None and self.domain == "known" and self.repo._query_index.can_execute_query_domain("stored"):
+            cdefs, _, _ = self._execute_federated_known_domain()
+            return len(cdefs)
         if self.domain == "nested":
             if self.universe is None and self.projection == "definitions":
-                cdefs, _ = self._execute_nested_definitions()
+                if self.repo._query_index.can_execute_query_domain("nested"):
+                    cdefs, _ = self.repo._query_index.execute_nested_definitions(self)
+                else:
+                    cdefs, _ = self._execute_nested_definitions()
                 return len(cdefs)
             if self.universe is None and self.projection == "owners":
-                cdefs, _, _ = self._execute_nested_owners()
+                if self.repo._query_index.can_execute_query_domain("nested"):
+                    cdefs, _, _ = self.repo._query_index.execute_nested_owners(self)
+                else:
+                    cdefs, _, _ = self._execute_nested_owners()
                 return len(cdefs)
             occurrences, _, _ = self._execute_nested_occurrences()
             if callable(occurrences):
@@ -281,6 +311,10 @@ class DefinitionQuery:
                 _, stats, _ = self._execute_nested_owners()
             else:
                 _, stats, _ = self._execute_nested_occurrences()
+            return stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+
+        if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
+            stats = self.repo._query_index.explain_definition_domain(self)
             return stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
 
         _, stats, _ = self._execute_definition_domain()
@@ -310,6 +344,8 @@ class DefinitionQuery:
 
         if self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
             return self.repo._query_index.execute_definition_domain(self)
+        if self.domain == "known" and self.repo._query_index.can_execute_query_domain("stored"):
+            return self._execute_federated_known_domain()
 
         catalog = self.repo._query_catalog
         exact_root = self.selector if isinstance(self.selector, ConcreteDefinition) else None
@@ -344,6 +380,71 @@ class DefinitionQuery:
         stats.result_count = len(matches)
         replicas = {cdef: replicas.get(cdef, ()) for cdef in matches}
         return matches, stats, replicas
+
+    def _execute_federated_known_domain(self, *, stop_after: int | None = None):
+        stored_query = replace(self, domain="stored")
+        stored_cdefs, stored_stats, stored_replicas = self.repo._query_index.execute_definition_domain(stored_query, stop_after=stop_after)
+
+        if stop_after is not None and len(stored_cdefs) >= stop_after:
+            stats = QueryStats(refresh_action="federated-known")
+            stats.store_scan_count = stored_stats.store_scan_count
+            stats.candidate_count = stored_stats.candidate_count
+            stats.verified_count = stored_stats.verified_count
+            stats.result_count = len(stored_cdefs)
+            stats.universe_size = None
+            stats.generation_vector = dict(stored_stats.generation_vector or {})
+            stats.source_plans = stored_stats.source_plans
+            return stored_cdefs, stats, stored_replicas
+
+        cached_query = replace(self, domain="cached")
+        cached_cdefs, cached_stats, cached_replicas = cached_query._execute_definition_domain()
+
+        merged = {cdef: cdef for cdef in stored_cdefs}
+        for cdef in cached_cdefs:
+            merged.setdefault(cdef, cdef)
+            if stop_after is not None and len(merged) >= stop_after:
+                break
+
+        out = tuple(sorted(merged.values(), key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+        replicas = {}
+        for cdef in out:
+            if cdef in stored_replicas:
+                replicas[cdef] = stored_replicas[cdef]
+            else:
+                replicas[cdef] = cached_replicas.get(cdef, ())
+
+        stats = QueryStats(refresh_action="federated-known")
+        stats.store_scan_count = stored_stats.store_scan_count + cached_stats.store_scan_count
+        stats.candidate_count = stored_stats.candidate_count + cached_stats.candidate_count
+        stats.verified_count = stored_stats.verified_count + cached_stats.verified_count
+        stats.result_count = len(out)
+        stats.universe_size = None
+        stats.generation_vector = dict(stored_stats.generation_vector or {})
+        stats.source_plans = stored_stats.source_plans
+        return out, stats, replicas
+
+    def _execute_terminal_items(self, *, stop_after: int):
+        self._require_domain()
+        if self.domain == "nested":
+            if self.universe is None and self.projection == "definitions" and self.repo._query_index.can_execute_query_domain("nested"):
+                return self.repo._query_index.execute_nested_definitions(self, stop_after=stop_after)[0]
+            if self.universe is None and self.projection == "owners" and self.repo._query_index.can_execute_query_domain("nested"):
+                return self.repo._query_index.execute_nested_owners(self, stop_after=stop_after)[0]
+            if self.universe is None and self.projection is None:
+                limit = stop_after if self.occurrence_limit is None else min(self.occurrence_limit, stop_after)
+                occurrences, _, _ = replace(self, occurrence_limit=limit)._execute_nested_occurrences()
+                if callable(occurrences):
+                    return tuple(item for _, item in zip(range(stop_after), occurrences()))
+                return tuple(occurrences[:stop_after])
+            result = self.execute()
+            return tuple(item for _, item in zip(range(stop_after), result))
+
+        if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
+            return self.repo._query_index.execute_definition_domain(self, stop_after=stop_after)[0]
+        if self.universe is None and self.domain == "known" and self.repo._query_index.can_execute_query_domain("stored"):
+            return self._execute_federated_known_domain(stop_after=stop_after)[0]
+        cdefs, _, _ = self._execute_definition_domain()
+        return tuple(cdefs[:stop_after])
 
     def _definition_domain(self, catalog):
         if self.domain == "stored":

@@ -12,10 +12,60 @@ from .path import GRAPH_PATH_SCHEMA_VERSION, GraphPath
 CDEF_CODEC_VERSION = 1
 FEATURE_CODEC_VERSION = 1
 PATH_CODEC_VERSION = GRAPH_PATH_SCHEMA_VERSION
+QUERY_INDEX_CODEC_VERSION = 1
 
 
 class QueryCodecError(ValueError):
     pass
+
+
+class QueryIndexCodec:
+    """Facade for the versioned query-index encoders.
+
+    The backend code primarily uses the module-level functions for clarity.
+    This facade gives the persisted query-index contract one named codec
+    surface and exposes the aggregate codec version used by schema metadata.
+    """
+
+    version = QUERY_INDEX_CODEC_VERSION
+    cdef_version = CDEF_CODEC_VERSION
+    feature_version = FEATURE_CODEC_VERSION
+    path_version = PATH_CODEC_VERSION
+
+    def encode_cdef(self, cdef: ConcreteDefinition) -> bytes:
+        """Encode a concrete definition for persistent query-index storage."""
+
+        return encode_cdef(cdef)
+
+    def decode_cdef(self, blob: bytes) -> ConcreteDefinition:
+        """Decode a concrete definition from persistent query-index storage."""
+
+        return decode_cdef(blob)
+
+    def encode_feature_token(self, token: FeatureToken) -> bytes:
+        """Encode a feature token for persistent query-index storage."""
+
+        return encode_feature_token(token)
+
+    def decode_feature_token(self, blob: bytes) -> FeatureToken:
+        """Decode a feature token from persistent query-index storage."""
+
+        return decode_feature_token(blob)
+
+    def encode_graph_path(self, path: GraphPath) -> bytes:
+        """Encode a graph path for persistent query-index storage."""
+
+        return encode_graph_path(path)
+
+    def decode_graph_path(self, blob: bytes) -> GraphPath:
+        """Decode a graph path from persistent query-index storage."""
+
+        return decode_graph_path(blob)
+
+    def digest_blob(self, blob: bytes) -> bytes:
+        """Return the stable digest used for encoded query-index blobs."""
+
+        return digest_blob(blob)
 
 
 def encode_cdef(cdef: ConcreteDefinition) -> bytes:

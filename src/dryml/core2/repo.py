@@ -22,7 +22,7 @@ from .repo_graph import manage_revision
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
 from .query.federation import RepoQueryIndex
-from .query.index import DefinitionCatalog
+from .query.memory import AggregateMemoryQueryIndex
 from .query.result import ObjectResultSet
 
 
@@ -89,7 +89,7 @@ class Repo:
         self.obj_config = {}
         self.config = dict(config or {})
         self.alias_index = {}
-        self._query_catalog = DefinitionCatalog(self)
+        self._query_catalog = AggregateMemoryQueryIndex(self)
 
         # Some helper variables for monitoring
         self._num_saves = 0
@@ -384,6 +384,11 @@ class Repo:
             store = make_store(store)
         self._query_index.rebuild(store=store)
         return self
+
+    def validate_index(self, store=None, *, thorough: bool = False):
+        if store is not None:
+            store = make_store(store)
+        return self._query_index.validate(store=store, thorough=thorough)
 
     def __len__(self):
         return len(self.strong_obj_cache)

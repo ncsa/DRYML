@@ -13,6 +13,17 @@ from dryml.core2.tensor_spec import TensorSpec
 from dryml.core2.cardinality import Cardinality
 
 
+def _persistent_query_index_count(store) -> int:
+    path = getattr(store, "query_index_path", None)
+    return int(path is not None and os.path.exists(path))
+
+
+def _assert_expected_store_root_entries(store):
+    entries = set(os.listdir(store.base_dir))
+    assert {"def.pkl", "aliases.pkl", "objects"} <= entries
+    assert entries <= {"def.pkl", "aliases.pkl", "objects", ".dryml"}
+
+
 def test_save_1(primary_store_set):
     # Create repo and save object
     repo = Repo(stores=primary_store_set.stores)
@@ -26,14 +37,15 @@ def test_save_1(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.find_defs(None, refresh=False)) == 0
+    assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
     assert repo._num_constructions == 0
 
     # Auto discovery finds definitions without materializing objects.
     defs = repo.find_defs(None)
     assert len(defs) == 1
     assert repo._num_constructions == 0
-    assert len(repo.light_index) == 1
+    if _persistent_query_index_count(primary_store_set.stores[0]) == 0:
+        assert len(repo.light_index) == 1
 
     # Save again should be no-op-ish and not corrupt anything
     repo.save()
@@ -68,7 +80,7 @@ def test_save_2(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.find_defs(None, refresh=False)) == 0
+    assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
     result = repo.get(build_missing=False)
     assert len(result) == 1
 
@@ -93,7 +105,7 @@ def test_save_3(primary_store_set):
     # Load the repository objects should not be loaded right away
     repo = dryml.core2.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.find_defs(None, refresh=False)) == 0
+    assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
     result = repo.get(build_missing=False)
     assert len(result) == 1
 
@@ -335,7 +347,7 @@ def test_save_load_1(primary_store_set):
     dryml.core2.save_object(obj1, repo=repo, main=True)
     repo.flush()
 
-    assert len(os.listdir(repo.stores[0].base_dir)) == 3
+    _assert_expected_store_root_entries(repo.stores[0])
     assert len(os.listdir(repo.stores[0].object_root_dir)) == 1
 
     del repo
@@ -360,7 +372,7 @@ def test_save_load_2(primary_store_set):
     dryml.core2.save_object(obj4, repo=repo, main=True)
     repo.flush()
 
-    assert len(os.listdir(repo.stores[0].base_dir)) == 3
+    _assert_expected_store_root_entries(repo.stores[0])
     obj_dirs = glob.glob(os.path.join(repo.stores[0].object_root_dir, '*', '*'))
     assert len(obj_dirs) == 1
     del repo
@@ -395,7 +407,7 @@ def test_save_load_3(primary_store_set):
     dryml.core2.save_object(obj11, repo=repo, main=True)
     repo.flush()
 
-    assert len(os.listdir(repo.stores[0].base_dir)) == 3
+    _assert_expected_store_root_entries(repo.stores[0])
     obj_dirs = glob.glob(os.path.join(repo.stores[0].object_root_dir, '*', '*'))
     assert len(obj_dirs) == 1
 

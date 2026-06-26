@@ -1,7 +1,12 @@
 from pathlib import Path
 
+import pytest
+
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
+from dryml.core2.query.model import QueryCardinalityError
 from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
+from dryml.core2.query.query import DefinitionQuery
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core2.store.dir import DirStore
 
@@ -220,6 +225,10 @@ def test_sqlite_federated_stored_query_uses_sidecar_without_hydration(tmp_path):
     assert list(results) == [wanted.definition]
     assert results.replicas(wanted.definition) == (reopened_store,)
     assert results.explanation.refresh_action == "federated"
+    assert results.explanation.generation_vector == {reopened_store.catalog_key(): 2}
+    assert len(results.explanation.source_plans) == 1
+    assert results.explanation.source_plans[0].source_key == reopened_store.catalog_key()
+    assert results.explanation.source_plans[0].backend == "sqlite"
 
 
 def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
@@ -240,6 +249,8 @@ def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
 
     assert list(results) == [obj.definition]
     assert tuple(store.base_dir for store in results.replicas(obj.definition)) == (store2.base_dir, store1.base_dir)
+    assert set(results.explanation.generation_vector) == {repo2.stores[0].catalog_key(), repo2.stores[1].catalog_key()}
+    assert [plan.backend for plan in results.explanation.source_plans] == ["sqlite", "sqlite"]
 
 
 def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
@@ -264,3 +275,160 @@ def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
     assert occurrences[0].owner == owner.definition
     assert occurrences[0].definition == leaf.definition
     assert str(occurrences[0].path) == "$.child"
+    assert definitions.explanation.generation_vector == {repo2_store.catalog_key(): 1}
+    assert owners.explanation.source_plans[0].result_count == 1
+
+
+def test_sqlite_nested_owner_projection_retries_after_generation_change(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="retry-owner", repo=repo)
+    owner = FederationParent(child=leaf, name="owner", repo=repo)
+    repo.save_object(owner)
+
+    repo2_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo2 = Repo(stores=repo2_store)
+    original = repo2._query_index._capture_nested_candidates
+    calls = 0
+
+    def capture_then_churn(query, binding, stats):
+        nonlocal calls
+        captured = original(query, binding, stats)
+        calls += 1
+        if calls == 1:
+            churn = FederationLeaf(name="owner-churn", repo=repo2).definition
+            index = repo2._query_index._source_index_for_binding(binding)
+            index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
+        return captured
+
+    monkeypatch.setattr(repo2._query_index, "_capture_nested_candidates", capture_then_churn)
+
+    result = repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="retry-owner")).nested().owners().one()
+
+    assert result == owner.definition
+    assert calls == 2
+
+
+def test_sqlite_nested_occurrence_projection_retries_after_generation_change(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="retry-occurrence", repo=repo)
+    owner = FederationParent(child=leaf, name="owner", repo=repo)
+    repo.save_object(owner)
+
+    repo2_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo2 = Repo(stores=repo2_store)
+    original = repo2._query_index._capture_nested_candidates
+    calls = 0
+
+    def capture_then_churn(query, binding, stats):
+        nonlocal calls
+        captured = original(query, binding, stats)
+        calls += 1
+        if calls == 1:
+            churn = FederationLeaf(name="occurrence-churn", repo=repo2).definition
+            index = repo2._query_index._source_index_for_binding(binding)
+            index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
+        return captured
+
+    monkeypatch.setattr(repo2._query_index, "_capture_nested_candidates", capture_then_churn)
+
+    occurrence = repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="retry-occurrence")).nested().one()
+
+    assert occurrence.owner == owner.definition
+    assert occurrence.definition == leaf.definition
+    assert calls == 2
+
+
+def test_mixed_memory_and_sqlite_nested_query_merges_sources(tmp_path):
+    sqlite_store = DirStore(tmp_path / "sqlite", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    memory_store = DirStore(tmp_path / "memory", query_index="memory")
+    repo = Repo(stores=[sqlite_store, memory_store])
+    sqlite_leaf = FederationLeaf(name="sqlite", repo=repo)
+    sqlite_owner = FederationParent(child=sqlite_leaf, name="sqlite-owner", repo=repo)
+    memory_leaf = FederationLeaf(name="memory", repo=repo)
+    memory_owner = FederationParent(child=memory_leaf, name="memory-owner", repo=repo)
+    repo.save_object(sqlite_owner, store=sqlite_store)
+    repo.save_object(memory_owner, store=memory_store)
+
+    repo2 = Repo(stores=[
+        DirStore(sqlite_store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(memory_store.base_dir, query_index="memory"),
+    ])
+    selector = Definition(FederationLeaf, SKIP_ARGS)
+
+    definitions = repo2.query(selector).nested().definitions().defs()
+    owners = repo2.query(selector).nested().owners().defs()
+
+    assert set(definitions) == {sqlite_leaf.definition, memory_leaf.definition}
+    assert set(owners) == {sqlite_owner.definition, memory_owner.definition}
+    owner_dirs = {
+        cdef: tuple(store.base_dir for store in owners.replicas(cdef))
+        for cdef in owners
+    }
+    assert owner_dirs[sqlite_owner.definition] == (sqlite_store.base_dir,)
+    assert owner_dirs[memory_owner.definition] == (memory_store.base_dir,)
+
+
+def test_sqlite_federated_exists_stops_before_full_verification(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(270):
+        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+
+    verified = 0
+    original = DefinitionQuery._verify_cdefs
+
+    def spy_verify(self, cdefs, *, stats):
+        nonlocal verified
+        verified += len(cdefs)
+        return original(self, cdefs, stats=stats)
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", spy_verify)
+
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().exists()
+    assert 0 < verified < 270
+    verified = 0
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).known().exists()
+    assert 0 < verified < 270
+
+
+def test_federated_query_one_and_one_or_none_stop_after_two(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="left", repo=repo))
+    repo.save_object(FederationLeaf(name="right", repo=repo))
+
+    verified = 0
+    original = DefinitionQuery._verify_cdefs
+
+    def spy_verify(self, cdefs, *, stats):
+        nonlocal verified
+        verified += len(cdefs)
+        return original(self, cdefs, stats=stats)
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", spy_verify)
+
+    with pytest.raises(QueryCardinalityError):
+        repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().one()
+    assert 0 < verified < 270
+
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS, name="missing")).stored().one_or_none() is None
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS, name="left")).stored().one().kwargs["name"] == "left"
+
+
+def test_sqlite_federated_explain_does_not_verify_cdefs(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="explain", repo=repo))
+
+    def fail_verify(*args, **kwargs):
+        raise AssertionError("explain() should not run final CDef verification")
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", fail_verify)
+
+    explanation = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().explain()
+
+    assert explanation.refresh_action == "federated-plan"
+    assert explanation.candidate_count == 1
+    assert explanation.result_count is None

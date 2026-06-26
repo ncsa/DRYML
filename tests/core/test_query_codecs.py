@@ -2,7 +2,9 @@ import pytest
 
 from dryml.core2 import Object
 from dryml.core2.query.codecs import (
+    QUERY_INDEX_CODEC_VERSION,
     QueryCodecError,
+    QueryIndexCodec,
     decode_cdef,
     decode_feature_token,
     decode_graph_path,
@@ -12,7 +14,7 @@ from dryml.core2.query.codecs import (
     encode_graph_path,
 )
 from dryml.core2.query.model import FeatureToken
-from dryml.core2.query.path import GraphPath, Index, Key, Kwarg, SetMember
+from dryml.core2.query.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
 from dryml.core2.query.utils import chunked, stable_hash_from_blob, stable_hash_to_blob
 from dryml.core2.utils.general import pickler
 
@@ -27,6 +29,19 @@ def test_cdef_codec_roundtrip():
     cdef = CodecLeaf("roundtrip").definition
 
     assert decode_cdef(encode_cdef(cdef)) == cdef
+
+
+def test_query_index_codec_facade_roundtrips_all_payloads():
+    codec = QueryIndexCodec()
+    cdef = CodecLeaf("facade").definition
+    token = FeatureToken("SCALAR", GraphPath((Kwarg("items"), Index(1))), "value")
+    path = GraphPath((Arg(0), Kwarg("items"), Index(1), Key("name"), SetMember("abc", 2)))
+
+    assert codec.version == QUERY_INDEX_CODEC_VERSION
+    assert codec.decode_cdef(codec.encode_cdef(cdef)) == cdef
+    assert codec.decode_feature_token(codec.encode_feature_token(token)) == token
+    assert codec.decode_graph_path(codec.encode_graph_path(path)) == path
+    assert codec.digest_blob(b"payload") == digest_blob(b"payload")
 
 
 def test_feature_codec_roundtrip():
@@ -47,6 +62,12 @@ def test_feature_codec_roundtrip_without_path():
 
 def test_path_codec_roundtrip():
     path = GraphPath((Kwarg("model"), Key("encoder"), SetMember("def", 0)))
+
+    assert decode_graph_path(encode_graph_path(path)) == path
+
+
+def test_graph_path_codec_roundtrip_all_segments():
+    path = GraphPath((Arg(0), Kwarg("model"), Index(3), Key(("tuple", 1)), SetMember("def", 2)))
 
     assert decode_graph_path(encode_graph_path(path)) == path
 

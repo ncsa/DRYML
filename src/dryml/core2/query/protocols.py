@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
-from .model import DefinitionId, FeatureRequirement, IndexWriteResult, QueryIndexStatus, QueryStats, RefreshPolicy
+from .model import DefinitionId, FeatureRequirement, IndexWriteResult, QueryIndexStatus, QueryStats, RefreshPolicy, ValidationReport
 from .path import DefinitionPath
 
 
@@ -123,7 +123,10 @@ class StoreQueryIndex(Protocol):
     def status(self) -> QueryIndexStatus:
         ...
 
-    def ensure_exact_stored(self, cdef: ConcreteDefinition, *, stats: QueryStats | None = None) -> None:
+    def validate(self, *, thorough: bool = False) -> ValidationReport:
+        ...
+
+    def ensure_exact_stored(self, cdef: ConcreteDefinition, *, stats: QueryStats | None = None) -> bool:
         ...
 
     def sync_caches(self, *, reuse_weak: bool = True) -> None:

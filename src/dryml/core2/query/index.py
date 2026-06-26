@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import contextmanager
-from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
@@ -11,19 +10,23 @@ from ..definition import ConcreteDefinition
 from .fingerprint import canonical_class_key, target_local_fingerprint
 from .model import (
     DefinitionId,
+    AllOccurrenceTraversalSnapshot,
     DefinitionEdgeRecord,
     DefinitionOccurrence,
     DefinitionRecord,
     EdgeKey,
     FeatureRequirement,
     FeatureToken,
+    IndexWriteResult,
+    OccurrenceTraversalSnapshot,
+    OwnerProjection,
     QueryIndexError,
     QueryIndexUnavailable,
     QueryStats,
     RefreshPolicy,
     StoreId,
 )
-from .path import DefinitionPath, GraphPath
+from .path import DefinitionPath
 from .utils import cdef_equal
 
 
@@ -34,114 +37,6 @@ class _CatalogBuildRepo:
         self.strong_obj_cache = repo.strong_obj_cache
         self.weak_obj_cache = repo.weak_obj_cache
         self.light_index: set[ConcreteDefinition] = set()
-
-
-@dataclass(frozen=True, slots=True)
-class OwnerProjection:
-    owner_ids: frozenset[DefinitionId]
-    cdefs: tuple[ConcreteDefinition, ...]
-    replicas: dict[ConcreteDefinition, tuple[Any, ...]]
-
-
-class OccurrenceTraversalSnapshot:
-    def __init__(
-            self,
-            *,
-            targets: set[DefinitionId],
-            cdefs: dict[DefinitionId, ConcreteDefinition],
-            stored_ids: set[DefinitionId],
-            incoming: dict[DefinitionId, tuple[DefinitionEdgeRecord, ...]],
-            owner_replicas: dict[ConcreteDefinition, tuple[Any, ...]] | None = None,
-            copy_data: bool = True):
-        self.targets = frozenset(targets)
-        self.cdefs = dict(cdefs) if copy_data else cdefs
-        self.stored_ids = frozenset(stored_ids) if copy_data else stored_ids
-        self.incoming = dict(incoming) if copy_data else incoming
-        self.owner_replicas = {} if owner_replicas is None else (dict(owner_replicas) if copy_data else owner_replicas)
-
-    def restrict_targets(self, targets: set[DefinitionId] | frozenset[DefinitionId]) -> "OccurrenceTraversalSnapshot":
-        return OccurrenceTraversalSnapshot(
-            targets=set(targets) & set(self.targets),
-            cdefs=self.cdefs,
-            stored_ids=self.stored_ids,
-            incoming=self.incoming,
-            owner_replicas=self.owner_replicas,
-            copy_data=False,
-        )
-
-    def _owner_ids_for_nested_ids(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> set[DefinitionId]:
-        owners: set[DefinitionId] = set()
-        seen: set[DefinitionId] = set(ids)
-        stack = list(ids)
-        while stack:
-            cur = stack.pop()
-            for edge in self.incoming.get(cur, ()):
-                parent_id = edge.parent_id
-                if parent_id in self.stored_ids:
-                    owners.add(parent_id)
-                if parent_id not in seen:
-                    seen.add(parent_id)
-                    stack.append(parent_id)
-        return owners
-
-    def project_owners(self, ids: set[DefinitionId] | frozenset[DefinitionId]) -> OwnerProjection:
-        owner_ids = self._owner_ids_for_nested_ids(ids)
-        owners = tuple(self.cdefs[owner_id] for owner_id in owner_ids if owner_id in self.cdefs)
-        replicas = {owner: self.owner_replicas.get(owner, ()) for owner in owners}
-        return OwnerProjection(frozenset(owner_ids), owners, replicas)
-
-    def iter_occurrences(self, *, max_occurrences: int | None = None):
-        yielded = 0
-        if max_occurrences is not None and max_occurrences <= 0:
-            return
-        for target_id in sorted(self.targets):
-            if target_id not in self.cdefs:
-                continue
-            stack = [(target_id, GraphPath())]
-            while stack:
-                cur_id, suffix = stack.pop()
-                edges = sorted(
-                    self.incoming.get(cur_id, ()),
-                    key=lambda edge: (edge.parent_id, str(edge.path)),
-                    reverse=True,
-                )
-                for edge in edges:
-                    path = edge.path.join(suffix)
-                    if edge.parent_id in self.stored_ids:
-                        yielded += 1
-                        yield DefinitionOccurrence(self.cdefs[edge.parent_id], path, self.cdefs[target_id])
-                        if max_occurrences is not None and yielded >= max_occurrences:
-                            return
-                    stack.append((edge.parent_id, path))
-
-
-class AllOccurrenceTraversalSnapshot:
-    def __init__(
-            self,
-            *,
-            cdefs: dict[DefinitionId, ConcreteDefinition],
-            stored_ids: set[DefinitionId],
-            outgoing: dict[DefinitionId, tuple[DefinitionEdgeRecord, ...]]):
-        self.cdefs = dict(cdefs)
-        self.stored_ids = frozenset(stored_ids)
-        self.outgoing = dict(outgoing)
-
-    def iter_occurrences(self, *, max_occurrences: int | None = None):
-        yielded = 0
-        if max_occurrences is not None and max_occurrences <= 0:
-            return
-        for owner_id in sorted(self.stored_ids):
-            stack = []
-            for edge in sorted(self.outgoing.get(owner_id, ()), key=lambda edge: str(edge.path), reverse=True):
-                stack.append((edge.child_id, edge.path))
-            while stack:
-                did, path = stack.pop()
-                yielded += 1
-                yield DefinitionOccurrence(self.cdefs[owner_id], path, self.cdefs[did])
-                if max_occurrences is not None and yielded >= max_occurrences:
-                    return
-                for edge in sorted(self.outgoing.get(did, ()), key=lambda edge: str(edge.path), reverse=True):
-                    stack.append((edge.child_id, path.join(edge.path)))
 
 
 class MemoryDefinitionGraphReadView:
@@ -275,6 +170,14 @@ class MemoryDefinitionGraphReadView:
     def all_stored_ids(self) -> set[DefinitionId]:
         self._check_active()
         return {did for did, stores in self._replicas_by_definition.items() if stores}
+
+    def stored_ids_for_store_id(self, store_id: StoreId) -> set[DefinitionId]:
+        self._check_active()
+        return {
+            did
+            for did, stores in self._replicas_by_definition.items()
+            if store_id in stores
+        }
 
     def is_cached_id(self, did: DefinitionId, *, reuse_weak: bool = True) -> bool:
         self._check_active()
@@ -697,11 +600,17 @@ class DefinitionCatalog:
                 self.generation += 1
             return did
 
-    def register_stored_roots(self, cdefs, store) -> tuple[DefinitionId, ...]:
+    def register_stored_roots(
+            self,
+            cdefs,
+            store,
+            *,
+            graph: ConcreteDefinitionGraph | None = None) -> tuple[DefinitionId, ...]:
         roots = tuple(dict.fromkeys(cdefs))
         if not roots:
             return ()
-        graph = ConcreteDefinitionGraph.from_roots(roots)
+        if graph is None:
+            graph = ConcreteDefinitionGraph.from_roots(roots)
         with self.lock:
             sid = self.store_id(store)
             changed = self._register_graph_structure_locked(graph)
@@ -721,6 +630,32 @@ class DefinitionCatalog:
             if membership_changed or changed:
                 self.generation += 1
             return tuple(ids)
+
+    def remove_stored_roots(self, cdefs, store) -> IndexWriteResult:
+        roots = tuple(dict.fromkeys(cdefs))
+        if not roots:
+            return IndexWriteResult(generation=self.current_generation(), changed=False)
+        with self.lock:
+            sid = self.store_id(store)
+            removed = 0
+            for cdef in roots:
+                did = self._definition_id_for_exact_cdef_locked(cdef)
+                if did is None:
+                    continue
+                if sid in self.replicas_by_definition.get(did, set()):
+                    self.replicas_by_definition[did].remove(sid)
+                    removed += 1
+                if did in self.stored_definitions_by_store.get(sid, set()):
+                    self.stored_definitions_by_store[sid].remove(did)
+                if not self.replicas_by_definition.get(did):
+                    self.repo.light_index.discard(self.definitions_by_id[did].cdef)
+            if removed:
+                self.generation += 1
+            return IndexWriteResult(
+                generation=self.generation,
+                changed=bool(removed),
+                roots_removed=removed,
+            )
 
     def cdef_id(self, cdef: ConcreteDefinition) -> DefinitionId | None:
         with self.read_view(include_cached=False) as view:
@@ -886,6 +821,8 @@ class DefinitionCatalog:
                 replacement.register_graph(ConcreteDefinitionGraph.from_roots(cached_cdefs))
             store_scan_count = 0
             for store in stores:
+                if self._store_uses_persistent_sqlite(store):
+                    continue
                 self._check_memory_hydration_allowed(store, explicit=True)
                 sid, cdefs = self._hydrate_store_definitions(store, explicit=True)
                 replacement.store_by_id.setdefault(sid, store)
@@ -913,19 +850,33 @@ class DefinitionCatalog:
         policy = getattr(store, "query_index_policy", "memory")
         if policy == "none":
             return False
+        if self._store_uses_persistent_sqlite(store):
+            return False
         self._check_memory_hydration_allowed(store, explicit=False)
         return True
 
     def _check_memory_hydration_allowed(self, store, *, explicit: bool) -> None:
         policy = getattr(store, "query_index_policy", "memory")
         if policy == "sqlite":
-            raise QueryIndexUnavailable(
-                f"Store {store!r} is configured with query_index='sqlite', but SQLite query execution is not implemented yet."
-            )
+            return
+        if policy == "auto" and self._store_uses_persistent_sqlite(store):
+            return
         if policy == "none" and not explicit:
             raise QueryIndexUnavailable(
                 f"Store {store!r} is configured with query_index='none'; use refresh=True for an explicit scan."
             )
+
+    def _store_uses_persistent_sqlite(self, store) -> bool:
+        policy = getattr(store, "query_index_policy", "memory")
+        if policy == "sqlite":
+            return True
+        if policy != "auto":
+            return False
+        try:
+            from .sqlite import sqlite_available
+        except Exception:
+            return False
+        return sqlite_available()
 
     def _replace_with_locked(self, replacement: "DefinitionCatalog", *, light_index: set[ConcreteDefinition]) -> None:
         self.definitions_by_id = replacement.definitions_by_id
@@ -1053,6 +1004,17 @@ class DefinitionCatalog:
         for token, count in record.local_fingerprint.counts.items():
             self.local_postings[token][did] = count
         return did, True
+
+    def _definition_id_for_exact_cdef_locked(self, cdef: ConcreteDefinition) -> DefinitionId | None:
+        existing = self.ids_by_cdef.get(cdef)
+        if existing is not None:
+            return existing
+        digest = cdef.stable_hash()
+        for did in self.ids_by_stable_hash.get(digest, set()):
+            if cdef_equal(self.definitions_by_id[did].cdef, cdef):
+                self.ids_by_cdef[cdef] = did
+                return did
+        return None
 
     def _register_graph_structure_locked(self, graph: ConcreteDefinitionGraph) -> bool:
         before = (len(self.definitions_by_id), len(self.edge_by_key))

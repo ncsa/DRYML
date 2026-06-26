@@ -244,7 +244,7 @@ def test_catalog_exposes_only_graph_native_index_state():
 
 
 def test_cached_only_definition_is_known_not_stored_then_save_promotes(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     obj = IndexLeaf("cached", repo=repo)
     repo.add_objects(obj)
@@ -292,7 +292,7 @@ def test_graph_registration_records_direct_edges_once():
 
 
 def test_repeated_stored_registration_does_not_change_generation(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     obj = IndexLeaf("stored", repo=repo)
     catalog = repo._query_catalog
@@ -398,13 +398,13 @@ def test_parent_local_postings_do_not_contain_child_interior_features():
 
 
 def test_repeated_nested_cdef_keeps_every_owner_path_occurrence(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     parent = IndexPersistent([child, child], repo=repo)
     repo.save_object(parent)
 
-    repo2 = Repo(stores=DirStore(store.base_dir))
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
     occurrences = repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS))
 
     assert occurrences.count() == 2
@@ -413,7 +413,7 @@ def test_repeated_nested_cdef_keeps_every_owner_path_occurrence(tmp_path):
 
 
 def test_occurrence_iteration_is_lazy(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -440,7 +440,7 @@ def test_occurrence_iteration_is_lazy(tmp_path, monkeypatch):
 
 
 def test_occurrence_limit_stops_before_full_path_enumeration(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     parent = IndexPersistent([child, child, child], repo=repo)
@@ -466,7 +466,7 @@ def test_occurrence_limit_stops_before_full_path_enumeration(tmp_path, monkeypat
 
 
 def test_occurrence_iteration_does_not_hold_catalog_lock(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     parent = IndexPersistent([child, child], repo=repo)
@@ -492,7 +492,7 @@ def test_occurrence_iteration_does_not_hold_catalog_lock(tmp_path):
 
 
 def test_occurrence_result_is_lazy(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("wanted", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
@@ -515,7 +515,7 @@ def test_occurrence_result_is_lazy(tmp_path, monkeypatch):
 
 
 def test_first_occurrence_does_not_enumerate_remaining_paths(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     repo.save_object(IndexPersistent([child, child, child], repo=repo))
@@ -537,7 +537,7 @@ def test_first_occurrence_does_not_enumerate_remaining_paths(tmp_path, monkeypat
 
 
 def test_query_max_occurrences_stops_path_generation(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("shared", repo=repo)
     repo.save_object(IndexPersistent([child, child, child], repo=repo))
@@ -564,7 +564,7 @@ def test_query_max_occurrences_stops_path_generation(tmp_path, monkeypatch):
 
 
 def test_selective_occurrence_query_does_not_scan_unrelated_roots(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     wanted = IndexLeaf("wanted", repo=repo)
     repo.save_object(IndexPersistent(wanted, repo=repo))
@@ -583,7 +583,7 @@ def test_selective_occurrence_query_does_not_scan_unrelated_roots(tmp_path, monk
 
 
 def test_refresh_failure_rolls_back_catalog_atomically(tmp_path):
-    good_store = DirStore(tmp_path / "good")
+    good_store = DirStore(tmp_path / "good", query_index="memory")
     repo = Repo(stores=good_store)
     good = IndexLeaf("good", repo=repo)
     repo.save_object(good)
@@ -605,7 +605,7 @@ def test_refresh_failure_rolls_back_catalog_atomically(tmp_path):
 
 
 def test_forced_refresh_builds_replacement_without_snapshot_helper(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     obj = IndexLeaf("stored", repo=repo)
     repo.save_object(obj)
@@ -616,7 +616,7 @@ def test_forced_refresh_builds_replacement_without_snapshot_helper(tmp_path):
 
 
 def test_forced_refresh_failure_keeps_live_catalog_without_snapshot(tmp_path):
-    good_store = DirStore(tmp_path / "good")
+    good_store = DirStore(tmp_path / "good", query_index="memory")
     repo = Repo(stores=good_store)
     good = IndexLeaf("good", repo=repo)
     repo.save_object(good)
@@ -645,7 +645,7 @@ def test_query_result_is_stable_across_registration():
 
 
 def test_query_result_is_stable_across_forced_refresh(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     obj = IndexLeaf("stored", repo=repo)
     repo.save_object(obj)
@@ -658,7 +658,7 @@ def test_query_result_is_stable_across_forced_refresh(tmp_path):
 
 
 def test_exact_stored_query_does_not_iterate_complete_catalog(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     wanted = IndexLeaf("wanted", repo=repo)
     repo.save_object(wanted)
@@ -671,7 +671,7 @@ def test_exact_stored_query_does_not_iterate_complete_catalog(tmp_path):
 
 
 def test_stored_query_does_not_enumerate_cache_keys(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     wanted = IndexLeaf("stored", repo=repo)
     cached = IndexLeaf("cached", repo=repo)
@@ -684,7 +684,7 @@ def test_stored_query_does_not_enumerate_cache_keys(tmp_path):
 
 
 def test_selective_query_does_not_iterate_complete_posting_index(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     wanted = IndexPersistent(IndexLeaf("wanted", repo=repo), repo=repo)
     repo.save_object(wanted)
@@ -839,7 +839,7 @@ def test_materializable_result_requires_replica_entry_for_every_definition():
 
 
 def test_nested_definition_result_does_not_lookup_live_replicas(monkeypatch, tmp_path):
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
 
@@ -855,7 +855,7 @@ def test_nested_definition_result_does_not_lookup_live_replicas(monkeypatch, tmp
 
 
 def test_nested_definitions_do_not_capture_occurrence_snapshot(monkeypatch, tmp_path):
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
 
@@ -870,7 +870,7 @@ def test_nested_definitions_do_not_capture_occurrence_snapshot(monkeypatch, tmp_
 
 
 def test_nested_definition_explanation_does_not_report_candidate_count_as_universe(tmp_path):
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
 
@@ -882,7 +882,7 @@ def test_nested_definition_explanation_does_not_report_candidate_count_as_univer
 def test_count_and_explain_do_not_construct_definition_resultset(monkeypatch, tmp_path):
     import dryml.core2.query.query as query_mod
 
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     obj = IndexLeaf("stored", repo=repo)
     repo.save_object(obj)
 
@@ -898,7 +898,7 @@ def test_count_and_explain_do_not_construct_definition_resultset(monkeypatch, tm
 
 
 def test_raw_occurrence_exists_stops_at_first_occurrence(monkeypatch, tmp_path):
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
     original = OccurrenceTraversalSnapshot.iter_occurrences
@@ -917,7 +917,7 @@ def test_raw_occurrence_exists_stops_at_first_occurrence(monkeypatch, tmp_path):
 
 
 def test_occurrence_definitions_do_not_query_live_catalog(monkeypatch, tmp_path):
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
     occurrences = repo.query(Definition(IndexLeaf, "child")).nested(refresh=False).execute()
@@ -934,7 +934,7 @@ def test_occurrence_definitions_do_not_query_live_catalog(monkeypatch, tmp_path)
 
 
 def test_owner_query_performs_one_reverse_traversal(monkeypatch, tmp_path):
-    repo = Repo(stores=DirStore(tmp_path / "store"))
+    repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     child = IndexLeaf("child", repo=repo)
     repo.save_object(IndexPersistent(child, repo=repo))
     calls = 0
@@ -1106,7 +1106,7 @@ def test_owner_deletion_between_capture_and_projection_is_not_mixed(monkeypatch)
 
 
 def test_repo_query_path_uses_protocol_only_backend_contract(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1137,7 +1137,7 @@ def test_repo_query_path_uses_protocol_only_backend_contract(tmp_path):
 
 
 def test_resultset_replica_metadata_survives_refresh_after_execute(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     obj = IndexLeaf("stored", repo=repo)
     repo.save_object(obj)
@@ -1193,7 +1193,7 @@ def test_auto_hydration_does_not_clone_existing_postings():
 
 
 def test_occurrence_result_does_not_gain_new_owner_after_execute(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     first_parent = IndexPersistent(child, state=1, repo=repo)
@@ -1207,7 +1207,7 @@ def test_occurrence_result_does_not_gain_new_owner_after_execute(tmp_path):
 
 
 def test_occurrence_result_survives_owner_deletion_after_execute(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1222,7 +1222,7 @@ def test_occurrence_result_survives_owner_deletion_after_execute(tmp_path):
 
 
 def test_occurrence_result_repeated_iteration_is_stable(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent([child, child], repo=repo)
@@ -1256,7 +1256,7 @@ def test_occurrence_restrict_targets_shares_traversal_backing():
 
 
 def test_occurrence_first_count_and_iteration_use_same_snapshot(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent([child, child], repo=repo)
@@ -1272,7 +1272,7 @@ def test_occurrence_first_count_and_iteration_use_same_snapshot(tmp_path):
 
 
 def test_occurrence_refine_preserves_owner_replicas(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1287,7 +1287,7 @@ def test_occurrence_refine_preserves_owner_replicas(tmp_path):
 
 
 def test_occurrence_refined_owners_retain_snapshot_after_refresh(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1308,7 +1308,7 @@ def test_occurrence_refined_owners_retain_snapshot_after_refresh(tmp_path):
 
 
 def test_occurrence_union_preserves_owner_replicas(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1322,7 +1322,7 @@ def test_occurrence_union_preserves_owner_replicas(tmp_path):
 
 
 def test_occurrence_intersection_preserves_owner_replicas(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1348,13 +1348,13 @@ def test_occurrence_owners_require_replica_metadata():
 
 
 def test_auto_hydration_failure_leaves_catalog_unchanged_and_retries(tmp_path):
-    good_store = DirStore(tmp_path / "good")
+    good_store = DirStore(tmp_path / "good", query_index="memory")
     good_repo = Repo(stores=good_store)
     good = IndexLeaf("good", repo=good_repo)
     good_repo.save_object(good)
 
     bad_store = BadIndexStore(["not-a-cdef"])
-    repo = Repo(stores=[DirStore(good_store.base_dir), bad_store])
+    repo = Repo(stores=[DirStore(good_store.base_dir, query_index="memory"), bad_store])
     before = catalog_state(repo)
 
     with pytest.raises(QueryIndexError):
@@ -1363,14 +1363,14 @@ def test_auto_hydration_failure_leaves_catalog_unchanged_and_retries(tmp_path):
     assert catalog_state(repo) == before
     assert repo._query_catalog.hydrated_stores == set()
 
-    repo.stores = [DirStore(good_store.base_dir)]
+    repo.stores = [DirStore(good_store.base_dir, query_index="memory")]
     assert list(repo.find_defs(None)) == [good.definition]
 
 
 def test_auto_hydration_fingerprints_each_new_cdef_once(tmp_path, monkeypatch):
     from dryml.core2.query import index as index_mod
 
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
@@ -1384,7 +1384,7 @@ def test_auto_hydration_fingerprints_each_new_cdef_once(tmp_path, monkeypatch):
         return original(cdef)
 
     monkeypatch.setattr(index_mod, "target_local_fingerprint", spy)
-    repo2 = Repo(stores=DirStore(store.base_dir))
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
 
     assert list(repo2.find_defs(None)) == [parent.definition]
     assert calls.count(parent.definition) == 1
@@ -1394,7 +1394,7 @@ def test_auto_hydration_fingerprints_each_new_cdef_once(tmp_path, monkeypatch):
 def test_auto_hydration_builds_each_store_graph_once(tmp_path, monkeypatch):
     from dryml.core2.query import index as index_mod
 
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     parent = IndexPersistent(IndexLeaf("child", repo=repo), repo=repo)
     repo.save_object(parent)
@@ -1407,20 +1407,20 @@ def test_auto_hydration_builds_each_store_graph_once(tmp_path, monkeypatch):
         return original(cdefs)
 
     monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "from_roots", classmethod(spy_from_roots))
-    repo2 = Repo(stores=DirStore(store.base_dir))
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
 
     assert list(repo2.find_defs(None)) == [parent.definition]
     assert len(calls) == 1
 
 
 def test_nested_definition_inside_set_is_indexed_with_defined_path(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("set-child", repo=repo)
     parent = IndexPersistent({child}, repo=repo)
     repo.save_object(parent)
 
-    repo2 = Repo(stores=DirStore(store.base_dir))
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
     occurrences = repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS))
 
     assert occurrences.count() == 1
@@ -1430,13 +1430,13 @@ def test_nested_definition_inside_set_is_indexed_with_defined_path(tmp_path):
 
 
 def test_forced_refresh_removes_deleted_root_and_occurrences(tmp_path):
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     child = IndexLeaf("child", repo=repo)
     parent = IndexPersistent(child, repo=repo)
     repo.save_object(parent)
 
-    repo2 = Repo(stores=DirStore(store.base_dir))
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
     assert repo2.find_defs(None).count() == 1
     assert repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS)).count() == 1
 
@@ -1448,13 +1448,13 @@ def test_forced_refresh_removes_deleted_root_and_occurrences(tmp_path):
 
 def test_exact_store_probe_confirms_persisted_definition_after_hash_hit(tmp_path, monkeypatch):
     monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "collision")
-    store = DirStore(tmp_path / "store")
+    store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     stored = IndexLeaf("stored", repo=repo)
     queried = IndexLeaf("queried", repo=repo)
     repo.save_object(stored)
 
-    repo2 = Repo(stores=DirStore(store.base_dir))
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
 
     assert repo2.query(queried.definition).stored().count() == 0
     assert repo2.query(stored.definition).stored().count() == 1

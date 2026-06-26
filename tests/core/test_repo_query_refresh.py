@@ -15,16 +15,16 @@ def test_refresh_false_auto_and_forced_refresh_visibility(tmp_path):
     repo_a.save_object(first)
 
     repo_view = Repo(stores=DirStore(store.base_dir))
-    assert len(repo_view.find_defs(None, refresh=False)) == 0
+    assert len(repo_view.find_defs(None, refresh=False)) == 1
     assert len(repo_view.find_defs(None)) == 1
 
     repo_b = Repo(stores=DirStore(store.base_dir))
     second = RefreshLeaf("second", repo=repo_b)
     repo_b.save_object(second)
 
-    # First-sprint contract: already-hydrated stores need forced refresh for
-    # external writes from another Repo instance.
-    assert len(repo_view.find_defs(None)) == 1
+    # Persistent auto-SQLite indexes expose committed external writes on the
+    # next read transaction without Store hydration.
+    assert len(repo_view.find_defs(None, refresh=False)) == 2
     assert len(repo_view.find_defs(None, refresh=True)) == 2
 
 

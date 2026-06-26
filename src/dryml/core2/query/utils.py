@@ -4,10 +4,15 @@ from collections.abc import Iterable, Iterator
 
 from ..cdef_identity import same_cdef
 from ..definition import ConcreteDefinition
+from .model import FeatureToken
 
 
 def cdef_equal(left: ConcreteDefinition, right: ConcreteDefinition) -> bool:
     return same_cdef(left, right)
+
+
+def feature_token_equal(left: FeatureToken, right: FeatureToken) -> bool:
+    return left == right
 
 
 def stable_hash_to_blob(stable_hash: str) -> bytes:

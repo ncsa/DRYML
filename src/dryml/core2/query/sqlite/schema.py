@@ -1,14 +1,47 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 
 from ...cdef_graph import CDEF_GRAPH_SCHEMA_VERSION
-from ..codecs import CDEF_CODEC_VERSION, FEATURE_CODEC_VERSION, PATH_CODEC_VERSION
-from ..model import FINGERPRINT_SCHEMA_VERSION, QueryIndexIncompatible
+from ..codecs import CDEF_CODEC_VERSION, FEATURE_CODEC_VERSION, PATH_CODEC_VERSION, QUERY_INDEX_CODEC_VERSION
+from ..model import FINGERPRINT_SCHEMA_VERSION, QueryIndexDirty, QueryIndexIncompatible
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
 SQLITE_QUERY_INDEX_SCHEMA_VERSION = 1
+IndexCompatibilityDecision = Literal["compatible", "migrate", "rebuild", "future-unsupported"]
+
+
+@dataclass(frozen=True, slots=True)
+class IndexSemanticVersion:
+    """Semantic version bundle required by a SQLite query index."""
+
+    schema_version: int
+    graph_schema_version: int
+    path_schema_version: int
+    fingerprint_version: int
+    cdef_codec_version: int
+    feature_codec_version: int
+    query_index_codec_version: int
+    canonical_version: int
+    store_key: str
+
+    def catalog_state(self) -> dict[str, int | str]:
+        """Return the subset stored in the SQLite `catalog_state` table."""
+
+        return {
+            "schema_version": self.schema_version,
+            "graph_schema_version": self.graph_schema_version,
+            "path_schema_version": self.path_schema_version,
+            "fingerprint_version": self.fingerprint_version,
+            "cdef_codec_version": self.cdef_codec_version,
+            "feature_codec_version": self.feature_codec_version,
+            "canonical_version": self.canonical_version,
+            "store_key": self.store_key,
+        }
 
 
 DDL = (
@@ -86,15 +119,17 @@ DDL = (
 )
 
 
-def initialize_schema(con, *, store_key: str, canonical_version: int = 1) -> None:
+def initialize_schema(con, *, store_key: str, canonical_version: int = 1, build_state: str = "ready") -> None:
+    if build_state not in {"building", "ready", "dirty"}:
+        raise ValueError("build_state must be 'building', 'ready', or 'dirty'.")
     con.execute(f"PRAGMA application_id = {SQLITE_QUERY_INDEX_APPLICATION_ID}")
     con.execute(f"PRAGMA user_version = {SQLITE_QUERY_INDEX_SCHEMA_VERSION}")
     for statement in DDL:
         con.execute(statement)
-    _ensure_catalog_state(con, store_key=store_key, canonical_version=canonical_version)
+    _ensure_catalog_state(con, store_key=store_key, canonical_version=canonical_version, build_state=build_state)
 
 
-def validate_schema(con, *, store_key: str, canonical_version: int = 1) -> None:
+def validate_schema(con, *, store_key: str, canonical_version: int = 1, require_ready: bool = True) -> None:
     application_id = con.execute("PRAGMA application_id").fetchone()[0]
     if application_id != SQLITE_QUERY_INDEX_APPLICATION_ID:
         raise QueryIndexIncompatible("SQLite file is not a DRYML query index.")
@@ -110,12 +145,48 @@ def validate_schema(con, *, store_key: str, canonical_version: int = 1) -> None:
     for key, value in expected.items():
         if state[key] != value:
             raise QueryIndexIncompatible(f"SQLite query index {key}={state[key]!r} is incompatible with expected {value!r}.")
+    if require_ready and state["build_state"] != "ready":
+        raise QueryIndexDirty(f"SQLite query index build_state={state['build_state']!r} is not ready.")
 
 
-def _ensure_catalog_state(con, *, store_key: str, canonical_version: int) -> None:
+def expected_semantic_version(*, store_key: str, canonical_version: int = 1) -> IndexSemanticVersion:
+    """Return the semantic version bundle expected for a Store index."""
+
+    return IndexSemanticVersion(
+        schema_version=SQLITE_QUERY_INDEX_SCHEMA_VERSION,
+        graph_schema_version=CDEF_GRAPH_SCHEMA_VERSION,
+        path_schema_version=PATH_CODEC_VERSION,
+        fingerprint_version=FINGERPRINT_SCHEMA_VERSION,
+        cdef_codec_version=CDEF_CODEC_VERSION,
+        feature_codec_version=FEATURE_CODEC_VERSION,
+        query_index_codec_version=QUERY_INDEX_CODEC_VERSION,
+        canonical_version=canonical_version,
+        store_key=store_key,
+    )
+
+
+def compatibility_decision(
+        actual: Mapping[str, int | str],
+        *,
+        expected: IndexSemanticVersion) -> IndexCompatibilityDecision:
+    """Classify how to handle persisted query-index version metadata."""
+
+    actual_schema = actual.get("schema_version")
+    if isinstance(actual_schema, int):
+        if actual_schema > expected.schema_version:
+            return "future-unsupported"
+        if actual_schema < expected.schema_version:
+            return "migrate"
+    for key, value in expected.catalog_state().items():
+        if actual.get(key) != value:
+            return "rebuild"
+    return "compatible"
+
+
+def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_state: str) -> None:
     existing = con.execute("SELECT 1 FROM catalog_state WHERE singleton = 1").fetchone()
     if existing is not None:
-        validate_schema(con, store_key=store_key, canonical_version=canonical_version)
+        validate_schema(con, store_key=store_key, canonical_version=canonical_version, require_ready=False)
         return
     now = datetime.now(timezone.utc).isoformat()
     values = _semantic_versions(store_key=store_key, canonical_version=canonical_version)
@@ -135,7 +206,7 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int) -> Non
             build_state,
             created_at,
             updated_at
-        ) VALUES (1, 0, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?)
+        ) VALUES (1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             values["schema_version"],
@@ -146,6 +217,7 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int) -> Non
             values["feature_codec_version"],
             values["canonical_version"],
             values["store_key"],
+            build_state,
             now,
             now,
         ),
@@ -153,13 +225,4 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int) -> Non
 
 
 def _semantic_versions(*, store_key: str, canonical_version: int) -> dict[str, int | str]:
-    return {
-        "schema_version": SQLITE_QUERY_INDEX_SCHEMA_VERSION,
-        "graph_schema_version": CDEF_GRAPH_SCHEMA_VERSION,
-        "path_schema_version": PATH_CODEC_VERSION,
-        "fingerprint_version": FINGERPRINT_SCHEMA_VERSION,
-        "cdef_codec_version": CDEF_CODEC_VERSION,
-        "feature_codec_version": FEATURE_CODEC_VERSION,
-        "canonical_version": canonical_version,
-        "store_key": store_key,
-    }
+    return expected_semantic_version(store_key=store_key, canonical_version=canonical_version).catalog_state()
