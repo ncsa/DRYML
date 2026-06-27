@@ -603,6 +603,40 @@ def test_sqlite_count_terminal_does_not_construct_resultset(tmp_path, monkeypatc
     assert count == 2
 
 
+def test_sqlite_terminal_verification_runs_after_read_view_closes(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="verify-left", repo=repo))
+    repo.save_object(FederationLeaf(name="verify-right", repo=repo))
+
+    active_views = set()
+    original_init = SQLiteQueryIndexReadView.__init__
+    original_close = SQLiteQueryIndexReadView.close
+    original_verify = DefinitionQuery._verify_cdefs
+
+    def track_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        active_views.add(id(self))
+
+    def track_close(self):
+        active_views.discard(id(self))
+        return original_close(self)
+
+    def assert_no_active_sqlite_read_view(self, cdefs, *, stats):
+        assert not active_views
+        return original_verify(self, cdefs, stats=stats)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "__init__", track_init)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "close", track_close)
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", assert_no_active_sqlite_read_view)
+
+    selector = Definition(FederationLeaf, SKIP_ARGS)
+    assert repo.query(selector).stored().exists()
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS, name="verify-left")).stored().one().kwargs["name"] == "verify-left"
+    assert repo.query(selector).stored().count() == 2
+    assert not active_views
+
+
 def test_sqlite_selective_query_does_not_construct_full_definition_universe(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)

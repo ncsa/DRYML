@@ -123,21 +123,24 @@ class RepoQueryIndex:
                     if stop_after is None:
                         cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
                     else:
-                        cdefs_by_id = {}
-                        for batch in chunked(sorted(candidate_ids), 256):
-                            batch_cdefs = snapshot.cdefs_by_id(batch)
-                            batch_matches = query._verify_cdefs(tuple(batch_cdefs.values()), stats=stats)
-                            source_matches += len(batch_matches)
-                            for cdef in batch_matches:
-                                canonical = _canonical_cdef_key(merged, cdef)
-                                replicas.setdefault(canonical, []).append(binding.store)
-                                if len(merged) >= stop_after:
-                                    break
-                            if len(merged) >= stop_after:
-                                break
+                        cdef_batches = tuple(
+                            tuple(snapshot.cdefs_by_id(batch).values())
+                            for batch in chunked(sorted(candidate_ids), 256)
+                        )
                 matches = () if stop_after is not None else query._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
                 if stop_after is None:
                     source_matches = len(matches)
+                else:
+                    for batch_cdefs in cdef_batches:
+                        batch_matches = query._verify_cdefs(batch_cdefs, stats=stats)
+                        source_matches += len(batch_matches)
+                        for cdef in batch_matches:
+                            canonical = _canonical_cdef_key(merged, cdef)
+                            replicas.setdefault(canonical, []).append(binding.store)
+                            if len(merged) >= stop_after:
+                                break
+                        if len(merged) >= stop_after:
+                            break
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(
@@ -180,34 +183,38 @@ class RepoQueryIndex:
                     candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
                     generation = snapshot.generation
                     generations[binding.source_key] = generation
-                    for batch in chunked(sorted(candidate_ids), 256):
-                        cdefs_by_id = snapshot.cdefs_by_id(batch)
-                        matches = query._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
-                        source_matches += len(matches)
-                        for cdef in matches:
-                            _canonical_cdef_key(merged, cdef)
-                            if stop_after is not None and len(merged) >= stop_after:
-                                source_plans.append(SourceQueryPlan(
-                                    source_key=binding.source_key,
-                                    backend=_source_backend(index),
-                                    generation=generation,
-                                    candidate_count=len(candidate_ids),
-                                    verified_count=stats.verified_count - before_verified,
-                                    result_count=source_matches,
-                                    refresh_action=stats.refresh_action,
-                                ))
-                                stats.result_count = len(merged)
-                                stats.universe_size = None
-                                stats.generation_vector = generations
-                                stats.source_plans = tuple(source_plans)
-                                return len(merged), stats
+                    cdef_batches = tuple(
+                        tuple(snapshot.cdefs_by_id(batch).values())
+                        for batch in chunked(sorted(candidate_ids), 256)
+                    )
+                    candidate_count = len(candidate_ids)
+                for cdefs in cdef_batches:
+                    matches = query._verify_cdefs(cdefs, stats=stats)
+                    source_matches += len(matches)
+                    for cdef in matches:
+                        _canonical_cdef_key(merged, cdef)
+                        if stop_after is not None and len(merged) >= stop_after:
+                            source_plans.append(SourceQueryPlan(
+                                source_key=binding.source_key,
+                                backend=_source_backend(index),
+                                generation=generation,
+                                candidate_count=candidate_count,
+                                verified_count=stats.verified_count - before_verified,
+                                result_count=source_matches,
+                                refresh_action=stats.refresh_action,
+                            ))
+                            stats.result_count = len(merged)
+                            stats.universe_size = None
+                            stats.generation_vector = generations
+                            stats.source_plans = tuple(source_plans)
+                            return len(merged), stats
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(
                 source_key=binding.source_key,
                 backend=_source_backend(index),
                 generation=generation,
-                candidate_count=len(candidate_ids),
+                candidate_count=candidate_count,
                 verified_count=stats.verified_count - before_verified,
                 result_count=source_matches,
                 refresh_action=stats.refresh_action,
