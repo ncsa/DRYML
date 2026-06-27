@@ -134,9 +134,9 @@ class SQLiteStoreQueryIndex:
             validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
             row = con.execute(
                 """
-                SELECT generation, schema_version, graph_schema_version, path_schema_version,
+                SELECT index_uuid, generation, schema_version, graph_schema_version, path_schema_version,
                        fingerprint_version, cdef_codec_version, feature_codec_version,
-                       canonical_version, build_state
+                       canonical_version, build_state, dirty
                 FROM catalog_state
                 WHERE singleton = 1
                 """
@@ -165,17 +165,19 @@ class SQLiteStoreQueryIndex:
             schema_version = None
             semantic_versions = {}
         else:
-            generation = row[0]
-            schema_version = row[1]
+            diagnostics["index_uuid"] = row[0]
+            diagnostics["dirty_flag"] = bool(row[10])
+            generation = row[1]
+            schema_version = row[2]
             semantic_versions = {
-                "graph_schema_version": row[2],
-                "path_schema_version": row[3],
-                "fingerprint_version": row[4],
-                "cdef_codec_version": row[5],
-                "feature_codec_version": row[6],
-                "canonical_version": row[7],
+                "graph_schema_version": row[3],
+                "path_schema_version": row[4],
+                "fingerprint_version": row[5],
+                "cdef_codec_version": row[6],
+                "feature_codec_version": row[7],
+                "canonical_version": row[8],
             }
-            state = row[8]
+            state = "dirty" if row[10] else row[9]
         return QueryIndexStatus(
             backend="sqlite",
             store_key=self.source_key,
@@ -696,8 +698,8 @@ class SQLiteStoreQueryIndex:
         def operation(con):
             validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
             con.execute(
-                "UPDATE catalog_state SET build_state = ?, updated_at = ? WHERE singleton = 1",
-                (state, datetime.now(timezone.utc).isoformat()),
+                "UPDATE catalog_state SET build_state = ?, dirty = ?, updated_at = ? WHERE singleton = 1",
+                (state, 1 if state == "dirty" else 0, datetime.now(timezone.utc).isoformat()),
             )
 
         self._run_write_transaction(operation)

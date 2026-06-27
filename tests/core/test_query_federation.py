@@ -7,6 +7,7 @@ from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
 from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError
 from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
 from dryml.core2.query.query import DefinitionQuery
+from dryml.core2.query.result import DefinitionResultSet
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core2.query.sqlite.index import SQLiteQueryIndexReadView
 from dryml.core2.store.dir import DirStore
@@ -254,6 +255,34 @@ def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
     assert [plan.backend for plan in results.explanation.source_plans] == ["sqlite", "sqlite"]
 
 
+def test_sqlite_objects_terminal_uses_query_replica_snapshot(tmp_path, monkeypatch):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    obj = FederationLeaf(name="materialize-priority", repo=repo)
+    repo.save_object(obj, store=store1)
+    repo.save_object(obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    results = repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="materialize-priority")).stored().defs()
+    repo2.set_default_store(repo2.stores[1])
+    selected = []
+
+    def spy_load(cdef, **kwargs):
+        selected.append(repo2.obj_default_store[cdef])
+        return obj
+
+    monkeypatch.setattr(repo2, "load_object", spy_load)
+
+    objects = results.objects()
+
+    assert len(objects) == 1
+    assert selected == [results.replicas(obj.definition)[0]]
+
+
 def test_sqlite_federated_known_includes_cached_only_definition(tmp_path):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -338,6 +367,32 @@ def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
     assert str(occurrences[0].path) == "$.child"
     assert definitions.explanation.generation_vector == {repo2_store.catalog_key(): 1}
     assert owners.explanation.source_plans[0].result_count == 1
+
+
+def test_sqlite_multistore_occurrences_deduplicate_and_keep_replica_order(tmp_path):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    leaf = FederationLeaf(name="duplicate-occurrence", repo=repo)
+    owner = FederationParent(child=leaf, name="owner", repo=repo)
+    repo.save_object(owner, store=store1)
+    repo.save_object(owner, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    selector = Definition(FederationLeaf, SKIP_ARGS, name="duplicate-occurrence")
+
+    occurrences = repo2.query(selector).nested().execute()
+    occurrence_items = tuple(occurrences)
+    owners = occurrences.owners()
+
+    assert len(occurrence_items) == 1
+    assert occurrence_items[0].owner == owner.definition
+    assert occurrence_items[0].definition == leaf.definition
+    assert str(occurrence_items[0].path) == "$.child"
+    assert tuple(store.base_dir for store in owners.replicas(owner.definition)) == (store2.base_dir, store1.base_dir)
 
 
 def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):
@@ -530,6 +585,22 @@ def test_sqlite_federated_explain_does_not_verify_cdefs(tmp_path, monkeypatch):
     assert explanation.refresh_action == "federated-plan"
     assert explanation.candidate_count == 1
     assert explanation.result_count is None
+
+
+def test_sqlite_count_terminal_does_not_construct_resultset(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="count-left", repo=repo))
+    repo.save_object(FederationLeaf(name="count-right", repo=repo))
+
+    def fail_resultset(*args, **kwargs):
+        raise AssertionError("count() should not construct a DefinitionResultSet")
+
+    monkeypatch.setattr(DefinitionResultSet, "__init__", fail_resultset)
+
+    count = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().count()
+
+    assert count == 2
 
 
 def test_sqlite_selective_query_does_not_construct_full_definition_universe(tmp_path, monkeypatch):

@@ -204,6 +204,154 @@ assert "torch" not in sys.modules
     )
 
 
+def test_sqlite_tf_import_refs_do_not_import_tensorflow_for_query_terminals():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core2.store.dir import DirStore
+from dryml.core2.symbol import ImportRef
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    child_cls = ImportRef("dryml.models.tf.keras.base", "Sequential")
+    root_cls = ImportRef("dryml.models.tf.base", "Model")
+    child = ConcreteDefinition(child_cls, FrozenTuple(()), FrozenDict({"name": "tf-child"}))
+    root = ConcreteDefinition(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "tf-root"}))
+    index = SQLiteStoreQueryIndex(
+        source_key=store.catalog_key(),
+        path=store.query_index_path,
+        config=SQLiteQueryIndexConfig(path=store.query_index_path, journal_mode="delete"),
+    )
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+    index.close()
+
+    repo = Repo(stores=store)
+    assert repo.index_status(store=store)[0].state == "ready"
+    assert repo.query(root).stored().count() == 1
+    assert list(repo.query(root).stored().defs()) == [root]
+    selector = Definition(child_cls, SKIP_ARGS, name="tf-child")
+    assert list(repo.query(selector).nested().definitions().defs()) == [child]
+    assert list(repo.query(selector).nested().owners().defs()) == [root]
+    occurrences = tuple(repo.query(selector).nested().max_occurrences(2).execute())
+    assert len(occurrences) == 1
+    assert occurrences[0].owner == root
+    assert occurrences[0].definition == child
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )
+
+
+def test_sqlite_torch_import_refs_do_not_import_torch_for_query_terminals():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core2.store.dir import DirStore
+from dryml.core2.symbol import ImportRef
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    child_cls = ImportRef("dryml.models.torch.base", "Wrapper")
+    root_cls = ImportRef("dryml.models.torch.base", "Model")
+    child = ConcreteDefinition(child_cls, FrozenTuple(()), FrozenDict({"name": "torch-child"}))
+    root = ConcreteDefinition(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "torch-root"}))
+    index = SQLiteStoreQueryIndex(
+        source_key=store.catalog_key(),
+        path=store.query_index_path,
+        config=SQLiteQueryIndexConfig(path=store.query_index_path, journal_mode="delete"),
+    )
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+    index.close()
+
+    repo = Repo(stores=store)
+    assert repo.index_status(store=store)[0].state == "ready"
+    assert repo.query(root).stored().count() == 1
+    assert list(repo.query(root).stored().defs()) == [root]
+    selector = Definition(child_cls, SKIP_ARGS, name="torch-child")
+    assert list(repo.query(selector).nested().definitions().defs()) == [child]
+    assert list(repo.query(selector).nested().owners().defs()) == [root]
+    occurrences = tuple(repo.query(selector).nested().max_occurrences(2).execute())
+    assert len(occurrences) == 1
+    assert occurrences[0].owner == root
+    assert occurrences[0].definition == child
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )
+
+
+def test_tensorflow_materialization_imports_tensorflow_when_backend_object_is_built():
+    _run_import_probe(
+        """
+import sys
+
+assert "tensorflow" not in sys.modules
+
+from dryml.core2 import Definition
+from dryml.core2.symbol import ImportRef
+
+obj = Definition(
+    ImportRef("dryml.models.tf.base", "Wrapper"),
+    ImportRef("tensorflow.keras.layers", "Dense"),
+    1,
+    input_shape=(1,),
+).build(restore_state=False, build_missing=True, cache="none")
+
+assert obj is not None
+assert "tensorflow" in sys.modules
+        """
+    )
+
+
+def test_torch_materialization_imports_torch_when_backend_object_is_built():
+    _run_import_probe(
+        """
+import sys
+
+assert "torch" not in sys.modules
+
+from dryml.core2 import Definition
+from dryml.core2.symbol import ImportRef
+
+obj = Definition(
+    ImportRef("dryml.models.torch.base", "Wrapper"),
+    ImportRef("torch.nn", "Linear"),
+    1,
+    1,
+).build(restore_state=False, build_missing=True, cache="none")
+
+assert obj is not None
+assert "torch" in sys.modules
+        """
+    )
+
+
 def test_query_protocol_and_planner_imports_do_not_import_sqlite():
     _run_import_probe(
         """
@@ -236,7 +384,7 @@ from dryml.core2.query.sqlite.utils import wal_runtime_is_known_safe
 
 assert SQLiteQueryIndexConfig is not None
 assert SQLiteConnectionManager is not None
-assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 1
+assert SQLITE_QUERY_INDEX_SCHEMA_VERSION == 2
 assert wal_runtime_is_known_safe((3, 51, 3))
 assert "sqlite3" not in sys.modules
         """

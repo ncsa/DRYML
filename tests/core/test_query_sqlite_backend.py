@@ -88,6 +88,29 @@ def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):
         }
 
 
+def test_registered_rows_include_edge_and_root_metadata(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf("metadata")
+    owner = SQLiteParent(child=leaf, name="owner")
+    graph = ConcreteDefinitionGraph.from_root(owner.definition)
+
+    result = index.register_stored_roots(graph, [owner.definition])
+
+    assert sqlite_rows(index.path, "SELECT unordered FROM definition_edges") == [(0,)]
+    stored_root = sqlite_rows(
+        index.path,
+        """
+        SELECT storage_hash, relative_def_path, def_size, def_mtime_ns, indexed_generation
+        FROM stored_roots
+        """,
+    )[0]
+    assert stored_root[0] == bytes.fromhex(owner.definition.stable_hash())
+    assert stored_root[1] == f"objects/{owner.definition.stable_hash()[:2]}/{owner.definition.stable_hash()}/def.pkl"
+    assert stored_root[2] is None
+    assert stored_root[3] is None
+    assert stored_root[4] == result.generation
+
+
 def test_register_prepares_encoded_rows_before_write_transaction(tmp_path, monkeypatch):
     index = sqlite_index(tmp_path)
     root = SQLiteLeaf("transaction-boundary")

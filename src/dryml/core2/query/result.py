@@ -161,6 +161,9 @@ class DefinitionResultSet:
             raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
         objs = {}
         for cdef in self._definitions:
+            replicas = self._replicas.get(cdef, ())
+            if replicas:
+                self.repo.set_object_store(cdef, replicas[0])
             objs[cdef] = self.repo.load_object(
                 cdef,
                 instance=instance,

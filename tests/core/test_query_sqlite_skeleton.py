@@ -1,4 +1,5 @@
 import threading
+from uuid import UUID
 
 import pytest
 
@@ -122,6 +123,118 @@ def test_schema_initialization_and_validation(tmp_path):
     assert state == (0, "ready", "store-a")
     for table in {"definitions", "feature_tokens", "postings", "definition_edges", "stored_roots"}:
         assert con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+    manager.close_all_current_process()
+
+
+def test_catalog_state_persists_required_metadata(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a")
+
+    row = con.execute(
+        """
+        SELECT index_uuid, generation, schema_version, graph_schema_version,
+               path_schema_version, fingerprint_version, cdef_codec_version,
+               feature_codec_version, canonical_version, store_key, build_state,
+               dirty, created_at, updated_at
+        FROM catalog_state
+        WHERE singleton = 1
+        """
+    ).fetchone()
+    assert row is not None
+    UUID(row[0])
+    assert row[1] == 0
+    assert row[2] == SQLITE_QUERY_INDEX_SCHEMA_VERSION
+    assert row[3:9] == tuple(expected_semantic_version(store_key="store-a").catalog_state()[key] for key in (
+        "graph_schema_version",
+        "path_schema_version",
+        "fingerprint_version",
+        "cdef_codec_version",
+        "feature_codec_version",
+        "canonical_version",
+    ))
+    assert row[9] == "store-a"
+    assert row[10] == "ready"
+    assert row[11] == 0
+    assert row[12]
+    assert row[13]
+
+    initialize_schema(con, store_key="store-a")
+    assert con.execute("SELECT index_uuid FROM catalog_state WHERE singleton = 1").fetchone()[0] == row[0]
+    manager.close_all_current_process()
+
+
+def test_schema_tables_expose_required_columns_and_constraints(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+
+    initialize_schema(con, store_key="store-a")
+
+    table_columns = {
+        table: {row[1]: row for row in con.execute(f"PRAGMA table_info({table})")}
+        for table in ("catalog_state", "definitions", "feature_tokens", "postings", "definition_edges", "stored_roots")
+    }
+    assert set(table_columns["catalog_state"]) >= {
+        "singleton",
+        "index_uuid",
+        "generation",
+        "schema_version",
+        "graph_schema_version",
+        "fingerprint_version",
+        "path_schema_version",
+        "cdef_codec_version",
+        "feature_codec_version",
+        "canonical_version",
+        "store_key",
+        "build_state",
+        "dirty",
+        "created_at",
+        "updated_at",
+    }
+    assert set(table_columns["definitions"]) >= {
+        "def_id",
+        "stable_hash",
+        "collision_ordinal",
+        "class_key",
+        "cdef_blob",
+        "created_generation",
+    }
+    assert set(table_columns["feature_tokens"]) >= {
+        "feature_id",
+        "token_hash",
+        "collision_ordinal",
+        "token_blob",
+        "document_frequency",
+    }
+    assert set(table_columns["postings"]) >= {"feature_id", "def_id", "multiplicity"}
+    assert set(table_columns["definition_edges"]) >= {
+        "parent_def_id",
+        "child_def_id",
+        "path_hash",
+        "path_blob",
+        "unordered",
+    }
+    assert set(table_columns["stored_roots"]) >= {
+        "def_id",
+        "storage_hash",
+        "relative_def_path",
+        "def_size",
+        "def_mtime_ns",
+        "indexed_generation",
+    }
+
+    index_columns = {
+        row[2]
+        for row in con.execute("PRAGMA index_info(postings_by_definition)")
+    }
+    assert index_columns == {"def_id", "feature_id"}
+    edge_indexes = {
+        row[0]
+        for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'definition_edges'")
+        if row[0] is not None
+    }
+    assert {"definition_edges_by_child", "definition_edges_by_parent_path"} <= edge_indexes
     manager.close_all_current_process()
 
 

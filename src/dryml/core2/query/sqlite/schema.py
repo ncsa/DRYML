@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
+from uuid import uuid4
 
 from ...cdef_graph import CDEF_GRAPH_SCHEMA_VERSION
 from ..codecs import CDEF_CODEC_VERSION, FEATURE_CODEC_VERSION, PATH_CODEC_VERSION, QUERY_INDEX_CODEC_VERSION
@@ -11,7 +12,7 @@ from ..model import FINGERPRINT_SCHEMA_VERSION, QueryIndexDirty, QueryIndexIncom
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 1
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 2
 IndexCompatibilityDecision = Literal["compatible", "migrate", "rebuild", "future-unsupported"]
 
 
@@ -48,6 +49,7 @@ DDL = (
     """
     CREATE TABLE IF NOT EXISTS catalog_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        index_uuid TEXT NOT NULL,
         generation INTEGER NOT NULL,
         schema_version INTEGER NOT NULL,
         graph_schema_version INTEGER NOT NULL,
@@ -58,6 +60,7 @@ DDL = (
         canonical_version INTEGER NOT NULL,
         store_key TEXT NOT NULL,
         build_state TEXT NOT NULL CHECK (build_state IN ('building', 'ready', 'dirty')),
+        dirty INTEGER NOT NULL CHECK (dirty IN (0, 1)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -100,8 +103,9 @@ DDL = (
         parent_def_id INTEGER NOT NULL REFERENCES definitions(def_id) ON DELETE CASCADE,
         path_hash BLOB NOT NULL,
         path_blob BLOB NOT NULL,
+        unordered INTEGER NOT NULL DEFAULT 0 CHECK (unordered IN (0, 1)),
         child_def_id INTEGER NOT NULL REFERENCES definitions(def_id) ON DELETE CASCADE,
-        PRIMARY KEY (parent_def_id, path_hash, path_blob, child_def_id)
+        PRIMARY KEY (parent_def_id, path_hash, path_blob, unordered, child_def_id)
     ) WITHOUT ROWID
     """,
     "CREATE INDEX IF NOT EXISTS definition_edges_by_child ON definition_edges(child_def_id, path_hash, parent_def_id)",
@@ -145,7 +149,7 @@ def validate_schema(con, *, store_key: str, canonical_version: int = 1, require_
     for key, value in expected.items():
         if state[key] != value:
             raise QueryIndexIncompatible(f"SQLite query index {key}={state[key]!r} is incompatible with expected {value!r}.")
-    if require_ready and state["build_state"] != "ready":
+    if require_ready and (state["build_state"] != "ready" or state["dirty"]):
         raise QueryIndexDirty(f"SQLite query index build_state={state['build_state']!r} is not ready.")
 
 
@@ -194,6 +198,7 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_
         """
         INSERT INTO catalog_state (
             singleton,
+            index_uuid,
             generation,
             schema_version,
             graph_schema_version,
@@ -204,11 +209,13 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_
             canonical_version,
             store_key,
             build_state,
+            dirty,
             created_at,
             updated_at
-        ) VALUES (1, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (1, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            str(uuid4()),
             values["schema_version"],
             values["graph_schema_version"],
             values["path_schema_version"],
@@ -218,6 +225,7 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_
             values["canonical_version"],
             values["store_key"],
             build_state,
+            1 if build_state == "dirty" else 0,
             now,
             now,
         ),

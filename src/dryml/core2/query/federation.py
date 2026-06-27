@@ -370,13 +370,17 @@ class RepoQueryIndex:
 
         def occurrence_factory():
             yielded = 0
+            seen = set()
             for traversal in traversals:
-                remaining = None if query.occurrence_limit is None else query.occurrence_limit - yielded
-                if remaining is not None and remaining <= 0:
-                    return
-                for occurrence in traversal.iter_occurrences(max_occurrences=remaining):
+                for occurrence in traversal.iter_occurrences():
+                    key = (occurrence.owner, occurrence.path, occurrence.definition)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     yielded += 1
                     yield occurrence
+                    if query.occurrence_limit is not None and yielded >= query.occurrence_limit:
+                        return
 
         return occurrence_factory, stats, {owner: tuple(_dedupe_stores(stores)) for owner, stores in owner_replicas.items()}
 
