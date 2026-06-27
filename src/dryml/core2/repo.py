@@ -89,6 +89,9 @@ class Repo:
         self.obj_config = {}
         self.config = dict(config or {})
         self.alias_index = {}
+        # Compatibility facade and live cache overlay. Store-owned indexes handle
+        # persistent sources; this aggregate remains the memory backend and cache
+        # source for existing APIs and `known()` cache federation.
         self._query_catalog = AggregateMemoryQueryIndex(self)
 
         # Some helper variables for monitoring

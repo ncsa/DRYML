@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import subprocess
@@ -10,7 +11,7 @@ import pytest
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.model import QueryIndexBusy
+from dryml.core2.query.model import QueryIndexBusy, QueryIndexError
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core2.repo_plan import SaveAction, SavePlan, execute_save_plan
@@ -117,6 +118,20 @@ def _collect_worker(proc: subprocess.Popen, *, timeout: float = 10.0) -> dict:
     return json.loads(lines[-1]) if lines else {}
 
 
+def _spawn_register_worker(path: str, queue) -> None:
+    idx = _index(Path(path), timeout=0.05, retries=20)
+    try:
+        root = _cdef("spawn-child")
+        before = idx._connections.connection(readonly=False)
+        result = idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+        after = idx._connections.connection(readonly=False)
+        queue.put({"generation": result.generation, "same_connection": before is after})
+    except BaseException as exc:
+        queue.put({"error": repr(exc)})
+    finally:
+        idx.close()
+
+
 def _cdef(name: str) -> ConcreteDefinition:
     return ConcreteDefinition(ImportRef("builtins", "dict"), FrozenTuple((name,)), FrozenDict({}))
 
@@ -217,6 +232,99 @@ emit({{"committed": True}})
             proc.wait(timeout=5)
 
 
+def test_read_transaction_keeps_snapshot_until_next_read_view(tmp_path):
+    path = tmp_path / "index.sqlite"
+    idx = SQLiteStoreQueryIndex(
+        source_key="concurrency-store",
+        path=path,
+        config=SQLiteQueryIndexConfig(journal_mode="wal", busy_timeout=0.05, max_write_retries=20),
+    )
+    try:
+        idx.initialize_empty()
+    except QueryIndexError as exc:
+        pytest.skip(f"WAL mode unavailable in this environment: {exc}")
+
+    with idx.read_view() as view:
+        assert view.generation == 0
+        result = _run_worker(f'''
+result = SQLiteStoreQueryIndex(
+    source_key="concurrency-store",
+    path={str(path)!r},
+    config=SQLiteQueryIndexConfig(journal_mode="wal", busy_timeout=0.05, max_write_retries=20),
+).register_stored_roots(ConcreteDefinitionGraph.from_root(cdef("snapshot")), [cdef("snapshot")])
+emit({{"generation": result.generation, "changed": result.changed}})
+''')
+        assert result == {"generation": 1, "changed": True}
+        assert view.generation == 0
+        assert view.exact_ids(_cdef("snapshot")) == set()
+
+    with idx.read_view() as view:
+        assert view.generation == 1
+        assert len(view.exact_ids(_cdef("snapshot"))) == 1
+
+
+def test_many_readers_one_writer_in_wal_mode(tmp_path):
+    path = tmp_path / "index.sqlite"
+    idx = SQLiteStoreQueryIndex(
+        source_key="concurrency-store",
+        path=path,
+        config=SQLiteQueryIndexConfig(journal_mode="wal", busy_timeout=0.05, max_write_retries=20),
+    )
+    try:
+        idx.initialize_empty()
+    except QueryIndexError as exc:
+        pytest.skip(f"WAL mode unavailable in this environment: {exc}")
+
+    release = tmp_path / "release-readers"
+    reader_procs = []
+    for reader_idx in range(3):
+        ready = tmp_path / f"reader-{reader_idx}-ready"
+        reader_procs.append(_start_worker(f'''
+idx = SQLiteStoreQueryIndex(
+    source_key="concurrency-store",
+    path={str(path)!r},
+    config=SQLiteQueryIndexConfig(journal_mode="wal", busy_timeout=0.05, max_write_retries=20),
+)
+with idx.read_view() as view:
+    Path({str(ready)!r}).write_text("ready")
+    while not Path({str(release)!r}).exists():
+        time.sleep(0.01)
+    emit({{"generation": view.generation, "count": len(view.exact_ids(cdef("wal-writer")))}})
+idx.close()
+'''))
+    try:
+        for reader_idx in range(3):
+            _wait_for(tmp_path / f"reader-{reader_idx}-ready")
+        result = _run_worker(f'''
+idx = SQLiteStoreQueryIndex(
+    source_key="concurrency-store",
+    path={str(path)!r},
+    config=SQLiteQueryIndexConfig(journal_mode="wal", busy_timeout=0.05, max_write_retries=20),
+)
+root = cdef("wal-writer")
+write_result = idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+idx.close()
+emit({{"generation": write_result.generation, "changed": write_result.changed}})
+''')
+        assert result == {"generation": 1, "changed": True}
+        release.write_text("go")
+        assert [_collect_worker(proc) for proc in reader_procs] == [
+            {"generation": 0, "count": 0},
+            {"generation": 0, "count": 0},
+            {"generation": 0, "count": 0},
+        ]
+    finally:
+        release.write_text("go")
+        for proc in reader_procs:
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=5)
+
+    with idx.read_view() as view:
+        assert view.generation == 1
+        assert len(view.exact_ids(_cdef("wal-writer"))) == 1
+
+
 def test_concurrent_different_writers_both_commit(tmp_path):
     path = tmp_path / "index.sqlite"
     _index(path).initialize_empty()
@@ -287,6 +395,61 @@ emit({{"released": True}})
     finally:
         release.write_text("go")
         assert _collect_worker(proc) == {"released": True}
+
+
+def test_writer_busy_retry_succeeds_after_lock_release(tmp_path):
+    path = tmp_path / "index.sqlite"
+    ready = tmp_path / "writer-ready"
+    release = tmp_path / "release-writer"
+    _index(path).initialize_empty()
+    proc = _start_worker(f'''
+idx = index({str(path)!r}, timeout=1.0, retries=0)
+con = idx._connections.connection(readonly=False)
+con.execute("BEGIN IMMEDIATE")
+Path({str(ready)!r}).write_text("ready")
+while not Path({str(release)!r}).exists():
+    time.sleep(0.01)
+con.execute("ROLLBACK")
+idx.close()
+emit({{"released": True}})
+''')
+
+    try:
+        _wait_for(ready)
+        writer = _start_worker(f'''
+result = register_root({str(path)!r}, "retry-success", timeout=0.01, retries=50)
+emit({{"generation": result.generation, "changed": result.changed}})
+''')
+        time.sleep(0.05)
+        release.write_text("go")
+        assert _collect_worker(proc) == {"released": True}
+        assert _collect_worker(writer) == {"generation": 1, "changed": True}
+        assert _stored_root_count(path) == 1
+    finally:
+        release.write_text("go")
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
+def test_spawned_worker_opens_process_local_connection(tmp_path):
+    path = tmp_path / "index.sqlite"
+    idx = _index(path)
+    idx.initialize_empty()
+    parent_con = idx._connections.connection(readonly=False)
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    process = ctx.Process(target=_spawn_register_worker, args=(str(path), queue))
+
+    process.start()
+    process.join(timeout=10)
+
+    assert process.exitcode == 0
+    result = queue.get(timeout=1)
+    assert result == {"generation": 1, "same_connection": True}
+    assert idx._connections.connection(readonly=False) is parent_con
+    with idx.read_view() as view:
+        assert len(view.exact_ids(_cdef("spawn-child"))) == 1
 
 
 def test_forked_child_uses_child_process_connection(tmp_path):

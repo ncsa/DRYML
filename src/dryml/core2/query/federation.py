@@ -8,7 +8,7 @@ from ..definition import ConcreteDefinition
 from .domain import NestedDomain, StoredDomain
 from .graph_plan import graph_candidate_ids
 from .memory import MemoryStoreQueryIndex
-from .model import DefinitionOccurrence, QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, QueryStats, RefreshPolicy, SourceQueryPlan, ValidationIssue, ValidationReport
+from .model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, QueryStats, RefreshPolicy, SourceQueryPlan, ValidationIssue, ValidationReport
 from .selector_graph import compile_selector_graph
 from .utils import chunked
 
@@ -330,7 +330,7 @@ class RepoQueryIndex:
 
     def execute_nested_occurrences(self, query):
         stats = QueryStats(refresh_action="federated")
-        occurrences: list[DefinitionOccurrence] = []
+        traversals = []
         owner_replicas: dict[ConcreteDefinition, list[Any]] = {}
         source_plans: list[SourceQueryPlan] = []
         generations: dict[str, int] = {}
@@ -348,12 +348,11 @@ class RepoQueryIndex:
                     break
             else:
                 raise QueryIndexError("Catalog generation changed repeatedly during nested occurrence query.")
-            generation_occurrences_before = len(occurrences)
-            for occ in traversal.iter_occurrences(max_occurrences=query.occurrence_limit):
-                occurrences.append(occ)
-                owner_replicas.setdefault(occ.owner, []).append(binding.store)
-                if query.occurrence_limit is not None and len(occurrences) >= query.occurrence_limit:
-                    break
+            traversals.append(traversal)
+            for owner_id in traversal.stored_ids:
+                owner = traversal.cdefs.get(owner_id)
+                if owner is not None:
+                    owner_replicas.setdefault(owner, []).append(binding.store)
             generations[binding.source_key] = generation
             source_plans.append(SourceQueryPlan(
                 source_key=binding.source_key,
@@ -361,16 +360,25 @@ class RepoQueryIndex:
                 generation=generation,
                 candidate_count=stats.candidate_count - before_candidates,
                 verified_count=stats.verified_count - before_verified,
-                result_count=len(occurrences) - generation_occurrences_before,
+                result_count=None,
                 refresh_action=stats.refresh_action,
             ))
-            if query.occurrence_limit is not None and len(occurrences) >= query.occurrence_limit:
-                break
-        stats.result_count = len(occurrences)
+        stats.result_count = None
         stats.universe_size = None
         stats.generation_vector = generations
         stats.source_plans = tuple(source_plans)
-        return tuple(occurrences), stats, {owner: tuple(_dedupe_stores(stores)) for owner, stores in owner_replicas.items()}
+
+        def occurrence_factory():
+            yielded = 0
+            for traversal in traversals:
+                remaining = None if query.occurrence_limit is None else query.occurrence_limit - yielded
+                if remaining is not None and remaining <= 0:
+                    return
+                for occurrence in traversal.iter_occurrences(max_occurrences=remaining):
+                    yielded += 1
+                    yield occurrence
+
+        return occurrence_factory, stats, {owner: tuple(_dedupe_stores(stores)) for owner, stores in owner_replicas.items()}
 
     def open_store_index(self, binding: StoreIndexBinding):
         existing = self._opened_indexes.get(binding.source_key)

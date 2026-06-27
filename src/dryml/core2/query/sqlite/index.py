@@ -47,6 +47,14 @@ _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
 class SQLiteStoreQueryIndex:
+    """Persistent query-index backend for one physical Store.
+
+    The backend stores graph nodes, local feature postings, direct definition
+    edges, and active stored-root membership in a SQLite sidecar. Store object
+    files remain authoritative: this index can be rebuilt or reconciled from the
+    owning Store and never owns object state.
+    """
+
     def __init__(
             self,
             *,
@@ -723,6 +731,13 @@ class SQLiteStoreQueryIndex:
 
 
 class SQLiteQueryIndexReadView:
+    """Generation-stable SQLite read transaction for query planning.
+
+    Store-local integer IDs returned by this view are valid only while the view
+    is active and only for its captured generation. Callers must resolve IDs to
+    CDefs before leaving the read view.
+    """
+
     def __init__(self, con, *, source_key: str, generation: int):
         self._con = con
         self.source_key = source_key

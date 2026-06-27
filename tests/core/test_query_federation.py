@@ -4,10 +4,11 @@ import pytest
 
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.query.model import QueryCardinalityError
+from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError
 from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
 from dryml.core2.query.query import DefinitionQuery
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.query.sqlite.index import SQLiteQueryIndexReadView
 from dryml.core2.store.dir import DirStore
 
 
@@ -529,3 +530,90 @@ def test_sqlite_federated_explain_does_not_verify_cdefs(tmp_path, monkeypatch):
     assert explanation.refresh_action == "federated-plan"
     assert explanation.candidate_count == 1
     assert explanation.result_count is None
+
+
+def test_sqlite_selective_query_does_not_construct_full_definition_universe(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(8):
+        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+
+    def fail_all_ids(self):
+        raise AssertionError("selective SQLite query should use indexed feature postings")
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "all_definition_ids", fail_all_ids)
+
+    selector = Definition(FederationLeaf, SKIP_ARGS, name="leaf-3")
+    result = repo.query(selector).stored().defs()
+
+    assert list(result) == [FederationLeaf(name="leaf-3").definition]
+    assert result.explanation.universe_size is None
+
+
+def test_sqlite_nested_definitions_do_not_expand_occurrence_paths(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="nested-definition", repo=repo)
+    owner = FederationParent(child=leaf, name="owner", repo=repo)
+    repo.save_object(owner)
+
+    def fail_occurrence_capture(*args, **kwargs):
+        raise AssertionError("nested definition terminal should not capture occurrence paths")
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "occurrence_snapshot_for_nested_ids", fail_occurrence_capture)
+
+    results = repo.query(Definition(FederationLeaf, SKIP_ARGS, name="nested-definition")).nested().definitions().defs()
+
+    assert list(results) == [leaf.definition]
+
+
+def test_sqlite_owner_query_uses_owner_projection_not_occurrence_capture(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="owner-projection", repo=repo)
+    owner = FederationParent(child=leaf, name="owner", repo=repo)
+    repo.save_object(owner)
+    calls = 0
+    original_owner_ids = SQLiteQueryIndexReadView._owner_ids_for_nested_ids
+
+    def fail_occurrence_capture(*args, **kwargs):
+        raise AssertionError("owner terminal should not build occurrence paths")
+
+    def spy_owner_ids(self, ids):
+        nonlocal calls
+        calls += 1
+        return original_owner_ids(self, ids)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "occurrence_snapshot_for_nested_ids", fail_occurrence_capture)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "_owner_ids_for_nested_ids", spy_owner_ids)
+
+    owners = repo.query(Definition(FederationLeaf, SKIP_ARGS, name="owner-projection")).nested().owners().defs()
+
+    assert list(owners) == [owner.definition]
+    assert calls == 1
+
+
+def test_sqlite_occurrence_query_defers_path_generation_until_iteration(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    leaf = FederationLeaf(name="lazy-occurrence", repo=repo)
+    owner = FederationParent(child=leaf, name="owner", repo=repo)
+    repo.save_object(owner)
+    yielded = 0
+    original_iter = OccurrenceTraversalSnapshot.iter_occurrences
+
+    def spy_iter(self, *, max_occurrences=None):
+        nonlocal yielded
+        for occurrence in original_iter(self, max_occurrences=max_occurrences):
+            yielded += 1
+            yield occurrence
+
+    monkeypatch.setattr(OccurrenceTraversalSnapshot, "iter_occurrences", spy_iter)
+
+    occurrences = repo.query(Definition(FederationLeaf, SKIP_ARGS, name="lazy-occurrence")).nested().execute()
+
+    assert yielded == 0
+    first = occurrences.first()
+    assert first.owner == owner.definition
+    assert first.definition == leaf.definition
+    assert yielded == 1

@@ -200,6 +200,53 @@ def test_sqlite_policy_broad_query_uses_index_without_memory_scan(tmp_path):
     assert Path(reopened_store.query_index_path).exists()
 
 
+def test_ready_sqlite_indexes_are_not_opened_during_repo_construction(tmp_path):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    repo.save_object(QueryIndexDirLeaf("one", repo=repo), store=store1)
+    repo.save_object(QueryIndexDirLeaf("two", repo=repo), store=store2)
+
+    reopened1 = DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    reopened2 = DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    open_calls = []
+
+    def wrap_open(source):
+        original = source.open_query_index
+
+        def opened():
+            open_calls.append(source.catalog_key())
+            return original()
+
+        return opened
+
+    reopened1.open_query_index = wrap_open(reopened1)
+    reopened2.open_query_index = wrap_open(reopened2)
+
+    repo2 = Repo(stores=[reopened1, reopened2])
+
+    assert open_calls == []
+    assert repo2.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count() == 2
+    assert sorted(open_calls) == sorted([reopened1.catalog_key(), reopened2.catalog_key()])
+
+
+def test_ready_sqlite_exact_query_does_not_scan_object_directories(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("ready-exact", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+
+    def fail_hydrate():
+        raise AssertionError("ready exact SQLite query should not hydrate Store roots")
+
+    reopened_store.hydrate_index = fail_hydrate
+    repo2 = Repo(stores=reopened_store)
+
+    assert repo2.query(obj.definition).stored().count() == 1
+
+
 def test_sqlite_missing_index_builds_once_from_store_roots(tmp_path):
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)

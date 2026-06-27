@@ -165,6 +165,14 @@ Use `index_status()` for lightweight diagnostics. Use `validate_index(thorough=T
 
 Corrupt SQLite sidecars are quarantined before rebuild. A changed or misplaced `def.pkl` is reported as Store corruption instead of being silently indexed under the wrong identity.
 
+Diagnostic status records include the backend, Store key, generation, schema version, row counts, journal mode, SQLite runtime version, sidecar path, and backend diagnostics such as WAL safety. Validation reports include structured issues rather than printing from library code.
+
+### Multi-Process Use
+
+Each process and thread opens its own SQLite connection. A worker that saves an object commits its query-index transaction after object files are published. A coordinator with an existing Store/index handle sees that committed root on its next read transaction without reconnecting.
+
+WAL mode can allow long-lived readers and a writer to overlap on supported local filesystems. The default `auto` journal policy is conservative and uses rollback journal unless the SQLite runtime is known safe for WAL.
+
 ## Failure Model
 
 Object state is published before persistent query-index root activation. If object publication succeeds and index update fails, the store can be marked dirty and reconciled later.
@@ -174,5 +182,6 @@ This means a missing or stale index affects performance or query completeness un
 ## Related Docs
 
 - [Objects and Definitions](objects_and_defs.md)
+- [Query Index Backend Contracts](query_index_backend_contracts.md)
 - [Artifacts API](artifacts.md)
 - [Data API](data.md)

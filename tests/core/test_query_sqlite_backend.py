@@ -88,6 +88,30 @@ def test_register_stored_roots_persists_graph_and_is_idempotent(tmp_path):
         }
 
 
+def test_register_prepares_encoded_rows_before_write_transaction(tmp_path, monkeypatch):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("transaction-boundary")
+    graph = ConcreteDefinitionGraph.from_root(root.definition)
+    events = []
+    original_from_cdef = sqlite_index_module._EncodedNode.from_cdef
+    original_run_write = SQLiteStoreQueryIndex._run_write_transaction
+
+    def spy_from_cdef(cls, cdef):
+        events.append("encode")
+        return original_from_cdef(cdef)
+
+    def spy_run_write(self, operation):
+        events.append("transaction")
+        return original_run_write(self, operation)
+
+    monkeypatch.setattr(sqlite_index_module._EncodedNode, "from_cdef", classmethod(spy_from_cdef))
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_run_write_transaction", spy_run_write)
+
+    index.register_stored_roots(graph, [root.definition])
+
+    assert events[:2] == ["encode", "transaction"]
+
+
 def test_register_graph_persists_rows_without_stored_root(tmp_path):
     index = sqlite_index(tmp_path)
     leaf = SQLiteLeaf("graph-only")

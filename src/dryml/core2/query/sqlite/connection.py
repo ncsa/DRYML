@@ -10,6 +10,14 @@ from .utils import wal_runtime_is_known_safe
 
 
 class SQLiteConnectionManager:
+    """Own SQLite connections for one index path per process and thread.
+
+    Connections are opened lazily, keyed by `(pid, thread_id, readonly)`, and
+    initialized with DRYML's required PRAGMAs. If a process forks, the child uses
+    a different PID key and opens its own connection instead of reusing the
+    parent's connection object.
+    """
+
     def __init__(self, config: SQLiteQueryIndexConfig):
         self.config = config
         self._connections = {}

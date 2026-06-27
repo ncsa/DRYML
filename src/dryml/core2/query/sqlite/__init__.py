@@ -13,6 +13,13 @@ Durability = Literal["normal", "full"]
 
 @dataclass(frozen=True, slots=True)
 class SQLiteQueryIndexConfig:
+    """Configuration for a Store-owned SQLite query-index sidecar.
+
+    `path` defaults to the owning `DirStore` sidecar path when omitted.
+    `journal_mode` selects rollback journal, WAL, or conservative automatic
+    choice. `busy_timeout` and `max_write_retries` bound write contention waits.
+    """
+
     path: str | Path | None = None
     journal_mode: JournalMode = "auto"
     durability: Durability = "normal"

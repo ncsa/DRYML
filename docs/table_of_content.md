@@ -14,6 +14,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 6. [Data API](data.md)
 7. [Models API](models.md)
 8. [Artifacts API](artifacts.md)
+9. [Query Index Backend Contracts](query_index_backend_contracts.md)
+10. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -26,6 +28,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - A `TensorSpec` describes tensor-like values independently from a specific ML backend.
 - A `Context` describes runtime resource and backend compatibility constraints.
 - `Dataset`, `Model`, and `Artifact` are higher-level APIs built on the core object/repo system.
+- Store-owned query indexes accelerate stored and nested queries without changing object identity.
 
 ## Documentation Status
 
