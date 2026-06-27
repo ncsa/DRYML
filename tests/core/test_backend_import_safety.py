@@ -4,6 +4,15 @@ import subprocess
 import sys
 
 
+def _module_importable(module_name: str) -> bool:
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module_name}"],
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def _run_import_probe(code: str):
     src_dir = Path(__file__).resolve().parents[2] / "src"
     env = os.environ.copy()
@@ -307,6 +316,11 @@ assert "torch" not in sys.modules
 
 
 def test_tensorflow_materialization_imports_tensorflow_when_backend_object_is_built():
+    if not _module_importable("tensorflow"):
+        import pytest
+
+        pytest.skip("tensorflow is not importable in this Python environment")
+
     _run_import_probe(
         """
 import sys
@@ -330,6 +344,11 @@ assert "tensorflow" in sys.modules
 
 
 def test_torch_materialization_imports_torch_when_backend_object_is_built():
+    if not _module_importable("torch"):
+        import pytest
+
+        pytest.skip("torch is not importable in this Python environment")
+
     _run_import_probe(
         """
 import sys
