@@ -546,6 +546,75 @@ def test_sqlite_federated_exists_stops_before_full_verification(tmp_path, monkey
     assert 0 < verified < 270
 
 
+def test_sqlite_exists_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(270):
+        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+
+    fetched = []
+    original = SQLiteQueryIndexReadView.cdefs_by_id
+
+    def spy_cdefs_by_id(self, ids):
+        result = original(self, ids)
+        fetched.append(len(result))
+        return result
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().exists()
+
+    assert fetched == [256]
+    assert sum(fetched) < 270
+
+
+def test_sqlite_one_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(270):
+        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+
+    fetched = []
+    original = SQLiteQueryIndexReadView.cdefs_by_id
+
+    def spy_cdefs_by_id(self, ids):
+        result = original(self, ids)
+        fetched.append(len(result))
+        return result
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+
+    with pytest.raises(QueryCardinalityError):
+        repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().one()
+
+    assert fetched == [256]
+    assert sum(fetched) < 270
+
+
+def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(270):
+        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+
+    fetched = []
+    original = SQLiteQueryIndexReadView.cdefs_by_id
+
+    def spy_cdefs_by_id(self, ids):
+        result = original(self, ids)
+        fetched.append(len(result))
+        return result
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+
+    selector = Definition(FederationLeaf, SKIP_ARGS, name=lambda value: value == "leaf-269")
+
+    assert repo.query(selector).stored().exists()
+
+    assert fetched == [256, 14]
+    assert sum(fetched) == 270
+
+
 def test_federated_query_one_and_one_or_none_stop_after_two(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)

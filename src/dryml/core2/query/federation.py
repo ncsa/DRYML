@@ -116,31 +116,48 @@ class RepoQueryIndex:
                 self._refresh_definition_source(index, query, exact_root, stats)
                 before_verified = stats.verified_count
                 source_matches = 0
-                with index.read_view(include_cached=False) as snapshot:
-                    candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
-                    generation = snapshot.generation
-                    generations[binding.source_key] = generation
-                    if stop_after is None:
-                        cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
-                    else:
-                        cdef_batches = tuple(
-                            tuple(snapshot.cdefs_by_id(batch).values())
-                            for batch in chunked(sorted(candidate_ids), 256)
-                        )
-                matches = () if stop_after is not None else query._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
                 if stop_after is None:
+                    with index.read_view(include_cached=False) as snapshot:
+                        candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
+                        generation = snapshot.generation
+                        generations[binding.source_key] = generation
+                        cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
+                    matches = query._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
                     source_matches = len(matches)
                 else:
-                    for batch_cdefs in cdef_batches:
-                        batch_matches = query._verify_cdefs(batch_cdefs, stats=stats)
-                        source_matches += len(batch_matches)
-                        for cdef in batch_matches:
-                            canonical = _canonical_cdef_key(merged, cdef)
-                            replicas.setdefault(canonical, []).append(binding.store)
-                            if len(merged) >= stop_after:
+                    matches = ()
+                    for _ in range(3):
+                        source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+                        source_replicas: dict[ConcreteDefinition, list[Any]] = {}
+                        source_matches = 0
+                        generation_changed = False
+                        with index.read_view(include_cached=False) as snapshot:
+                            candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
+                            generation = snapshot.generation
+                            generations[binding.source_key] = generation
+                        for batch in chunked(sorted(candidate_ids), 256):
+                            with index.read_view(include_cached=False) as snapshot:
+                                if snapshot.generation != generation:
+                                    generation_changed = True
+                                    break
+                                batch_cdefs = tuple(snapshot.cdefs_by_id(batch).values())
+                            batch_matches = query._verify_cdefs(batch_cdefs, stats=stats)
+                            source_matches += len(batch_matches)
+                            for cdef in batch_matches:
+                                source_canonical = _canonical_cdef_key(source_merged, cdef)
+                                source_replicas.setdefault(source_canonical, []).append(binding.store)
+                                if _combined_cdef_count(merged, source_merged) >= stop_after:
+                                    break
+                            if _combined_cdef_count(merged, source_merged) >= stop_after:
                                 break
-                        if len(merged) >= stop_after:
-                            break
+                        if generation_changed:
+                            continue
+                        for cdef in source_merged.values():
+                            canonical = _canonical_cdef_key(merged, cdef)
+                            replicas.setdefault(canonical, []).extend(source_replicas.get(cdef, ()))
+                        break
+                    else:
+                        raise QueryIndexError("Catalog generation changed repeatedly during terminal stored query.")
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(
@@ -179,35 +196,51 @@ class RepoQueryIndex:
                 self._refresh_definition_source(index, query, exact_root, stats)
                 source_matches = 0
                 before_verified = stats.verified_count
-                with index.read_view(include_cached=False) as snapshot:
-                    candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
-                    generation = snapshot.generation
-                    generations[binding.source_key] = generation
-                    cdef_batches = tuple(
-                        tuple(snapshot.cdefs_by_id(batch).values())
-                        for batch in chunked(sorted(candidate_ids), 256)
-                    )
-                    candidate_count = len(candidate_ids)
-                for cdefs in cdef_batches:
-                    matches = query._verify_cdefs(cdefs, stats=stats)
-                    source_matches += len(matches)
-                    for cdef in matches:
+                for _ in range(3):
+                    source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+                    source_matches = 0
+                    generation_changed = False
+                    with index.read_view(include_cached=False) as snapshot:
+                        candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
+                        generation = snapshot.generation
+                        generations[binding.source_key] = generation
+                        candidate_count = len(candidate_ids)
+                    for batch in chunked(sorted(candidate_ids), 256):
+                        with index.read_view(include_cached=False) as snapshot:
+                            if snapshot.generation != generation:
+                                generation_changed = True
+                                break
+                            cdefs = tuple(snapshot.cdefs_by_id(batch).values())
+                        matches = query._verify_cdefs(cdefs, stats=stats)
+                        source_matches += len(matches)
+                        for cdef in matches:
+                            _canonical_cdef_key(source_merged, cdef)
+                            if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
+                                break
+                        if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
+                            break
+                    if generation_changed:
+                        continue
+                    for cdef in source_merged.values():
                         _canonical_cdef_key(merged, cdef)
-                        if stop_after is not None and len(merged) >= stop_after:
-                            source_plans.append(SourceQueryPlan(
-                                source_key=binding.source_key,
-                                backend=_source_backend(index),
-                                generation=generation,
-                                candidate_count=candidate_count,
-                                verified_count=stats.verified_count - before_verified,
-                                result_count=source_matches,
-                                refresh_action=stats.refresh_action,
-                            ))
-                            stats.result_count = len(merged)
-                            stats.universe_size = None
-                            stats.generation_vector = generations
-                            stats.source_plans = tuple(source_plans)
-                            return len(merged), stats
+                    break
+                else:
+                    raise QueryIndexError("Catalog generation changed repeatedly during terminal count query.")
+                if stop_after is not None and len(merged) >= stop_after:
+                    source_plans.append(SourceQueryPlan(
+                        source_key=binding.source_key,
+                        backend=_source_backend(index),
+                        generation=generation,
+                        candidate_count=candidate_count,
+                        verified_count=stats.verified_count - before_verified,
+                        result_count=source_matches,
+                        refresh_action=stats.refresh_action,
+                    ))
+                    stats.result_count = len(merged)
+                    stats.universe_size = None
+                    stats.generation_vector = generations
+                    stats.source_plans = tuple(source_plans)
+                    return len(merged), stats
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(
@@ -654,6 +687,17 @@ def _canonical_cdef_key(merged: dict[ConcreteDefinition, ConcreteDefinition], cd
         return existing
     merged[cdef] = cdef
     return cdef
+
+
+def _combined_cdef_count(
+    merged: Mapping[ConcreteDefinition, ConcreteDefinition],
+    additions: Mapping[ConcreteDefinition, ConcreteDefinition],
+) -> int:
+    count = len(merged)
+    for cdef in additions:
+        if cdef not in merged:
+            count += 1
+    return count
 
 
 def _dedupe_stores(stores: Sequence[Any]) -> tuple[Any, ...]:
