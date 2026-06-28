@@ -10,12 +10,13 @@ from .model import (
     QueryVerifyBudgetExceeded,
     QueryWouldScanError,
 )
-from .lowering import ScanPolicy
+from .lowering import CandidateRelation, ScanPolicy
 from .query import DefinitionQuery
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet, QueryBackedDefinitionResultSet
 
 __all__ = [
     "Arg",
+    "CandidateRelation",
     "DefinitionPath",
     "DefinitionQuery",
     "DefinitionResultSet",

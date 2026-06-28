@@ -43,6 +43,23 @@ class PagedResultCursor:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateRelation:
+    """Backend-owned candidate relation contract exposed to federation.
+
+    The relation is identified by source and generation, and pages in stable
+    `(stable_hash, collision_ordinal, definition_id)` order. It carries no live
+    backend connection or cursor state; concrete backends decide whether the
+    relation is represented by SQL text, a CTE, or a temporary table.
+    """
+
+    source_key: str
+    generation: int
+    relation_id: str
+    ordering: tuple[str, ...] = ("stable_hash", "collision_ordinal", "definition_id")
+    supports_keyset: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateBatch:
     """CDef batch fetched from a lowered relation after a short read view."""
 
@@ -106,12 +123,25 @@ class LoweredQueryPlan:
     candidate_sql: str
     params: tuple[Any, ...] = ()
     strategy: str = "sqlite-lowered"
+    relation_id: str = "candidate_relation"
+    ordering: tuple[str, ...] = ("stable_hash", "collision_ordinal", "definition_id")
     ordered: bool = True
     supports_keyset: bool = True
     estimated_size: int | None = None
     scan_required: bool = False
     scan_reason: str | None = None
     diagnostics: LoweringDiagnostics = field(default_factory=LoweringDiagnostics)
+
+    def relation(self) -> CandidateRelation:
+        """Return the backend-neutral candidate relation contract for this plan."""
+
+        return CandidateRelation(
+            source_key=self.source_key,
+            generation=self.generation,
+            relation_id=self.relation_id,
+            ordering=self.ordering,
+            supports_keyset=self.supports_keyset,
+        )
 
 
 class TerminalSink(Protocol):

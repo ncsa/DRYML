@@ -46,6 +46,9 @@ class SQLiteRelationCompiler:
             scan_reason = "selector has no indexable requirements"
             self._apply_scan_policy(scan_policy, diagnostics, scan_reason)
         else:
+            if not _has_indexable_requirement(selector_graph):
+                scan_reason = "selector graph has no indexable requirements"
+                self._apply_scan_policy(scan_policy, diagnostics, scan_reason)
             body_sql = self._compile_graph(selector_graph, params, diagnostics, scan_policy)
 
         domain_sql = self._apply_domain_sql(body_sql, domain.name)
@@ -267,7 +270,10 @@ class SQLiteRelationCompiler:
                     (feature_id,),
                 ).fetchone()
                 estimates.append(0 if row is None else row[0])
-        return min(estimates) if estimates else None
+        if estimates:
+            return min(estimates)
+        table = "stored_roots" if domain_name == "stored" else "definitions"
+        return self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
     def _anchor_description(self, selector_graph: SelectorGraph) -> str | None:
         anchors = []
@@ -288,3 +294,10 @@ class SQLiteRelationCompiler:
             raise QueryWouldScanError(reason)
         if scan_policy.mode == "warn":
             warnings.warn(f"DRYML query requires scan fallback: {reason}", RuntimeWarning, stacklevel=3)
+
+
+def _has_indexable_requirement(selector_graph: SelectorGraph) -> bool:
+    for node in selector_graph.nodes:
+        if node.exact_definition is not None or node.local_requirements:
+            return True
+    return False

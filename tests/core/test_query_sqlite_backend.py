@@ -5,7 +5,7 @@ import pytest
 from dryml.core2 import Definition, Object, SKIP_ARGS
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.lowering import LoweringDiagnostics, ScanPolicy
+from dryml.core2.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
 from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats, QueryWouldScanError
 from dryml.core2.query.domain import StoredDomain
 from dryml.core2.query.graph_plan import graph_candidate_ids
@@ -319,6 +319,69 @@ def test_lowered_child_edge_join_matches_v1_path(tmp_path):
     assert batch.cdefs == (wanted.definition,)
 
 
+def test_candidate_relation_pages_without_cursor_escape(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"relation-{idx}").definition for idx in range(3)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            None,
+            StoredDomain(view),
+            terminal="page",
+            scan_policy=ScanPolicy(),
+            diagnostics=LoweringDiagnostics(),
+        )
+        relation = plan.relation()
+        first = next(view.iter_candidate_cdef_batches(plan, batch_size=2))
+
+    assert isinstance(relation, CandidateRelation)
+    assert first.cdefs
+    assert first.next_cursor is not None
+    assert not hasattr(first.next_cursor, "cursor")
+    assert not hasattr(first.next_cursor, "connection")
+
+
+def test_candidate_relation_preserves_generation(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("generation").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        relation = plan.relation()
+
+    assert relation.source_key == index.source_key
+    assert relation.generation == index.current_generation()
+
+
+def test_candidate_relation_empty(tmp_path):
+    index = sqlite_index(tmp_path)
+    index.initialize_empty()
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=2), None)
+
+    assert batch is None
+
+
+def test_candidate_relation_ordering_stable(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(name).definition for name in ("c", "a", "b")]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        relation = plan.relation()
+        first = next(view.iter_candidate_cdef_batches(plan, batch_size=2))
+        second = next(view.iter_candidate_cdef_batches(plan, after=first.next_cursor, batch_size=2))
+
+    observed = first.cdefs + second.cdefs
+    assert relation.ordering == ("stable_hash", "collision_ordinal", "definition_id")
+    assert observed == tuple(sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+
+
 def test_lowered_unordered_edge_uses_conservative_edge_relation(tmp_path):
     index = sqlite_index(tmp_path)
     wanted_leaf = SQLiteLeaf(name="wanted")
@@ -450,6 +513,41 @@ def test_scan_policy_forbid_rejects_unindexed_selector(tmp_path):
                 scan_policy=ScanPolicy("forbid"),
                 diagnostics=LoweringDiagnostics(),
             )
+
+
+def test_scan_policy_forbid_rejects_empty_selector_graph(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("scan-graph").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view() as view:
+        with pytest.raises(QueryWouldScanError, match="selector graph has no indexable requirements"):
+            view.lower_selector_graph(
+                compile_selector_graph(Definition(SQLiteLeaf, SKIP_ARGS)),
+                StoredDomain(view),
+                terminal="collect",
+                scan_policy=ScanPolicy("forbid"),
+                diagnostics=LoweringDiagnostics(),
+            )
+
+
+def test_explain_reports_scan_reason(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("scan-reason").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        view.lower_selector_graph(
+            compile_selector_graph(Definition(SQLiteLeaf, SKIP_ARGS)),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics.scan_required
+    assert diagnostics.scan_reason == "selector graph has no indexable requirements"
 
 
 def test_read_view_estimates_candidates_and_query_stats(tmp_path):

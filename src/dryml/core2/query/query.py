@@ -299,8 +299,8 @@ class DefinitionQuery:
             raise QueryCardinalityError(f"Expected zero or one {label}, found {len(items)}.")
         return items[0] if items else None
 
-    def explain(self, *, analyze: bool = False) -> QueryExplanation:
-        return self._execute_explanation(analyze=analyze)
+    def explain(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
+        return self._execute_explanation(analyze=analyze, sql=sql)
 
     def _execute_count(self) -> int:
         self._require_domain()
@@ -331,7 +331,7 @@ class DefinitionQuery:
         cdefs, _, _ = self._execute_definition_domain()
         return len(cdefs)
 
-    def _execute_explanation(self, *, analyze: bool = False) -> QueryExplanation:
+    def _execute_explanation(self, *, analyze: bool = False, sql: bool = False) -> QueryExplanation:
         self._require_domain()
         if analyze:
             result = self.execute()
@@ -630,7 +630,7 @@ class DefinitionQuery:
             stats.python_verifications += len(cdefs)
             if self.max_verify_limit is not None and stats.verified_count > self.max_verify_limit:
                 raise QueryVerifyBudgetExceeded(
-                    f"Query exceeded max_verify budget {self.max_verify_limit}."
+                    f"Query exceeded max_verify budget {self.max_verify_limit}: verified {stats.verified_count} CDefs."
                 )
             return tuple(sorted(cdefs, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
 
@@ -640,7 +640,7 @@ class DefinitionQuery:
             stats.python_verifications += 1
             if self.max_verify_limit is not None and stats.verified_count > self.max_verify_limit:
                 raise QueryVerifyBudgetExceeded(
-                    f"Query exceeded max_verify budget {self.max_verify_limit}."
+                    f"Query exceeded max_verify budget {self.max_verify_limit}: verified {stats.verified_count} CDefs."
                 )
             if not _structural_match(
                     self.selector,

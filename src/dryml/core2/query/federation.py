@@ -371,7 +371,7 @@ class RepoQueryIndex:
                 self._refresh_definition_source(index, query, exact_root, stats)
                 with index.read_view(include_cached=False) as snapshot:
                     before_candidates = stats.candidate_count
-                    if _source_supports_lowering(index):
+                    if getattr(snapshot, "supports_lowering", False):
                         diagnostics = LoweringDiagnostics()
                         plan = snapshot.lower_selector_graph(
                             selector_graph,
@@ -396,6 +396,8 @@ class RepoQueryIndex:
                     generations[binding.source_key] = generation
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
+            if stats.candidate_count == before_candidates:
+                stats.candidate_count += candidate_delta
             source_plans.append(SourceQueryPlan(
                 source_key=binding.source_key,
                 backend=_source_backend(index),
@@ -444,13 +446,14 @@ class RepoQueryIndex:
                     batch = next(batches, None)
                 if batch is None:
                     break
-                before_verified = stats.verified_count
-                matches = query._verify_cdefs(batch.cdefs, stats=stats)
-                diagnostics.python_verifications += stats.verified_count - before_verified
-                for cdef in matches:
-                    _canonical_cdef_key(source_merged, cdef)
-                    sink.accept(cdef)
-                    if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
+                for cdef in batch.cdefs:
+                    before_verified = stats.verified_count
+                    matches = query._verify_cdefs((cdef,), stats=stats)
+                    diagnostics.python_verifications += stats.verified_count - before_verified
+                    if matches:
+                        _canonical_cdef_key(source_merged, matches[0])
+                        sink.accept(matches[0])
+                    if sink.done or (stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after):
                         break
                 if sink.done or (stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after):
                     diagnostics.terminal_stop_reason = sink.stop_reason or "collect-limit"
@@ -502,12 +505,13 @@ class RepoQueryIndex:
                     batch = next(batches, None)
                 if batch is None:
                     break
-                before_verified = stats.verified_count
-                matches = query._verify_cdefs(batch.cdefs, stats=stats)
-                diagnostics.python_verifications += stats.verified_count - before_verified
-                for cdef in matches:
-                    _canonical_cdef_key(source_merged, cdef)
-                    sink.accept(cdef)
+                for cdef in batch.cdefs:
+                    before_verified = stats.verified_count
+                    matches = query._verify_cdefs((cdef,), stats=stats)
+                    diagnostics.python_verifications += stats.verified_count - before_verified
+                    if matches:
+                        _canonical_cdef_key(source_merged, matches[0])
+                        sink.accept(matches[0])
                     if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
                         break
                 if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
@@ -705,14 +709,13 @@ class RepoQueryIndex:
                     batch = next(batches, None)
                 if batch is None:
                     break
-                before_verified = stats.verified_count
-                matches = query._verify_cdefs(batch.cdefs, stats=stats)
-                diagnostics.python_verifications += stats.verified_count - before_verified
-                match_set = set(matches)
                 for did, cdef in zip(batch.ids, batch.cdefs):
-                    if cdef not in match_set:
+                    before_verified = stats.verified_count
+                    matches = query._verify_cdefs((cdef,), stats=stats)
+                    diagnostics.python_verifications += stats.verified_count - before_verified
+                    if not matches:
                         continue
-                    _canonical_cdef_key(merged, cdef)
+                    _canonical_cdef_key(merged, matches[0])
                     match_ids.add(did)
                     if stop_after is not None and len(merged) >= stop_after:
                         break

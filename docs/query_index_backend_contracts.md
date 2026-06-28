@@ -19,6 +19,8 @@ DRYML query indexes are acceleration metadata for `Repo.query(...)`. Backends mu
 
 SQLite read views also expose a lowering-capable path for safe SQL-native candidate relations. See `docs/sqlite_lowering.md` for the lowered relation, terminal, scan-policy, diagnostics, and fallback boundaries.
 
+Lowered candidate relations are backend-owned. Federation may inspect only their source key, generation, ordering contract, and opaque keyset cursor. SQLite may represent the relation as SQL text, CTEs, or temp tables, but a `DefinitionResultSet` or cursor must not retain a live SQLite cursor, connection, transaction, or backend-local ID without source/generation metadata.
+
 ## Transaction Boundaries
 
 SQLite writes use one logical transaction per mutation:
@@ -54,3 +56,5 @@ Shared persistent semantics live in focused modules:
 - `query/sqlite/index.py` owns SQLite query-index operations.
 
 Planner and query orchestration code must not import SQLite implementation modules.
+
+The V2 helper audit kept terminal policy in `query/lowering.py`, SQLite SQL strategy in `query/sqlite/lowering.py`, and backend lifecycle in `query/sqlite/index.py`. No catch-all helper module was added.
