@@ -4,7 +4,7 @@ import pytest
 
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryVerifyBudgetExceeded, QueryWouldScanError
+from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryIndexGenerationChanged, QueryVerifyBudgetExceeded, QueryWouldScanError
 import dryml.core2.query.federation as federation_module
 from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
 from dryml.core2.query.query import DefinitionQuery
@@ -323,6 +323,26 @@ def test_sqlite_plan_diagnostics_available(tmp_path):
 
     assert explanation.lowering_diagnostics["sqlite_plan"]
     assert explanation.lowering_diagnostics["strategy"] == "sqlite-lowered"
+
+
+def test_repo_explain_reports_local_posting_anchor_kind(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    wanted = FederationParent(child=FederationLeaf(name="posting-anchor", repo=repo), name="root", repo=repo)
+    other = FederationParent(child=FederationLeaf(name="other-anchor", repo=repo), name="root", repo=repo)
+    repo.save_object(wanted)
+    repo.save_object(other)
+
+    selector = Definition(
+        FederationParent,
+        SKIP_ARGS,
+        child=Definition(FederationLeaf, SKIP_ARGS, name="posting-anchor"),
+    )
+    explanation = repo.query(selector).stored().explain(sql=True)
+
+    assert explanation.lowering_diagnostics["anchor_reason"] == "local-posting"
+    assert explanation.lowering_diagnostics["anchor_relation_kind"] == "posting"
+    assert any("SEARCH p" in row for row in explanation.lowering_diagnostics["sqlite_plan"])
 
 
 def test_query_backed_resultset_fetches_first_page_only(tmp_path, monkeypatch):
@@ -919,6 +939,39 @@ def test_lowered_count_dedupes_same_cdef_across_two_stores(tmp_path):
     ])
 
     assert repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="count-dedupe")).stored().count() == 1
+
+
+def test_lowered_count_retries_generation_change_during_witness_load(tmp_path, monkeypatch):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    obj = FederationLeaf(name="count-retry", repo=repo)
+    repo.save_object(obj, store=store1)
+    repo.save_object(obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    original_loader = repo2._query_index._count_witness_loader
+    failures = 0
+
+    def flaky_loader(index, source_key):
+        load = original_loader(index, source_key)
+
+        def load_once_generation_changed(generation, definition_id):
+            nonlocal failures
+            if failures == 0:
+                failures += 1
+                raise QueryIndexGenerationChanged("forced count witness generation change")
+            return load(generation, definition_id)
+
+        return load_once_generation_changed
+
+    monkeypatch.setattr(repo2._query_index, "_count_witness_loader", flaky_loader)
+
+    assert repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="count-retry")).stored().count() == 1
+    assert failures == 1
 
 
 def test_lowered_count_handles_hash_collision_bucket(monkeypatch):

@@ -270,6 +270,15 @@ class RepoQueryIndex:
                 after = batch.next_cursor
 
     def count_definition_domain(self, query, *, stop_after: int | None = None) -> tuple[int, QueryStats]:
+        last_generation_error = None
+        for _ in range(3):
+            try:
+                return self._count_definition_domain_once(query, stop_after=stop_after)
+            except QueryIndexGenerationChanged as exc:
+                last_generation_error = exc
+        raise QueryIndexError("Catalog generation changed repeatedly during terminal count query.") from last_generation_error
+
+    def _count_definition_domain_once(self, query, *, stop_after: int | None = None) -> tuple[int, QueryStats]:
         stats = QueryStats(refresh_action="federated")
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
         exact_root = query.selector if isinstance(query.selector, ConcreteDefinition) else None
@@ -360,6 +369,8 @@ class RepoQueryIndex:
                     stats.generation_vector = generations
                     stats.source_plans = tuple(source_plans)
                     return merged.count, stats
+            except QueryIndexGenerationChanged:
+                raise
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(

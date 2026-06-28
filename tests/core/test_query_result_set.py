@@ -164,8 +164,11 @@ def test_query_backed_resultset_preserves_adversarial_page_order(tmp_path):
 
     results = QueryBackedDefinitionResultSet(repo, page_factory, materializable=False)
 
-    assert tuple(results) == page_order
-    assert tuple(results) == page_order
+    first_iteration = tuple(results)
+    second_iteration = tuple(results)
+
+    assert first_iteration == page_order
+    assert second_iteration == first_iteration
 
 
 def test_fixed_resultset_universe_rejects_domain_switch(tmp_path):
