@@ -4,10 +4,11 @@ import pytest
 
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError
+from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryVerifyBudgetExceeded, QueryWouldScanError
+import dryml.core2.query.federation as federation_module
 from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
 from dryml.core2.query.query import DefinitionQuery
-from dryml.core2.query.result import DefinitionResultSet
+from dryml.core2.query.result import DefinitionResultSet, QueryBackedDefinitionResultSet
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core2.query.sqlite.index import SQLiteQueryIndexReadView
 from dryml.core2.store.dir import DirStore
@@ -233,6 +234,88 @@ def test_sqlite_federated_stored_query_uses_sidecar_without_hydration(tmp_path):
     assert results.explanation.source_plans[0].backend == "sqlite"
 
 
+def test_sqlite_lowered_require_indexed_rejects_unindexed_broad_query(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("scan", repo=repo))
+
+    with pytest.raises(QueryWouldScanError):
+        repo.query(None).stored().require_indexed().count()
+
+
+def test_sqlite_lowered_scan_warn_emits_warning(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("scan", repo=repo))
+
+    with pytest.warns(RuntimeWarning, match="scan fallback"):
+        assert repo.query(None).stored().scan_policy("warn").count() == 1
+
+
+def test_sqlite_lowered_max_verify_budget_is_enforced(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("budget", repo=repo))
+
+    with pytest.raises(QueryVerifyBudgetExceeded):
+        repo.query(None).stored().max_verify(0).count()
+
+
+def test_sqlite_explain_analyze_reports_lowering_counts(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("explain", repo=repo))
+
+    plan_only = repo.query(None).stored().explain()
+    analyzed = repo.query(None).stored().explain(analyze=True)
+
+    assert plan_only.verified_count == 0
+    assert analyzed.verified_count == 1
+    assert analyzed.cdef_blobs_decoded >= 1
+    assert analyzed.lowering_strategy == "sqlite-lowered"
+
+
+def test_query_backed_resultset_fetches_first_page_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 2)
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 2)
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(5):
+        repo.save_object(FederationLeaf(name=f"paged-{idx}", repo=repo))
+
+    fetched = []
+    original = SQLiteQueryIndexReadView.cdefs_by_id
+
+    def spy_cdefs_by_id(self, ids):
+        result = original(self, ids)
+        fetched.append(len(result))
+        return result
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+
+    results = repo.query(None).stored().defs()
+    assert isinstance(results, QueryBackedDefinitionResultSet)
+    assert next(iter(results)) is not None
+    assert fetched == [2]
+
+
+def test_query_backed_resultset_generation_change_fails_clearly(tmp_path, monkeypatch):
+    from dryml.core2.query.model import QueryIndexGenerationChanged
+
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(3):
+        repo.save_object(FederationLeaf(name=f"snapshot-{idx}", repo=repo))
+
+    results = repo.query(None).stored().defs()
+    assert isinstance(results, QueryBackedDefinitionResultSet)
+    repo.save_object(FederationLeaf(name="later", repo=repo))
+
+    with pytest.raises(QueryIndexGenerationChanged):
+        list(results)
+
+
 def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
     store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
@@ -410,12 +493,12 @@ def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):
         DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
         DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
     ])
-    original = repo2._query_index._capture_nested_candidates
+    original = repo2._query_index._capture_lowered_nested_matches
     counts = {store.catalog_key(): 0 for store in repo2.stores}
     churn_source = repo2.stores[0].catalog_key()
 
-    def capture_then_churn(query, binding, stats):
-        captured = original(query, binding, stats)
+    def capture_then_churn(query, binding, stats, **kwargs):
+        captured = original(query, binding, stats, **kwargs)
         counts[binding.source_key] += 1
         if binding.source_key == churn_source and counts[binding.source_key] == 1:
             churn = FederationLeaf(name="source-local-churn", repo=repo2).definition
@@ -423,7 +506,7 @@ def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):
             index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
         return captured
 
-    monkeypatch.setattr(repo2._query_index, "_capture_nested_candidates", capture_then_churn)
+    monkeypatch.setattr(repo2._query_index, "_capture_lowered_nested_matches", capture_then_churn)
 
     owners = repo2.query(Definition(FederationLeaf, SKIP_ARGS)).nested().owners().defs()
 
@@ -441,12 +524,12 @@ def test_sqlite_nested_owner_projection_retries_after_generation_change(tmp_path
 
     repo2_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo2 = Repo(stores=repo2_store)
-    original = repo2._query_index._capture_nested_candidates
+    original = repo2._query_index._capture_lowered_nested_matches
     calls = 0
 
-    def capture_then_churn(query, binding, stats):
+    def capture_then_churn(query, binding, stats, **kwargs):
         nonlocal calls
-        captured = original(query, binding, stats)
+        captured = original(query, binding, stats, **kwargs)
         calls += 1
         if calls == 1:
             churn = FederationLeaf(name="owner-churn", repo=repo2).definition
@@ -454,7 +537,7 @@ def test_sqlite_nested_owner_projection_retries_after_generation_change(tmp_path
             index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
         return captured
 
-    monkeypatch.setattr(repo2._query_index, "_capture_nested_candidates", capture_then_churn)
+    monkeypatch.setattr(repo2._query_index, "_capture_lowered_nested_matches", capture_then_churn)
 
     result = repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="retry-owner")).nested().owners().one()
 
@@ -471,12 +554,12 @@ def test_sqlite_nested_occurrence_projection_retries_after_generation_change(tmp
 
     repo2_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo2 = Repo(stores=repo2_store)
-    original = repo2._query_index._capture_nested_candidates
+    original = repo2._query_index._capture_lowered_nested_matches
     calls = 0
 
-    def capture_then_churn(query, binding, stats):
+    def capture_then_churn(query, binding, stats, **kwargs):
         nonlocal calls
-        captured = original(query, binding, stats)
+        captured = original(query, binding, stats, **kwargs)
         calls += 1
         if calls == 1:
             churn = FederationLeaf(name="occurrence-churn", repo=repo2).definition
@@ -484,7 +567,7 @@ def test_sqlite_nested_occurrence_projection_retries_after_generation_change(tmp
             index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
         return captured
 
-    monkeypatch.setattr(repo2._query_index, "_capture_nested_candidates", capture_then_churn)
+    monkeypatch.setattr(repo2._query_index, "_capture_lowered_nested_matches", capture_then_churn)
 
     occurrence = repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="retry-occurrence")).nested().one()
 
@@ -526,8 +609,11 @@ def test_mixed_memory_and_sqlite_nested_query_merges_sources(tmp_path):
 def test_sqlite_federated_exists_stops_before_full_verification(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
+    leaves = []
     for idx in range(270):
-        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+        leaf = FederationLeaf(name=f"leaf-{idx}", repo=repo)
+        leaves.append(leaf)
+        repo.save_object(leaf)
 
     verified = 0
     original = DefinitionQuery._verify_cdefs
@@ -549,8 +635,11 @@ def test_sqlite_federated_exists_stops_before_full_verification(tmp_path, monkey
 def test_sqlite_exists_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
+    leaves = []
     for idx in range(270):
-        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+        leaf = FederationLeaf(name=f"leaf-{idx}", repo=repo)
+        leaves.append(leaf)
+        repo.save_object(leaf)
 
     fetched = []
     original = SQLiteQueryIndexReadView.cdefs_by_id
@@ -594,8 +683,11 @@ def test_sqlite_one_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
 def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
+    leaves = []
     for idx in range(270):
-        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+        leaf = FederationLeaf(name=f"leaf-{idx}", repo=repo)
+        leaves.append(leaf)
+        repo.save_object(leaf)
 
     fetched = []
     original = SQLiteQueryIndexReadView.cdefs_by_id
@@ -607,7 +699,9 @@ def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatc
 
     monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
 
-    selector = Definition(FederationLeaf, SKIP_ARGS, name=lambda value: value == "leaf-269")
+    last = sorted((leaf.definition for leaf in leaves), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))[-1]
+    target_name = last.kwargs["name"]
+    selector = Definition(FederationLeaf, SKIP_ARGS, name=lambda value: value == target_name)
 
     assert repo.query(selector).stored().exists()
 

@@ -11,6 +11,7 @@ from ..object import Object
 from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..utils.types import is_nonclass_callable
 from .graph_plan import graph_candidate_ids
+from .lowering import ScanPolicy
 from .domain import CachedDomain, KnownDomain, NestedDomain, StoredDomain
 from .model import (
     ClassMatchPolicy,
@@ -22,6 +23,7 @@ from .model import (
     QueryCardinalityError,
     QueryIndexError,
     QueryIndexUnavailable,
+    QueryVerifyBudgetExceeded,
     QueryProjection,
     SourceQueryPlan,
     QueryStats,
@@ -61,6 +63,8 @@ class DefinitionQuery:
     reuse_weak_policy: bool = True
     universe: ResultUniverse | None = None
     occurrence_limit: int | None = None
+    scan_policy_mode: str = "allow"
+    max_verify_limit: int | None = None
 
     @classmethod
     def from_source(
@@ -171,6 +175,23 @@ class DefinitionQuery:
         # This bounds path enumeration. Capturing the candidate ancestor subgraph is terminal-specific.
         return replace(self, occurrence_limit=limit)
 
+    def scan_policy(self, policy: str) -> "DefinitionQuery":
+        if policy not in {"allow", "warn", "forbid"}:
+            raise ValueError("scan policy must be 'allow', 'warn', or 'forbid'.")
+        return replace(self, scan_policy_mode=policy)
+
+    def require_indexed(self) -> "DefinitionQuery":
+        return self.scan_policy("forbid")
+
+    def max_verify(self, limit: int | None) -> "DefinitionQuery":
+        if limit is not None and limit < 0:
+            raise ValueError("max_verify limit must be non-negative or None.")
+        return replace(self, max_verify_limit=limit)
+
+    @property
+    def lowering_scan_policy(self) -> ScanPolicy:
+        return ScanPolicy(self.scan_policy_mode, self.max_verify_limit)
+
     def execute(self):
         self._require_domain()
         if self.domain == "nested":
@@ -212,6 +233,13 @@ class DefinitionQuery:
             if self.projection == "owners":
                 return raw.owners()
             return raw
+
+        if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
+            query_backed = getattr(self.repo._query_index, "query_backed_definition_result_set", None)
+            if query_backed is not None:
+                result_set = query_backed(self)
+                if result_set is not None:
+                    return result_set
 
         cdefs, stats, query_replicas = self._execute_definition_domain()
         explanation = stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
@@ -271,8 +299,8 @@ class DefinitionQuery:
             raise QueryCardinalityError(f"Expected zero or one {label}, found {len(items)}.")
         return items[0] if items else None
 
-    def explain(self) -> QueryExplanation:
-        return self._execute_explanation()
+    def explain(self, *, analyze: bool = False) -> QueryExplanation:
+        return self._execute_explanation(analyze=analyze)
 
     def _execute_count(self) -> int:
         self._require_domain()
@@ -303,8 +331,14 @@ class DefinitionQuery:
         cdefs, _, _ = self._execute_definition_domain()
         return len(cdefs)
 
-    def _execute_explanation(self) -> QueryExplanation:
+    def _execute_explanation(self, *, analyze: bool = False) -> QueryExplanation:
         self._require_domain()
+        if analyze:
+            result = self.execute()
+            explanation = result.explanation
+            if explanation is None:
+                return QueryStats(result_count=len(result)).explanation(domain=self._domain_label(), refresh=self.refresh_policy)
+            return explanation
         if self.domain == "nested":
             if self.universe is None and self.projection == "definitions":
                 _, stats = self._execute_nested_definitions()
@@ -593,11 +627,21 @@ class DefinitionQuery:
             stats: QueryStats) -> tuple[ConcreteDefinition, ...]:
         if self.selector is None:
             stats.verified_count += len(cdefs)
+            stats.python_verifications += len(cdefs)
+            if self.max_verify_limit is not None and stats.verified_count > self.max_verify_limit:
+                raise QueryVerifyBudgetExceeded(
+                    f"Query exceeded max_verify budget {self.max_verify_limit}."
+                )
             return tuple(sorted(cdefs, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
 
         out: list[ConcreteDefinition] = []
         for cdef in cdefs:
             stats.verified_count += 1
+            stats.python_verifications += 1
+            if self.max_verify_limit is not None and stats.verified_count > self.max_verify_limit:
+                raise QueryVerifyBudgetExceeded(
+                    f"Query exceeded max_verify budget {self.max_verify_limit}."
+                )
             if not _structural_match(
                     self.selector,
                     cdef,

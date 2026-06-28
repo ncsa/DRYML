@@ -7,13 +7,16 @@ from typing import Any
 from ..definition import ConcreteDefinition
 from .domain import NestedDomain, StoredDomain
 from .graph_plan import graph_candidate_ids
+from .lowering import CollectSink, CountSink, LoweringDiagnostics
 from .memory import MemoryStoreQueryIndex
-from .model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, QueryStats, RefreshPolicy, SourceQueryPlan, ValidationIssue, ValidationReport
+from .model import QueryIndexError, QueryIndexGenerationChanged, QueryIndexStatus, QueryIndexUnavailable, QueryStats, QueryVerifyBudgetExceeded, QueryWouldScanError, RefreshPolicy, SourceQueryPlan, ValidationIssue, ValidationReport
 from .selector_graph import compile_selector_graph
 from .utils import chunked
 
 
 CACHE_SOURCE_KEY = "repo-cache"
+_QUERY_BACKED_RESULT_THRESHOLD = 10_000
+_QUERY_BACKED_PAGE_SIZE = 512
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,12 +119,23 @@ class RepoQueryIndex:
                 self._refresh_definition_source(index, query, exact_root, stats)
                 before_verified = stats.verified_count
                 source_matches = 0
-                if stop_after is None:
+                if _source_supports_lowering(index):
+                    matches, generation, candidate_count, source_matches = self._execute_lowered_definition_source(
+                        index,
+                        query,
+                        selector_graph,
+                        stats,
+                        stop_after=stop_after,
+                        existing=merged,
+                    )
+                    generations[binding.source_key] = generation
+                elif stop_after is None:
                     with index.read_view(include_cached=False) as snapshot:
                         candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
                         generation = snapshot.generation
                         generations[binding.source_key] = generation
                         cdefs_by_id = snapshot.cdefs_by_id(candidate_ids)
+                        candidate_count = len(candidate_ids)
                     matches = query._verify_cdefs(tuple(cdefs_by_id.values()), stats=stats)
                     source_matches = len(matches)
                 else:
@@ -158,13 +172,14 @@ class RepoQueryIndex:
                         break
                     else:
                         raise QueryIndexError("Catalog generation changed repeatedly during terminal stored query.")
+                    candidate_count = len(candidate_ids)
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(
                 source_key=binding.source_key,
                 backend=_source_backend(index),
                 generation=generation,
-                candidate_count=len(candidate_ids),
+                candidate_count=candidate_count,
                 verified_count=stats.verified_count - before_verified,
                 result_count=source_matches,
                 refresh_action=stats.refresh_action,
@@ -182,6 +197,78 @@ class RepoQueryIndex:
         stats.source_plans = tuple(source_plans)
         return out, stats, {cdef: tuple(replicas.get(cdef, ())) for cdef in out}
 
+    def query_backed_definition_result_set(self, query):
+        if query.domain != "stored" or query.universe is not None:
+            return None
+        for binding in self._executable_bindings("stored"):
+            if not _source_supports_lowering(self._source_index_for_binding(binding)):
+                return None
+        stats = self.explain_definition_domain(query)
+        estimated = sum(plan.candidate_count for plan in stats.source_plans)
+        if estimated <= _QUERY_BACKED_RESULT_THRESHOLD:
+            return None
+
+        from .result import QueryBackedDefinitionResultSet
+
+        generation_vector = dict(stats.generation_vector or {})
+        explanation = stats.explanation(domain=query.domain or "stored", refresh=query.refresh_policy)
+
+        def page_factory():
+            return self.iter_lowered_definition_results(
+                query,
+                generation_vector=generation_vector,
+                page_size=_QUERY_BACKED_PAGE_SIZE,
+            )
+
+        return QueryBackedDefinitionResultSet(
+            self.repo,
+            page_factory,
+            materializable=True,
+            domain="stored",
+            explanation=explanation,
+        )
+
+    def iter_lowered_definition_results(
+            self,
+            query,
+            *,
+            generation_vector: Mapping[str, int],
+            page_size: int = _QUERY_BACKED_PAGE_SIZE):
+        selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
+        seen: dict[ConcreteDefinition, ConcreteDefinition] = {}
+        for binding in self._executable_bindings("stored"):
+            index = self._source_index_for_binding(binding)
+            expected_generation = generation_vector.get(binding.source_key)
+            after = None
+            diagnostics = LoweringDiagnostics()
+            with index.read_view(include_cached=False) as snapshot:
+                if expected_generation is not None and snapshot.generation != expected_generation:
+                    raise QueryIndexGenerationChanged("Query-backed ResultSet source generation changed.")
+                plan = snapshot.lower_selector_graph(
+                    selector_graph,
+                    StoredDomain(snapshot),
+                    terminal="page",
+                    scan_policy=query.lowering_scan_policy,
+                    diagnostics=diagnostics,
+                )
+                generation = snapshot.generation
+            while True:
+                with index.read_view(include_cached=False) as snapshot:
+                    if snapshot.generation != generation:
+                        raise QueryIndexGenerationChanged("Query-backed ResultSet source generation changed.")
+                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=page_size)
+                    batch = next(batches, None)
+                if batch is None:
+                    break
+                page_stats = QueryStats()
+                matches = query._verify_cdefs(batch.cdefs, stats=page_stats)
+                for cdef in matches:
+                    if cdef in seen:
+                        continue
+                    seen[cdef] = cdef
+                    yield cdef, (binding.store,)
+                after = batch.next_cursor
+
     def count_definition_domain(self, query, *, stop_after: int | None = None) -> tuple[int, QueryStats]:
         stats = QueryStats(refresh_action="federated")
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
@@ -196,36 +283,49 @@ class RepoQueryIndex:
                 self._refresh_definition_source(index, query, exact_root, stats)
                 source_matches = 0
                 before_verified = stats.verified_count
-                for _ in range(3):
-                    source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
-                    source_matches = 0
-                    generation_changed = False
-                    with index.read_view(include_cached=False) as snapshot:
-                        candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
-                        generation = snapshot.generation
-                        generations[binding.source_key] = generation
-                        candidate_count = len(candidate_ids)
-                    for batch in chunked(sorted(candidate_ids), 256):
-                        with index.read_view(include_cached=False) as snapshot:
-                            if snapshot.generation != generation:
-                                generation_changed = True
-                                break
-                            cdefs = tuple(snapshot.cdefs_by_id(batch).values())
-                        matches = query._verify_cdefs(cdefs, stats=stats)
-                        source_matches += len(matches)
-                        for cdef in matches:
-                            _canonical_cdef_key(source_merged, cdef)
-                            if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
-                                break
-                        if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
-                            break
-                    if generation_changed:
-                        continue
+                if _source_supports_lowering(index):
+                    source_merged, generation, candidate_count, source_matches = self._count_lowered_definition_source(
+                        index,
+                        query,
+                        selector_graph,
+                        stats,
+                        stop_after=stop_after,
+                        existing=merged,
+                    )
+                    generations[binding.source_key] = generation
                     for cdef in source_merged.values():
                         _canonical_cdef_key(merged, cdef)
-                    break
                 else:
-                    raise QueryIndexError("Catalog generation changed repeatedly during terminal count query.")
+                    for _ in range(3):
+                        source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+                        source_matches = 0
+                        generation_changed = False
+                        with index.read_view(include_cached=False) as snapshot:
+                            candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
+                            generation = snapshot.generation
+                            generations[binding.source_key] = generation
+                            candidate_count = len(candidate_ids)
+                        for batch in chunked(sorted(candidate_ids), 256):
+                            with index.read_view(include_cached=False) as snapshot:
+                                if snapshot.generation != generation:
+                                    generation_changed = True
+                                    break
+                                cdefs = tuple(snapshot.cdefs_by_id(batch).values())
+                            matches = query._verify_cdefs(cdefs, stats=stats)
+                            source_matches += len(matches)
+                            for cdef in matches:
+                                _canonical_cdef_key(source_merged, cdef)
+                                if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
+                                    break
+                            if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
+                                break
+                        if generation_changed:
+                            continue
+                        for cdef in source_merged.values():
+                            _canonical_cdef_key(merged, cdef)
+                        break
+                    else:
+                        raise QueryIndexError("Catalog generation changed repeatedly during terminal count query.")
                 if stop_after is not None and len(merged) >= stop_after:
                     source_plans.append(SourceQueryPlan(
                         source_key=binding.source_key,
@@ -271,7 +371,27 @@ class RepoQueryIndex:
                 self._refresh_definition_source(index, query, exact_root, stats)
                 with index.read_view(include_cached=False) as snapshot:
                     before_candidates = stats.candidate_count
-                    candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
+                    if _source_supports_lowering(index):
+                        diagnostics = LoweringDiagnostics()
+                        plan = snapshot.lower_selector_graph(
+                            selector_graph,
+                            StoredDomain(snapshot),
+                            terminal="explain",
+                            scan_policy=query.lowering_scan_policy,
+                            diagnostics=diagnostics,
+                        )
+                        explain = getattr(snapshot, "explain_lowered_plan", None)
+                        if explain is not None:
+                            explain(plan)
+                        candidate_ids = ()
+                        stats.lowering_strategy = diagnostics.strategy
+                        stats.scan_required = stats.scan_required or diagnostics.scan_required
+                        stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
+                        stats.lowering_diagnostics = diagnostics.as_dict()
+                        candidate_delta = plan.estimated_size or 0
+                    else:
+                        candidate_ids = self._definition_candidate_ids(snapshot, query, selector_graph, exact_root, stats)
+                        candidate_delta = stats.candidate_count - before_candidates if stats.candidate_count >= before_candidates else len(candidate_ids)
                     generation = snapshot.generation
                     generations[binding.source_key] = generation
             except Exception as exc:
@@ -280,7 +400,7 @@ class RepoQueryIndex:
                 source_key=binding.source_key,
                 backend=_source_backend(index),
                 generation=generation,
-                candidate_count=stats.candidate_count - before_candidates if stats.candidate_count >= before_candidates else len(candidate_ids),
+                candidate_count=candidate_delta,
                 verified_count=0,
                 result_count=None,
                 refresh_action=stats.refresh_action,
@@ -291,6 +411,121 @@ class RepoQueryIndex:
         stats.source_plans = tuple(source_plans)
         return stats
 
+    def _execute_lowered_definition_source(
+            self,
+            index,
+            query,
+            selector_graph,
+            stats: QueryStats,
+            *,
+            stop_after: int | None,
+            existing: Mapping[ConcreteDefinition, ConcreteDefinition]):
+        for _ in range(3):
+            sink = CollectSink(stop_after=stop_after)
+            source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+            generation_changed = False
+            after = None
+            diagnostics = LoweringDiagnostics()
+            with index.read_view(include_cached=False) as snapshot:
+                plan = snapshot.lower_selector_graph(
+                    selector_graph,
+                    StoredDomain(snapshot),
+                    terminal="collect",
+                    scan_policy=query.lowering_scan_policy,
+                    diagnostics=diagnostics,
+                )
+                generation = snapshot.generation
+            while True:
+                with index.read_view(include_cached=False) as snapshot:
+                    if snapshot.generation != generation:
+                        generation_changed = True
+                        break
+                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=256)
+                    batch = next(batches, None)
+                if batch is None:
+                    break
+                before_verified = stats.verified_count
+                matches = query._verify_cdefs(batch.cdefs, stats=stats)
+                diagnostics.python_verifications += stats.verified_count - before_verified
+                for cdef in matches:
+                    _canonical_cdef_key(source_merged, cdef)
+                    sink.accept(cdef)
+                    if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
+                        break
+                if sink.done or (stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after):
+                    diagnostics.terminal_stop_reason = sink.stop_reason or "collect-limit"
+                    break
+                after = batch.next_cursor
+            if generation_changed:
+                continue
+            stats.lowering_strategy = diagnostics.strategy
+            stats.scan_required = stats.scan_required or diagnostics.scan_required
+            stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
+            stats.candidate_rows_read += diagnostics.candidate_rows_read
+            stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
+            stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
+            stats.lowering_diagnostics = diagnostics.as_dict()
+            matches = tuple(source_merged.values())
+            return matches, generation, diagnostics.candidate_rows_read, len(matches)
+        raise QueryIndexError("Catalog generation changed repeatedly during lowered stored query.")
+
+    def _count_lowered_definition_source(
+            self,
+            index,
+            query,
+            selector_graph,
+            stats: QueryStats,
+            *,
+            stop_after: int | None,
+            existing: Mapping[ConcreteDefinition, ConcreteDefinition]):
+        for _ in range(3):
+            sink = CountSink(stop_after=stop_after)
+            source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+            generation_changed = False
+            after = None
+            diagnostics = LoweringDiagnostics()
+            with index.read_view(include_cached=False) as snapshot:
+                plan = snapshot.lower_selector_graph(
+                    selector_graph,
+                    StoredDomain(snapshot),
+                    terminal="count",
+                    scan_policy=query.lowering_scan_policy,
+                    diagnostics=diagnostics,
+                )
+                generation = snapshot.generation
+            while True:
+                with index.read_view(include_cached=False) as snapshot:
+                    if snapshot.generation != generation:
+                        generation_changed = True
+                        break
+                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=256)
+                    batch = next(batches, None)
+                if batch is None:
+                    break
+                before_verified = stats.verified_count
+                matches = query._verify_cdefs(batch.cdefs, stats=stats)
+                diagnostics.python_verifications += stats.verified_count - before_verified
+                for cdef in matches:
+                    _canonical_cdef_key(source_merged, cdef)
+                    sink.accept(cdef)
+                    if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
+                        break
+                if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
+                    diagnostics.terminal_stop_reason = sink.stop_reason or "count-limit"
+                    break
+                after = batch.next_cursor
+            if generation_changed:
+                continue
+            stats.lowering_strategy = diagnostics.strategy
+            stats.scan_required = stats.scan_required or diagnostics.scan_required
+            stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
+            stats.candidate_rows_read += diagnostics.candidate_rows_read
+            stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
+            stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
+            stats.lowering_diagnostics = diagnostics.as_dict()
+            return source_merged, generation, diagnostics.candidate_rows_read, len(source_merged)
+        raise QueryIndexError("Catalog generation changed repeatedly during lowered count query.")
+
     def execute_nested_definitions(self, query, *, stop_after: int | None = None):
         stats = QueryStats(refresh_action="federated")
         merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
@@ -299,9 +534,19 @@ class RepoQueryIndex:
         for binding in self._executable_bindings("nested"):
             before_candidates = stats.candidate_count
             before_verified = stats.verified_count
-            cdefs_by_id, generation = self._capture_nested_candidates(query, binding, stats)
+            index = self._source_index_for_binding(binding)
+            if _source_supports_lowering(index):
+                matches, _, generation, candidate_count = self._capture_lowered_nested_matches(
+                    query,
+                    binding,
+                    stats,
+                    stop_after=stop_after,
+                )
+                stats.candidate_count += candidate_count
+            else:
+                cdefs_by_id, generation = self._capture_nested_candidates(query, binding, stats)
+                matches, _ = query._verify_cdefs_by_id(cdefs_by_id, stats=stats)
             generations[binding.source_key] = generation
-            matches, _ = query._verify_cdefs_by_id(cdefs_by_id, stats=stats)
             source_plans.append(SourceQueryPlan(
                 source_key=binding.source_key,
                 backend=_source_backend(self._source_index_for_binding(binding)),
@@ -334,9 +579,13 @@ class RepoQueryIndex:
             before_candidates = stats.candidate_count
             before_verified = stats.verified_count
             for _ in range(3):
-                cdefs_by_id, generation = self._capture_nested_candidates(query, binding, stats)
-                _, match_ids = query._verify_cdefs_by_id(cdefs_by_id, stats=stats)
                 index = self._source_index_for_binding(binding)
+                if _source_supports_lowering(index):
+                    _, match_ids, generation, candidate_count = self._capture_lowered_nested_matches(query, binding, stats)
+                    stats.candidate_count += candidate_count
+                else:
+                    cdefs_by_id, generation = self._capture_nested_candidates(query, binding, stats)
+                    _, match_ids = query._verify_cdefs_by_id(cdefs_by_id, stats=stats)
                 with index.read_view(include_cached=False) as snapshot:
                     if snapshot.generation != generation:
                         continue
@@ -378,9 +627,13 @@ class RepoQueryIndex:
             before_candidates = stats.candidate_count
             before_verified = stats.verified_count
             for _ in range(3):
-                cdefs_by_id, generation = self._capture_nested_candidates(query, binding, stats)
-                _, match_ids = query._verify_cdefs_by_id(cdefs_by_id, stats=stats)
                 index = self._source_index_for_binding(binding)
+                if _source_supports_lowering(index):
+                    _, match_ids, generation, candidate_count = self._capture_lowered_nested_matches(query, binding, stats)
+                    stats.candidate_count += candidate_count
+                else:
+                    cdefs_by_id, generation = self._capture_nested_candidates(query, binding, stats)
+                    _, match_ids = query._verify_cdefs_by_id(cdefs_by_id, stats=stats)
                 with index.read_view(include_cached=False) as snapshot:
                     if snapshot.generation != generation:
                         continue
@@ -423,6 +676,61 @@ class RepoQueryIndex:
                         return
 
         return occurrence_factory, stats, {owner: tuple(_dedupe_stores(stores)) for owner, stores in owner_replicas.items()}
+
+    def _capture_lowered_nested_matches(self, query, binding: StoreIndexBinding, stats: QueryStats, *, stop_after: int | None = None):
+        index = self._source_index_for_binding(binding)
+        index.refresh(query.refresh_policy, stats=stats)
+        selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
+        for _ in range(3):
+            merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+            match_ids: set[Any] = set()
+            generation_changed = False
+            after = None
+            diagnostics = LoweringDiagnostics()
+            with index.read_view(include_cached=False) as snapshot:
+                plan = snapshot.lower_selector_graph(
+                    selector_graph,
+                    NestedDomain(snapshot),
+                    terminal="collect",
+                    scan_policy=query.lowering_scan_policy,
+                    diagnostics=diagnostics,
+                )
+                generation = snapshot.generation
+            while True:
+                with index.read_view(include_cached=False) as snapshot:
+                    if snapshot.generation != generation:
+                        generation_changed = True
+                        break
+                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=256)
+                    batch = next(batches, None)
+                if batch is None:
+                    break
+                before_verified = stats.verified_count
+                matches = query._verify_cdefs(batch.cdefs, stats=stats)
+                diagnostics.python_verifications += stats.verified_count - before_verified
+                match_set = set(matches)
+                for did, cdef in zip(batch.ids, batch.cdefs):
+                    if cdef not in match_set:
+                        continue
+                    _canonical_cdef_key(merged, cdef)
+                    match_ids.add(did)
+                    if stop_after is not None and len(merged) >= stop_after:
+                        break
+                if stop_after is not None and len(merged) >= stop_after:
+                    diagnostics.terminal_stop_reason = "collect-limit"
+                    break
+                after = batch.next_cursor
+            if generation_changed:
+                continue
+            stats.lowering_strategy = diagnostics.strategy
+            stats.scan_required = stats.scan_required or diagnostics.scan_required
+            stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
+            stats.candidate_rows_read += diagnostics.candidate_rows_read
+            stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
+            stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
+            stats.lowering_diagnostics = diagnostics.as_dict()
+            return tuple(merged.values()), match_ids, generation, diagnostics.candidate_rows_read
+        raise QueryIndexError("Catalog generation changed repeatedly during lowered nested query.")
 
     def open_store_index(self, binding: StoreIndexBinding):
         existing = self._opened_indexes.get(binding.source_key)
@@ -723,7 +1031,19 @@ def _source_backend(index) -> str:
     return name
 
 
+def _source_supports_lowering(index) -> bool:
+    if index is None:
+        return False
+    try:
+        with index.read_view(include_cached=False) as snapshot:
+            return bool(getattr(snapshot, "supports_lowering", False))
+    except Exception:
+        return False
+
+
 def _source_query_error(binding: StoreIndexBinding, exc: BaseException) -> QueryIndexError:
+    if isinstance(exc, (QueryWouldScanError, QueryVerifyBudgetExceeded)):
+        return exc
     if isinstance(exc, QueryIndexError):
         return QueryIndexError(f"Query source {binding.source_key!r} failed: {exc}")
     return QueryIndexError(f"Query source {binding.source_key!r} failed with {type(exc).__name__}: {exc}")

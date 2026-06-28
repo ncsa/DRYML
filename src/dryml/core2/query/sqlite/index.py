@@ -33,11 +33,13 @@ from ..model import (
     ValidationIssue,
     ValidationReport,
 )
+from ..lowering import LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager
 from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, validate_schema
 from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
+from .lowering import SQLiteRelationCompiler
 
 
 _CODEC = QueryIndexCodec()
@@ -745,13 +747,88 @@ class SQLiteQueryIndexReadView:
         self.source_key = source_key
         self.generation = generation
         self._active = True
+        self._temp_relations: list[str] = []
+        self._temp_relation_counter = 0
 
     def close(self) -> None:
+        self.drop_temp_relations()
         self._active = False
 
     def _check_active(self) -> None:
         if not self._active:
             raise QueryIndexError("SQLite query index read view is closed.")
+
+    @property
+    def supports_lowering(self) -> bool:
+        return True
+
+    def lower_selector_graph(
+            self,
+            selector_graph,
+            domain,
+            *,
+            terminal: QueryTerminal,
+            scan_policy: ScanPolicy,
+            diagnostics: LoweringDiagnostics | None = None,
+            within_relation: str | None = None) -> LoweredQueryPlan:
+        self._check_active()
+        if within_relation is not None and within_relation not in self._temp_relations:
+            raise QueryIndexError("within_relation must be a temp relation owned by this read view.")
+        compiler = SQLiteRelationCompiler(
+            self._con,
+            source_key=self.source_key,
+            generation=self.generation,
+            codec=_CODEC,
+            cdef_loader=self.cdefs_by_id,
+        )
+        return compiler.lower_selector_graph(
+            selector_graph,
+            domain,
+            terminal=terminal,
+            scan_policy=scan_policy,
+            diagnostics=diagnostics,
+            within_relation=within_relation,
+        )
+
+    def iter_candidate_cdef_batches(
+            self,
+            plan: LoweredQueryPlan,
+            *,
+            after: PagedResultCursor | None = None,
+            batch_size: int):
+        self._check_active()
+        compiler = SQLiteRelationCompiler(
+            self._con,
+            source_key=self.source_key,
+            generation=self.generation,
+            codec=_CODEC,
+            cdef_loader=self.cdefs_by_id,
+        )
+        return compiler.iter_candidate_cdef_batches(plan, after=after, batch_size=batch_size)
+
+    def explain_lowered_plan(self, plan: LoweredQueryPlan) -> tuple[str, ...]:
+        self._check_active()
+        compiler = SQLiteRelationCompiler(self._con, source_key=self.source_key, generation=self.generation, codec=_CODEC)
+        return compiler.explain_query_plan(plan)
+
+    def create_temp_relation(self, ids) -> str:
+        self._check_active()
+        self._temp_relation_counter += 1
+        name = f"temp_candidate_{self._temp_relation_counter}"
+        self._con.execute(f"CREATE TEMP TABLE {name} (def_id INTEGER PRIMARY KEY) WITHOUT ROWID")
+        self._temp_relations.append(name)
+        unique_ids = tuple(dict.fromkeys(ids))
+        if unique_ids:
+            self._con.executemany(f"INSERT OR IGNORE INTO {name} (def_id) VALUES (?)", ((did,) for did in unique_ids))
+        return name
+
+    def drop_temp_relations(self) -> None:
+        while self._temp_relations:
+            name = self._temp_relations.pop()
+            try:
+                self._con.execute(f"DROP TABLE IF EXISTS temp.{name}")
+            except Exception:
+                pass
 
     def all_definition_ids(self) -> set[DefinitionId]:
         self._check_active()

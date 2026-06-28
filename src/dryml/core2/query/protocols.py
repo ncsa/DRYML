@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
+from .lowering import CandidateBatch, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
 from .model import DefinitionId, FeatureRequirement, IndexWriteResult, QueryIndexStatus, QueryStats, RefreshPolicy, ValidationReport
 from .path import DefinitionPath
 
@@ -97,6 +98,29 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
         ...
 
     def occurrence_snapshot_for_nested_ids(self, target_ids: Collection[DefinitionId]) -> Any:
+        ...
+
+    @property
+    def supports_lowering(self) -> bool:
+        ...
+
+    def lower_selector_graph(
+            self,
+            selector_graph,
+            domain: DefinitionDomain,
+            *,
+            terminal: QueryTerminal,
+            scan_policy: ScanPolicy,
+            diagnostics: LoweringDiagnostics | None = None,
+            within_relation: str | None = None) -> LoweredQueryPlan:
+        ...
+
+    def iter_candidate_cdef_batches(
+            self,
+            plan: LoweredQueryPlan,
+            *,
+            after: PagedResultCursor | None = None,
+            batch_size: int) -> Any:
         ...
 
 

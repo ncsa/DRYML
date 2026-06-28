@@ -5,11 +5,12 @@ import pytest
 from dryml.core2 import Definition, Object, SKIP_ARGS
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats
+from dryml.core2.query.lowering import LoweringDiagnostics, ScanPolicy
+from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats, QueryWouldScanError
 from dryml.core2.query.domain import StoredDomain
 from dryml.core2.query.graph_plan import graph_candidate_ids
 from dryml.core2.query.path import GraphPath
-from dryml.core2.query.selector_graph import compile_selector_graph
+from dryml.core2.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode, compile_selector_graph
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core2.query.sqlite.index as sqlite_index_module
 from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
@@ -237,6 +238,218 @@ def test_exact_and_local_candidate_lookup(tmp_path):
         cdefs = tuple(view.cdefs_by_id(ids).values())
 
     assert cdefs == (wanted.definition,)
+
+
+def test_lowered_exact_anchor_relation_uses_hash_index(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteLeaf("wanted")
+    other = SQLiteLeaf("other")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+
+    selector_graph = compile_selector_graph(wanted.definition)
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+        explain = view.explain_lowered_plan(plan)
+
+    assert any("definitions_by_stable_hash" in row or "stable_hash" in row for row in explain)
+    assert diagnostics.strategy == "sqlite-lowered"
+
+
+def test_lowered_feature_anchor_relation_uses_postings_index(tmp_path, monkeypatch):
+    token = FeatureToken("LOWERED_FEATURE", GraphPath(), "wanted")
+
+    def controlled_fingerprint(cdef):
+        return DefinitionFingerprint({token: 1})
+
+    monkeypatch.setattr(sqlite_index_module, "target_local_fingerprint", controlled_fingerprint)
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteLeaf("wanted")
+    other = SQLiteLeaf("other")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+
+    selector_graph = SelectorGraph(
+        root=0,
+        nodes=(SelectorGraphNode(0, GraphPath(), wanted.definition, (FeatureRequirement(token),), None),),
+        edges=(),
+    )
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=LoweringDiagnostics(),
+        )
+        explain = view.explain_lowered_plan(plan)
+
+    assert "FROM postings" in plan.candidate_sql
+    assert any("USING" in row and ("INDEX" in row or "PRIMARY KEY" in row) for row in explain)
+
+
+def test_lowered_child_edge_join_matches_v1_path(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteParent(child=SQLiteLeaf(name="wanted"), name="root")
+    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="root")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+
+    selector = Definition(SQLiteParent, SKIP_ARGS, child=Definition(SQLiteLeaf, SKIP_ARGS, name="wanted"))
+    selector_graph = compile_selector_graph(selector)
+    with index.read_view() as view:
+        v1_ids = graph_candidate_ids(view, selector_graph, StoredDomain(view))
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy(),
+            diagnostics=LoweringDiagnostics(),
+        )
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
+
+    assert set(batch.ids) == v1_ids
+    assert batch.cdefs == (wanted.definition,)
+
+
+def test_lowered_unordered_edge_uses_conservative_edge_relation(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted_leaf = SQLiteLeaf(name="wanted")
+    wanted = SQLiteParent(child=wanted_leaf, name="root")
+    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="root")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+    selector_graph = SelectorGraph(
+        root=0,
+        nodes=(
+            SelectorGraphNode(0, GraphPath(), Definition(SQLiteParent, SKIP_ARGS), (), None),
+            SelectorGraphNode(1, GraphPath().child("child"), wanted_leaf.definition, (), wanted_leaf.definition),
+        ),
+        edges=(SelectorGraphEdge(0, GraphPath().child("child"), 1, unordered=True),),
+    )
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy("forbid"),
+            diagnostics=LoweringDiagnostics(),
+        )
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
+
+    assert wanted.definition in batch.cdefs
+    assert other.definition not in batch.cdefs
+
+
+def test_temp_relation_is_dropped_on_view_exit(tmp_path):
+    index = sqlite_index(tmp_path)
+    obj = SQLiteLeaf("temp")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(obj.definition), [obj.definition])
+
+    with index.read_view() as view:
+        did = view.cdef_id(obj.definition)
+        name = view.create_temp_relation([did])
+        assert view._con.execute(
+            "SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone() == (name,)
+
+    with index.read_view() as view:
+        assert view._con.execute(
+            "SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone() is None
+
+
+def test_lowered_within_relation_restricts_candidates_with_temp_table(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteLeaf("within-wanted")
+    other = SQLiteLeaf("within-other")
+    index.register_stored_roots(
+        ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition]),
+        [wanted.definition, other.definition],
+    )
+
+    with index.read_view() as view:
+        wanted_id = view.cdef_id(wanted.definition)
+        within = view.create_temp_relation([wanted_id])
+        plan = view.lower_selector_graph(
+            None,
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy(),
+            diagnostics=LoweringDiagnostics(),
+            within_relation=within,
+        )
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
+
+    assert batch.cdefs == (wanted.definition,)
+    assert plan.diagnostics.relation_strategy == "cte+temp"
+
+
+def test_lowered_stored_domain_filters_before_cdef_fetch(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf("nested-only")
+    owner = SQLiteParent(child=leaf, name="owner")
+    graph = ConcreteDefinitionGraph.from_root(owner.definition)
+    index.register_stored_roots(graph, [owner.definition])
+
+    selector_graph = compile_selector_graph(Definition(SQLiteLeaf, SKIP_ARGS, name="nested-only"))
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy(),
+            diagnostics=LoweringDiagnostics(),
+        )
+        batches = tuple(view.iter_candidate_cdef_batches(plan, batch_size=10))
+
+    assert batches == ()
+
+
+def test_lowered_explain_plan_only_does_not_decode_cdefs(tmp_path, monkeypatch):
+    index = sqlite_index(tmp_path)
+    obj = SQLiteLeaf("plan-only")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(obj.definition), [obj.definition])
+
+    def fail_decode(_blob):
+        raise AssertionError("plan-only explain should not decode CDefs")
+
+    monkeypatch.setattr(sqlite_index_module._CODEC, "decode_cdef", fail_decode)
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            compile_selector_graph(Definition(SQLiteLeaf, SKIP_ARGS, name="plan-only")),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=LoweringDiagnostics(),
+        )
+        view.explain_lowered_plan(plan)
+
+
+def test_scan_policy_forbid_rejects_unindexed_selector(tmp_path):
+    index = sqlite_index(tmp_path)
+    obj = SQLiteLeaf("scan")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(obj.definition), [obj.definition])
+
+    with index.read_view() as view:
+        with pytest.raises(QueryWouldScanError):
+            view.lower_selector_graph(
+                None,
+                StoredDomain(view),
+                terminal="collect",
+                scan_policy=ScanPolicy("forbid"),
+                diagnostics=LoweringDiagnostics(),
+            )
 
 
 def test_read_view_estimates_candidates_and_query_stats(tmp_path):

@@ -17,6 +17,8 @@ DRYML query indexes are acceleration metadata for `Repo.query(...)`. Backends mu
 
 `QueryIndexReadView` is a short-lived read transaction. It returns Store-local definition IDs, candidate sets, owner projections, and occurrence traversal snapshots for one source generation.
 
+SQLite read views also expose a lowering-capable path for safe SQL-native candidate relations. See `docs/sqlite_lowering.md` for the lowered relation, terminal, scan-policy, diagnostics, and fallback boundaries.
+
 ## Transaction Boundaries
 
 SQLite writes use one logical transaction per mutation:

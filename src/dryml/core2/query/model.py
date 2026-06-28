@@ -52,6 +52,14 @@ class QueryIndexGenerationChanged(QueryIndexError):
     pass
 
 
+class QueryWouldScanError(QueryIndexError):
+    pass
+
+
+class QueryVerifyBudgetExceeded(QueryError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class QueryIndexStatus:
     backend: str
@@ -333,6 +341,14 @@ class QueryExplanation:
     graph_candidate_count: int = 0
     generation_vector: dict[str, int] | None = None
     source_plans: tuple[SourceQueryPlan, ...] = ()
+    lowering_strategy: str | None = None
+    scan_required: bool = False
+    scan_reason: str | None = None
+    candidate_rows_read: int = 0
+    cdef_blobs_decoded: int = 0
+    python_verifications: int = 0
+    terminal_stop_reason: str | None = None
+    lowering_diagnostics: dict[str, Any] | None = None
 
     def format(self) -> str:
         lines = [
@@ -359,6 +375,16 @@ class QueryExplanation:
             lines.append(f"graph candidates: {self.graph_candidate_count}")
         if self.generation_vector:
             lines.append(f"generations: {dict(sorted(self.generation_vector.items()))!r}")
+        if self.lowering_strategy is not None:
+            lines.append(f"lowering: {self.lowering_strategy}")
+        if self.scan_required:
+            lines.append(f"scan required: {self.scan_reason or 'unknown'}")
+        if self.candidate_rows_read or self.cdef_blobs_decoded or self.python_verifications:
+            lines.append(f"candidate rows read: {self.candidate_rows_read}")
+            lines.append(f"CDef blobs decoded: {self.cdef_blobs_decoded}")
+            lines.append(f"Python verifications: {self.python_verifications}")
+        if self.terminal_stop_reason is not None:
+            lines.append(f"terminal stop: {self.terminal_stop_reason}")
         for source in self.source_plans:
             result_count = source.result_count if source.result_count is not None else "unknown"
             lines.append(
@@ -400,6 +426,14 @@ class QueryStats:
     graph_candidate_count: int = 0
     generation_vector: dict[str, int] | None = None
     source_plans: tuple[SourceQueryPlan, ...] = ()
+    lowering_strategy: str | None = None
+    scan_required: bool = False
+    scan_reason: str | None = None
+    candidate_rows_read: int = 0
+    cdef_blobs_decoded: int = 0
+    python_verifications: int = 0
+    terminal_stop_reason: str | None = None
+    lowering_diagnostics: dict[str, Any] | None = None
 
     def explanation(self, *, domain: str, refresh: RefreshPolicy) -> QueryExplanation:
         return QueryExplanation(
@@ -421,4 +455,12 @@ class QueryStats:
             graph_candidate_count=self.graph_candidate_count,
             generation_vector=None if self.generation_vector is None else dict(self.generation_vector),
             source_plans=self.source_plans,
+            lowering_strategy=self.lowering_strategy,
+            scan_required=self.scan_required,
+            scan_reason=self.scan_reason,
+            candidate_rows_read=self.candidate_rows_read,
+            cdef_blobs_decoded=self.cdef_blobs_decoded,
+            python_verifications=self.python_verifications,
+            terminal_stop_reason=self.terminal_stop_reason,
+            lowering_diagnostics=None if self.lowering_diagnostics is None else dict(self.lowering_diagnostics),
         )

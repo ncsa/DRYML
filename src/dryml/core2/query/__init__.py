@@ -7,9 +7,12 @@ from .model import (
     QueryIndexError,
     QueryIndexStatus,
     QueryIndexUnavailable,
+    QueryVerifyBudgetExceeded,
+    QueryWouldScanError,
 )
+from .lowering import ScanPolicy
 from .query import DefinitionQuery
-from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
+from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet, QueryBackedDefinitionResultSet
 
 __all__ = [
     "Arg",
@@ -30,7 +33,11 @@ __all__ = [
     "QueryIndexError",
     "QueryIndexStatus",
     "QueryIndexUnavailable",
+    "QueryVerifyBudgetExceeded",
+    "QueryWouldScanError",
     "QueryPathError",
+    "QueryBackedDefinitionResultSet",
+    "ScanPolicy",
     "SetMember",
     "normalize_path",
 ]

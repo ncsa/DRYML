@@ -188,6 +188,107 @@ class DefinitionResultSet:
             )
 
 
+class QueryBackedDefinitionResultSet(DefinitionResultSet):
+    """Definition result set that pages verified CDefs from a replayable query.
+
+    The result set stores no SQLite connection, cursor, or read transaction. It
+    asks its page factory for fresh bounded read views during iteration and
+    caches verified results as they are yielded so repeated full iteration is
+    stable without re-querying.
+    """
+
+    __slots__ = ("_page_factory", "_definition_cache", "_replica_cache", "_cache_complete")
+
+    def __init__(
+            self,
+            repo,
+            page_factory: Callable[[], Iterable[tuple[ConcreteDefinition, tuple[Any, ...]]]],
+            *,
+            materializable: bool = True,
+            domain: str = "stored",
+            explanation: QueryExplanation | None = None):
+        object.__setattr__(self, "repo", repo)
+        object.__setattr__(self, "_definitions", ())
+        object.__setattr__(self, "materializable", materializable)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "explanation", explanation)
+        object.__setattr__(self, "_replicas", {})
+        object.__setattr__(self, "_page_factory", page_factory)
+        object.__setattr__(self, "_definition_cache", [])
+        object.__setattr__(self, "_replica_cache", {})
+        object.__setattr__(self, "_cache_complete", False)
+
+    def __iter__(self) -> Iterator[ConcreteDefinition]:
+        if self._cache_complete:
+            return iter(self._definitions)
+        return self._iter_query_backed()
+
+    def __len__(self) -> int:
+        return len(self._materialize_definitions())
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._materialize_definitions()
+
+    def count(self) -> int:
+        return len(self)
+
+    def exists(self) -> bool:
+        return self.first() is not None
+
+    def first(self) -> ConcreteDefinition | None:
+        if self._definition_cache:
+            return self._definition_cache[0]
+        for cdef in self:
+            return cdef
+        return None
+
+    def query(self, selector=None):
+        self._materialize_definitions()
+        return super().query(selector)
+
+    def union(self, other: "DefinitionResultSet") -> "DefinitionResultSet":
+        self._materialize_definitions()
+        return super().union(other)
+
+    def intersection(self, other: "DefinitionResultSet") -> "DefinitionResultSet":
+        self._materialize_definitions()
+        return super().intersection(other)
+
+    def objects(self, **kwargs) -> "ObjectResultSet":
+        self._materialize_definitions()
+        return super().objects(**kwargs)
+
+    def replicas(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:
+        if cdef not in self._replica_cache and not self._cache_complete:
+            self._materialize_definitions()
+        return self._replica_cache.get(cdef, ())
+
+    def _iter_query_backed(self) -> Iterator[ConcreteDefinition]:
+        seen = set(self._definition_cache)
+        for cached in tuple(self._definition_cache):
+            yield cached
+        for cdef, replicas in self._page_factory():
+            if cdef in seen:
+                continue
+            seen.add(cdef)
+            self._definition_cache.append(cdef)
+            self._replica_cache[cdef] = tuple(replicas)
+            yield cdef
+        self._finish_cache()
+
+    def _materialize_definitions(self) -> tuple[ConcreteDefinition, ...]:
+        if not self._cache_complete:
+            for _ in self._iter_query_backed():
+                pass
+        return self._definitions
+
+    def _finish_cache(self) -> None:
+        definitions = _sort_cdefs(dict.fromkeys(self._definition_cache).keys())
+        object.__setattr__(self, "_definitions", definitions)
+        object.__setattr__(self, "_replicas", dict(self._replica_cache))
+        object.__setattr__(self, "_cache_complete", True)
+
+
 @dataclass(frozen=True, slots=True)
 class OccurrenceResultSet:
     repo: Any
