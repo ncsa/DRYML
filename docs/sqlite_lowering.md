@@ -27,7 +27,7 @@ Lowering currently chooses one anchor path to the selector root. Sibling subtree
 
 Query-backed `DefinitionResultSet` ordering is stable in source order, with each source ordered by `(stable_hash, collision_ordinal, def_id)`. After materialization, repeated iteration preserves the original streamed page-factory order rather than re-sorting cached results. A result set stores a generation vector and opaque keyset page cursors, but it does not retain SQLite connections, cursors, or live read transactions. If a source generation changes before page iteration completes, iteration raises `QueryIndexGenerationChanged` instead of silently mixing snapshots.
 
-Lowered `count()` streams verified CDefs into a collision-safe stable-hash bucket counter. It does not construct a `DefinitionResultSet` or retain a CDef-keyed result map as its primary count state. The counter retains CDef witnesses inside stable-hash buckets so exact deduplication remains correct across duplicate definitions and stable-hash collisions.
+Lowered `count()` streams verified CDefs into a collision-safe stable-hash count state. On first sight of a stable hash it stores only `(source_key, generation, def_id)` as a witness ref and increments the count. If the same stable hash appears again, federation reopens a short backend read view to load that witness CDef and materializes a collision bucket for that hash only. Non-colliding result sets therefore do not retain full CDefs after verification, while duplicate definitions and stable-hash collisions remain exact.
 
 Fallback boundaries:
 

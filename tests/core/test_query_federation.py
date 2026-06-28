@@ -925,13 +925,40 @@ def test_lowered_count_handles_hash_collision_bucket(monkeypatch):
     first = FederationLeaf(name="collision-left").definition
     second = FederationLeaf(name="collision-right").definition
     counter = federation_module._CDefDedupeCounter()
+    loaded = []
+
+    def load(_generation, definition_id):
+        loaded.append(definition_id)
+        return {1: first, 2: second}[definition_id]
+
+    counter.register_source("test-source", load)
 
     monkeypatch.setattr(type(first), "stable_hash", lambda self: "same-stable-hash")
 
-    assert counter.accept(first)
-    assert not counter.accept(first)
-    assert counter.accept(second)
+    assert counter.accept(first, source_key="test-source", generation=1, definition_id=1)
+    assert counter._buckets == {}
+    assert not counter.accept(first, source_key="test-source", generation=1, definition_id=1)
+    assert counter.accept(second, source_key="test-source", generation=1, definition_id=2)
     assert counter.count == 2
+    assert loaded == [1]
+
+
+def test_count_state_keeps_only_witness_refs_until_hash_repeats():
+    first = FederationLeaf(name="unique-left").definition
+    second = FederationLeaf(name="unique-right").definition
+    counter = federation_module._CDefDedupeCounter()
+
+    def fail_load(*args, **kwargs):
+        raise AssertionError("unique stable hashes should not reload or retain CDefs")
+
+    counter.register_source("test-source", fail_load)
+
+    assert counter.accept(first, source_key="test-source", generation=1, definition_id=1)
+    assert counter.accept(second, source_key="test-source", generation=1, definition_id=2)
+
+    assert counter.count == 2
+    assert set(counter._witnesses) == {first.stable_hash(), second.stable_hash()}
+    assert counter._buckets == {}
 
 
 def test_sqlite_terminal_verification_runs_after_read_view_closes(tmp_path, monkeypatch):

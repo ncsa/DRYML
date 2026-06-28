@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from ..definition import ConcreteDefinition
 from .domain import NestedDomain, StoredDomain
@@ -284,6 +284,10 @@ class RepoQueryIndex:
                 source_matches = 0
                 before_verified = stats.verified_count
                 if _source_supports_lowering(index):
+                    merged.register_source(
+                        binding.source_key,
+                        self._count_witness_loader(index, binding.source_key),
+                    )
                     source_counter, generation, candidate_count, source_matches = self._count_lowered_definition_source(
                         index,
                         query,
@@ -297,6 +301,9 @@ class RepoQueryIndex:
                 else:
                     for _ in range(3):
                         source_counter = _CDefDedupeCounter()
+                        loader = self._count_witness_loader(index, binding.source_key)
+                        source_counter.register_source(binding.source_key, loader)
+                        merged.register_source(binding.source_key, loader)
                         new_global_matches = 0
                         source_matches = 0
                         generation_changed = False
@@ -310,13 +317,23 @@ class RepoQueryIndex:
                                 if snapshot.generation != generation:
                                     generation_changed = True
                                     break
-                                cdefs = tuple(snapshot.cdefs_by_id(batch).values())
-                            matches = query._verify_cdefs(cdefs, stats=stats)
-                            for cdef in matches:
-                                if not source_counter.accept(cdef):
+                                cdefs_by_id = snapshot.cdefs_by_id(batch)
+                            for did in batch:
+                                cdef = cdefs_by_id.get(did)
+                                if cdef is None:
+                                    continue
+                                matches = query._verify_cdefs((cdef,), stats=stats)
+                                if not matches:
+                                    continue
+                                match = matches[0]
+                                if not source_counter.accept(
+                                        match,
+                                        source_key=binding.source_key,
+                                        generation=generation,
+                                        definition_id=did):
                                     continue
                                 source_matches += 1
-                                if not merged.seen(cdef):
+                                if not merged.seen(match):
                                     new_global_matches += 1
                                 if stop_after is not None and merged.count + new_global_matches >= stop_after:
                                     break
@@ -486,6 +503,7 @@ class RepoQueryIndex:
         for _ in range(3):
             sink = CountSink(stop_after=stop_after)
             source_counter = _CDefDedupeCounter()
+            source_counter.register_source(index.source_key, self._count_witness_loader(index, index.source_key))
             new_global_matches = 0
             generation_changed = False
             after = None
@@ -508,14 +526,19 @@ class RepoQueryIndex:
                     batch = next(batches, None)
                 if batch is None:
                     break
-                for cdef in batch.cdefs:
+                for did, cdef in zip(batch.ids, batch.cdefs):
                     before_verified = stats.verified_count
                     matches = query._verify_cdefs((cdef,), stats=stats)
                     diagnostics.python_verifications += stats.verified_count - before_verified
                     if matches:
-                        if source_counter.accept(matches[0]):
-                            sink.accept(matches[0])
-                            if not existing.seen(matches[0]):
+                        match = matches[0]
+                        if source_counter.accept(
+                                match,
+                                source_key=index.source_key,
+                                generation=generation,
+                                definition_id=did):
+                            sink.accept(match)
+                            if not existing.seen(match):
                                 new_global_matches += 1
                     if stop_after is not None and existing.count + new_global_matches >= stop_after:
                         break
@@ -534,6 +557,22 @@ class RepoQueryIndex:
             stats.lowering_diagnostics = diagnostics.as_dict()
             return source_counter, generation, diagnostics.candidate_rows_read, source_counter.count
         raise QueryIndexError("Catalog generation changed repeatedly during lowered count query.")
+
+    def _count_witness_loader(self, index, source_key: str) -> Callable[[int, int], ConcreteDefinition]:
+        def load(generation: int, definition_id: int) -> ConcreteDefinition:
+            with index.read_view(include_cached=False) as snapshot:
+                if snapshot.generation != generation:
+                    raise QueryIndexGenerationChanged(
+                        f"Count dedupe witness source '{source_key}' generation changed."
+                    )
+                cdef = snapshot.cdefs_by_id((definition_id,)).get(definition_id)
+                if cdef is None:
+                    raise QueryIndexError(
+                        f"Count dedupe witness {definition_id} is missing from source '{source_key}'."
+                    )
+                return cdef
+
+        return load
 
     def execute_nested_definitions(self, query, *, stop_after: int | None = None):
         stats = QueryStats(refresh_action="federated")
@@ -997,29 +1036,97 @@ def _store_source_key(store) -> str:
     return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
 
 
+@dataclass(frozen=True, slots=True)
+class _CDefWitnessRef:
+    source_key: str
+    generation: int
+    definition_id: int
+
+
 class _CDefDedupeCounter:
-    """Collision-safe streaming counter keyed by stable hash buckets."""
+    """Collision-safe count state with lazy CDef witness recovery.
+
+    First observations retain only a stable hash and a backend witness ref. Full
+    CDefs are loaded and retained only when a stable hash repeats and exact
+    equality must distinguish duplicates from real hash collisions.
+    """
 
     def __init__(self) -> None:
+        self._witnesses: dict[str, _CDefWitnessRef] = {}
         self._buckets: dict[str, list[ConcreteDefinition]] = {}
+        self._bucket_refs: dict[str, list[_CDefWitnessRef]] = {}
+        self._loaders: dict[str, Callable[[int, int], ConcreteDefinition]] = {}
         self.count = 0
 
+    def register_source(self, source_key: str, loader: Callable[[int, int], ConcreteDefinition]) -> None:
+        self._loaders[source_key] = loader
+
     def seen(self, cdef: ConcreteDefinition) -> bool:
-        bucket = self._buckets.get(cdef.stable_hash(), ())
+        stable_hash = cdef.stable_hash()
+        if stable_hash not in self._witnesses and stable_hash not in self._buckets:
+            return False
+        bucket = self._ensure_bucket(stable_hash)
         return any(existing == cdef for existing in bucket)
 
-    def accept(self, cdef: ConcreteDefinition) -> bool:
-        bucket = self._buckets.setdefault(cdef.stable_hash(), [])
+    def accept(
+            self,
+            cdef: ConcreteDefinition,
+            *,
+            source_key: str,
+            generation: int,
+            definition_id: int) -> bool:
+        ref = _CDefWitnessRef(source_key, generation, definition_id)
+        stable_hash = cdef.stable_hash()
+        if stable_hash not in self._witnesses and stable_hash not in self._buckets:
+            self._witnesses[stable_hash] = ref
+            self.count += 1
+            return True
+        return self._accept_repeated_hash(cdef, ref)
+
+    def merge_from(self, other: "_CDefDedupeCounter") -> None:
+        self._loaders.update(other._loaders)
+        for stable_hash, ref in other._witnesses.items():
+            if stable_hash in other._buckets:
+                continue
+            if stable_hash not in self._witnesses and stable_hash not in self._buckets:
+                self._witnesses[stable_hash] = ref
+                self.count += 1
+            else:
+                self._accept_repeated_hash(other._load_ref(ref), ref)
+        for stable_hash, bucket in other._buckets.items():
+            refs = other._bucket_refs[stable_hash]
+            for cdef, ref in zip(bucket, refs):
+                if stable_hash not in self._witnesses and stable_hash not in self._buckets:
+                    self._witnesses[stable_hash] = ref
+                    self.count += 1
+                else:
+                    self._accept_repeated_hash(cdef, ref)
+
+    def _accept_repeated_hash(self, cdef: ConcreteDefinition, ref: _CDefWitnessRef) -> bool:
+        stable_hash = cdef.stable_hash()
+        bucket = self._ensure_bucket(stable_hash)
         if any(existing == cdef for existing in bucket):
             return False
         bucket.append(cdef)
+        self._bucket_refs[stable_hash].append(ref)
         self.count += 1
         return True
 
-    def merge_from(self, other: "_CDefDedupeCounter") -> None:
-        for bucket in other._buckets.values():
-            for cdef in bucket:
-                self.accept(cdef)
+    def _ensure_bucket(self, stable_hash: str) -> list[ConcreteDefinition]:
+        bucket = self._buckets.get(stable_hash)
+        if bucket is not None:
+            return bucket
+        ref = self._witnesses[stable_hash]
+        bucket = [self._load_ref(ref)]
+        self._buckets[stable_hash] = bucket
+        self._bucket_refs[stable_hash] = [ref]
+        return bucket
+
+    def _load_ref(self, ref: _CDefWitnessRef) -> ConcreteDefinition:
+        loader = self._loaders.get(ref.source_key)
+        if loader is None:
+            raise QueryIndexError(f"No count dedupe witness loader for source '{ref.source_key}'.")
+        return loader(ref.generation, ref.definition_id)
 
 
 def _canonical_cdef_key(merged: dict[ConcreteDefinition, ConcreteDefinition], cdef: ConcreteDefinition) -> ConcreteDefinition:
