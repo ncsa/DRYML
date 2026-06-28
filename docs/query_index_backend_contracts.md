@@ -21,7 +21,7 @@ SQLite read views also expose a lowering-capable path for safe SQL-native candid
 
 Lowered candidate relations are backend-owned. Federation may inspect only their source key, generation, ordering contract, and opaque keyset cursor. SQLite may represent the relation as SQL text, CTEs, or temp tables, but a `DefinitionResultSet` or cursor must not retain a live SQLite cursor, connection, transaction, or backend-local ID without source/generation metadata.
 
-Lowered graph plans are anchor-oriented. A backend should report the chosen anchor node, anchor reason, anchor estimate, and parent/child propagation steps. SQLite uses stable-hash or local-posting anchors, walks `definition_edges` in SQL to project the selector root, applies domain filters in SQL, and leaves final truth to Python `ConcreteDefinition` verification.
+Lowered graph plans are anchor-oriented. A backend should report the chosen anchor node, anchor reason, anchor relation kind, anchor estimate, and parent/child propagation steps. SQLite uses `definitions.stable_hash` for stable-hash anchors and `postings.feature_id` for posting anchors, walks `definition_edges` in SQL to project the selector root, applies domain filters in SQL, and leaves final truth to Python `ConcreteDefinition` verification.
 
 ## Transaction Boundaries
 

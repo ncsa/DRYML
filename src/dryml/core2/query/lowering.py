@@ -99,7 +99,9 @@ class LoweringDiagnostics:
     anchor: str | None = None
     anchor_node: int | None = None
     anchor_reason: str | None = None
+    anchor_relation_kind: str | None = None
     anchor_estimate: int | None = None
+    anchor_fallback_reason: str | None = None
     propagation_steps: tuple[str, ...] = ()
     relation_strategy: str = "cte"
     estimated_rows: int | None = None
@@ -121,7 +123,9 @@ class LoweringDiagnostics:
             "anchor": self.anchor,
             "anchor_node": self.anchor_node,
             "anchor_reason": self.anchor_reason,
+            "anchor_relation_kind": self.anchor_relation_kind,
             "anchor_estimate": self.anchor_estimate,
+            "anchor_fallback_reason": self.anchor_fallback_reason,
             "propagation_steps": self.propagation_steps,
             "relation_strategy": self.relation_strategy,
             "estimated_rows": self.estimated_rows,

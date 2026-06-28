@@ -261,9 +261,10 @@ def test_lowered_exact_anchor_relation_uses_hash_index(tmp_path):
 
     assert any("definitions_by_stable_hash" in row or "stable_hash" in row for row in explain)
     assert diagnostics.strategy == "sqlite-lowered"
+    assert diagnostics.anchor_relation_kind == "stable-hash"
 
 
-def test_lowered_feature_anchor_relation_uses_postings_index(tmp_path, monkeypatch):
+def test_lowered_sql_local_posting_anchor_uses_postings_anchor(tmp_path, monkeypatch):
     token = FeatureToken("LOWERED_FEATURE", GraphPath(), "wanted")
 
     def controlled_fingerprint(cdef):
@@ -282,17 +283,46 @@ def test_lowered_feature_anchor_relation_uses_postings_index(tmp_path, monkeypat
         edges=(),
     )
     with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
         plan = view.lower_selector_graph(
             selector_graph,
             StoredDomain(view),
             terminal="explain",
             scan_policy=ScanPolicy(),
-            diagnostics=LoweringDiagnostics(),
+            diagnostics=diagnostics,
         )
         explain = view.explain_lowered_plan(plan)
 
-    assert "FROM postings" in plan.candidate_sql
-    assert any("USING" in row and ("INDEX" in row or "PRIMARY KEY" in row) for row in explain)
+    assert "anchor_0(def_id) AS" in plan.candidate_sql
+    assert "SELECT DISTINCT p.def_id" in plan.candidate_sql
+    assert "FROM postings p" in plan.candidate_sql
+    assert diagnostics.anchor_reason == "local-posting"
+    assert diagnostics.anchor_relation_kind == "posting"
+    assert any("SEARCH p" in row and ("INDEX" in row or "PRIMARY KEY" in row) for row in explain)
+
+
+def test_lowered_plan_reports_local_posting_anchor_kind(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteParent(child=SQLiteLeaf(name="rare-local-kind"), name="root")
+    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="root")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+    selector = Definition(SQLiteParent, SKIP_ARGS, child=Definition(SQLiteLeaf, SKIP_ARGS, name="rare-local-kind"))
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        view.lower_selector_graph(
+            compile_selector_graph(selector),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics.anchor_node == 1
+    assert diagnostics.anchor_reason == "local-posting"
+    assert diagnostics.anchor_relation_kind == "posting"
+    assert diagnostics.relation_strategy == "rare-anchor-cte"
 
 
 def test_lowered_child_edge_join_matches_v1_path(tmp_path):
@@ -367,9 +397,11 @@ def test_lowered_sql_uses_rare_local_posting_anchor(tmp_path):
 
     assert batch.cdefs == (wanted.definition,)
     assert "anchor_1" in plan.candidate_sql
-    assert "FROM postings" in plan.candidate_sql
+    assert "SELECT DISTINCT p.def_id" in plan.candidate_sql
+    assert "FROM postings p" in plan.candidate_sql
     assert diagnostics.anchor_node == 1
     assert diagnostics.anchor_reason == "local-posting"
+    assert diagnostics.anchor_relation_kind == "posting"
 
 
 def test_lowered_plan_reports_anchor_and_direction(tmp_path):
@@ -389,8 +421,47 @@ def test_lowered_plan_reports_anchor_and_direction(tmp_path):
         )
 
     assert diagnostics.anchor == "stable-hash:$.child"
+    assert diagnostics.anchor_relation_kind == "stable-hash"
     assert diagnostics.anchor_estimate == 1
     assert diagnostics.propagation_steps == ("parent:1->0:$.child",)
+
+
+def test_lowering_fallback_reports_ambiguous_anchor_path(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf(name="ambiguous")
+    parent = SQLiteParent(child=leaf, name="root")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(parent.definition), [parent.definition])
+    requirements = tuple(
+        FeatureRequirement(token, count)
+        for token, count in target_local_fingerprint(leaf.definition).counts.items()
+    )
+    selector_graph = SelectorGraph(
+        root=0,
+        nodes=(
+            SelectorGraphNode(0, GraphPath(), Definition(SQLiteParent, SKIP_ARGS), (), None),
+            SelectorGraphNode(1, GraphPath().child("other"), Definition(SQLiteParent, SKIP_ARGS), (), None),
+            SelectorGraphNode(2, GraphPath().child("child"), Definition(SQLiteLeaf, SKIP_ARGS, name="ambiguous"), requirements, None),
+        ),
+        edges=(
+            SelectorGraphEdge(0, GraphPath().child("child"), 2),
+            SelectorGraphEdge(1, GraphPath().child("child"), 2),
+        ),
+    )
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics.anchor_node == 2
+    assert diagnostics.anchor_fallback_reason == "anchor path to root is ambiguous"
+    assert diagnostics.relation_strategy == "root-oriented-cte"
+    assert "SELECT def_id FROM node_0" in plan.candidate_sql
 
 
 def test_lowered_parent_projection_uses_edge_index(tmp_path):

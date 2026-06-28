@@ -891,7 +891,7 @@ def test_sqlite_count_terminal_does_not_construct_resultset(tmp_path, monkeypatc
     assert count == 2
 
 
-def test_lowered_count_does_not_retain_all_verified_cdefs(tmp_path, monkeypatch):
+def test_lowered_count_does_not_construct_result_map(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
     repo.save_object(FederationLeaf(name="count-no-map-left", repo=repo))

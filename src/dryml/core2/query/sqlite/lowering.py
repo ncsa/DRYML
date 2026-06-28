@@ -44,10 +44,12 @@ class SQLiteRelationCompiler:
         if selector_graph is None:
             body_sql = "SELECT d.def_id FROM definitions d"
             scan_reason = "selector has no indexable requirements"
+            diagnostics.anchor_relation_kind = "scan"
             self._apply_scan_policy(scan_policy, diagnostics, scan_reason)
         else:
             if not _has_indexable_requirement(selector_graph):
                 scan_reason = "selector graph has no indexable requirements"
+                diagnostics.anchor_relation_kind = "scan"
                 self._apply_scan_policy(scan_policy, diagnostics, scan_reason)
             body_sql = self._compile_graph(selector_graph, params, diagnostics, scan_policy)
 
@@ -157,25 +159,32 @@ class SQLiteRelationCompiler:
             scan_policy: ScanPolicy) -> str:
         anchor = self._choose_anchor(selector_graph)
         if anchor is None:
-            return self._compile_root_oriented_graph(selector_graph, params, diagnostics)
+            return self._compile_root_oriented_graph(
+                selector_graph,
+                params,
+                diagnostics,
+                fallback_reason="selector graph has no indexable anchor",
+            )
 
         path_to_root = self._path_to_root(selector_graph, anchor.node_id)
         if path_to_root is None:
-            return self._compile_root_oriented_graph(selector_graph, params, diagnostics)
+            diagnostics.anchor = f"{self._anchor_reason(anchor)}:{anchor.source_path!s}"
+            diagnostics.anchor_node = anchor.node_id
+            diagnostics.anchor_reason = self._anchor_reason(anchor)
+            diagnostics.anchor_relation_kind = self._anchor_relation_kind(anchor)
+            diagnostics.anchor_estimate = self._node_estimate(anchor)
+            return self._compile_root_oriented_graph(
+                selector_graph,
+                params,
+                diagnostics,
+                fallback_reason="anchor path to root is ambiguous",
+            )
 
         ctes: list[str] = []
         compiled_subtrees: set[int] = set()
         anchor_name = f"anchor_{anchor.node_id}"
 
-        for edge in selector_graph.outgoing(anchor.node_id):
-            self._compile_subtree_relation(selector_graph, edge.child, ctes, params, compiled_subtrees)
-        predicates = self._node_predicates(anchor, params)
-        predicates.extend(
-            self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
-            for edge in selector_graph.outgoing(anchor.node_id)
-        )
-        where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
-        ctes.append(f"{anchor_name}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
+        self._compile_anchor_relation(selector_graph, anchor, anchor_name, ctes, params, compiled_subtrees)
 
         relation_name = anchor_name
         steps: list[LoweredEdgeStep] = []
@@ -220,6 +229,7 @@ class SQLiteRelationCompiler:
         diagnostics.anchor = f"{graph_plan.anchor_reason}:{anchor.source_path!s}"
         diagnostics.anchor_node = graph_plan.anchor_node
         diagnostics.anchor_reason = graph_plan.anchor_reason
+        diagnostics.anchor_relation_kind = self._anchor_relation_kind(anchor)
         diagnostics.anchor_estimate = graph_plan.anchor_estimate
         diagnostics.propagation_steps = tuple(
             f"{step.direction}:{step.from_node}->{step.to_node}:{step.path!s}"
@@ -232,7 +242,11 @@ class SQLiteRelationCompiler:
             self,
             selector_graph: SelectorGraph,
             params: list[Any],
-            diagnostics: LoweringDiagnostics) -> str:
+            diagnostics: LoweringDiagnostics,
+            *,
+            fallback_reason: str | None = None) -> str:
+        diagnostics.relation_strategy = "root-oriented-cte"
+        diagnostics.anchor_fallback_reason = fallback_reason
         ctes: list[str] = []
         for node in reversed(selector_graph.nodes):
             predicates = self._node_predicates(node, params)
@@ -242,6 +256,60 @@ class SQLiteRelationCompiler:
             ctes.append(f"node_{node.node_id}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
         diagnostics.anchor = self._anchor_description(selector_graph)
         return f"WITH {', '.join(ctes)} SELECT def_id FROM node_{selector_graph.root}"
+
+    def _compile_anchor_relation(
+            self,
+            selector_graph: SelectorGraph,
+            anchor: SelectorGraphNode,
+            anchor_name: str,
+            ctes: list[str],
+            params: list[Any],
+        compiled_subtrees: set[int]) -> None:
+        for edge in selector_graph.outgoing(anchor.node_id):
+            self._compile_subtree_relation(selector_graph, edge.child, ctes, params, compiled_subtrees)
+        if anchor.exact_definition is not None:
+            predicates = self._node_predicates(anchor, params)
+            predicates.extend(
+                self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+                for edge in selector_graph.outgoing(anchor.node_id)
+            )
+            where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+            ctes.append(f"{anchor_name}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
+            return
+
+        posting_req = self._posting_anchor_requirement(anchor)
+        if posting_req is None:
+            predicates = self._node_predicates(anchor, params)
+            predicates.extend(
+                self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+                for edge in selector_graph.outgoing(anchor.node_id)
+            )
+            where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+            ctes.append(f"{anchor_name}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
+            return
+
+        feature_id = self._feature_id(posting_req.token)
+        if feature_id is None:
+            predicates = ["0 = 1"]
+        else:
+            predicates = ["p.feature_id = ?", "p.multiplicity >= ?"]
+            params.extend((feature_id, posting_req.count))
+        predicates.extend(self._node_predicates(anchor, params, skip_requirement=posting_req))
+        predicates.extend(
+            self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+            for edge in selector_graph.outgoing(anchor.node_id)
+        )
+        where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+        ctes.append(
+            f"""
+            {anchor_name}(def_id) AS (
+                SELECT DISTINCT p.def_id
+                FROM postings p
+                JOIN definitions d ON d.def_id = p.def_id
+                WHERE {where_sql}
+            )
+            """
+        )
 
     def _compile_subtree_relation(
             self,
@@ -284,12 +352,14 @@ class SQLiteRelationCompiler:
         params.extend((digest_blob(path_blob), path_blob))
         return [f"{alias}.path_hash = ?", f"{alias}.path_blob = ?"]
 
-    def _node_predicates(self, node: SelectorGraphNode, params: list[Any]) -> list[str]:
+    def _node_predicates(self, node: SelectorGraphNode, params: list[Any], *, skip_requirement=None) -> list[str]:
         predicates: list[str] = []
         if node.exact_definition is not None:
             predicates.append("d.stable_hash = ?")
             params.append(stable_hash_to_blob(node.exact_definition.stable_hash()))
         for req in node.local_requirements:
+            if skip_requirement is not None and req == skip_requirement:
+                continue
             feature_id = self._feature_id(req.token)
             if feature_id is None:
                 predicates.append("0 = 1")
@@ -336,6 +406,29 @@ class SQLiteRelationCompiler:
         if node.exact_definition is not None:
             return "stable-hash"
         return "local-posting"
+
+    def _anchor_relation_kind(self, node: SelectorGraphNode) -> str:
+        if node.exact_definition is not None:
+            return "stable-hash"
+        if node.local_requirements:
+            return "posting"
+        return "scan"
+
+    def _posting_anchor_requirement(self, node: SelectorGraphNode):
+        candidates = []
+        for req in node.local_requirements:
+            feature_id = self._feature_id(req.token)
+            if feature_id is None:
+                candidates.append((0, req))
+                continue
+            row = self.con.execute(
+                "SELECT document_frequency FROM feature_tokens WHERE feature_id = ?",
+                (feature_id,),
+            ).fetchone()
+            candidates.append((0 if row is None else row[0], req))
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item[0])[1]
 
     def _node_estimate(self, node: SelectorGraphNode) -> int | None:
         estimates = []
