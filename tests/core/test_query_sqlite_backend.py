@@ -319,6 +319,122 @@ def test_lowered_child_edge_join_matches_v1_path(tmp_path):
     assert batch.cdefs == (wanted.definition,)
 
 
+def test_lowered_sql_uses_rare_exact_nested_anchor(tmp_path):
+    index = sqlite_index(tmp_path)
+    rare_leaf = SQLiteLeaf(name="rare")
+    wanted = SQLiteParent(child=rare_leaf, name="root")
+    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="root")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+    selector = Definition(SQLiteParent, SKIP_ARGS, child=rare_leaf.definition)
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        plan = view.lower_selector_graph(
+            compile_selector_graph(selector),
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
+
+    assert batch.cdefs == (wanted.definition,)
+    assert "anchor_1" in plan.candidate_sql
+    assert "JOIN anchor_1 child_relation" in plan.candidate_sql
+    assert diagnostics.anchor_node == 1
+    assert diagnostics.anchor_reason == "stable-hash"
+
+
+def test_lowered_sql_uses_rare_local_posting_anchor(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteParent(child=SQLiteLeaf(name="rare-local"), name="root")
+    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="root")
+    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
+    index.register_stored_roots(graph, [wanted.definition, other.definition])
+    selector = Definition(SQLiteParent, SKIP_ARGS, child=Definition(SQLiteLeaf, SKIP_ARGS, name="rare-local"))
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        plan = view.lower_selector_graph(
+            compile_selector_graph(selector),
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
+
+    assert batch.cdefs == (wanted.definition,)
+    assert "anchor_1" in plan.candidate_sql
+    assert "FROM postings" in plan.candidate_sql
+    assert diagnostics.anchor_node == 1
+    assert diagnostics.anchor_reason == "local-posting"
+
+
+def test_lowered_plan_reports_anchor_and_direction(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf(name="direction")
+    root = SQLiteParent(child=leaf, name="root")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root.definition), [root.definition])
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        view.lower_selector_graph(
+            compile_selector_graph(Definition(SQLiteParent, SKIP_ARGS, child=leaf.definition)),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+
+    assert diagnostics.anchor == "stable-hash:$.child"
+    assert diagnostics.anchor_estimate == 1
+    assert diagnostics.propagation_steps == ("parent:1->0:$.child",)
+
+
+def test_lowered_parent_projection_uses_edge_index(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf(name="edge-index")
+    root = SQLiteParent(child=leaf, name="root")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root.definition), [root.definition])
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            compile_selector_graph(Definition(SQLiteParent, SKIP_ARGS, child=leaf.definition)),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+        )
+        explain = view.explain_lowered_plan(plan)
+
+    assert any("SEARCH e" in row and ("definition_edges" in row or "PRIMARY KEY" in row) for row in explain)
+
+
+def test_lowered_child_projection_uses_edge_index(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLitePair(left=SQLiteLeaf(name="left"), right=SQLiteLeaf(name="right"), name="pair")
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(wanted.definition), [wanted.definition])
+    selector = Definition(
+        SQLitePair,
+        SKIP_ARGS,
+        left=Definition(SQLiteLeaf, SKIP_ARGS, name="left"),
+        right=Definition(SQLiteLeaf, SKIP_ARGS, name="right"),
+    )
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            compile_selector_graph(selector),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+        )
+        explain = view.explain_lowered_plan(plan)
+
+    assert "EXISTS" in plan.candidate_sql
+    assert any("SEARCH e" in row and ("definition_edges" in row or "PRIMARY KEY" in row) for row in explain)
+
+
 def test_candidate_relation_pages_without_cursor_escape(tmp_path):
     index = sqlite_index(tmp_path)
     roots = [SQLiteLeaf(f"relation-{idx}").definition for idx in range(3)]

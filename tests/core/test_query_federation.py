@@ -261,6 +261,26 @@ def test_scan_policy_warns_for_graph_with_no_indexable_requirements(tmp_path):
         assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().scan_policy("warn").exists()
 
 
+def test_scan_policy_forbid_rejects_empty_selector_graph(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("scan-forbid", repo=repo))
+
+    with pytest.raises(QueryWouldScanError, match="no indexable"):
+        repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().require_indexed().exists()
+
+
+def test_explain_reports_scan_reason(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("scan-explain", repo=repo))
+
+    explanation = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().scan_policy("allow").explain()
+
+    assert explanation.scan_required
+    assert "no indexable" in explanation.scan_reason
+
+
 def test_sqlite_lowered_max_verify_budget_is_enforced(tmp_path):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -419,7 +439,8 @@ def test_query_backed_multistore_order_stable(tmp_path, monkeypatch):
     results = repo2.query(None).stored().defs()
 
     assert isinstance(results, QueryBackedDefinitionResultSet)
-    assert tuple(results) == tuple(results)
+    assert tuple(results) == (left.definition, right.definition)
+    assert tuple(results) == (left.definition, right.definition)
 
 
 def test_sqlite_objects_terminal_uses_query_replica_snapshot(tmp_path, monkeypatch):
@@ -870,6 +891,49 @@ def test_sqlite_count_terminal_does_not_construct_resultset(tmp_path, monkeypatc
     assert count == 2
 
 
+def test_lowered_count_does_not_retain_all_verified_cdefs(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="count-no-map-left", repo=repo))
+    repo.save_object(FederationLeaf(name="count-no-map-right", repo=repo))
+
+    def fail_canonical_map(*args, **kwargs):
+        raise AssertionError("count() should not use full CDef result maps")
+
+    monkeypatch.setattr(federation_module, "_canonical_cdef_key", fail_canonical_map)
+
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().count() == 2
+
+
+def test_lowered_count_dedupes_same_cdef_across_two_stores(tmp_path):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    obj = FederationLeaf(name="count-dedupe", repo=repo)
+    repo.save_object(obj, store=store1)
+    repo.save_object(obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+
+    assert repo2.query(Definition(FederationLeaf, SKIP_ARGS, name="count-dedupe")).stored().count() == 1
+
+
+def test_lowered_count_handles_hash_collision_bucket(monkeypatch):
+    first = FederationLeaf(name="collision-left").definition
+    second = FederationLeaf(name="collision-right").definition
+    counter = federation_module._CDefDedupeCounter()
+
+    monkeypatch.setattr(type(first), "stable_hash", lambda self: "same-stable-hash")
+
+    assert counter.accept(first)
+    assert not counter.accept(first)
+    assert counter.accept(second)
+    assert counter.count == 2
+
+
 def test_sqlite_terminal_verification_runs_after_read_view_closes(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -920,6 +984,39 @@ def test_sqlite_selective_query_does_not_construct_full_definition_universe(tmp_
 
     assert list(result) == [FederationLeaf(name="leaf-3").definition]
     assert result.explanation.universe_size is None
+
+
+def test_lowered_nested_exact_query_does_not_scan_all_roots(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    owners = []
+    leaves = []
+    for idx in range(12):
+        leaf = FederationLeaf(name=f"rare-anchor-{idx}", repo=repo)
+        owner = FederationParent(child=leaf, name="owner", repo=repo)
+        repo.save_object(owner)
+        leaves.append(leaf)
+        owners.append(owner)
+
+    def fail_all_ids(self):
+        raise AssertionError("rare nested anchor query should not enumerate all roots")
+
+    fetched = []
+    original_cdefs_by_id = SQLiteQueryIndexReadView.cdefs_by_id
+
+    def spy_cdefs_by_id(self, ids):
+        result = original_cdefs_by_id(self, ids)
+        fetched.append(len(result))
+        return result
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "all_definition_ids", fail_all_ids)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+
+    selector = Definition(FederationParent, SKIP_ARGS, child=leaves[-1].definition)
+    result = repo.query(selector).stored().defs()
+
+    assert list(result) == [owners[-1].definition]
+    assert fetched == [1]
 
 
 def test_sqlite_nested_definitions_do_not_expand_occurrence_paths(tmp_path, monkeypatch):

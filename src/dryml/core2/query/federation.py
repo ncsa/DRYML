@@ -273,7 +273,7 @@ class RepoQueryIndex:
         stats = QueryStats(refresh_action="federated")
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
         exact_root = query.selector if isinstance(query.selector, ConcreteDefinition) else None
-        merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+        merged = _CDefDedupeCounter()
         source_plans: list[SourceQueryPlan] = []
         generations: dict[str, int] = {}
 
@@ -284,7 +284,7 @@ class RepoQueryIndex:
                 source_matches = 0
                 before_verified = stats.verified_count
                 if _source_supports_lowering(index):
-                    source_merged, generation, candidate_count, source_matches = self._count_lowered_definition_source(
+                    source_counter, generation, candidate_count, source_matches = self._count_lowered_definition_source(
                         index,
                         query,
                         selector_graph,
@@ -293,11 +293,11 @@ class RepoQueryIndex:
                         existing=merged,
                     )
                     generations[binding.source_key] = generation
-                    for cdef in source_merged.values():
-                        _canonical_cdef_key(merged, cdef)
+                    merged.merge_from(source_counter)
                 else:
                     for _ in range(3):
-                        source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+                        source_counter = _CDefDedupeCounter()
+                        new_global_matches = 0
                         source_matches = 0
                         generation_changed = False
                         with index.read_view(include_cached=False) as snapshot:
@@ -312,21 +312,23 @@ class RepoQueryIndex:
                                     break
                                 cdefs = tuple(snapshot.cdefs_by_id(batch).values())
                             matches = query._verify_cdefs(cdefs, stats=stats)
-                            source_matches += len(matches)
                             for cdef in matches:
-                                _canonical_cdef_key(source_merged, cdef)
-                                if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
+                                if not source_counter.accept(cdef):
+                                    continue
+                                source_matches += 1
+                                if not merged.seen(cdef):
+                                    new_global_matches += 1
+                                if stop_after is not None and merged.count + new_global_matches >= stop_after:
                                     break
-                            if stop_after is not None and _combined_cdef_count(merged, source_merged) >= stop_after:
+                            if stop_after is not None and merged.count + new_global_matches >= stop_after:
                                 break
                         if generation_changed:
                             continue
-                        for cdef in source_merged.values():
-                            _canonical_cdef_key(merged, cdef)
+                        merged.merge_from(source_counter)
                         break
                     else:
                         raise QueryIndexError("Catalog generation changed repeatedly during terminal count query.")
-                if stop_after is not None and len(merged) >= stop_after:
+                if stop_after is not None and merged.count >= stop_after:
                     source_plans.append(SourceQueryPlan(
                         source_key=binding.source_key,
                         backend=_source_backend(index),
@@ -336,11 +338,11 @@ class RepoQueryIndex:
                         result_count=source_matches,
                         refresh_action=stats.refresh_action,
                     ))
-                    stats.result_count = len(merged)
+                    stats.result_count = merged.count
                     stats.universe_size = None
                     stats.generation_vector = generations
                     stats.source_plans = tuple(source_plans)
-                    return len(merged), stats
+                    return merged.count, stats
             except Exception as exc:
                 raise _source_query_error(binding, exc) from exc
             source_plans.append(SourceQueryPlan(
@@ -353,11 +355,11 @@ class RepoQueryIndex:
                 refresh_action=stats.refresh_action,
             ))
 
-        stats.result_count = len(merged)
+        stats.result_count = merged.count
         stats.universe_size = None
         stats.generation_vector = generations
         stats.source_plans = tuple(source_plans)
-        return len(merged), stats
+        return merged.count, stats
 
     def explain_definition_domain(self, query) -> QueryStats:
         stats = QueryStats(refresh_action="federated-plan")
@@ -480,10 +482,11 @@ class RepoQueryIndex:
             stats: QueryStats,
             *,
             stop_after: int | None,
-            existing: Mapping[ConcreteDefinition, ConcreteDefinition]):
+            existing: "_CDefDedupeCounter"):
         for _ in range(3):
             sink = CountSink(stop_after=stop_after)
-            source_merged: dict[ConcreteDefinition, ConcreteDefinition] = {}
+            source_counter = _CDefDedupeCounter()
+            new_global_matches = 0
             generation_changed = False
             after = None
             diagnostics = LoweringDiagnostics()
@@ -510,11 +513,13 @@ class RepoQueryIndex:
                     matches = query._verify_cdefs((cdef,), stats=stats)
                     diagnostics.python_verifications += stats.verified_count - before_verified
                     if matches:
-                        _canonical_cdef_key(source_merged, matches[0])
-                        sink.accept(matches[0])
-                    if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
+                        if source_counter.accept(matches[0]):
+                            sink.accept(matches[0])
+                            if not existing.seen(matches[0]):
+                                new_global_matches += 1
+                    if stop_after is not None and existing.count + new_global_matches >= stop_after:
                         break
-                if stop_after is not None and _combined_cdef_count(existing, source_merged) >= stop_after:
+                if stop_after is not None and existing.count + new_global_matches >= stop_after:
                     diagnostics.terminal_stop_reason = sink.stop_reason or "count-limit"
                     break
                 after = batch.next_cursor
@@ -527,7 +532,7 @@ class RepoQueryIndex:
             stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
             stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
             stats.lowering_diagnostics = diagnostics.as_dict()
-            return source_merged, generation, diagnostics.candidate_rows_read, len(source_merged)
+            return source_counter, generation, diagnostics.candidate_rows_read, source_counter.count
         raise QueryIndexError("Catalog generation changed repeatedly during lowered count query.")
 
     def execute_nested_definitions(self, query, *, stop_after: int | None = None):
@@ -990,6 +995,31 @@ def _store_source_key(store) -> str:
     if catalog_key is not None:
         return catalog_key()
     return f"{type(store).__module__}.{type(store).__qualname__}:id:{id(store)}"
+
+
+class _CDefDedupeCounter:
+    """Collision-safe streaming counter keyed by stable hash buckets."""
+
+    def __init__(self) -> None:
+        self._buckets: dict[str, list[ConcreteDefinition]] = {}
+        self.count = 0
+
+    def seen(self, cdef: ConcreteDefinition) -> bool:
+        bucket = self._buckets.get(cdef.stable_hash(), ())
+        return any(existing == cdef for existing in bucket)
+
+    def accept(self, cdef: ConcreteDefinition) -> bool:
+        bucket = self._buckets.setdefault(cdef.stable_hash(), [])
+        if any(existing == cdef for existing in bucket):
+            return False
+        bucket.append(cdef)
+        self.count += 1
+        return True
+
+    def merge_from(self, other: "_CDefDedupeCounter") -> None:
+        for bucket in other._buckets.values():
+            for cdef in bucket:
+                self.accept(cdef)
 
 
 def _canonical_cdef_key(merged: dict[ConcreteDefinition, ConcreteDefinition], cdef: ConcreteDefinition) -> ConcreteDefinition:

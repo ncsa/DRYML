@@ -5,9 +5,9 @@ from typing import Any
 
 from ..codecs import QueryIndexCodec, digest_blob
 from ..domain import DefinitionDomain
-from ..lowering import CandidateBatch, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
+from ..lowering import CandidateBatch, LoweredEdgeStep, LoweredGraphPlan, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
 from ..model import QueryWouldScanError
-from ..selector_graph import SelectorGraph, SelectorGraphNode
+from ..selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 from ..utils import feature_token_equal, stable_hash_to_blob
 
 
@@ -155,40 +155,134 @@ class SQLiteRelationCompiler:
             params: list[Any],
             diagnostics: LoweringDiagnostics,
             scan_policy: ScanPolicy) -> str:
+        anchor = self._choose_anchor(selector_graph)
+        if anchor is None:
+            return self._compile_root_oriented_graph(selector_graph, params, diagnostics)
+
+        path_to_root = self._path_to_root(selector_graph, anchor.node_id)
+        if path_to_root is None:
+            return self._compile_root_oriented_graph(selector_graph, params, diagnostics)
+
+        ctes: list[str] = []
+        compiled_subtrees: set[int] = set()
+        anchor_name = f"anchor_{anchor.node_id}"
+
+        for edge in selector_graph.outgoing(anchor.node_id):
+            self._compile_subtree_relation(selector_graph, edge.child, ctes, params, compiled_subtrees)
+        predicates = self._node_predicates(anchor, params)
+        predicates.extend(
+            self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+            for edge in selector_graph.outgoing(anchor.node_id)
+        )
+        where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+        ctes.append(f"{anchor_name}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
+
+        relation_name = anchor_name
+        steps: list[LoweredEdgeStep] = []
+        for edge in path_to_root:
+            for sibling in selector_graph.outgoing(edge.parent):
+                if sibling.child == edge.child:
+                    continue
+                self._compile_subtree_relation(selector_graph, sibling.child, ctes, params, compiled_subtrees)
+            edge_filters = self._edge_filters(edge, "e", params)
+            parent_predicates = self._node_predicates(selector_graph.node(edge.parent), params)
+            parent_predicates.extend(
+                self._child_exists_predicate(sibling, f"subtree_{sibling.child}", params)
+                for sibling in selector_graph.outgoing(edge.parent)
+                if sibling.child != edge.child
+            )
+            where_parts = [*edge_filters, *parent_predicates]
+            where_sql = " AND ".join(f"({predicate})" for predicate in where_parts) if where_parts else "1 = 1"
+            parent_name = f"node_{edge.parent}_from_{edge.child}"
+            ctes.append(
+                f"""
+                {parent_name}(def_id) AS (
+                    SELECT DISTINCT e.parent_def_id
+                    FROM definition_edges e
+                    JOIN {relation_name} child_relation ON child_relation.def_id = e.child_def_id
+                    JOIN definitions d ON d.def_id = e.parent_def_id
+                    WHERE {where_sql}
+                )
+                """
+            )
+            steps.append(LoweredEdgeStep(edge.child, edge.parent, edge.path, "parent", edge.unordered))
+            relation_name = parent_name
+
+        anchor_reason = self._anchor_reason(anchor)
+        anchor_estimate = self._node_estimate(anchor)
+        graph_plan = LoweredGraphPlan(
+            anchor_node=anchor.node_id,
+            anchor_reason=anchor_reason,
+            anchor_estimate=anchor_estimate,
+            propagation_steps=tuple(steps),
+            root_node=selector_graph.root,
+        )
+        diagnostics.anchor = f"{graph_plan.anchor_reason}:{anchor.source_path!s}"
+        diagnostics.anchor_node = graph_plan.anchor_node
+        diagnostics.anchor_reason = graph_plan.anchor_reason
+        diagnostics.anchor_estimate = graph_plan.anchor_estimate
+        diagnostics.propagation_steps = tuple(
+            f"{step.direction}:{step.from_node}->{step.to_node}:{step.path!s}"
+            for step in graph_plan.propagation_steps
+        )
+        diagnostics.relation_strategy = "rare-anchor-cte"
+        return f"WITH {', '.join(ctes)} SELECT def_id FROM {relation_name}"
+
+    def _compile_root_oriented_graph(
+            self,
+            selector_graph: SelectorGraph,
+            params: list[Any],
+            diagnostics: LoweringDiagnostics) -> str:
         ctes: list[str] = []
         for node in reversed(selector_graph.nodes):
             predicates = self._node_predicates(node, params)
             for edge in selector_graph.outgoing(node.node_id):
-                if edge.unordered:
-                    predicates.append(
-                        f"""
-                        EXISTS (
-                            SELECT 1
-                            FROM definition_edges e
-                            JOIN node_{edge.child} child ON child.def_id = e.child_def_id
-                            WHERE e.parent_def_id = d.def_id
-                        )
-                        """
-                    )
-                else:
-                    path_blob = self.codec.encode_graph_path(edge.path)
-                    predicates.append(
-                        f"""
-                        EXISTS (
-                            SELECT 1
-                            FROM definition_edges e
-                            JOIN node_{edge.child} child ON child.def_id = e.child_def_id
-                            WHERE e.parent_def_id = d.def_id
-                              AND e.path_hash = ?
-                              AND e.path_blob = ?
-                        )
-                        """
-                    )
-                    params.extend((digest_blob(path_blob), path_blob))
+                predicates.append(self._child_exists_predicate(edge, f"node_{edge.child}", params))
             where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
             ctes.append(f"node_{node.node_id}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
         diagnostics.anchor = self._anchor_description(selector_graph)
         return f"WITH {', '.join(ctes)} SELECT def_id FROM node_{selector_graph.root}"
+
+    def _compile_subtree_relation(
+            self,
+            selector_graph: SelectorGraph,
+            node_id: int,
+            ctes: list[str],
+            params: list[Any],
+            compiled: set[int]) -> None:
+        if node_id in compiled:
+            return
+        node = selector_graph.node(node_id)
+        for edge in selector_graph.outgoing(node_id):
+            self._compile_subtree_relation(selector_graph, edge.child, ctes, params, compiled)
+        predicates = self._node_predicates(node, params)
+        predicates.extend(
+            self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+            for edge in selector_graph.outgoing(node_id)
+        )
+        where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+        ctes.append(f"subtree_{node_id}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
+        compiled.add(node_id)
+
+    def _child_exists_predicate(self, edge: SelectorGraphEdge, child_relation_name: str, params: list[Any]) -> str:
+        edge_filters = self._edge_filters(edge, "e", params)
+        edge_sql = " AND ".join(f"({predicate})" for predicate in edge_filters) if edge_filters else "1 = 1"
+        return f"""
+        EXISTS (
+            SELECT 1
+            FROM definition_edges e
+            JOIN {child_relation_name} child ON child.def_id = e.child_def_id
+            WHERE e.parent_def_id = d.def_id
+              AND {edge_sql}
+        )
+        """
+
+    def _edge_filters(self, edge: SelectorGraphEdge, alias: str, params: list[Any]) -> list[str]:
+        if edge.unordered:
+            return []
+        path_blob = self.codec.encode_graph_path(edge.path)
+        params.extend((digest_blob(path_blob), path_blob))
+        return [f"{alias}.path_hash = ?", f"{alias}.path_blob = ?"]
 
     def _node_predicates(self, node: SelectorGraphNode, params: list[Any]) -> list[str]:
         predicates: list[str] = []
@@ -213,6 +307,53 @@ class SQLiteRelationCompiler:
             )
             params.extend((feature_id, req.count))
         return predicates
+
+    def _choose_anchor(self, selector_graph: SelectorGraph) -> SelectorGraphNode | None:
+        anchors = []
+        for node in selector_graph.nodes:
+            if node.exact_definition is None and not node.local_requirements:
+                continue
+            estimate = self._node_estimate(node)
+            reason_rank = 0 if node.exact_definition is not None else 1
+            anchors.append((float("inf") if estimate is None else estimate, reason_rank, node.node_id, node))
+        if not anchors:
+            return None
+        return min(anchors, key=lambda item: (item[0], item[1], item[2]))[3]
+
+    def _path_to_root(self, selector_graph: SelectorGraph, node_id: int) -> tuple[SelectorGraphEdge, ...] | None:
+        edges: list[SelectorGraphEdge] = []
+        current = node_id
+        while current != selector_graph.root:
+            incoming = selector_graph.incoming(current)
+            if len(incoming) != 1:
+                return None
+            edge = incoming[0]
+            edges.append(edge)
+            current = edge.parent
+        return tuple(edges)
+
+    def _anchor_reason(self, node: SelectorGraphNode) -> str:
+        if node.exact_definition is not None:
+            return "stable-hash"
+        return "local-posting"
+
+    def _node_estimate(self, node: SelectorGraphNode) -> int | None:
+        estimates = []
+        if node.exact_definition is not None:
+            estimates.append(self.con.execute(
+                "SELECT COUNT(*) FROM definitions WHERE stable_hash = ?",
+                (stable_hash_to_blob(node.exact_definition.stable_hash()),),
+            ).fetchone()[0])
+        for req in node.local_requirements:
+            feature_id = self._feature_id(req.token)
+            if feature_id is None:
+                return 0
+            row = self.con.execute(
+                "SELECT document_frequency FROM feature_tokens WHERE feature_id = ?",
+                (feature_id,),
+            ).fetchone()
+            estimates.append(0 if row is None else row[0])
+        return min(estimates) if estimates else None
 
     def _apply_domain_sql(self, body_sql: str, domain_name: str) -> str:
         if domain_name == "stored":

@@ -5,6 +5,7 @@ from typing import Any, Literal, Protocol
 
 from ..definition import ConcreteDefinition
 from .model import QueryCardinalityError
+from .path import DefinitionPath
 
 
 QueryTerminal = Literal["collect", "count", "exists", "one", "one_or_none", "page", "owners", "occurrences", "explain"]
@@ -60,6 +61,28 @@ class CandidateRelation:
 
 
 @dataclass(frozen=True, slots=True)
+class LoweredEdgeStep:
+    """One SQL-side graph propagation step between selector graph nodes."""
+
+    from_node: int
+    to_node: int
+    path: DefinitionPath
+    direction: Literal["parent", "child"]
+    unordered: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class LoweredGraphPlan:
+    """Anchor-oriented graph relation plan emitted by lowering compilers."""
+
+    anchor_node: int
+    anchor_reason: str
+    anchor_estimate: int | None
+    propagation_steps: tuple[LoweredEdgeStep, ...]
+    root_node: int
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateBatch:
     """CDef batch fetched from a lowered relation after a short read view."""
 
@@ -74,6 +97,10 @@ class LoweringDiagnostics:
 
     strategy: str = "fallback"
     anchor: str | None = None
+    anchor_node: int | None = None
+    anchor_reason: str | None = None
+    anchor_estimate: int | None = None
+    propagation_steps: tuple[str, ...] = ()
     relation_strategy: str = "cte"
     estimated_rows: int | None = None
     sql_statements_executed: int = 0
@@ -92,6 +119,10 @@ class LoweringDiagnostics:
         return {
             "strategy": self.strategy,
             "anchor": self.anchor,
+            "anchor_node": self.anchor_node,
+            "anchor_reason": self.anchor_reason,
+            "anchor_estimate": self.anchor_estimate,
+            "propagation_steps": self.propagation_steps,
             "relation_strategy": self.relation_strategy,
             "estimated_rows": self.estimated_rows,
             "sql_statements_executed": self.sql_statements_executed,

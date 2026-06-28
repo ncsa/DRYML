@@ -2,6 +2,7 @@ import pytest
 
 from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
 from dryml.core2.query import QueryCardinalityError, QueryDomainError
+from dryml.core2.query.result import QueryBackedDefinitionResultSet
 from dryml.core2.store.dir import DirStore
 
 
@@ -149,6 +150,22 @@ def test_resultset_union_and_intersection_replica_metadata_is_commutative(tmp_pa
     assert len(two_replicas.union(one_replica).replicas(obj.definition)) == 2
     assert one_replica.union(two_replicas).replicas(obj.definition) == two_replicas.union(one_replica).replicas(obj.definition)
     assert one_replica.intersection(two_replicas).replicas(obj.definition) == two_replicas.intersection(one_replica).replicas(obj.definition)
+
+
+def test_query_backed_resultset_preserves_adversarial_page_order(tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    first = ResultLeaf("stream-first", repo=repo).definition
+    second = ResultLeaf("stream-second", repo=repo).definition
+    page_order = (second, first)
+
+    def page_factory():
+        for cdef in page_order:
+            yield cdef, ()
+
+    results = QueryBackedDefinitionResultSet(repo, page_factory, materializable=False)
+
+    assert tuple(results) == page_order
+    assert tuple(results) == page_order
 
 
 def test_fixed_resultset_universe_rejects_domain_switch(tmp_path):

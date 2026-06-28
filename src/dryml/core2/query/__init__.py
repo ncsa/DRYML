@@ -10,7 +10,7 @@ from .model import (
     QueryVerifyBudgetExceeded,
     QueryWouldScanError,
 )
-from .lowering import CandidateRelation, ScanPolicy
+from .lowering import CandidateRelation, LoweredEdgeStep, LoweredGraphPlan, ScanPolicy
 from .query import DefinitionQuery
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet, QueryBackedDefinitionResultSet
 
@@ -25,6 +25,8 @@ __all__ = [
     "Index",
     "Key",
     "Kwarg",
+    "LoweredEdgeStep",
+    "LoweredGraphPlan",
     "ObjectResultSet",
     "OccurrenceResultSet",
     "QueryCardinalityError",

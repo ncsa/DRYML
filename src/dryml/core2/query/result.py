@@ -283,7 +283,7 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
         return self._definitions
 
     def _finish_cache(self) -> None:
-        definitions = _sort_cdefs(dict.fromkeys(self._definition_cache).keys())
+        definitions = tuple(dict.fromkeys(self._definition_cache).keys())
         object.__setattr__(self, "_definitions", definitions)
         object.__setattr__(self, "_replicas", dict(self._replica_cache))
         object.__setattr__(self, "_cache_complete", True)
