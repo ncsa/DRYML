@@ -389,7 +389,7 @@ class RepoQueryIndex:
         stats.source_plans = tuple(source_plans)
         return merged.count, stats
 
-    def explain_definition_domain(self, query) -> QueryStats:
+    def explain_definition_domain(self, query, *, sql: bool = False) -> QueryStats:
         stats = QueryStats(refresh_action="federated-plan")
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
         exact_root = query.selector if isinstance(query.selector, ConcreteDefinition) else None
@@ -411,7 +411,7 @@ class RepoQueryIndex:
                             diagnostics=diagnostics,
                         )
                         explain = getattr(snapshot, "explain_lowered_plan", None)
-                        if explain is not None:
+                        if sql and explain is not None:
                             explain(plan)
                         candidate_ids = ()
                         stats.lowering_strategy = diagnostics.strategy
@@ -496,6 +496,7 @@ class RepoQueryIndex:
             stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
             stats.candidate_rows_read += diagnostics.candidate_rows_read
             stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
+            stats.pages_fetched += diagnostics.pages_fetched
             stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
             stats.lowering_diagnostics = diagnostics.as_dict()
             matches = tuple(source_merged.values())
@@ -564,6 +565,11 @@ class RepoQueryIndex:
             stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
             stats.candidate_rows_read += diagnostics.candidate_rows_read
             stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
+            stats.pages_fetched += diagnostics.pages_fetched
+            stats.count_witness_reloads += source_counter.witness_reload_count
+            stats.count_collision_buckets += source_counter.collision_bucket_count
+            diagnostics.count_witness_reloads = source_counter.witness_reload_count
+            diagnostics.count_collision_buckets = source_counter.collision_bucket_count
             stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
             stats.lowering_diagnostics = diagnostics.as_dict()
             return source_counter, generation, diagnostics.candidate_rows_read, source_counter.count
@@ -785,6 +791,7 @@ class RepoQueryIndex:
             stats.scan_reason = stats.scan_reason or diagnostics.scan_reason
             stats.candidate_rows_read += diagnostics.candidate_rows_read
             stats.cdef_blobs_decoded += diagnostics.cdef_blobs_decoded
+            stats.pages_fetched += diagnostics.pages_fetched
             stats.terminal_stop_reason = stats.terminal_stop_reason or diagnostics.terminal_stop_reason
             stats.lowering_diagnostics = diagnostics.as_dict()
             return tuple(merged.values()), match_ids, generation, diagnostics.candidate_rows_read
@@ -1068,6 +1075,8 @@ class _CDefDedupeCounter:
         self._bucket_refs: dict[str, list[_CDefWitnessRef]] = {}
         self._loaders: dict[str, Callable[[int, int], ConcreteDefinition]] = {}
         self.count = 0
+        self.witness_reload_count = 0
+        self.collision_bucket_count = 0
 
     def register_source(self, source_key: str, loader: Callable[[int, int], ConcreteDefinition]) -> None:
         self._loaders[source_key] = loader
@@ -1131,12 +1140,14 @@ class _CDefDedupeCounter:
         bucket = [self._load_ref(ref)]
         self._buckets[stable_hash] = bucket
         self._bucket_refs[stable_hash] = [ref]
+        self.collision_bucket_count += 1
         return bucket
 
     def _load_ref(self, ref: _CDefWitnessRef) -> ConcreteDefinition:
         loader = self._loaders.get(ref.source_key)
         if loader is None:
             raise QueryIndexError(f"No count dedupe witness loader for source '{ref.source_key}'.")
+        self.witness_reload_count += 1
         return loader(ref.generation, ref.definition_id)
 
 

@@ -349,7 +349,7 @@ class DefinitionQuery:
             return stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
 
         if self.universe is None and self.domain == "stored" and self.repo._query_index.can_execute_query_domain("stored"):
-            stats = self.repo._query_index.explain_definition_domain(self)
+            stats = self.repo._query_index.explain_definition_domain(self, sql=sql)
             return stats.explanation(domain=self._domain_label(), refresh=self.refresh_policy)
 
         _, stats, _ = self._execute_definition_domain()

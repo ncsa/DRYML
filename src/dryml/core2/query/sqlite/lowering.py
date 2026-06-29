@@ -143,6 +143,7 @@ class SQLiteRelationCompiler:
         cdefs = [cdefs_by_id[did] for did in ids]
         plan.diagnostics.candidate_rows_read += len(ids)
         plan.diagnostics.cdef_blobs_decoded += len(cdefs)
+        plan.diagnostics.pages_fetched += 1
         yield CandidateBatch(tuple(ids), tuple(cdefs), cursor)
 
     def explain_query_plan(self, plan: LoweredQueryPlan) -> tuple[str, ...]:

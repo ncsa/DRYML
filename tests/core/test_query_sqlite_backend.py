@@ -542,6 +542,27 @@ def test_candidate_relation_preserves_generation(tmp_path):
     assert relation.generation == index.current_generation()
 
 
+def test_candidate_relation_exposes_v3_metadata(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"metadata-{idx}").definition for idx in range(2)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy(), diagnostics=diagnostics)
+        relation = plan.relation()
+
+    assert relation.source_key == index.source_key
+    assert relation.generation == index.current_generation()
+    assert relation.relation_id == "candidate_relation"
+    assert relation.relation_kind == "cte"
+    assert relation.ordering == ("stable_hash", "collision_ordinal", "definition_id")
+    assert relation.supports_keyset
+    assert relation.estimated_rows == 2
+    assert relation.exact_safe is False
+    assert relation.debug_label == "candidate_relation"
+
+
 def test_candidate_relation_empty(tmp_path):
     index = sqlite_index(tmp_path)
     index.initialize_empty()

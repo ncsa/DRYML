@@ -19,9 +19,9 @@ DRYML query indexes are acceleration metadata for `Repo.query(...)`. Backends mu
 
 SQLite read views also expose a lowering-capable path for safe SQL-native candidate relations. See `docs/sqlite_lowering.md` for the lowered relation, terminal, scan-policy, diagnostics, and fallback boundaries.
 
-Lowered candidate relations are backend-owned. Federation may inspect only their source key, generation, ordering contract, and opaque keyset cursor. SQLite may represent the relation as SQL text, CTEs, or temp tables, but a `DefinitionResultSet` or cursor must not retain a live SQLite cursor, connection, transaction, or backend-local ID without source/generation metadata.
+Lowered candidate relations are backend-owned. Federation may inspect only their source key, generation, opaque relation ID, relation kind, ordering contract, estimated rows, exact-safe flag, debug label, and opaque keyset cursor. SQLite may represent the relation as SQL text, CTEs, or temp tables, but a `DefinitionResultSet` or cursor must not retain a live SQLite cursor, connection, transaction, or backend-local ID without source/generation metadata.
 
-Lowered graph plans are anchor-oriented. A backend should report the chosen anchor node, anchor reason, anchor relation kind, anchor estimate, and parent/child propagation steps. SQLite uses `definitions.stable_hash` for stable-hash anchors and `postings.feature_id` for posting anchors, walks `definition_edges` in SQL to project the selector root, applies domain filters in SQL, and leaves final truth to Python `ConcreteDefinition` verification.
+Lowered graph plans are anchor-oriented. A backend should report the chosen anchor node, anchor reason, anchor relation kind, anchor estimate, parent/child propagation steps, page fetch counts, terminal stop reason, and count witness/collision diagnostics when relevant. SQLite uses `definitions.stable_hash` for stable-hash anchors and `postings.feature_id` for posting anchors, walks `definition_edges` in SQL to project the selector root, applies domain filters in SQL, and leaves final truth to Python `ConcreteDefinition` verification. SQLite `EXPLAIN QUERY PLAN` rows are diagnostics requested with `explain(sql=True)`, not a public semantic contract.
 
 ## Transaction Boundaries
 

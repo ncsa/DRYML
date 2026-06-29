@@ -4,7 +4,7 @@ DRYML's SQLite query index lowers safe selector work into SQLite while keeping P
 
 Lowered SQLite execution currently handles:
 
-- backend-owned candidate relation contracts identified by source key and generation;
+- backend-owned candidate relation contracts identified by source key, generation, opaque relation ID, relation kind, stable ordering, estimated rows, exact-safe status, and debug label;
 - anchor-first relation plans for exact stable-hash and local-posting anchors;
 - local feature posting predicates;
 - parent edge projection from rare nested anchors and child edge projection for sibling subtrees;
@@ -13,13 +13,13 @@ Lowered SQLite execution currently handles:
 - owner projection through the existing recursive SQLite owner relation;
 - stable keyset-ordered candidate batches using `(stable_hash, collision_ordinal, def_id)` ordering;
 - terminal-aware `exists()`, `one()`, `one_or_none()`, and `count()` verification that stops within fetched pages;
-- plan-only `explain()`, optional `explain(sql=True)` SQLite plan diagnostics, and analyzed `explain(analyze=True)` diagnostics;
+- plan-only `explain()`, opt-in `explain(sql=True)` SQLite plan diagnostics, and analyzed `explain(analyze=True)` diagnostics;
 - scan policies through `scan_policy("allow" | "warn" | "forbid")`, `require_indexed()`, and `max_verify(...)`.
 - query-backed `DefinitionResultSet` paging for broad stored SQLite queries above the eager threshold.
 
 SQLite lowering is conservative. SQL may return false positives, but returned definitions are still verified in Python with the normal query matcher. SQL must not introduce false negatives for supported lowered predicates.
 
-Read transactions remain short. Candidate IDs and CDef batches are fetched inside a read view, the read view closes, and Python verification runs afterward. Result metadata records candidate rows read, CDef blobs decoded, Python verifications, scan fallback reason, terminal stop reason, anchor node/reason/estimate, propagation direction, SQLite plan rows when requested, and per-source generation.
+Read transactions remain short. Candidate IDs and CDef batches are fetched inside a read view, the read view closes, and Python verification runs afterward. Result metadata records candidate rows read, CDef blobs decoded, Python verifications, pages fetched, scan fallback reason, terminal stop reason, anchor node/reason/estimate, propagation direction, SQLite plan rows when requested, count witness reloads, count collision buckets, and per-source generation.
 
 For selector graphs with indexable requirements, SQLite lowering chooses the rarest exact stable-hash or local-posting node as the SQL anchor. Exact anchors start from `definitions.stable_hash`; local-posting anchors start from `postings.feature_id` and `postings.multiplicity`, then apply remaining local predicates. If the anchor is nested, SQL builds that relation first, walks `definition_edges` toward the selector root with path predicates, applies local predicates at each reached parent, applies sibling child-subtree checks with `EXISTS`, then projects the root relation and applies the requested domain filter. Exact anchors are stable-hash candidate anchors; Python verification remains authoritative for hash-collision buckets and all selector semantics.
 
@@ -37,7 +37,7 @@ Fallback boundaries:
 - broad query-backed definition results store a generation vector and fail clearly if a Store generation changes before page iteration;
 - arbitrary Python callable selector semantics are never evaluated in SQLite;
 - object materialization remains explicit through `objects()` after definition search;
-- occurrence path enumeration remains Python-side and lazy, fed by verified lowered nested target IDs. Full SQL-native occurrence path enumeration is deferred.
+- occurrence path enumeration remains Python-side and lazy, fed by verified lowered nested target IDs. `max_occurrences` bounds emitted paths; current backing capture is candidate-target scoped but not a full SQL-native path enumerator. Full SQL-native occurrence path enumeration is deferred.
 
 The million-definition benchmark contract is tracked in `docs/sqlite_lowering_million_definition_benchmark.md`.
 

@@ -311,6 +311,7 @@ def test_sqlite_explain_analyze_reports_lowering_counts(tmp_path):
     assert plan_only.verified_count == 0
     assert analyzed.verified_count == 1
     assert analyzed.cdef_blobs_decoded >= 1
+    assert analyzed.pages_fetched == 1
     assert analyzed.lowering_strategy == "sqlite-lowered"
 
 
@@ -323,6 +324,16 @@ def test_sqlite_plan_diagnostics_available(tmp_path):
 
     assert explanation.lowering_diagnostics["sqlite_plan"]
     assert explanation.lowering_diagnostics["strategy"] == "sqlite-lowered"
+
+
+def test_sqlite_plan_diagnostics_are_opt_in(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("plan-opt-in", repo=repo))
+
+    explanation = repo.query(None).stored().explain()
+
+    assert explanation.lowering_diagnostics["sqlite_plan"] == ()
 
 
 def test_repo_explain_reports_local_posting_anchor_kind(tmp_path):
@@ -994,6 +1005,8 @@ def test_lowered_count_handles_hash_collision_bucket(monkeypatch):
     assert counter.accept(second, source_key="test-source", generation=1, definition_id=2)
     assert counter.count == 2
     assert loaded == [1]
+    assert counter.witness_reload_count == 1
+    assert counter.collision_bucket_count == 1
 
 
 def test_count_state_keeps_only_witness_refs_until_hash_repeats():
@@ -1012,6 +1025,8 @@ def test_count_state_keeps_only_witness_refs_until_hash_repeats():
     assert counter.count == 2
     assert set(counter._witnesses) == {first.stable_hash(), second.stable_hash()}
     assert counter._buckets == {}
+    assert counter.witness_reload_count == 0
+    assert counter.collision_bucket_count == 0
 
 
 def test_sqlite_terminal_verification_runs_after_read_view_closes(tmp_path, monkeypatch):

@@ -56,8 +56,12 @@ class CandidateRelation:
     source_key: str
     generation: int
     relation_id: str
+    relation_kind: str = "cte"
     ordering: tuple[str, ...] = ("stable_hash", "collision_ordinal", "definition_id")
     supports_keyset: bool = True
+    estimated_rows: int | None = None
+    exact_safe: bool = False
+    debug_label: str = "candidate_relation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,9 @@ class LoweringDiagnostics:
     candidate_rows_read: int = 0
     cdef_blobs_decoded: int = 0
     python_verifications: int = 0
+    pages_fetched: int = 0
+    count_witness_reloads: int = 0
+    count_collision_buckets: int = 0
     relations_created: int = 0
     relations_dropped: int = 0
     temp_rows_inserted: int = 0
@@ -133,6 +140,9 @@ class LoweringDiagnostics:
             "candidate_rows_read": self.candidate_rows_read,
             "cdef_blobs_decoded": self.cdef_blobs_decoded,
             "python_verifications": self.python_verifications,
+            "pages_fetched": self.pages_fetched,
+            "count_witness_reloads": self.count_witness_reloads,
+            "count_collision_buckets": self.count_collision_buckets,
             "relations_created": self.relations_created,
             "relations_dropped": self.relations_dropped,
             "temp_rows_inserted": self.temp_rows_inserted,
@@ -159,10 +169,13 @@ class LoweredQueryPlan:
     params: tuple[Any, ...] = ()
     strategy: str = "sqlite-lowered"
     relation_id: str = "candidate_relation"
+    relation_kind: str = "cte"
     ordering: tuple[str, ...] = ("stable_hash", "collision_ordinal", "definition_id")
     ordered: bool = True
     supports_keyset: bool = True
     estimated_size: int | None = None
+    exact_safe: bool = False
+    debug_label: str = "candidate_relation"
     scan_required: bool = False
     scan_reason: str | None = None
     diagnostics: LoweringDiagnostics = field(default_factory=LoweringDiagnostics)
@@ -174,8 +187,12 @@ class LoweredQueryPlan:
             source_key=self.source_key,
             generation=self.generation,
             relation_id=self.relation_id,
+            relation_kind=self.relation_kind,
             ordering=self.ordering,
             supports_keyset=self.supports_keyset,
+            estimated_rows=self.estimated_size,
+            exact_safe=self.exact_safe,
+            debug_label=self.debug_label,
         )
 
 

@@ -347,6 +347,9 @@ class QueryExplanation:
     candidate_rows_read: int = 0
     cdef_blobs_decoded: int = 0
     python_verifications: int = 0
+    pages_fetched: int = 0
+    count_witness_reloads: int = 0
+    count_collision_buckets: int = 0
     terminal_stop_reason: str | None = None
     lowering_diagnostics: dict[str, Any] | None = None
 
@@ -383,6 +386,11 @@ class QueryExplanation:
             lines.append(f"candidate rows read: {self.candidate_rows_read}")
             lines.append(f"CDef blobs decoded: {self.cdef_blobs_decoded}")
             lines.append(f"Python verifications: {self.python_verifications}")
+        if self.pages_fetched:
+            lines.append(f"pages fetched: {self.pages_fetched}")
+        if self.count_witness_reloads or self.count_collision_buckets:
+            lines.append(f"count witness reloads: {self.count_witness_reloads}")
+            lines.append(f"count collision buckets: {self.count_collision_buckets}")
         if self.terminal_stop_reason is not None:
             lines.append(f"terminal stop: {self.terminal_stop_reason}")
         for source in self.source_plans:
@@ -432,6 +440,9 @@ class QueryStats:
     candidate_rows_read: int = 0
     cdef_blobs_decoded: int = 0
     python_verifications: int = 0
+    pages_fetched: int = 0
+    count_witness_reloads: int = 0
+    count_collision_buckets: int = 0
     terminal_stop_reason: str | None = None
     lowering_diagnostics: dict[str, Any] | None = None
 
@@ -461,6 +472,9 @@ class QueryStats:
             candidate_rows_read=self.candidate_rows_read,
             cdef_blobs_decoded=self.cdef_blobs_decoded,
             python_verifications=self.python_verifications,
+            pages_fetched=self.pages_fetched,
+            count_witness_reloads=self.count_witness_reloads,
+            count_collision_buckets=self.count_collision_buckets,
             terminal_stop_reason=self.terminal_stop_reason,
             lowering_diagnostics=None if self.lowering_diagnostics is None else dict(self.lowering_diagnostics),
         )
