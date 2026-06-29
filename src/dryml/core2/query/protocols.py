@@ -131,6 +131,46 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
             batch_size: int) -> Any:
         ...
 
+    def relation_exact_stored(self, cdef: ConcreteDefinition) -> CandidateRelation:
+        ...
+
+    def relation_filter_domain(
+            self,
+            relation: CandidateRelation,
+            domain: DefinitionDomain) -> CandidateRelation:
+        ...
+
+    def relation_parents(
+            self,
+            relation: CandidateRelation,
+            path: DefinitionPath,
+            *,
+            unordered: bool = False) -> CandidateRelation:
+        ...
+
+    def relation_children(
+            self,
+            relation: CandidateRelation,
+            path: DefinitionPath,
+            *,
+            unordered: bool = False) -> CandidateRelation:
+        ...
+
+    def relation_semijoin_child_exists(
+            self,
+            parent_relation: CandidateRelation,
+            child_relation: CandidateRelation,
+            path: DefinitionPath,
+            *,
+            unordered: bool = False) -> CandidateRelation:
+        ...
+
+    def relation_count_estimate(self, relation: CandidateRelation) -> int | None:
+        ...
+
+    def relation_exact_safe_count(self, relation: CandidateRelation) -> int | None:
+        ...
+
 
 class StoreQueryIndex(Protocol):
     @property

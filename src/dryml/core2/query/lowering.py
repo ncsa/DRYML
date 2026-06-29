@@ -107,6 +107,7 @@ class LoweringDiagnostics:
     anchor_estimate: int | None = None
     anchor_fallback_reason: str | None = None
     propagation_steps: tuple[str, ...] = ()
+    semijoin_steps: tuple[str, ...] = ()
     relation_strategy: str = "cte"
     estimated_rows: int | None = None
     sql_statements_executed: int = 0
@@ -134,6 +135,7 @@ class LoweringDiagnostics:
             "anchor_estimate": self.anchor_estimate,
             "anchor_fallback_reason": self.anchor_fallback_reason,
             "propagation_steps": self.propagation_steps,
+            "semijoin_steps": self.semijoin_steps,
             "relation_strategy": self.relation_strategy,
             "estimated_rows": self.estimated_rows,
             "sql_statements_executed": self.sql_statements_executed,

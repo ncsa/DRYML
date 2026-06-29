@@ -214,7 +214,7 @@ class RepoQueryIndex:
         explanation = stats.explanation(domain=query.domain or "stored", refresh=query.refresh_policy)
 
         def page_factory():
-            return self.iter_lowered_definition_results(
+            return self._iter_query_backed_lowered_definition_results(
                 query,
                 generation_vector=generation_vector,
                 page_size=_QUERY_BACKED_PAGE_SIZE,
@@ -228,7 +228,7 @@ class RepoQueryIndex:
             explanation=explanation,
         )
 
-    def iter_lowered_definition_results(
+    def _iter_query_backed_lowered_definition_results(
             self,
             query,
             *,
@@ -401,16 +401,21 @@ class RepoQueryIndex:
             index = self._source_index_for_binding(binding)
             self._refresh_definition_source(index, query, exact_root, stats)
             with index.read_view(include_cached=False) as snapshot:
-                ids = snapshot.filter_stored_ids(snapshot.exact_ids(exact_root))
+                exact_relation = getattr(snapshot, "relation_exact_stored", None)
+                exact_count = getattr(snapshot, "relation_exact_safe_count", None)
+                if exact_relation is not None and exact_count is not None:
+                    relation = exact_relation(exact_root)
+                    source_match = exact_count(relation) or 0
+                else:
+                    source_match = 1 if snapshot.filter_stored_ids(snapshot.exact_ids(exact_root)) else 0
                 generation = snapshot.generation
             generations[binding.source_key] = generation
-            source_match = 1 if ids else 0
-            found = found or bool(ids)
+            found = found or bool(source_match)
             source_plans.append(SourceQueryPlan(
                 source_key=binding.source_key,
                 backend=_source_backend(index),
                 generation=generation,
-                candidate_count=len(ids),
+                candidate_count=source_match,
                 verified_count=0,
                 result_count=source_match,
                 refresh_action=stats.refresh_action,

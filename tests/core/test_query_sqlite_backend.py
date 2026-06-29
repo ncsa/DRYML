@@ -7,7 +7,7 @@ from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.query.fingerprint import target_local_fingerprint
 from dryml.core2.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
 from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats, QueryWouldScanError
-from dryml.core2.query.domain import StoredDomain
+from dryml.core2.query.domain import KnownDomain, NestedDomain, StoredDomain
 from dryml.core2.query.graph_plan import graph_candidate_ids
 from dryml.core2.query.path import GraphPath
 from dryml.core2.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode, compile_selector_graph
@@ -533,11 +533,13 @@ def test_lowered_multibranch_semijoin_filters_before_cdef_decode(tmp_path, monke
     monkeypatch.setattr(sqlite_index_module.SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
 
     with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
         plan = view.lower_selector_graph(
             compile_selector_graph(selector),
             StoredDomain(view),
             terminal="collect",
             scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
         )
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=20))
 
@@ -545,6 +547,7 @@ def test_lowered_multibranch_semijoin_filters_before_cdef_decode(tmp_path, monke
     assert len(fetched) == 1
     assert len(fetched[0]) == 1
     assert "EXISTS" in plan.candidate_sql
+    assert diagnostics.semijoin_steps
 
 
 def test_candidate_relation_pages_without_cursor_escape(tmp_path):
@@ -603,6 +606,61 @@ def test_candidate_relation_keyset_cursor_roundtrip(tmp_path):
         second = next(view.iter_relation_cdef_batches(relation, after=roundtrip, batch_size=1))
 
     assert second.cdefs[0] != first.cdefs[0]
+
+
+def test_relation_operations_parent_child_domain_and_semijoin(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf("relation-child")
+    owner = SQLiteParent(child=leaf, name="relation-owner")
+    other = SQLiteParent(child=SQLiteLeaf("other-child"), name="other-owner")
+    graph = ConcreteDefinitionGraph.from_roots([owner.definition, other.definition])
+    index.register_stored_roots(graph, [owner.definition, other.definition])
+    child_path = GraphPath().child("child")
+
+    with index.read_view() as view:
+        known_leaf_plan = view.lower_selector_graph(
+            compile_selector_graph(leaf.definition),
+            KnownDomain(view),
+            terminal="page",
+            scan_policy=ScanPolicy(),
+        )
+        leaf_relation = known_leaf_plan.relation()
+        nested_leaf_relation = view.relation_filter_domain(leaf_relation, NestedDomain(view))
+        stored_leaf_relation = view.relation_filter_domain(leaf_relation, StoredDomain(view))
+        parent_relation = view.relation_parents(nested_leaf_relation, child_path)
+        child_relation = view.relation_children(parent_relation, child_path)
+
+        all_roots_plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        semijoin_relation = view.relation_semijoin_child_exists(all_roots_plan.relation(), nested_leaf_relation, child_path)
+
+        nested_leaf_batch = next(view.iter_relation_cdef_batches(nested_leaf_relation, batch_size=10))
+        stored_leaf_batch = next(view.iter_relation_cdef_batches(stored_leaf_relation, batch_size=10), None)
+        parent_batch = next(view.iter_relation_cdef_batches(parent_relation, batch_size=10))
+        child_batch = next(view.iter_relation_cdef_batches(child_relation, batch_size=10))
+        semijoin_batch = next(view.iter_relation_cdef_batches(semijoin_relation, batch_size=10))
+
+    assert nested_leaf_batch.cdefs == (leaf.definition,)
+    assert stored_leaf_batch is None
+    assert parent_batch.cdefs == (owner.definition,)
+    assert child_batch.cdefs == (leaf.definition,)
+    assert semijoin_batch.cdefs == (owner.definition,)
+
+
+def test_relation_exact_safe_count_contract(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("exact-relation-count").definition
+    other = SQLiteLeaf("other-relation-count").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots([root, other]), [root, other])
+
+    with index.read_view() as view:
+        relation = view.relation_exact_stored(root)
+        broad_plan = view.lower_selector_graph(None, StoredDomain(view), terminal="count", scan_policy=ScanPolicy())
+
+        assert relation.exact_safe
+        assert relation.relation_kind == "temp"
+        assert view.relation_exact_safe_count(relation) == 1
+        assert view.relation_count_estimate(relation) == 1
+        assert view.relation_exact_safe_count(broad_plan.relation()) is None
 
 
 def test_candidate_relation_preserves_generation(tmp_path):

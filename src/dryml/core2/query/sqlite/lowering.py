@@ -201,6 +201,11 @@ class SQLiteRelationCompiler:
                 for sibling in selector_graph.outgoing(edge.parent)
                 if sibling.child != edge.child
             )
+            diagnostics.semijoin_steps = (*diagnostics.semijoin_steps, *(
+                f"child-exists:{edge.parent}->{sibling.child}:{sibling.path!s}"
+                for sibling in selector_graph.outgoing(edge.parent)
+                if sibling.child != edge.child
+            ))
             where_parts = [*edge_filters, *parent_predicates]
             where_sql = " AND ".join(f"({predicate})" for predicate in where_parts) if where_parts else "1 = 1"
             parent_name = f"node_{edge.parent}_from_{edge.child}"

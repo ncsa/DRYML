@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -749,6 +750,7 @@ class SQLiteQueryIndexReadView:
         self._active = True
         self._temp_relations: list[str] = []
         self._temp_relation_counter = 0
+        self._relation_counter = 0
         self._relation_plans: dict[str, LoweredQueryPlan] = {}
 
     def close(self) -> None:
@@ -823,10 +825,165 @@ class SQLiteQueryIndexReadView:
             raise QueryIndexError("CandidateRelation is not owned by this read view.")
         return self.iter_candidate_cdef_batches(plan, after=after, batch_size=batch_size)
 
+    def relation_exact_stored(self, cdef: ConcreteDefinition) -> CandidateRelation:
+        self._check_active()
+        ids = self.filter_stored_ids(self.exact_ids(cdef))
+        name = self.create_temp_relation(ids)
+        relation_id = self._next_relation_id("exact_stored")
+        plan = LoweredQueryPlan(
+            source_key=self.source_key,
+            generation=self.generation,
+            domain="stored",
+            terminal="count",
+            candidate_sql=f"SELECT def_id FROM temp.{name}",
+            strategy="exact-safe-count",
+            relation_id=relation_id,
+            relation_kind="temp",
+            estimated_size=len(ids),
+            exact_safe=True,
+            debug_label="exact-stored",
+        )
+        self._relation_plans[relation_id] = plan
+        return plan.relation()
+
+    def relation_filter_domain(self, relation: CandidateRelation, domain) -> CandidateRelation:
+        plan = self._plan_for_relation(relation)
+        compiler = SQLiteRelationCompiler(self._con, source_key=self.source_key, generation=self.generation, codec=_CODEC)
+        candidate_sql = compiler._apply_domain_sql(plan.candidate_sql, domain.name)
+        return self._register_derived_relation(
+            plan,
+            candidate_sql,
+            params=plan.params,
+            relation_kind="cte",
+            exact_safe=plan.exact_safe,
+            debug_label=f"{relation.debug_label}:domain:{domain.name}",
+        )
+
+    def relation_parents(self, relation: CandidateRelation, path, *, unordered: bool = False) -> CandidateRelation:
+        plan = self._plan_for_relation(relation)
+        params = list(plan.params)
+        path_sql = self._relation_path_predicate("e", path, unordered, params)
+        candidate_sql = f"""
+        SELECT DISTINCT e.parent_def_id AS def_id
+        FROM definition_edges e
+        JOIN ({plan.candidate_sql}) child_relation
+          ON child_relation.def_id = e.child_def_id
+        WHERE {path_sql}
+        """
+        return self._register_derived_relation(
+            plan,
+            candidate_sql,
+            params=tuple(params),
+            exact_safe=False,
+            debug_label=f"{relation.debug_label}:parents",
+        )
+
+    def relation_children(self, relation: CandidateRelation, path, *, unordered: bool = False) -> CandidateRelation:
+        plan = self._plan_for_relation(relation)
+        params = list(plan.params)
+        path_sql = self._relation_path_predicate("e", path, unordered, params)
+        candidate_sql = f"""
+        SELECT DISTINCT e.child_def_id AS def_id
+        FROM definition_edges e
+        JOIN ({plan.candidate_sql}) parent_relation
+          ON parent_relation.def_id = e.parent_def_id
+        WHERE {path_sql}
+        """
+        return self._register_derived_relation(
+            plan,
+            candidate_sql,
+            params=tuple(params),
+            exact_safe=False,
+            debug_label=f"{relation.debug_label}:children",
+        )
+
+    def relation_semijoin_child_exists(
+            self,
+            parent_relation: CandidateRelation,
+            child_relation: CandidateRelation,
+            path,
+            *,
+            unordered: bool = False) -> CandidateRelation:
+        parent_plan = self._plan_for_relation(parent_relation)
+        child_plan = self._plan_for_relation(child_relation)
+        params = [*parent_plan.params, *child_plan.params]
+        path_sql = self._relation_path_predicate("e", path, unordered, params)
+        candidate_sql = f"""
+        SELECT DISTINCT parent_relation.def_id
+        FROM ({parent_plan.candidate_sql}) parent_relation
+        WHERE EXISTS (
+            SELECT 1
+            FROM definition_edges e
+            JOIN ({child_plan.candidate_sql}) child_relation
+              ON child_relation.def_id = e.child_def_id
+            WHERE e.parent_def_id = parent_relation.def_id
+              AND {path_sql}
+        )
+        """
+        return self._register_derived_relation(
+            parent_plan,
+            candidate_sql,
+            params=tuple(params),
+            exact_safe=False,
+            debug_label=f"{parent_relation.debug_label}:semijoin-child-exists",
+        )
+
+    def relation_count_estimate(self, relation: CandidateRelation) -> int | None:
+        return relation.estimated_rows
+
+    def relation_exact_safe_count(self, relation: CandidateRelation) -> int | None:
+        plan = self._plan_for_relation(relation)
+        if not relation.exact_safe:
+            return None
+        return self._con.execute(f"SELECT COUNT(*) FROM ({plan.candidate_sql})", plan.params).fetchone()[0]
+
     def explain_lowered_plan(self, plan: LoweredQueryPlan) -> tuple[str, ...]:
         self._check_active()
         compiler = SQLiteRelationCompiler(self._con, source_key=self.source_key, generation=self.generation, codec=_CODEC)
         return compiler.explain_query_plan(plan)
+
+    def _plan_for_relation(self, relation: CandidateRelation) -> LoweredQueryPlan:
+        self._check_active()
+        if relation.source_key != self.source_key or relation.generation != self.generation:
+            raise QueryIndexError("CandidateRelation is not compatible with this read view.")
+        plan = self._relation_plans.get(relation.relation_id)
+        if plan is None:
+            raise QueryIndexError("CandidateRelation is not owned by this read view.")
+        return plan
+
+    def _register_derived_relation(
+            self,
+            plan: LoweredQueryPlan,
+            candidate_sql: str,
+            *,
+            params: tuple = (),
+            relation_kind: str = "cte",
+            exact_safe: bool = False,
+            debug_label: str = "derived-relation") -> CandidateRelation:
+        relation_id = self._next_relation_id("relation")
+        derived = replace(
+            plan,
+            candidate_sql=candidate_sql,
+            params=params,
+            relation_id=relation_id,
+            relation_kind=relation_kind,
+            estimated_size=None,
+            exact_safe=exact_safe,
+            debug_label=debug_label,
+        )
+        self._relation_plans[relation_id] = derived
+        return derived.relation()
+
+    def _next_relation_id(self, prefix: str) -> str:
+        self._relation_counter += 1
+        return f"{prefix}_{self._relation_counter}"
+
+    def _relation_path_predicate(self, alias: str, path, unordered: bool, params: list) -> str:
+        if unordered:
+            return "1 = 1"
+        path_blob = _CODEC.encode_graph_path(path)
+        params.extend((digest_blob(path_blob), path_blob))
+        return f"{alias}.path_hash = ? AND {alias}.path_blob = ?"
 
     def create_temp_relation(self, ids) -> str:
         self._check_active()

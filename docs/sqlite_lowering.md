@@ -5,6 +5,7 @@ DRYML's SQLite query index lowers safe selector work into SQLite while keeping P
 Lowered SQLite execution currently handles:
 
 - backend-owned candidate relation contracts identified by source key, generation, opaque relation ID, relation kind, stable ordering, estimated rows, exact-safe status, and debug label;
+- active read-view relation operations for domain filtering, parent traversal, child traversal, child-exists semijoins, keyset paging, count estimates, and exact-safe counts;
 - anchor-first relation plans for exact stable-hash and local-posting anchors;
 - local feature posting predicates;
 - parent edge projection from rare nested anchors and child edge projection for sibling subtrees;
@@ -25,7 +26,7 @@ For selector graphs with indexable requirements, SQLite lowering chooses the rar
 
 Lowering currently chooses one anchor path to the selector root. Sibling subtrees are enforced as SQL `EXISTS` filters; multi-anchor semijoin optimization is future scale work.
 
-Query-backed `DefinitionResultSet` ordering is stable in source order, with each source ordered by `(stable_hash, collision_ordinal, def_id)`. After materialization, repeated iteration preserves the original streamed page-factory order rather than re-sorting cached results. A result set stores a generation vector and opaque keyset page cursors, but it does not retain SQLite connections, cursors, or live read transactions. If a source generation changes before page iteration completes, iteration raises `QueryIndexGenerationChanged` instead of silently mixing snapshots.
+Query-backed `DefinitionResultSet` ordering is stable in source order, with each source ordered by `(stable_hash, collision_ordinal, def_id)`. This source-order contract is the current V3 cross-Store paging policy; global keyset merge across Stores is deferred. After materialization, repeated iteration preserves the original streamed page-factory order rather than re-sorting cached results. A result set stores a generation vector and opaque keyset page cursors, but it does not retain SQLite connections, cursors, or live read transactions. If a source generation changes before page iteration completes, iteration raises `QueryIndexGenerationChanged` instead of silently mixing snapshots.
 
 Lowered `count()` streams verified CDefs into a collision-safe stable-hash count state. On first sight of a stable hash it stores only `(source_key, generation, def_id)` as a witness ref and increments the count. If the same stable hash appears again, federation reopens a short backend read view to load that witness CDef and materializes a collision bucket for that hash only. If the witness source generation changed before reload, the count terminal retries from the beginning a bounded number of times. Non-colliding result sets therefore do not retain full CDefs after verification, while duplicate definitions and stable-hash collisions remain exact. Exact stored-root `ConcreteDefinition` counts use an exact-safe index path after backend equality confirmation and do not run final query verification or fetch candidate CDef pages.
 

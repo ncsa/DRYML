@@ -474,6 +474,34 @@ def test_query_backed_multistore_order_stable(tmp_path, monkeypatch):
     assert tuple(results) == (left.definition, right.definition)
 
 
+def test_query_backed_multistore_source_order_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    first = FederationLeaf(name="source-order-first", repo=repo)
+    second = FederationLeaf(name="source-order-second", repo=repo)
+    source1_obj, source2_obj = sorted(
+        (first, second),
+        key=lambda obj: (obj.definition.stable_hash(), repr(obj.definition)),
+        reverse=True,
+    )
+    repo.save_object(source1_obj, store=store1)
+    repo.save_object(source2_obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    results = repo2.query(None).stored().defs()
+
+    assert tuple(results) == (source1_obj.definition, source2_obj.definition)
+    assert tuple(results) != tuple(sorted(
+        (source1_obj.definition, source2_obj.definition),
+        key=lambda cdef: (cdef.stable_hash(), repr(cdef)),
+    ))
+
+
 def test_query_backed_paging_dedupes_same_cdef_across_stores(tmp_path, monkeypatch):
     monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
     store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
