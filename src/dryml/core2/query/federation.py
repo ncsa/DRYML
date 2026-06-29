@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..definition import ConcreteDefinition
-from .domain import NestedDomain, StoredDomain
+from .domain import KnownDomain, NestedDomain, StoredDomain
 from .graph_plan import graph_candidate_ids
 from .lowering import CollectSink, CountSink, LoweringDiagnostics
 from .memory import MemoryStoreQueryIndex
@@ -243,9 +243,9 @@ class RepoQueryIndex:
             with index.read_view(include_cached=False) as snapshot:
                 if expected_generation is not None and snapshot.generation != expected_generation:
                     raise QueryIndexGenerationChanged("Query-backed ResultSet source generation changed.")
-                plan = snapshot.lower_selector_graph(
+                self._lower_stored_relation(
+                    snapshot,
                     selector_graph,
-                    StoredDomain(snapshot),
                     terminal="page",
                     scan_policy=query.lowering_scan_policy,
                     diagnostics=diagnostics,
@@ -255,7 +255,14 @@ class RepoQueryIndex:
                 with index.read_view(include_cached=False) as snapshot:
                     if snapshot.generation != generation:
                         raise QueryIndexGenerationChanged("Query-backed ResultSet source generation changed.")
-                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=page_size)
+                    relation, _ = self._lower_stored_relation(
+                        snapshot,
+                        selector_graph,
+                        terminal="page",
+                        scan_policy=query.lowering_scan_policy,
+                        diagnostics=LoweringDiagnostics(),
+                    )
+                    batches = snapshot.iter_relation_cdef_batches(relation, after=after, batch_size=page_size)
                     batch = next(batches, None)
                 if batch is None:
                     break
@@ -504,9 +511,9 @@ class RepoQueryIndex:
             after = None
             diagnostics = LoweringDiagnostics()
             with index.read_view(include_cached=False) as snapshot:
-                plan = snapshot.lower_selector_graph(
+                self._lower_stored_relation(
+                    snapshot,
                     selector_graph,
-                    StoredDomain(snapshot),
                     terminal="collect",
                     scan_policy=query.lowering_scan_policy,
                     diagnostics=diagnostics,
@@ -517,12 +524,21 @@ class RepoQueryIndex:
                     if snapshot.generation != generation:
                         generation_changed = True
                         break
-                    batches = snapshot.iter_candidate_cdef_batches(
-                        plan,
+                    page_diagnostics = LoweringDiagnostics()
+                    relation, _ = self._lower_stored_relation(
+                        snapshot,
+                        selector_graph,
+                        terminal="collect",
+                        scan_policy=query.lowering_scan_policy,
+                        diagnostics=page_diagnostics,
+                    )
+                    batches = snapshot.iter_relation_cdef_batches(
+                        relation,
                         after=after,
                         batch_size=_terminal_batch_size(stop_after),
                     )
                     batch = next(batches, None)
+                    _merge_page_diagnostics(diagnostics, page_diagnostics)
                 if batch is None:
                     break
                 for cdef in batch.cdefs:
@@ -570,9 +586,9 @@ class RepoQueryIndex:
             after = None
             diagnostics = LoweringDiagnostics()
             with index.read_view(include_cached=False) as snapshot:
-                plan = snapshot.lower_selector_graph(
+                self._lower_stored_relation(
+                    snapshot,
                     selector_graph,
-                    StoredDomain(snapshot),
                     terminal="count",
                     scan_policy=query.lowering_scan_policy,
                     diagnostics=diagnostics,
@@ -583,12 +599,21 @@ class RepoQueryIndex:
                     if snapshot.generation != generation:
                         generation_changed = True
                         break
-                    batches = snapshot.iter_candidate_cdef_batches(
-                        plan,
+                    page_diagnostics = LoweringDiagnostics()
+                    relation, _ = self._lower_stored_relation(
+                        snapshot,
+                        selector_graph,
+                        terminal="count",
+                        scan_policy=query.lowering_scan_policy,
+                        diagnostics=page_diagnostics,
+                    )
+                    batches = snapshot.iter_relation_cdef_batches(
+                        relation,
                         after=after,
                         batch_size=_terminal_batch_size(stop_after),
                     )
                     batch = next(batches, None)
+                    _merge_page_diagnostics(diagnostics, page_diagnostics)
                 if batch is None:
                     break
                 for did, cdef in zip(batch.ids, batch.cdefs):
@@ -806,7 +831,8 @@ class RepoQueryIndex:
             after = None
             diagnostics = LoweringDiagnostics()
             with index.read_view(include_cached=False) as snapshot:
-                plan = snapshot.lower_selector_graph(
+                self._lower_relation_for_domain(
+                    snapshot,
                     selector_graph,
                     NestedDomain(snapshot),
                     terminal="collect",
@@ -819,8 +845,18 @@ class RepoQueryIndex:
                     if snapshot.generation != generation:
                         generation_changed = True
                         break
-                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=256)
+                    page_diagnostics = LoweringDiagnostics()
+                    relation, _ = self._lower_relation_for_domain(
+                        snapshot,
+                        selector_graph,
+                        NestedDomain(snapshot),
+                        terminal="collect",
+                        scan_policy=query.lowering_scan_policy,
+                        diagnostics=page_diagnostics,
+                    )
+                    batches = snapshot.iter_relation_cdef_batches(relation, after=after, batch_size=256)
                     batch = next(batches, None)
+                    _merge_page_diagnostics(diagnostics, page_diagnostics)
                 if batch is None:
                     break
                 for did, cdef in zip(batch.ids, batch.cdefs):
@@ -849,6 +885,42 @@ class RepoQueryIndex:
             stats.lowering_diagnostics = diagnostics.as_dict()
             return tuple(merged.values()), match_ids, generation, diagnostics.candidate_rows_read
         raise QueryIndexError("Catalog generation changed repeatedly during lowered nested query.")
+
+    def _lower_stored_relation(
+            self,
+            snapshot,
+            selector_graph,
+            *,
+            terminal,
+            scan_policy,
+            diagnostics: LoweringDiagnostics):
+        return self._lower_relation_for_domain(
+            snapshot,
+            selector_graph,
+            StoredDomain(snapshot),
+            terminal=terminal,
+            scan_policy=scan_policy,
+            diagnostics=diagnostics,
+        )
+
+    def _lower_relation_for_domain(
+            self,
+            snapshot,
+            selector_graph,
+            domain,
+            *,
+            terminal,
+            scan_policy,
+            diagnostics: LoweringDiagnostics):
+        plan = snapshot.lower_selector_graph(
+            selector_graph,
+            KnownDomain(snapshot),
+            terminal=terminal,
+            scan_policy=scan_policy,
+            diagnostics=diagnostics,
+        )
+        relation = snapshot.relation_filter_domain(plan.relation(), domain)
+        return relation, plan
 
     def open_store_index(self, binding: StoreIndexBinding):
         existing = self._opened_indexes.get(binding.source_key)
@@ -1221,6 +1293,16 @@ def _combined_cdef_count(
         if cdef not in merged:
             count += 1
     return count
+
+
+def _merge_page_diagnostics(total: LoweringDiagnostics, page: LoweringDiagnostics) -> None:
+    total.sql_statements_executed += page.sql_statements_executed
+    total.candidate_rows_read += page.candidate_rows_read
+    total.cdef_blobs_decoded += page.cdef_blobs_decoded
+    total.pages_fetched += page.pages_fetched
+    total.relations_created += page.relations_created
+    total.relations_dropped += page.relations_dropped
+    total.temp_rows_inserted += page.temp_rows_inserted
 
 
 def _terminal_batch_size(stop_after: int | None) -> int:

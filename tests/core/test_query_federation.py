@@ -1,4 +1,5 @@
 from pathlib import Path
+import inspect
 
 import pytest
 
@@ -24,6 +25,14 @@ class FederationParent(Object):
     def __init__(self, child=None, *, name="parent"):
         super().__init__()
         self.child = child
+        self.name = name
+
+
+class FederationPair(Object):
+    def __init__(self, left=None, right=None, *, name="pair"):
+        super().__init__()
+        self.left = left
+        self.right = right
         self.name = name
 
 
@@ -232,6 +241,116 @@ def test_sqlite_federated_stored_query_uses_sidecar_without_hydration(tmp_path):
     assert len(results.explanation.source_plans) == 1
     assert results.explanation.source_plans[0].source_key == reopened_store.catalog_key()
     assert results.explanation.source_plans[0].backend == "sqlite"
+
+
+def test_federated_lowered_query_pages_via_relation_api(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(3):
+        repo.save_object(FederationLeaf(name=f"relation-api-{idx}", repo=repo))
+
+    relation_pages = []
+    original_relation = SQLiteQueryIndexReadView.iter_relation_cdef_batches
+    original_candidate = SQLiteQueryIndexReadView.iter_candidate_cdef_batches
+
+    def spy_relation_batches(self, relation, *, after=None, batch_size):
+        relation_pages.append((relation.debug_label, batch_size))
+        return original_relation(self, relation, after=after, batch_size=batch_size)
+
+    def reject_direct_candidate_batches(self, plan, *, after=None, batch_size):
+        caller = inspect.currentframe().f_back
+        if caller is not None and caller.f_code.co_filename.endswith("query/federation.py"):
+            raise AssertionError("federation must page through CandidateRelation")
+        return original_candidate(self, plan, after=after, batch_size=batch_size)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_relation_cdef_batches", spy_relation_batches)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_candidate_cdef_batches", reject_direct_candidate_batches)
+
+    results = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+
+    assert len(results) == 3
+    assert relation_pages
+
+
+def test_relation_filter_domain_is_used_for_stored_domain_in_production(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="stored-domain", repo=repo))
+
+    domains = []
+    original = SQLiteQueryIndexReadView.relation_filter_domain
+
+    def spy_filter_domain(self, relation, domain):
+        domains.append(domain.name)
+        return original(self, relation, domain)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "relation_filter_domain", spy_filter_domain)
+
+    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().count() == 1
+
+    assert "stored" in domains
+
+
+def test_query_backed_lowered_query_pages_via_relation_api(tmp_path, monkeypatch):
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 2)
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(4):
+        repo.save_object(FederationLeaf(name=f"query-backed-relation-{idx}", repo=repo))
+
+    relation_pages = []
+    original_relation = SQLiteQueryIndexReadView.iter_relation_cdef_batches
+    original_candidate = SQLiteQueryIndexReadView.iter_candidate_cdef_batches
+
+    def spy_relation_batches(self, relation, *, after=None, batch_size):
+        relation_pages.append((relation.debug_label, batch_size))
+        return original_relation(self, relation, after=after, batch_size=batch_size)
+
+    def reject_direct_candidate_batches(self, plan, *, after=None, batch_size):
+        caller = inspect.currentframe().f_back
+        if caller is not None and caller.f_code.co_filename.endswith("query/federation.py"):
+            raise AssertionError("query-backed federation must page through CandidateRelation")
+        return original_candidate(self, plan, after=after, batch_size=batch_size)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_relation_cdef_batches", spy_relation_batches)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_candidate_cdef_batches", reject_direct_candidate_batches)
+
+    results = repo.query(None).stored().defs()
+
+    assert isinstance(results, QueryBackedDefinitionResultSet)
+    assert next(iter(results)) is not None
+    assert relation_pages == [("candidate_relation:domain:stored", 2)]
+
+
+def test_production_multibranch_selector_reports_semijoin_diagnostics(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    wanted = FederationPair(
+        left=FederationLeaf(name="left", repo=repo),
+        right=FederationLeaf(name="right", repo=repo),
+        name="pair",
+        repo=repo,
+    )
+    false_parent = FederationPair(
+        left=FederationLeaf(name="left", repo=repo),
+        right=FederationLeaf(name="wrong", repo=repo),
+        name="pair",
+        repo=repo,
+    )
+    repo.save_object(wanted)
+    repo.save_object(false_parent)
+    selector = Definition(
+        FederationPair,
+        SKIP_ARGS,
+        left=Definition(FederationLeaf, SKIP_ARGS, name="left"),
+        right=Definition(FederationLeaf, SKIP_ARGS, name="right"),
+    )
+
+    results = repo.query(selector).stored().defs()
+
+    assert list(results) == [wanted.definition]
+    assert results.explanation.lowering_diagnostics["semijoin_steps"]
 
 
 def test_sqlite_lowered_require_indexed_rejects_unindexed_broad_query(tmp_path):
@@ -992,6 +1111,24 @@ def test_exact_safe_count_uses_exact_index_without_final_verification(tmp_path, 
     assert stats.cdef_blobs_decoded == 0
     assert stats.lowering_strategy == "exact-safe-count"
     assert stats.lowering_diagnostics["exact_safe"] is True
+
+
+def test_exact_stored_exists_uses_exact_safe_relation_path(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="exact-safe-exists", repo=repo)
+    repo.save_object(obj)
+
+    def fail_verify(*args, **kwargs):
+        raise AssertionError("exact-safe exists should not run final query verification")
+
+    def fail_cdefs_by_id(*args, **kwargs):
+        raise AssertionError("exact-safe exists should not fetch candidate CDef pages")
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", fail_verify)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", fail_cdefs_by_id)
+
+    assert repo.query(obj.definition).stored().exists()
 
 
 def test_lowered_count_does_not_construct_result_map(tmp_path, monkeypatch):
