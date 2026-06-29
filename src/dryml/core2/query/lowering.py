@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Literal, Protocol
 
 from ..definition import ConcreteDefinition
@@ -152,6 +152,17 @@ class LoweringDiagnostics:
     scan_policy: str = "allow"
     verify_budget: int | None = None
     sqlite_plan: tuple[str, ...] = ()
+
+    def copy(self) -> "LoweringDiagnostics":
+        """Return an independent diagnostics object for a derived relation."""
+
+        return replace(self)
+
+    def copy_from(self, other: "LoweringDiagnostics") -> None:
+        """Overwrite this diagnostics object with another relation's facts."""
+
+        for info in fields(self):
+            setattr(self, info.name, getattr(other, info.name))
 
     def as_dict(self) -> dict[str, Any]:
         return {

@@ -15,6 +15,7 @@ from dryml.core2.query.selector_graph import SelectorGraph, SelectorGraphEdge, S
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core2.query.sqlite.index as sqlite_index_module
 from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core2.query.sqlite.lowering import SQLiteOptimizerPolicy
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -695,6 +696,99 @@ def test_relation_set_ops_materialization_and_owner_projection(tmp_path):
             ).fetchone() is None
 
 
+def test_materialized_relation_diagnostics_do_not_pollute_sibling_relation(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"sibling-diag-{idx}").definition for idx in range(2)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, KnownDomain(view), terminal="page", scan_policy=ScanPolicy())
+        first = view.relation_filter_domain(plan.relation(), StoredDomain(view))
+        sibling = view.relation_filter_domain(plan.relation(), StoredDomain(view))
+        materialized = view.relation_materialize(first, reason="test-diagnostics")
+
+        materialized_diagnostics = view.relation_diagnostics(materialized)
+        sibling_diagnostics = view.relation_diagnostics(sibling)
+
+    assert materialized_diagnostics.materialized_relations
+    assert materialized_diagnostics.physical_plan.strategy == "temp-relation"
+    assert sibling_diagnostics.materialized_relations == ()
+    assert sibling_diagnostics.physical_plan.strategy == "inline-cte"
+
+
+def test_multiple_materialized_relations_cleanup_on_exception(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"cleanup-exception-{idx}").definition for idx in range(2)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+    temp_names = ()
+
+    with pytest.raises(RuntimeError, match="forced"):
+        with index.read_view() as view:
+            plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+            first = view.relation_materialize(plan.relation(), reason="first")
+            second = view.relation_materialize(plan.relation(), reason="second")
+            temp_names = (
+                *view.relation_diagnostics(first).materialized_relations,
+                *view.relation_diagnostics(second).materialized_relations,
+            )
+            raise RuntimeError("forced")
+
+    assert temp_names
+    with index.read_view() as view:
+        for name in temp_names:
+            assert view._con.execute(
+                "SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name = ?",
+                (name,),
+            ).fetchone() is None
+
+
+def test_materialized_relation_can_be_paged_twice_by_keyset(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"materialized-page-{idx}").definition for idx in range(3)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        materialized = view.relation_materialize(plan.relation(), reason="page-twice")
+        first = next(view.iter_relation_cdef_batches(materialized, batch_size=1))
+        second = next(view.iter_relation_cdef_batches(materialized, after=first.next_cursor, batch_size=2))
+
+    observed = first.cdefs + second.cdefs
+    assert observed == tuple(sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+
+
+def test_optimizer_policy_materializes_reused_relation(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"policy-reused-{idx}").definition for idx in range(2)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        view.optimizer_policy = SQLiteOptimizerPolicy(materialize_if_reused=True, materialize_if_estimate_gt=100)
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        optimized = view.relation_optimize(plan.relation(), use_count=2)
+        diagnostics = view.relation_diagnostics(optimized)
+
+    assert optimized.relation_kind == "temp"
+    assert diagnostics.physical_plan.strategy == "temp-relation"
+    assert diagnostics.physical_plan.fallback_reason == "reused-relation"
+
+
+def test_optimizer_policy_keeps_small_single_use_relation_inline(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("policy-inline").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view() as view:
+        view.optimizer_policy = SQLiteOptimizerPolicy(materialize_if_reused=True, materialize_if_estimate_gt=100)
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        optimized = view.relation_optimize(plan.relation(), use_count=1)
+        diagnostics = view.relation_diagnostics(optimized)
+
+    assert optimized.relation_kind == "cte"
+    assert diagnostics.physical_plan.strategy == "inline-cte"
+    assert diagnostics.materialized_relations == ()
+
+
 def test_relation_exact_safe_count_contract(tmp_path):
     index = sqlite_index(tmp_path)
     root = SQLiteLeaf("exact-relation-count").definition
@@ -784,7 +878,7 @@ def test_lowered_physical_strategy_diagnostics(tmp_path):
 
     data = diagnostics.as_dict()
     assert data["logical_plan"]["root_node"] == 0
-    assert data["physical_plan"]["strategy"] in {"rare-anchor-cte", "root-oriented-cte"}
+    assert data["physical_plan"]["strategy"] == "inline-cte"
     assert data["physical_plan"]["inline_relations"] == ("candidates",)
     assert data["anchor_relation_kind"] == "posting"
     assert data["sqlite_plan"] == sql_plan

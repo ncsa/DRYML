@@ -9,7 +9,7 @@ from .domain import KnownDomain, NestedDomain, StoredDomain
 from .graph_plan import graph_candidate_ids
 from .lowering import CollectSink, CountSink, LoweringDiagnostics
 from .memory import MemoryStoreQueryIndex
-from .model import QueryIndexError, QueryIndexGenerationChanged, QueryIndexStatus, QueryIndexUnavailable, QueryStats, QueryVerifyBudgetExceeded, QueryWouldScanError, RefreshPolicy, SourceQueryPlan, ValidationIssue, ValidationReport
+from .model import OwnerProjection, QueryIndexError, QueryIndexGenerationChanged, QueryIndexStatus, QueryIndexUnavailable, QueryStats, QueryVerifyBudgetExceeded, QueryWouldScanError, RefreshPolicy, SourceQueryPlan, ValidationIssue, ValidationReport
 from .selector_graph import compile_selector_graph
 from .utils import chunked
 
@@ -113,6 +113,9 @@ class RepoQueryIndex:
         source_plans: list[SourceQueryPlan] = []
         generations: dict[str, int] = {}
 
+        if exact_root is not None:
+            return self._execute_exact_stored_definition(query, exact_root, stats, stop_after=stop_after)
+
         for binding in self._executable_bindings("stored"):
             try:
                 index = self._source_index_for_binding(binding)
@@ -197,6 +200,55 @@ class RepoQueryIndex:
         stats.source_plans = tuple(source_plans)
         return out, stats, {cdef: tuple(replicas.get(cdef, ())) for cdef in out}
 
+    def _execute_exact_stored_definition(
+            self,
+            query,
+            exact_root: ConcreteDefinition,
+            stats: QueryStats,
+            *,
+            stop_after: int | None):
+        source_plans: list[SourceQueryPlan] = []
+        generations: dict[str, int] = {}
+        replicas = []
+        for binding in self._executable_bindings("stored"):
+            index = self._source_index_for_binding(binding)
+            self._refresh_definition_source(index, query, exact_root, stats)
+            with index.read_view(include_cached=False) as snapshot:
+                exact_relation = getattr(snapshot, "relation_exact_stored", None)
+                exact_count = getattr(snapshot, "relation_exact_safe_count", None)
+                if exact_relation is not None and exact_count is not None:
+                    relation = exact_relation(exact_root)
+                    source_match = exact_count(relation) or 0
+                else:
+                    source_match = 1 if snapshot.filter_stored_ids(snapshot.exact_ids(exact_root)) else 0
+                generation = snapshot.generation
+            generations[binding.source_key] = generation
+            if source_match:
+                replicas.append(binding.store)
+            source_plans.append(SourceQueryPlan(
+                source_key=binding.source_key,
+                backend=_source_backend(index),
+                generation=generation,
+                candidate_count=source_match,
+                verified_count=0,
+                result_count=source_match,
+                refresh_action=stats.refresh_action,
+            ))
+            if stop_after is not None and replicas:
+                break
+        out = (exact_root,) if replicas else ()
+        stats.result_count = len(out)
+        stats.universe_size = None
+        stats.generation_vector = generations
+        stats.source_plans = tuple(source_plans)
+        stats.lowering_strategy = "exact-safe-definition"
+        stats.lowering_diagnostics = {
+            "strategy": "exact-safe-definition",
+            "exact_safe": True,
+            "terminal_stop_reason": "exact-safe-match" if stop_after is not None and replicas else None,
+        }
+        return out, stats, {exact_root: tuple(_dedupe_stores(replicas))} if replicas else {}
+
     def query_backed_definition_result_set(self, query):
         if query.domain != "stored" or query.universe is not None:
             return None
@@ -264,6 +316,9 @@ class RepoQueryIndex:
                     )
                     batches = snapshot.iter_relation_cdef_batches(relation, after=after, batch_size=page_size)
                     batch = next(batches, None)
+                    relation_diagnostics = getattr(snapshot, "relation_diagnostics", None)
+                    if relation_diagnostics is not None:
+                        diagnostics.copy_from(relation_diagnostics(relation))
                 if batch is None:
                     break
                 page_stats = QueryStats()
@@ -538,6 +593,9 @@ class RepoQueryIndex:
                         batch_size=_terminal_batch_size(stop_after),
                     )
                     batch = next(batches, None)
+                    relation_diagnostics = getattr(snapshot, "relation_diagnostics", None)
+                    if relation_diagnostics is not None:
+                        page_diagnostics.copy_from(relation_diagnostics(relation))
                     _merge_page_diagnostics(diagnostics, page_diagnostics)
                 if batch is None:
                     break
@@ -613,6 +671,9 @@ class RepoQueryIndex:
                         batch_size=_terminal_batch_size(stop_after),
                     )
                     batch = next(batches, None)
+                    relation_diagnostics = getattr(snapshot, "relation_diagnostics", None)
+                    if relation_diagnostics is not None:
+                        page_diagnostics.copy_from(relation_diagnostics(relation))
                     _merge_page_diagnostics(diagnostics, page_diagnostics)
                 if batch is None:
                     break
@@ -718,12 +779,14 @@ class RepoQueryIndex:
         replicas: dict[ConcreteDefinition, list[Any]] = {}
         source_plans: list[SourceQueryPlan] = []
         generations: dict[str, int] = {}
+        owner_relation_ops = 0
         for binding in self._executable_bindings("nested"):
             before_candidates = stats.candidate_count
             before_verified = stats.verified_count
             for _ in range(3):
                 index = self._source_index_for_binding(binding)
-                if _source_supports_lowering(index):
+                using_lowering = _source_supports_lowering(index)
+                if using_lowering:
                     _, match_ids, generation, candidate_count = self._capture_lowered_nested_matches(query, binding, stats)
                     stats.candidate_count += candidate_count
                 else:
@@ -732,7 +795,24 @@ class RepoQueryIndex:
                 with index.read_view(include_cached=False) as snapshot:
                     if snapshot.generation != generation:
                         continue
-                    projection = snapshot.project_owners(match_ids)
+                    if using_lowering and hasattr(snapshot, "relation_from_ids") and hasattr(snapshot, "relation_project_owners"):
+                        target_relation = snapshot.relation_from_ids(
+                            match_ids,
+                            domain="nested",
+                            debug_label="verified-nested-targets",
+                        )
+                        owner_relation = snapshot.relation_project_owners(target_relation)
+                        owner_batches = tuple(snapshot.iter_relation_cdef_batches(owner_relation, batch_size=256))
+                        owner_ids = frozenset(did for batch in owner_batches for did in batch.ids)
+                        owner_cdefs = tuple(cdef for batch in owner_batches for cdef in batch.cdefs)
+                        projection = OwnerProjection(
+                            owner_ids=owner_ids,
+                            cdefs=owner_cdefs,
+                            replicas={owner: (binding.store,) for owner in owner_cdefs},
+                        )
+                        owner_relation_ops += 1
+                    else:
+                        projection = snapshot.project_owners(match_ids)
                     break
             else:
                 raise QueryIndexError("Catalog generation changed repeatedly during nested owner query.")
@@ -761,6 +841,7 @@ class RepoQueryIndex:
         stats.lowering_diagnostics = {
             **(stats.lowering_diagnostics or {}),
             "owners_found": len(out),
+            "owner_projection_relation_ops": owner_relation_ops,
         }
         return out, stats, {cdef: tuple(replicas.get(cdef, ())) for cdef in out}
 
@@ -874,6 +955,9 @@ class RepoQueryIndex:
                     )
                     batches = snapshot.iter_relation_cdef_batches(relation, after=after, batch_size=256)
                     batch = next(batches, None)
+                    relation_diagnostics = getattr(snapshot, "relation_diagnostics", None)
+                    if relation_diagnostics is not None:
+                        page_diagnostics.copy_from(relation_diagnostics(relation))
                     _merge_page_diagnostics(diagnostics, page_diagnostics)
                 if batch is None:
                     break
@@ -911,7 +995,9 @@ class RepoQueryIndex:
             *,
             terminal,
             scan_policy,
-            diagnostics: LoweringDiagnostics):
+            diagnostics: LoweringDiagnostics,
+            use_count: int = 1,
+            recursive: bool = False):
         return self._lower_relation_for_domain(
             snapshot,
             selector_graph,
@@ -919,6 +1005,8 @@ class RepoQueryIndex:
             terminal=terminal,
             scan_policy=scan_policy,
             diagnostics=diagnostics,
+            use_count=use_count,
+            recursive=recursive,
         )
 
     def _lower_relation_for_domain(
@@ -929,7 +1017,9 @@ class RepoQueryIndex:
             *,
             terminal,
             scan_policy,
-            diagnostics: LoweringDiagnostics):
+            diagnostics: LoweringDiagnostics,
+            use_count: int = 1,
+            recursive: bool = False):
         plan = snapshot.lower_selector_graph(
             selector_graph,
             KnownDomain(snapshot),
@@ -938,6 +1028,12 @@ class RepoQueryIndex:
             diagnostics=diagnostics,
         )
         relation = snapshot.relation_filter_domain(plan.relation(), domain)
+        optimize = getattr(snapshot, "relation_optimize", None)
+        if optimize is not None:
+            relation = optimize(relation, use_count=use_count, recursive=recursive)
+        relation_diagnostics = getattr(snapshot, "relation_diagnostics", None)
+        if relation_diagnostics is not None:
+            diagnostics.copy_from(relation_diagnostics(relation))
         return relation, plan
 
     def open_store_index(self, binding: StoreIndexBinding):

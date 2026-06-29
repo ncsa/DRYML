@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from typing import Any
 
 from ..codecs import QueryIndexCodec, digest_blob
@@ -9,6 +10,23 @@ from ..lowering import CandidateBatch, LoweredEdgeStep, LoweredGraphPlan, Lowere
 from ..model import QueryWouldScanError
 from ..selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 from ..utils import feature_token_equal, stable_hash_to_blob
+
+
+@dataclass(frozen=True, slots=True)
+class SQLiteOptimizerPolicy:
+    """Rule-based SQLite relation strategy thresholds.
+
+    Args:
+        materialize_if_reused: Materialize a relation that one operation will scan repeatedly.
+        materialize_if_estimate_gt: Materialize relations whose estimated row count exceeds this threshold.
+        materialize_if_sql_length_gt: Materialize relations whose SQL text exceeds this many characters.
+        materialize_recursive_owner_inputs: Materialize recursive owner-projection inputs.
+    """
+
+    materialize_if_reused: bool = True
+    materialize_if_estimate_gt: int = 10_000
+    materialize_if_sql_length_gt: int = 20_000
+    materialize_recursive_owner_inputs: bool = True
 
 
 class SQLiteRelationCompiler:
@@ -76,7 +94,7 @@ class SQLiteRelationCompiler:
         diagnostics.estimated_rows = self._estimate_rows(selector_graph, domain.name)
         diagnostics.logical_plan = self._logical_plan(selector_graph, diagnostics)
         diagnostics.physical_plan = PhysicalRelationPlan(
-            strategy=diagnostics.relation_strategy,
+            strategy="inline-cte",
             root_relation_kind=diagnostics.anchor_relation_kind or "scan",
             inline_relations=diagnostics.inline_relations,
             materialized_relations=diagnostics.materialized_relations,

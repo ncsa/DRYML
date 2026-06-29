@@ -12,6 +12,7 @@ from dryml.core2.query.query import DefinitionQuery
 from dryml.core2.query.result import DefinitionResultSet, QueryBackedDefinitionResultSet
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core2.query.sqlite.index import SQLiteQueryIndexReadView
+from dryml.core2.query.sqlite.lowering import SQLiteOptimizerPolicy
 from dryml.core2.store.dir import DirStore
 
 
@@ -489,6 +490,46 @@ def test_repo_explain_reports_local_posting_anchor_kind(tmp_path):
     assert explanation.lowering_diagnostics["anchor_reason"] == "local-posting"
     assert explanation.lowering_diagnostics["anchor_relation_kind"] == "posting"
     assert any("SEARCH p" in row for row in explanation.lowering_diagnostics["sqlite_plan"])
+
+
+def test_production_large_relation_materializes_by_optimizer_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        SQLiteQueryIndexReadView,
+        "optimizer_policy",
+        SQLiteOptimizerPolicy(materialize_if_reused=False, materialize_if_estimate_gt=1),
+    )
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(3):
+        repo.save_object(FederationLeaf(name=f"materialize-prod-{idx}", repo=repo))
+
+    result = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+    diagnostics = result.explanation.lowering_diagnostics
+
+    assert list(result)
+    assert diagnostics["physical_plan"]["strategy"] == "temp-relation"
+    assert diagnostics["physical_plan"]["fallback_reason"] == "estimated-large"
+    assert diagnostics["materialized_relations"]
+    assert diagnostics["temp_rows_inserted"] >= 3
+    assert diagnostics["temp_rows_inserted"] % 3 == 0
+
+
+def test_production_small_relation_stays_inline_by_optimizer_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        SQLiteQueryIndexReadView,
+        "optimizer_policy",
+        SQLiteOptimizerPolicy(materialize_if_reused=False, materialize_if_estimate_gt=100),
+    )
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf(name="inline-prod", repo=repo))
+
+    result = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+    diagnostics = result.explanation.lowering_diagnostics
+
+    assert list(result) == [FederationLeaf(name="inline-prod").definition]
+    assert diagnostics["physical_plan"]["strategy"] == "inline-cte"
+    assert diagnostics["materialized_relations"] == ()
 
 
 def test_query_backed_resultset_fetches_first_page_only(tmp_path, monkeypatch):
@@ -1154,6 +1195,26 @@ def test_exact_stored_exists_uses_exact_safe_relation_path(tmp_path, monkeypatch
     assert repo.query(obj.definition).stored().exists()
 
 
+def test_exact_stored_one_uses_exact_safe_backend_path(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="exact-safe-one", repo=repo)
+    repo.save_object(obj)
+
+    def fail_verify(*args, **kwargs):
+        raise AssertionError("exact-safe one should not run final query verification")
+
+    def fail_cdefs_by_id(*args, **kwargs):
+        raise AssertionError("exact-safe one should not fetch candidate CDef pages")
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", fail_verify)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", fail_cdefs_by_id)
+
+    result = repo.query(obj.definition).stored().one()
+
+    assert result == obj.definition
+
+
 def test_exact_safe_terminals_do_not_import_ml_frameworks(tmp_path, monkeypatch):
     import builtins
 
@@ -1395,23 +1456,28 @@ def test_sqlite_owner_query_uses_owner_projection_not_occurrence_capture(tmp_pat
     owner = FederationParent(child=leaf, name="owner", repo=repo)
     repo.save_object(owner)
     calls = 0
-    original_owner_ids = SQLiteQueryIndexReadView._owner_ids_for_nested_ids
+    original_relation_project_owners = SQLiteQueryIndexReadView.relation_project_owners
 
     def fail_occurrence_capture(*args, **kwargs):
         raise AssertionError("owner terminal should not build occurrence paths")
 
-    def spy_owner_ids(self, ids):
+    def fail_project_owners(*args, **kwargs):
+        raise AssertionError("SQLite owner terminal should use relation_project_owners")
+
+    def spy_relation_project_owners(self, relation):
         nonlocal calls
         calls += 1
-        return original_owner_ids(self, ids)
+        return original_relation_project_owners(self, relation)
 
     monkeypatch.setattr(SQLiteQueryIndexReadView, "occurrence_snapshot_for_nested_ids", fail_occurrence_capture)
-    monkeypatch.setattr(SQLiteQueryIndexReadView, "_owner_ids_for_nested_ids", spy_owner_ids)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "project_owners", fail_project_owners)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "relation_project_owners", spy_relation_project_owners)
 
     owners = repo.query(Definition(FederationLeaf, SKIP_ARGS, name="owner-projection")).nested().owners().defs()
 
     assert list(owners) == [owner.definition]
     assert calls == 1
+    assert owners.explanation.lowering_diagnostics["owner_projection_relation_ops"] == 1
 
 
 def test_occurrence_limit_does_not_fetch_unrelated_roots(tmp_path, monkeypatch):

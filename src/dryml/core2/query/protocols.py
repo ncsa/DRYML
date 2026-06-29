@@ -134,6 +134,14 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
     def relation_exact_stored(self, cdef: ConcreteDefinition) -> CandidateRelation:
         ...
 
+    def relation_from_ids(
+            self,
+            ids: Collection[DefinitionId],
+            *,
+            domain: str = "known",
+            debug_label: str = "id-relation") -> CandidateRelation:
+        ...
+
     def relation_filter_domain(
             self,
             relation: CandidateRelation,
@@ -185,6 +193,17 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
         ...
 
     def relation_project_owners(self, relation: CandidateRelation) -> CandidateRelation:
+        ...
+
+    def relation_optimize(
+            self,
+            relation: CandidateRelation,
+            *,
+            use_count: int = 1,
+            recursive: bool = False) -> CandidateRelation:
+        ...
+
+    def relation_diagnostics(self, relation: CandidateRelation) -> LoweringDiagnostics:
         ...
 
     def relation_count_estimate(self, relation: CandidateRelation) -> int | None:

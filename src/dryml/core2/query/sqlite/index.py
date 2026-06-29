@@ -40,7 +40,7 @@ from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager
 from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, validate_schema
 from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
-from .lowering import SQLiteRelationCompiler
+from .lowering import SQLiteOptimizerPolicy, SQLiteRelationCompiler
 
 
 _CODEC = QueryIndexCodec()
@@ -743,6 +743,8 @@ class SQLiteQueryIndexReadView:
     CDefs before leaving the read view.
     """
 
+    optimizer_policy = SQLiteOptimizerPolicy()
+
     def __init__(self, con, *, source_key: str, generation: int):
         self._con = con
         self.source_key = source_key
@@ -842,6 +844,46 @@ class SQLiteQueryIndexReadView:
             estimated_size=len(ids),
             exact_safe=True,
             debug_label="exact-stored",
+        )
+        self._relation_plans[relation_id] = plan
+        return plan.relation()
+
+    def relation_from_ids(
+            self,
+            ids,
+            *,
+            domain: str = "known",
+            debug_label: str = "id-relation") -> CandidateRelation:
+        self._check_active()
+        unique_ids = tuple(dict.fromkeys(ids))
+        name = self.create_temp_relation(unique_ids)
+        relation_id = self._next_relation_id("ids")
+        diagnostics = LoweringDiagnostics(
+            strategy="sqlite-relation-ids",
+            relation_strategy="temp-relation",
+            materialized_relations=(name,),
+            estimated_rows=len(unique_ids),
+            relations_created=1,
+            temp_rows_inserted=len(unique_ids),
+            physical_plan=PhysicalRelationPlan(
+                strategy="temp-relation",
+                root_relation_kind="temp",
+                materialized_relations=(name,),
+                fallback_reason="explicit-id-relation",
+            ),
+        )
+        plan = LoweredQueryPlan(
+            source_key=self.source_key,
+            generation=self.generation,
+            domain=domain,
+            terminal="page",
+            candidate_sql=f"SELECT def_id FROM temp.{name}",
+            strategy="sqlite-relation-ids",
+            relation_id=relation_id,
+            relation_kind="temp",
+            estimated_size=len(unique_ids),
+            debug_label=debug_label,
+            diagnostics=diagnostics,
         )
         self._relation_plans[relation_id] = plan
         return plan.relation()
@@ -971,13 +1013,13 @@ class SQLiteQueryIndexReadView:
         )
         row_count = self._con.execute(f"SELECT COUNT(*) FROM temp.{name}").fetchone()[0]
         relation_id = self._next_relation_id("materialized")
-        diagnostics = plan.diagnostics
-        diagnostics.relation_strategy = "temp"
+        diagnostics = plan.diagnostics.copy()
+        diagnostics.relation_strategy = "temp-relation"
         diagnostics.materialized_relations = (*diagnostics.materialized_relations, name)
         diagnostics.relations_created += 1
         diagnostics.temp_rows_inserted += row_count
         diagnostics.physical_plan = PhysicalRelationPlan(
-            strategy="temp",
+            strategy="temp-relation",
             root_relation_kind="temp",
             inline_relations=diagnostics.inline_relations,
             materialized_relations=diagnostics.materialized_relations,
@@ -1035,6 +1077,29 @@ class SQLiteQueryIndexReadView:
             return None
         return self._con.execute(f"SELECT COUNT(*) FROM ({plan.candidate_sql})", plan.params).fetchone()[0]
 
+    def relation_diagnostics(self, relation: CandidateRelation) -> LoweringDiagnostics:
+        return self._plan_for_relation(relation).diagnostics
+
+    def relation_optimize(
+            self,
+            relation: CandidateRelation,
+            *,
+            use_count: int = 1,
+            recursive: bool = False) -> CandidateRelation:
+        plan = self._plan_for_relation(relation)
+        policy = self.optimizer_policy
+        reason = self._materialization_reason(plan, relation, use_count=use_count, recursive=recursive, policy=policy)
+        if reason is None:
+            diagnostics = plan.diagnostics
+            if diagnostics.physical_plan is not None:
+                diagnostics.physical_plan = replace(
+                    diagnostics.physical_plan,
+                    strategy="inline-cte",
+                    materialized_relations=diagnostics.materialized_relations,
+                )
+            return relation
+        return self.relation_materialize(relation, reason=reason)
+
     def explain_lowered_plan(self, plan: LoweredQueryPlan) -> tuple[str, ...]:
         self._check_active()
         compiler = SQLiteRelationCompiler(self._con, source_key=self.source_key, generation=self.generation, codec=_CODEC)
@@ -1059,7 +1124,7 @@ class SQLiteQueryIndexReadView:
             exact_safe: bool = False,
             debug_label: str = "derived-relation") -> CandidateRelation:
         relation_id = self._next_relation_id("relation")
-        diagnostics = plan.diagnostics
+        diagnostics = plan.diagnostics.copy()
         diagnostics.inline_relations = tuple(dict.fromkeys((*diagnostics.inline_relations, relation_id)))
         if diagnostics.physical_plan is not None:
             diagnostics.physical_plan = replace(
@@ -1072,12 +1137,34 @@ class SQLiteQueryIndexReadView:
             params=params,
             relation_id=relation_id,
             relation_kind=relation_kind,
-            estimated_size=None,
+            estimated_size=plan.estimated_size,
             exact_safe=exact_safe,
             debug_label=debug_label,
+            diagnostics=diagnostics,
         )
         self._relation_plans[relation_id] = derived
         return derived.relation()
+
+    def _materialization_reason(
+            self,
+            plan: LoweredQueryPlan,
+            relation: CandidateRelation,
+            *,
+            use_count: int,
+            recursive: bool,
+            policy: SQLiteOptimizerPolicy) -> str | None:
+        if relation.relation_kind == "temp":
+            return None
+        if recursive and policy.materialize_recursive_owner_inputs:
+            return "recursive-input"
+        if policy.materialize_if_reused and use_count > 1:
+            return "reused-relation"
+        estimate = relation.estimated_rows if relation.estimated_rows is not None else plan.estimated_size
+        if estimate is not None and estimate > policy.materialize_if_estimate_gt:
+            return "estimated-large"
+        if len(plan.candidate_sql) > policy.materialize_if_sql_length_gt:
+            return "sql-length-large"
+        return None
 
     def _next_relation_id(self, prefix: str) -> str:
         self._relation_counter += 1
