@@ -5,7 +5,7 @@ from typing import Any
 
 from ..codecs import QueryIndexCodec, digest_blob
 from ..domain import DefinitionDomain
-from ..lowering import CandidateBatch, LoweredEdgeStep, LoweredGraphPlan, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
+from ..lowering import CandidateBatch, LoweredEdgeStep, LoweredGraphPlan, LoweredQueryPlan, LoweringDiagnostics, LogicalRelationPlan, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
 from ..model import QueryWouldScanError
 from ..selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
 from ..utils import feature_token_equal, stable_hash_to_blob
@@ -39,6 +39,9 @@ class SQLiteRelationCompiler:
             diagnostics = LoweringDiagnostics()
         diagnostics.strategy = "sqlite-lowered"
         diagnostics.relation_strategy = "cte"
+        diagnostics.inline_relations = ("candidates",)
+        diagnostics.scan_policy = scan_policy.mode
+        diagnostics.verify_budget = scan_policy.max_verify
 
         params: list[Any] = []
         if selector_graph is None:
@@ -71,6 +74,14 @@ class SQLiteRelationCompiler:
         ORDER BY d.stable_hash, d.collision_ordinal, d.def_id
         """
         diagnostics.estimated_rows = self._estimate_rows(selector_graph, domain.name)
+        diagnostics.logical_plan = self._logical_plan(selector_graph, diagnostics)
+        diagnostics.physical_plan = PhysicalRelationPlan(
+            strategy=diagnostics.relation_strategy,
+            root_relation_kind=diagnostics.anchor_relation_kind or "scan",
+            inline_relations=diagnostics.inline_relations,
+            materialized_relations=diagnostics.materialized_relations,
+            fallback_reason=diagnostics.anchor_fallback_reason,
+        )
         return LoweredQueryPlan(
             source_key=self.source_key,
             generation=self.generation,
@@ -534,6 +545,26 @@ class SQLiteRelationCompiler:
             raise QueryWouldScanError(reason)
         if scan_policy.mode == "warn":
             warnings.warn(f"DRYML query requires scan fallback: {reason}", RuntimeWarning, stacklevel=3)
+
+    def _logical_plan(self, selector_graph: SelectorGraph | None, diagnostics: LoweringDiagnostics) -> LogicalRelationPlan:
+        if selector_graph is None:
+            return LogicalRelationPlan(
+                anchor_node=None,
+                anchor_reason=diagnostics.anchor_reason,
+                root_node=None,
+                propagation_steps=diagnostics.propagation_steps,
+                residual_constraints=("selector:none",),
+            )
+        return LogicalRelationPlan(
+            anchor_node=diagnostics.anchor_node,
+            anchor_reason=diagnostics.anchor_reason,
+            root_node=selector_graph.root,
+            propagation_steps=diagnostics.propagation_steps,
+            residual_constraints=tuple(
+                f"node:{node.node_id}:local={len(node.local_requirements)}:exact={node.exact_definition is not None}"
+                for node in selector_graph.nodes
+            ),
+        )
 
 
 def _has_indexable_requirement(selector_graph: SelectorGraph) -> bool:

@@ -398,6 +398,18 @@ def test_explain_reports_scan_reason(tmp_path):
 
     assert explanation.scan_required
     assert "no indexable" in explanation.scan_reason
+    assert explanation.lowering_diagnostics["scan_policy"] == "allow"
+
+
+def test_explain_reports_verify_budget(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(FederationLeaf("budget-explain", repo=repo))
+
+    explanation = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().max_verify(3).explain()
+
+    assert explanation.lowering_diagnostics["verify_budget"] == 3
+    assert explanation.lowering_diagnostics["scan_policy"] == "allow"
 
 
 def test_sqlite_lowered_max_verify_budget_is_enforced(tmp_path):
@@ -429,9 +441,11 @@ def test_sqlite_explain_analyze_reports_lowering_counts(tmp_path):
 
     assert plan_only.verified_count == 0
     assert analyzed.verified_count == 1
+    assert analyzed.python_verifications == 1
     assert analyzed.cdef_blobs_decoded >= 1
     assert analyzed.pages_fetched == 1
     assert analyzed.lowering_strategy == "sqlite-lowered"
+    assert analyzed.terminal_stop_reason is None
 
 
 def test_sqlite_plan_diagnostics_available(tmp_path):
@@ -443,6 +457,8 @@ def test_sqlite_plan_diagnostics_available(tmp_path):
 
     assert explanation.lowering_diagnostics["sqlite_plan"]
     assert explanation.lowering_diagnostics["strategy"] == "sqlite-lowered"
+    assert explanation.lowering_diagnostics["logical_plan"] is not None
+    assert explanation.lowering_diagnostics["physical_plan"] is not None
 
 
 def test_sqlite_plan_diagnostics_are_opt_in(tmp_path):
@@ -743,7 +759,8 @@ def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
 
     definitions = repo2.query(selector).nested().definitions().defs()
     owners = repo2.query(selector).nested().owners().defs()
-    occurrences = tuple(repo2.query(selector).nested().max_occurrences(10).execute())
+    occurrence_results = repo2.query(selector).nested().max_occurrences(10).execute()
+    occurrences = tuple(occurrence_results)
 
     assert list(definitions) == [leaf.definition]
     assert list(owners) == [owner.definition]
@@ -754,6 +771,12 @@ def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
     assert str(occurrences[0].path) == "$.child"
     assert definitions.explanation.generation_vector == {repo2_store.catalog_key(): 1}
     assert owners.explanation.source_plans[0].result_count == 1
+    assert owners.explanation.lowering_diagnostics["owners_found"] == 1
+    assert occurrence_results.explanation.lowering_diagnostics["occurrence_nested_targets"] == 1
+    assert occurrence_results.explanation.lowering_diagnostics["occurrence_nodes_captured"] >= 2
+    assert occurrence_results.explanation.lowering_diagnostics["occurrence_incoming_edges_captured"] >= 1
+    assert occurrence_results.explanation.lowering_diagnostics["occurrence_owners_found"] == 1
+    assert occurrence_results.explanation.lowering_diagnostics["occurrence_path_limit"] == 10
 
 
 def test_sqlite_multistore_occurrences_deduplicate_and_keep_replica_order(tmp_path):
@@ -1129,6 +1152,31 @@ def test_exact_stored_exists_uses_exact_safe_relation_path(tmp_path, monkeypatch
     monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", fail_cdefs_by_id)
 
     assert repo.query(obj.definition).stored().exists()
+
+
+def test_exact_safe_terminals_do_not_import_ml_frameworks(tmp_path, monkeypatch):
+    import builtins
+
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="import-safe", repo=repo)
+    repo.save_object(obj)
+    original_import = builtins.__import__
+    blocked = []
+
+    def spy_import(name, *args, **kwargs):
+        if name == "tensorflow" or name.startswith("tensorflow.") or name == "torch" or name.startswith("torch."):
+            blocked.append(name)
+            raise AssertionError(f"exact-safe terminal imported {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", spy_import)
+
+    query = repo.query(obj.definition).stored()
+
+    assert query.count() == 1
+    assert query.exists()
+    assert blocked == []
 
 
 def test_lowered_count_does_not_construct_result_map(tmp_path, monkeypatch):

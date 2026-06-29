@@ -1,4 +1,5 @@
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -646,6 +647,54 @@ def test_relation_operations_parent_child_domain_and_semijoin(tmp_path):
     assert semijoin_batch.cdefs == (owner.definition,)
 
 
+def test_relation_set_ops_materialization_and_owner_projection(tmp_path):
+    index = sqlite_index(tmp_path)
+    leaf = SQLiteLeaf("owner-child")
+    owner = SQLiteParent(child=leaf, name="owner-root")
+    other = SQLiteLeaf("other-root")
+    graph = ConcreteDefinitionGraph.from_roots([owner.definition, other.definition])
+    index.register_stored_roots(graph, [owner.definition, other.definition])
+
+    temp_names = ()
+    with index.read_view() as view:
+        all_plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        owner_exact = view.relation_exact_stored(owner.definition)
+        other_exact = view.relation_exact_stored(other.definition)
+        intersected = view.relation_intersect(all_plan.relation(), owner_exact)
+        unioned = view.relation_union(owner_exact, other_exact)
+        materialized = view.relation_materialize(unioned, reason="test-reuse")
+
+        leaf_plan = view.lower_selector_graph(
+            compile_selector_graph(leaf.definition),
+            KnownDomain(view),
+            terminal="page",
+            scan_policy=ScanPolicy(),
+        )
+        owner_relation = view.relation_project_owners(view.relation_filter_domain(leaf_plan.relation(), NestedDomain(view)))
+
+        intersected_batch = next(view.iter_relation_cdef_batches(intersected, batch_size=10))
+        materialized_batch = next(view.iter_relation_cdef_batches(materialized, batch_size=10))
+        owners_batch = next(view.iter_relation_cdef_batches(owner_relation, batch_size=10))
+        materialized_diagnostics = view._relation_plans[materialized.relation_id].diagnostics
+        temp_names = tuple(materialized_diagnostics.materialized_relations)
+
+        assert materialized.relation_kind == "temp"
+        assert materialized.estimated_rows == 2
+        assert materialized_diagnostics.physical_plan.materialized_relations
+        assert materialized_diagnostics.temp_rows_inserted == 2
+
+    assert intersected_batch.cdefs == (owner.definition,)
+    assert set(materialized_batch.cdefs) == {owner.definition, other.definition}
+    assert owners_batch.cdefs == (owner.definition,)
+
+    with index.read_view() as view:
+        for name in temp_names or ():
+            assert view._con.execute(
+                "SELECT name FROM sqlite_temp_master WHERE type = 'table' AND name = ?",
+                (name,),
+            ).fetchone() is None
+
+
 def test_relation_exact_safe_count_contract(tmp_path):
     index = sqlite_index(tmp_path)
     root = SQLiteLeaf("exact-relation-count").definition
@@ -676,6 +725,22 @@ def test_candidate_relation_preserves_generation(tmp_path):
     assert relation.generation == index.current_generation()
 
 
+def test_candidate_relation_rejects_wrong_source_and_generation(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("wrong-generation").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view() as view:
+        relation = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy()).relation()
+        wrong_source = replace(relation, source_key="other-source")
+        wrong_generation = replace(relation, generation=relation.generation + 1)
+
+        with pytest.raises(QueryIndexError, match="not compatible"):
+            next(view.iter_relation_cdef_batches(wrong_source, batch_size=1))
+        with pytest.raises(QueryIndexError, match="not compatible"):
+            next(view.iter_relation_cdef_batches(wrong_generation, batch_size=1))
+
+
 def test_candidate_relation_exposes_v3_metadata(tmp_path):
     index = sqlite_index(tmp_path)
     roots = [SQLiteLeaf(f"metadata-{idx}").definition for idx in range(2)]
@@ -695,6 +760,34 @@ def test_candidate_relation_exposes_v3_metadata(tmp_path):
     assert relation.estimated_rows == 2
     assert relation.exact_safe is False
     assert relation.debug_label == "candidate_relation"
+
+
+def test_lowered_physical_strategy_diagnostics(tmp_path):
+    index = sqlite_index(tmp_path)
+    wanted = SQLiteLeaf("physical-wanted")
+    other = SQLiteLeaf("physical-other")
+    index.register_stored_roots(
+        ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition]),
+        [wanted.definition, other.definition],
+    )
+
+    with index.read_view() as view:
+        diagnostics = LoweringDiagnostics()
+        plan = view.lower_selector_graph(
+            compile_selector_graph(Definition(SQLiteLeaf, SKIP_ARGS, name="physical-wanted")),
+            StoredDomain(view),
+            terminal="explain",
+            scan_policy=ScanPolicy(),
+            diagnostics=diagnostics,
+        )
+        sql_plan = view.explain_lowered_plan(plan)
+
+    data = diagnostics.as_dict()
+    assert data["logical_plan"]["root_node"] == 0
+    assert data["physical_plan"]["strategy"] in {"rare-anchor-cte", "root-oriented-cte"}
+    assert data["physical_plan"]["inline_relations"] == ("candidates",)
+    assert data["anchor_relation_kind"] == "posting"
+    assert data["sqlite_plan"] == sql_plan
 
 
 def test_candidate_relation_empty(tmp_path):

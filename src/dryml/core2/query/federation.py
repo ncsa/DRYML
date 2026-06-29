@@ -758,6 +758,10 @@ class RepoQueryIndex:
         stats.universe_size = None
         stats.generation_vector = generations
         stats.source_plans = tuple(source_plans)
+        stats.lowering_diagnostics = {
+            **(stats.lowering_diagnostics or {}),
+            "owners_found": len(out),
+        }
         return out, stats, {cdef: tuple(replicas.get(cdef, ())) for cdef in out}
 
     def execute_nested_occurrences(self, query):
@@ -803,6 +807,20 @@ class RepoQueryIndex:
         stats.universe_size = None
         stats.generation_vector = generations
         stats.source_plans = tuple(source_plans)
+        stats.lowering_diagnostics = {
+            **(stats.lowering_diagnostics or {}),
+            "occurrence_nested_targets": sum(len(traversal.targets) for traversal in traversals),
+            "occurrence_nodes_captured": sum(len(traversal.cdefs) for traversal in traversals),
+            "occurrence_incoming_edges_captured": sum(
+                len(edges)
+                for traversal in traversals
+                for edges in traversal.incoming.values()
+            ),
+            "occurrence_owners_found": sum(len(traversal.stored_ids) for traversal in traversals),
+            "occurrence_path_limit": query.occurrence_limit,
+            "occurrence_paths_emitted": None,
+            "occurrence_path_limit_reached": None,
+        }
 
         def occurrence_factory():
             yielded = 0
@@ -1303,6 +1321,12 @@ def _merge_page_diagnostics(total: LoweringDiagnostics, page: LoweringDiagnostic
     total.relations_created += page.relations_created
     total.relations_dropped += page.relations_dropped
     total.temp_rows_inserted += page.temp_rows_inserted
+    total.inline_relations = tuple(dict.fromkeys((*total.inline_relations, *page.inline_relations)))
+    total.materialized_relations = tuple(dict.fromkeys((*total.materialized_relations, *page.materialized_relations)))
+    if total.logical_plan is None:
+        total.logical_plan = page.logical_plan
+    if total.physical_plan is None:
+        total.physical_plan = page.physical_plan
 
 
 def _terminal_batch_size(stop_after: int | None) -> int:

@@ -165,6 +165,28 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
             unordered: bool = False) -> CandidateRelation:
         ...
 
+    def relation_intersect(
+            self,
+            left: CandidateRelation,
+            right: CandidateRelation) -> CandidateRelation:
+        ...
+
+    def relation_union(
+            self,
+            left: CandidateRelation,
+            right: CandidateRelation) -> CandidateRelation:
+        ...
+
+    def relation_materialize(
+            self,
+            relation: CandidateRelation,
+            *,
+            reason: str | None = None) -> CandidateRelation:
+        ...
+
+    def relation_project_owners(self, relation: CandidateRelation) -> CandidateRelation:
+        ...
+
     def relation_count_estimate(self, relation: CandidateRelation) -> int | None:
         ...
 

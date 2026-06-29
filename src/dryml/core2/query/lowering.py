@@ -87,6 +87,28 @@ class LoweredGraphPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class LogicalRelationPlan:
+    """Backend-neutral relation-planning summary for optimizer diagnostics."""
+
+    anchor_node: int | None
+    anchor_reason: str | None
+    root_node: int | None
+    propagation_steps: tuple[str, ...] = ()
+    residual_constraints: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PhysicalRelationPlan:
+    """Backend physical relation strategy summary for optimizer diagnostics."""
+
+    strategy: str
+    root_relation_kind: str
+    inline_relations: tuple[str, ...] = ()
+    materialized_relations: tuple[str, ...] = ()
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateBatch:
     """CDef batch fetched from a lowered relation after a short read view."""
 
@@ -108,7 +130,11 @@ class LoweringDiagnostics:
     anchor_fallback_reason: str | None = None
     propagation_steps: tuple[str, ...] = ()
     semijoin_steps: tuple[str, ...] = ()
+    logical_plan: LogicalRelationPlan | None = None
+    physical_plan: PhysicalRelationPlan | None = None
     relation_strategy: str = "cte"
+    inline_relations: tuple[str, ...] = ()
+    materialized_relations: tuple[str, ...] = ()
     estimated_rows: int | None = None
     sql_statements_executed: int = 0
     candidate_rows_read: int = 0
@@ -123,6 +149,8 @@ class LoweringDiagnostics:
     terminal_stop_reason: str | None = None
     scan_required: bool = False
     scan_reason: str | None = None
+    scan_policy: str = "allow"
+    verify_budget: int | None = None
     sqlite_plan: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -136,7 +164,23 @@ class LoweringDiagnostics:
             "anchor_fallback_reason": self.anchor_fallback_reason,
             "propagation_steps": self.propagation_steps,
             "semijoin_steps": self.semijoin_steps,
+            "logical_plan": None if self.logical_plan is None else {
+                "anchor_node": self.logical_plan.anchor_node,
+                "anchor_reason": self.logical_plan.anchor_reason,
+                "root_node": self.logical_plan.root_node,
+                "propagation_steps": self.logical_plan.propagation_steps,
+                "residual_constraints": self.logical_plan.residual_constraints,
+            },
+            "physical_plan": None if self.physical_plan is None else {
+                "strategy": self.physical_plan.strategy,
+                "root_relation_kind": self.physical_plan.root_relation_kind,
+                "inline_relations": self.physical_plan.inline_relations,
+                "materialized_relations": self.physical_plan.materialized_relations,
+                "fallback_reason": self.physical_plan.fallback_reason,
+            },
             "relation_strategy": self.relation_strategy,
+            "inline_relations": self.inline_relations,
+            "materialized_relations": self.materialized_relations,
             "estimated_rows": self.estimated_rows,
             "sql_statements_executed": self.sql_statements_executed,
             "candidate_rows_read": self.candidate_rows_read,
@@ -151,6 +195,8 @@ class LoweringDiagnostics:
             "terminal_stop_reason": self.terminal_stop_reason,
             "scan_required": self.scan_required,
             "scan_reason": self.scan_reason,
+            "scan_policy": self.scan_policy,
+            "verify_budget": self.verify_budget,
             "sqlite_plan": self.sqlite_plan,
         }
 

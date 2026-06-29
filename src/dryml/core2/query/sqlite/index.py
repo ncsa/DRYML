@@ -34,7 +34,7 @@ from ..model import (
     ValidationIssue,
     ValidationReport,
 )
-from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
+from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager
@@ -928,6 +928,104 @@ class SQLiteQueryIndexReadView:
             debug_label=f"{parent_relation.debug_label}:semijoin-child-exists",
         )
 
+    def relation_intersect(self, left: CandidateRelation, right: CandidateRelation) -> CandidateRelation:
+        left_plan = self._plan_for_relation(left)
+        right_plan = self._plan_for_relation(right)
+        candidate_sql = f"""
+        SELECT def_id FROM ({left_plan.candidate_sql})
+        INTERSECT
+        SELECT def_id FROM ({right_plan.candidate_sql})
+        """
+        relation = self._register_derived_relation(
+            left_plan,
+            candidate_sql,
+            params=(*left_plan.params, *right_plan.params),
+            exact_safe=left.exact_safe and right.exact_safe,
+            debug_label=f"{left.debug_label}:intersect:{right.debug_label}",
+        )
+        return relation
+
+    def relation_union(self, left: CandidateRelation, right: CandidateRelation) -> CandidateRelation:
+        left_plan = self._plan_for_relation(left)
+        right_plan = self._plan_for_relation(right)
+        candidate_sql = f"""
+        SELECT def_id FROM ({left_plan.candidate_sql})
+        UNION
+        SELECT def_id FROM ({right_plan.candidate_sql})
+        """
+        relation = self._register_derived_relation(
+            left_plan,
+            candidate_sql,
+            params=(*left_plan.params, *right_plan.params),
+            exact_safe=left.exact_safe and right.exact_safe,
+            debug_label=f"{left.debug_label}:union:{right.debug_label}",
+        )
+        return relation
+
+    def relation_materialize(self, relation: CandidateRelation, *, reason: str | None = None) -> CandidateRelation:
+        plan = self._plan_for_relation(relation)
+        name = self._create_empty_temp_relation()
+        self._con.execute(
+            f"INSERT OR IGNORE INTO temp.{name} (def_id) SELECT DISTINCT def_id FROM ({plan.candidate_sql})",
+            plan.params,
+        )
+        row_count = self._con.execute(f"SELECT COUNT(*) FROM temp.{name}").fetchone()[0]
+        relation_id = self._next_relation_id("materialized")
+        diagnostics = plan.diagnostics
+        diagnostics.relation_strategy = "temp"
+        diagnostics.materialized_relations = (*diagnostics.materialized_relations, name)
+        diagnostics.relations_created += 1
+        diagnostics.temp_rows_inserted += row_count
+        diagnostics.physical_plan = PhysicalRelationPlan(
+            strategy="temp",
+            root_relation_kind="temp",
+            inline_relations=diagnostics.inline_relations,
+            materialized_relations=diagnostics.materialized_relations,
+            fallback_reason=reason or diagnostics.anchor_fallback_reason,
+        )
+        materialized = replace(
+            plan,
+            candidate_sql=f"SELECT def_id FROM temp.{name}",
+            params=(),
+            relation_id=relation_id,
+            relation_kind="temp",
+            estimated_size=row_count,
+            debug_label=f"{relation.debug_label}:materialized",
+            diagnostics=diagnostics,
+        )
+        self._relation_plans[relation_id] = materialized
+        return materialized.relation()
+
+    def relation_project_owners(self, relation: CandidateRelation) -> CandidateRelation:
+        plan = self._plan_for_relation(relation)
+        candidate_sql = f"""
+        WITH RECURSIVE
+            targets(def_id) AS ({plan.candidate_sql}),
+            ancestors(current_id) AS (
+                SELECT definition_edges.parent_def_id
+                FROM targets
+                JOIN definition_edges
+                  ON definition_edges.child_def_id = targets.def_id
+                UNION
+                SELECT definition_edges.parent_def_id
+                FROM ancestors
+                JOIN definition_edges
+                  ON definition_edges.child_def_id = ancestors.current_id
+            )
+        SELECT DISTINCT stored_roots.def_id
+        FROM ancestors
+        JOIN stored_roots
+          ON stored_roots.def_id = ancestors.current_id
+        """
+        derived = self._register_derived_relation(
+            plan,
+            candidate_sql,
+            params=plan.params,
+            exact_safe=False,
+            debug_label=f"{relation.debug_label}:owner-projection",
+        )
+        return derived
+
     def relation_count_estimate(self, relation: CandidateRelation) -> int | None:
         return relation.estimated_rows
 
@@ -961,6 +1059,13 @@ class SQLiteQueryIndexReadView:
             exact_safe: bool = False,
             debug_label: str = "derived-relation") -> CandidateRelation:
         relation_id = self._next_relation_id("relation")
+        diagnostics = plan.diagnostics
+        diagnostics.inline_relations = tuple(dict.fromkeys((*diagnostics.inline_relations, relation_id)))
+        if diagnostics.physical_plan is not None:
+            diagnostics.physical_plan = replace(
+                diagnostics.physical_plan,
+                inline_relations=diagnostics.inline_relations,
+            )
         derived = replace(
             plan,
             candidate_sql=candidate_sql,
@@ -987,13 +1092,17 @@ class SQLiteQueryIndexReadView:
 
     def create_temp_relation(self, ids) -> str:
         self._check_active()
-        self._temp_relation_counter += 1
-        name = f"temp_candidate_{self._temp_relation_counter}"
-        self._con.execute(f"CREATE TEMP TABLE {name} (def_id INTEGER PRIMARY KEY) WITHOUT ROWID")
-        self._temp_relations.append(name)
+        name = self._create_empty_temp_relation()
         unique_ids = tuple(dict.fromkeys(ids))
         if unique_ids:
             self._con.executemany(f"INSERT OR IGNORE INTO {name} (def_id) VALUES (?)", ((did,) for did in unique_ids))
+        return name
+
+    def _create_empty_temp_relation(self) -> str:
+        self._temp_relation_counter += 1
+        name = f"dryml_rel_{self._temp_relation_counter}"
+        self._con.execute(f"CREATE TEMP TABLE {name} (def_id INTEGER PRIMARY KEY) WITHOUT ROWID")
+        self._temp_relations.append(name)
         return name
 
     def drop_temp_relations(self) -> None:
