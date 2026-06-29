@@ -506,6 +506,47 @@ def test_lowered_child_projection_uses_edge_index(tmp_path):
     assert any("SEARCH e" in row and ("definition_edges" in row or "PRIMARY KEY" in row) for row in explain)
 
 
+def test_lowered_multibranch_semijoin_filters_before_cdef_decode(tmp_path, monkeypatch):
+    index = sqlite_index(tmp_path)
+    wanted = SQLitePair(left=SQLiteLeaf(name="common-left"), right=SQLiteLeaf(name="rare-right"), name="wanted")
+    wrong_left = SQLitePair(left=SQLiteLeaf(name="wrong-left"), right=SQLiteLeaf(name="rare-right"), name="wrong-left")
+    distractors = [
+        SQLitePair(left=SQLiteLeaf(name="common-left"), right=SQLiteLeaf(name=f"other-{idx}"), name=f"other-{idx}")
+        for idx in range(8)
+    ]
+    roots = [wanted.definition, wrong_left.definition, *(obj.definition for obj in distractors)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+    selector = Definition(
+        SQLitePair,
+        SKIP_ARGS,
+        left=Definition(SQLiteLeaf, SKIP_ARGS, name="common-left"),
+        right=Definition(SQLiteLeaf, SKIP_ARGS, name="rare-right"),
+    )
+    fetched = []
+    original = sqlite_index_module.SQLiteQueryIndexReadView.cdefs_by_id
+
+    def spy_cdefs_by_id(self, ids):
+        result = original(self, ids)
+        fetched.append(tuple(ids))
+        return result
+
+    monkeypatch.setattr(sqlite_index_module.SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(
+            compile_selector_graph(selector),
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy(),
+        )
+        batch = next(view.iter_candidate_cdef_batches(plan, batch_size=20))
+
+    assert batch.cdefs == (wanted.definition,)
+    assert len(fetched) == 1
+    assert len(fetched[0]) == 1
+    assert "EXISTS" in plan.candidate_sql
+
+
 def test_candidate_relation_pages_without_cursor_escape(tmp_path):
     index = sqlite_index(tmp_path)
     roots = [SQLiteLeaf(f"relation-{idx}").definition for idx in range(3)]
@@ -520,13 +561,48 @@ def test_candidate_relation_pages_without_cursor_escape(tmp_path):
             diagnostics=LoweringDiagnostics(),
         )
         relation = plan.relation()
-        first = next(view.iter_candidate_cdef_batches(plan, batch_size=2))
+        first = next(view.iter_relation_cdef_batches(relation, batch_size=2))
 
     assert isinstance(relation, CandidateRelation)
     assert first.cdefs
     assert first.next_cursor is not None
     assert not hasattr(first.next_cursor, "cursor")
     assert not hasattr(first.next_cursor, "connection")
+
+
+def test_candidate_relation_invalid_after_read_view(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("closed-view").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+
+    with pytest.raises(QueryIndexError, match="read view is closed"):
+        next(view.iter_relation_cdef_batches(plan.relation(), batch_size=1))
+
+
+def test_candidate_relation_keyset_cursor_roundtrip(tmp_path):
+    index = sqlite_index(tmp_path)
+    roots = [SQLiteLeaf(f"cursor-{idx}").definition for idx in range(3)]
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(roots), roots)
+
+    with index.read_view() as view:
+        plan = view.lower_selector_graph(None, StoredDomain(view), terminal="page", scan_policy=ScanPolicy())
+        relation = plan.relation()
+        first = next(view.iter_relation_cdef_batches(relation, batch_size=1))
+        cursor = first.next_cursor
+        roundtrip = type(cursor)(
+            source_key=cursor.source_key,
+            generation=cursor.generation,
+            stable_hash=cursor.stable_hash,
+            collision_ordinal=cursor.collision_ordinal,
+            definition_id=cursor.definition_id,
+            direction=cursor.direction,
+        )
+        second = next(view.iter_relation_cdef_batches(relation, after=roundtrip, batch_size=1))
+
+    assert second.cdefs[0] != first.cdefs[0]
 
 
 def test_candidate_relation_preserves_generation(tmp_path):

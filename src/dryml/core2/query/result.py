@@ -269,6 +269,8 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
             yield cached
         for cdef, replicas in self._page_factory():
             if cdef in seen:
+                existing = self._replica_cache.get(cdef, ())
+                self._replica_cache[cdef] = _merge_store_tuple(existing, tuple(replicas))
                 continue
             seen.add(cdef)
             self._definition_cache.append(cdef)
@@ -287,6 +289,13 @@ class QueryBackedDefinitionResultSet(DefinitionResultSet):
         object.__setattr__(self, "_definitions", definitions)
         object.__setattr__(self, "_replicas", dict(self._replica_cache))
         object.__setattr__(self, "_cache_complete", True)
+
+
+def _merge_store_tuple(left: tuple[Any, ...], right: tuple[Any, ...]) -> tuple[Any, ...]:
+    merged: dict[str, Any] = {}
+    for store in (*left, *right):
+        merged.setdefault(_store_key(store), store)
+    return tuple(merged[key] for key in sorted(merged))
 
 
 @dataclass(frozen=True, slots=True)

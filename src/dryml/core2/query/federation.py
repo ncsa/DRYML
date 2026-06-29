@@ -235,7 +235,6 @@ class RepoQueryIndex:
             generation_vector: Mapping[str, int],
             page_size: int = _QUERY_BACKED_PAGE_SIZE):
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
-        seen: dict[ConcreteDefinition, ConcreteDefinition] = {}
         for binding in self._executable_bindings("stored"):
             index = self._source_index_for_binding(binding)
             expected_generation = generation_vector.get(binding.source_key)
@@ -263,9 +262,6 @@ class RepoQueryIndex:
                 page_stats = QueryStats()
                 matches = query._verify_cdefs(batch.cdefs, stats=page_stats)
                 for cdef in matches:
-                    if cdef in seen:
-                        continue
-                    seen[cdef] = cdef
                     yield cdef, (binding.store,)
                 after = batch.next_cursor
 
@@ -282,6 +278,8 @@ class RepoQueryIndex:
         stats = QueryStats(refresh_action="federated")
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
         exact_root = query.selector if isinstance(query.selector, ConcreteDefinition) else None
+        if exact_root is not None and query.domain == "stored":
+            return self._count_exact_stored_definition(query, exact_root, stats, stop_after=stop_after)
         merged = _CDefDedupeCounter()
         source_plans: list[SourceQueryPlan] = []
         generations: dict[str, int] = {}
@@ -389,6 +387,48 @@ class RepoQueryIndex:
         stats.source_plans = tuple(source_plans)
         return merged.count, stats
 
+    def _count_exact_stored_definition(
+            self,
+            query,
+            exact_root: ConcreteDefinition,
+            stats: QueryStats,
+            *,
+            stop_after: int | None) -> tuple[int, QueryStats]:
+        source_plans: list[SourceQueryPlan] = []
+        generations: dict[str, int] = {}
+        found = False
+        for binding in self._executable_bindings("stored"):
+            index = self._source_index_for_binding(binding)
+            self._refresh_definition_source(index, query, exact_root, stats)
+            with index.read_view(include_cached=False) as snapshot:
+                ids = snapshot.filter_stored_ids(snapshot.exact_ids(exact_root))
+                generation = snapshot.generation
+            generations[binding.source_key] = generation
+            source_match = 1 if ids else 0
+            found = found or bool(ids)
+            source_plans.append(SourceQueryPlan(
+                source_key=binding.source_key,
+                backend=_source_backend(index),
+                generation=generation,
+                candidate_count=len(ids),
+                verified_count=0,
+                result_count=source_match,
+                refresh_action=stats.refresh_action,
+            ))
+            if stop_after is not None and found:
+                break
+        stats.result_count = 1 if found else 0
+        stats.universe_size = None
+        stats.generation_vector = generations
+        stats.source_plans = tuple(source_plans)
+        stats.lowering_strategy = "exact-safe-count"
+        stats.lowering_diagnostics = {
+            "strategy": "exact-safe-count",
+            "exact_safe": True,
+            "terminal_stop_reason": "first-match" if stop_after is not None and found else None,
+        }
+        return stats.result_count, stats
+
     def explain_definition_domain(self, query, *, sql: bool = False) -> QueryStats:
         stats = QueryStats(refresh_action="federated-plan")
         selector_graph = compile_selector_graph(query.selector, class_match=query.class_match_policy)
@@ -472,7 +512,11 @@ class RepoQueryIndex:
                     if snapshot.generation != generation:
                         generation_changed = True
                         break
-                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=256)
+                    batches = snapshot.iter_candidate_cdef_batches(
+                        plan,
+                        after=after,
+                        batch_size=_terminal_batch_size(stop_after),
+                    )
                     batch = next(batches, None)
                 if batch is None:
                     break
@@ -534,7 +578,11 @@ class RepoQueryIndex:
                     if snapshot.generation != generation:
                         generation_changed = True
                         break
-                    batches = snapshot.iter_candidate_cdef_batches(plan, after=after, batch_size=256)
+                    batches = snapshot.iter_candidate_cdef_batches(
+                        plan,
+                        after=after,
+                        batch_size=_terminal_batch_size(stop_after),
+                    )
                     batch = next(batches, None)
                 if batch is None:
                     break
@@ -1168,6 +1216,12 @@ def _combined_cdef_count(
         if cdef not in merged:
             count += 1
     return count
+
+
+def _terminal_batch_size(stop_after: int | None) -> int:
+    if stop_after is None:
+        return 256
+    return max(1, min(256, stop_after))
 
 
 def _dedupe_stores(stores: Sequence[Any]) -> tuple[Any, ...]:

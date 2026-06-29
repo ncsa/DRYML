@@ -33,7 +33,7 @@ from ..model import (
     ValidationIssue,
     ValidationReport,
 )
-from ..lowering import LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
+from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager
@@ -749,6 +749,7 @@ class SQLiteQueryIndexReadView:
         self._active = True
         self._temp_relations: list[str] = []
         self._temp_relation_counter = 0
+        self._relation_plans: dict[str, LoweredQueryPlan] = {}
 
     def close(self) -> None:
         self.drop_temp_relations()
@@ -781,7 +782,7 @@ class SQLiteQueryIndexReadView:
             codec=_CODEC,
             cdef_loader=self.cdefs_by_id,
         )
-        return compiler.lower_selector_graph(
+        plan = compiler.lower_selector_graph(
             selector_graph,
             domain,
             terminal=terminal,
@@ -789,6 +790,8 @@ class SQLiteQueryIndexReadView:
             diagnostics=diagnostics,
             within_relation=within_relation,
         )
+        self._relation_plans[plan.relation_id] = plan
+        return plan
 
     def iter_candidate_cdef_batches(
             self,
@@ -805,6 +808,20 @@ class SQLiteQueryIndexReadView:
             cdef_loader=self.cdefs_by_id,
         )
         return compiler.iter_candidate_cdef_batches(plan, after=after, batch_size=batch_size)
+
+    def iter_relation_cdef_batches(
+            self,
+            relation: CandidateRelation,
+            *,
+            after: PagedResultCursor | None = None,
+            batch_size: int):
+        self._check_active()
+        if relation.source_key != self.source_key or relation.generation != self.generation:
+            raise QueryIndexError("CandidateRelation is not compatible with this read view.")
+        plan = self._relation_plans.get(relation.relation_id)
+        if plan is None:
+            raise QueryIndexError("CandidateRelation is not owned by this read view.")
+        return self.iter_candidate_cdef_batches(plan, after=after, batch_size=batch_size)
 
     def explain_lowered_plan(self, plan: LoweredQueryPlan) -> tuple[str, ...]:
         self._check_active()

@@ -474,6 +474,27 @@ def test_query_backed_multistore_order_stable(tmp_path, monkeypatch):
     assert tuple(results) == (left.definition, right.definition)
 
 
+def test_query_backed_paging_dedupes_same_cdef_across_stores(tmp_path, monkeypatch):
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    obj = FederationLeaf(name="query-backed-duplicate", repo=repo)
+    repo.save_object(obj, store=store1)
+    repo.save_object(obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    results = repo2.query(None).stored().defs()
+
+    assert isinstance(results, QueryBackedDefinitionResultSet)
+    assert tuple(results) == (obj.definition,)
+    replica_dirs = {store.base_dir for store in results.replicas(obj.definition)}
+    assert replica_dirs == {repo2.stores[0].base_dir, repo2.stores[1].base_dir}
+
+
 def test_sqlite_objects_terminal_uses_query_replica_snapshot(tmp_path, monkeypatch):
     store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
@@ -809,8 +830,7 @@ def test_sqlite_exists_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
 
     assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().exists()
 
-    assert fetched == [256]
-    assert sum(fetched) < 270
+    assert fetched == [1]
 
 
 def test_sqlite_one_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
@@ -832,8 +852,7 @@ def test_sqlite_one_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
     with pytest.raises(QueryCardinalityError):
         repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().one()
 
-    assert fetched == [256]
-    assert sum(fetched) < 270
+    assert fetched == [2]
 
 
 def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatch):
@@ -861,7 +880,7 @@ def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatc
 
     assert repo.query(selector).stored().exists()
 
-    assert fetched == [256, 14]
+    assert fetched == [1] * 270
     assert sum(fetched) == 270
 
 
@@ -920,6 +939,31 @@ def test_sqlite_count_terminal_does_not_construct_resultset(tmp_path, monkeypatc
     count = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().count()
 
     assert count == 2
+
+
+def test_exact_safe_count_uses_exact_index_without_final_verification(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="exact-safe-count", repo=repo)
+    repo.save_object(obj)
+
+    def fail_verify(*args, **kwargs):
+        raise AssertionError("exact-safe count should not run final query verification")
+
+    def fail_cdefs_by_id(*args, **kwargs):
+        raise AssertionError("exact-safe count should not fetch candidate CDef pages")
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", fail_verify)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", fail_cdefs_by_id)
+
+    query = repo.query(obj.definition).stored()
+    count, stats = repo._query_index.count_definition_domain(query)
+
+    assert count == 1
+    assert stats.verified_count == 0
+    assert stats.cdef_blobs_decoded == 0
+    assert stats.lowering_strategy == "exact-safe-count"
+    assert stats.lowering_diagnostics["exact_safe"] is True
 
 
 def test_lowered_count_does_not_construct_result_map(tmp_path, monkeypatch):

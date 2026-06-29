@@ -12,14 +12,14 @@ Lowered SQLite execution currently handles:
 - nested-domain filtering through recursive ancestor traversal;
 - owner projection through the existing recursive SQLite owner relation;
 - stable keyset-ordered candidate batches using `(stable_hash, collision_ordinal, def_id)` ordering;
-- terminal-aware `exists()`, `one()`, `one_or_none()`, and `count()` verification that stops within fetched pages;
+- terminal-aware `exists()`, `one()`, `one_or_none()`, and `count()` execution using terminal-sized keyset pages where possible;
 - plan-only `explain()`, opt-in `explain(sql=True)` SQLite plan diagnostics, and analyzed `explain(analyze=True)` diagnostics;
 - scan policies through `scan_policy("allow" | "warn" | "forbid")`, `require_indexed()`, and `max_verify(...)`.
 - query-backed `DefinitionResultSet` paging for broad stored SQLite queries above the eager threshold.
 
 SQLite lowering is conservative. SQL may return false positives, but returned definitions are still verified in Python with the normal query matcher. SQL must not introduce false negatives for supported lowered predicates.
 
-Read transactions remain short. Candidate IDs and CDef batches are fetched inside a read view, the read view closes, and Python verification runs afterward. Result metadata records candidate rows read, CDef blobs decoded, Python verifications, pages fetched, scan fallback reason, terminal stop reason, anchor node/reason/estimate, propagation direction, SQLite plan rows when requested, count witness reloads, count collision buckets, and per-source generation.
+Read transactions remain short. Candidate IDs and CDef batches are fetched inside a read view, the read view closes, and Python verification runs afterward. SQLite read views expose opaque `CandidateRelation` paging for active read-view relation handles and captured lowered plans for query-backed replay. Result metadata records candidate rows read, CDef blobs decoded, Python verifications, pages fetched, scan fallback reason, terminal stop reason, anchor node/reason/estimate, propagation direction, SQLite plan rows when requested, count witness reloads, count collision buckets, and per-source generation.
 
 For selector graphs with indexable requirements, SQLite lowering chooses the rarest exact stable-hash or local-posting node as the SQL anchor. Exact anchors start from `definitions.stable_hash`; local-posting anchors start from `postings.feature_id` and `postings.multiplicity`, then apply remaining local predicates. If the anchor is nested, SQL builds that relation first, walks `definition_edges` toward the selector root with path predicates, applies local predicates at each reached parent, applies sibling child-subtree checks with `EXISTS`, then projects the root relation and applies the requested domain filter. Exact anchors are stable-hash candidate anchors; Python verification remains authoritative for hash-collision buckets and all selector semantics.
 
@@ -27,7 +27,7 @@ Lowering currently chooses one anchor path to the selector root. Sibling subtree
 
 Query-backed `DefinitionResultSet` ordering is stable in source order, with each source ordered by `(stable_hash, collision_ordinal, def_id)`. After materialization, repeated iteration preserves the original streamed page-factory order rather than re-sorting cached results. A result set stores a generation vector and opaque keyset page cursors, but it does not retain SQLite connections, cursors, or live read transactions. If a source generation changes before page iteration completes, iteration raises `QueryIndexGenerationChanged` instead of silently mixing snapshots.
 
-Lowered `count()` streams verified CDefs into a collision-safe stable-hash count state. On first sight of a stable hash it stores only `(source_key, generation, def_id)` as a witness ref and increments the count. If the same stable hash appears again, federation reopens a short backend read view to load that witness CDef and materializes a collision bucket for that hash only. If the witness source generation changed before reload, the count terminal retries from the beginning a bounded number of times. Non-colliding result sets therefore do not retain full CDefs after verification, while duplicate definitions and stable-hash collisions remain exact.
+Lowered `count()` streams verified CDefs into a collision-safe stable-hash count state. On first sight of a stable hash it stores only `(source_key, generation, def_id)` as a witness ref and increments the count. If the same stable hash appears again, federation reopens a short backend read view to load that witness CDef and materializes a collision bucket for that hash only. If the witness source generation changed before reload, the count terminal retries from the beginning a bounded number of times. Non-colliding result sets therefore do not retain full CDefs after verification, while duplicate definitions and stable-hash collisions remain exact. Exact stored-root `ConcreteDefinition` counts use an exact-safe index path after backend equality confirmation and do not run final query verification or fetch candidate CDef pages.
 
 Fallback boundaries:
 

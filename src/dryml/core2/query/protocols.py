@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
-from .lowering import CandidateBatch, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
+from .lowering import CandidateBatch, CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
 from .model import DefinitionId, FeatureRequirement, IndexWriteResult, QueryIndexStatus, QueryStats, RefreshPolicy, ValidationReport
 from .path import DefinitionPath
 
@@ -118,6 +118,14 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
     def iter_candidate_cdef_batches(
             self,
             plan: LoweredQueryPlan,
+            *,
+            after: PagedResultCursor | None = None,
+            batch_size: int) -> Any:
+        ...
+
+    def iter_relation_cdef_batches(
+            self,
+            relation: CandidateRelation,
             *,
             after: PagedResultCursor | None = None,
             batch_size: int) -> Any:
