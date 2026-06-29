@@ -1030,7 +1030,7 @@ class RepoQueryIndex:
         relation = snapshot.relation_filter_domain(plan.relation(), domain)
         optimize = getattr(snapshot, "relation_optimize", None)
         if optimize is not None:
-            relation = optimize(relation, use_count=use_count, recursive=recursive)
+            relation = optimize(relation, terminal=terminal, use_count=use_count, recursive=recursive)
         relation_diagnostics = getattr(snapshot, "relation_diagnostics", None)
         if relation_diagnostics is not None:
             diagnostics.copy_from(relation_diagnostics(relation))

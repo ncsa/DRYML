@@ -199,6 +199,7 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
             self,
             relation: CandidateRelation,
             *,
+            terminal: QueryTerminal | None = None,
             use_count: int = 1,
             recursive: bool = False) -> CandidateRelation:
         ...

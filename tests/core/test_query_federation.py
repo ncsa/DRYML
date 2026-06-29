@@ -532,6 +532,111 @@ def test_production_small_relation_stays_inline_by_optimizer_policy(tmp_path, mo
     assert diagnostics["materialized_relations"] == ()
 
 
+def test_query_backed_large_relation_does_not_materialize_each_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 2)
+    monkeypatch.setattr(
+        SQLiteQueryIndexReadView,
+        "optimizer_policy",
+        SQLiteOptimizerPolicy(materialize_if_reused=False, materialize_if_estimate_gt=1),
+    )
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    roots = []
+    for idx in range(5):
+        obj = FederationLeaf(name=f"query-backed-inline-{idx}", repo=repo)
+        roots.append(obj.definition)
+        repo.save_object(obj)
+
+    materialize_calls = []
+    original_materialize = SQLiteQueryIndexReadView.relation_materialize
+
+    def spy_materialize(self, relation, *, reason=None):
+        materialize_calls.append(reason)
+        return original_materialize(self, relation, reason=reason)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "relation_materialize", spy_materialize)
+
+    results = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+
+    assert isinstance(results, QueryBackedDefinitionResultSet)
+    assert tuple(results) == tuple(sorted(roots, key=lambda cdef: (cdef.stable_hash(), repr(cdef))))
+    assert materialize_calls == []
+
+
+def test_query_backed_page_terminal_forces_inline_strategy_when_relation_is_not_persistent(tmp_path, monkeypatch):
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 2)
+    monkeypatch.setattr(
+        SQLiteQueryIndexReadView,
+        "optimizer_policy",
+        SQLiteOptimizerPolicy(materialize_if_reused=False, materialize_if_estimate_gt=1),
+    )
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    for idx in range(4):
+        repo.save_object(FederationLeaf(name=f"query-backed-strategy-{idx}", repo=repo))
+
+    page_strategies = []
+    original = SQLiteQueryIndexReadView.iter_relation_cdef_batches
+
+    def spy_relation_batches(self, relation, *, after=None, batch_size):
+        diagnostics = self.relation_diagnostics(relation)
+        page_strategies.append((diagnostics.physical_plan.strategy, diagnostics.materialized_relations))
+        return original(self, relation, after=after, batch_size=batch_size)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_relation_cdef_batches", spy_relation_batches)
+
+    results = repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+
+    assert isinstance(results, QueryBackedDefinitionResultSet)
+    assert next(iter(results)) is not None
+    assert page_strategies == [("inline-cte", ())]
+
+
+def test_eager_collect_large_relation_can_materialize_but_query_backed_page_does_not(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        SQLiteQueryIndexReadView,
+        "optimizer_policy",
+        SQLiteOptimizerPolicy(materialize_if_reused=False, materialize_if_estimate_gt=1),
+    )
+    eager_store = DirStore(tmp_path / "eager", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    eager_repo = Repo(stores=eager_store)
+    for idx in range(3):
+        eager_repo.save_object(FederationLeaf(name=f"eager-materialize-{idx}", repo=eager_repo))
+
+    eager_result = eager_repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+    eager_diagnostics = eager_result.explanation.lowering_diagnostics
+
+    assert not isinstance(eager_result, QueryBackedDefinitionResultSet)
+    assert eager_diagnostics["physical_plan"]["strategy"] == "temp-relation"
+    assert eager_diagnostics["materialized_relations"]
+
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
+    monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 2)
+    paged_store = DirStore(tmp_path / "paged", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    paged_repo = Repo(stores=paged_store)
+    for idx in range(4):
+        paged_repo.save_object(FederationLeaf(name=f"paged-inline-{idx}", repo=paged_repo))
+
+    page_strategies = []
+    original = SQLiteQueryIndexReadView.iter_relation_cdef_batches
+
+    def spy_relation_batches(self, relation, *, after=None, batch_size):
+        diagnostics = self.relation_diagnostics(relation)
+        page_strategies.append((diagnostics.physical_plan.strategy, diagnostics.materialized_relations))
+        return original(self, relation, after=after, batch_size=batch_size)
+
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "iter_relation_cdef_batches", spy_relation_batches)
+
+    paged_result = paged_repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+
+    assert isinstance(paged_result, QueryBackedDefinitionResultSet)
+    assert tuple(paged_result)
+    assert page_strategies
+    assert all(strategy == "inline-cte" and materialized == () for strategy, materialized in page_strategies)
+
+
 def test_query_backed_resultset_fetches_first_page_only(tmp_path, monkeypatch):
     monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 2)
     monkeypatch.setattr(federation_module, "_QUERY_BACKED_PAGE_SIZE", 2)
@@ -1177,7 +1282,7 @@ def test_exact_safe_count_uses_exact_index_without_final_verification(tmp_path, 
     assert stats.lowering_diagnostics["exact_safe"] is True
 
 
-def test_exact_stored_exists_uses_exact_safe_relation_path(tmp_path, monkeypatch):
+def test_exact_stored_exists_uses_exact_safe_backend_path(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
     obj = FederationLeaf(name="exact-safe-exists", repo=repo)
@@ -1193,6 +1298,28 @@ def test_exact_stored_exists_uses_exact_safe_relation_path(tmp_path, monkeypatch
     monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", fail_cdefs_by_id)
 
     assert repo.query(obj.definition).stored().exists()
+
+
+def test_exact_stored_defs_uses_exact_safe_definition_path(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = FederationLeaf(name="exact-safe-defs", repo=repo)
+    repo.save_object(obj)
+
+    def fail_verify(*args, **kwargs):
+        raise AssertionError("exact-safe defs should not run final query verification")
+
+    def fail_cdefs_by_id(*args, **kwargs):
+        raise AssertionError("exact-safe defs should not fetch candidate CDef pages")
+
+    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", fail_verify)
+    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", fail_cdefs_by_id)
+
+    result = repo.query(obj.definition).stored().defs()
+
+    assert list(result) == [obj.definition]
+    assert result.explanation.lowering_strategy == "exact-safe-definition"
+    assert result.explanation.lowering_diagnostics["exact_safe"] is True
 
 
 def test_exact_stored_one_uses_exact_safe_backend_path(tmp_path, monkeypatch):

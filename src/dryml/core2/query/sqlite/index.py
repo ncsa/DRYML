@@ -1084,11 +1084,19 @@ class SQLiteQueryIndexReadView:
             self,
             relation: CandidateRelation,
             *,
+            terminal: QueryTerminal | None = None,
             use_count: int = 1,
             recursive: bool = False) -> CandidateRelation:
         plan = self._plan_for_relation(relation)
         policy = self.optimizer_policy
-        reason = self._materialization_reason(plan, relation, use_count=use_count, recursive=recursive, policy=policy)
+        reason = self._materialization_reason(
+            plan,
+            relation,
+            terminal=terminal,
+            use_count=use_count,
+            recursive=recursive,
+            policy=policy,
+        )
         if reason is None:
             diagnostics = plan.diagnostics
             if diagnostics.physical_plan is not None:
@@ -1150,10 +1158,13 @@ class SQLiteQueryIndexReadView:
             plan: LoweredQueryPlan,
             relation: CandidateRelation,
             *,
+            terminal: QueryTerminal | None,
             use_count: int,
             recursive: bool,
             policy: SQLiteOptimizerPolicy) -> str | None:
         if relation.relation_kind == "temp":
+            return None
+        if terminal == "page" and not policy.materialize_page_relations:
             return None
         if recursive and policy.materialize_recursive_owner_inputs:
             return "recursive-input"

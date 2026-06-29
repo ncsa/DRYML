@@ -21,12 +21,15 @@ class SQLiteOptimizerPolicy:
         materialize_if_estimate_gt: Materialize relations whose estimated row count exceeds this threshold.
         materialize_if_sql_length_gt: Materialize relations whose SQL text exceeds this many characters.
         materialize_recursive_owner_inputs: Materialize recursive owner-projection inputs.
+        materialize_page_relations: Materialize page-terminal relations. This is disabled by default because
+            query-backed paging opens a fresh read view for each page, so temp relations cannot be reused.
     """
 
     materialize_if_reused: bool = True
     materialize_if_estimate_gt: int = 10_000
     materialize_if_sql_length_gt: int = 20_000
     materialize_recursive_owner_inputs: bool = True
+    materialize_page_relations: bool = False
 
 
 class SQLiteRelationCompiler:
