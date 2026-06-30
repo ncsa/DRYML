@@ -33,6 +33,11 @@ def pytest_addoption(parser):
         action="store_true",
         help="Print a DRYML test timing summary at the end of the run.",
     )
+    group.addoption(
+        "--dryml-timing-unknown-only",
+        action="store_true",
+        help="When profiling, run only tests missing from baseline node_tiers.",
+    )
 
 
 def pytest_configure(config):
@@ -59,6 +64,18 @@ def pytest_collection_modifyitems(config, items):
         if category:
             item.add_marker(pytest.mark.category(category))
             item.add_marker(f"category_{category}")
+    if _unknown_only_enabled(config):
+        known = set(baseline.get("node_tiers", {}))
+        selected = [item for item in items if item.nodeid not in known]
+        deselected = [item for item in items if item.nodeid in known]
+        if deselected:
+            config.hook.pytest_deselected(items=deselected)
+            items[:] = selected
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _unknown_only_enabled(session.config) and exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED:
+        session.exitstatus = pytest.ExitCode.OK
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -101,6 +118,16 @@ def _load_baseline(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text())
+
+
+def _unknown_only_enabled(config) -> bool:
+    getoption = getattr(config, "getoption", None)
+    if getoption is None:
+        return bool(getattr(config, "_dryml_timing_unknown_only", False))
+    try:
+        return bool(getoption("--dryml-timing-unknown-only"))
+    except (AttributeError, ValueError):
+        return bool(getattr(config, "_dryml_timing_unknown_only", False))
 
 
 def path_for_nodeid(nodeid: str) -> str:

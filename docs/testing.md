@@ -84,6 +84,14 @@ Run a profiling pass:
 
 This runs in two phases, writes `tests/.test-timings-medium.json` and `tests/.test-timings-heavy.json`, prints timing summaries, and merges both timing files into `tests/test_tiers.json` node-tier overrides for tests that passed.
 
+When only newly added tests need node-tier timings, run:
+
+```bash
+./tests.sh profile --unknown-only
+```
+
+Unknown means a collected test nodeid is absent from `tests/test_tiers.json` `node_tiers`. Path tiers, category tiers, and default tiers still decide which profile phase collects the test, but only missing nodeids are executed and written to the timing output. This is the preferred workflow after adding tests to an existing file because the new tests inherit enough tier information to be collected, then get explicit node timings without rerunning all known tests.
+
 The default thresholds are:
 
 ```text
@@ -103,6 +111,7 @@ When adding tests:
 3. Put integration, subprocess, SQLite, or import-safety tests in `medium` unless they are clearly heavyweight.
 4. Keep framework imports, training, dataset-backed tests, and multi-framework tests in `heavy`.
 5. Run `./tests.sh smoke` first, then `./tests.sh medium`, then relevant `heavy` tests.
+6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
 
 If a new file is not listed in `path_tiers`, it inherits its category tier.
 

@@ -74,13 +74,29 @@ run_full() {
 }
 
 run_profile() {
-    strip_suite_paths "$@"
+    local unknown_only=0
+    local profile_args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --unknown-only)
+                unknown_only=1
+                ;;
+            *)
+                profile_args+=("$arg")
+                ;;
+        esac
+    done
+    strip_suite_paths "${profile_args[@]}"
     local medium_output="./tests/.test-timings-medium.json"
     local heavy_output="./tests/.test-timings-heavy.json"
+    local unknown_args=()
+    if [ "$unknown_only" -eq 1 ]; then
+        unknown_args=(--dryml-timing-unknown-only)
+    fi
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
-    pytest --no-cov -m "speed_smoke or speed_medium" "${medium_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov -m "speed_heavy" "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${stripped_args[@]}"
+    pytest --no-cov -m "speed_smoke or speed_medium" "${medium_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov -m "speed_heavy" "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
     python ./tests/tools/test_buckets.py update "$medium_output" "$heavy_output"
     python ./tests/tools/test_buckets.py summary --all-files
 }
