@@ -12,4 +12,8 @@ def is_torch_value(x: Any) -> bool:
     torch = sys.modules.get("torch")
     if torch is None:
         return isinstance(x, TorchTensorSpec)
-    return torch.is_tensor(x) or isinstance(x, TorchTensorSpec)
+    spec = getattr(torch, "__spec__", None)
+    if getattr(spec, "_initializing", False):
+        return isinstance(x, TorchTensorSpec)
+    tensor_type = getattr(torch, "__dict__", {}).get("Tensor")
+    return (tensor_type is not None and isinstance(x, tensor_type)) or isinstance(x, TorchTensorSpec)

@@ -9,14 +9,15 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 1. [Introduction](intro.md)
 2. [Objects and Definitions](objects_and_defs.md)
 3. [Frozen Definitions](frozen_definitions.md)
-4. [Repos and Stores](repos.md)
-5. [Tensor Specs](tensor_specs.md)
-6. [Contexts](context.md)
-7. [Data API](data.md)
-8. [Models API](models.md)
-9. [Artifacts API](artifacts.md)
-10. [Query Index Backend Contracts](query_index_backend_contracts.md)
-11. [Release Notes](release_notes.md)
+4. [Environments](environments.md)
+5. [Repos and Stores](repos.md)
+6. [Tensor Specs](tensor_specs.md)
+7. [Contexts](context.md)
+8. [Data API](data.md)
+9. [Models API](models.md)
+10. [Artifacts API](artifacts.md)
+11. [Query Index Backend Contracts](query_index_backend_contracts.md)
+12. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -24,6 +25,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - A `Definition` is a deferred construction recipe.
 - A `ConcreteDefinition` is a fully resolved, stable identity for an object.
 - A frozen definition records a non-materializing exact or selector reference in a definition graph.
+- An environment record describes observed Python/software facts without changing object identity.
 - An `Object` is the runtime instance associated with a concrete definition.
 - A `Repo` manages live objects, persistent stores, aliases, queries, saves, and loads.
 - A `Store` owns persisted object state.

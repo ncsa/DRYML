@@ -49,11 +49,6 @@ def _detect_num_gpus() -> int:
         import GPUtil
         return len(GPUtil.getGPUs())
     except Exception:
-        pass
-    try:
-        import torch
-        return int(torch.cuda.device_count())
-    except Exception:
         return 0
 
 
