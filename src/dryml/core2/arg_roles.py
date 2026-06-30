@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from inspect import Parameter, signature
-from typing import Annotated, Any, get_args, get_origin, get_type_hints
+from types import UnionType
+from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
 
@@ -189,6 +190,13 @@ def role_from_annotation(annotation: Any) -> ArgRole | None:
                 return meta
             if isinstance(meta, str) and meta.replace("-", "_").lower() in _ROLE_NAMES:
                 return normalize_role(meta)
+    if origin in (Union, UnionType):
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            role = role_from_annotation(arg)
+            if role is not None:
+                return role
     if annotation in (FrozenCDefArg, FrozenCDef):
         return FrozenCDefArg()
     if annotation in (FrozenDefArg, FrozenDef):

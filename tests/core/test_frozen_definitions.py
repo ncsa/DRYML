@@ -1,5 +1,5 @@
 import pytest
-from typing import Annotated
+from typing import Annotated, Optional
 from pathlib import Path
 
 import dryml
@@ -55,6 +55,12 @@ class FrozenOwnerByMap(Object):
 
 class FrozenOwnerByAnnotated(Object):
     def __init__(self, child: Annotated[ConcreteDefinition, FrozenCDefArg()] = None):
+        super().__init__()
+        self.child = child
+
+
+class FrozenOwnerByOptionalAnnotated(Object):
+    def __init__(self, child: Optional[Annotated[ConcreteDefinition, FrozenCDefArg()]] = None):
         super().__init__()
         self.child = child
 
@@ -183,6 +189,17 @@ def test_annotation_frozen_cdef_role_from_cdef_and_default():
     assert isinstance(owner_cdef.args[0], FrozenConcreteDefinition)
     assert owner_cdef.args[0].thaw() == child_cdef
     assert default_cdef.args == FrozenTuple(())
+
+
+def test_optional_annotated_frozen_cdef_role_from_cdef():
+    child_cdef = Definition(FrozenLeaf, "child").concretize()
+
+    roles = resolve_arg_roles(FrozenOwnerByOptionalAnnotated)
+    owner_cdef = Definition(FrozenOwnerByOptionalAnnotated, child_cdef).concretize()
+
+    assert isinstance(roles["child"], FrozenCDefArg)
+    assert isinstance(owner_cdef.args[0], FrozenConcreteDefinition)
+    assert owner_cdef.args[0].thaw() == child_cdef
 
 
 def test_annotation_inherited_constructor_role():
