@@ -131,9 +131,12 @@ def apply_definition_arg_roles(definition: Definition) -> Definition:
 
     if definition.cls is None or definition.args is None:
         return definition
-    from .symbol import resolve_symbol
-
-    cls = resolve_symbol(definition.cls)
+    if not isinstance(definition.cls, type):
+        # Avoid importing serialized selector classes during definition-only
+        # query/index planning. Such selectors must already contain explicit
+        # frozen wrappers if they need frozen-reference semantics.
+        return definition
+    cls = definition.cls
     args, kwargs = apply_arg_roles(cls, tuple(definition.args), dict(definition.kwargs))
     if args == tuple(definition.args) and kwargs == definition.kwargs:
         return definition

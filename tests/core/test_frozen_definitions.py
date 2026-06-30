@@ -1,5 +1,6 @@
 import pytest
 from typing import Annotated
+from pathlib import Path
 
 import dryml
 from dryml.core2 import (
@@ -457,6 +458,50 @@ def test_nested_default_uses_materialize_edges_only(tmp_path):
     assert owners == (material_owner.definition,)
 
 
+def test_sqlite_nested_default_uses_materialize_edges_only(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    child = FrozenLeaf("child", repo=repo)
+    frozen_owner = FrozenOwner(child, repo=repo)
+    material_owner = MaterializingOwner(child, repo=repo)
+    repo.save_object(frozen_owner)
+    repo.save_object(material_owner)
+
+    owners = tuple(repo.query(child).nested().owners().defs())
+
+    assert owners == (material_owner.definition,)
+
+
+def test_sqlite_nested_definitions_excludes_frozen_only_reference(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    child = FrozenLeaf("child", repo=repo)
+    frozen_owner = FrozenOwner(child, repo=repo)
+    repo.save_object(frozen_owner)
+
+    definitions = tuple(repo.query(child).nested().definitions().defs())
+    owners = tuple(repo.query(child).nested().owners().defs())
+
+    assert definitions == ()
+    assert owners == ()
+
+
+def test_sqlite_nested_occurrences_exclude_frozen_references(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    child = FrozenLeaf("child", repo=repo)
+    frozen_owner = FrozenOwner(child, repo=repo)
+    material_owner = MaterializingOwner(child, repo=repo)
+    repo.save_object(frozen_owner)
+    repo.save_object(material_owner)
+
+    occurrences = tuple(repo.query(child).nested().max_occurrences(4).execute())
+
+    assert len(occurrences) == 1
+    assert occurrences[0].owner == material_owner.definition
+    assert occurrences[0].definition == child.definition
+
+
 def test_selector_graph_shows_edge_kind_constraint():
     child_cdef = Definition(FrozenLeaf, "child").concretize()
 
@@ -565,3 +610,16 @@ def test_accuracy_and_plot_artifact_style_examples(tmp_path):
     assert loaded_accuracy.compute(repo) == ("data", "model")
     assert isinstance(loaded_plot.models, Definition)
     assert loaded_plot.compute(repo) == (model.definition,)
+
+
+def test_frozen_definitions_doc_page_exists():
+    docs_path = Path(__file__).resolve().parents[2] / "docs" / "frozen_definitions.md"
+
+    text = docs_path.read_text(encoding="utf-8")
+
+    assert "ConcreteDefinition.freeze" in text
+    assert "Definition.freeze" in text
+    assert "FrozenCDef" in text
+    assert "FrozenDef" in text
+    assert "materialize" in text
+    assert "frozen" in text

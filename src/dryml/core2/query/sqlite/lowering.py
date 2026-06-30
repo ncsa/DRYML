@@ -502,11 +502,15 @@ class SQLiteRelationCompiler:
                  ancestors(start_id, current_id) AS (
                     SELECT base.def_id, definition_edges.parent_def_id
                     FROM base
-                    JOIN definition_edges ON definition_edges.child_def_id = base.def_id
+                    JOIN definition_edges
+                      ON definition_edges.child_def_id = base.def_id
+                     AND definition_edges.edge_kind = 'materialize'
                     UNION
                     SELECT ancestors.start_id, definition_edges.parent_def_id
                     FROM ancestors
-                    JOIN definition_edges ON definition_edges.child_def_id = ancestors.current_id
+                    JOIN definition_edges
+                      ON definition_edges.child_def_id = ancestors.current_id
+                     AND definition_edges.edge_kind = 'materialize'
                  )
             SELECT DISTINCT base.def_id
             FROM base

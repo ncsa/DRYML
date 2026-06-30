@@ -6,6 +6,10 @@ Use this for metrics, reports, provenance records, cache entries, and artifact-l
 
 ## API
 
+`ConcreteDefinition.freeze()` returns a `FrozenConcreteDefinition`, and `FrozenConcreteDefinition.thaw()` returns the target `ConcreteDefinition`.
+
+`Definition.freeze()` returns a `FrozenDefinition` selector snapshot without calling `Definition.concretize()`. `FrozenDefinition.thaw()` returns a fresh mutable `Definition` copy.
+
 ```python
 frozen_cdef = obj.definition.freeze()
 assert frozen_cdef.thaw() == obj.definition
@@ -57,8 +61,12 @@ The canonical definition stores `FrozenDefinition`; the constructor receives an 
 
 ## Edge Semantics
 
-Raw `ConcreteDefinition` values remain materialization edges. `FrozenConcreteDefinition` values create frozen edges.
+Raw `ConcreteDefinition` values remain `materialize` edges. `FrozenConcreteDefinition` values create `frozen` edges.
 
 Materialization, save, collect, and default nested traversal follow materialization edges only. Query indexes store edge kind, and frozen-reference selectors match frozen edges without matching materialization edges.
+
+Structural frozen-reference search is available by querying with the same frozen role shape as the stored owner, for example `repo.query(Accuracy(data=data_obj, model=model_obj)).stored().defs()`. Public reverse-reference helpers such as `repo.query_references(...)` and public `nested(edge_kinds=...)` controls are deferred.
+
+For import safety, automatic role resolution applies to live class selectors. Serialized selectors whose class is only an import reference should contain explicit frozen wrappers already, for example `Definition(AccuracyRef, model=model_cdef.freeze())`, so definition-only query planning does not import backend modules just to rediscover annotations.
 
 SQLite query indexes rebuild because the edge schema version changed to include `edge_kind`.
