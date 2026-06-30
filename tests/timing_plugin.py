@@ -41,7 +41,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "category(name): auto-applied DRYML test category")
     config.addinivalue_line("markers", "timed: test duration was recorded by the DRYML timing plugin")
     baseline = _load_baseline(Path(config.getoption("--dryml-tier-baseline")))
-    categories = set(baseline.get("category_tiers", {}))
+    categories = {"uncategorized", *baseline.get("category_tiers", {})}
     categories.update(category_for_path(path) for path in baseline.get("path_tiers", {}))
     for category in sorted(categories):
         config.addinivalue_line("markers", f"category_{category}: auto-applied DRYML category")
@@ -53,10 +53,11 @@ def pytest_collection_modifyitems(config, items):
     baseline = getattr(config, "_dryml_tier_baseline", {})
     for item in items:
         category = category_for_nodeid(item.nodeid)
-        tier = tier_for_nodeid(item.nodeid, baseline)
-        item.add_marker(f"speed_{tier}")
+        tier = tier_for_item(item, baseline)
+        if not _has_marker(item, f"speed_{tier}"):
+            item.add_marker(f"speed_{tier}")
         if category:
-            item.add_marker("category", category)
+            item.add_marker(pytest.mark.category(category))
             item.add_marker(f"category_{category}")
 
 
@@ -113,15 +114,12 @@ def category_for_nodeid(nodeid: str) -> str:
 
 def category_for_path(path: str) -> str:
     parts = Path(path).parts
-    if len(parts) >= 2 and parts[0] == "tests":
+    if len(parts) >= 3 and parts[0] == "tests":
         return parts[1]
     return "uncategorized"
 
 
 def tier_for_nodeid(nodeid: str, baseline: dict[str, Any]) -> str:
-    explicit = _explicit_marker_tier(nodeid)
-    if explicit is not None:
-        return explicit
     node_tiers = baseline.get("node_tiers", {})
     if nodeid in node_tiers:
         return _validated_tier(node_tiers[nodeid])
@@ -136,10 +134,28 @@ def tier_for_nodeid(nodeid: str, baseline: dict[str, Any]) -> str:
     return _validated_tier(baseline.get("default_tier", "medium"))
 
 
-def _explicit_marker_tier(nodeid: str) -> str | None:
-    # Placeholder for future static parsing; runtime pytest markers are handled
-    # by user-provided -m expressions after this plugin applies baseline tiers.
+def tier_for_item(item, baseline: dict[str, Any]) -> str:
+    explicit = _explicit_marker_tier(item)
+    if explicit is not None:
+        return explicit
+    return tier_for_nodeid(item.nodeid, baseline)
+
+
+def _explicit_marker_tier(item) -> str | None:
+    for tier in ("heavy", "medium", "smoke"):
+        if _has_marker(item, f"speed_{tier}"):
+            return tier
     return None
+
+
+def _has_marker(item, name: str) -> bool:
+    getter = getattr(item, "get_closest_marker", None)
+    if getter is not None and getter(name) is not None:
+        return True
+    iterator = getattr(item, "iter_markers", None)
+    if iterator is not None:
+        return any(marker.name == name for marker in iterator())
+    return False
 
 
 def _validated_tier(value: str) -> str:

@@ -20,7 +20,7 @@ from .specs import (
     PythonExecutableSpec,
     spec_from_data,
 )
-from .utils import merge_env
+from .utils import build_probe_env
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,13 +112,33 @@ def probe(spec: EnvironmentSpec | None = None, *, timeout: float | None = 30.0) 
     if isinstance(spec, CurrentEnvironmentSpec):
         return EnvironmentProbeResult(spec=spec, ok=True, record=inspect_current())
     if isinstance(spec, PythonExecutableSpec):
-        return _probe_command(spec, spec.probe_command(), timeout=timeout, env=dict(spec.env))
+        return _probe_command(
+            spec,
+            spec.probe_command(),
+            timeout=timeout,
+            env=build_probe_env(
+                base=None,
+                overrides=spec.env,
+                pythonpath_policy=spec.pythonpath_policy,
+                extra_pythonpath=spec.extra_pythonpath,
+            ),
+        )
     if isinstance(spec, CondaEnvironmentSpec):
         try:
             cmd = spec.probe_command()
         except EnvironmentSpecError as exc:
             return _failure_result(spec, "unsupported_environment_spec", str(exc))
-        return _probe_command(spec, cmd, timeout=timeout, env=dict(spec.env))
+        return _probe_command(
+            spec,
+            cmd,
+            timeout=timeout,
+            env=build_probe_env(
+                base=None,
+                overrides=spec.env,
+                pythonpath_policy=spec.pythonpath_policy,
+                extra_pythonpath=spec.extra_pythonpath,
+            ),
+        )
     if isinstance(spec, ContainerEnvironmentSpec):
         return _failure_result(spec, "unsupported_environment_spec", "container probing is not implemented")
     return _failure_result(spec, "unsupported_environment_spec", f"unsupported environment spec {type(spec).__name__}")
@@ -137,7 +157,7 @@ def _probe_command(
             text=True,
             capture_output=True,
             timeout=timeout,
-            env=merge_env(None, env),
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         return _failure_result(

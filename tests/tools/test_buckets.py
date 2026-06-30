@@ -85,7 +85,7 @@ def has_node_tier(path: str, baseline: dict[str, Any], tiers: set[str]) -> bool:
 
 def category_for_path(path: str) -> str:
     parts = Path(path).parts
-    if len(parts) >= 2 and parts[0] == "tests":
+    if len(parts) >= 3 and parts[0] == "tests":
         return parts[1]
     return "uncategorized"
 

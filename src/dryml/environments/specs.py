@@ -10,7 +10,8 @@ from typing import Any, Literal
 from .errors import EnvironmentSpecError
 from .ids import content_id
 from .schema import ENVIRONMENT_LOCK_REF_SCHEMA_VERSION, ENVIRONMENT_SPEC_SCHEMA_VERSION
-from .serialization import freeze_mapping
+from .serialization import deep_freeze_json, json_ready
+from .utils import coerce_tuple
 
 
 ProbeWorkerCommand = ("-m", "dryml.environments.probe_worker", "--json")
@@ -48,11 +49,13 @@ class PythonExecutableSpec:
     executable: str
     env: Mapping[str, str] = field(default_factory=dict)
     pythonpath_policy: str = "none"
+    extra_pythonpath: tuple[str, ...] = ()
     kind: Literal["python"] = "python"
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "env", freeze_mapping(self.env))
+        object.__setattr__(self, "env", deep_freeze_json(self.env))
+        object.__setattr__(self, "extra_pythonpath", tuple(str(path) for path in coerce_tuple(self.extra_pythonpath)))
 
     @property
     def id(self) -> str:
@@ -72,8 +75,9 @@ class PythonExecutableSpec:
             "schema_version": self.schema_version,
             "kind": self.kind,
             "executable": self.executable,
-            "env": dict(self.env),
+            "env": json_ready(self.env),
             "pythonpath_policy": self.pythonpath_policy,
+            "extra_pythonpath": list(self.extra_pythonpath),
         }
 
     @classmethod
@@ -84,6 +88,7 @@ class PythonExecutableSpec:
             executable=data["executable"],
             env=data.get("env", {}),
             pythonpath_policy=data.get("pythonpath_policy", "none"),
+            extra_pythonpath=tuple(data.get("extra_pythonpath", ())),
             schema_version=data.get("schema_version", ENVIRONMENT_SPEC_SCHEMA_VERSION),
         )
 
@@ -98,6 +103,7 @@ class CondaEnvironmentSpec:
     launch_mode: Literal["direct", "conda-run"] = "direct"
     env: Mapping[str, str] = field(default_factory=dict)
     pythonpath_policy: str = "none"
+    extra_pythonpath: tuple[str, ...] = ()
     kind: Literal["conda"] = "conda"
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
@@ -109,7 +115,8 @@ class CondaEnvironmentSpec:
                 f"unsupported Conda launch mode {self.launch_mode!r}",
                 context={"launch_mode": self.launch_mode},
             )
-        object.__setattr__(self, "env", freeze_mapping(self.env))
+        object.__setattr__(self, "env", deep_freeze_json(self.env))
+        object.__setattr__(self, "extra_pythonpath", tuple(str(path) for path in coerce_tuple(self.extra_pythonpath)))
 
     @property
     def id(self) -> str:
@@ -151,8 +158,9 @@ class CondaEnvironmentSpec:
             "name": self.name,
             "conda_executable": self.conda_executable,
             "launch_mode": self.launch_mode,
-            "env": dict(self.env),
+            "env": json_ready(self.env),
             "pythonpath_policy": self.pythonpath_policy,
+            "extra_pythonpath": list(self.extra_pythonpath),
         }
 
     @classmethod
@@ -166,6 +174,7 @@ class CondaEnvironmentSpec:
             launch_mode=data.get("launch_mode", "direct"),
             env=data.get("env", {}),
             pythonpath_policy=data.get("pythonpath_policy", "none"),
+            extra_pythonpath=tuple(data.get("extra_pythonpath", ())),
             schema_version=data.get("schema_version", ENVIRONMENT_SPEC_SCHEMA_VERSION),
         )
 

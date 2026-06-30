@@ -37,6 +37,8 @@ if not report.ok:
 
 Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structured `CompatibilityIssue` entries with stable issue codes and readable `explain()` output.
 
+PEP 508 environment markers are evaluated from the `EnvironmentRecord` being checked, not from the coordinator process. If a marker references platform metadata that the record cannot provide, the check reports an `unknown` compatibility issue instead of silently using local platform facts.
+
 Environment checks are software-focused. CUDA, GPU allocation, process topology, and framework runtime configuration are future provider/context/world work, not ordinary `EnvironmentRequirement` fields.
 
 ## Content IDs
@@ -49,6 +51,8 @@ requirement_id = req.id
 ```
 
 `EnvironmentRecord.id` includes observed provenance such as interpreter path, prefixes, platform, packages, tags, and details. It is an exact observed-environment key, not a package-solver equivalence class.
+
+Record, requirement, and spec metadata fields are deeply frozen at construction. Mutating an input dictionary or list after construction cannot change the object payload or invalidate its content ID.
 
 ## Probing
 
@@ -68,6 +72,23 @@ if result.ok:
 else:
     print(result.report.explain())
 ```
+
+Probe specs enforce `pythonpath_policy` before launching a worker:
+
+```python
+isolated = envs.PythonExecutableSpec(
+    "/opt/envs/torch/bin/python",
+    pythonpath_policy="none",       # remove inherited PYTHONPATH
+)
+
+explicit = envs.PythonExecutableSpec(
+    "/opt/envs/torch/bin/python",
+    pythonpath_policy="explicit",   # use only these paths
+    extra_pythonpath=("/project/src",),
+)
+```
+
+The supported policies are `none`, `explicit`, `inherit`, and `dryml-source`. `dryml-source` injects this DRYML checkout's source root without inheriting unrelated coordinator paths.
 
 Represent Conda probes without depending on Conda Python libraries:
 

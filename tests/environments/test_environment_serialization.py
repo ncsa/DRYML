@@ -3,7 +3,7 @@ from pathlib import Path
 
 import dryml.environments as envs
 from dryml.environments.ids import content_id
-from dryml.environments.serialization import canonical_json_bytes, canonical_json_dumps
+from dryml.environments.serialization import canonical_json_bytes, canonical_json_dumps, deep_freeze_json
 
 
 def test_schema_constants_are_visible():
@@ -20,6 +20,12 @@ def test_canonical_serialization_stable_under_dict_order():
     right = {"a": {"x": 1, "y": 2}, "b": [2, 1]}
     assert canonical_json_dumps(left) == canonical_json_dumps(right)
     assert canonical_json_bytes(left) == canonical_json_bytes(right)
+
+
+def test_deep_freeze_json_canonicalizes_sets_and_lists():
+    frozen = deep_freeze_json({"items": {"b", "a"}, "nested": [1, {"x": True}]})
+
+    assert canonical_json_dumps(frozen) == '{"items":["a","b"],"nested":[1,{"x":true}]}'
 
 
 def test_content_id_changes_with_schema_version_and_data():

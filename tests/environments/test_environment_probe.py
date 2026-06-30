@@ -3,6 +3,7 @@ import os
 import shlex
 import stat
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -102,3 +103,85 @@ def test_probe_container_unsupported_and_conda_absent_clear_failure():
     assert container.report.issues[0].code == "unsupported_environment_spec"
     conda = envs.probe(envs.CondaEnvironmentSpec(prefix="/missing", conda_executable="/missing/conda", launch_mode="conda-run"))
     assert conda.report.issues[0].code == "probe_failed"
+
+
+def test_probe_pythonpath_policy_none_removes_parent_pythonpath(monkeypatch):
+    import importlib
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(sample_payload()), stderr="")
+
+    monkeypatch.setenv("PYTHONPATH", "/parent")
+    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+
+    result = envs.probe(envs.PythonExecutableSpec("python", env={"PYTHONPATH": "/override"}))
+
+    assert result.ok
+    assert "PYTHONPATH" not in captured["env"]
+
+
+def test_probe_pythonpath_policy_explicit_uses_only_extra_paths(monkeypatch):
+    import importlib
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(sample_payload()), stderr="")
+
+    monkeypatch.setenv("PYTHONPATH", "/parent")
+    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+
+    result = envs.probe(
+        envs.PythonExecutableSpec(
+            "python",
+            env={"PYTHONPATH": "/override"},
+            pythonpath_policy="explicit",
+            extra_pythonpath=("/explicit-a", "/explicit-b"),
+        )
+    )
+
+    assert result.ok
+    assert captured["env"]["PYTHONPATH"] == os.pathsep.join(("/explicit-a", "/explicit-b"))
+
+
+def test_probe_pythonpath_policy_inherit_preserves_parent_pythonpath(monkeypatch):
+    env = envs.build_probe_env(
+        base={"PYTHONPATH": "/parent"},
+        overrides={"PYTHONPATH": "/override"},
+        pythonpath_policy="inherit",
+        extra_pythonpath=("/extra",),
+    )
+
+    assert env["PYTHONPATH"] == os.pathsep.join(("/parent", "/extra"))
+
+
+def test_conda_probe_uses_pythonpath_policy(monkeypatch):
+    import importlib
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured.update({"command": command, **kwargs})
+        return SimpleNamespace(returncode=0, stdout=json.dumps(sample_payload()), stderr="")
+
+    monkeypatch.setenv("PYTHONPATH", "/parent")
+    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+
+    result = envs.probe(
+        envs.CondaEnvironmentSpec(
+            prefix="/conda/env",
+            pythonpath_policy="explicit",
+            extra_pythonpath=("/only",),
+        )
+    )
+
+    assert result.ok
+    assert captured["command"][0] == "/conda/env/bin/python"
+    assert captured["env"]["PYTHONPATH"] == "/only"

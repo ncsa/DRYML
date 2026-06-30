@@ -5,12 +5,13 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
-from .errors import EnvironmentRequirementError
+from .errors import EnvironmentRequirementError, EnvironmentSpecError
 
 
 _NAME_RUN_RE = re.compile(r"[-_.]+")
@@ -90,6 +91,59 @@ def merge_env(base: Mapping[str, str] | None, overrides: Mapping[str, str] | Non
     return env
 
 
+def dryml_source_root() -> str:
+    """Return the source root containing the importable ``dryml`` package."""
+
+    return str(Path(__file__).resolve().parents[2])
+
+
+def build_probe_env(
+    *,
+    base: Mapping[str, str] | None,
+    overrides: Mapping[str, str] | None,
+    pythonpath_policy: str,
+    extra_pythonpath: tuple[str, ...] = (),
+) -> dict[str, str]:
+    """Build a subprocess environment while enforcing PYTHONPATH policy.
+
+    ``none`` removes ``PYTHONPATH``. ``explicit`` uses only
+    ``extra_pythonpath``. ``inherit`` preserves the base value and appends any
+    explicit paths. ``dryml-source`` uses the current DRYML source root plus any
+    explicit paths so a probed interpreter can import this checkout without
+    inheriting unrelated orchestrator paths.
+    """
+
+    policy = str(pythonpath_policy).strip().lower().replace("_", "-")
+    if policy not in {"none", "explicit", "inherit", "dryml-source"}:
+        raise EnvironmentSpecError(
+            f"unknown Python path probe policy {pythonpath_policy!r}",
+            context={"pythonpath_policy": pythonpath_policy},
+        )
+
+    base_env = os.environ if base is None else base
+    env = dict(base_env)
+    env.update({str(key): str(value) for key, value in (overrides or {}).items() if str(key) != "PYTHONPATH"})
+    inherited = base_env.get("PYTHONPATH")
+    paths = tuple(str(path) for path in extra_pythonpath if str(path))
+
+    if policy == "none":
+        env.pop("PYTHONPATH", None)
+    elif policy == "explicit":
+        if paths:
+            env["PYTHONPATH"] = os.pathsep.join(paths)
+        else:
+            env.pop("PYTHONPATH", None)
+    elif policy == "inherit":
+        combined = tuple(path for path in ((inherited,) if inherited else ()) + paths if path)
+        if combined:
+            env["PYTHONPATH"] = os.pathsep.join(combined)
+        else:
+            env.pop("PYTHONPATH", None)
+    else:
+        env["PYTHONPATH"] = os.pathsep.join((dryml_source_root(), *paths))
+    return env
+
+
 __all__ = [
     "normalize_distribution_name",
     "normalize_requirement_string",
@@ -97,4 +151,6 @@ __all__ = [
     "coerce_specifier",
     "coerce_tuple",
     "merge_env",
+    "build_probe_env",
+    "dryml_source_root",
 ]

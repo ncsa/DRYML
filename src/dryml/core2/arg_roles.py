@@ -191,12 +191,17 @@ def role_from_annotation(annotation: Any) -> ArgRole | None:
             if isinstance(meta, str) and meta.replace("-", "_").lower() in _ROLE_NAMES:
                 return normalize_role(meta)
     if origin in (Union, UnionType):
+        found: list[ArgRole] = []
         for arg in get_args(annotation):
             if arg is type(None):
                 continue
             role = role_from_annotation(arg)
             if role is not None:
-                return role
+                found.append(role)
+        if len({role.name for role in found}) > 1:
+            raise TypeError("Union annotations cannot declare multiple DRYML argument roles.")
+        if found:
+            return found[0]
     if annotation in (FrozenCDefArg, FrozenCDef):
         return FrozenCDefArg()
     if annotation in (FrozenDefArg, FrozenDef):

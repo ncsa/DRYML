@@ -65,6 +65,12 @@ class FrozenOwnerByOptionalAnnotated(Object):
         self.child = child
 
 
+class FrozenOwnerByPep604OptionalAnnotated(Object):
+    def __init__(self, child: Annotated[ConcreteDefinition, FrozenCDefArg()] | None = None):
+        super().__init__()
+        self.child = child
+
+
 class FrozenOwnerConflict(Object):
     __dryml_arg_roles__ = {"child": "materialize"}
 
@@ -200,6 +206,27 @@ def test_optional_annotated_frozen_cdef_role_from_cdef():
     assert isinstance(roles["child"], FrozenCDefArg)
     assert isinstance(owner_cdef.args[0], FrozenConcreteDefinition)
     assert owner_cdef.args[0].thaw() == child_cdef
+
+
+def test_pep604_optional_annotated_frozen_role():
+    child_cdef = Definition(FrozenLeaf, "child").concretize()
+
+    roles = resolve_arg_roles(FrozenOwnerByPep604OptionalAnnotated)
+    owner_cdef = Definition(FrozenOwnerByPep604OptionalAnnotated, child_cdef).concretize()
+
+    assert isinstance(roles["child"], FrozenCDefArg)
+    assert isinstance(owner_cdef.args[0], FrozenConcreteDefinition)
+    assert owner_cdef.args[0].thaw() == child_cdef
+
+
+def test_union_with_two_different_roles_is_rejected():
+    class AmbiguousUnionOwner(Object):
+        def __init__(self, child: Annotated[ConcreteDefinition, FrozenCDefArg()] | Annotated[Definition, FrozenDefArg()]):
+            super().__init__()
+            self.child = child
+
+    with pytest.raises(TypeError, match="multiple DRYML argument roles"):
+        resolve_arg_roles(AmbiguousUnionOwner)
 
 
 def test_annotation_inherited_constructor_role():

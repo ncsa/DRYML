@@ -37,7 +37,7 @@ from .records import (
     PythonRecord,
 )
 from .registry import EnvironmentRegistry, EnvironmentRegistryEntry
-from .requirements import EnvironmentRequirement
+from .requirements import EnvironmentRequirement, marker_environment_from_record
 from .schema import (
     COMPATIBILITY_REPORT_SCHEMA_VERSION,
     ENVIRONMENT_FRAGMENT_SCHEMA_VERSION,
@@ -55,7 +55,7 @@ from .specs import (
     PythonExecutableSpec,
     spec_from_data,
 )
-from .utils import normalize_distribution_name, normalize_requirement_string
+from .utils import build_probe_env, normalize_distribution_name, normalize_requirement_string
 
 __all__ = [
     "COMPATIBILITY_REPORT_SCHEMA_VERSION",
@@ -92,12 +92,14 @@ __all__ = [
     "PythonRecord",
     "RequirementFragment",
     "add_req",
+    "build_probe_env",
     "coerce_policy",
     "compose_fragments",
     "fragments_for_class",
     "inspect_current",
     "normalize_distribution_name",
     "normalize_requirement_string",
+    "marker_environment_from_record",
     "override_req",
     "probe",
     "probe_conda",

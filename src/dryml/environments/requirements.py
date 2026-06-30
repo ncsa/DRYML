@@ -6,14 +6,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.version import InvalidVersion, Version
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy, report_from_issues
 from .records import EnvironmentRecord
 from .schema import ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION
-from .serialization import freeze_mapping
+from .serialization import deep_freeze_json, json_ready
 from .ids import content_id
 from .utils import (
     coerce_specifier,
@@ -57,8 +56,8 @@ class EnvironmentRequirement:
             tuple(sorted(str(item) for item in coerce_tuple(self.capabilities))),
         )
         object.__setattr__(self, "tags", tuple(sorted(str(item) for item in coerce_tuple(self.tags))))
-        object.__setattr__(self, "schema_versions", freeze_mapping(self.schema_versions))
-        object.__setattr__(self, "details", freeze_mapping(self.details))
+        object.__setattr__(self, "schema_versions", deep_freeze_json(self.schema_versions))
+        object.__setattr__(self, "details", deep_freeze_json(self.details))
         coerce_specifier(self.python)
         if self.dryml_protocol:
             coerce_specifier(self.dryml_protocol)
@@ -134,13 +133,25 @@ class EnvironmentRequirement:
 
     def _check_packages(self, record: EnvironmentRecord) -> tuple[CompatibilityIssue, ...]:
         issues: list[CompatibilityIssue] = []
-        marker_env = default_environment()
-        marker_env["python_version"] = ".".join(record.python.version.split(".")[:2])
-        marker_env["python_full_version"] = record.python.version
+        marker_env = marker_environment_from_record(record)
         for req_text in self.requirements:
             req = Requirement(req_text)
-            if req.marker is not None and not req.marker.evaluate(marker_env):
-                continue
+            if req.marker is not None:
+                unknowns = _unknown_marker_variables(req.marker, marker_env)
+                if unknowns:
+                    issues.append(
+                        CompatibilityIssue(
+                            "marker_environment_unknown",
+                            "unknown",
+                            f"environment marker for {req_text!r} references unknown fields: {', '.join(unknowns)}",
+                            requirement_path=f"requirements.{normalize_distribution_name(req.name)}.marker",
+                            expected=str(req.marker),
+                            observed={name: marker_env.get(name) for name in unknowns},
+                        )
+                    )
+                    continue
+                if not req.marker.evaluate({key: "" if value is None else value for key, value in marker_env.items()}):
+                    continue
             name = normalize_distribution_name(req.name)
             package = record.distributions.get(name)
             if package is None:
@@ -258,8 +269,22 @@ class EnvironmentRequirement:
                 )
             else:
                 specifier = coerce_specifier(self.dryml_protocol)
-                observed = Version(str(record.dryml.execution_protocol))
-                if specifier and observed not in specifier:
+                try:
+                    observed = Version(str(record.dryml.execution_protocol))
+                except InvalidVersion:
+                    issues.append(
+                        CompatibilityIssue(
+                            "dryml_protocol_mismatch",
+                            "unknown",
+                            f"DRYML protocol {record.dryml.execution_protocol!r} could not be parsed",
+                            requirement_path="dryml_protocol",
+                            observed_path="dryml.execution_protocol",
+                            expected=self.dryml_protocol,
+                            observed=record.dryml.execution_protocol,
+                        )
+                    )
+                    observed = None
+                if observed is not None and specifier and observed not in specifier:
                     issues.append(
                         CompatibilityIssue(
                             "dryml_protocol_mismatch",
@@ -286,7 +311,22 @@ class EnvironmentRequirement:
                 continue
             observed = record.dryml.schema_versions[schema_name]
             specifier = coerce_specifier(schema_spec)
-            if specifier and Version(str(observed)) not in specifier:
+            try:
+                observed_version = Version(str(observed))
+            except InvalidVersion:
+                issues.append(
+                    CompatibilityIssue(
+                        "schema_version_mismatch",
+                        "unknown",
+                        f"schema {schema_name!r} version {observed!r} could not be parsed",
+                        requirement_path=f"schema_versions.{schema_name}",
+                        observed_path=f"dryml.schema_versions.{schema_name}",
+                        expected=schema_spec,
+                        observed=observed,
+                    )
+                )
+                continue
+            if specifier and observed_version not in specifier:
                 issues.append(
                     CompatibilityIssue(
                         "schema_version_mismatch",
@@ -326,8 +366,8 @@ class EnvironmentRequirement:
             "capabilities": list(self.capabilities),
             "tags": list(self.tags),
             "dryml_protocol": self.dryml_protocol,
-            "schema_versions": dict(self.schema_versions),
-            "details": dict(self.details),
+            "schema_versions": json_ready(self.schema_versions),
+            "details": json_ready(self.details),
         }
 
     @classmethod
@@ -347,4 +387,87 @@ class EnvironmentRequirement:
         )
 
 
-__all__ = ["EnvironmentRequirement"]
+def marker_environment_from_record(record: EnvironmentRecord) -> dict[str, str | None]:
+    """Derive PEP 508 marker variables from an EnvironmentRecord.
+
+    Values come from the record and conservative derivations from record fields;
+    the orchestrator process platform is never used for remote marker checks.
+    """
+
+    system = record.platform.system or None
+    implementation = record.python.implementation or None
+    return {
+        "implementation_name": record.platform.implementation_name or _implementation_name(implementation),
+        "implementation_version": record.platform.implementation_version or record.python.version,
+        "os_name": record.platform.os_name or _os_name_from_system(system),
+        "platform_machine": record.platform.machine or None,
+        "platform_release": record.platform.release or None,
+        "platform_system": system,
+        "platform_version": record.platform.version or None,
+        "platform_python_implementation": record.platform.platform_python_implementation or implementation,
+        "python_full_version": record.python.version or None,
+        "python_version": _python_major_minor(record.python.version),
+        "sys_platform": record.platform.sys_platform or _sys_platform_from_system(system),
+        "extra": "",
+    }
+
+
+def _python_major_minor(version: str | None) -> str | None:
+    if not version:
+        return None
+    parts = str(version).split(".")
+    if len(parts) < 2:
+        return None
+    return ".".join(parts[:2])
+
+
+def _implementation_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    return str(value).lower()
+
+
+def _os_name_from_system(system: str | None) -> str | None:
+    if not system:
+        return None
+    key = system.lower()
+    if key.startswith(("linux", "darwin", "freebsd", "openbsd", "netbsd")):
+        return "posix"
+    if key.startswith("windows"):
+        return "nt"
+    return None
+
+
+def _sys_platform_from_system(system: str | None) -> str | None:
+    if not system:
+        return None
+    key = system.lower()
+    if key.startswith("linux"):
+        return "linux"
+    if key.startswith("darwin"):
+        return "darwin"
+    if key.startswith("windows"):
+        return "win32"
+    return None
+
+
+def _unknown_marker_variables(marker: Any, marker_env: Mapping[str, str | None]) -> tuple[str, ...]:
+    return tuple(sorted(name for name in _marker_variables(marker) if marker_env.get(name) is None))
+
+
+def _marker_variables(marker: Any) -> set[str]:
+    variables: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if value.__class__.__name__ == "Variable":
+            variables.add(str(getattr(value, "value", value)))
+            return
+        if isinstance(value, list | tuple):
+            for item in value:
+                visit(item)
+
+    visit(getattr(marker, "_markers", ()))
+    return variables
+
+
+__all__ = ["EnvironmentRequirement", "marker_environment_from_record"]

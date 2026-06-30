@@ -2,6 +2,8 @@ import importlib.metadata as metadata
 import sys
 import types
 
+import pytest
+
 import dryml.environments as envs
 from dryml.environments import introspection
 
@@ -40,6 +42,37 @@ def test_environment_record_distribution_keys_are_normalized_and_order_stable():
     second = sample_record(distributions={"foo-bar": envs.PackageRecord("Foo_Bar", "1")})
     assert tuple(first.distributions) == ("foo-bar",)
     assert first.id == second.id
+
+
+def test_environment_record_details_are_deeply_immutable():
+    input_details = {"nested": {"items": ["a"]}}
+    record = sample_record(details=input_details)
+    before = record.id
+
+    input_details["nested"]["items"].append("b")
+
+    assert record.to_data()["details"] == {"nested": {"items": ["a"]}}
+    assert record.id == before
+    with pytest.raises(AttributeError):
+        record.details["nested"]["items"].append("c")
+
+
+def test_environment_requirement_details_are_deeply_immutable():
+    input_details = {"sources": ["base"], "nested": {"enabled": True}}
+    requirement = envs.EnvironmentRequirement(details=input_details)
+    before = requirement.id
+
+    input_details["sources"].append("mutated")
+
+    assert requirement.to_data()["details"] == {"nested": {"enabled": True}, "sources": ["base"]}
+    assert requirement.id == before
+    with pytest.raises(AttributeError):
+        requirement.details["sources"].append("x")
+
+
+def test_non_json_details_are_rejected():
+    with pytest.raises(envs.EnvironmentSerializationError):
+        sample_record(details={"bad": object()})
 
 
 def test_environment_intern_table_reuses_record_and_requirement_instances():
