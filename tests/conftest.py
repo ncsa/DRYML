@@ -1,7 +1,11 @@
 from fixtures import store_resource_factory, create_name, create_temp_file, \
     create_temp_named_file, create_temp_dir, primary_store_set, ray
 import builtins
+import os
 import sys
+
+pytest_plugins = ("timing_plugin",)
+
 try:
     from mk_ic import install
     from mk_ic import pytest_wrapper_elimination as _pwe
@@ -11,9 +15,12 @@ else:
     install()
     ics.configureOutput(frame_filters=[_pwe])
 
-from dryml.context.context_tracker import add_context
-
 def pytest_sessionstart(session):
+    if os.environ.get("DRYML_TEST_BOOTSTRAP_CONTEXTS") != "1":
+        return
+
+    from dryml.context.context_tracker import add_context
+
     # import jax needs to go before tensorflow
     # Enforce special loading order to prevent crash
     # https://github.com/pytorch/pytorch/issues/101152

@@ -17,7 +17,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 9. [Models API](models.md)
 10. [Artifacts API](artifacts.md)
 11. [Query Index Backend Contracts](query_index_backend_contracts.md)
-12. [Release Notes](release_notes.md)
+12. [Testing Workflow](testing.md)
+13. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -33,6 +34,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - A `Context` describes runtime resource and backend compatibility constraints.
 - `Dataset`, `Model`, and `Artifact` are higher-level APIs built on the core object/repo system.
 - Store-owned query indexes accelerate stored and nested queries without changing object identity.
+- Tests are grouped by feature category and automatically bucketed into smoke, medium, and heavy speed tiers.
 
 ## Documentation Status
 

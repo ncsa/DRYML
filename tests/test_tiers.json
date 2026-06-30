@@ -1,0 +1,38 @@
+{
+  "category_tiers": {
+    "artifacts": "medium",
+    "code": "smoke",
+    "core": "medium",
+    "data": "medium",
+    "environments": "medium",
+    "execute": "medium",
+    "jax": "heavy",
+    "models": "heavy",
+    "multi_framework": "heavy",
+    "tf": "heavy",
+    "torch": "heavy"
+  },
+  "default_tier": "medium",
+  "node_tiers": {
+    "tests/core/test_dirstore_query_index.py::test_sqlite_concurrent_missing_index_build_claim_scans_once": "heavy"
+  },
+  "path_tiers": {
+    "tests/core/test_environment_integration_guard.py": "medium",
+    "tests/core/test_backend_import_safety.py": "medium",
+    "tests/data/test_source_adapters.py": "heavy",
+    "tests/environments/test_compatibility_reports.py": "smoke",
+    "tests/environments/test_environment_probe.py": "medium",
+    "tests/environments/test_environment_records.py": "medium",
+    "tests/environments/test_environment_registry.py": "medium",
+    "tests/environments/test_environment_requirements.py": "smoke",
+    "tests/environments/test_environment_serialization.py": "smoke",
+    "tests/environments/test_environment_specs.py": "smoke",
+    "tests/environments/test_import_safety.py": "medium",
+    "tests/environments/test_requirement_fragments.py": "smoke"
+  },
+  "thresholds": {
+    "medium_seconds": 2.0,
+    "smoke_seconds": 0.25
+  },
+  "version": 1
+}
