@@ -52,7 +52,7 @@ requirement_id = req.id
 
 `EnvironmentRecord.id` includes observed provenance such as interpreter path, prefixes, platform, packages, tags, and details. It is an exact observed-environment key, not a package-solver equivalence class.
 
-Record, requirement, and spec metadata fields are deeply frozen at construction. Mutating an input dictionary or list after construction cannot change the object payload or invalidate its content ID.
+Record, requirement, and spec metadata fields are deeply frozen at construction. Mutating an input dictionary or list after construction cannot change the object payload or invalidate its content ID. Arbitrary JSON metadata must use string mapping keys and finite numeric values; non-string keys, key collisions caused by coercion, non-finite floats, and non-JSON values are rejected at construction/freezing time.
 
 ## Probing
 
@@ -88,7 +88,7 @@ explicit = envs.PythonExecutableSpec(
 )
 ```
 
-The supported policies are `none`, `explicit`, `inherit`, and `dryml-source`. `dryml-source` injects this DRYML checkout's source root without inheriting unrelated coordinator paths.
+The supported policies are `none`, `explicit`, `inherit`, and `dryml-source`. `dryml-source` injects this DRYML checkout's source root without inheriting unrelated coordinator paths. `PYTHONPATH` is controlled only by `pythonpath_policy` and `extra_pythonpath`; `env={"PYTHONPATH": ...}` is ignored so callers cannot accidentally bypass the selected isolation policy.
 
 Represent Conda probes without depending on Conda Python libraries:
 

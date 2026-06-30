@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
@@ -20,7 +21,7 @@ def json_ready(value: Any) -> Any:
     if isinstance(value, MappingProxyType):
         value = dict(value)
     if isinstance(value, Mapping):
-        return {str(key): json_ready(value[key]) for key in sorted(value, key=str)}
+        return {key: json_ready(value[key]) for key in _sorted_string_keys(value)}
     if isinstance(value, tuple):
         return [json_ready(item) for item in value]
     if isinstance(value, list):
@@ -29,6 +30,11 @@ def json_ready(value: Any) -> Any:
         return [json_ready(item) for item in sorted(value, key=repr)]
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
         return [json_ready(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EnvironmentSerializationError(
+            "environment metadata floats must be finite",
+            context={"value": repr(value)},
+        )
     return value
 
 
@@ -42,12 +48,17 @@ def deep_freeze_json(value: Any) -> FrozenJson:
 
     if isinstance(value, Mapping):
         return MappingProxyType(
-            {str(key): deep_freeze_json(value[key]) for key in sorted(value, key=str)}
+            {key: deep_freeze_json(value[key]) for key in _sorted_string_keys(value)}
         )
     if isinstance(value, list | tuple):
         return tuple(deep_freeze_json(item) for item in value)
     if isinstance(value, set | frozenset):
         return tuple(deep_freeze_json(item) for item in sorted(value, key=repr))
+    if isinstance(value, float) and not math.isfinite(value):
+        raise EnvironmentSerializationError(
+            "environment metadata floats must be finite",
+            context={"value": repr(value)},
+        )
     if isinstance(value, str | int | float | bool) or value is None:
         return value
     raise EnvironmentSerializationError(
@@ -84,9 +95,25 @@ def canonical_json_bytes(data: Any) -> bytes:
 
 
 def freeze_mapping(mapping: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Return an immutable copy of a mapping with deterministic string keys."""
+    """Return an immutable shallow copy with deterministic string keys.
+
+    Use this only for mappings whose values are already immutable domain
+    objects. Use :func:`deep_freeze_json` for arbitrary JSON metadata.
+    """
 
     return MappingProxyType({str(key): mapping[key] for key in sorted(mapping or {}, key=str)})
+
+
+def _sorted_string_keys(mapping: Mapping[Any, Any]) -> tuple[str, ...]:
+    keys = []
+    for key in mapping:
+        if not isinstance(key, str):
+            raise EnvironmentSerializationError(
+                "environment metadata mapping keys must be strings",
+                context={"key": repr(key), "type": type(key).__name__},
+            )
+        keys.append(key)
+    return tuple(sorted(keys))
 
 
 __all__ = [

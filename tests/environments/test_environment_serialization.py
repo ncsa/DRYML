@@ -3,7 +3,7 @@ from pathlib import Path
 
 import dryml.environments as envs
 from dryml.environments.ids import content_id
-from dryml.environments.serialization import canonical_json_bytes, canonical_json_dumps, deep_freeze_json
+from dryml.environments.serialization import canonical_json_bytes, canonical_json_dumps, deep_freeze_json, json_ready
 
 
 def test_schema_constants_are_visible():
@@ -26,6 +26,27 @@ def test_deep_freeze_json_canonicalizes_sets_and_lists():
     frozen = deep_freeze_json({"items": {"b", "a"}, "nested": [1, {"x": True}]})
 
     assert canonical_json_dumps(frozen) == '{"items":["a","b"],"nested":[1,{"x":true}]}'
+
+
+def test_deep_freeze_rejects_non_string_mapping_keys():
+    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+        deep_freeze_json({1: "integer-key"})
+
+
+def test_deep_freeze_rejects_string_key_collision():
+    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+        deep_freeze_json({"1": "string-key", 1: "integer-key"})
+
+
+def test_json_ready_does_not_silently_collapse_keys():
+    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+        json_ready({"1": "string-key", 1: "integer-key"})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_floats_are_rejected_during_freeze(value):
+    with pytest.raises(envs.EnvironmentSerializationError, match="floats must be finite"):
+        deep_freeze_json({"value": value})
 
 
 def test_content_id_changes_with_schema_version_and_data():

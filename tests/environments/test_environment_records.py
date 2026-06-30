@@ -75,6 +75,21 @@ def test_non_json_details_are_rejected():
         sample_record(details={"bad": object()})
 
 
+def test_environment_record_rejects_non_string_detail_keys():
+    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+        sample_record(details={"1": "string-key", 1: "integer-key"})
+
+
+def test_environment_requirement_rejects_non_string_detail_keys():
+    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+        envs.EnvironmentRequirement(details={"1": "string-key", 1: "integer-key"})
+
+
+def test_environment_record_rejects_non_finite_detail_floats():
+    with pytest.raises(envs.EnvironmentSerializationError, match="floats must be finite"):
+        sample_record(details={"value": float("nan")})
+
+
 def test_environment_intern_table_reuses_record_and_requirement_instances():
     table = envs.EnvironmentInternTable()
     record = sample_record()

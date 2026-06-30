@@ -47,6 +47,11 @@ def test_conda_spec_validation():
         envs.spec_from_data({"kind": "unknown"})
 
 
+def test_environment_spec_rejects_non_string_env_keys():
+    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+        envs.PythonExecutableSpec("/usr/bin/python", env={"1": "string-key", 1: "integer-key"})
+
+
 def test_environment_lock_ref_roundtrip_and_id():
     lock = envs.EnvironmentLockRef("conda-lock", "file:///tmp/conda-lock.yml", digest="sha256:abc")
     clone = envs.EnvironmentLockRef.from_data(lock.to_data())
