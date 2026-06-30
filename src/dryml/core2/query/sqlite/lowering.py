@@ -384,11 +384,14 @@ class SQLiteRelationCompiler:
         """
 
     def _edge_filters(self, edge: SelectorGraphEdge, alias: str, params: list[Any]) -> list[str]:
+        filters = [f"{alias}.edge_kind = ?"]
+        params.append(edge.edge_kind.value)
         if edge.unordered:
-            return []
+            return filters
         path_blob = self.codec.encode_graph_path(edge.path)
         params.extend((digest_blob(path_blob), path_blob))
-        return [f"{alias}.path_hash = ?", f"{alias}.path_blob = ?"]
+        filters.extend([f"{alias}.path_hash = ?", f"{alias}.path_blob = ?"])
+        return filters
 
     def _node_predicates(self, node: SelectorGraphNode, params: list[Any], *, skip_requirement=None) -> list[str]:
         predicates: list[str] = []

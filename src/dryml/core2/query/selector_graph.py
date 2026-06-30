@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition, Definition
 from ..object import Object
 from .local_structure import LocalStructureCycleError, walk_local_structure
@@ -37,6 +38,7 @@ class SelectorGraphEdge:
     path: DefinitionPath
     child: SelectorNodeId
     unordered: bool = False
+    edge_kind: EdgeKind = EdgeKind.MATERIALIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,12 +168,17 @@ class _GraphLocalConsumer:
             path: DefinitionPath,
             definition: Definition | ConcreteDefinition,
             *,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             unordered: bool = False) -> None:
         child_id = self.compiler.add_node(definition, self.source_path.join(path))
-        self.feature("CDEF_EDGE_AT_PATH", path, None)
+        self.feature(f"CDEF_EDGE_AT_PATH:{edge_kind.value}", path, None)
+        if edge_kind is EdgeKind.MATERIALIZE:
+            self.feature("CDEF_EDGE_AT_PATH", path, None)
         if isinstance(definition, ConcreteDefinition):
-            self.feature("CDEF_EDGE_EXACT", path, definition.stable_hash())
-        self.compiler.edges.append(SelectorGraphEdge(self.parent_id, path, child_id, unordered=unordered))
+            self.feature(f"CDEF_EDGE_EXACT:{edge_kind.value}", path, definition.stable_hash())
+            if edge_kind is EdgeKind.MATERIALIZE:
+                self.feature("CDEF_EDGE_EXACT", path, definition.stable_hash())
+        self.compiler.edges.append(SelectorGraphEdge(self.parent_id, path, child_id, unordered=unordered, edge_kind=edge_kind))
 
 
 def _validate_acyclic(

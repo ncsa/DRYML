@@ -2,16 +2,22 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Iterable, Iterator
 
 from .cdef_identity import same_cdef
-from .definition import ConcreteDefinition, Definition
+from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
 from .object import Object
 from .utils.graph.path import GraphPath
 from .utils.graph.value import get_subtree, iter_value_edges
 
 
-CDEF_GRAPH_SCHEMA_VERSION = 1
+CDEF_GRAPH_SCHEMA_VERSION = 2
+
+
+class EdgeKind(Enum):
+    MATERIALIZE = "materialize"
+    FROZEN = "frozen"
 
 
 class ConcreteDefinitionGraphError(Exception):
@@ -37,6 +43,7 @@ class CDefEdge:
     parent: ConcreteDefinition
     path: GraphPath
     child: ConcreteDefinition
+    kind: EdgeKind = EdgeKind.MATERIALIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,9 +51,10 @@ class CDefOccurrence:
     root: ConcreteDefinition
     path: GraphPath
     definition: ConcreteDefinition
+    kind: EdgeKind = EdgeKind.MATERIALIZE
 
 
-def iter_direct_cdef_edges(cdef: ConcreteDefinition) -> Iterator[tuple[GraphPath, ConcreteDefinition]]:
+def iter_direct_cdef_edges(cdef: ConcreteDefinition) -> Iterator[tuple[GraphPath, ConcreteDefinition, EdgeKind]]:
     if not isinstance(cdef, ConcreteDefinition):
         raise TypeError(f"Expected ConcreteDefinition, got {type(cdef).__name__}.")
 
@@ -54,13 +62,18 @@ def iter_direct_cdef_edges(cdef: ConcreteDefinition) -> Iterator[tuple[GraphPath
         yield from _iter_direct_edges_from_value(edge.value, GraphPath((edge.segment,)))
 
 
-def _iter_direct_edges_from_value(value: Any, path: GraphPath) -> Iterator[tuple[GraphPath, ConcreteDefinition]]:
+def _iter_direct_edges_from_value(value: Any, path: GraphPath) -> Iterator[tuple[GraphPath, ConcreteDefinition, EdgeKind]]:
     if isinstance(value, Object):
         raise ConcreteDefinitionGraphError(f"Runtime Object found inside ConcreteDefinition graph at {path!s}.")
     if isinstance(value, Definition):
         raise ConcreteDefinitionGraphError(f"Plain Definition found inside ConcreteDefinition graph at {path!s}.")
     if isinstance(value, ConcreteDefinition):
-        yield path, value
+        yield path, value, EdgeKind.MATERIALIZE
+        return
+    if isinstance(value, FrozenConcreteDefinition):
+        yield path, value.thaw(), EdgeKind.FROZEN
+        return
+    if isinstance(value, FrozenDefinition):
         return
 
     for edge in iter_value_edges(value):
@@ -160,25 +173,28 @@ class ConcreteDefinitionGraph:
                 yield CDefOccurrence(root, GraphPath(), root)
                 if limit is not None and count >= limit:
                     return
-            stack = [(edge, edge.path) for edge in reversed(self.outgoing(root))]
+            stack = [(edge, edge.path, edge.kind) for edge in reversed(self.outgoing(root)) if edge.kind is EdgeKind.MATERIALIZE]
             while stack:
-                edge, path = stack.pop()
+                edge, path, kind = stack.pop()
                 if target is None or same_cdef(edge.child, target):
                     count += 1
                     if max_occurrences is not None and count > max_occurrences:
                         raise ConcreteDefinitionGraphOccurrenceLimitError(
                             f"Occurrence limit {max_occurrences} exceeded while walking {root.stable_hash()}."
                         )
-                    yield CDefOccurrence(root, path, edge.child)
+                    yield CDefOccurrence(root, path, edge.child, kind)
                     if limit is not None and count >= limit:
                         return
                 for child_edge in reversed(self.outgoing(edge.child)):
-                    stack.append((child_edge, path.join(child_edge.path)))
+                    if child_edge.kind is EdgeKind.MATERIALIZE:
+                        stack.append((child_edge, path.join(child_edge.path), child_edge.kind))
 
     def resolve(self, root: ConcreteDefinition, path: GraphPath) -> ConcreteDefinition:
         if not path:
             return root
         value = get_subtree(root, path)
+        if isinstance(value, FrozenConcreteDefinition):
+            return value.thaw()
         if not isinstance(value, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(f"Path {path!s} does not resolve to a ConcreteDefinition boundary.")
         return value
@@ -288,13 +304,15 @@ class ConcreteDefinitionGraphBuilder:
         self._active[cdef] = path
         self._nodes.setdefault(cdef, CDefNode(cdef, cdef.stable_hash()))
         try:
-            for edge_path, child in iter_direct_cdef_edges(cdef):
-                edge = CDefEdge(cdef, edge_path, child)
-                edge_key = (edge.parent, edge.path, edge.child)
+            for edge_path, child, kind in iter_direct_cdef_edges(cdef):
+                edge = CDefEdge(cdef, edge_path, child, kind)
+                edge_key = (edge.parent, edge.path, edge.child, edge.kind)
                 if edge_key not in self._edges:
+                    self._nodes.setdefault(child, CDefNode(child, child.stable_hash()))
                     self._edges[edge_key] = edge
                     self._edges_by_parent.setdefault(edge.parent, []).append(edge)
-                self._visit(child, path.join(edge_path))
+                if kind is EdgeKind.MATERIALIZE:
+                    self._visit(child, path.join(edge_path))
         finally:
             self._active.pop(cdef, None)
             self._completed.add(cdef)
@@ -345,6 +363,8 @@ def _validate_graph_parts(
     for edge in edges:
         if not isinstance(edge, CDefEdge):
             raise TypeError(f"Graph edges must be CDefEdge instances, got {type(edge).__name__}.")
+        if not isinstance(edge.kind, EdgeKind):
+            raise TypeError(f"Graph edge kind must be EdgeKind, got {type(edge.kind).__name__}.")
         if not isinstance(edge.parent, ConcreteDefinition):
             raise TypeError(f"Graph edge parents must be ConcreteDefinitions, got {type(edge.parent).__name__}.")
         if not isinstance(edge.child, ConcreteDefinition):
@@ -361,6 +381,16 @@ def _validate_graph_parts(
             raise ConcreteDefinitionGraphError(
                 f"Graph edge path {edge.path!s} cannot be resolved on parent {edge.parent}."
             ) from e
+        if isinstance(resolved, FrozenConcreteDefinition):
+            if edge.kind is not EdgeKind.FROZEN:
+                raise ConcreteDefinitionGraphError(
+                    f"Graph edge path {edge.path!s} resolves to a frozen reference but edge kind is {edge.kind.value!r}."
+                )
+            resolved = resolved.thaw()
+        elif edge.kind is EdgeKind.FROZEN:
+            raise ConcreteDefinitionGraphError(
+                f"Graph frozen edge path {edge.path!s} does not resolve to a FrozenConcreteDefinition boundary."
+            )
         if not isinstance(resolved, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(
                 f"Graph edge path {edge.path!s} does not resolve to a ConcreteDefinition boundary."
@@ -371,8 +401,11 @@ def _validate_graph_parts(
             )
 
     outgoing: dict[ConcreteDefinition, list[ConcreteDefinition]] = defaultdict(list)
+    reachable_outgoing: dict[ConcreteDefinition, list[ConcreteDefinition]] = defaultdict(list)
     for edge in edges:
-        outgoing[edge.parent].append(edge.child)
+        reachable_outgoing[edge.parent].append(edge.child)
+        if edge.kind is EdgeKind.MATERIALIZE:
+            outgoing[edge.parent].append(edge.child)
 
     visited: set[ConcreteDefinition] = set()
     active: set[ConcreteDefinition] = set()
@@ -395,6 +428,18 @@ def _validate_graph_parts(
     for root in roots:
         visit(root)
 
+    reachable: set[ConcreteDefinition] = set()
+
+    def visit_reachable(cdef: ConcreteDefinition) -> None:
+        if cdef in reachable:
+            return
+        reachable.add(cdef)
+        for child in reachable_outgoing.get(cdef, ()):
+            visit_reachable(child)
+
+    for root in roots:
+        visit_reachable(root)
+
     for node in nodes:
-        if node.definition not in visited:
+        if node.definition not in reachable:
             raise ConcreteDefinitionGraphError(f"Graph node {node.definition} is not reachable from any root.")

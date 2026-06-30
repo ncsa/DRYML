@@ -198,7 +198,7 @@ def _parents_with_matching_child(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids or not child_ids:
         return set()
-    return catalog.parents(child_ids, edge.path, unordered=edge.unordered, within=parent_ids)
+    return _parents(catalog, child_ids, edge, within=parent_ids)
 
 
 def _parents_for_children(
@@ -207,7 +207,7 @@ def _parents_for_children(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not child_ids:
         return set()
-    return catalog.parents(child_ids, edge.path, unordered=edge.unordered)
+    return _parents(catalog, child_ids, edge)
 
 
 def _children_with_matching_parent(
@@ -217,7 +217,7 @@ def _children_with_matching_parent(
         child_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids or not child_ids:
         return set()
-    return catalog.children(parent_ids, edge.path, unordered=edge.unordered, within=child_ids)
+    return _children(catalog, parent_ids, edge, within=child_ids)
 
 
 def _children_for_parents(
@@ -226,4 +226,22 @@ def _children_for_parents(
         parent_ids: set[DefinitionId]) -> set[DefinitionId]:
     if not parent_ids:
         return set()
-    return catalog.children(parent_ids, edge.path, unordered=edge.unordered)
+    return _children(catalog, parent_ids, edge)
+
+
+def _parents(catalog, child_ids, edge: SelectorGraphEdge, *, within=None):
+    try:
+        return catalog.parents(child_ids, edge.path, unordered=edge.unordered, edge_kind=edge.edge_kind, within=within)
+    except TypeError:
+        if edge.edge_kind.value != "materialize":
+            raise
+        return catalog.parents(child_ids, edge.path, unordered=edge.unordered, within=within)
+
+
+def _children(catalog, parent_ids, edge: SelectorGraphEdge, *, within=None):
+    try:
+        return catalog.children(parent_ids, edge.path, unordered=edge.unordered, edge_kind=edge.edge_kind, within=within)
+    except TypeError:
+        if edge.edge_kind.value != "materialize":
+            raise
+        return catalog.children(parent_ids, edge.path, unordered=edge.unordered, within=within)

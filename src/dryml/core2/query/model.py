@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ..cdef_graph import EdgeKind
 from .path import DefinitionPath
 
 
@@ -163,7 +164,7 @@ class DefinitionFingerprint:
 
 DefinitionId = str
 StoreId = str
-EdgeKey = tuple[DefinitionId, DefinitionPath, DefinitionId]
+EdgeKey = tuple[DefinitionId, DefinitionPath, DefinitionId, EdgeKind]
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +181,7 @@ class DefinitionEdgeRecord:
     parent_id: DefinitionId
     path: DefinitionPath
     child_id: DefinitionId
+    edge_kind: EdgeKind = EdgeKind.MATERIALIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +312,8 @@ class AllOccurrenceTraversalSnapshot:
         for owner_id in sorted(self.stored_ids):
             stack = []
             for edge in sorted(self.outgoing.get(owner_id, ()), key=lambda edge: str(edge.path), reverse=True):
+                if edge.edge_kind is not EdgeKind.MATERIALIZE:
+                    continue
                 stack.append((edge.child_id, edge.path))
             while stack:
                 did, path = stack.pop()
@@ -318,6 +322,8 @@ class AllOccurrenceTraversalSnapshot:
                 if max_occurrences is not None and yielded >= max_occurrences:
                     return
                 for edge in sorted(self.outgoing.get(did, ()), key=lambda edge: str(edge.path), reverse=True):
+                    if edge.edge_kind is not EdgeKind.MATERIALIZE:
+                        continue
                     stack.append((edge.child_id, path.join(edge.path)))
 
 

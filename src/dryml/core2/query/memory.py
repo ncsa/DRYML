@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+from ..cdef_graph import EdgeKind
 from .index import DefinitionCatalog, MemoryDefinitionGraphReadView
 from .model import IndexWriteResult, OccurrenceTraversalSnapshot, QueryIndexStatus, ValidationReport
 
@@ -102,11 +103,11 @@ class MemoryStoreReadView:
     def local_candidates(self, requirements, *, within=None, domain=None, stats=None):
         return self._view.local_candidates(requirements, within=within, domain=domain, stats=stats)
 
-    def parents(self, child_ids, path, *, unordered: bool, within=None):
-        return self._view.parents(child_ids, path, unordered=unordered, within=within)
+    def parents(self, child_ids, path, *, unordered: bool, edge_kind: EdgeKind = EdgeKind.MATERIALIZE, within=None):
+        return self._view.parents(child_ids, path, unordered=unordered, edge_kind=edge_kind, within=within)
 
-    def children(self, parent_ids, path, *, unordered: bool, within=None):
-        return self._view.children(parent_ids, path, unordered=unordered, within=within)
+    def children(self, parent_ids, path, *, unordered: bool, edge_kind: EdgeKind = EdgeKind.MATERIALIZE, within=None):
+        return self._view.children(parent_ids, path, unordered=unordered, edge_kind=edge_kind, within=within)
 
     def is_stored_id(self, did) -> bool:
         return did in self._stored_ids()
@@ -132,7 +133,7 @@ class MemoryStoreReadView:
         seen = set(stack)
         while stack:
             parent_id = stack.pop()
-            children = self._view.children({parent_id}, _ROOT_PATH, unordered=True)
+            children = self._view.children({parent_id}, _ROOT_PATH, unordered=True, edge_kind=EdgeKind.MATERIALIZE)
             for child_id in children:
                 if child_id in seen:
                     continue
@@ -150,7 +151,7 @@ class MemoryStoreReadView:
         stack = [did]
         while stack:
             child_id = stack.pop()
-            parents = self._view.parents({child_id}, _ROOT_PATH, unordered=True)
+            parents = self._view.parents({child_id}, _ROOT_PATH, unordered=True, edge_kind=EdgeKind.MATERIALIZE)
             for parent_id in parents:
                 if parent_id in stored:
                     return True

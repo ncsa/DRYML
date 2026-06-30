@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition, Definition
 from .local_structure import canonical_class_key, scalar_key, walk_local_structure
 from .model import (
@@ -69,12 +70,19 @@ class _FeatureCounter:
             path: DefinitionPath,
             definition: Definition | ConcreteDefinition,
             *,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             unordered: bool = False) -> None:
-        _add(self.counts, "CDEF_EDGE_AT_PATH", path, None)
+        _add(self.counts, f"CDEF_EDGE_AT_PATH:{edge_kind.value}", path, None)
+        if edge_kind is EdgeKind.MATERIALIZE:
+            _add(self.counts, "CDEF_EDGE_AT_PATH", path, None)
         if isinstance(definition, ConcreteDefinition):
-            _add(self.counts, "CDEF_EDGE_EXACT", path, definition.stable_hash())
+            _add(self.counts, f"CDEF_EDGE_EXACT:{edge_kind.value}", path, definition.stable_hash())
+            if edge_kind is EdgeKind.MATERIALIZE:
+                _add(self.counts, "CDEF_EDGE_EXACT", path, definition.stable_hash())
             if self.include_edge_class:
-                _add(self.counts, "CDEF_EDGE_CLASS", path, canonical_class_key(definition.cls))
+                _add(self.counts, f"CDEF_EDGE_CLASS:{edge_kind.value}", path, canonical_class_key(definition.cls))
+                if edge_kind is EdgeKind.MATERIALIZE:
+                    _add(self.counts, "CDEF_EDGE_CLASS", path, canonical_class_key(definition.cls))
 
 def legacy_requirements_satisfied(fingerprint: DefinitionFingerprint, requirements: tuple[FeatureRequirement, ...]) -> bool:
     for req in requirements:

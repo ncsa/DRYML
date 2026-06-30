@@ -154,12 +154,14 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.FROZEN_DICT,
             NodeKind.DEFINITION,
             NodeKind.CONCRETE_DEFINITION,
+            NodeKind.FROZEN_CONCRETE_DEFINITION,
+            NodeKind.FROZEN_DEFINITION,
             NodeKind.OBJECT,
         }
 
     def dispatch(self, obj, ctx: GraphCtx) -> str:
         from ..canonical import node_kind, NodeKind
-        from ..definition import Definition, ConcreteDefinition
+        from ..definition import Definition, ConcreteDefinition, FrozenConcreteDefinition, FrozenDefinition
         from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
         from ..object import Object
 
@@ -184,6 +186,18 @@ class StableHashGraphHasher(GraphHasher):
             type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
             items = [(k, obj[k]) for k in obj]
             return self._hash_mapping(type_marker, dict(items), ctx)
+
+        if isinstance(obj, FrozenConcreteDefinition):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(type_marker, {"target": obj.target}, ctx)
+
+        if isinstance(obj, FrozenDefinition):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(
+                type_marker,
+                {"cls": obj.cls, "args": obj.args, "kwargs": obj.kwargs},
+                ctx,
+            )
 
         raise TypeError(f"Unsupported type {type(obj)} for stable hashing")
 

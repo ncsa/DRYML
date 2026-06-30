@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, Protocol
 
-from ..definition import ConcreteDefinition, Definition
+from ..cdef_graph import EdgeKind
+from ..definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
 from ..symbol import maybe_symbol_ref
@@ -28,6 +29,7 @@ class LocalStructureConsumer(Protocol):
             path: DefinitionPath,
             definition: Definition | ConcreteDefinition,
             *,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             unordered: bool = False) -> None:
         ...
 
@@ -78,6 +80,25 @@ def _walk(
     if isinstance(value, Object):
         value = value.definition
 
+    is_target = mode.startswith("target")
+    is_local = mode.endswith("local")
+    if isinstance(value, FrozenConcreteDefinition):
+        if is_target:
+            consumer.feature("FROZEN_CDEF_AT", path, None)
+            consumer.feature("FROZEN_CDEF_HASH", path, value.thaw().stable_hash())
+        if is_local and path:
+            consumer.definition_boundary(path, value.thaw(), edge_kind=EdgeKind.FROZEN)
+        return
+
+    if isinstance(value, FrozenDefinition):
+        consumer.feature("FROZEN_DEF_AT", path, None)
+        if value.cls is not None:
+            try:
+                consumer.feature("FROZEN_DEF_ROOT_CLASS", path, canonical_class_key(value.cls))
+            except TypeError:
+                pass
+        return
+
     active_id = id(value) if _tracks_cycles(value) else None
     if active_id is not None:
         first_path = active.get(active_id)
@@ -119,7 +140,7 @@ def _walk_checked(
     if isinstance(value, ConcreteDefinition):
         if is_target:
             if is_local and path:
-                consumer.definition_boundary(path, value)
+                consumer.definition_boundary(path, value, edge_kind=EdgeKind.MATERIALIZE)
                 return
             if is_local:
                 consumer.feature("EXACT_NODE", path, value.stable_hash())
@@ -137,14 +158,17 @@ def _walk_checked(
             return
 
         if is_selector and is_local and path:
-            consumer.definition_boundary(path, value)
+            consumer.definition_boundary(path, value, edge_kind=EdgeKind.MATERIALIZE)
             return
         consumer.feature("EXACT_SUBTREE", path, value.stable_hash())
         return
 
     if is_selector and isinstance(value, Definition):
+        from ..arg_roles import apply_definition_arg_roles
+
+        value = apply_definition_arg_roles(value)
         if is_local and path:
-            consumer.definition_boundary(path, value)
+            consumer.definition_boundary(path, value, edge_kind=EdgeKind.MATERIALIZE)
             return
         if value.cls is not None and class_match == "exact" and not is_nonclass_callable(value.cls):
             try:
@@ -306,12 +330,12 @@ def _walk_set(
         if not isinstance(child, (Definition, ConcreteDefinition)):
             continue
         if unordered_set_boundaries and isinstance(child, Definition):
-            consumer.definition_boundary(path, child, unordered=True)
+            consumer.definition_boundary(path, child, edge_kind=EdgeKind.MATERIALIZE, unordered=True)
             continue
         member_path = path.child(edge.segment)
         if not isinstance(edge.segment, SetMember):
             raise TypeError(f"Expected SetMember path segment, got {type(edge.segment).__name__}.")
-        consumer.definition_boundary(member_path, child)
+        consumer.definition_boundary(member_path, child, edge_kind=EdgeKind.MATERIALIZE)
 
 
 def _container_families(value: Any, *, mode: LocalStructureMode) -> tuple[str, ...]:

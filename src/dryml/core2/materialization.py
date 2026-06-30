@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .canonical import from_canonical
-from .cdef_graph import ConcreteDefinitionGraph
+from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import CachePolicy, RepoLoadOptions
@@ -179,7 +179,8 @@ def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefiniti
         if cached and not options.restore_state:
             return
         for edge in graph.outgoing(cdef):
-            visit(edge.child)
+            if edge.kind is EdgeKind.MATERIALIZE:
+                visit(edge.child)
 
     visit(root)
     return included

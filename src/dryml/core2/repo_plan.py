@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Generic, Iterable, Iterator, Literal, TypeVar
 
 from .canonical import NodeKind, is_runtime_leaf, node_kind
-from .cdef_graph import ConcreteDefinitionGraph
+from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
 from .policies import RepoGraphOptions, RepoLoadOptions
@@ -86,18 +86,21 @@ def build_runtime_binding(
         resolve_global: bool = False) -> RuntimeGraphBinding:
     roots = collect_runtime_roots(value)
     graph = ConcreteDefinitionGraph.from_roots(root.definition for root in roots)
+    materialize_nodes = _materialize_reachable_nodes(graph, roots)
     objects: dict[ConcreteDefinition, Object] = {}
     for root in roots:
         if root.obj is not None:
             bind_runtime_object(objects, root.definition, root.obj, path=root.path)
     for node in graph.nodes():
+        if node.definition not in materialize_nodes:
+            continue
         if node.definition in objects:
             continue
         obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
         if obj is not None:
             path = _node_primary_path(graph, roots, node.definition)
             bind_runtime_object(objects, node.definition, obj, path=path)
-    missing = frozenset(node.definition for node in graph.nodes() if node.definition not in objects)
+    missing = frozenset(cdef for cdef in materialize_nodes if cdef not in objects)
     return RuntimeGraphBinding(graph=graph, roots=roots, objects=objects, missing=missing)
 
 
@@ -169,6 +172,8 @@ def _iter_bound_graph_object_occurrences(
             out.append(GraphObjectOccurrence(path, cdef, obj))
 
         for edge in binding.graph.outgoing(cdef):
+            if edge.kind is not EdgeKind.MATERIALIZE:
+                continue
             visit(edge.child, path.join(edge.path))
 
         if options.order == "post" and should_apply:
@@ -232,6 +237,8 @@ def build_save_plan(
     min_depth = _minimum_depths(binding.graph, binding.roots)
     actions: list[SaveAction] = []
     for cdef in binding.graph.topological_order(dependencies_first=True):
+        if cdef not in binding.objects:
+            continue
         obj = binding.objects[cdef]
         reason = _save_reason(
             obj,
@@ -284,6 +291,10 @@ def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]
         return
     if kind is NodeKind.CONCRETE_DEFINITION:
         roots.append(RuntimeRoot(value, path, None))
+        return
+    if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
+        return
+    if kind is NodeKind.FROZEN_DEFINITION:
         return
     if kind is NodeKind.DEFINITION:
         from .repo import RepoGraphError
@@ -377,8 +388,24 @@ def _minimum_depths(graph: ConcreteDefinitionGraph, roots: tuple[RuntimeRoot, ..
             continue
         depths[cdef] = depth
         for edge in graph.outgoing(cdef):
+            if edge.kind is not EdgeKind.MATERIALIZE:
+                continue
             queue.append((edge.child, depth + 1))
     return depths
+
+
+def _materialize_reachable_nodes(graph: ConcreteDefinitionGraph, roots: tuple[RuntimeRoot, ...]) -> set[ConcreteDefinition]:
+    out: set[ConcreteDefinition] = set()
+    stack = [root.definition for root in roots]
+    while stack:
+        cdef = stack.pop()
+        if cdef in out:
+            continue
+        out.add(cdef)
+        for edge in graph.outgoing(cdef):
+            if edge.kind is EdgeKind.MATERIALIZE:
+                stack.append(edge.child)
+    return out
 
 
 def _save_reason(

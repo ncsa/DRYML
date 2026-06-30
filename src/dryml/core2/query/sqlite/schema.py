@@ -12,7 +12,7 @@ from ..model import FINGERPRINT_SCHEMA_VERSION, QueryIndexDirty, QueryIndexIncom
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 2
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 3
 IndexCompatibilityDecision = Literal["compatible", "migrate", "rebuild", "future-unsupported"]
 
 
@@ -104,12 +104,13 @@ DDL = (
         path_hash BLOB NOT NULL,
         path_blob BLOB NOT NULL,
         unordered INTEGER NOT NULL DEFAULT 0 CHECK (unordered IN (0, 1)),
+        edge_kind TEXT NOT NULL DEFAULT 'materialize',
         child_def_id INTEGER NOT NULL REFERENCES definitions(def_id) ON DELETE CASCADE,
-        PRIMARY KEY (parent_def_id, path_hash, path_blob, unordered, child_def_id)
+        PRIMARY KEY (parent_def_id, edge_kind, path_hash, path_blob, unordered, child_def_id)
     ) WITHOUT ROWID
     """,
-    "CREATE INDEX IF NOT EXISTS definition_edges_by_child ON definition_edges(child_def_id, path_hash, parent_def_id)",
-    "CREATE INDEX IF NOT EXISTS definition_edges_by_parent_path ON definition_edges(parent_def_id, path_hash, child_def_id)",
+    "CREATE INDEX IF NOT EXISTS definition_edges_by_child ON definition_edges(child_def_id, edge_kind, path_hash, parent_def_id)",
+    "CREATE INDEX IF NOT EXISTS definition_edges_by_parent_path ON definition_edges(parent_def_id, edge_kind, path_hash, child_def_id)",
     """
     CREATE TABLE IF NOT EXISTS stored_roots (
         def_id INTEGER PRIMARY KEY REFERENCES definitions(def_id) ON DELETE CASCADE,

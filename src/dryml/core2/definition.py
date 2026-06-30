@@ -8,6 +8,7 @@ import sys
 from collections.abc import Mapping
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any, Callable, Iterator
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .utils.types import is_nonclass_callable
@@ -231,6 +232,11 @@ class Definition(DefInterface, Mapping):
     def thaw(self, memo: dict|None=None) -> Any:
         return self
 
+    def freeze(self) -> "FrozenDefinition":
+        """Return an immutable selector snapshot without concretizing."""
+
+        return FrozenDefinition.from_definition(self)
+
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return to_canonical(self, repo=repo)
 
@@ -299,11 +305,111 @@ class ConcreteDefinition(DefInterface, Mapping):
     def copy(self):
         return deepcopy(self)
 
+    def freeze(self) -> "FrozenConcreteDefinition":
+        """Return a non-materializing canonical reference to this CDef."""
+
+        return FrozenConcreteDefinition(self)
+
     def thaw(self, memo: dict | None = None) -> Any:
         return thaw_value(self, memo=memo)
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return self
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenConcreteDefinition:
+    """Canonical wrapper for a non-materializing exact CDef reference."""
+
+    target: ConcreteDefinition
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, ConcreteDefinition):
+            raise TypeError(
+                "FrozenConcreteDefinition target must be a ConcreteDefinition, "
+                f"got {type(self.target).__name__}."
+            )
+
+    def __hash__(self) -> int:
+        return stable_int_hash(stable_hash_function(self))
+
+    def thaw(self) -> ConcreteDefinition:
+        return self.target
+
+    def __repr__(self) -> str:
+        return f"FrozenConcreteDefinition({self.target!r})"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenDefinition:
+    """Immutable snapshot of a mutable Definition selector."""
+
+    cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
+    args: Any
+    kwargs: Any
+
+    @classmethod
+    def from_definition(cls, definition: Definition) -> "FrozenDefinition":
+        if not isinstance(definition, Definition):
+            raise TypeError(f"Expected Definition, got {type(definition).__name__}.")
+        return cls(
+            _freeze_definition_value(definition.cls),
+            None if definition.args is None else _freeze_definition_value(definition.args),
+            _freeze_definition_value(definition.kwargs),
+        )
+
+    @property
+    def skip_args(self) -> bool:
+        return self.args is None
+
+    def __hash__(self) -> int:
+        return stable_int_hash(stable_hash_function(self))
+
+    def thaw(self) -> Definition:
+        thaw_args = () if self.args is None else _thaw_definition_value(self.args)
+        thaw_kwargs = _thaw_definition_value(self.kwargs)
+        if self.cls is None:
+            if self.args is None:
+                return Definition(SKIP_ARGS, **thaw_kwargs)
+            return Definition(*thaw_args, **thaw_kwargs)
+        cls = _thaw_definition_value(self.cls)
+        if self.args is None:
+            return Definition(cls, SKIP_ARGS, **thaw_kwargs)
+        return Definition(cls, *thaw_args, **thaw_kwargs)
+
+    def __repr__(self) -> str:
+        return f"FrozenDefinition(cls={self.cls!r}, args={self.args!r}, kwargs={self.kwargs!r})"
+
+
+def freeze(value: Any) -> FrozenConcreteDefinition | FrozenDefinition:
+    """Freeze a DRYML Object, ConcreteDefinition, Definition, or frozen value."""
+
+    from .object import Object
+
+    if isinstance(value, (FrozenConcreteDefinition, FrozenDefinition)):
+        return value
+    if isinstance(value, Object):
+        return value.definition.freeze()
+    if isinstance(value, ConcreteDefinition):
+        return value.freeze()
+    if isinstance(value, Definition):
+        return value.freeze()
+    raise TypeError(
+        "dryml.freeze expects Object, ConcreteDefinition, Definition, or frozen wrapper; "
+        f"got {type(value).__name__}."
+    )
+
+
+def _freeze_definition_value(value: Any) -> Any:
+    from .canonical import to_canonical_definition_value
+
+    return to_canonical_definition_value(value)
+
+
+def _thaw_definition_value(value: Any) -> Any:
+    from .canonical import thaw_frozen_definition_value
+
+    return thaw_frozen_definition_value(value)
 
 
 def get_path(obj_or_def, path):
@@ -706,6 +812,10 @@ class SelectorMatcher(GraphMatcher):
     def match_dryml(self, selector, target, ctx: GraphCtx) -> bool:
         sel_def = self._normalize_dryml(selector)
         tgt_def = self._normalize_dryml(target)
+        if isinstance(sel_def, Definition):
+            from .arg_roles import apply_definition_arg_roles
+
+            sel_def = apply_definition_arg_roles(sel_def)
 
         compare_failed = False
 

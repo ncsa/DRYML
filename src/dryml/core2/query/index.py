@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from threading import RLock
 from typing import Any
 
-from ..cdef_graph import ConcreteDefinitionGraph
+from ..cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from ..definition import ConcreteDefinition
 from .fingerprint import canonical_class_key, target_local_fingerprint
 from .model import (
@@ -52,8 +52,8 @@ class MemoryDefinitionGraphReadView:
             edge_by_key: dict[EdgeKey, DefinitionEdgeRecord],
             outgoing_edges: dict[DefinitionId, frozenset[EdgeKey]],
             incoming_edges: dict[DefinitionId, frozenset[EdgeKey]],
-            child_by_parent_path: dict[tuple[DefinitionId, DefinitionPath], frozenset[DefinitionId]],
-            parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath], frozenset[DefinitionId]],
+            child_by_parent_path: dict[tuple[DefinitionId, DefinitionPath, EdgeKind], frozenset[DefinitionId]],
+            parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath, EdgeKind], frozenset[DefinitionId]],
             strong_cached_ids: set[DefinitionId],
             weak_cached_ids: set[DefinitionId],
             source_key: str = "memory-catalog",
@@ -242,7 +242,11 @@ class MemoryDefinitionGraphReadView:
     def has_stored_ancestor(self, did: DefinitionId) -> bool:
         self._check_active()
         seen: set[DefinitionId] = set()
-        stack = [self._edge_by_key[key].parent_id for key in self._incoming_edges.get(did, ())]
+        stack = [
+            self._edge_by_key[key].parent_id
+            for key in self._incoming_edges.get(did, ())
+            if self._edge_by_key[key].edge_kind is EdgeKind.MATERIALIZE
+        ]
         while stack:
             cur = stack.pop()
             if cur in seen:
@@ -250,7 +254,11 @@ class MemoryDefinitionGraphReadView:
             if self.is_stored_id(cur):
                 return True
             seen.add(cur)
-            stack.extend(self._edge_by_key[key].parent_id for key in self._incoming_edges.get(cur, ()))
+            stack.extend(
+                self._edge_by_key[key].parent_id
+                for key in self._incoming_edges.get(cur, ())
+                if self._edge_by_key[key].edge_kind is EdgeKind.MATERIALIZE
+            )
         return False
 
     def _owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
@@ -261,6 +269,8 @@ class MemoryDefinitionGraphReadView:
         while stack:
             cur = stack.pop()
             for edge_key in self._incoming_edges.get(cur, ()):
+                if self._edge_by_key[edge_key].edge_kind is not EdgeKind.MATERIALIZE:
+                    continue
                 parent_id = self._edge_by_key[edge_key].parent_id
                 if self.is_stored_id(parent_id):
                     owners.add(parent_id)
@@ -290,6 +300,7 @@ class MemoryDefinitionGraphReadView:
             path: DefinitionPath,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         self._check_active()
         if not child_ids or (within is not None and not within):
@@ -300,19 +311,19 @@ class MemoryDefinitionGraphReadView:
                 for child_id in child_ids:
                     for edge_key in self._incoming_edges.get(child_id, ()):
                         record = self._edge_by_key[edge_key]
-                        if record.path.startswith(path):
+                        if record.edge_kind is edge_kind and record.path.startswith(path):
                             out.add(record.parent_id)
                 return out
             child_filter = set(child_ids)
             for parent_id in within:
                 for edge_key in self._outgoing_edges.get(parent_id, ()):
                     record = self._edge_by_key[edge_key]
-                    if record.child_id in child_filter and record.path.startswith(path):
+                    if record.edge_kind is edge_kind and record.child_id in child_filter and record.path.startswith(path):
                         out.add(parent_id)
                         break
             return out
         for child_id in child_ids:
-            parents = self._parents_by_child_path.get((child_id, path), frozenset())
+            parents = self._parents_by_child_path.get((child_id, path, edge_kind), frozenset())
             out.update(parents if within is None else parents & within)
         return out
 
@@ -322,6 +333,7 @@ class MemoryDefinitionGraphReadView:
             path: DefinitionPath,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         self._check_active()
         if not parent_ids or (within is not None and not within):
@@ -331,11 +343,11 @@ class MemoryDefinitionGraphReadView:
             for parent_id in parent_ids:
                 for edge_key in self._outgoing_edges.get(parent_id, ()):
                     record = self._edge_by_key[edge_key]
-                    if (within is None or record.child_id in within) and record.path.startswith(path):
+                    if record.edge_kind is edge_kind and (within is None or record.child_id in within) and record.path.startswith(path):
                         out.add(record.child_id)
             return out
         for parent_id in parent_ids:
-            children = self._child_by_parent_path.get((parent_id, path), frozenset())
+            children = self._child_by_parent_path.get((parent_id, path, edge_kind), frozenset())
             out.update(children if within is None else children & within)
         return out
 
@@ -356,6 +368,8 @@ class MemoryDefinitionGraphReadView:
             seen.add(cur)
             for edge_key in self._incoming_edges.get(cur, ()):
                 edge = self._edge_by_key[edge_key]
+                if edge.edge_kind is not EdgeKind.MATERIALIZE:
+                    continue
                 incoming[edge.child_id].append(edge)
                 cdefs.setdefault(edge.child_id, self._definitions_by_id[edge.child_id].cdef)
                 cdefs.setdefault(edge.parent_id, self._definitions_by_id[edge.parent_id].cdef)
@@ -391,7 +405,7 @@ class MemoryDefinitionGraphReadView:
         self._check_active()
         seen: set[DefinitionId] = set()
         stack = [self._edge_by_key[key].child_id for key in sorted(
-            self._outgoing_edges.get(owner_id, ()),
+            (key for key in self._outgoing_edges.get(owner_id, ()) if self._edge_by_key[key].edge_kind is EdgeKind.MATERIALIZE),
             key=lambda key: str(self._edge_by_key[key].path),
         )]
         while stack:
@@ -400,7 +414,7 @@ class MemoryDefinitionGraphReadView:
                 continue
             seen.add(cur)
             child_edges = sorted(
-                self._outgoing_edges.get(cur, ()),
+                (key for key in self._outgoing_edges.get(cur, ()) if self._edge_by_key[key].edge_kind is EdgeKind.MATERIALIZE),
                 key=lambda key: str(self._edge_by_key[key].path),
             )
             stack.extend(self._edge_by_key[key].child_id for key in reversed(child_edges))
@@ -420,8 +434,8 @@ class DefinitionCatalog:
         self.edge_by_key: dict[EdgeKey, DefinitionEdgeRecord] = {}
         self.outgoing_edges: dict[DefinitionId, set[EdgeKey]] = defaultdict(set)
         self.incoming_edges: dict[DefinitionId, set[EdgeKey]] = defaultdict(set)
-        self.child_by_parent_path: dict[tuple[DefinitionId, DefinitionPath], set[DefinitionId]] = defaultdict(set)
-        self.parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath], set[DefinitionId]] = defaultdict(set)
+        self.child_by_parent_path: dict[tuple[DefinitionId, DefinitionPath, EdgeKind], set[DefinitionId]] = defaultdict(set)
+        self.parents_by_child_path: dict[tuple[DefinitionId, DefinitionPath, EdgeKind], set[DefinitionId]] = defaultdict(set)
         self.store_by_id: dict[StoreId, Any] = {}
         self.hydrated_stores: set[StoreId] = set()
         self.generation = 0
@@ -780,9 +794,10 @@ class DefinitionCatalog:
             path: DefinitionPath,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         with self.read_view(include_cached=False) as view:
-            return view.parents(child_ids, path, unordered=unordered, within=within)
+            return view.parents(child_ids, path, unordered=unordered, edge_kind=edge_kind, within=within)
 
     def children(
             self,
@@ -790,9 +805,10 @@ class DefinitionCatalog:
             path: DefinitionPath,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         with self.read_view(include_cached=False) as view:
-            return view.children(parent_ids, path, unordered=unordered, within=within)
+            return view.children(parent_ids, path, unordered=unordered, edge_kind=edge_kind, within=within)
 
     def _hydrate_stores(self, stores, *, stats: QueryStats | None = None) -> None:
         build_repo = _CatalogBuildRepo(self.repo)
@@ -907,13 +923,13 @@ class DefinitionCatalog:
         for edge in staged.edge_by_key.values():
             parent_id = id_map[edge.parent_id]
             child_id = id_map[edge.child_id]
-            key: EdgeKey = (parent_id, edge.path, child_id)
+            key: EdgeKey = (parent_id, edge.path, child_id, edge.edge_kind)
             if key not in self.edge_by_key:
-                self.edge_by_key[key] = DefinitionEdgeRecord(key, parent_id, edge.path, child_id)
+                self.edge_by_key[key] = DefinitionEdgeRecord(key, parent_id, edge.path, child_id, edge.edge_kind)
                 self.outgoing_edges[parent_id].add(key)
                 self.incoming_edges[child_id].add(key)
-                self.child_by_parent_path[(parent_id, edge.path)].add(child_id)
-                self.parents_by_child_path[(child_id, edge.path)].add(parent_id)
+                self.child_by_parent_path[(parent_id, edge.path, edge.edge_kind)].add(child_id)
+                self.parents_by_child_path[(child_id, edge.path, edge.edge_kind)].add(parent_id)
                 changed = True
 
         for sid, store in staged.store_by_id.items():
@@ -1023,13 +1039,13 @@ class DefinitionCatalog:
         for edge in graph.edges():
             parent_id = self.ids_by_cdef[edge.parent]
             child_id = self.ids_by_cdef[edge.child]
-            key: EdgeKey = (parent_id, edge.path, child_id)
+            key: EdgeKey = (parent_id, edge.path, child_id, edge.kind)
             if key not in self.edge_by_key:
-                self.edge_by_key[key] = DefinitionEdgeRecord(key, parent_id, edge.path, child_id)
+                self.edge_by_key[key] = DefinitionEdgeRecord(key, parent_id, edge.path, child_id, edge.kind)
                 self.outgoing_edges[parent_id].add(key)
                 self.incoming_edges[child_id].add(key)
-                self.child_by_parent_path[(parent_id, edge.path)].add(child_id)
-                self.parents_by_child_path[(child_id, edge.path)].add(parent_id)
+                self.child_by_parent_path[(parent_id, edge.path, edge.kind)].add(child_id)
+                self.parents_by_child_path[(child_id, edge.path, edge.kind)].add(parent_id)
         return (len(self.definitions_by_id), len(self.edge_by_key)) != before
 
     def _cached_cdefs(self, *, reuse_weak: bool = True) -> tuple[ConcreteDefinition, ...]:

@@ -210,13 +210,15 @@ class NodeKind(Enum):
 
     DEFINITION = auto()
     CONCRETE_DEFINITION = auto()
+    FROZEN_CONCRETE_DEFINITION = auto()
+    FROZEN_DEFINITION = auto()
     OBJECT = auto()
 
     UNSUPPORTED = auto()
 
 
 def node_kind(x: Any) -> NodeKind:
-    from .definition import ConcreteDefinition, Definition
+    from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
     from .object import Object
 
     if isinstance(x, type):
@@ -253,6 +255,12 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, dict):
         return NodeKind.DICT
 
+    if isinstance(x, FrozenConcreteDefinition):
+        return NodeKind.FROZEN_CONCRETE_DEFINITION
+
+    if isinstance(x, FrozenDefinition):
+        return NodeKind.FROZEN_DEFINITION
+
     if isinstance(x, ConcreteDefinition):
         return NodeKind.CONCRETE_DEFINITION
 
@@ -284,6 +292,8 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.FROZEN_SET,
         NodeKind.FROZEN_DICT,
         NodeKind.CONCRETE_DEFINITION,
+        NodeKind.FROZEN_CONCRETE_DEFINITION,
+        NodeKind.FROZEN_DEFINITION,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
     } or _is_naked_core_type(x)
@@ -620,6 +630,8 @@ class _ToCanonicalTransformer(GraphTransformer):
 
             live_cls = resolve_symbol(obj.cls)
             prep_args, prep_kwargs = live_cls.__prepare_args__(*obj.args, **obj.kwargs)
+            from .arg_roles import apply_arg_roles
+            prep_args, prep_kwargs = apply_arg_roles(live_cls, tuple(prep_args), dict(prep_kwargs))
             c_args = self.transform(prep_args, ctx.child("args"))
             c_kwargs = self.transform(prep_kwargs, ctx.child("kwargs"))
             c_cls = self.transform(live_cls, ctx.child("cls"))
@@ -637,6 +649,9 @@ class _ToCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.FUNCTION:
             return symbol_ref(obj)
+
+        if kind is NodeKind.FROZEN_DEFINITION:
+            return obj
 
         raise TypeError(
             f"Cannot canonicalize object of type {type(obj).__name__} at {ctx.path_str()}"
@@ -663,6 +678,8 @@ class _ThawValueTransformer(GraphTransformer):
             NodeKind.FROZEN_TUPLE,
             NodeKind.FROZEN_DICT,
             NodeKind.CONCRETE_DEFINITION,
+            NodeKind.FROZEN_CONCRETE_DEFINITION,
+            NodeKind.FROZEN_DEFINITION,
             NodeKind.DEFINITION,
             NodeKind.OBJECT,
         }:
@@ -677,6 +694,8 @@ class _ThawValueTransformer(GraphTransformer):
             NodeKind.FROZEN_TUPLE,
             NodeKind.FROZEN_DICT,
             NodeKind.CONCRETE_DEFINITION,
+            NodeKind.FROZEN_CONCRETE_DEFINITION,
+            NodeKind.FROZEN_DEFINITION,
             NodeKind.DEFINITION,
             NodeKind.OBJECT,
         }
@@ -706,6 +725,12 @@ class _ThawValueTransformer(GraphTransformer):
             thaw_args = self.transform(obj.args, ctx.child("args"))
             thaw_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
             return Definition(obj.cls, *thaw_args, **thaw_kwargs)
+
+        if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
+            return obj.thaw()
+
+        if kind is NodeKind.FROZEN_DEFINITION:
+            return obj.thaw()
 
         if kind is NodeKind.DEFINITION:
             return obj
@@ -741,7 +766,7 @@ class _FromCanonicalTransformer(GraphTransformer):
         return obj
 
     def memo_key(self, obj: Any, ctx: GraphCtx):
-        if node_kind(obj) is NodeKind.CONCRETE_DEFINITION:
+        if node_kind(obj) in {NodeKind.CONCRETE_DEFINITION, NodeKind.FROZEN_CONCRETE_DEFINITION, NodeKind.FROZEN_DEFINITION}:
             return obj
         return None
 
@@ -755,6 +780,8 @@ class _FromCanonicalTransformer(GraphTransformer):
             NodeKind.FROZEN_TUPLE,
             NodeKind.FROZEN_SET,
             NodeKind.FROZEN_DICT,
+            NodeKind.FROZEN_CONCRETE_DEFINITION,
+            NodeKind.FROZEN_DEFINITION,
             NodeKind.DEFINITION,
             NodeKind.OBJECT,
         }
@@ -777,6 +804,12 @@ class _FromCanonicalTransformer(GraphTransformer):
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
+
+        if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
+            return obj.thaw()
+
+        if kind is NodeKind.FROZEN_DEFINITION:
+            return obj.thaw()
 
         if kind is NodeKind.DEFINITION:
             cdef = to_canonical(obj, repo=self.repo)
@@ -896,3 +929,63 @@ def from_canonical(
         memo=memo,
     )
     return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)
+
+
+def to_canonical_definition_value(value: Any) -> Any:
+    """Snapshot values for Definition.freeze without concretizing Definitions."""
+
+    from .definition import FrozenDefinition
+
+    kind = node_kind(value)
+    if kind is NodeKind.DEFINITION:
+        return FrozenDefinition.from_definition(value)
+    if kind is NodeKind.NDARRAY:
+        return FrozenNDArray.from_array(value)
+    if kind is NodeKind.OBJECT:
+        return value.definition.freeze()
+    if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
+        return transform_container(
+            value,
+            lambda p, v: to_canonical_definition_value(v),
+            target="canonical",
+        )
+    if kind in {
+        NodeKind.POD,
+        NodeKind.TYPE,
+        NodeKind.IDENTITY_VALUE,
+        NodeKind.FROZEN_NDARRAY,
+        NodeKind.FROZEN_LIST,
+        NodeKind.FROZEN_TUPLE,
+        NodeKind.FROZEN_SET,
+        NodeKind.FROZEN_DICT,
+        NodeKind.CONCRETE_DEFINITION,
+        NodeKind.FROZEN_CONCRETE_DEFINITION,
+        NodeKind.FROZEN_DEFINITION,
+        NodeKind.IMPORT_REF,
+        NodeKind.SOURCE_SPEC,
+    }:
+        return value
+    if kind is NodeKind.FUNCTION:
+        return symbol_ref(value)
+    raise TypeError(f"Cannot freeze Definition value of type {type(value).__name__}.")
+
+
+def thaw_frozen_definition_value(value: Any) -> Any:
+    """Thaw one value from a FrozenDefinition snapshot."""
+
+    kind = node_kind(value)
+    if kind is NodeKind.FROZEN_DEFINITION:
+        return value.thaw()
+    if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
+        return value.thaw()
+    if kind is NodeKind.FROZEN_NDARRAY:
+        return value.thaw()
+    if kind in {NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
+        return transform_container(
+            value,
+            lambda p, v: thaw_frozen_definition_value(v),
+            target="runtime",
+        )
+    if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC}:
+        return resolve_symbol(value)
+    return value

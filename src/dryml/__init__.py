@@ -3,6 +3,7 @@ import dryml.core2 as core2
 import dryml.artifacts as artifacts
 import dryml.execute as execute
 from dryml.core2.session import config, configure, reset_config, status
+from dryml.core2 import FrozenCDef, FrozenCDefArg, FrozenConcreteDefinition, FrozenDef, FrozenDefArg, FrozenDefinition, freeze
 
 __version__ = "0.3.0-dev"
 
@@ -15,4 +16,11 @@ __all__ = [
     "configure",
     "reset_config",
     "status",
+    "freeze",
+    "FrozenCDef",
+    "FrozenDef",
+    "FrozenCDefArg",
+    "FrozenDefArg",
+    "FrozenConcreteDefinition",
+    "FrozenDefinition",
 ]

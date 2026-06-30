@@ -6,6 +6,7 @@ from dryml.core2.cdef_graph import (
     CDefNode,
     ConcreteDefinitionGraphCycleError,
     ConcreteDefinitionGraphError,
+    EdgeKind,
     iter_direct_cdef_edges,
 )
 from dryml.core2.definition import ConcreteDefinition
@@ -152,7 +153,7 @@ def test_iter_direct_cdef_edges_stops_at_child_boundary():
 
     edges = tuple(iter_direct_cdef_edges(root.definition))
 
-    assert edges == ((edges[0][0], mid.definition),)
+    assert edges == ((edges[0][0], mid.definition, EdgeKind.MATERIALIZE),)
     assert str(edges[0][0]) == "$.args[0]"
 
 

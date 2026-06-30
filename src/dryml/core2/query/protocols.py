@@ -4,6 +4,7 @@ from collections.abc import Collection
 from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
+from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition
 from .domain import DefinitionDomain
 from .lowering import CandidateBatch, CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, QueryTerminal, ScanPolicy
@@ -39,6 +40,7 @@ class DefinitionGraphIndex(Protocol):
             path: DefinitionPath,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         ...
 
@@ -48,6 +50,7 @@ class DefinitionGraphIndex(Protocol):
             path: DefinitionPath,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         ...
 
@@ -153,7 +156,8 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
             relation: CandidateRelation,
             path: DefinitionPath,
             *,
-            unordered: bool = False) -> CandidateRelation:
+            unordered: bool = False,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE) -> CandidateRelation:
         ...
 
     def relation_children(
@@ -161,7 +165,8 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
             relation: CandidateRelation,
             path: DefinitionPath,
             *,
-            unordered: bool = False) -> CandidateRelation:
+            unordered: bool = False,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE) -> CandidateRelation:
         ...
 
     def relation_semijoin_child_exists(
@@ -170,7 +175,8 @@ class QueryIndexReadView(DefinitionGraphIndex, Protocol):
             child_relation: CandidateRelation,
             path: DefinitionPath,
             *,
-            unordered: bool = False) -> CandidateRelation:
+            unordered: bool = False,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE) -> CandidateRelation:
         ...
 
     def relation_intersect(

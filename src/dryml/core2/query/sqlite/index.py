@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import time
 
-from ...cdef_graph import ConcreteDefinitionGraph
+from ...cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from ...definition import ConcreteDefinition
 from ..codecs import (
     QueryIndexCodec,
@@ -416,10 +416,10 @@ class SQLiteStoreQueryIndex:
                 child_id = cdef_to_id[encoded.child]
                 cur = con.execute(
                     """
-                    INSERT OR IGNORE INTO definition_edges (parent_def_id, path_hash, path_blob, child_def_id)
-                    VALUES (?, ?, ?, ?)
+                    INSERT OR IGNORE INTO definition_edges (parent_def_id, path_hash, path_blob, unordered, edge_kind, child_def_id)
+                    VALUES (?, ?, ?, 0, ?, ?)
                     """,
-                    (parent_id, encoded.path_hash, encoded.path_blob, child_id),
+                    (parent_id, encoded.path_hash, encoded.path_blob, encoded.edge_kind.value, child_id),
                 )
                 if cur.rowcount:
                     counters.edges_added += 1
@@ -901,10 +901,10 @@ class SQLiteQueryIndexReadView:
             debug_label=f"{relation.debug_label}:domain:{domain.name}",
         )
 
-    def relation_parents(self, relation: CandidateRelation, path, *, unordered: bool = False) -> CandidateRelation:
+    def relation_parents(self, relation: CandidateRelation, path, *, unordered: bool = False, edge_kind: EdgeKind = EdgeKind.MATERIALIZE) -> CandidateRelation:
         plan = self._plan_for_relation(relation)
         params = list(plan.params)
-        path_sql = self._relation_path_predicate("e", path, unordered, params)
+        path_sql = self._relation_path_predicate("e", path, unordered, params, edge_kind=edge_kind)
         candidate_sql = f"""
         SELECT DISTINCT e.parent_def_id AS def_id
         FROM definition_edges e
@@ -920,10 +920,10 @@ class SQLiteQueryIndexReadView:
             debug_label=f"{relation.debug_label}:parents",
         )
 
-    def relation_children(self, relation: CandidateRelation, path, *, unordered: bool = False) -> CandidateRelation:
+    def relation_children(self, relation: CandidateRelation, path, *, unordered: bool = False, edge_kind: EdgeKind = EdgeKind.MATERIALIZE) -> CandidateRelation:
         plan = self._plan_for_relation(relation)
         params = list(plan.params)
-        path_sql = self._relation_path_predicate("e", path, unordered, params)
+        path_sql = self._relation_path_predicate("e", path, unordered, params, edge_kind=edge_kind)
         candidate_sql = f"""
         SELECT DISTINCT e.child_def_id AS def_id
         FROM definition_edges e
@@ -945,11 +945,12 @@ class SQLiteQueryIndexReadView:
             child_relation: CandidateRelation,
             path,
             *,
-            unordered: bool = False) -> CandidateRelation:
+            unordered: bool = False,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE) -> CandidateRelation:
         parent_plan = self._plan_for_relation(parent_relation)
         child_plan = self._plan_for_relation(child_relation)
         params = [*parent_plan.params, *child_plan.params]
-        path_sql = self._relation_path_predicate("e", path, unordered, params)
+        path_sql = self._relation_path_predicate("e", path, unordered, params, edge_kind=edge_kind)
         candidate_sql = f"""
         SELECT DISTINCT parent_relation.def_id
         FROM ({parent_plan.candidate_sql}) parent_relation
@@ -1048,11 +1049,13 @@ class SQLiteQueryIndexReadView:
                 FROM targets
                 JOIN definition_edges
                   ON definition_edges.child_def_id = targets.def_id
+                 AND definition_edges.edge_kind = 'materialize'
                 UNION
                 SELECT definition_edges.parent_def_id
                 FROM ancestors
                 JOIN definition_edges
                   ON definition_edges.child_def_id = ancestors.current_id
+                 AND definition_edges.edge_kind = 'materialize'
             )
         SELECT DISTINCT stored_roots.def_id
         FROM ancestors
@@ -1181,12 +1184,13 @@ class SQLiteQueryIndexReadView:
         self._relation_counter += 1
         return f"{prefix}_{self._relation_counter}"
 
-    def _relation_path_predicate(self, alias: str, path, unordered: bool, params: list) -> str:
+    def _relation_path_predicate(self, alias: str, path, unordered: bool, params: list, *, edge_kind: EdgeKind) -> str:
+        params.append(edge_kind.value)
         if unordered:
-            return "1 = 1"
+            return f"{alias}.edge_kind = ?"
         path_blob = _CODEC.encode_graph_path(path)
         params.extend((digest_blob(path_blob), path_blob))
-        return f"{alias}.path_hash = ? AND {alias}.path_blob = ?"
+        return f"{alias}.edge_kind = ? AND {alias}.path_hash = ? AND {alias}.path_blob = ?"
 
     def create_temp_relation(self, ids) -> str:
         self._check_active()
@@ -1342,11 +1346,13 @@ class SQLiteQueryIndexReadView:
                         FROM candidate_ids
                         JOIN definition_edges
                           ON definition_edges.child_def_id = candidate_ids.def_id
+                         AND definition_edges.edge_kind = 'materialize'
                         UNION
                         SELECT ancestors.start_id, definition_edges.parent_def_id
                         FROM ancestors
                         JOIN definition_edges
                           ON definition_edges.child_def_id = ancestors.current_id
+                         AND definition_edges.edge_kind = 'materialize'
                     )
                 SELECT DISTINCT ancestors.start_id
                 FROM ancestors
@@ -1403,6 +1409,7 @@ class SQLiteQueryIndexReadView:
             path,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         self._check_active()
         if not child_ids or (within is not None and not within):
@@ -1414,12 +1421,12 @@ class SQLiteQueryIndexReadView:
             rows = self._con.execute(
                 """
                 SELECT parent_def_id, path_blob FROM definition_edges
-                WHERE child_def_id = ? AND path_hash = ?
+                WHERE child_def_id = ? AND edge_kind = ? AND path_hash = ?
                 """,
-                (child_id, path_hash),
+                (child_id, edge_kind.value, path_hash),
             ) if not unordered else self._con.execute(
-                "SELECT parent_def_id, path_blob FROM definition_edges WHERE child_def_id = ?",
-                (child_id,),
+                "SELECT parent_def_id, path_blob FROM definition_edges WHERE child_def_id = ? AND edge_kind = ?",
+                (child_id, edge_kind.value),
             )
             for parent_id, row_path_blob in rows:
                 row_path = _CODEC.decode_graph_path(row_path_blob)
@@ -1434,6 +1441,7 @@ class SQLiteQueryIndexReadView:
             path,
             *,
             unordered: bool,
+            edge_kind: EdgeKind = EdgeKind.MATERIALIZE,
             within: set[DefinitionId] | frozenset[DefinitionId] | None = None) -> set[DefinitionId]:
         self._check_active()
         if not parent_ids or (within is not None and not within):
@@ -1445,12 +1453,12 @@ class SQLiteQueryIndexReadView:
             rows = self._con.execute(
                 """
                 SELECT child_def_id, path_blob FROM definition_edges
-                WHERE parent_def_id = ? AND path_hash = ?
+                WHERE parent_def_id = ? AND edge_kind = ? AND path_hash = ?
                 """,
-                (parent_id, path_hash),
+                (parent_id, edge_kind.value, path_hash),
             ) if not unordered else self._con.execute(
-                "SELECT child_def_id, path_blob FROM definition_edges WHERE parent_def_id = ?",
-                (parent_id,),
+                "SELECT child_def_id, path_blob FROM definition_edges WHERE parent_def_id = ? AND edge_kind = ?",
+                (parent_id, edge_kind.value),
             )
             for child_id, row_path_blob in rows:
                 row_path = _CODEC.decode_graph_path(row_path_blob)
@@ -1507,10 +1515,11 @@ class SQLiteQueryIndexReadView:
 
     def all_occurrence_snapshot(self) -> AllOccurrenceTraversalSnapshot:
         outgoing = defaultdict(list)
-        for parent_id, path_blob, child_id in self._con.execute(
-                "SELECT parent_def_id, path_blob, child_def_id FROM definition_edges"):
+        for parent_id, path_blob, child_id, edge_kind in self._con.execute(
+                "SELECT parent_def_id, path_blob, child_def_id, edge_kind FROM definition_edges"):
             path = _CODEC.decode_graph_path(path_blob)
-            edge = DefinitionEdgeRecord((parent_id, path, child_id), parent_id, path, child_id)
+            kind = EdgeKind(edge_kind)
+            edge = DefinitionEdgeRecord((parent_id, path, child_id, kind), parent_id, path, child_id, kind)
             outgoing[parent_id].append(edge)
         return AllOccurrenceTraversalSnapshot(
             cdefs=self.cdefs_by_id(self.all_definition_ids()),
@@ -1530,12 +1539,12 @@ class SQLiteQueryIndexReadView:
 
     def _parent_edges(self, child_id: DefinitionId) -> tuple[DefinitionEdgeRecord, ...]:
         rows = self._con.execute(
-            "SELECT parent_def_id, path_blob, child_def_id FROM definition_edges WHERE child_def_id = ?",
+            "SELECT parent_def_id, path_blob, child_def_id, edge_kind FROM definition_edges WHERE child_def_id = ? AND edge_kind = 'materialize'",
             (child_id,),
         )
         return tuple(
-            DefinitionEdgeRecord((parent_id, _CODEC.decode_graph_path(path_blob), row_child_id), parent_id, _CODEC.decode_graph_path(path_blob), row_child_id)
-            for parent_id, path_blob, row_child_id in rows
+            DefinitionEdgeRecord((parent_id, _CODEC.decode_graph_path(path_blob), row_child_id, EdgeKind(edge_kind)), parent_id, _CODEC.decode_graph_path(path_blob), row_child_id, EdgeKind(edge_kind))
+            for parent_id, path_blob, row_child_id, edge_kind in rows
         )
 
     def _owner_ids_for_nested_ids(self, ids: set[DefinitionId]) -> set[DefinitionId]:
@@ -1551,11 +1560,13 @@ class SQLiteQueryIndexReadView:
                         FROM target_ids
                         JOIN definition_edges
                           ON definition_edges.child_def_id = target_ids.def_id
+                         AND definition_edges.edge_kind = 'materialize'
                         UNION
                         SELECT definition_edges.parent_def_id
                         FROM ancestors
                         JOIN definition_edges
                           ON definition_edges.child_def_id = ancestors.current_id
+                         AND definition_edges.edge_kind = 'materialize'
                     )
                 SELECT DISTINCT stored_roots.def_id
                 FROM ancestors
@@ -1569,7 +1580,7 @@ class SQLiteQueryIndexReadView:
     def _descendant_ids(self, owner_id: DefinitionId) -> set[DefinitionId]:
         descendants = set()
         stack = [row[0] for row in self._con.execute(
-            "SELECT child_def_id FROM definition_edges WHERE parent_def_id = ?",
+            "SELECT child_def_id FROM definition_edges WHERE parent_def_id = ? AND edge_kind = 'materialize'",
             (owner_id,),
         )]
         while stack:
@@ -1578,7 +1589,7 @@ class SQLiteQueryIndexReadView:
                 continue
             descendants.add(cur)
             stack.extend(row[0] for row in self._con.execute(
-                "SELECT child_def_id FROM definition_edges WHERE parent_def_id = ?",
+                "SELECT child_def_id FROM definition_edges WHERE parent_def_id = ? AND edge_kind = 'materialize'",
                 (cur,),
             ))
         return descendants
@@ -1623,16 +1634,17 @@ class _EncodedNode:
 
 
 class _EncodedEdge:
-    def __init__(self, parent, child, path_blob, path_hash):
+    def __init__(self, parent, child, path_blob, path_hash, edge_kind: EdgeKind):
         self.parent = parent
         self.child = child
         self.path_blob = path_blob
         self.path_hash = path_hash
+        self.edge_kind = edge_kind
 
     @classmethod
     def from_edge(cls, edge):
         path_blob = _CODEC.encode_graph_path(edge.path)
-        return cls(edge.parent, edge.child, path_blob, digest_blob(path_blob))
+        return cls(edge.parent, edge.child, path_blob, digest_blob(path_blob), edge.kind)
 
 
 def _resolve_definition_id(con, encoded: _EncodedNode, *, generation: int) -> tuple[int, bool]:

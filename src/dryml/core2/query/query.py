@@ -5,7 +5,8 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..canonical import matching_container_family
-from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
+from ..arg_roles import apply_definition_arg_roles
+from ..definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..object import Object
 from ..symbol import maybe_symbol_ref, resolve_symbol
@@ -680,7 +681,14 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
     if isinstance(selector, ConcreteDefinition):
             return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
 
+    if isinstance(selector, FrozenConcreteDefinition):
+        return isinstance(target, FrozenConcreteDefinition) and cdef_equal(selector.thaw(), target.thaw())
+
+    if isinstance(selector, FrozenDefinition):
+        return isinstance(target, FrozenDefinition) and selector == target
+
     if isinstance(selector, Definition):
+        selector = apply_definition_arg_roles(selector)
         if not isinstance(target, (Definition, ConcreteDefinition)):
             return False
         if selector.cls is not None:

@@ -8,20 +8,22 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 
 1. [Introduction](intro.md)
 2. [Objects and Definitions](objects_and_defs.md)
-3. [Repos and Stores](repos.md)
-4. [Tensor Specs](tensor_specs.md)
-5. [Contexts](context.md)
-6. [Data API](data.md)
-7. [Models API](models.md)
-8. [Artifacts API](artifacts.md)
-9. [Query Index Backend Contracts](query_index_backend_contracts.md)
-10. [Release Notes](release_notes.md)
+3. [Frozen Definitions](frozen_definitions.md)
+4. [Repos and Stores](repos.md)
+5. [Tensor Specs](tensor_specs.md)
+6. [Contexts](context.md)
+7. [Data API](data.md)
+8. [Models API](models.md)
+9. [Artifacts API](artifacts.md)
+10. [Query Index Backend Contracts](query_index_backend_contracts.md)
+11. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
 - DRYML programs are built from object graphs.
 - A `Definition` is a deferred construction recipe.
 - A `ConcreteDefinition` is a fully resolved, stable identity for an object.
+- A frozen definition records a non-materializing exact or selector reference in a definition graph.
 - An `Object` is the runtime instance associated with a concrete definition.
 - A `Repo` manages live objects, persistent stores, aliases, queries, saves, and loads.
 - A `Store` owns persisted object state.

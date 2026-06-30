@@ -1,5 +1,6 @@
 from dryml.core2.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode
-from dryml.core2.definition import Definition, SKIP_ARGS
+from dryml.core2.definition import Definition, FrozenConcreteDefinition, FrozenDefinition, SKIP_ARGS, freeze
+from dryml.core2.arg_roles import ArgRole, FrozenCDef, FrozenCDefArg, FrozenDef, FrozenDefArg, MaterializeArg, ValueArg
 from dryml.core2.repo import Repo, load_alias, load_object, save_object
 from dryml.core2.dtype import dtype, DType
 from dryml.core2.tensor_spec import (
@@ -18,6 +19,7 @@ from dryml.core2.cdef_graph import (
     ConcreteDefinitionGraph,
     ConcreteDefinitionGraphCycleError,
     ConcreteDefinitionGraphError,
+    EdgeKind,
     iter_direct_cdef_edges,
 )
 from dryml.core2.query import (
@@ -50,6 +52,16 @@ __all__ = [
     "Metadata",
     "Compute",
     "Definition",
+    "FrozenConcreteDefinition",
+    "FrozenDefinition",
+    "freeze",
+    "ArgRole",
+    "FrozenCDef",
+    "FrozenCDefArg",
+    "FrozenDef",
+    "FrozenDefArg",
+    "MaterializeArg",
+    "ValueArg",
     "SKIP_ARGS",
     "Repo",
     "configure",
@@ -75,6 +87,7 @@ __all__ = [
     "ConcreteDefinitionGraph",
     "ConcreteDefinitionGraphCycleError",
     "ConcreteDefinitionGraphError",
+    "EdgeKind",
     "iter_direct_cdef_edges",
     "Arg",
     "DefinitionPath",
