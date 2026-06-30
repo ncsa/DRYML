@@ -33,7 +33,7 @@ Try to avoid executing the full test suite often. There are some tests which are
 
 ## Draft Commit Message
 
-A draft commit message should be written to `COMMIT-MSG`. This file may already exist in which case it includes a draft already in progress. Append your new version after the current text. The user will make final edits given the history of the evolving message.
+A draft commit message should be written to `COMMIT-MSG`. This file may already exist in which case it includes a draft already in progress. Append your new version after the current text. The user will make final edits given the history of the evolving message. Check the last commit message before editing. A previous draft message may have already been checked in. In which case, inspect the diff and make the commit message reflect that diff.
 
 ### Other
 `examples` - Example dryml programs to illustrate dryml use cases
