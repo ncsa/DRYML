@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, Serializable
+from dryml.core2 import ConcreteDefinition, Definition, Object, Repo, Serializable
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan, from_canonical_local
 from dryml.core2.policies import RepoLoadOptions
@@ -22,6 +22,17 @@ class MaterialParent(Object):
         super().__init__()
         self.left = left
         self.right = right
+
+
+class MaterialChainNode(Object):
+    constructed = []
+
+    def __init__(self, name, child=None, ref=None):
+        super().__init__()
+        self.name = name
+        self.child = child
+        self.ref = ref
+        type(self).constructed.append(name)
 
 
 class MaterialSerializable(Serializable):
@@ -127,6 +138,33 @@ def test_materialization_shared_child_constructed_once():
     assert parent.left is parent.right
     assert MaterialLeaf.constructed.count("shared") == 1
     assert repo._num_constructions == 2
+
+
+def test_materialization_stops_at_ref_edge_before_materialized_subgraph():
+    repo = Repo()
+    d_def = Definition(MaterialChainNode, "D")
+    c_def = Definition(MaterialChainNode, "C", ref=d_def.ref())
+    b_def = Definition(MaterialChainNode, "B", child=c_def.mat())
+    a_def = Definition(MaterialChainNode, "A", ref=b_def.ref())
+    a_cdef = a_def.concretize(repo=repo)
+    b_cdef = a_cdef.kwargs["ref"].target
+
+    MaterialChainNode.constructed.clear()
+    plan = build_materialization_plan(
+        repo,
+        a_cdef,
+        RepoLoadOptions(build_missing=True),
+        memo={},
+        path=[""],
+    )
+    obj = repo.load_or_build(a_cdef)
+
+    assert plan.order == (a_cdef,)
+    assert MaterialChainNode.constructed == ["A"]
+    assert obj.name == "A"
+    assert obj.ref == b_cdef
+    assert isinstance(obj.ref, ConcreteDefinition)
+    assert repo._num_constructions == 1
 
 
 def test_materialization_new_still_shares_within_one_pass():
