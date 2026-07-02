@@ -373,12 +373,21 @@ class SQLiteStoreQueryIndex:
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
         roots = tuple(dict.fromkeys(roots))
-        graph = as_query_index_graph(graph, graph.roots or roots)
+        graph = as_query_index_graph(graph, roots if roots else graph.roots)
         graph_nodes = graph.nodes()
         node_hash_blobs = {node.definition: stable_hash_to_blob(node.stable_hash) for node in graph_nodes}
         encoded_edges = tuple(_EncodedEdge.from_edge(edge) for edge in graph.edges())
         if not roots and not graph_nodes and not encoded_edges:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
+        existing_node_ids, missing_nodes = self._preflight_graph_nodes(
+            graph_nodes,
+            node_hash_blobs,
+            require_ready=require_ready,
+        )
+        encoded_missing_nodes = tuple(
+            _EncodedNode.from_cdef(cdef, stable_hash_blob=node_hash_blobs[cdef])
+            for cdef in missing_nodes
+        )
 
         def operation(con):
             initialize_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
@@ -391,17 +400,9 @@ class SQLiteStoreQueryIndex:
             generation = _read_generation(con)
             next_generation = generation + 1
             counters = _WriteCounters()
-            cdef_to_id: dict[ConcreteDefinition, int] = {}
-            missing_nodes: list[ConcreteDefinition] = []
-            for node in graph_nodes:
-                did = _existing_definition_id(con, node.definition, stable_hash_blob=node_hash_blobs[node.definition])
-                if did is None:
-                    missing_nodes.append(node.definition)
-                else:
-                    cdef_to_id[node.definition] = did
+            cdef_to_id: dict[ConcreteDefinition, int] = dict(existing_node_ids)
 
-            for cdef in missing_nodes:
-                encoded = _EncodedNode.from_cdef(cdef, stable_hash_blob=node_hash_blobs[cdef])
+            for encoded in encoded_missing_nodes:
                 did, added = _resolve_definition_id(con, encoded, generation=next_generation)
                 cdef_to_id[encoded.cdef] = did
                 counters.definitions_added += int(added)
@@ -465,6 +466,28 @@ class SQLiteStoreQueryIndex:
             )
 
         return self._run_write_transaction(operation)
+
+    def _preflight_graph_nodes(self, graph_nodes, node_hash_blobs, *, require_ready: bool):
+        missing_nodes = [node.definition for node in graph_nodes]
+        if not self.path.exists():
+            return {}, tuple(missing_nodes)
+
+        con = self._connections.connection(readonly=True)
+        validate_schema(
+            con,
+            store_key=self.source_key,
+            canonical_version=self.canonical_version,
+            require_ready=require_ready,
+        )
+        existing_node_ids: dict[ConcreteDefinition, int] = {}
+        missing_nodes = []
+        for node in graph_nodes:
+            did = _existing_definition_id(con, node.definition, stable_hash_blob=node_hash_blobs[node.definition])
+            if did is None:
+                missing_nodes.append(node.definition)
+            else:
+                existing_node_ids[node.definition] = did
+        return existing_node_ids, tuple(missing_nodes)
 
     def remove_stored_roots(self, roots):
         roots = tuple(dict.fromkeys(roots))

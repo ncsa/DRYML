@@ -15,7 +15,7 @@ from .utils.graph.path import GraphPath
 from .utils.graph.value import get_subtree, iter_value_edges
 
 
-CDEF_GRAPH_SCHEMA_VERSION = 3
+CDEF_GRAPH_SCHEMA_VERSION = 4
 
 
 class EdgeKind(Enum):
@@ -513,6 +513,6 @@ def as_query_index_graph(
     """Return a query-index closure for roots without rebuilding one that is already suitable."""
 
     wanted_roots = tuple(dict.fromkeys(graph.roots if roots is None else roots))
-    if graph.closure is GraphClosure.QUERY_INDEX and set(graph.roots) == set(wanted_roots):
+    if graph.closure is GraphClosure.QUERY_INDEX and graph.roots == wanted_roots:
         return graph
     return ConcreteDefinitionGraph.for_query_index_roots(wanted_roots)

@@ -7,6 +7,8 @@ from dryml.core2.cdef_graph import (
     ConcreteDefinitionGraphCycleError,
     ConcreteDefinitionGraphError,
     EdgeKind,
+    GraphClosure,
+    as_query_index_graph,
     iter_direct_cdef_edges,
 )
 from dryml.core2.definition import ConcreteDefinition
@@ -112,6 +114,20 @@ def test_multi_root_graph_deduplicates_shared_nodes():
 
     assert definitions.count(shared.definition) == 1
     assert graph.roots == (left.definition, right.definition)
+
+
+def test_query_index_graph_rebuilds_for_requested_root_order():
+    repo = Repo()
+    shared = GraphLeaf("shared", repo=repo)
+    left = GraphParent(shared, label="left", repo=repo)
+    right = GraphParent(shared, label="right", repo=repo)
+    graph = ConcreteDefinitionGraph.for_query_index_roots((left.definition, right.definition))
+
+    reordered = as_query_index_graph(graph, (right.definition, left.definition))
+
+    assert reordered is not graph
+    assert reordered.closure is GraphClosure.QUERY_INDEX
+    assert reordered.roots == (right.definition, left.definition)
 
 
 def test_child_inside_set_uses_semantic_set_member_path():

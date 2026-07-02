@@ -35,7 +35,7 @@ SQLite writes use one logical transaction per mutation:
 - activate or remove stored roots
 - increment generation once if the logical state changed
 
-Expensive pure work, such as graph traversal and row encoding, happens before acquiring the SQLite writer slot. The writer transaction is intentionally short and retried only for known busy/locked errors.
+Expensive pure work, such as graph traversal and row encoding, happens before acquiring the SQLite writer slot. Registration may use a read-side preflight to identify definitions already present in the sidecar, encode only missing nodes outside the writer transaction, and then re-resolve those encoded nodes while writing. The writer transaction is intentionally short and retried only for known busy/locked errors.
 
 Read views begin a SQLite read transaction, capture the current DRYML generation, fetch candidate IDs/CDefs, and close before Python verification or user iteration. Result sets must not retain a SQLite cursor or transaction.
 
