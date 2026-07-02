@@ -373,6 +373,7 @@ class SQLiteStoreQueryIndex:
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
         roots = tuple(dict.fromkeys(roots))
+        graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots or roots)
         encoded_nodes = tuple(_EncodedNode.from_cdef(node.definition) for node in graph.nodes())
         encoded_edges = tuple(_EncodedEdge.from_edge(edge) for edge in graph.edges())
         if not roots and not encoded_nodes and not encoded_edges:

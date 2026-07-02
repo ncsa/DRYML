@@ -26,7 +26,7 @@ from dryml.core2 import (
 )
 from dryml.core2.object import Object
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference
+from dryml.core2.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
 from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
 from dryml.core2.query.path import Arg, Index
 from dryml.core2.utils.graph.path import GraphPath
@@ -36,6 +36,14 @@ import core2_objects as objects
 Cls1 = objects.TestClass1
 Cls2 = objects.TestClass2
 Nest3 = objects.TestNest3
+
+
+class AuditChainNode(Object):
+    def __init__(self, name, child=None, ref=None, width=None):
+        self.name = name
+        self.child = child
+        self.ref = ref
+        self.width = width
 
 
 def test_definition_is_immutable_hashable_and_structural():
@@ -101,6 +109,31 @@ def test_cdef_graph_uses_ref_edges_and_materialize_only_containment():
     assert graph.paths_to(parent, ref_child_cdef) == ()
 
 
+def test_query_index_graph_expands_ref_targets_without_changing_containment():
+    d = Definition(AuditChainNode, "D", width=512)
+    c = Definition(AuditChainNode, "C", ref=d.ref())
+    b = Definition(AuditChainNode, "B", child=c.mat())
+    a = Definition(AuditChainNode, "A", ref=b.ref()).concretize()
+    b_cdef = a.kwargs["ref"].target
+    c_cdef = b_cdef.kwargs["child"]
+    d_cdef = c_cdef.kwargs["ref"].target
+
+    materialize_graph = ConcreteDefinitionGraph.from_root(a)
+    query_graph = ConcreteDefinitionGraph.for_query_index(a)
+
+    assert {(edge.parent, edge.child, edge.kind) for edge in materialize_graph.edges()} == {
+        (a, b_cdef, EdgeKind.REF),
+    }
+    assert {(edge.parent, edge.child, edge.kind) for edge in query_graph.edges()} == {
+        (a, b_cdef, EdgeKind.REF),
+        (b_cdef, c_cdef, EdgeKind.MATERIALIZE),
+        (c_cdef, d_cdef, EdgeKind.REF),
+    }
+    assert not query_graph.contains(a, b_cdef)
+    assert not query_graph.contains(a, c_cdef)
+    assert not query_graph.contains(a, d_cdef)
+
+
 def test_selector_matches_ref_edges_and_matchers():
     child = Definition(Cls1, 3)
     target = Definition(Nest3, ref=child.ref(), value=10).concretize()
@@ -158,6 +191,31 @@ class FakeStore:
 class AuditRefOwner(Object):
     def __init__(self, child: RefCDef):
         self.child = child
+
+
+def test_indexed_query_can_inspect_ref_target_subgraph():
+    repo = Repo()
+    d = Definition(AuditChainNode, "D", width=512)
+    c = Definition(AuditChainNode, "C", ref=d.ref())
+    b = Definition(AuditChainNode, "B", child=c.mat())
+    a = Definition(AuditChainNode, "A", ref=b.ref()).concretize()
+    repo._query_catalog.register_stored(a, FakeStore())
+
+    selector = Definition(
+        AuditChainNode,
+        "A",
+        ref=Ref(Selector(Definition(
+            AuditChainNode,
+            "B",
+            child=Definition(
+                AuditChainNode,
+                "C",
+                ref=Definition(AuditChainNode, "D", width=512).ref(),
+            ),
+        ))),
+    )
+
+    assert list(repo.query(selector).stored(refresh=False).defs()) == [a]
 
 
 def test_repo_query_selector_preserves_policy():
@@ -272,6 +330,19 @@ def test_concretize_rejects_nested_par_inside_container():
 def test_concrete_definition_rejects_nested_definition_inside_container():
     with pytest.raises(TypeError, match="unresolved Definition"):
         ConcreteDefinition(Nest3, FrozenTuple((FrozenList([Definition(Cls1)]),)), FrozenDict({}))
+
+
+def test_concrete_definition_rejects_cyclic_container():
+    xs = []
+    xs.append(xs)
+
+    with pytest.raises(CycleError):
+        ConcreteDefinition(Nest3, FrozenTuple((xs,)), FrozenDict({}))
+
+
+def test_nested_concrete_boundary_error_reports_path():
+    with pytest.raises(CannotConcretizeParameterizedDefinition, match="kwargs/xs/0"):
+        ConcreteDefinition(Nest3, FrozenTuple(()), FrozenDict({"xs": FrozenList([Missing()])}))
 
 
 def test_concrete_definition_collapses_nested_materialize_links():

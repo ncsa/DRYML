@@ -335,8 +335,16 @@ class ConcreteDefinition(DefInterface, Mapping):
 
         args = self.args if isinstance(self.args, FrozenTuple) else FrozenTuple(self.args)
         kwargs = self.kwargs if isinstance(self.kwargs, FrozenDict) else FrozenDict(self.kwargs)
-        object.__setattr__(self, "args", FrozenTuple(freeze_concrete_value(v) for v in args))
-        object.__setattr__(self, "kwargs", FrozenDict({k: freeze_concrete_value(v) for k, v in kwargs.items()}))
+        object.__setattr__(
+            self,
+            "args",
+            FrozenTuple(freeze_concrete_value(v, path=("args", i)) for i, v in enumerate(args)),
+        )
+        object.__setattr__(
+            self,
+            "kwargs",
+            FrozenDict({k: freeze_concrete_value(v, path=("kwargs", k)) for k, v in kwargs.items()}),
+        )
 
     def __hash__(self) -> int:
         return stable_int_hash(self.stable_hash())

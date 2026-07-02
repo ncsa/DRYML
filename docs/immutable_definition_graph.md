@@ -4,9 +4,11 @@ DRYML now separates graph expression syntax from storage identity, query interpr
 
 `Definition` is the immutable structural expression value. It deeply freezes user containers at construction and update boundaries, uses structural equality, and is hashable. Use `with_args`, `with_arg`, `with_kwargs`, `with_kwarg`, `without_kwarg`, and `at(path).set(value)` for copy-on-write updates.
 
-`ConcreteDefinition` is the exact canonical materializable identity used by repos, stores, materialization, graph extraction, and stable hashes. It is separate from `Definition`. Concrete-domain validation is recursive through containers: unresolved `Definition` and `Par` values cannot be stored, materializing links collapse everywhere, and selector-as-data must be stable-hashable.
+`ConcreteDefinition` is the exact canonical materializable identity used by repos, stores, materialization, graph extraction, and stable hashes. It is separate from `Definition`. Concrete-domain validation is recursive through containers: unresolved `Definition` and `Par` values cannot be stored, materializing links collapse everywhere, selector-as-data must be stable-hashable, and cyclic concrete containers are rejected with path-aware errors.
 
 `Ref(target)` marks a parent slot as a non-materializing graph edge. `Mat(target)` marks an explicit materializing edge. Raw nested `Definition` or `ConcreteDefinition` values are materializing children. At concrete identity boundaries, materializing links collapse to the raw child `ConcreteDefinition`, so there is only one canonical materializing representation. Materialization follows materializing edges only; constructors annotated with `RefCDef` receive the referenced `ConcreteDefinition` target, not graph edge state.
+
+DRYML uses two graph closures over the same edge-kind data. Materialization, nested containment, `contains()`, and occurrence traversal follow `EdgeKind.MATERIALIZE` only. Query indexes use structural closure, which expands through `Ref` targets as well as materializing targets while preserving each edge kind. This lets a stored root match selectors such as `A -ref-> B -mat-> C -ref-> D` without making `B`, `C`, or `D` contained by or materialized with `A`.
 
 `Selector(root)` is the query interpretation of a `Definition`. `repo.query(defn)` lifts definitions to selectors, while `repo.query(selector)` uses the selector directly. `Definition.__eq__` is never selector matching; use `Selector(defn).matches(target)` for semantic matching.
 

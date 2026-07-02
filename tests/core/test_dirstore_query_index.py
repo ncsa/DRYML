@@ -28,6 +28,15 @@ class QueryIndexCfgOwner(Object):
         self.ref = ref
 
 
+class QueryIndexChainNode(Object):
+    def __init__(self, name, child=None, ref=None, width=None):
+        super().__init__()
+        self.name = name
+        self.child = child
+        self.ref = ref
+        self.width = width
+
+
 class FailingSaveDirLeaf(Object):
     def __init__(self, name="fail"):
         super().__init__()
@@ -110,6 +119,33 @@ def test_sqlite_stored_query_missing_does_not_require_presence(tmp_path):
     assert list(repo.query(root_selector).stored().defs()) == [root_missing.definition]
     assert list(repo.query(nested_selector).stored().defs()) == [nested_missing.definition]
     assert list(repo.query(ref_selector).stored().defs()) == [ref_parent.definition]
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_sqlite_stored_query_can_inspect_ref_target_subgraph(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    d = Definition(QueryIndexChainNode, "D", width=512)
+    c = Definition(QueryIndexChainNode, "C", ref=d.ref())
+    b = Definition(QueryIndexChainNode, "B", child=c.mat())
+    a = Definition(QueryIndexChainNode, "A", ref=b.ref()).build(repo=repo)
+    repo.save_object(a)
+
+    selector = Definition(
+        QueryIndexChainNode,
+        "A",
+        ref=Ref(Selector(Definition(
+            QueryIndexChainNode,
+            "B",
+            child=Definition(
+                QueryIndexChainNode,
+                "C",
+                ref=Definition(QueryIndexChainNode, "D", width=512).ref(),
+            ),
+        ))),
+    )
+
+    assert list(repo.query(selector).stored().defs()) == [a.definition]
 
 
 def test_dirstore_auto_uses_sqlite_when_available_without_construction_io(tmp_path):

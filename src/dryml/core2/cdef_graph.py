@@ -107,12 +107,30 @@ class ConcreteDefinitionGraph:
         self._incoming = {cdef: tuple(edges) for cdef, edges in incoming.items()}
 
     @classmethod
-    def from_root(cls, cdef: ConcreteDefinition) -> "ConcreteDefinitionGraph":
-        return cls.from_roots((cdef,))
+    def from_root(
+            cls,
+            cdef: ConcreteDefinition,
+            *,
+            expand_ref_targets: bool = False) -> "ConcreteDefinitionGraph":
+        return cls.from_roots((cdef,), expand_ref_targets=expand_ref_targets)
 
     @classmethod
-    def from_roots(cls, cdefs: Iterable[ConcreteDefinition]) -> "ConcreteDefinitionGraph":
-        builder = ConcreteDefinitionGraphBuilder()
+    def from_roots(
+            cls,
+            cdefs: Iterable[ConcreteDefinition],
+            *,
+            expand_ref_targets: bool = False) -> "ConcreteDefinitionGraph":
+        builder = ConcreteDefinitionGraphBuilder(expand_ref_targets=expand_ref_targets)
+        builder.add_roots(cdefs)
+        return builder.build()
+
+    @classmethod
+    def for_query_index(cls, cdef: ConcreteDefinition) -> "ConcreteDefinitionGraph":
+        return cls.for_query_index_roots((cdef,))
+
+    @classmethod
+    def for_query_index_roots(cls, cdefs: Iterable[ConcreteDefinition]) -> "ConcreteDefinitionGraph":
+        builder = ConcreteDefinitionGraphBuilder(expand_ref_targets=True)
         builder.add_roots(cdefs)
         return builder.build()
 
@@ -265,10 +283,11 @@ class ConcreteDefinitionGraph:
 
 
 class ConcreteDefinitionGraphBuilder:
-    def __init__(self):
+    def __init__(self, *, expand_ref_targets: bool = False):
+        self._expand_ref_targets = expand_ref_targets
         self._roots: list[ConcreteDefinition] = []
         self._nodes: dict[ConcreteDefinition, CDefNode] = {}
-        self._edges: dict[tuple[ConcreteDefinition, GraphPath, ConcreteDefinition], CDefEdge] = {}
+        self._edges: dict[tuple[ConcreteDefinition, GraphPath, ConcreteDefinition, EdgeKind], CDefEdge] = {}
         self._edges_by_parent: dict[ConcreteDefinition, list[CDefEdge]] = defaultdict(list)
         self._completed: set[ConcreteDefinition] = set()
         self._active: dict[ConcreteDefinition, GraphPath] = {}
@@ -318,7 +337,7 @@ class ConcreteDefinitionGraphBuilder:
                     self._nodes.setdefault(child, CDefNode(child, child.stable_hash()))
                     self._edges[edge_key] = edge
                     self._edges_by_parent.setdefault(edge.parent, []).append(edge)
-                if kind is EdgeKind.MATERIALIZE:
+                if kind is EdgeKind.MATERIALIZE or self._expand_ref_targets:
                     self._visit(child, path.join(edge_path))
         finally:
             self._active.pop(cdef, None)

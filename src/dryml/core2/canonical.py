@@ -1068,9 +1068,20 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     raise TypeError(f"Cannot freeze Definition value of type {type(value).__name__}.")
 
 
-def freeze_concrete_value(value: Any) -> Any:
+def freeze_concrete_value(
+        value: Any,
+        *,
+        path: tuple[str | int, ...] | None = None) -> Any:
     """Deep-freeze values admitted into ConcreteDefinition values."""
 
+    return _freeze_concrete_value(value, stack=set(), path=() if path is None else tuple(path))
+
+
+def _path_label(path: tuple[str | int, ...]) -> str:
+    return "/".join(map(str, path)) if path else "<root>"
+
+
+def _freeze_concrete_value(value: Any, *, stack: set[int], path: tuple[str | int, ...]) -> Any:
     kind = node_kind(value)
     if kind in {
         NodeKind.LIST,
@@ -1082,38 +1093,59 @@ def freeze_concrete_value(value: Any) -> Any:
         NodeKind.FROZEN_SET,
         NodeKind.FROZEN_DICT,
     }:
-        return transform_container(
-            value,
-            lambda p, v: freeze_concrete_value(v),
-            target="canonical",
-            transform_keys=False,
-        )
+        oid = id(value)
+        if oid in stack:
+            raise CycleError(f"at {_path_label(path)}: {type(value).__name__}")
+        stack.add(oid)
+        try:
+            return transform_container(
+                value,
+                lambda p, v: _freeze_concrete_value(v, stack=stack, path=path + (p,)),
+                target="canonical",
+                transform_keys=False,
+            )
+        finally:
+            stack.remove(oid)
     if kind is NodeKind.PAR:
-        raise CannotConcretizeParameterizedDefinition((), value)
+        raise CannotConcretizeParameterizedDefinition(path, value)
     if kind is NodeKind.DEFINITION:
-        raise TypeError("ConcreteDefinition values cannot contain unresolved Definition values; concretize first.")
+        raise TypeError(
+            f"ConcreteDefinition values cannot contain unresolved Definition values at {_path_label(path)}; concretize first."
+        )
     if kind is NodeKind.DEFLINK:
         from .definition import ConcreteDefinition
         from .cdef_graph import EdgeKind
         from .selector import Selector
         if isinstance(value.target, Selector):
-            raise CannotConcretizeSelectorReference((), value.target)
+            raise CannotConcretizeSelectorReference(path, value.target)
         if not isinstance(value.target, ConcreteDefinition):
-            raise TypeError("ConcreteDefinition link values must target ConcreteDefinition values.")
+            raise TypeError(
+                f"ConcreteDefinition link values at {_path_label(path)} must target ConcreteDefinition values."
+            )
         if value.kind is EdgeKind.MATERIALIZE:
             return value.target
         return value
     if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC}:
         from .utils.stable_hash import stable_hash_function
 
-        stable_hash_function(value)
+        try:
+            stable_hash_function(value)
+        except Exception as e:
+            raise TypeError(
+                f"ConcreteDefinition selector-as-data value at {_path_label(path)} must be stable-hashable."
+            ) from e
         return value
     if kind is NodeKind.SELECTOR:
         from .quoted import SelectorSpec
         from .utils.stable_hash import stable_hash_function
 
         spec = SelectorSpec(value)
-        stable_hash_function(spec)
+        try:
+            stable_hash_function(spec)
+        except Exception as e:
+            raise TypeError(
+                f"ConcreteDefinition selector-as-data value at {_path_label(path)} must be stable-hashable."
+            ) from e
         return spec
     return freeze_def_value(value)
 

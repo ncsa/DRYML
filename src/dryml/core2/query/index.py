@@ -520,6 +520,7 @@ class DefinitionCatalog:
             cdefs = list(dict.fromkeys(cdefs))
             if cdefs:
                 graph = ConcreteDefinitionGraph.from_roots(cdefs)
+                graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
                 self._register_graph_structure_locked(graph)
                 for cdef in graph.roots:
                     ids.add(self.ids_by_cdef[cdef])
@@ -561,13 +562,13 @@ class DefinitionCatalog:
 
     def register_cached(self, cdef: ConcreteDefinition) -> DefinitionId:
         with self.lock:
-            graph = ConcreteDefinitionGraph.from_root(cdef)
+            graph = ConcreteDefinitionGraph.for_query_index(cdef)
             self._register_graph_structure_locked(graph)
             return self.ids_by_cdef[cdef]
 
     def register_graph(self, graph: ConcreteDefinitionGraph) -> tuple[DefinitionId, ...]:
         with self.lock:
-            changed = self._register_graph_structure_locked(graph)
+            changed = self._register_query_graph_structure_locked(graph)
             ids = [self.ids_by_cdef[root] for root in graph.roots]
             if changed:
                 self.generation += 1
@@ -583,7 +584,8 @@ class DefinitionCatalog:
             sid = self.store_id(store)
             if graph is None:
                 graph = ConcreteDefinitionGraph.from_root(cdef)
-            changed = self._register_graph_structure_locked(graph)
+                graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
+            changed = self._register_query_graph_structure_locked(graph)
             did = self.ids_by_cdef[cdef]
             membership_changed = (
                 sid not in self.replicas_by_definition.get(did, set())
@@ -625,9 +627,10 @@ class DefinitionCatalog:
             return ()
         if graph is None:
             graph = ConcreteDefinitionGraph.from_roots(roots)
+            graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
         with self.lock:
             sid = self.store_id(store)
-            changed = self._register_graph_structure_locked(graph)
+            changed = self._register_query_graph_structure_locked(graph)
             membership_changed = False
             ids = []
             for cdef in roots:
@@ -834,7 +837,8 @@ class DefinitionCatalog:
             build_repo = _CatalogBuildRepo(self.repo)
             replacement = DefinitionCatalog(build_repo)
             if cached_cdefs:
-                replacement.register_graph(ConcreteDefinitionGraph.from_roots(cached_cdefs))
+                graph = ConcreteDefinitionGraph.from_roots(cached_cdefs)
+                replacement.register_graph(ConcreteDefinitionGraph.for_query_index_roots(graph.roots))
             store_scan_count = 0
             for store in stores:
                 if self._store_uses_persistent_sqlite(store):
@@ -1032,11 +1036,17 @@ class DefinitionCatalog:
                 return did
         return None
 
-    def _register_graph_structure_locked(self, graph: ConcreteDefinitionGraph) -> bool:
+    def _register_graph_structure_locked(
+            self,
+            graph: ConcreteDefinitionGraph,
+            *,
+            return_signature: bool = False):
         before = (len(self.definitions_by_id), len(self.edge_by_key))
-        for node in graph.nodes():
+        nodes = graph.nodes()
+        edges = graph.edges()
+        for node in nodes:
             self._register_definition_locked(node.definition)
-        for edge in graph.edges():
+        for edge in edges:
             parent_id = self.ids_by_cdef[edge.parent]
             child_id = self.ids_by_cdef[edge.child]
             key: EdgeKey = (parent_id, edge.path, child_id, edge.kind)
@@ -1046,7 +1056,17 @@ class DefinitionCatalog:
                 self.incoming_edges[child_id].add(key)
                 self.child_by_parent_path[(parent_id, edge.path, edge.kind)].add(child_id)
                 self.parents_by_child_path[(child_id, edge.path, edge.kind)].add(parent_id)
-        return (len(self.definitions_by_id), len(self.edge_by_key)) != before
+        changed = (len(self.definitions_by_id), len(self.edge_by_key)) != before
+        if return_signature:
+            return changed, _graph_structure_signature(graph, nodes=nodes, edges=edges)
+        return changed
+
+    def _register_query_graph_structure_locked(self, graph: ConcreteDefinitionGraph) -> bool:
+        changed, graph_signature = self._register_graph_structure_locked(graph, return_signature=True)
+        query_graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
+        if graph_signature == _graph_structure_signature(query_graph):
+            return changed
+        return self._register_graph_structure_locked(query_graph) or changed
 
     def _cached_cdefs(self, *, reuse_weak: bool = True) -> tuple[ConcreteDefinition, ...]:
         cdefs = list(self.repo.strong_obj_cache.keys())
@@ -1103,3 +1123,23 @@ def _candidate_ids_from_postings_data(
     if stats is not None:
         stats.candidate_count = len(candidates)
     return candidates
+
+
+def _graph_structure_signature(
+        graph: ConcreteDefinitionGraph,
+        *,
+        nodes=None,
+        edges=None):
+    if nodes is None:
+        nodes = graph.nodes()
+    if edges is None:
+        edges = graph.edges()
+
+    def edge_key(edge):
+        return (edge.parent, edge.path, edge.child, edge.kind)
+
+    return (
+        graph.roots,
+        tuple(node.definition for node in nodes),
+        tuple(edge_key(edge) for edge in edges),
+    )
