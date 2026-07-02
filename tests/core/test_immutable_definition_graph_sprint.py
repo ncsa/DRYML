@@ -257,6 +257,37 @@ def test_unstable_selector_data_fails_at_concrete_boundary():
         Definition(Nest3, SelectorSpec(selector)).concretize()
 
 
+def test_concretize_nested_definition_inside_container_becomes_cdef():
+    child = Definition(Cls1, 13)
+    cdef = Definition(Nest3, xs=[child]).concretize()
+
+    assert isinstance(cdef.kwargs["xs"][0], ConcreteDefinition)
+
+
+def test_concretize_rejects_nested_par_inside_container():
+    with pytest.raises(CannotConcretizeParameterizedDefinition):
+        Definition(Nest3, xs=[Missing()]).concretize()
+
+
+def test_concrete_definition_rejects_nested_definition_inside_container():
+    with pytest.raises(TypeError, match="unresolved Definition"):
+        ConcreteDefinition(Nest3, FrozenTuple((FrozenList([Definition(Cls1)]),)), FrozenDict({}))
+
+
+def test_concrete_definition_collapses_nested_materialize_links():
+    child = Definition(Cls1, 14).concretize()
+    cdef = ConcreteDefinition(Nest3, FrozenTuple((FrozenList([Mat(child)]),)), FrozenDict({}))
+
+    assert cdef.args[0][0] == child
+
+
+def test_unstable_selector_data_fails_inside_container():
+    selector = Selector(Definition(Cls1, test=Satisfies(lambda value: True)))
+
+    with pytest.raises(TypeError, match="stable-hashable"):
+        Definition(Nest3, specs=[SelectorSpec(selector)]).concretize()
+
+
 def test_satisfies_lambda_requires_stable_name_for_hash():
     anon = Definition(Cls1, test=Satisfies(lambda value: True))
     named1 = Definition(Cls1, test=Satisfies(lambda value: True, name="always"))

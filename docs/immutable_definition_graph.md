@@ -4,7 +4,7 @@ DRYML now separates graph expression syntax from storage identity, query interpr
 
 `Definition` is the immutable structural expression value. It deeply freezes user containers at construction and update boundaries, uses structural equality, and is hashable. Use `with_args`, `with_arg`, `with_kwargs`, `with_kwarg`, `without_kwarg`, and `at(path).set(value)` for copy-on-write updates.
 
-`ConcreteDefinition` is the exact canonical materializable identity used by repos, stores, materialization, graph extraction, and stable hashes. It is separate from `Definition`.
+`ConcreteDefinition` is the exact canonical materializable identity used by repos, stores, materialization, graph extraction, and stable hashes. It is separate from `Definition`. Concrete-domain validation is recursive through containers: unresolved `Definition` and `Par` values cannot be stored, materializing links collapse everywhere, and selector-as-data must be stable-hashable.
 
 `Ref(target)` marks a parent slot as a non-materializing graph edge. `Mat(target)` marks an explicit materializing edge. Raw nested `Definition` or `ConcreteDefinition` values are materializing children. At concrete identity boundaries, materializing links collapse to the raw child `ConcreteDefinition`, so there is only one canonical materializing representation. Materialization follows materializing edges only; constructors annotated with `RefCDef` receive the referenced `ConcreteDefinition` target, not graph edge state.
 

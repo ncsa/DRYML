@@ -593,6 +593,8 @@ def transform_container(
 
 class _ToCanonicalTransformer(GraphTransformer):
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
+        if node_kind(obj) in (CANONICAL_SEQ_KINDS | CANONICAL_DICT_KINDS):
+            return False
         return is_canonical_value(obj)
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
@@ -605,6 +607,10 @@ class _ToCanonicalTransformer(GraphTransformer):
             NodeKind.TUPLE,
             NodeKind.SET,
             NodeKind.DICT,
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT,
             NodeKind.DEFINITION,
         }
 
@@ -623,7 +629,16 @@ class _ToCanonicalTransformer(GraphTransformer):
                 return obj
             return symbol_ref(obj)
 
-        if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
+        if kind in {
+            NodeKind.LIST,
+            NodeKind.TUPLE,
+            NodeKind.SET,
+            NodeKind.DICT,
+            NodeKind.FROZEN_LIST,
+            NodeKind.FROZEN_TUPLE,
+            NodeKind.FROZEN_SET,
+            NodeKind.FROZEN_DICT,
+        }:
             return transform_container(
                 obj,
                 lambda p, v: self.transform(v, ctx.child(p)),
@@ -1057,6 +1072,22 @@ def freeze_concrete_value(value: Any) -> Any:
     """Deep-freeze values admitted into ConcreteDefinition values."""
 
     kind = node_kind(value)
+    if kind in {
+        NodeKind.LIST,
+        NodeKind.TUPLE,
+        NodeKind.SET,
+        NodeKind.DICT,
+        NodeKind.FROZEN_LIST,
+        NodeKind.FROZEN_TUPLE,
+        NodeKind.FROZEN_SET,
+        NodeKind.FROZEN_DICT,
+    }:
+        return transform_container(
+            value,
+            lambda p, v: freeze_concrete_value(v),
+            target="canonical",
+            transform_keys=False,
+        )
     if kind is NodeKind.PAR:
         raise CannotConcretizeParameterizedDefinition((), value)
     if kind is NodeKind.DEFINITION:
