@@ -6,7 +6,7 @@ Use `Ref(target)` for a non-materializing parent-slot edge. The target remains q
 metric = Definition(Accuracy, data=Ref(test_data.definition), model=Ref(model.definition))
 ```
 
-Constructor roles can request this behavior with `RefCDef` or `RefCDefArg`:
+Constructor roles can request this behavior with `RefCDef` or `RefCDefArg`. Runtime constructors receive the referenced `ConcreteDefinition` target, not the parent-slot graph wrapper:
 
 ```python
 class Accuracy(Object):

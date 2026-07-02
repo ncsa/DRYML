@@ -1192,7 +1192,9 @@ def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatc
 
     last = sorted((leaf.definition for leaf in leaves), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))[-1]
     target_name = last.kwargs["name"]
-    selector = Definition(FederationLeaf, SKIP_ARGS, name=lambda value: value == target_name)
+    from dryml.core2 import Satisfies
+
+    selector = Definition(FederationLeaf, SKIP_ARGS, name=Satisfies(lambda value: value == target_name, name="target-name"))
 
     assert repo.query(selector).stored().exists()
 

@@ -292,10 +292,6 @@ def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]
     if kind is NodeKind.CONCRETE_DEFINITION:
         roots.append(RuntimeRoot(value, path, None))
         return
-    if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
-        return
-    if kind is NodeKind.FROZEN_DEFINITION:
-        return
     if kind is NodeKind.DEFINITION:
         from .repo import RepoGraphError
 

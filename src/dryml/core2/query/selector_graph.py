@@ -87,15 +87,19 @@ class SelectorGraph:
 def compile_selector_graph(
         selector: Definition | ConcreteDefinition | Selector | None,
         *,
-        class_match: ClassMatchPolicy = "selector") -> SelectorGraph | None:
+        class_match: ClassMatchPolicy | None = None) -> SelectorGraph | None:
     if selector is None:
         return None
     if isinstance(selector, Object):
         selector = selector.definition
     if isinstance(selector, Selector):
+        if class_match is None:
+            class_match = selector.cls_policy
         selector = selector.root
     if not isinstance(selector, (Definition, ConcreteDefinition)):
         return None
+    if class_match is None:
+        class_match = "selector"
     compiler = _SelectorGraphCompiler(class_match=class_match)
     root = compiler.add_node(selector, DefinitionPath())
     return SelectorGraph(root=root, nodes=tuple(compiler.nodes), edges=tuple(compiler.edges))

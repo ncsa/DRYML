@@ -3,7 +3,7 @@ import pytest
 import shutil
 import threading
 
-from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core2 import Definition, Object, Repo, Satisfies, Serializable, SKIP_ARGS
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
@@ -777,7 +777,7 @@ def test_callable_selector_does_not_run_under_catalog_lock():
         assert catalog_lock_available(repo._query_catalog)
         return value == "x"
 
-    assert list(repo.query(Definition(IndexLeaf, predicate)).known(refresh=False).defs()) == [obj.definition]
+    assert list(repo.query(Definition(IndexLeaf, Satisfies(predicate, name="is-x"))).known(refresh=False).defs()) == [obj.definition]
 
 
 def test_slow_verification_does_not_block_registration():
@@ -795,7 +795,7 @@ def test_slow_verification_does_not_block_registration():
 
     def query():
         try:
-            list(repo.query(Definition(IndexLeaf, predicate)).known(refresh=False).defs())
+            list(repo.query(Definition(IndexLeaf, Satisfies(predicate, name="slow-is-x"))).known(refresh=False).defs())
         except Exception as exc:  # pragma: no cover - assertion below reports it
             errors.append(exc)
 

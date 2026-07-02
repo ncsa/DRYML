@@ -50,7 +50,9 @@ def test_empty_feature_selector_falls_back_to_full_universe():
     for idx in range(5):
         repo.add_objects(PlanBase(name=f"n{idx}", repo=repo))
 
-    explanation = repo.query(Definition(PlanBase, lambda child: True)).known(refresh=False).explain()
+    from dryml.core2 import Satisfies
+
+    explanation = repo.query(Definition(PlanBase, Satisfies(lambda child: True, name="any-child"))).known(refresh=False).explain()
 
     assert explanation.universe_size == 5
     assert explanation.candidate_count == 5

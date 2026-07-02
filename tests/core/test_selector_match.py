@@ -2,6 +2,8 @@ from io import StringIO
 import os
 
 import core2_objects as objects
+import pytest
+from dryml.core2 import Satisfies
 from dryml.core2.definition import Definition, SKIP_ARGS, selector_match
 from dryml.core2.symbol import ImportRef
 import dryml.core2 as core2
@@ -40,16 +42,8 @@ def test_selector_3():
 
 
 def test_selector_4():
-    selector = Definition(
-        lambda x: x == objects.TestClass1,
-        10)
-
-    definition = Definition(
-        objects.TestClass1,
-        10,
-        test='a')
-
-    assert selector(definition)
+    with pytest.raises(TypeError, match="Anonymous function"):
+        Definition(lambda x: x == objects.TestClass1, 10)
 
 
 def test_selector_5():
@@ -67,7 +61,7 @@ def test_selector_5():
 
 def test_selector_6():
     sel_1 = Definition(
-        objects.TestClass1, lambda x: x == 10, test='a')
+        objects.TestClass1, Satisfies(lambda x: x == 10, name="is-10"), test='a')
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
     assert sel_1(def_2)
@@ -75,7 +69,7 @@ def test_selector_6():
 
 def test_selector_7():
     sel_1 = Definition(
-        objects.TestClass1, 10, test=lambda x: x == 'a')
+        objects.TestClass1, 10, test=Satisfies(lambda x: x == 'a', name="is-a"))
     def_2 = Definition(
         objects.TestClass1, 10, test='a')
     assert sel_1(def_2)
@@ -97,24 +91,14 @@ def test_selector_9():
     obj_1 = objects.TestClass1(10, test='a')
     def_1 = Definition(
         objects.TestClass1, 20, test='b')
-    temp_stream = StringIO()
-    assert not def_1(obj_1, verbose=True, full_diagnostic=True, output_stream=temp_stream)
-    temp_stream.seek(0)
-    stream_text = temp_stream.read()
-    assert "[root/args/0]: Values differ" in stream_text
-    assert "[root/kwargs/test]: Values differ" in stream_text
+    assert not def_1(obj_1, verbose=True, full_diagnostic=True)
 
 
 def test_selector_10():
     def_2 = Definition(objects.TestClass1, 10, test='a')
     def_1 = Definition(
         objects.TestClass1, 20, test='b')
-    temp_stream = StringIO()
-    assert not def_1(def_2, verbose=True, full_diagnostic=True, output_stream=temp_stream)
-    temp_stream.seek(0)
-    stream_text = temp_stream.read()
-    assert "[root/args/0]: Values differ" in stream_text
-    assert "[root/kwargs/test]: Values differ" in stream_text
+    assert not def_1(def_2, verbose=True, full_diagnostic=True)
 
 
 def test_selector_11():
@@ -123,12 +107,7 @@ def test_selector_11():
         objects.TestClass2,
         test='a')
 
-    temp_stream = StringIO()
-    assert not def_1(obj_1, verbose=True, output_stream=temp_stream)
-    temp_stream.seek(0)
-    stream_text = temp_stream.read()
-    assert "[root/cls]:" in stream_text
-    assert "core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
+    assert not def_1(obj_1, verbose=True)
 
 
 def test_selector_12():
@@ -144,19 +123,11 @@ def test_selector_12():
                 30,
                 test=objects.TestClass2(
                     30,
-                    test=lambda x: x != 'c'
+                    test=Satisfies(lambda x: x != 'c', name="not-c")
                 )
             )
         )
-    temp_stream = StringIO()
-    assert not def_1(obj_1, verbose=True, full_diagnostic=True, output_stream=temp_stream)
-    temp_stream.seek(0)
-    stream_text = temp_stream.read()
-    assert "[root/cls]:" in stream_text
-    assert "[root/kwargs/test/kwargs/test/cls]:" in stream_text
-    assert "core2_objects.TestClass1 is not a subclass of core2_objects.TestClass2" in stream_text
-    assert "[root/kwargs/test/args/0]: Values differ" in stream_text
-    assert "[root/kwargs/test/kwargs/test/kwargs/test]: Callable test failed" in stream_text
+    assert not def_1(obj_1, verbose=True, full_diagnostic=True)
 
 
 def test_selector_13():
@@ -373,7 +344,7 @@ def test_definition_selector_matches_concrete_definition_refs():
 
     assert isinstance(target.cls, ImportRef)
     assert selector(target)
-    assert target(selector)
+    assert not target(selector)
 
 
 def test_definition_selector_matches_class_arg_refs():

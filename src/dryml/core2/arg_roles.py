@@ -6,7 +6,7 @@ from inspect import Parameter, signature
 from types import UnionType
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
-from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+from .definition import ConcreteDefinition, Definition
 from .links import DefLink, Ref
 from .quoted import QuotedDef, SelectorSpec
 from .selector import Selector
@@ -39,8 +39,6 @@ class RefCDefArg(ArgRole):
 
         if isinstance(value, DefLink):
             return value
-        if isinstance(value, FrozenConcreteDefinition):
-            return Ref(value.thaw())
         if isinstance(value, Object):
             return Ref(value.definition)
         if isinstance(value, (ConcreteDefinition, Definition, Selector)):
@@ -59,8 +57,6 @@ class SelectorArg(ArgRole):
     def canonicalize(self, value: Any) -> Any:
         if isinstance(value, (QuotedDef, SelectorSpec)):
             return value
-        if isinstance(value, FrozenDefinition):
-            return QuotedDef(value.thaw())
         if isinstance(value, Selector):
             return SelectorSpec(value)
         if isinstance(value, Definition):
@@ -79,21 +75,13 @@ class ValueArg(ArgRole):
 
 
 RefCDef = Annotated[ConcreteDefinition, RefCDefArg()]
-FrozenCDefArg = RefCDefArg
-FrozenCDef = RefCDef
-FrozenDefArg = SelectorArg
-FrozenDef = Annotated[Definition, SelectorArg()]
 
 _ROLE_NAMES = {
     "materialize": MaterializeArg(),
     "ref_cdef": RefCDefArg(),
     "refcdef": RefCDefArg(),
-    "frozen_cdef": RefCDefArg(),
-    "frozencdef": RefCDefArg(),
     "selector_arg": SelectorArg(),
     "selectorarg": SelectorArg(),
-    "frozen_def": SelectorArg(),
-    "frozendef": SelectorArg(),
     "value": ValueArg(),
 }
 
@@ -151,7 +139,7 @@ def apply_definition_arg_roles(definition: Definition) -> Definition:
     if not isinstance(definition.cls, type):
         # Avoid importing serialized selector classes during definition-only
         # query/index planning. Such selectors must already contain explicit
-        # frozen wrappers if they need frozen-reference semantics.
+        # Ref/SelectorSpec wrappers if they need role-specific semantics.
         return definition
     cls = definition.cls
     args, kwargs = apply_arg_roles(cls, tuple(definition.args), dict(definition.kwargs))
@@ -218,8 +206,8 @@ def role_from_annotation(annotation: Any) -> ArgRole | None:
             raise TypeError("Union annotations cannot declare multiple DRYML argument roles.")
         if found:
             return found[0]
-    if annotation in (RefCDefArg, RefCDef, FrozenCDefArg, FrozenCDef):
+    if annotation in (RefCDefArg, RefCDef):
         return RefCDefArg()
-    if annotation in (SelectorArg, FrozenDefArg, FrozenDef):
+    if annotation is SelectorArg:
         return SelectorArg()
     return None

@@ -1,7 +1,7 @@
 import pytest
 
 import core2_objects as objects
-from dryml.core2 import Definition, SKIP_ARGS
+from dryml.core2 import Definition, SKIP_ARGS, Satisfies, Selector
 from dryml.core2.definition import selector_match
 from dryml.core2.freeze import FrozenList
 from dryml.core2.query.fingerprint import (
@@ -14,7 +14,7 @@ from dryml.core2.utils.stable_hash import stable_hash_function
 
 
 def assert_no_fingerprint_false_negative(selector, target, *, class_match="selector"):
-    assert selector_match(selector, target, strict=False)
+    assert Selector(selector, cls_policy=class_match).matches(target)
     requirements = legacy_selector_requirements(selector, class_match=class_match)
     fingerprint = legacy_target_fingerprint(target)
     assert legacy_requirements_satisfied(fingerprint, requirements)
@@ -53,7 +53,7 @@ def test_frozen_list_selector_matches_list_and_tuple_compatible_targets():
             lambda: objects.TestClass1(10, test="a").definition,
         ),
         (
-            Definition(objects.TestClass1, lambda x: x == 10, test=lambda x: x == "a"),
+            Definition(objects.TestClass1, Satisfies(lambda x: x == 10, name="is-10"), test=Satisfies(lambda x: x == "a", name="is-a")),
             lambda: objects.TestClass1(10, test="a").definition,
         ),
         (
@@ -82,7 +82,7 @@ def selector_corpus():
     return [
         Definition(objects.TestClass1, 10),
         Definition(objects.TestClass1, SKIP_ARGS),
-        Definition(objects.TestClass1, SKIP_ARGS, test=lambda x: x in {"a", "b"}),
+        Definition(objects.TestClass1, SKIP_ARGS, test=Satisfies(lambda x: x in {"a", "b"}, name="is-a-or-b")),
         Definition(objects.TestNest, (1, 2)),
         Definition(objects.TestNest, [1, 2]),
         Definition(objects.TestNest, {"key": (1, 2)}),

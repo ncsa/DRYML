@@ -44,3 +44,15 @@ class CannotConcretizeParameterizedDefinition(TypeError):
     def __str__(self) -> str:
         p = "/".join(map(str, self.path)) if self.path else "<root>"
         return f"{self.msg} at {p}: {type(self.value).__name__} -> {self.value!r}"
+
+
+class CannotConcretizeSelectorReference(TypeError):
+    def __init__(self, path, value, msg: str = "Cannot concretize Ref(Selector)"):
+        self.path = tuple(path)
+        self.value = value
+        self.msg = msg
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        p = "/".join(map(str, self.path)) if self.path else "<root>"
+        return f"{self.msg} at {p}: selector references are query-only; store SelectorSpec/QuotedDef for data values"

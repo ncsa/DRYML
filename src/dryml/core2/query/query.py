@@ -6,7 +6,7 @@ from typing import Any
 
 from ..canonical import matching_container_family
 from ..arg_roles import apply_definition_arg_roles
-from ..definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition, categorical_definition, selector_match
+from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
 from ..object import Object
@@ -79,6 +79,17 @@ class DefinitionQuery:
             *,
             domain: QueryDomain | None = None,
             universe: ResultUniverse | None = None) -> "DefinitionQuery":
+        if isinstance(source, Selector):
+            root = source.root
+            return cls(
+                repo=repo,
+                original=root,
+                selector=root,
+                domain=domain,
+                universe=universe,
+                strict_policy=source.strict,
+                class_match_policy=source.cls_policy,
+            )
         original = _snapshot_source(source)
         return cls(repo=repo, original=original, selector=original, domain=domain, universe=universe)
 
@@ -689,30 +700,22 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
     if isinstance(selector, ConcreteDefinition):
             return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
 
-    if isinstance(selector, FrozenConcreteDefinition):
-        return isinstance(target, FrozenConcreteDefinition) and cdef_equal(selector.thaw(), target.thaw())
-
-    if isinstance(selector, FrozenDefinition):
-        return isinstance(target, FrozenDefinition) and selector == target
-
     if isinstance(selector, DefLink):
         from ..cdef_graph import EdgeKind
         if selector.kind is EdgeKind.MATERIALIZE:
             target_value = target.target if isinstance(target, DefLink) and target.kind is EdgeKind.MATERIALIZE else target
             return _query_match(selector.target, target_value, strict=strict, class_match=class_match)
         if selector.kind is EdgeKind.REF:
-            if isinstance(target, FrozenConcreteDefinition):
-                target = target.thaw().ref()
             if not isinstance(target, DefLink) or target.kind is not EdgeKind.REF:
                 return False
             return _query_match(selector.target, target.target, strict=strict, class_match=class_match)
         return False
 
     if isinstance(selector, (QuotedDef, SelectorSpec)):
-        if not isinstance(target, (QuotedDef, SelectorSpec, FrozenDefinition, Selector, Definition)):
+        if not isinstance(target, (QuotedDef, SelectorSpec, Selector, Definition)):
             return False
         sel_value = selector.value if isinstance(selector, QuotedDef) else selector.selector
-        tgt_value = target.value if isinstance(target, QuotedDef) else target.selector if isinstance(target, SelectorSpec) else target.thaw() if isinstance(target, FrozenDefinition) else target
+        tgt_value = target.value if isinstance(target, QuotedDef) else target.selector if isinstance(target, SelectorSpec) else target
         if isinstance(sel_value, Selector):
             sel_value = sel_value.root
         if isinstance(tgt_value, Selector):

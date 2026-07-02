@@ -15,7 +15,7 @@ from .freeze import (
 from .types import is_pod
 from .utils.graph import GraphCtx, GraphTransformer
 from .policies import RepoLoadOptions
-from .errors import CannotConcretizeParameterizedDefinition, CycleError
+from .errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
 
 if TYPE_CHECKING:
     from .definition import ConcreteDefinition
@@ -211,8 +211,6 @@ class NodeKind(Enum):
 
     DEFINITION = auto()
     CONCRETE_DEFINITION = auto()
-    FROZEN_CONCRETE_DEFINITION = auto()
-    FROZEN_DEFINITION = auto()
     DEFLINK = auto()
     QUOTED_DEF = auto()
     SELECTOR_SPEC = auto()
@@ -224,7 +222,7 @@ class NodeKind(Enum):
 
 
 def node_kind(x: Any) -> NodeKind:
-    from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+    from .definition import ConcreteDefinition, Definition
     from .links import DefLink
     from .object import Object
     from .params import Par
@@ -264,12 +262,6 @@ def node_kind(x: Any) -> NodeKind:
         return NodeKind.SET
     if isinstance(x, dict):
         return NodeKind.DICT
-
-    if isinstance(x, FrozenConcreteDefinition):
-        return NodeKind.FROZEN_CONCRETE_DEFINITION
-
-    if isinstance(x, FrozenDefinition):
-        return NodeKind.FROZEN_DEFINITION
 
     if isinstance(x, DefLink):
         return NodeKind.DEFLINK
@@ -317,8 +309,6 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.FROZEN_SET,
         NodeKind.FROZEN_DICT,
         NodeKind.CONCRETE_DEFINITION,
-        NodeKind.FROZEN_CONCRETE_DEFINITION,
-        NodeKind.FROZEN_DEFINITION,
         NodeKind.QUOTED_DEF,
         NodeKind.SELECTOR_SPEC,
         NodeKind.IMPORT_REF,
@@ -648,6 +638,10 @@ class _ToCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
             from .links import Ref
+            from .selector import Selector
+
+            if obj.kind is EdgeKind.REF and isinstance(obj.target, Selector):
+                raise CannotConcretizeSelectorReference(tuple(ctx.path), obj.target)
 
             target = self.transform(obj.target, ctx.child("target"))
             if obj.kind is EdgeKind.MATERIALIZE:
@@ -698,9 +692,6 @@ class _ToCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.FUNCTION:
             return symbol_ref(obj)
 
-        if kind is NodeKind.FROZEN_DEFINITION:
-            return obj
-
         raise TypeError(
             f"Cannot canonicalize object of type {type(obj).__name__} at {ctx.path_str()}"
         )
@@ -726,8 +717,6 @@ class _ThawValueTransformer(GraphTransformer):
             NodeKind.FROZEN_TUPLE,
             NodeKind.FROZEN_DICT,
             NodeKind.CONCRETE_DEFINITION,
-            NodeKind.FROZEN_CONCRETE_DEFINITION,
-            NodeKind.FROZEN_DEFINITION,
             NodeKind.DEFINITION,
             NodeKind.OBJECT,
         }:
@@ -742,8 +731,6 @@ class _ThawValueTransformer(GraphTransformer):
             NodeKind.FROZEN_TUPLE,
             NodeKind.FROZEN_DICT,
             NodeKind.CONCRETE_DEFINITION,
-            NodeKind.FROZEN_CONCRETE_DEFINITION,
-            NodeKind.FROZEN_DEFINITION,
             NodeKind.DEFINITION,
             NodeKind.OBJECT,
         }
@@ -770,15 +757,9 @@ class _ThawValueTransformer(GraphTransformer):
             )
 
         if kind is NodeKind.CONCRETE_DEFINITION:
-            thaw_args = self.transform(obj.args, ctx.child("args"))
-            thaw_kwargs = self.transform(obj.kwargs, ctx.child("kwargs"))
+            thaw_args = thaw_definition_surface_value(obj.args)
+            thaw_kwargs = thaw_definition_surface_value(obj.kwargs)
             return Definition(obj.cls, *thaw_args, **thaw_kwargs)
-
-        if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
-            return obj.thaw()
-
-        if kind is NodeKind.FROZEN_DEFINITION:
-            return obj.thaw()
 
         if kind is NodeKind.DEFLINK:
             return obj
@@ -820,7 +801,7 @@ class _FromCanonicalTransformer(GraphTransformer):
         return obj
 
     def memo_key(self, obj: Any, ctx: GraphCtx):
-        if node_kind(obj) in {NodeKind.CONCRETE_DEFINITION, NodeKind.FROZEN_CONCRETE_DEFINITION, NodeKind.FROZEN_DEFINITION}:
+        if node_kind(obj) is NodeKind.CONCRETE_DEFINITION:
             return obj
         return None
 
@@ -834,8 +815,6 @@ class _FromCanonicalTransformer(GraphTransformer):
             NodeKind.FROZEN_TUPLE,
             NodeKind.FROZEN_SET,
             NodeKind.FROZEN_DICT,
-            NodeKind.FROZEN_CONCRETE_DEFINITION,
-            NodeKind.FROZEN_DEFINITION,
             NodeKind.DEFINITION,
             NodeKind.OBJECT,
         }
@@ -859,16 +838,10 @@ class _FromCanonicalTransformer(GraphTransformer):
                 path=list(ctx.path),
             )
 
-        if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
-            return obj.thaw()
-
-        if kind is NodeKind.FROZEN_DEFINITION:
-            return obj.thaw()
-
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
             if obj.kind is EdgeKind.REF:
-                return obj
+                return obj.target
             return self.transform(obj.target, ctx.child("target"))
 
         if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.PAR, NodeKind.SELECTOR}:
@@ -994,73 +967,30 @@ def from_canonical(
     return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)
 
 
-def to_canonical_definition_value(value: Any) -> Any:
-    """Snapshot values for Definition.freeze without concretizing Definitions."""
+def thaw_definition_surface_value(value: Any) -> Any:
+    """Thaw canonical containers for Definition.thaw while preserving symbols."""
 
-    from .definition import FrozenDefinition
-
-    kind = node_kind(value)
-    if kind is NodeKind.DEFINITION:
-        return FrozenDefinition.from_definition(value)
-    if kind is NodeKind.NDARRAY:
-        return FrozenNDArray.from_array(value)
-    if kind is NodeKind.OBJECT:
-        return value.definition.freeze()
-    if kind is NodeKind.DEFLINK:
-        from .links import DefLink
-        return DefLink(value.kind, to_canonical_definition_value(value.target))
-    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR}:
-        return value
-    if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
-        return transform_container(
-            value,
-            lambda p, v: to_canonical_definition_value(v),
-            target="canonical",
-        )
-    if kind in {
-        NodeKind.POD,
-        NodeKind.TYPE,
-        NodeKind.IDENTITY_VALUE,
-        NodeKind.FROZEN_NDARRAY,
-        NodeKind.FROZEN_LIST,
-        NodeKind.FROZEN_TUPLE,
-        NodeKind.FROZEN_SET,
-        NodeKind.FROZEN_DICT,
-        NodeKind.CONCRETE_DEFINITION,
-        NodeKind.FROZEN_CONCRETE_DEFINITION,
-        NodeKind.FROZEN_DEFINITION,
-        NodeKind.DEFLINK,
-        NodeKind.QUOTED_DEF,
-        NodeKind.SELECTOR_SPEC,
-        NodeKind.SELECTOR,
-        NodeKind.PAR,
-        NodeKind.IMPORT_REF,
-        NodeKind.SOURCE_SPEC,
-    }:
-        return value
-    if kind is NodeKind.FUNCTION:
-        return value
-    raise TypeError(f"Cannot freeze Definition value of type {type(value).__name__}.")
-
-
-def thaw_frozen_definition_value(value: Any) -> Any:
-    """Thaw one value from a FrozenDefinition snapshot."""
+    from .definition import Definition
 
     kind = node_kind(value)
-    if kind is NodeKind.FROZEN_DEFINITION:
-        return value.thaw()
-    if kind is NodeKind.FROZEN_CONCRETE_DEFINITION:
-        return value.thaw()
     if kind is NodeKind.FROZEN_NDARRAY:
         return value.thaw()
     if kind in {NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
         return transform_container(
             value,
-            lambda p, v: thaw_frozen_definition_value(v),
+            lambda p, v: thaw_definition_surface_value(v),
             target="runtime",
         )
-    if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC}:
-        return resolve_symbol(value)
+    if kind is NodeKind.CONCRETE_DEFINITION:
+        args = thaw_definition_surface_value(value.args)
+        kwargs = thaw_definition_surface_value(value.kwargs)
+        return Definition(value.cls, *args, **kwargs)
+    if kind is NodeKind.DEFLINK:
+        from .links import DefLink
+
+        return DefLink(value.kind, thaw_definition_surface_value(value.target))
+    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR}:
+        return value
     return value
 
 
@@ -1085,7 +1015,16 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
     kind = node_kind(value)
     if kind is NodeKind.NDARRAY:
         return FrozenNDArray.from_array(value)
-    if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
+    if kind in {
+        NodeKind.LIST,
+        NodeKind.TUPLE,
+        NodeKind.SET,
+        NodeKind.DICT,
+        NodeKind.FROZEN_LIST,
+        NodeKind.FROZEN_TUPLE,
+        NodeKind.FROZEN_SET,
+        NodeKind.FROZEN_DICT,
+    }:
         oid = id(value)
         if oid in stack:
             raise CycleError(f"at {type(value).__name__}")
@@ -1099,16 +1038,18 @@ def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
         NodeKind.TYPE,
         NodeKind.IDENTITY_VALUE,
         NodeKind.FROZEN_NDARRAY,
-        NodeKind.FROZEN_LIST,
-        NodeKind.FROZEN_TUPLE,
-        NodeKind.FROZEN_SET,
-        NodeKind.FROZEN_DICT,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
     }:
         return value
     if kind is NodeKind.FUNCTION:
-        return value
+        try:
+            return symbol_ref(value)
+        except Exception as e:
+            raise TypeError(
+                "Anonymous function values are not allowed in Definition values; "
+                "use Satisfies(predicate, name=...) for selector predicates."
+            ) from e
     raise TypeError(f"Cannot freeze Definition value of type {type(value).__name__}.")
 
 
@@ -1122,6 +1063,9 @@ def freeze_concrete_value(value: Any) -> Any:
         raise TypeError("ConcreteDefinition values cannot contain unresolved Definition values; concretize first.")
     if kind is NodeKind.DEFLINK:
         from .definition import ConcreteDefinition
+        from .selector import Selector
+        if isinstance(value.target, Selector):
+            raise CannotConcretizeSelectorReference((), value.target)
         if not isinstance(value.target, ConcreteDefinition):
             raise TypeError("ConcreteDefinition link values must target ConcreteDefinition values.")
         return value

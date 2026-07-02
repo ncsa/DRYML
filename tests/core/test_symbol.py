@@ -145,8 +145,8 @@ def test_concrete_definition_equal_for_same_local_function_source():
 def test_concrete_definition_rejects_closure_function():
     fn = make_multiplier(5)
 
-    with pytest.raises(ValueError, match="closure"):
-        Definition(FunctionHolder, fn).concretize()
+    with pytest.raises(TypeError, match="Anonymous function"):
+        Definition(FunctionHolder, fn)
 
 
 def test_concrete_definition_symbol_ref_passthrough():
@@ -170,7 +170,7 @@ def test_concrete_definition_thaw_source_lambda_string():
 
     d = cdef.thaw()
 
-    assert d.args[0](10) == 13
+    assert d.args[0].resolve()(10) == 13
 
 
 def test_concrete_definition_thaw_symbol_ref():
@@ -179,7 +179,7 @@ def test_concrete_definition_thaw_symbol_ref():
 
     d = cdef.thaw()
 
-    assert d.args[0](3) == 4
+    assert d.args[0].resolve()(3) == 4
 
 
 def test_concrete_definition_build_source_lambda_string():

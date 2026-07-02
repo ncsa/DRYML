@@ -6,13 +6,17 @@ DRYML now separates graph expression syntax from storage identity, query interpr
 
 `ConcreteDefinition` is the exact canonical materializable identity used by repos, stores, materialization, graph extraction, and stable hashes. It is separate from `Definition`.
 
-`Ref(target)` marks a parent slot as a non-materializing graph edge. `Mat(target)` marks an explicit materializing edge. Raw nested `Definition` or `ConcreteDefinition` values are materializing children. Materialization follows materializing edges only; ref targets remain reference values passed to constructors.
+`Ref(target)` marks a parent slot as a non-materializing graph edge. `Mat(target)` marks an explicit materializing edge. Raw nested `Definition` or `ConcreteDefinition` values are materializing children. Materialization follows materializing edges only; constructors annotated with `RefCDef` receive the referenced `ConcreteDefinition` target, not graph edge state.
 
 `Selector(root)` is the query interpretation of a `Definition`. `repo.query(defn)` lifts definitions to selectors, while `repo.query(selector)` uses the selector directly. `Definition.__eq__` is never selector matching; use `Selector(defn).matches(target)` for semantic matching.
 
 `QuotedDef(defn)` and `SelectorSpec(selector)` store expressions as local constructor data. They do not emit object graph edges, which is the distinction from `Ref(selector_or_def)`.
 
 `Par` placeholders carry a matcher and optionally a generator. Matchers such as `Present`, `Missing`, `AnyValue`, `Exact`, `Choice`, `IntRange`, `SubclassOf`, and `Satisfies` participate in selector verification. Unresolved `Par` values cannot be concretized.
+
+`Ref(Selector(...))` is query-only and cannot be concretized as stored object identity. Store selector expressions as data with `SelectorSpec` or `QuotedDef` instead.
+
+Importable function values are symbolized at `Definition` boundaries. Anonymous functions/lambdas are rejected as raw values; use `Satisfies(predicate, name="stable-name")` for scan-only selector predicates. Anonymous `Satisfies` predicates can match but are not stable-hashable.
 
 `SearchSpace` is the generative interpretation of a `Definition` containing generator-backed `Par` values such as `UniformIntRange` and `UniformFromSet`. It can sample definitions, enumerate finite grids, and produce a support selector.
 

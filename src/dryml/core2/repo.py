@@ -345,14 +345,14 @@ class Repo:
         raise ConfigError(f"Repo config has no value for {key!r}.")
 
     def resolve_config(self, value: Any) -> Any:
-        from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+        from .definition import ConcreteDefinition, Definition
 
         if isinstance(value, ConfigRef):
             if value.has_default:
                 return self.get_config(value.key, default=value.default)
             return self.get_config(value.key)
 
-        if isinstance(value, (ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition)):
+        if isinstance(value, (ConcreteDefinition, Definition)):
             return value
 
         if isinstance(value, Mapping):

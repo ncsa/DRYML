@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any, Iterable, Iterator
 
 from .cdef_identity import same_cdef
-from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+from .definition import ConcreteDefinition, Definition
 from .links import DefLink
 from .params import Par
 from .quoted import QuotedDef, SelectorSpec
@@ -21,7 +21,6 @@ CDEF_GRAPH_SCHEMA_VERSION = 3
 class EdgeKind(Enum):
     MATERIALIZE = "materialize"
     REF = "ref"
-    FROZEN = "ref"
 
 
 class ConcreteDefinitionGraphError(Exception):
@@ -79,10 +78,7 @@ def _iter_direct_edges_from_value(value: Any, path: GraphPath) -> Iterator[tuple
             raise ConcreteDefinitionGraphError(f"DefLink at {path!s} does not resolve to a ConcreteDefinition boundary.")
         yield path, value.target, value.kind
         return
-    if isinstance(value, FrozenConcreteDefinition):
-        yield path, value.thaw(), EdgeKind.REF
-        return
-    if isinstance(value, (FrozenDefinition, QuotedDef, SelectorSpec)):
+    if isinstance(value, (QuotedDef, SelectorSpec)):
         return
     if isinstance(value, Par):
         raise ConcreteDefinitionGraphError(f"Unresolved Par found inside ConcreteDefinition graph at {path!s}.")
@@ -206,8 +202,6 @@ class ConcreteDefinitionGraph:
         value = get_subtree(root, path)
         if isinstance(value, DefLink):
             return value.target
-        if isinstance(value, FrozenConcreteDefinition):
-            return value.thaw()
         if not isinstance(value, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(f"Path {path!s} does not resolve to a ConcreteDefinition boundary.")
         return value
@@ -400,12 +394,6 @@ def _validate_graph_parts(
                     f"Graph edge path {edge.path!s} resolves to a {resolved.kind.value!r} reference but edge kind is {edge.kind.value!r}."
                 )
             resolved = resolved.target
-        elif isinstance(resolved, FrozenConcreteDefinition):
-            if edge.kind is not EdgeKind.REF:
-                raise ConcreteDefinitionGraphError(
-                    f"Graph edge path {edge.path!s} resolves to a frozen reference but edge kind is {edge.kind.value!r}."
-                )
-            resolved = resolved.thaw()
         elif edge.kind is EdgeKind.REF:
             raise ConcreteDefinitionGraphError(
                 f"Graph ref edge path {edge.path!s} does not resolve to a Ref boundary."

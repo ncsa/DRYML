@@ -247,15 +247,15 @@ class SQLiteStoreQueryIndex:
         if policy is False:
             return
         if policy is True:
-            self.rebuild(stats=stats)
+            self.rebuild(stats=stats, force=True)
             return
         status = self.status()
         if status.state in {"missing", "dirty", "building", "incompatible", "corrupt"}:
-            self.rebuild(stats=stats, quarantine_existing=status.state in {"corrupt", "incompatible"})
+            self.rebuild(stats=stats, quarantine_existing=status.state in {"corrupt", "incompatible"}, force=False)
             return
         self._ensure_ready()
 
-    def rebuild(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
+    def rebuild(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False, force: bool = True) -> None:
         """Recreate this SQLite index from the owning Store's root definitions.
 
         Rebuilds acquire a sidecar build claim so concurrent callers do not all
@@ -265,7 +265,7 @@ class SQLiteStoreQueryIndex:
         is renamed aside instead of unlinked before rebuilding.
         """
 
-        with self._build_claim() as acquired:
+        with self._build_claim(force=force) as acquired:
             if not acquired:
                 if stats is not None:
                     stats.refresh_action = "sqlite-rebuild-wait"
@@ -307,7 +307,8 @@ class SQLiteStoreQueryIndex:
             *,
             quarantine_existing: bool = False) -> ReconcileReport:
         try:
-            self.rebuild(quarantine_existing=quarantine_existing)
+            force = before.state not in {"missing", "dirty", "building", "incompatible", "corrupt"}
+            self.rebuild(quarantine_existing=quarantine_existing, force=force)
         except Exception as exc:
             return ReconcileReport(
                 backend=before.backend,
@@ -634,11 +635,16 @@ class SQLiteStoreQueryIndex:
                 issues.append(ValidationIssue("error", "Store root is indexed but not active as a stored root.", cdef.stable_hash()))
 
     @contextmanager
-    def _build_claim(self):
+    def _build_claim(self, *, force: bool = False):
         claim_path = self._build_claim_path()
         start = time.monotonic()
         saw_existing_claim = False
         while True:
+            if not force and self.path.exists() and not self._is_dirty():
+                self._connections.close_all_current_process()
+                if self.status().state == "ready":
+                    yield False
+                    return
             if saw_existing_claim and self.path.exists() and not self._is_dirty():
                 self._connections.close_all_current_process()
                 if self.status().state == "ready":

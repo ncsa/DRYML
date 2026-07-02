@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
+from dryml.core2 import Definition, Object, Repo, SKIP_ARGS, Satisfies
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.query.graph_plan import graph_candidate_ids
 from dryml.core2.query.index import MemoryDefinitionGraphReadView
@@ -373,7 +373,7 @@ def test_graph_planner_matches_independent_bruteforce_matrix():
         Definition(PlannerParent, SKIP_ARGS, child=rare.definition),
         Definition(PlannerParent, SKIP_ARGS, child=[shared.definition, shared.definition]),
         Definition(PlannerSetParent, SKIP_ARGS, members={rare.definition}),
-        Definition(PlannerParent, SKIP_ARGS, name=lambda value: value.startswith("shared")),
+        Definition(PlannerParent, SKIP_ARGS, name=Satisfies(lambda value: value.startswith("shared"), name="starts-shared")),
     ]
 
     for selector in selectors:

@@ -13,6 +13,9 @@ class Matcher(Protocol):
     def matches(self, value: Any, *, present: bool = True) -> bool:
         ...
 
+    def stable_key(self) -> Any:
+        ...
+
 
 class Generator(Protocol):
     """Value generator used by SearchSpace sampling/grid expansion."""
@@ -24,6 +27,9 @@ class Generator(Protocol):
         ...
 
     def grid(self) -> tuple[Any, ...]:
+        ...
+
+    def stable_key(self) -> Any:
         ...
 
 
@@ -38,11 +44,18 @@ class Par:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return self.matcher.matches(value, present=present)
 
+    def stable_key(self) -> Any:
+        gen_key = None if self.generator is None else self.generator.stable_key()
+        return ("par", self.name, self.matcher.stable_key(), gen_key)
+
 
 @dataclass(frozen=True, slots=True)
 class PresentMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present
+
+    def stable_key(self) -> Any:
+        return ("present",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,11 +63,17 @@ class MissingMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return not present
 
+    def stable_key(self) -> Any:
+        return ("missing",)
+
 
 @dataclass(frozen=True, slots=True)
 class AnyMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present
+
+    def stable_key(self) -> Any:
+        return ("any",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +88,9 @@ class ExactMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present and value == self.value
 
+    def stable_key(self) -> Any:
+        return ("exact", self.value)
+
 
 @dataclass(frozen=True, slots=True)
 class ChoiceMatcher:
@@ -82,6 +104,9 @@ class ChoiceMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present and any(value == choice for choice in self.values)
 
+    def stable_key(self) -> Any:
+        return ("choice", self.values)
+
 
 @dataclass(frozen=True, slots=True)
 class IntRangeMatcher:
@@ -91,6 +116,9 @@ class IntRangeMatcher:
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present and isinstance(value, int) and self.lo <= value <= self.hi
 
+    def stable_key(self) -> Any:
+        return ("int-range", self.lo, self.hi)
+
 
 @dataclass(frozen=True, slots=True)
 class SubclassMatcher:
@@ -98,6 +126,9 @@ class SubclassMatcher:
 
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present and isinstance(value, type) and issubclass(value, self.cls)
+
+    def stable_key(self) -> Any:
+        return ("subclass", self.cls)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +138,16 @@ class SatisfiesMatcher:
 
     def matches(self, value: Any, *, present: bool = True) -> bool:
         return present and bool(self.predicate(value))
+
+    def stable_key(self) -> Any:
+        if self.name is not None:
+            return ("satisfies", self.name)
+        from .symbol import maybe_symbol_ref
+
+        ref = maybe_symbol_ref(self.predicate, functions=True)
+        if ref is not None:
+            return ("satisfies", ref)
+        raise TypeError("Anonymous Satisfies predicates are not stable-hashable; provide name=...")
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +163,9 @@ class UniformIntRangeGenerator:
 
     def grid(self) -> tuple[int, ...]:
         return tuple(range(self.lo, self.hi + 1))
+
+    def stable_key(self) -> Any:
+        return ("uniform-int-range", self.lo, self.hi)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +185,9 @@ class UniformFromSetGenerator:
 
     def grid(self) -> tuple[Any, ...]:
         return tuple(self.values)
+
+    def stable_key(self) -> Any:
+        return ("uniform-from-set", self.values)
 
 
 def Present(name: str | None = None) -> Par:

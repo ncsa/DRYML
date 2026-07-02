@@ -12,18 +12,24 @@ from dryml.core2 import (
     Present,
     QuotedDef,
     Ref,
+    RefCDef,
+    Repo,
     SearchSpace,
     Selector,
     SelectorSpec,
+    Satisfies,
     UniformFromSet,
     UniformIntRange,
     definition_mode,
     selector_mode,
     space_mode,
 )
+from dryml.core2.object import Object
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.errors import CannotConcretizeParameterizedDefinition
-from dryml.core2.freeze import FrozenDict, FrozenList
+from dryml.core2.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference
+from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
+from dryml.core2.query.path import Arg, Index
+from dryml.core2.utils.graph.path import GraphPath
 
 import core2_objects as objects
 
@@ -142,3 +148,82 @@ def test_definition_selector_and_space_modes():
 def test_public_exports():
     for name in ("Definition", "ConcreteDefinition", "Ref", "Mat", "Selector", "SelectorSpec", "QuotedDef", "Par", "SearchSpace"):
         assert hasattr(dryml, name)
+
+
+class FakeStore:
+    def catalog_key(self):
+        return "immutable-definition-graph-audit"
+
+
+class AuditRefOwner(Object):
+    def __init__(self, child: RefCDef):
+        self.child = child
+
+
+def test_repo_query_selector_preserves_policy():
+    repo = Repo()
+    child = Definition(objects.TestClassA, item=1).concretize(repo=repo)
+    repo._query_catalog.register_stored(child, FakeStore())
+
+    broad = Selector(Definition(objects.TestBase), cls_policy="selector")
+    exact = Selector(Definition(objects.TestBase), cls_policy="exact")
+
+    assert repo.query(broad).stored(refresh=False).count() == 1
+    assert repo.query(exact).stored(refresh=False).count() == 0
+
+
+def test_lens_set_deep_freezes_replacement_inside_frozen_container():
+    d1 = Definition(Nest3, [[1]])
+    replacement = [2, 3]
+    d2 = d1.at(GraphPath((Arg(0), Index(0)))).set(replacement)
+
+    replacement.append(4)
+
+    assert d2.args[0][0] == FrozenList([2, 3])
+
+
+def test_user_supplied_frozen_containers_are_revalidated():
+    inner = [1]
+    supplied = FrozenList([inner])
+    d = Definition(Nest3, supplied)
+
+    inner.append(2)
+
+    assert d.args[0][0] == FrozenList([1])
+
+
+def test_definition_match_uses_selector_semantics_for_par_and_ref():
+    target = Definition(Nest3, ref=Definition(Cls1, 10).ref()).concretize()
+    selector = Definition(Nest3, ref=Definition(Cls1, AnyValue()).ref())
+
+    assert selector.match(target)
+
+
+def test_refcdef_runtime_constructor_receives_cdef_target():
+    child = Definition(Cls1, 11).concretize()
+    owner = Definition(AuditRefOwner, child).build()
+
+    assert owner.child == child
+    assert isinstance(owner.child, ConcreteDefinition)
+
+
+def test_ref_selector_cannot_concretize_with_clear_error():
+    selector = Selector(Definition(Cls1, test=Present()))
+
+    with pytest.raises(CannotConcretizeSelectorReference):
+        Definition(Nest3, Ref(selector)).concretize()
+
+
+def test_satisfies_lambda_requires_stable_name_for_hash():
+    anon = Definition(Cls1, test=Satisfies(lambda value: True))
+    named1 = Definition(Cls1, test=Satisfies(lambda value: True, name="always"))
+    named2 = Definition(Cls1, test=Satisfies(lambda value: False, name="always"))
+
+    with pytest.raises(TypeError, match="stable-hashable"):
+        hash(anon)
+    assert hash(named1) == hash(named2)
+
+
+def test_raw_function_value_in_definition_is_rejected():
+    with pytest.raises(TypeError, match="Anonymous function"):
+        Definition(Cls1, test=lambda value: True)

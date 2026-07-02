@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal, Protocol
 
 from ..cdef_graph import EdgeKind
-from ..definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+from ..definition import ConcreteDefinition, Definition
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
 from ..object import Object
@@ -86,14 +86,6 @@ def _walk(
 
     is_target = mode.startswith("target")
     is_local = mode.endswith("local")
-    if isinstance(value, FrozenConcreteDefinition):
-        if is_target:
-            consumer.feature("REF_CDEF_AT", path, None)
-            consumer.feature("REF_CDEF_HASH", path, value.thaw().stable_hash())
-        if is_local and path:
-            consumer.definition_boundary(path, value.thaw(), edge_kind=EdgeKind.REF)
-        return
-
     if isinstance(value, DefLink):
         if is_local and path:
             target = value.target.root if isinstance(value.target, Selector) else value.target
@@ -103,8 +95,8 @@ def _walk(
     if isinstance(value, Selector):
         value = SelectorSpec(value)
 
-    if isinstance(value, (FrozenDefinition, QuotedDef, SelectorSpec)):
-        quoted = value.thaw() if isinstance(value, FrozenDefinition) else (value.value if isinstance(value, QuotedDef) else value.selector)
+    if isinstance(value, (QuotedDef, SelectorSpec)):
+        quoted = value.value if isinstance(value, QuotedDef) else value.selector
         consumer.feature("QUOTED_SELECTOR_AT", path, None)
         root = quoted.root if isinstance(quoted, Selector) else quoted
         if getattr(root, "cls", None) is not None:
@@ -115,7 +107,6 @@ def _walk(
         return
 
     if isinstance(value, Par):
-        consumer.feature("PAR_MATCHER", path, type(value.matcher).__name__)
         return
 
     active_id = id(value) if _tracks_cycles(value) else None
