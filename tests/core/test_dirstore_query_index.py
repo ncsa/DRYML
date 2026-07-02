@@ -5,7 +5,7 @@ import threading
 import time
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
+from dryml.core2 import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
 from dryml.core2.query.model import QueryIndexUnavailable, ValidationIssue, ValidationReport
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core2.query.sqlite.index as sqlite_index_module
@@ -18,6 +18,14 @@ class QueryIndexDirLeaf(Object):
     def __init__(self, name="leaf"):
         super().__init__()
         self.name = name
+
+
+class QueryIndexCfgOwner(Object):
+    def __init__(self, name="owner", cfg=None, ref=None):
+        super().__init__()
+        self.name = name
+        self.cfg = {} if cfg is None else cfg
+        self.ref = ref
 
 
 class FailingSaveDirLeaf(Object):
@@ -78,6 +86,30 @@ def test_dirstore_sqlite_policy_opens_skeleton_without_creating_file(tmp_path):
     assert index.path == Path(store.query_index_path)
     assert not Path(store.query_index_path).exists()
     assert index.status().state == "missing"
+
+
+def test_sqlite_stored_query_missing_does_not_require_presence(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    root_missing = QueryIndexCfgOwner("root", repo=repo)
+    nested_missing = QueryIndexCfgOwner("nested", cfg={}, repo=repo)
+    ref_child = QueryIndexCfgOwner("child", repo=repo)
+    ref_parent = QueryIndexCfgOwner("parent", ref=ref_child.definition.ref(), repo=repo)
+
+    for obj in (root_missing, nested_missing, ref_parent):
+        repo.save_object(obj)
+
+    root_selector = Definition(QueryIndexCfgOwner, "root", missing=Missing())
+    nested_selector = Definition(QueryIndexCfgOwner, "nested", cfg={"x": Missing()})
+    ref_selector = Definition(
+        QueryIndexCfgOwner,
+        "parent",
+        ref=Ref(Selector(Definition(QueryIndexCfgOwner, "child", missing=Missing()))),
+    )
+
+    assert list(repo.query(root_selector).stored().defs()) == [root_missing.definition]
+    assert list(repo.query(nested_selector).stored().defs()) == [nested_missing.definition]
+    assert list(repo.query(ref_selector).stored().defs()) == [ref_parent.definition]
 
 
 def test_dirstore_auto_uses_sqlite_when_available_without_construction_io(tmp_path):

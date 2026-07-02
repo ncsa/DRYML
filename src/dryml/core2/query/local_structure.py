@@ -254,7 +254,8 @@ def _walk_definition_children(
         unordered_set_boundaries: bool) -> None:
     for edge in iter_value_edges(definition):
         if isinstance(edge.segment, Kwarg):
-            consumer.feature("HAS_KWARG", path, edge.segment.name)
+            if not _can_match_absent(edge.value):
+                consumer.feature("HAS_KWARG", path, edge.segment.name)
         _walk(
             edge.value,
             path.child(edge.segment),
@@ -278,7 +279,7 @@ def _walk_mapping(
     for edge in iter_value_edges(value):
         if isinstance(edge.segment, Key):
             key_hash = scalar_key(edge.segment.key)
-            if key_hash is not None:
+            if key_hash is not None and not _can_match_absent(edge.value):
                 consumer.feature("HAS_MAPPING_KEY", path, key_hash)
         _walk(
             edge.value,
@@ -378,3 +379,7 @@ def _tracks_cycles(value: Any) -> bool:
         FrozenSet,
         FrozenDict,
     ))
+
+
+def _can_match_absent(value: Any) -> bool:
+    return isinstance(value, Par) and value.matches(None, present=False)

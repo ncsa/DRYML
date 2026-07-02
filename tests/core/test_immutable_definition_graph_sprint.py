@@ -224,6 +224,39 @@ def test_nested_mapping_missing_matches_absent_key():
     assert selector.matches(target)
 
 
+def test_indexed_query_missing_does_not_require_presence():
+    repo = Repo()
+    root_missing = Definition(Cls2).concretize()
+    nested_missing = Definition(Nest3, cfg={}).concretize()
+    ref_child = Definition(Cls1).concretize()
+    ref_parent = Definition(Nest3, ref=ref_child.ref()).concretize()
+    for cdef in (root_missing, nested_missing, ref_parent):
+        repo._query_catalog.register_stored(cdef, FakeStore())
+
+    assert list(repo.query(Definition(Cls2, missing=Missing())).stored(refresh=False).defs()) == [root_missing]
+    assert list(repo.query(Definition(Nest3, cfg={"x": Missing()})).stored(refresh=False).defs()) == [nested_missing]
+
+    ref_selector = Definition(Nest3, ref=Ref(Selector(Definition(Cls1, test=Missing()))))
+    assert list(repo.query(ref_selector).stored(refresh=False).defs()) == [ref_parent]
+
+
+def test_concrete_definition_collapses_materialize_links():
+    child = Definition(Cls1, 12).concretize()
+    raw = ConcreteDefinition(Nest3, FrozenTuple((child,)), FrozenDict({}))
+    linked = ConcreteDefinition(Nest3, FrozenTuple((Mat(child),)), FrozenDict({}))
+
+    assert linked.args[0] == child
+    assert linked == raw
+    assert hash(linked) == hash(raw)
+
+
+def test_unstable_selector_data_fails_at_concrete_boundary():
+    selector = Selector(Definition(Cls1, test=Satisfies(lambda value: True)))
+
+    with pytest.raises(TypeError, match="stable-hashable"):
+        Definition(Nest3, SelectorSpec(selector)).concretize()
+
+
 def test_satisfies_lambda_requires_stable_name_for_hash():
     anon = Definition(Cls1, test=Satisfies(lambda value: True))
     named1 = Definition(Cls1, test=Satisfies(lambda value: True, name="always"))

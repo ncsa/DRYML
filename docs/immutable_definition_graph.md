@@ -6,7 +6,7 @@ DRYML now separates graph expression syntax from storage identity, query interpr
 
 `ConcreteDefinition` is the exact canonical materializable identity used by repos, stores, materialization, graph extraction, and stable hashes. It is separate from `Definition`.
 
-`Ref(target)` marks a parent slot as a non-materializing graph edge. `Mat(target)` marks an explicit materializing edge. Raw nested `Definition` or `ConcreteDefinition` values are materializing children. Materialization follows materializing edges only; constructors annotated with `RefCDef` receive the referenced `ConcreteDefinition` target, not graph edge state.
+`Ref(target)` marks a parent slot as a non-materializing graph edge. `Mat(target)` marks an explicit materializing edge. Raw nested `Definition` or `ConcreteDefinition` values are materializing children. At concrete identity boundaries, materializing links collapse to the raw child `ConcreteDefinition`, so there is only one canonical materializing representation. Materialization follows materializing edges only; constructors annotated with `RefCDef` receive the referenced `ConcreteDefinition` target, not graph edge state.
 
 `Selector(root)` is the query interpretation of a `Definition`. `repo.query(defn)` lifts definitions to selectors, while `repo.query(selector)` uses the selector directly. `Definition.__eq__` is never selector matching; use `Selector(defn).matches(target)` for semantic matching.
 
@@ -16,7 +16,7 @@ DRYML now separates graph expression syntax from storage identity, query interpr
 
 `Ref(Selector(...))` and `Mat(Selector(...))` are query-only link patterns and cannot be concretized as stored object identity. Store selector expressions as data with `SelectorSpec` or `QuotedDef` instead.
 
-Importable function values are symbolized at `Definition` boundaries. Anonymous functions/lambdas are rejected as raw values; use `Satisfies(predicate, name="stable-name")` for scan-only selector predicates. Anonymous `Satisfies` predicates can match but are not stable-hashable. A `Satisfies` name is a semantic identity, not a display label; do not reuse one name for predicates with different behavior.
+Importable function values are symbolized at `Definition` boundaries. Anonymous functions/lambdas are rejected as raw values; use `Satisfies(predicate, name="stable-name")` for scan-only selector predicates. Anonymous `Satisfies` predicates can match in query-only selectors but are not stable-hashable, so selector-valued concrete data must use named or symbolically identifiable predicates. A `Satisfies` name is a semantic identity, not a display label; do not reuse one name for predicates with different behavior.
 
 `SearchSpace` is the generative interpretation of a `Definition` containing generator-backed `Par` values such as `UniformIntRange` and `UniformFromSet`. It can sample definitions, enumerate finite grids, and produce a support selector.
 

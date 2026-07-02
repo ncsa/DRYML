@@ -1063,15 +1063,27 @@ def freeze_concrete_value(value: Any) -> Any:
         raise TypeError("ConcreteDefinition values cannot contain unresolved Definition values; concretize first.")
     if kind is NodeKind.DEFLINK:
         from .definition import ConcreteDefinition
+        from .cdef_graph import EdgeKind
         from .selector import Selector
         if isinstance(value.target, Selector):
             raise CannotConcretizeSelectorReference((), value.target)
         if not isinstance(value.target, ConcreteDefinition):
             raise TypeError("ConcreteDefinition link values must target ConcreteDefinition values.")
+        if value.kind is EdgeKind.MATERIALIZE:
+            return value.target
+        return value
+    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC}:
+        from .utils.stable_hash import stable_hash_function
+
+        stable_hash_function(value)
         return value
     if kind is NodeKind.SELECTOR:
         from .quoted import SelectorSpec
-        return SelectorSpec(value)
+        from .utils.stable_hash import stable_hash_function
+
+        spec = SelectorSpec(value)
+        stable_hash_function(spec)
+        return spec
     return freeze_def_value(value)
 
 
