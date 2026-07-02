@@ -412,15 +412,15 @@ def test_sqlite_rebuild_registers_store_roots_in_batches(tmp_path, monkeypatch):
         repo.save_object(obj)
 
     monkeypatch.setattr(sqlite_index_module, "_REBUILD_BATCH_SIZE", 2)
-    original_from_roots = sqlite_index_module.ConcreteDefinitionGraph.from_roots
+    original_for_query_index_roots = sqlite_index_module.ConcreteDefinitionGraph.for_query_index_roots
     batch_sizes = []
 
-    def spy_from_roots(cls, cdefs):
+    def spy_for_query_index_roots(cls, cdefs):
         cdefs = tuple(cdefs)
         batch_sizes.append(len(cdefs))
-        return original_from_roots(cdefs)
+        return original_for_query_index_roots(cdefs)
 
-    monkeypatch.setattr(sqlite_index_module.ConcreteDefinitionGraph, "from_roots", classmethod(spy_from_roots))
+    monkeypatch.setattr(sqlite_index_module.ConcreteDefinitionGraph, "for_query_index_roots", classmethod(spy_for_query_index_roots))
     reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
 
     count = Repo(stores=reopened_store).query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count()

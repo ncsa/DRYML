@@ -314,14 +314,14 @@ def test_cache_sync_registers_union_graph_once(monkeypatch):
     repo.pin(left)
     repo.pin(right)
     calls = []
-    original = index_mod.ConcreteDefinitionGraph.from_roots
+    original = index_mod.ConcreteDefinitionGraph.for_query_index_roots
 
-    def spy_from_roots(cls, cdefs):
+    def spy_for_query_index_roots(cls, cdefs):
         cdefs = tuple(cdefs)
         calls.append(cdefs)
         return original(cdefs)
 
-    monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "from_roots", classmethod(spy_from_roots))
+    monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "for_query_index_roots", classmethod(spy_for_query_index_roots))
 
     repo._query_catalog.sync_caches()
 
@@ -1399,14 +1399,14 @@ def test_auto_hydration_builds_each_store_graph_once(tmp_path, monkeypatch):
     parent = IndexPersistent(IndexLeaf("child", repo=repo), repo=repo)
     repo.save_object(parent)
     calls = []
-    original = index_mod.ConcreteDefinitionGraph.from_roots
+    original = index_mod.ConcreteDefinitionGraph.for_query_index_roots
 
-    def spy_from_roots(cls, cdefs):
+    def spy_for_query_index_roots(cls, cdefs):
         cdefs = tuple(cdefs)
         calls.append(cdefs)
         return original(cdefs)
 
-    monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "from_roots", classmethod(spy_from_roots))
+    monkeypatch.setattr(index_mod.ConcreteDefinitionGraph, "for_query_index_roots", classmethod(spy_for_query_index_roots))
     repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
 
     assert list(repo2.find_defs(None)) == [parent.definition]

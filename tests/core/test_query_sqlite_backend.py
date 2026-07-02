@@ -114,7 +114,7 @@ def test_registered_rows_include_edge_and_root_metadata(tmp_path):
     assert stored_root[4] == result.generation
 
 
-def test_register_prepares_encoded_rows_before_write_transaction(tmp_path, monkeypatch):
+def test_register_encodes_only_missing_rows(tmp_path, monkeypatch):
     index = sqlite_index(tmp_path)
     root = SQLiteLeaf("transaction-boundary")
     graph = ConcreteDefinitionGraph.from_root(root.definition)
@@ -122,9 +122,9 @@ def test_register_prepares_encoded_rows_before_write_transaction(tmp_path, monke
     original_from_cdef = sqlite_index_module._EncodedNode.from_cdef
     original_run_write = SQLiteStoreQueryIndex._run_write_transaction
 
-    def spy_from_cdef(cls, cdef):
+    def spy_from_cdef(cls, cdef, **kwargs):
         events.append("encode")
-        return original_from_cdef(cdef)
+        return original_from_cdef(cdef, **kwargs)
 
     def spy_run_write(self, operation):
         events.append("transaction")
@@ -135,7 +135,12 @@ def test_register_prepares_encoded_rows_before_write_transaction(tmp_path, monke
 
     index.register_stored_roots(graph, [root.definition])
 
-    assert events[:2] == ["encode", "transaction"]
+    assert events[:2] == ["transaction", "encode"]
+
+    events.clear()
+    index.register_stored_roots(graph, [root.definition])
+
+    assert events == ["transaction"]
 
 
 def test_register_graph_persists_rows_without_stored_root(tmp_path):

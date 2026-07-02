@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from threading import RLock
 from typing import Any
 
-from ..cdef_graph import ConcreteDefinitionGraph, EdgeKind
+from ..cdef_graph import ConcreteDefinitionGraph, EdgeKind, GraphClosure, as_query_index_graph
 from ..definition import ConcreteDefinition
 from .fingerprint import canonical_class_key, target_local_fingerprint
 from .model import (
@@ -519,8 +519,7 @@ class DefinitionCatalog:
                 cdefs.extend(self.repo.weak_obj_cache.keys())
             cdefs = list(dict.fromkeys(cdefs))
             if cdefs:
-                graph = ConcreteDefinitionGraph.from_roots(cdefs)
-                graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
+                graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
                 self._register_graph_structure_locked(graph)
                 for cdef in graph.roots:
                     ids.add(self.ids_by_cdef[cdef])
@@ -583,8 +582,9 @@ class DefinitionCatalog:
         with self.lock:
             sid = self.store_id(store)
             if graph is None:
-                graph = ConcreteDefinitionGraph.from_root(cdef)
-                graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
+                graph = ConcreteDefinitionGraph.for_query_index(cdef)
+            else:
+                graph = as_query_index_graph(graph)
             changed = self._register_query_graph_structure_locked(graph)
             did = self.ids_by_cdef[cdef]
             membership_changed = (
@@ -626,8 +626,9 @@ class DefinitionCatalog:
         if not roots:
             return ()
         if graph is None:
-            graph = ConcreteDefinitionGraph.from_roots(roots)
-            graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
+            graph = ConcreteDefinitionGraph.for_query_index_roots(roots)
+        else:
+            graph = as_query_index_graph(graph, roots)
         with self.lock:
             sid = self.store_id(store)
             changed = self._register_query_graph_structure_locked(graph)
@@ -837,8 +838,7 @@ class DefinitionCatalog:
             build_repo = _CatalogBuildRepo(self.repo)
             replacement = DefinitionCatalog(build_repo)
             if cached_cdefs:
-                graph = ConcreteDefinitionGraph.from_roots(cached_cdefs)
-                replacement.register_graph(ConcreteDefinitionGraph.for_query_index_roots(graph.roots))
+                replacement.register_graph(ConcreteDefinitionGraph.for_query_index_roots(cached_cdefs))
             store_scan_count = 0
             for store in stores:
                 if self._store_uses_persistent_sqlite(store):
@@ -1062,8 +1062,10 @@ class DefinitionCatalog:
         return changed
 
     def _register_query_graph_structure_locked(self, graph: ConcreteDefinitionGraph) -> bool:
+        if graph.closure is GraphClosure.QUERY_INDEX:
+            return self._register_graph_structure_locked(graph)
         changed, graph_signature = self._register_graph_structure_locked(graph, return_signature=True)
-        query_graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots)
+        query_graph = as_query_index_graph(graph)
         if graph_signature == _graph_structure_signature(query_graph):
             return changed
         return self._register_graph_structure_locked(query_graph) or changed

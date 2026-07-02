@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import time
 
-from ...cdef_graph import ConcreteDefinitionGraph, EdgeKind
+from ...cdef_graph import ConcreteDefinitionGraph, EdgeKind, as_query_index_graph
 from ...definition import ConcreteDefinition
 from ..codecs import (
     QueryIndexCodec,
@@ -347,7 +347,7 @@ class SQLiteStoreQueryIndex:
                 if not isinstance(cdef, ConcreteDefinition):
                     raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
             scanned += len(cdefs)
-            graph = ConcreteDefinitionGraph.from_roots(cdefs)
+            graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
             self._register_stored_roots(graph, cdefs, require_ready=False)
         self._validate_rebuild_before_ready()
         self._set_build_state("ready")
@@ -373,10 +373,11 @@ class SQLiteStoreQueryIndex:
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
         roots = tuple(dict.fromkeys(roots))
-        graph = ConcreteDefinitionGraph.for_query_index_roots(graph.roots or roots)
-        encoded_nodes = tuple(_EncodedNode.from_cdef(node.definition) for node in graph.nodes())
+        graph = as_query_index_graph(graph, graph.roots or roots)
+        graph_nodes = graph.nodes()
+        node_hash_blobs = {node.definition: stable_hash_to_blob(node.stable_hash) for node in graph_nodes}
         encoded_edges = tuple(_EncodedEdge.from_edge(edge) for edge in graph.edges())
-        if not roots and not encoded_nodes and not encoded_edges:
+        if not roots and not graph_nodes and not encoded_edges:
             return IndexWriteResult(generation=self.current_generation(), changed=False)
 
         def operation(con):
@@ -391,7 +392,16 @@ class SQLiteStoreQueryIndex:
             next_generation = generation + 1
             counters = _WriteCounters()
             cdef_to_id: dict[ConcreteDefinition, int] = {}
-            for encoded in encoded_nodes:
+            missing_nodes: list[ConcreteDefinition] = []
+            for node in graph_nodes:
+                did = _existing_definition_id(con, node.definition, stable_hash_blob=node_hash_blobs[node.definition])
+                if did is None:
+                    missing_nodes.append(node.definition)
+                else:
+                    cdef_to_id[node.definition] = did
+
+            for cdef in missing_nodes:
+                encoded = _EncodedNode.from_cdef(cdef, stable_hash_blob=node_hash_blobs[cdef])
                 did, added = _resolve_definition_id(con, encoded, generation=next_generation)
                 cdef_to_id[encoded.cdef] = did
                 counters.definitions_added += int(added)
@@ -1636,11 +1646,13 @@ class _EncodedNode:
         self.features = features
 
     @classmethod
-    def from_cdef(cls, cdef: ConcreteDefinition):
+    def from_cdef(cls, cdef: ConcreteDefinition, *, stable_hash_blob: bytes | None = None):
+        if stable_hash_blob is None:
+            stable_hash_blob = stable_hash_to_blob(cdef.stable_hash())
         fingerprint = target_local_fingerprint(cdef)
         return cls(
             cdef=cdef,
-            stable_hash=stable_hash_to_blob(cdef.stable_hash()),
+            stable_hash=stable_hash_blob,
             class_key=stable_hash_to_blob(canonical_class_key(cdef.cls)),
             cdef_blob=_CODEC.encode_cdef(cdef),
             features=tuple(
@@ -1648,6 +1660,15 @@ class _EncodedNode:
                 for token, count in fingerprint.counts.items()
             ),
         )
+
+
+def _existing_definition_id(con, cdef: ConcreteDefinition, *, stable_hash_blob: bytes) -> int | None:
+    for did, cdef_blob in con.execute(
+            "SELECT def_id, cdef_blob FROM definitions WHERE stable_hash = ? ORDER BY collision_ordinal",
+            (stable_hash_blob,)):
+        if cdef_equal(_CODEC.decode_cdef(cdef_blob), cdef):
+            return did
+    return None
 
 
 class _EncodedEdge:

@@ -110,8 +110,10 @@ class Definition(DefInterface, Mapping):
     _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
     _args: FrozenTuple | None
     _kwargs: FrozenDict[str, Any]
+    _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def __init__(self, *args, **kwargs):
+        object.__setattr__(self, "_stable_hash_cache", None)
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]) and not isinstance(args[0], (ImportRef, SourceSpec)):
                 if args[0] is SKIP_ARGS and len(args) == 1:
@@ -198,6 +200,14 @@ class Definition(DefInterface, Mapping):
     def __hash__(self) -> int:
         return stable_int_hash(self.stable_hash())
 
+    def stable_hash(self) -> str:
+        cached = self._stable_hash_cache
+        if cached is not None:
+            return cached
+        value = stable_hash_function(self)
+        object.__setattr__(self, "_stable_hash_cache", value)
+        return value
+
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
 
@@ -228,6 +238,7 @@ class Definition(DefInterface, Mapping):
         object.__setattr__(self, "_cls", self._freeze_value(state['cls']))
         object.__setattr__(self, "_args", None if state['args'] is None else FrozenTuple(self._freeze_value(v) for v in state['args']))
         object.__setattr__(self, "_kwargs", self._freeze_kwargs(dict(state['kwargs'])))
+        object.__setattr__(self, "_stable_hash_cache", None)
 
     def __deepcopy__(self, memo):
         """
@@ -329,6 +340,7 @@ class ConcreteDefinition(DefInterface, Mapping):
     cls: type | ImportRef | SourceSpec
     args: FrozenTuple[Any, ...] = field(default_factory = lambda: FrozenTuple())
     kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
+    _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         from .canonical import freeze_concrete_value
@@ -348,6 +360,14 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     def __hash__(self) -> int:
         return stable_int_hash(self.stable_hash())
+
+    def stable_hash(self) -> str:
+        cached = self._stable_hash_cache
+        if cached is not None:
+            return cached
+        value = stable_hash_function(self)
+        object.__setattr__(self, "_stable_hash_cache", value)
+        return value
 
     def __getitem__(self, k: str) -> Any:
         if k == "cls": return self.cls

@@ -23,6 +23,13 @@ class EdgeKind(Enum):
     REF = "ref"
 
 
+class GraphClosure(Enum):
+    """Traversal closure represented by a ConcreteDefinitionGraph."""
+
+    MATERIALIZATION = "materialization"
+    QUERY_INDEX = "query_index"
+
+
 class ConcreteDefinitionGraphError(Exception):
     pass
 
@@ -92,10 +99,15 @@ class ConcreteDefinitionGraph:
             self,
             roots: Iterable[ConcreteDefinition],
             nodes: Iterable[CDefNode],
-            edges: Iterable[CDefEdge]):
+            edges: Iterable[CDefEdge],
+            *,
+            closure: GraphClosure = GraphClosure.MATERIALIZATION):
+        if not isinstance(closure, GraphClosure):
+            raise TypeError(f"Graph closure must be GraphClosure, got {type(closure).__name__}.")
         self._roots = tuple(dict.fromkeys(roots))
         self._nodes = tuple(nodes)
         self._edges = tuple(dict.fromkeys(edges))
+        self._closure = closure
         _validate_graph_parts(self._roots, self._nodes, self._edges)
         self._node_by_cdef = {node.definition: node for node in self._nodes}
         outgoing: dict[ConcreteDefinition, list[CDefEdge]] = defaultdict(list)
@@ -120,7 +132,8 @@ class ConcreteDefinitionGraph:
             cdefs: Iterable[ConcreteDefinition],
             *,
             expand_ref_targets: bool = False) -> "ConcreteDefinitionGraph":
-        builder = ConcreteDefinitionGraphBuilder(expand_ref_targets=expand_ref_targets)
+        closure = GraphClosure.QUERY_INDEX if expand_ref_targets else GraphClosure.MATERIALIZATION
+        builder = ConcreteDefinitionGraphBuilder(expand_ref_targets=expand_ref_targets, closure=closure)
         builder.add_roots(cdefs)
         return builder.build()
 
@@ -130,9 +143,15 @@ class ConcreteDefinitionGraph:
 
     @classmethod
     def for_query_index_roots(cls, cdefs: Iterable[ConcreteDefinition]) -> "ConcreteDefinitionGraph":
-        builder = ConcreteDefinitionGraphBuilder(expand_ref_targets=True)
+        builder = ConcreteDefinitionGraphBuilder(expand_ref_targets=True, closure=GraphClosure.QUERY_INDEX)
         builder.add_roots(cdefs)
         return builder.build()
+
+    @property
+    def closure(self) -> GraphClosure:
+        """Return the traversal closure used to build this graph."""
+
+        return self._closure
 
     @property
     def roots(self) -> tuple[ConcreteDefinition, ...]:
@@ -283,9 +302,16 @@ class ConcreteDefinitionGraph:
 
 
 class ConcreteDefinitionGraphBuilder:
-    def __init__(self, *, expand_ref_targets: bool = False):
+    def __init__(
+            self,
+            *,
+            expand_ref_targets: bool = False,
+            closure: GraphClosure = GraphClosure.MATERIALIZATION):
         self._expand_ref_targets = expand_ref_targets
+        self._closure = closure
         self._roots: list[ConcreteDefinition] = []
+        self._root_hashes: dict[str, list[ConcreteDefinition]] = defaultdict(list)
+        self._hashes_by_id: dict[int, str] = {}
         self._nodes: dict[ConcreteDefinition, CDefNode] = {}
         self._edges: dict[tuple[ConcreteDefinition, GraphPath, ConcreteDefinition, EdgeKind], CDefEdge] = {}
         self._edges_by_parent: dict[ConcreteDefinition, list[CDefEdge]] = defaultdict(list)
@@ -295,7 +321,10 @@ class ConcreteDefinitionGraphBuilder:
     def add_root(self, cdef: ConcreteDefinition) -> None:
         if not isinstance(cdef, ConcreteDefinition):
             raise TypeError(f"Graph roots must be ConcreteDefinitions, got {type(cdef).__name__}.")
-        if not any(same_cdef(cdef, root) for root in self._roots):
+        digest = self._stable_hash(cdef)
+        bucket = self._root_hashes[digest]
+        if not any(existing == cdef for existing in bucket):
+            bucket.append(cdef)
             self._roots.append(cdef)
         self._visit(cdef, GraphPath())
 
@@ -312,11 +341,18 @@ class ConcreteDefinitionGraphBuilder:
             key=lambda edge: (
                 order_index.get(edge.parent, len(order_index)),
                 str(edge.path),
-                edge.child.stable_hash(),
-                repr(edge.child),
+                self._stable_hash(edge.child),
             ),
         ))
-        return ConcreteDefinitionGraph(tuple(self._roots), ordered_nodes, ordered_edges)
+        return ConcreteDefinitionGraph(tuple(self._roots), ordered_nodes, ordered_edges, closure=self._closure)
+
+    def _stable_hash(self, cdef: ConcreteDefinition) -> str:
+        cache_key = id(cdef)
+        digest = self._hashes_by_id.get(cache_key)
+        if digest is None:
+            digest = cdef.stable_hash()
+            self._hashes_by_id[cache_key] = digest
+        return digest
 
     def _visit(self, cdef: ConcreteDefinition, path: GraphPath) -> None:
         if cdef in self._completed:
@@ -328,13 +364,13 @@ class ConcreteDefinitionGraphBuilder:
             )
 
         self._active[cdef] = path
-        self._nodes.setdefault(cdef, CDefNode(cdef, cdef.stable_hash()))
+        self._nodes.setdefault(cdef, CDefNode(cdef, self._stable_hash(cdef)))
         try:
             for edge_path, child, kind in iter_direct_cdef_edges(cdef):
                 edge = CDefEdge(cdef, edge_path, child, kind)
                 edge_key = (edge.parent, edge.path, edge.child, edge.kind)
                 if edge_key not in self._edges:
-                    self._nodes.setdefault(child, CDefNode(child, child.stable_hash()))
+                    self._nodes.setdefault(child, CDefNode(child, self._stable_hash(child)))
                     self._edges[edge_key] = edge
                     self._edges_by_parent.setdefault(edge.parent, []).append(edge)
                 if kind is EdgeKind.MATERIALIZE or self._expand_ref_targets:
@@ -353,7 +389,7 @@ class ConcreteDefinitionGraphBuilder:
             seen.add(cdef)
             out.append(cdef)
             child_edges = list(self._edges_by_parent.get(cdef, ()))
-            child_edges.sort(key=lambda edge: (str(edge.path), edge.child.stable_hash(), repr(edge.child)))
+            child_edges.sort(key=lambda edge: (str(edge.path), self._stable_hash(edge.child)))
             for edge in child_edges:
                 visit(edge.child)
 
@@ -469,3 +505,14 @@ def _validate_graph_parts(
     for node in nodes:
         if node.definition not in reachable:
             raise ConcreteDefinitionGraphError(f"Graph node {node.definition} is not reachable from any root.")
+
+
+def as_query_index_graph(
+        graph: ConcreteDefinitionGraph,
+        roots: Iterable[ConcreteDefinition] | None = None) -> ConcreteDefinitionGraph:
+    """Return a query-index closure for roots without rebuilding one that is already suitable."""
+
+    wanted_roots = tuple(dict.fromkeys(graph.roots if roots is None else roots))
+    if graph.closure is GraphClosure.QUERY_INDEX and set(graph.roots) == set(wanted_roots):
+        return graph
+    return ConcreteDefinitionGraph.for_query_index_roots(wanted_roots)
