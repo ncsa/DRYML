@@ -7,6 +7,9 @@ from types import UnionType
 from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
 
 from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+from .links import DefLink, Ref
+from .quoted import QuotedDef, SelectorSpec
+from .selector import Selector
 
 
 class ArgRole:
@@ -26,38 +29,44 @@ class MaterializeArg(ArgRole):
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenCDefArg(ArgRole):
+class RefCDefArg(ArgRole):
     """Canonicalize Object/CDef inputs as non-materializing CDef references."""
 
-    name: str = "frozen_cdef"
+    name: str = "ref_cdef"
 
-    def canonicalize(self, value: Any) -> FrozenConcreteDefinition:
+    def canonicalize(self, value: Any) -> Any:
         from .object import Object
 
-        if isinstance(value, FrozenConcreteDefinition):
+        if isinstance(value, DefLink):
             return value
+        if isinstance(value, FrozenConcreteDefinition):
+            return Ref(value.thaw())
         if isinstance(value, Object):
-            return value.definition.freeze()
-        if isinstance(value, ConcreteDefinition):
-            return value.freeze()
+            return Ref(value.definition)
+        if isinstance(value, (ConcreteDefinition, Definition, Selector)):
+            return Ref(value)
         raise TypeError(
-            "FrozenCDef argument expects Object, ConcreteDefinition, or "
-            f"FrozenConcreteDefinition; got {type(value).__name__}."
+            "RefCDef argument expects Object, Definition, ConcreteDefinition, Selector, or Ref; "
+            f"got {type(value).__name__}."
         )
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenDefArg(ArgRole):
-    """Canonicalize Definition inputs as immutable selector snapshots."""
+class SelectorArg(ArgRole):
+    """Canonicalize selector inputs as quoted selector data."""
 
-    name: str = "frozen_def"
-    def canonicalize(self, value: Any) -> FrozenDefinition:
-        if isinstance(value, FrozenDefinition):
+    name: str = "selector_arg"
+    def canonicalize(self, value: Any) -> Any:
+        if isinstance(value, (QuotedDef, SelectorSpec)):
             return value
+        if isinstance(value, FrozenDefinition):
+            return QuotedDef(value.thaw())
+        if isinstance(value, Selector):
+            return SelectorSpec(value)
         if isinstance(value, Definition):
-            return value.freeze()
+            return QuotedDef(value)
         raise TypeError(
-            "FrozenDef argument expects Definition or FrozenDefinition; "
+            "SelectorArg expects Definition, Selector, QuotedDef, or SelectorSpec; "
             f"got {type(value).__name__}."
         )
 
@@ -69,15 +78,22 @@ class ValueArg(ArgRole):
     name: str = "value"
 
 
-FrozenCDef = Annotated[ConcreteDefinition, FrozenCDefArg()]
-FrozenDef = Annotated[Definition, FrozenDefArg()]
+RefCDef = Annotated[ConcreteDefinition, RefCDefArg()]
+FrozenCDefArg = RefCDefArg
+FrozenCDef = RefCDef
+FrozenDefArg = SelectorArg
+FrozenDef = Annotated[Definition, SelectorArg()]
 
 _ROLE_NAMES = {
     "materialize": MaterializeArg(),
-    "frozen_cdef": FrozenCDefArg(),
-    "frozencdef": FrozenCDefArg(),
-    "frozen_def": FrozenDefArg(),
-    "frozendef": FrozenDefArg(),
+    "ref_cdef": RefCDefArg(),
+    "refcdef": RefCDefArg(),
+    "frozen_cdef": RefCDefArg(),
+    "frozencdef": RefCDefArg(),
+    "selector_arg": SelectorArg(),
+    "selectorarg": SelectorArg(),
+    "frozen_def": SelectorArg(),
+    "frozendef": SelectorArg(),
     "value": ValueArg(),
 }
 
@@ -202,8 +218,8 @@ def role_from_annotation(annotation: Any) -> ArgRole | None:
             raise TypeError("Union annotations cannot declare multiple DRYML argument roles.")
         if found:
             return found[0]
-    if annotation in (FrozenCDefArg, FrozenCDef):
-        return FrozenCDefArg()
-    if annotation in (FrozenDefArg, FrozenDef):
-        return FrozenDefArg()
+    if annotation in (RefCDefArg, RefCDef, FrozenCDefArg, FrozenCDef):
+        return RefCDefArg()
+    if annotation in (SelectorArg, FrozenDefArg, FrozenDef):
+        return SelectorArg()
     return None

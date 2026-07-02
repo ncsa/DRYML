@@ -156,6 +156,11 @@ class StableHashGraphHasher(GraphHasher):
             NodeKind.CONCRETE_DEFINITION,
             NodeKind.FROZEN_CONCRETE_DEFINITION,
             NodeKind.FROZEN_DEFINITION,
+            NodeKind.DEFLINK,
+            NodeKind.QUOTED_DEF,
+            NodeKind.SELECTOR_SPEC,
+            NodeKind.SELECTOR,
+            NodeKind.PAR,
             NodeKind.OBJECT,
         }
 
@@ -163,7 +168,11 @@ class StableHashGraphHasher(GraphHasher):
         from ..canonical import node_kind, NodeKind
         from ..definition import Definition, ConcreteDefinition, FrozenConcreteDefinition, FrozenDefinition
         from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+        from ..links import DefLink
         from ..object import Object
+        from ..params import Par
+        from ..quoted import QuotedDef, SelectorSpec
+        from ..selector import Selector
 
         kind = node_kind(obj)
 
@@ -198,6 +207,26 @@ class StableHashGraphHasher(GraphHasher):
                 {"cls": obj.cls, "args": obj.args, "kwargs": obj.kwargs},
                 ctx,
             )
+
+        if isinstance(obj, DefLink):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(type_marker, {"kind": obj.kind.value, "target": obj.target}, ctx)
+
+        if isinstance(obj, QuotedDef):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(type_marker, {"value": obj.value}, ctx)
+
+        if isinstance(obj, SelectorSpec):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(type_marker, {"selector": obj.selector}, ctx)
+
+        if isinstance(obj, Selector):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(type_marker, {"root": obj.root, "strict": obj.strict, "cls_policy": obj.cls_policy}, ctx)
+
+        if isinstance(obj, Par):
+            type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            return self._hash_mapping(type_marker, {"name": obj.name, "matcher": repr(obj.matcher), "generator": repr(obj.generator)}, ctx)
 
         raise TypeError(f"Unsupported type {type(obj)} for stable hashing")
 

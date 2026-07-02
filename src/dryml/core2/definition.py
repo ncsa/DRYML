@@ -63,16 +63,18 @@ class DefInterface(ABC):
             cache: "CachePolicy" = "weak",
             revision: "str | None" = None) -> Object:
         from .repo import manage_repo
+        from .session import config
         with manage_repo(repo=repo) as sub_repo:
             concrete_def = self.concretize(repo=sub_repo)
             loader = sub_repo.load_or_build if build_missing else sub_repo.load
-            return loader(
-                concrete_def,
-                instance=instance,
-                restore_state=restore_state,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision)
+            with config(object_mode="fresh"):
+                return loader(
+                    concrete_def,
+                    instance=instance,
+                    restore_state=restore_state,
+                    reuse_weak=reuse_weak,
+                    cache=cache,
+                    revision=revision)
 
     def match(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs) -> bool:
         from .definition import selector_match  # or wherever you keep it
@@ -85,45 +87,54 @@ class DefInterface(ABC):
         return stable_hash_function(self)
 
 
-@dataclass(slots=True, init=False, eq=False)
+@dataclass(frozen=True, slots=True, init=False, eq=False)
 class Definition(DefInterface, Mapping):
     """
-    Mutable, selector-capable spec.
-    - Unhashable by contract.
-    - Behaves like a mapping with keys: cls, (args?), kwargs
+    Immutable structural graph expression.
+
+    Values supplied at construction and update boundaries are deeply frozen so
+    user-owned containers cannot mutate the Definition after creation.
     """
 
     _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
-    _args: tuple[Any, ...] | None
-    _kwargs: dict[str, Any]
-
-    __hash__ = None  # critical: prevent dict/set usage
+    _args: FrozenTuple | None
+    _kwargs: FrozenDict[str, Any]
 
     def __init__(self, *args, **kwargs):
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]) and not isinstance(args[0], (ImportRef, SourceSpec)):
                 if args[0] is SKIP_ARGS and len(args) == 1:
-                    self._cls = None
-                    self._args = None
-                    self._kwargs = kwargs
+                    object.__setattr__(self, "_cls", None)
+                    object.__setattr__(self, "_args", None)
+                    object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
                 else:
                     raise ValueError("First positional argument must be a class, callable, or symbol reference.")
             if len(args) > 1 and args[1] is SKIP_ARGS:
                 if len(args) > 2:
                     raise ValueError("SKIP_ARGS must be the only positional argument besides the class.")
 
-                self._cls = args[0]
-                self._args = None
-                self._kwargs = kwargs
+                object.__setattr__(self, "_cls", self._freeze_value(args[0]))
+                object.__setattr__(self, "_args", None)
+                object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
 
             else:
-                self._cls = args[0]
-                self._args = args[1:]
-                self._kwargs = kwargs
+                object.__setattr__(self, "_cls", self._freeze_value(args[0]))
+                object.__setattr__(self, "_args", FrozenTuple(self._freeze_value(v) for v in args[1:]))
+                object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
         else:
-            self._cls = None
-            self._args = args
-            self._kwargs = kwargs
+            object.__setattr__(self, "_cls", None)
+            object.__setattr__(self, "_args", FrozenTuple())
+            object.__setattr__(self, "_kwargs", self._freeze_kwargs(kwargs))
+
+    @staticmethod
+    def _freeze_value(value):
+        from .canonical import freeze_def_value
+
+        return freeze_def_value(value)
+
+    @classmethod
+    def _freeze_kwargs(cls, kwargs):
+        return FrozenDict({k: cls._freeze_value(v) for k, v in kwargs.items()})
 
     @property
     def cls(self):
@@ -169,14 +180,12 @@ class Definition(DefInterface, Mapping):
         return 1 + (1 if self._args is not None else 0) + (1 if self.cls is not None else 0)
 
     def __eq__(self, rhs):
-        if type(self) != type(rhs):
+        if type(self) is not type(rhs):
             return False
-        # We actually need to check in both directions.
-        if not selector_match(self, rhs, strict=True):
-            return False
-        if not selector_match(rhs, self, strict=True):
-            return False
-        return True
+        return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self.args, rhs.args) and _structural_value_equal(self.kwargs, rhs.kwargs)
+
+    def __hash__(self) -> int:
+        return stable_int_hash(self.stable_hash())
 
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
@@ -205,40 +214,95 @@ class Definition(DefInterface, Mapping):
         }
 
     def __setstate__(self, state):
-        self._cls = state['cls']
-        self._args = state['args']
-        self._kwargs = state['kwargs']
+        object.__setattr__(self, "_cls", self._freeze_value(state['cls']))
+        object.__setattr__(self, "_args", None if state['args'] is None else FrozenTuple(self._freeze_value(v) for v in state['args']))
+        object.__setattr__(self, "_kwargs", self._freeze_kwargs(dict(state['kwargs'])))
 
     def __deepcopy__(self, memo):
         """
-        Snapshot cls/args/kwargs, but re-use _obj and any repo reference.
+        Return self because Definition is immutable.
         """
-        cp_args = []
-        if self._cls is not None:
-            cp_args.append(self._cls)
-        if self._args is None:
-            cp_args.append(SKIP_ARGS)
-        else:
-            cp_args.extend(deepcopy(self._args, memo))
-        cp_kwargs = deepcopy(self._kwargs, memo)
-
-        new = type(self)(*cp_args, **cp_kwargs)
-
-        ## Reuse identity-ish bits
-        #new._repo = self._repo
-
-        return new
+        return self
 
     def thaw(self, memo: dict|None=None) -> Any:
         return self
 
-    def freeze(self) -> "FrozenDefinition":
-        """Return an immutable selector snapshot without concretizing."""
+    def freeze(self):
+        """Return a quoted Definition snapshot for expression-as-data use."""
 
-        return FrozenDefinition.from_definition(self)
+        return self.quote()
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return to_canonical(self, repo=repo)
+
+    def with_cls(self, cls) -> "Definition":
+        args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
+        return Definition(cls, *args, **dict(self.kwargs))
+
+    def with_args(self, *args) -> "Definition":
+        if self.cls is None:
+            return Definition(*args, **dict(self.kwargs))
+        return Definition(self.cls, *args, **dict(self.kwargs))
+
+    def with_arg(self, index, value) -> "Definition":
+        if self.args is None:
+            raise IndexError("Cannot update positional args on a skip-args Definition.")
+        args = list(self.args)
+        args[index] = value
+        return self.with_args(*args)
+
+    def with_kwargs(self, **kwargs) -> "Definition":
+        merged = dict(self.kwargs)
+        merged.update(kwargs)
+        args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
+        if self.cls is None:
+            return Definition(*args, **merged)
+        return Definition(self.cls, *args, **merged)
+
+    def with_kwarg(self, key, value) -> "Definition":
+        return self.with_kwargs(**{key: value})
+
+    def without_kwarg(self, key) -> "Definition":
+        kwargs = dict(self.kwargs)
+        kwargs.pop(key)
+        args = (SKIP_ARGS,) if self.args is None else tuple(self.args)
+        if self.cls is None:
+            return Definition(*args, **kwargs)
+        return Definition(self.cls, *args, **kwargs)
+
+    def at(self, path) -> "DefinitionLens":
+        return DefinitionLens(self, path)
+
+    def ref(self):
+        from .links import Ref
+        return Ref(self)
+
+    def mat(self):
+        from .links import Mat
+        return Mat(self)
+
+    def quote(self):
+        from .quoted import QuotedDef
+        return QuotedDef(self)
+
+    def as_selector(self, **policy):
+        from .selector import Selector
+        return Selector(self, **policy)
+
+    def as_space(self):
+        from .search_space import SearchSpace
+        return SearchSpace.from_def(self)
+
+
+@dataclass(frozen=True, slots=True)
+class DefinitionLens:
+    definition: Definition
+    path: Any
+
+    def set(self, value: Any) -> Definition:
+        from .utils.graph.value import replace_subtree
+
+        return replace_subtree(self.definition, self.path, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +316,14 @@ class ConcreteDefinition(DefInterface, Mapping):
     cls: type | ImportRef | SourceSpec
     args: FrozenTuple[Any, ...] = field(default_factory = lambda: FrozenTuple())
     kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
+
+    def __post_init__(self) -> None:
+        from .canonical import freeze_concrete_value
+
+        args = self.args if isinstance(self.args, FrozenTuple) else FrozenTuple(self.args)
+        kwargs = self.kwargs if isinstance(self.kwargs, FrozenDict) else FrozenDict(self.kwargs)
+        object.__setattr__(self, "args", FrozenTuple(freeze_concrete_value(v) for v in args))
+        object.__setattr__(self, "kwargs", FrozenDict({k: freeze_concrete_value(v) for k, v in kwargs.items()}))
 
     def __hash__(self) -> int:
         return stable_int_hash(self.stable_hash())
@@ -280,14 +352,9 @@ class ConcreteDefinition(DefInterface, Mapping):
         return f"{type(self).__name__}({arg_str})"
 
     def __eq__(self, rhs):
-        if type(self) != type(rhs):
+        if type(self) is not type(rhs):
             return False
-        # We actually need to check in both directions.
-        if not selector_match(self, rhs, strict=True):
-            return False
-        if not selector_match(rhs, self, strict=True):
-            return False
-        return True
+        return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self.args, rhs.args) and _structural_value_equal(self.kwargs, rhs.kwargs)
 
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
@@ -305,10 +372,18 @@ class ConcreteDefinition(DefInterface, Mapping):
     def copy(self):
         return deepcopy(self)
 
-    def freeze(self) -> "FrozenConcreteDefinition":
+    def freeze(self):
         """Return a non-materializing canonical reference to this CDef."""
 
-        return FrozenConcreteDefinition(self)
+        return self.ref()
+
+    def ref(self):
+        from .links import Ref
+        return Ref(self)
+
+    def mat(self):
+        from .links import Mat
+        return Mat(self)
 
     def thaw(self, memo: dict | None = None) -> Any:
         return thaw_value(self, memo=memo)
@@ -412,6 +487,54 @@ def _thaw_definition_value(value: Any) -> Any:
     return thaw_frozen_definition_value(value)
 
 
+def _structural_value_equal(left: Any, right: Any) -> bool:
+    from .freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
+    from .links import DefLink
+    from .quoted import QuotedDef, SelectorSpec
+    from .selector import Selector
+
+    if left is right:
+        return True
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
+            return False
+        return left.shape == right.shape and left.dtype == right.dtype and bool(np.array_equal(left, right))
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, (Definition, ConcreteDefinition)):
+        return left == right
+    if isinstance(left, DefLink):
+        return left.kind is right.kind and _structural_value_equal(left.target, right.target)
+    if isinstance(left, QuotedDef):
+        return _structural_value_equal(left.value, right.value)
+    if isinstance(left, SelectorSpec):
+        return _structural_value_equal(left.selector, right.selector)
+    if isinstance(left, Selector):
+        return left.strict == right.strict and left.cls_policy == right.cls_policy and _structural_value_equal(left.root, right.root)
+    if isinstance(left, (FrozenList, FrozenTuple, tuple, list)):
+        return len(left) == len(right) and all(_structural_value_equal(a, b) for a, b in zip(left, right))
+    if isinstance(left, (FrozenDict, dict)):
+        if len(left) != len(right) or tuple(left.keys()) != tuple(right.keys()):
+            return False
+        return all(_structural_value_equal(left[k], right[k]) for k in left.keys())
+    if isinstance(left, (FrozenSet, frozenset, set)):
+        if len(left) != len(right):
+            return False
+        unmatched = list(right)
+        for item in left:
+            for idx, other in enumerate(unmatched):
+                if _structural_value_equal(item, other):
+                    unmatched.pop(idx)
+                    break
+            else:
+                return False
+        return True
+    result = left == right
+    if isinstance(result, np.ndarray):
+        return bool(np.all(result))
+    return bool(result)
+
+
 def get_path(obj_or_def, path):
     from .object import Object
     if len(path) == 0:
@@ -482,6 +605,19 @@ class CategoricalDefinitionTransformer(GraphTransformer):
 
     def transform_atomic(self, obj: Any, ctx: GraphCtx) -> Any:
         return obj
+
+    def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
+        from .freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+
+        if isinstance(obj, FrozenDict):
+            return {k: self.transform(v, ctx.child(k if isinstance(k, (str, int)) else str(k))) for k, v in obj.items()}
+        if isinstance(obj, FrozenList):
+            return [self.transform(v, ctx.child(i)) for i, v in enumerate(obj)]
+        if isinstance(obj, FrozenTuple):
+            return tuple(self.transform(v, ctx.child(i)) for i, v in enumerate(obj))
+        if isinstance(obj, FrozenSet):
+            return {self.transform(v, ctx.child(f"<set:{i}>")) for i, v in enumerate(obj)}
+        return super().dispatch(obj, ctx)
 
     def should_track_cycle(self, obj: Any, ctx: GraphCtx) -> bool:
         from .definition import Definition

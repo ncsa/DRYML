@@ -32,3 +32,15 @@ class PathAccessError(KeyError):
     def __str__(self) -> str:
         p = "/".join(self.path) if self.path else "<root>"
         return f"Path Access error at {p}"
+
+
+class CannotConcretizeParameterizedDefinition(TypeError):
+    def __init__(self, path, value, msg: str = "Cannot concretize unresolved Par"):
+        self.path = tuple(path)
+        self.value = value
+        self.msg = msg
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        p = "/".join(map(str, self.path)) if self.path else "<root>"
+        return f"{self.msg} at {p}: {type(self.value).__name__} -> {self.value!r}"

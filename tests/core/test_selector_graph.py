@@ -92,28 +92,22 @@ def test_selector_graph_local_requirements_use_shared_walker():
 
 def test_selector_graph_rejects_cycle_with_source_path():
     selector = Definition(SelectorParent, SKIP_ARGS)
-    selector.kwargs["child"] = selector
-
-    with pytest.raises(SelectorGraphCycleError, match=r"\$\.child"):
-        compile_selector_graph(selector)
+    with pytest.raises(TypeError):
+        selector.kwargs["child"] = selector
 
 
 def test_selector_graph_rejects_self_referential_list():
     items = []
     items.append(items)
-    selector = Definition(SelectorParent, SKIP_ARGS, child=items)
-
-    with pytest.raises(SelectorGraphCycleError, match=r"\$\.child\[0\]"):
-        compile_selector_graph(selector)
+    with pytest.raises(Exception, match="Cycle"):
+        Definition(SelectorParent, SKIP_ARGS, child=items)
 
 
 def test_selector_graph_rejects_self_referential_mapping():
     mapping = {}
     mapping["self"] = mapping
-    selector = Definition(SelectorParent, SKIP_ARGS, child=mapping)
-
-    with pytest.raises(SelectorGraphCycleError, match=r"\$\.child\['self'\]"):
-        compile_selector_graph(selector)
+    with pytest.raises(Exception, match="Cycle"):
+        Definition(SelectorParent, SKIP_ARGS, child=mapping)
 
 
 def test_shared_acyclic_container_is_allowed():

@@ -17,13 +17,29 @@ if TYPE_CHECKING:
 def in_definition_mode() -> bool:
     from .session import current_object_mode
 
-    return current_object_mode() in {"definition", "concrete"}
+    return current_object_mode() in {"definition", "concrete", "selector", "space"}
 
 
 def definition_mode_concrete() -> bool:
     from .session import current_object_mode
 
     return current_object_mode() == "concrete"
+
+
+@contextmanager
+def selector_mode(enabled: bool = True):
+    from .session import config
+
+    with config(object_mode="selector" if enabled else "fresh"):
+        yield
+
+
+@contextmanager
+def space_mode(enabled: bool = True):
+    from .session import config
+
+    with config(object_mode="space" if enabled else "fresh"):
+        yield
 
 
 @contextmanager
@@ -57,10 +73,17 @@ class Dryml(type):
         if __cdef__ is None and object_mode == "concrete":
             return cls.defn(*args, **kwargs).concretize(repo=active_repo)
 
+        if __cdef__ is None and object_mode == "selector":
+            return cls.defn(*args, **kwargs).as_selector()
+
+        if __cdef__ is None and object_mode == "space":
+            return cls.defn(*args, **kwargs).as_space()
+
         if __cdef__ is None and object_mode == "load_or_build":
             from .repo import manage_repo
 
             with manage_repo(repo=active_repo) as sub_repo:
+                _cache_runtime_object_args(sub_repo, args, kwargs)
                 cdef = Definition(cls, *args, **kwargs).concretize(repo=sub_repo)
                 return sub_repo.load_or_build(cdef, cache=session_config.cache)
 
@@ -68,6 +91,7 @@ class Dryml(type):
         with manage_repo(repo=active_repo) as sub_repo:
             if __cdef__ is None:
                 # First-time construction from a soft Definition
+                _cache_runtime_object_args(sub_repo, args, kwargs)
                 defn = Definition(cls, *args, **kwargs)
                 cdef = defn.concretize(repo=sub_repo)
 
@@ -104,11 +128,39 @@ class Dryml(type):
 
             # Initialize with runtime (built) args while exposing the construction
             # repo to code that consults get_default_repo().
-            with default_repo(sub_repo):
+            from .session import config
+            with config(object_mode="fresh"), default_repo(sub_repo):
                 obj.__init__(*rt_args, **rt_kwargs)
 
 
         return obj
+
+
+def _cache_runtime_object_args(repo, args, kwargs) -> None:
+    """Seed repo weak cache for runtime Object values before Definition snapshotting."""
+
+    seen: set[int] = set()
+
+    def visit(value):
+        oid = id(value)
+        if oid in seen:
+            return
+        seen.add(oid)
+        if isinstance(value, Object):
+            repo.cache_weak(value)
+            return
+        if isinstance(value, dict):
+            for child in value.values():
+                visit(child)
+            return
+        if isinstance(value, (list, tuple, set, frozenset)):
+            for child in value:
+                visit(child)
+
+    for arg in args:
+        visit(arg)
+    for value in kwargs.values():
+        visit(value)
 
 
 class Object(metaclass=Dryml):

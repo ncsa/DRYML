@@ -1,5 +1,6 @@
 import core2_objects as objects
 from dryml.core2.definition import Definition
+from dryml.core2.freeze import FrozenList, FrozenTuple
 
 
 def test_def_1():
@@ -32,8 +33,7 @@ def test_def_1():
     assert obj_class_def.match(obj_def_manual)
 
     obj_class_def = obj_def.categorical(recursive=False)
-    obj_def_thawed = obj_def.thaw()
-    del obj_def_thawed.kwargs['uid']
+    obj_def_thawed = obj_def.thaw().without_kwarg('uid')
     assert obj_class_def(obj_def_thawed)
 
 
@@ -45,14 +45,14 @@ def test_def_2():
     obj = objects.TestNest4(('test', 'test'))
     obj_def = obj.definition.categorical()
 
-    assert type(obj_def.args[0]) is tuple
+    assert type(obj_def.args[0]) is FrozenTuple
     assert obj_def.args[0][0] == 'test'
     assert obj_def.args[0][1] == 'test'
 
     obj = objects.TestNest4(['test', 'test'])
     obj_def = obj.definition.categorical()
 
-    assert type(obj_def.args[0]) is list
+    assert type(obj_def.args[0]) is FrozenList
     assert obj_def.args[0][0] == 'test'
     assert obj_def.args[0][1] == 'test'
 

@@ -6,11 +6,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 
-ObjectMode = Literal["fresh", "definition", "concrete", "load_or_build"]
+ObjectMode = Literal["fresh", "definition", "concrete", "selector", "space", "load_or_build"]
 CacheMode = Literal["none", "weak", "strong"]
 
 _UNSET = object()
-_OBJECT_MODES = {"fresh", "definition", "concrete", "load_or_build"}
+_OBJECT_MODES = {"fresh", "definition", "concrete", "selector", "space", "load_or_build"}
 _CACHE_MODES = {"none", "weak", "strong"}
 
 

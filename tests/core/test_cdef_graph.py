@@ -158,10 +158,8 @@ def test_iter_direct_cdef_edges_stops_at_child_boundary():
 
 
 def test_exact_graph_builder_rejects_plain_definition_in_cdef():
-    cdef = ConcreteDefinition(GraphContainer, FrozenTuple((Definition(GraphLeaf, "x"),)), FrozenDict({}))
-
-    with pytest.raises(Exception, match="Plain Definition"):
-        ConcreteDefinitionGraph.from_root(cdef)
+    with pytest.raises(TypeError, match="concretize first"):
+        ConcreteDefinition(GraphContainer, FrozenTuple((Definition(GraphLeaf, "x"),)), FrozenDict({}))
 
 
 def test_graph_rejects_missing_root_node():

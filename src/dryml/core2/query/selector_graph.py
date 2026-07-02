@@ -7,6 +7,7 @@ from typing import Any
 from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition, Definition
 from ..object import Object
+from ..selector import Selector
 from .local_structure import LocalStructureCycleError, walk_local_structure
 from .model import ClassMatchPolicy, FeatureRequirement, FeatureToken
 from .path import DefinitionPath
@@ -84,13 +85,15 @@ class SelectorGraph:
 
 
 def compile_selector_graph(
-        selector: Definition | ConcreteDefinition | None,
+        selector: Definition | ConcreteDefinition | Selector | None,
         *,
         class_match: ClassMatchPolicy = "selector") -> SelectorGraph | None:
     if selector is None:
         return None
     if isinstance(selector, Object):
         selector = selector.definition
+    if isinstance(selector, Selector):
+        selector = selector.root
     if not isinstance(selector, (Definition, ConcreteDefinition)):
         return None
     compiler = _SelectorGraphCompiler(class_match=class_match)

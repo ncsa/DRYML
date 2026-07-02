@@ -213,7 +213,7 @@ assert "torch" not in sys.modules
     )
 
 
-def test_canonical_frozen_refs_do_not_import_backends_for_selector_planning():
+def test_canonical_ref_edges_do_not_import_backends_for_selector_planning():
     _run_import_probe(
         """
 import sys
@@ -242,16 +242,16 @@ root = ConcreteDefinition(
 
 class FakeStore:
     def catalog_key(self):
-        return "fake-frozen-ref-store"
+        return "fake-ref-edge-store"
 
 graph = ConcreteDefinitionGraph.from_root(root)
-assert graph.edges()[0].kind is EdgeKind.FROZEN
+assert graph.edges()[0].kind is EdgeKind.REF
 target_local_fingerprint(root)
 selector_graph = compile_selector_graph(root)
 assert selector_graph.edges == ()
 selector = Definition(ImportRef("dryml.models.torch.base", "Model"), child=child.freeze())
 selector_graph = compile_selector_graph(selector)
-assert selector_graph.edges[0].edge_kind is EdgeKind.FROZEN
+assert selector_graph.edges[0].edge_kind is EdgeKind.REF
 
 repo = Repo()
 repo._query_catalog.register_stored(root, FakeStore())

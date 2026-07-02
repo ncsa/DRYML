@@ -1557,4 +1557,8 @@ Materialize every result eagerly.
 The performance principle is simple:
 
 > Push safe candidate filtering into the index. Keep final DRYML semantics in Python. Load Objects only when explicitly requested.
+# Immutable Definition Graph Terminology
 
+Graph-query code uses `Ref` / `EdgeKind.REF` for non-materializing edges.
+
+Use `Selector(Definition(...))` for semantic query matching. `Definition.__eq__` is structural equality, not selector matching. Use `QuotedDef` or `SelectorSpec` when a selector/expression is stored as constructor data and must not emit `definition_edges` rows.

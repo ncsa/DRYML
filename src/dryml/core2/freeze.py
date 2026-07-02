@@ -13,7 +13,7 @@ import numpy as np
 class FrozenList(tuple):
     """Immutable representation of a Python list (tagged for thaw to list)."""
     __slots__ = ()
-    def __new__(cls, items: Iterable[Any]):
+    def __new__(cls, items: Iterable[Any] = ()):
         return super().__new__(cls, tuple(items))
 
     def __repr__(self) -> str:
@@ -23,7 +23,7 @@ class FrozenList(tuple):
 class FrozenTuple(tuple):
     """Tagged tuple for symmetric thaw handling."""
     __slots__ = ()
-    def __new__(cls, items: Iterable[Any]):
+    def __new__(cls, items: Iterable[Any] = ()):
         return super().__new__(cls, tuple(items))
 
     def __repr__(self) -> str:
@@ -33,7 +33,7 @@ class FrozenTuple(tuple):
 class FrozenSet(frozenset):
     """Immutable representation of a Python set (tagged for thaw to set)."""
     __slots__ = ()
-    def __new__(cls, items: Iterable[Any]):
+    def __new__(cls, items: Iterable[Any] = ()):
         return super().__new__(cls, items)
 
     def __repr__(self) -> str:
@@ -73,6 +73,9 @@ class FrozenDict(ABCMapping):
 
     def __repr__(self) -> str:
         return f"F{self._dict!r}"
+
+    def __hash__(self) -> int:
+        return hash(self._items)
 
 
 class FrozenNDArray(np.ndarray):

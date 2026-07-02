@@ -1,6 +1,11 @@
-from dryml.core2.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode
-from dryml.core2.definition import Definition, FrozenConcreteDefinition, FrozenDefinition, SKIP_ARGS, freeze
-from dryml.core2.arg_roles import ArgRole, FrozenCDef, FrozenCDefArg, FrozenDef, FrozenDefArg, MaterializeArg, ValueArg
+from dryml.core2.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode, selector_mode, space_mode
+from dryml.core2.definition import ConcreteDefinition, Definition, SKIP_ARGS, freeze
+from dryml.core2.arg_roles import ArgRole, MaterializeArg, RefCDef, RefCDefArg, SelectorArg, ValueArg
+from dryml.core2.links import DefLink, Mat, Ref
+from dryml.core2.params import AnyValue, Choice, Exact, IntRange, Missing, Par, Present, Satisfies, SubclassOf, UniformFromSet, UniformIntRange
+from dryml.core2.quoted import QuotedDef, SelectorSpec
+from dryml.core2.search_space import SearchSpace
+from dryml.core2.selector import Selector, selector
 from dryml.core2.repo import Repo, load_alias, load_object, save_object
 from dryml.core2.dtype import dtype, DType
 from dryml.core2.tensor_spec import (
@@ -52,22 +57,41 @@ __all__ = [
     "Metadata",
     "Compute",
     "Definition",
-    "FrozenConcreteDefinition",
-    "FrozenDefinition",
+    "ConcreteDefinition",
+    "DefLink",
+    "Ref",
+    "Mat",
     "freeze",
     "ArgRole",
-    "FrozenCDef",
-    "FrozenCDefArg",
-    "FrozenDef",
-    "FrozenDefArg",
+    "RefCDef",
+    "RefCDefArg",
+    "SelectorArg",
     "MaterializeArg",
     "ValueArg",
+    "QuotedDef",
+    "SelectorSpec",
+    "Selector",
+    "selector",
+    "Par",
+    "Present",
+    "Missing",
+    "AnyValue",
+    "Exact",
+    "Choice",
+    "IntRange",
+    "SubclassOf",
+    "Satisfies",
+    "UniformIntRange",
+    "UniformFromSet",
+    "SearchSpace",
     "SKIP_ARGS",
     "Repo",
     "configure",
     "reset_config",
     "status",
     "definition_mode",
+    "selector_mode",
+    "space_mode",
     "dtype",
     "DType",
     "ConfigRef",

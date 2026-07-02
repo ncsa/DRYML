@@ -7,17 +7,21 @@ from typing import Any, Iterable, Iterator
 
 from .cdef_identity import same_cdef
 from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+from .links import DefLink
+from .params import Par
+from .quoted import QuotedDef, SelectorSpec
 from .object import Object
 from .utils.graph.path import GraphPath
 from .utils.graph.value import get_subtree, iter_value_edges
 
 
-CDEF_GRAPH_SCHEMA_VERSION = 2
+CDEF_GRAPH_SCHEMA_VERSION = 3
 
 
 class EdgeKind(Enum):
     MATERIALIZE = "materialize"
-    FROZEN = "frozen"
+    REF = "ref"
+    FROZEN = "ref"
 
 
 class ConcreteDefinitionGraphError(Exception):
@@ -70,11 +74,18 @@ def _iter_direct_edges_from_value(value: Any, path: GraphPath) -> Iterator[tuple
     if isinstance(value, ConcreteDefinition):
         yield path, value, EdgeKind.MATERIALIZE
         return
+    if isinstance(value, DefLink):
+        if not isinstance(value.target, ConcreteDefinition):
+            raise ConcreteDefinitionGraphError(f"DefLink at {path!s} does not resolve to a ConcreteDefinition boundary.")
+        yield path, value.target, value.kind
+        return
     if isinstance(value, FrozenConcreteDefinition):
-        yield path, value.thaw(), EdgeKind.FROZEN
+        yield path, value.thaw(), EdgeKind.REF
         return
-    if isinstance(value, FrozenDefinition):
+    if isinstance(value, (FrozenDefinition, QuotedDef, SelectorSpec)):
         return
+    if isinstance(value, Par):
+        raise ConcreteDefinitionGraphError(f"Unresolved Par found inside ConcreteDefinition graph at {path!s}.")
 
     for edge in iter_value_edges(value):
         yield from _iter_direct_edges_from_value(edge.value, path.child(edge.segment))
@@ -193,6 +204,8 @@ class ConcreteDefinitionGraph:
         if not path:
             return root
         value = get_subtree(root, path)
+        if isinstance(value, DefLink):
+            return value.target
         if isinstance(value, FrozenConcreteDefinition):
             return value.thaw()
         if not isinstance(value, ConcreteDefinition):
@@ -381,15 +394,21 @@ def _validate_graph_parts(
             raise ConcreteDefinitionGraphError(
                 f"Graph edge path {edge.path!s} cannot be resolved on parent {edge.parent}."
             ) from e
-        if isinstance(resolved, FrozenConcreteDefinition):
-            if edge.kind is not EdgeKind.FROZEN:
+        if isinstance(resolved, DefLink):
+            if edge.kind is not resolved.kind:
+                raise ConcreteDefinitionGraphError(
+                    f"Graph edge path {edge.path!s} resolves to a {resolved.kind.value!r} reference but edge kind is {edge.kind.value!r}."
+                )
+            resolved = resolved.target
+        elif isinstance(resolved, FrozenConcreteDefinition):
+            if edge.kind is not EdgeKind.REF:
                 raise ConcreteDefinitionGraphError(
                     f"Graph edge path {edge.path!s} resolves to a frozen reference but edge kind is {edge.kind.value!r}."
                 )
             resolved = resolved.thaw()
-        elif edge.kind is EdgeKind.FROZEN:
+        elif edge.kind is EdgeKind.REF:
             raise ConcreteDefinitionGraphError(
-                f"Graph frozen edge path {edge.path!s} does not resolve to a FrozenConcreteDefinition boundary."
+                f"Graph ref edge path {edge.path!s} does not resolve to a Ref boundary."
             )
         if not isinstance(resolved, ConcreteDefinition):
             raise ConcreteDefinitionGraphError(

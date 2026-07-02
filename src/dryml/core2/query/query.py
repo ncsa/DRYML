@@ -8,7 +8,11 @@ from ..canonical import matching_container_family
 from ..arg_roles import apply_definition_arg_roles
 from ..definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from ..links import DefLink
 from ..object import Object
+from ..params import Par
+from ..quoted import QuotedDef, SelectorSpec
+from ..selector import Selector
 from ..symbol import maybe_symbol_ref, resolve_symbol
 from ..utils.types import is_nonclass_callable
 from .graph_plan import graph_candidate_ids
@@ -660,9 +664,11 @@ def _snapshot_source(source):
         return source.definition
     if isinstance(source, ConcreteDefinition):
         return source
+    if isinstance(source, Selector):
+        return source.root
     if isinstance(source, Definition):
         return deepcopy(source)
-    raise TypeError(f"Query source must be Definition, ConcreteDefinition, Object, or None, not {type(source).__name__}.")
+    raise TypeError(f"Query source must be Selector, Definition, ConcreteDefinition, Object, or None, not {type(source).__name__}.")
 
 
 def _structural_match(selector, cdef: ConcreteDefinition, *, strict: bool, class_match: ClassMatchPolicy) -> bool:
@@ -677,6 +683,8 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         selector = selector.definition
     if isinstance(target, Object):
         target = target.definition
+    if isinstance(selector, Selector):
+        selector = selector.root
 
     if isinstance(selector, ConcreteDefinition):
             return isinstance(target, ConcreteDefinition) and cdef_equal(selector, target)
@@ -686,6 +694,33 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
 
     if isinstance(selector, FrozenDefinition):
         return isinstance(target, FrozenDefinition) and selector == target
+
+    if isinstance(selector, DefLink):
+        from ..cdef_graph import EdgeKind
+        if selector.kind is EdgeKind.MATERIALIZE:
+            target_value = target.target if isinstance(target, DefLink) and target.kind is EdgeKind.MATERIALIZE else target
+            return _query_match(selector.target, target_value, strict=strict, class_match=class_match)
+        if selector.kind is EdgeKind.REF:
+            if isinstance(target, FrozenConcreteDefinition):
+                target = target.thaw().ref()
+            if not isinstance(target, DefLink) or target.kind is not EdgeKind.REF:
+                return False
+            return _query_match(selector.target, target.target, strict=strict, class_match=class_match)
+        return False
+
+    if isinstance(selector, (QuotedDef, SelectorSpec)):
+        if not isinstance(target, (QuotedDef, SelectorSpec, FrozenDefinition, Selector, Definition)):
+            return False
+        sel_value = selector.value if isinstance(selector, QuotedDef) else selector.selector
+        tgt_value = target.value if isinstance(target, QuotedDef) else target.selector if isinstance(target, SelectorSpec) else target.thaw() if isinstance(target, FrozenDefinition) else target
+        if isinstance(sel_value, Selector):
+            sel_value = sel_value.root
+        if isinstance(tgt_value, Selector):
+            tgt_value = tgt_value.root
+        return _query_match(sel_value, tgt_value, strict=strict, class_match=class_match)
+
+    if isinstance(selector, Par):
+        return selector.matches(target, present=True)
 
     if isinstance(selector, Definition):
         selector = apply_definition_arg_roles(selector)
@@ -701,6 +736,8 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
                 return False
         for key, child in selector.kwargs.items():
             if key not in target.kwargs:
+                if isinstance(child, Par) and child.matches(None, present=False):
+                    continue
                 return False
             if not _query_match(child, target.kwargs[key], strict=strict, class_match=class_match):
                 return False

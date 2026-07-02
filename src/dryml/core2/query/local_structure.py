@@ -5,7 +5,11 @@ from typing import Any, Literal, Protocol
 from ..cdef_graph import EdgeKind
 from ..definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
+from ..links import DefLink
 from ..object import Object
+from ..params import Par
+from ..quoted import QuotedDef, SelectorSpec
+from ..selector import Selector
 from ..symbol import maybe_symbol_ref
 from ..utils.stable_hash import stable_hash_function
 from ..utils.types import is_nonclass_callable
@@ -84,19 +88,34 @@ def _walk(
     is_local = mode.endswith("local")
     if isinstance(value, FrozenConcreteDefinition):
         if is_target:
-            consumer.feature("FROZEN_CDEF_AT", path, None)
-            consumer.feature("FROZEN_CDEF_HASH", path, value.thaw().stable_hash())
+            consumer.feature("REF_CDEF_AT", path, None)
+            consumer.feature("REF_CDEF_HASH", path, value.thaw().stable_hash())
         if is_local and path:
-            consumer.definition_boundary(path, value.thaw(), edge_kind=EdgeKind.FROZEN)
+            consumer.definition_boundary(path, value.thaw(), edge_kind=EdgeKind.REF)
         return
 
-    if isinstance(value, FrozenDefinition):
-        consumer.feature("FROZEN_DEF_AT", path, None)
-        if value.cls is not None:
+    if isinstance(value, DefLink):
+        if is_local and path:
+            target = value.target.root if isinstance(value.target, Selector) else value.target
+            consumer.definition_boundary(path, target, edge_kind=value.kind)
+        return
+
+    if isinstance(value, Selector):
+        value = SelectorSpec(value)
+
+    if isinstance(value, (FrozenDefinition, QuotedDef, SelectorSpec)):
+        quoted = value.thaw() if isinstance(value, FrozenDefinition) else (value.value if isinstance(value, QuotedDef) else value.selector)
+        consumer.feature("QUOTED_SELECTOR_AT", path, None)
+        root = quoted.root if isinstance(quoted, Selector) else quoted
+        if getattr(root, "cls", None) is not None:
             try:
-                consumer.feature("FROZEN_DEF_ROOT_CLASS", path, canonical_class_key(value.cls))
+                consumer.feature("QUOTED_SELECTOR_ROOT_CLASS", path, canonical_class_key(root.cls))
             except TypeError:
                 pass
+        return
+
+    if isinstance(value, Par):
+        consumer.feature("PAR_MATCHER", path, type(value.matcher).__name__)
         return
 
     active_id = id(value) if _tracks_cycles(value) else None

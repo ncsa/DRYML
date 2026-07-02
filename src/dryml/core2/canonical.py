@@ -15,6 +15,7 @@ from .freeze import (
 from .types import is_pod
 from .utils.graph import GraphCtx, GraphTransformer
 from .policies import RepoLoadOptions
+from .errors import CannotConcretizeParameterizedDefinition, CycleError
 
 if TYPE_CHECKING:
     from .definition import ConcreteDefinition
@@ -212,6 +213,11 @@ class NodeKind(Enum):
     CONCRETE_DEFINITION = auto()
     FROZEN_CONCRETE_DEFINITION = auto()
     FROZEN_DEFINITION = auto()
+    DEFLINK = auto()
+    QUOTED_DEF = auto()
+    SELECTOR_SPEC = auto()
+    SELECTOR = auto()
+    PAR = auto()
     OBJECT = auto()
 
     UNSUPPORTED = auto()
@@ -219,7 +225,11 @@ class NodeKind(Enum):
 
 def node_kind(x: Any) -> NodeKind:
     from .definition import ConcreteDefinition, Definition, FrozenConcreteDefinition, FrozenDefinition
+    from .links import DefLink
     from .object import Object
+    from .params import Par
+    from .quoted import QuotedDef, SelectorSpec
+    from .selector import Selector
 
     if isinstance(x, type):
         return NodeKind.TYPE
@@ -261,6 +271,21 @@ def node_kind(x: Any) -> NodeKind:
     if isinstance(x, FrozenDefinition):
         return NodeKind.FROZEN_DEFINITION
 
+    if isinstance(x, DefLink):
+        return NodeKind.DEFLINK
+
+    if isinstance(x, QuotedDef):
+        return NodeKind.QUOTED_DEF
+
+    if isinstance(x, SelectorSpec):
+        return NodeKind.SELECTOR_SPEC
+
+    if isinstance(x, Selector):
+        return NodeKind.SELECTOR
+
+    if isinstance(x, Par):
+        return NodeKind.PAR
+
     if isinstance(x, ConcreteDefinition):
         return NodeKind.CONCRETE_DEFINITION
 
@@ -294,6 +319,8 @@ def is_canonical_value(x: Any) -> bool:
         NodeKind.CONCRETE_DEFINITION,
         NodeKind.FROZEN_CONCRETE_DEFINITION,
         NodeKind.FROZEN_DEFINITION,
+        NodeKind.QUOTED_DEF,
+        NodeKind.SELECTOR_SPEC,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
     } or _is_naked_core_type(x)
@@ -618,6 +645,27 @@ class _ToCanonicalTransformer(GraphTransformer):
             repo.cache_weak(obj)
             return obj.__cdef__
 
+        if kind is NodeKind.DEFLINK:
+            from .cdef_graph import EdgeKind
+            from .links import Ref
+
+            target = self.transform(obj.target, ctx.child("target"))
+            if obj.kind is EdgeKind.MATERIALIZE:
+                return target
+            if obj.kind is EdgeKind.REF:
+                return Ref(target)
+            raise TypeError(f"Unknown DefLink kind {obj.kind!r} at {ctx.path_str()}")
+
+        if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC}:
+            return obj
+
+        if kind is NodeKind.SELECTOR:
+            from .quoted import SelectorSpec
+            return SelectorSpec(obj)
+
+        if kind is NodeKind.PAR:
+            raise CannotConcretizeParameterizedDefinition(tuple(ctx.path), obj)
+
         if kind is NodeKind.DEFINITION:
             if obj.cls is None:
                 raise ValueError(
@@ -732,6 +780,12 @@ class _ThawValueTransformer(GraphTransformer):
         if kind is NodeKind.FROZEN_DEFINITION:
             return obj.thaw()
 
+        if kind is NodeKind.DEFLINK:
+            return obj
+
+        if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.PAR, NodeKind.SELECTOR}:
+            return obj
+
         if kind is NodeKind.DEFINITION:
             return obj
 
@@ -810,6 +864,15 @@ class _FromCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.FROZEN_DEFINITION:
             return obj.thaw()
+
+        if kind is NodeKind.DEFLINK:
+            from .cdef_graph import EdgeKind
+            if obj.kind is EdgeKind.REF:
+                return obj
+            return self.transform(obj.target, ctx.child("target"))
+
+        if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.PAR, NodeKind.SELECTOR}:
+            return obj
 
         if kind is NodeKind.DEFINITION:
             cdef = to_canonical(obj, repo=self.repo)
@@ -943,6 +1006,11 @@ def to_canonical_definition_value(value: Any) -> Any:
         return FrozenNDArray.from_array(value)
     if kind is NodeKind.OBJECT:
         return value.definition.freeze()
+    if kind is NodeKind.DEFLINK:
+        from .links import DefLink
+        return DefLink(value.kind, to_canonical_definition_value(value.target))
+    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC, NodeKind.SELECTOR, NodeKind.PAR}:
+        return value
     if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
         return transform_container(
             value,
@@ -961,12 +1029,17 @@ def to_canonical_definition_value(value: Any) -> Any:
         NodeKind.CONCRETE_DEFINITION,
         NodeKind.FROZEN_CONCRETE_DEFINITION,
         NodeKind.FROZEN_DEFINITION,
+        NodeKind.DEFLINK,
+        NodeKind.QUOTED_DEF,
+        NodeKind.SELECTOR_SPEC,
+        NodeKind.SELECTOR,
+        NodeKind.PAR,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
     }:
         return value
     if kind is NodeKind.FUNCTION:
-        return symbol_ref(value)
+        return value
     raise TypeError(f"Cannot freeze Definition value of type {type(value).__name__}.")
 
 
@@ -989,3 +1062,90 @@ def thaw_frozen_definition_value(value: Any) -> Any:
     if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC}:
         return resolve_symbol(value)
     return value
+
+
+def freeze_def_value(value: Any) -> Any:
+    """Deep-freeze values admitted into Definition expressions."""
+
+    return _freeze_def_value(value, stack=set())
+
+
+def _freeze_def_value(value: Any, *, stack: set[int]) -> Any:
+    from .definition import ConcreteDefinition, Definition
+    from .links import DefLink
+    from .object import Object
+    from .params import Par
+    from .quoted import QuotedDef, SelectorSpec
+    from .selector import Selector
+
+    if isinstance(value, Object):
+        return value.definition
+    if isinstance(value, (Definition, ConcreteDefinition, DefLink, QuotedDef, SelectorSpec, Selector, Par)):
+        return value
+    kind = node_kind(value)
+    if kind is NodeKind.NDARRAY:
+        return FrozenNDArray.from_array(value)
+    if kind in {NodeKind.LIST, NodeKind.TUPLE, NodeKind.SET, NodeKind.DICT}:
+        oid = id(value)
+        if oid in stack:
+            raise CycleError(f"at {type(value).__name__}")
+        stack.add(oid)
+        try:
+            return transform_container(value, lambda p, v: _freeze_def_value(v, stack=stack), target="canonical")
+        finally:
+            stack.remove(oid)
+    if kind in {
+        NodeKind.POD,
+        NodeKind.TYPE,
+        NodeKind.IDENTITY_VALUE,
+        NodeKind.FROZEN_NDARRAY,
+        NodeKind.FROZEN_LIST,
+        NodeKind.FROZEN_TUPLE,
+        NodeKind.FROZEN_SET,
+        NodeKind.FROZEN_DICT,
+        NodeKind.IMPORT_REF,
+        NodeKind.SOURCE_SPEC,
+    }:
+        return value
+    if kind is NodeKind.FUNCTION:
+        return value
+    raise TypeError(f"Cannot freeze Definition value of type {type(value).__name__}.")
+
+
+def freeze_concrete_value(value: Any) -> Any:
+    """Deep-freeze values admitted into ConcreteDefinition values."""
+
+    kind = node_kind(value)
+    if kind is NodeKind.PAR:
+        raise CannotConcretizeParameterizedDefinition((), value)
+    if kind is NodeKind.DEFINITION:
+        raise TypeError("ConcreteDefinition values cannot contain unresolved Definition values; concretize first.")
+    if kind is NodeKind.DEFLINK:
+        from .definition import ConcreteDefinition
+        if not isinstance(value.target, ConcreteDefinition):
+            raise TypeError("ConcreteDefinition link values must target ConcreteDefinition values.")
+        return value
+    if kind is NodeKind.SELECTOR:
+        from .quoted import SelectorSpec
+        return SelectorSpec(value)
+    return freeze_def_value(value)
+
+
+def freeze_selector_value(value: Any) -> Any:
+    """Deep-freeze values stored inside quoted selector/expression wrappers."""
+
+    return freeze_def_value(value)
+
+
+def freeze_link_target(value: Any) -> Any:
+    """Freeze and validate a link target."""
+
+    from .definition import ConcreteDefinition, Definition
+    from .object import Object
+    from .selector import Selector
+
+    if isinstance(value, Object):
+        return value.definition
+    if isinstance(value, (Definition, ConcreteDefinition, Selector)):
+        return value
+    raise TypeError(f"DefLink target must be Definition, ConcreteDefinition, Selector, or Object; got {type(value).__name__}.")
