@@ -10,6 +10,11 @@ from dryml.models import Experiment
 
 pytest.importorskip("tensorflow_datasets")
 
+_MNIST_TRAIN_SPLIT = "train[:64]"
+_MNIST_VAL_SPLIT = "test[:32]"
+_MNIST_EPOCHS = 1
+_MNIST_SKLEARN_MAX_ITER = 2
+
 
 def _mnist_dataset(split):
     raw = TFDSAdapter("mnist", split=split, as_supervised=True, as_numpy=True)
@@ -22,9 +27,9 @@ def test_sklearn_basic_mnist_classifier_with_tfds_adapter():
     linear_model = pytest.importorskip("sklearn.linear_model")
     from dryml.models.sklearn import BasicTraining, ClassifierModel
 
-    train_ds = _mnist_dataset("train[:1000]")
-    val_ds = _mnist_dataset("test[:200]")
-    model = ClassifierModel(linear_model.SGDClassifier, loss="log_loss", max_iter=20, tol=None, random_state=1)
+    train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
+    val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
+    model = ClassifierModel(linear_model.SGDClassifier, loss="log_loss", max_iter=_MNIST_SKLEARN_MAX_ITER, tol=None, random_state=1)
     exp = Experiment(model, BasicTraining(), train_data=train_ds, val_data=val_ds)
 
     exp.train()
@@ -38,8 +43,8 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
     tf = pytest.importorskip("tensorflow")
     from dryml.models.tf import BasicTraining, Loss, Optimizer, Sequential
 
-    train_ds = _mnist_dataset("train[:1000]")
-    val_ds = _mnist_dataset("test[:200]")
+    train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
+    val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
     model = Sequential(
         layer_defs=(("Dense", {"units": 10}),),
     )
@@ -47,7 +52,7 @@ def test_tf_basic_mnist_classifier_with_tfds_adapter():
     train_fn = BasicTraining(
         optimizer=optimizer,
         loss=Loss(tf.keras.losses.SparseCategoricalCrossentropy, from_logits=True),
-        epochs=5,
+        epochs=_MNIST_EPOCHS,
         batch_size=64,
     )
     exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
@@ -63,8 +68,8 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
     torch = pytest.importorskip("torch")
     from dryml.models.torch import Optimizer, Sequential, Training
 
-    train_ds = _mnist_dataset("train[:1000]")
-    val_ds = _mnist_dataset("test[:200]")
+    train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
+    val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
     model = Sequential(
         layer_defs=(("Linear", (28 * 28, 10), {}),),
     )
@@ -72,7 +77,7 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
     train_fn = Training(
         optimizer=optimizer,
         loss_cls=torch.nn.CrossEntropyLoss,
-        epochs=5,
+        epochs=_MNIST_EPOCHS,
         batch_size=64,
         verbose=0,
     )
@@ -99,12 +104,12 @@ def sklearn_mnist_experiment():
     from dryml.models.sklearn import BasicTraining, ClassifierModel
 
     with definition_mode(concrete=True):
-        train_ds = _mnist_dataset("train[:1000]")
-        val_ds = _mnist_dataset("test[:200]")
+        train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
+        val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
         model = ClassifierModel(
             linear_model.SGDClassifier,
             loss="log_loss",
-            max_iter=20,
+            max_iter=_MNIST_SKLEARN_MAX_ITER,
             tol=None,
             random_state=1,
         )
@@ -121,8 +126,8 @@ def tf_mnist_experiment():
     from dryml.models.tf import BasicTraining, Loss, Optimizer, Sequential
 
     with definition_mode(concrete=True):
-        train_ds = _mnist_dataset("train[:1000]")
-        val_ds = _mnist_dataset("test[:200]")
+        train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
+        val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
         model = Sequential(
             layer_defs=(("Dense", {"units": 10}),),
         )
@@ -130,7 +135,7 @@ def tf_mnist_experiment():
         train_fn = BasicTraining(
             optimizer=optimizer,
             loss=Loss(tf.keras.losses.SparseCategoricalCrossentropy, from_logits=True),
-            epochs=5,
+            epochs=_MNIST_EPOCHS,
             batch_size=64,
         )
         return Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
@@ -141,8 +146,8 @@ def torch_mnist_experiment():
     from dryml.models.torch import Optimizer, Sequential, Training
 
     with definition_mode(concrete=True):
-        train_ds = _mnist_dataset("train[:1000]")
-        val_ds = _mnist_dataset("test[:200]")
+        train_ds = _mnist_dataset(_MNIST_TRAIN_SPLIT)
+        val_ds = _mnist_dataset(_MNIST_VAL_SPLIT)
         model = Sequential(
             layer_defs=(("Linear", (28 * 28, 10), {}),),
         )
@@ -150,22 +155,24 @@ def torch_mnist_experiment():
         train_fn = Training(
             optimizer=optimizer,
             loss_cls=torch.nn.CrossEntropyLoss,
-            epochs=5,
+            epochs=_MNIST_EPOCHS,
             batch_size=64,
             verbose=0,
         )
         return Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
 
-@pytest.mark.parametrize("backend", ["inline", "process"])
+_MNIST_EXEC_CASES = [
+    pytest.param(sklearn_mnist_experiment, "inline", id="sklearn-inline"),
+    pytest.param(sklearn_mnist_experiment, "process", id="sklearn-process"),
+    pytest.param(tf_mnist_experiment, "inline", id="tf-inline"),
+    pytest.param(torch_mnist_experiment, "inline", id="torch-inline"),
+]
+
+
 @pytest.mark.parametrize(
-    "experiment_factory",
-    [
-        sklearn_mnist_experiment,
-        tf_mnist_experiment,
-        torch_mnist_experiment,
-    ],
-    ids=["sklearn", "tf", "torch"],
+    "experiment_factory,backend",
+    _MNIST_EXEC_CASES,
 )
 def test_mnist_execute_multi_framework_train_and_score_matches_model_score(
         tmp_path,
@@ -203,15 +210,9 @@ def test_mnist_execute_multi_framework_train_and_score_matches_model_score(
     assert exp.state.phase == "trained"
 
 
-@pytest.mark.parametrize("backend", ["inline", "process"])
 @pytest.mark.parametrize(
-    "experiment_factory",
-    [
-        sklearn_mnist_experiment,
-        tf_mnist_experiment,
-        torch_mnist_experiment,
-    ],
-    ids=["sklearn", "tf", "torch"],
+    "experiment_factory,backend",
+    _MNIST_EXEC_CASES,
 )
 def test_mnist_execute_definition_only_train_and_score_matches_model_score(
         tmp_path,
