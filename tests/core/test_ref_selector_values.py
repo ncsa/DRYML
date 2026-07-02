@@ -17,6 +17,7 @@ from dryml.core2 import (
 from dryml.core2.arg_roles import resolve_arg_roles
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph, ConcreteDefinitionGraphError
 from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.links import DefLink
 from dryml.core2.object import Object, definition_mode
 from dryml.core2.query.selector_graph import compile_selector_graph
 from dryml.core2.utils.graph.path import Arg, GraphPath
@@ -79,6 +80,21 @@ def test_selector_arg_stores_quoted_selector_data_not_edge():
     assert isinstance(cdef.args[0], SelectorSpec)
     assert ConcreteDefinitionGraph.from_root(cdef).edges() == ()
     assert Selector(Definition(SelectorOwner, selector=selector)).matches(cdef)
+
+
+def test_selector_arg_runtime_constructor_receives_wrapper():
+    selector = Selector(Definition(objects.TestClass1, test=dryml.Present()))
+    owner = Definition(SelectorOwner, selector).build()
+
+    assert isinstance(owner.selector, SelectorSpec)
+    assert owner.selector.selector == selector
+
+
+def test_deflink_rejects_invalid_edge_kind():
+    child = Definition(objects.TestClass1, 1).concretize()
+
+    with pytest.raises(TypeError, match="EdgeKind"):
+        DefLink("ref", child)
 
 
 def test_quoted_def_stores_expression_data_not_edge():

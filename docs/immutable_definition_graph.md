@@ -14,9 +14,9 @@ DRYML now separates graph expression syntax from storage identity, query interpr
 
 `Par` placeholders carry a matcher and optionally a generator. Matchers such as `Present`, `Missing`, `AnyValue`, `Exact`, `Choice`, `IntRange`, `SubclassOf`, and `Satisfies` participate in selector verification. Unresolved `Par` values cannot be concretized.
 
-`Ref(Selector(...))` is query-only and cannot be concretized as stored object identity. Store selector expressions as data with `SelectorSpec` or `QuotedDef` instead.
+`Ref(Selector(...))` and `Mat(Selector(...))` are query-only link patterns and cannot be concretized as stored object identity. Store selector expressions as data with `SelectorSpec` or `QuotedDef` instead.
 
-Importable function values are symbolized at `Definition` boundaries. Anonymous functions/lambdas are rejected as raw values; use `Satisfies(predicate, name="stable-name")` for scan-only selector predicates. Anonymous `Satisfies` predicates can match but are not stable-hashable.
+Importable function values are symbolized at `Definition` boundaries. Anonymous functions/lambdas are rejected as raw values; use `Satisfies(predicate, name="stable-name")` for scan-only selector predicates. Anonymous `Satisfies` predicates can match but are not stable-hashable. A `Satisfies` name is a semantic identity, not a display label; do not reuse one name for predicates with different behavior.
 
 `SearchSpace` is the generative interpretation of a `Definition` containing generator-backed `Par` values such as `UniformIntRange` and `UniformFromSet`. It can sample definitions, enumerate finite grids, and produce a support selector.
 

@@ -133,6 +133,8 @@ class SubclassMatcher:
 
 @dataclass(frozen=True, slots=True)
 class SatisfiesMatcher:
+    """Predicate matcher whose optional name is a stable semantic identity."""
+
     predicate: Callable[[Any], bool]
     name: str | None = None
 

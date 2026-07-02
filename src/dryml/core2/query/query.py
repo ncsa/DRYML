@@ -751,6 +751,8 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
             return False
         for key, child in selector.items():
             if key not in target:
+                if isinstance(child, Par) and child.matches(None, present=False):
+                    continue
                 return False
             if not _query_match(child, target[key], strict=strict, class_match=class_match):
                 return False

@@ -213,6 +213,16 @@ def test_ref_selector_cannot_concretize_with_clear_error():
     with pytest.raises(CannotConcretizeSelectorReference):
         Definition(Nest3, Ref(selector)).concretize()
 
+    with pytest.raises(CannotConcretizeSelectorReference):
+        Definition(Nest3, Mat(selector)).concretize()
+
+
+def test_nested_mapping_missing_matches_absent_key():
+    selector = Selector(Definition(Nest3, cfg={"x": Missing()}))
+    target = Definition(Nest3, cfg={}).concretize()
+
+    assert selector.matches(target)
+
 
 def test_satisfies_lambda_requires_stable_name_for_hash():
     anon = Definition(Cls1, test=Satisfies(lambda value: True))

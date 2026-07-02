@@ -669,6 +669,16 @@ class SQLiteStoreQueryIndex:
                     raise QueryIndexBusy("Timed out waiting for another SQLite query-index rebuild to finish.")
                 time.sleep(0.01)
                 continue
+            if not force and self.path.exists() and not self._is_dirty():
+                self._connections.close_all_current_process()
+                if self.status().state == "ready":
+                    os.close(fd)
+                    try:
+                        claim_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    yield False
+                    return
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(f"pid={os.getpid()}\ncreated={datetime.now(timezone.utc).isoformat()}\n")
             try:

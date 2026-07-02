@@ -13,6 +13,10 @@ class DefLink:
 
     def __post_init__(self) -> None:
         from .canonical import freeze_link_target
+        from .cdef_graph import EdgeKind
+
+        if not isinstance(self.kind, EdgeKind):
+            raise TypeError(f"DefLink kind must be an EdgeKind, got {type(self.kind).__name__}.")
 
         object.__setattr__(self, "target", freeze_link_target(self.target))
 

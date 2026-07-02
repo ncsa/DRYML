@@ -6,7 +6,11 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class QuotedDef:
-    """Store a Definition expression as local constructor data, not an object edge."""
+    """Store a Definition expression as local constructor data, not an object edge.
+
+    SelectorArg constructors receive this wrapper at runtime when the stored
+    value originated from a quoted Definition.
+    """
 
     value: Any
 
@@ -18,7 +22,11 @@ class QuotedDef:
 
 @dataclass(frozen=True, slots=True)
 class SelectorSpec:
-    """Store a Selector expression as local constructor data."""
+    """Store a Selector expression as local constructor data.
+
+    SelectorArg constructors receive this wrapper at runtime when the stored
+    value originated from a Selector.
+    """
 
     selector: Any
 

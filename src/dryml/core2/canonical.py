@@ -640,7 +640,7 @@ class _ToCanonicalTransformer(GraphTransformer):
             from .links import Ref
             from .selector import Selector
 
-            if obj.kind is EdgeKind.REF and isinstance(obj.target, Selector):
+            if isinstance(obj.target, Selector):
                 raise CannotConcretizeSelectorReference(tuple(ctx.path), obj.target)
 
             target = self.transform(obj.target, ctx.child("target"))

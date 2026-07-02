@@ -16,7 +16,7 @@ class Accuracy(Object):
         self.value = value
 ```
 
-Use `SelectorSpec(selector)` or `Definition.quote()` / `QuotedDef(defn)` when an expression is constructor data rather than an object edge.
+Use `SelectorSpec(selector)` or `Definition.quote()` / `QuotedDef(defn)` when an expression is constructor data rather than an object edge. Constructors annotated with `SelectorArg` receive the storage wrapper (`SelectorSpec` or `QuotedDef`) so they can distinguish selector-as-data from a materialized runtime object.
 
 ```python
 class Plot(Object):
