@@ -28,10 +28,9 @@ class Backend(Enum):
 
     @property
     def module(self):
-        from dryml.context import ContextError
         import importlib
         if not backend_existence_testers[self]():
-            raise ContextError("This backend is not available in this context.")
+            raise RuntimeError("This backend is not available in this runtime.")
         return importlib.import_module(f"dryml.{self.value}")
 
     @property

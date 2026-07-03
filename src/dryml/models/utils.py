@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-from dryml.context import check_context, NoContextError, \
-    WrongContextError, ContextIncompatibilityError
 from typing import Any
 
 from dryml.core2.tensor_spec import iter_specs
 from dryml.data import Shuffle, Take, Unbatch
 from dryml.models.train_spec import TrainState
-
-expected_context_errors = (NoContextError, WrongContextError, ContextIncompatibilityError)
-
 
 def validate_num_examples(num_examples: int | None) -> None:
     if num_examples is not None and num_examples < 0:
@@ -73,10 +68,9 @@ def advance_train_state(exp, *, epochs: int = 0, steps: int = 0, phase: str = Tr
 
 def signature_discovery(obj: Any, **kwargs):
     try:
-        check_context('tf')
         from .tf.utils import tf_signature_discovery
         return tf_signature_discovery(obj, **kwargs)
-    except expected_context_errors:
+    except (ImportError, ModuleNotFoundError):
         pass
 
     raise ValueError("Unable to guess a signature based on the object.")

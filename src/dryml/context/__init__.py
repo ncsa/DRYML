@@ -1,3 +1,10 @@
+"""Legacy compute-context compatibility surface.
+
+``dryml.context`` is retained for older code only. New code should use
+``dryml.worlds`` for resource/topology requirements and ``dryml.runtime`` for
+process-local mode, allocation, device visibility, and bootstrap.
+"""
+
 from .context_tracker import active_context, use_context, \
     add_context, set_context, clear_context, \
     check_context, \

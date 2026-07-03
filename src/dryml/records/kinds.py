@@ -39,6 +39,7 @@ SPEC_FAMILIES: dict[str, SpecFamily] = {
     "environment_lock": SpecFamily("environment_lock", "dryml.environments.lock.v1", "envlock", "environment_lock"),
     "world": SpecFamily("world", "dryml.world.v1", "world", "world"),
     "world_requirement": SpecFamily("world_requirement", "dryml.world_requirement.v1", "worldreq", "world_requirement"),
+    "world_allocation": SpecFamily("world_allocation", "dryml.world_allocation.v1", "worldalloc", "world_allocation"),
     "runtime": SpecFamily("runtime", "dryml.runtime.v1", "runtime", "runtime"),
     "annotation": SpecFamily("annotation", "dryml.annotation.v1", "annotation", "annotation"),
     "generic": SpecFamily("generic", None, "spec", "generic"),

@@ -5,7 +5,7 @@ import traceback
 
 from dryml.core2 import Repo
 from dryml.core2.canonical import to_canonical
-from dryml.context import use_context
+from dryml.runtime import RuntimeAllocationView, RuntimeMode, enter_runtime
 
 from .protocol import (
     ExecutionResponse,
@@ -52,12 +52,34 @@ def execute_request(request) -> ExecutionResponse:
         )
 
     try:
-        if request.context_reqs:
-            with use_context(request.context_reqs):
-                return run_call()
-        return run_call()
+        with enter_runtime(RuntimeMode.WORKER, _allocation_from_legacy_context_reqs(request.context_reqs)):
+            return run_call()
     except BaseException as exc:
         return ExecutionResponse.failure(exc, traceback.format_exc())
+
+
+def _allocation_from_legacy_context_reqs(context_reqs) -> RuntimeAllocationView:
+    """Translate retained execute context requirements to a runtime allocation.
+
+    This is a compatibility bridge only; dispatch v2 should pass a real
+    WorldAllocation-derived RuntimeAllocationView.
+    """
+
+    cpus = 0
+    gpus = 0
+    for spec in (context_reqs or {}).values():
+        if isinstance(spec, dict):
+            cpus = max(cpus, int(spec.get("num_cpus", 0) or 0))
+            gpus = max(gpus, int(spec.get("num_gpus", 0) or 0))
+    return RuntimeAllocationView(
+        role="legacy_execute_worker",
+        replica=0,
+        rank=0,
+        local_rank=0,
+        cpus=tuple(range(cpus)),
+        accelerators={"gpu": tuple(range(gpus))} if gpus else {},
+        metadata={"source": "dryml.execute legacy context_reqs"},
+    )
 
 
 def main(argv=None) -> int:

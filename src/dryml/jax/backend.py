@@ -1,14 +1,9 @@
+import importlib.util
 from typing import Any
-from dryml.context import check_context, ContextError
 
 
 def is_jax_available() -> bool:
-    try:
-        check_context('jax')
-        return True
-    except ContextError:
-        pass
-    return False
+    return importlib.util.find_spec("jax") is not None
 
 
 def is_jax_value(x: Any) -> bool:

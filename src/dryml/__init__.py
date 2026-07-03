@@ -11,6 +11,8 @@ _SUBMODULE_EXPORTS = {
     "formats": "dryml.formats",
     "operations": "dryml.operations",
     "records": "dryml.records",
+    "runtime": "dryml.runtime",
+    "worlds": "dryml.worlds",
 }
 
 _CORE2_EXPORTS = {
@@ -71,6 +73,8 @@ __all__ = [
     "formats",
     "operations",
     "records",
+    "runtime",
+    "worlds",
     "config",
     "configure",
     "reset_config",

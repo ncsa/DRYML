@@ -357,8 +357,8 @@ class Compute(Object):
     @classmethod
     def __pre_init__(cls):
         assert hasattr(cls, "__compute_reqs__"), "classes which inherit Compute must define a __compute_reqs__ attribute listing their compute requirements"
-        from ..context import context_check
-        context_check(cls.__compute_reqs__)
+        from dryml.runtime import require_allocation
+        require_allocation(f"initialize compute object {cls.__name__}")
 
 
 class WorkspaceCapable:

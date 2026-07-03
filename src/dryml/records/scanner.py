@@ -38,6 +38,7 @@ _TYPED_KEYS: dict[str, tuple[str, str, bool, tuple[str, ...] | None]] = {
     "environment_lock_id": ("content_id", "environment_lock", False, ("envlock",)),
     "world_requirement_id": ("content_id", "world_requirement", False, ("worldreq",)),
     "world_id": ("content_id", "world", False, ("world",)),
+    "world_allocation_id": ("content_id", "world_allocation", False, ("worldalloc",)),
     "runtime_id": ("content_id", "runtime", False, ("runtime",)),
     "record_id": ("content_id", "record", False, ("record",)),
     "record_ids": ("content_id", "record", True, ("record",)),
