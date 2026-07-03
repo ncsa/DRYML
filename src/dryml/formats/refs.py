@@ -14,6 +14,24 @@ from .ids import ContentIDParts, parse_content_id, validate_schema_version
 
 _CDEF_ID_RE = re.compile(r"^cdef-v(?P<version>[1-9][0-9]*)-(?P<digest>[0-9a-f]{16,})$")
 _REF_CDEF_RE = re.compile(r"^ref\((?P<cdef_id>cdef-v[1-9][0-9]*-[0-9a-f]{16,})\)$")
+_RESERVED_CONTENT_PREFIXES = frozenset(
+    {
+        "annotation",
+        "blob",
+        "env",
+        "envlock",
+        "envrec",
+        "envreq",
+        "envspec",
+        "op",
+        "record",
+        "repr",
+        "runtime",
+        "spec",
+        "world",
+        "worldreq",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +216,12 @@ def parse_reserved_ref(value: Any) -> ReservedRef | None:
         )
     try:
         content = parse_content_id(value)
-    except ContentIDError:
+    except ContentIDError as exc:
+        if _looks_like_reserved_content_ref(value):
+            raise ReferenceParseError(
+                "invalid reserved content reference",
+                context={"value": value, "error": str(exc)},
+            ) from exc
         return None
     return _reserved_content_ref(value, content)
 
@@ -221,6 +244,11 @@ def _reserved_content_ref(raw: str, content: ContentIDParts) -> ReservedRef:
         schema_version=content.schema_version,
         digest=content.digest,
     )
+
+
+def _looks_like_reserved_content_ref(value: str) -> bool:
+    prefix, separator, _rest = value.partition("-v")
+    return bool(separator) and prefix in _RESERVED_CONTENT_PREFIXES
 
 
 def _validate_cdef_digest(digest: str) -> None:

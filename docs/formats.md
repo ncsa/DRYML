@@ -14,6 +14,7 @@ Canonical JSON helpers live in `dryml.formats.canonical`.
 - `deep_freeze_json` returns deeply immutable structures suitable for dataclass fields.
 - Non-finite floats, bytes, datetimes, and arbitrary Python objects are rejected.
 - Canonical dumps use `sort_keys=True`, compact separators, `allow_nan=False`, and UTF-8 bytes.
+- Canonical loads reject `NaN`, `Infinity`, `-Infinity`, and duplicate object keys.
 
 Use `canonical_json_bytes(data)` when computing stable hashes. Use `deep_freeze_json(data)` when storing JSON-compatible metadata on immutable objects.
 
@@ -43,19 +44,19 @@ Prefixes must match `^[a-z][a-z0-9_]*$`. Schema versions are positive integers. 
 
 Generic envelope helpers live in `dryml.formats.envelope`.
 
-An envelope contains `schema`, `kind`, and `payload`, with optional `schema_version`, `id`, and `metadata` fields. `payload` defaults to `{}`. The helpers are intentionally generic; they do not define records, operation specs, or store layout.
+An envelope contains `schema`, `kind`, and `payload`, with optional `schema_version`, `id`, and `metadata` fields. `payload` defaults to `{}`. The helpers are intentionally generic; they do not define records, operation specs, or store layout. `validate_envelope` checks canonical JSON compatibility for `payload` and `metadata` by default; callers may opt out only when they need a structural preflight before canonicalization.
 
 `envelope_payload_for_id(envelope)` selects stable fields for content-ID hashing and excludes `id` and `metadata` by default. Put semantically identifying metadata inside `payload` when it should affect identity.
 
 ## Reserved References
 
-Reserved reference helpers live in `dryml.formats.refs`.
+Reserved reference helpers live in `dryml.formats.refs`. Malformed strings using known reserved content-ID prefixes are rejected rather than treated as ordinary strings.
 
 Supported forms include:
 
 ```text
-cdef-v4-<lowercase-hex-digest>
-ref(cdef-v4-<lowercase-hex-digest>)
+cdef-v4-<lowercase-hex-digest-of-at-least-16-characters>
+ref(cdef-v4-<lowercase-hex-digest-of-at-least-16-characters>)
 record-v1-<sha256>
 spec-v1-<sha256>
 env-v1-<sha256>
@@ -79,3 +80,5 @@ Use a literal escape when a value looks like a reserved reference but must remai
 ```
 
 Literal escapes must contain exactly one key, `"$literal"`, and may wrap any JSON-compatible value.
+
+CDef references intentionally accept lowercase hex digests of length 16 or more because existing concrete-definition hash presentations may be shorter than generic content IDs. Generic content IDs remain strict 64-character SHA-256 hex digests.

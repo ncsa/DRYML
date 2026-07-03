@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .canonical import json_ready
-from .errors import CanonicalJSONError, EnvelopeError
+from .errors import CanonicalJSONError, ContentIDError, EnvelopeError
 from .ids import validate_schema_version
 
 
@@ -61,10 +61,10 @@ def make_envelope(
     envelope: dict[str, Any] = {
         "schema": schema,
         "kind": kind,
-        "payload": _json_ready_for_envelope(payload or {}, "payload"),
+        "payload": _json_ready_for_envelope({} if payload is None else payload, "payload"),
     }
     if schema_version is not None:
-        envelope["schema_version"] = validate_schema_version(schema_version)
+        envelope["schema_version"] = _validate_schema_version_for_envelope(schema_version)
     if id is not None:
         _validate_required_string("id", id)
         envelope["id"] = id
@@ -79,6 +79,7 @@ def validate_envelope(
     schema: str | None = None,
     kind: str | None = None,
     require_payload: bool = True,
+    require_json_ready: bool = True,
 ) -> Mapping[str, Any]:
     """Validate a generic envelope and return it unchanged.
 
@@ -92,6 +93,9 @@ def validate_envelope(
         Optional expected kind.
     require_payload:
         Whether the ``payload`` key must be present.
+    require_json_ready:
+        Whether ``payload`` and ``metadata`` values must be canonical
+        JSON-compatible during validation.
 
     Returns
     -------
@@ -124,7 +128,12 @@ def validate_envelope(
     if "metadata" in data and not isinstance(data["metadata"], Mapping):
         raise EnvelopeError("envelope metadata must be a mapping", context={"type": type(data["metadata"]).__name__})
     if "schema_version" in data:
-        validate_schema_version(data["schema_version"])
+        _validate_schema_version_for_envelope(data["schema_version"])
+    if require_json_ready:
+        if "payload" in data:
+            _json_ready_for_envelope(data["payload"], "payload")
+        if "metadata" in data:
+            _json_ready_for_envelope(data["metadata"], "metadata")
     return data
 
 
@@ -164,6 +173,13 @@ def _json_ready_for_envelope(value: Any, field: str) -> Any:
         return json_ready(value)
     except CanonicalJSONError as exc:
         raise EnvelopeError(f"envelope {field} is not JSON serializable", context=exc.context) from exc
+
+
+def _validate_schema_version_for_envelope(schema_version: Any) -> int:
+    try:
+        return validate_schema_version(schema_version)
+    except ContentIDError as exc:
+        raise EnvelopeError("envelope schema_version is invalid", context=exc.context) from exc
 
 
 __all__ = [

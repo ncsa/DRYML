@@ -120,7 +120,7 @@ def canonical_json_dumps(data: Any) -> str:
 
 
 def canonical_json_loads(text: str) -> Any:
-    """Decode canonical JSON text into ordinary JSON data.
+    """Decode strict canonical JSON text into ordinary JSON data.
 
     Parameters
     ----------
@@ -130,14 +130,27 @@ def canonical_json_loads(text: str) -> Any:
     Returns
     -------
     Any
-        Decoded JSON-compatible Python data.
+        Decoded JSON-compatible Python data. Non-finite JSON constants and
+        duplicate object keys are rejected because their canonical meaning is
+        ambiguous.
     """
 
     try:
-        return json.loads(text)
+        return json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except CanonicalJSONError:
+        raise
     except json.JSONDecodeError as exc:
         raise CanonicalJSONError(
             "canonical JSON text could not be decoded",
+            context={"error": str(exc)},
+        ) from exc
+    except TypeError as exc:
+        raise CanonicalJSONError(
+            "canonical JSON text must be a string",
             context={"error": str(exc)},
         ) from exc
 
@@ -210,6 +223,25 @@ def _sorted_string_keys(mapping: Mapping[Any, Any]) -> tuple[str, ...]:
             )
         keys.append(key)
     return tuple(sorted(keys))
+
+
+def _reject_json_constant(value: str) -> None:
+    raise CanonicalJSONError(
+        "canonical JSON non-finite number is not allowed",
+        context={"value": value},
+    )
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CanonicalJSONError(
+                "canonical JSON object contains duplicate key",
+                context={"key": key},
+            )
+        result[key] = value
+    return result
 
 
 __all__ = [
