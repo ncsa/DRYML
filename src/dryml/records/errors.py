@@ -43,10 +43,25 @@ class SpecNotFoundError(RecordIOError):
     """Raised when a requested spec sidecar is absent."""
 
 
+class RecordPolicyError(RecordError):
+    """Raised when a save/export record policy is invalid or unsafe."""
+
+
+class RecordClosureError(RecordError):
+    """Raised when record/spec closure planning cannot complete."""
+
+
+class RecordExportError(RecordError):
+    """Raised when record/spec/product export cannot complete."""
+
+
 __all__ = [
+    "RecordClosureError",
     "RecordError",
+    "RecordExportError",
     "RecordIOError",
     "RecordNotFoundError",
+    "RecordPolicyError",
     "RecordValidationError",
     "SpecNotFoundError",
     "SpecValidationError",

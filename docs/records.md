@@ -2,7 +2,7 @@
 
 `dryml.records` provides optional store-owned JSON sidecars for metadata that should not be part of DRYML object identity. Records and specs are canonical JSON documents owned by a store. They are not `Object` instances, do not participate in the object graph, and do not change `ConcreteDefinition` hashes or object state bytes.
 
-Sprint 1 intentionally does not change `repo.save()` policy. Calling `repo.save()` or saving an object writes the existing object layout only; callers must use `RecordStoreIO(store)` or `store.records` explicitly to write records/specs.
+Save/export record policies are explicit. Calling `repo.save()` without a policy, or with `record_policy="none"`, writes the existing object layout only and creates no `records/`, no `products/`, and no record reference index. More inclusive policies must be requested by name.
 
 ## Sidecar Layout
 
@@ -33,6 +33,80 @@ products/
 ```
 
 `records/indexes/` is optional and rebuildable. Deleting it does not affect `read_record()`, `read_spec()`, or listing, because JSON files are the source of truth.
+
+## Save And Export Policies
+
+The public policy values are:
+
+| Policy | Behavior |
+|---|---|
+| `none` | Default. Save object bytes only. Do not create record/spec/product/index sidecars. |
+| `descriptive` | Save object bytes and emit direct `stored_state` records plus the default object-state representation spec. |
+| `closure` | Include seed records and specs referenced by those records/specs. Do not follow provenance ancestry or products by default. |
+| `provenance` | Explicitly include record lineage such as `derived_from`, consumed/produced records, and existing execution/adapter/probe records that mention seeds. |
+| `all` | Include all records and specs in the selected source store. Products are included by default for `all`; indexes are still omitted as authoritative data. |
+
+Policy options are available through `RecordPolicyOptions`. `include_products=None` means the policy default: false for `none`, `descriptive`, `closure`, and `provenance`, and true for `all`. Set `include_products=True` to copy product directories for included records. Set `rebuild_index=True` to rebuild `records/indexes/ref-index-v1.json` after writes or copies. Set `overwrite_sidecars=True` only when replacing existing record/spec/product sidecars is intended. `include_indexes` defaults to false; indexes are derived and should normally be rebuilt in the destination rather than copied.
+
+Example descriptive save:
+
+```python
+repo.save(obj, record_policy="descriptive")
+```
+
+For each saved object action, `descriptive` writes a direct `stored_state` record like:
+
+```json
+{
+  "subject_cdef_id": "cdef-v4-...",
+  "representation_id": "repr-v1-...",
+  "storage": [
+    {
+      "kind": "object-dir",
+      "subject_cdef_id": "cdef-v4-...",
+      "path": ".",
+      "role": "default-state"
+    }
+  ],
+  "save": {
+    "reason": "explicit-root",
+    "minimum_root_depth": 0
+  }
+}
+```
+
+If a save revision is supplied, it is recorded under `payload.save.revision`. The payload does not include absolute paths, source/destination store refs, mtimes, or index facts. The storage ref is logical and resolves relative to the current store through `RecordStoreIO.resolve_storage_ref()`.
+
+The default object-state representation spec is in family `representation`, schema `dryml.representation.v1`, kind `dryml.object_state`, and has a stable payload describing the object-dir default-state layout:
+
+```json
+{
+  "format": "dryml.object_state",
+  "storage_kind": "object-dir",
+  "role": "default-state",
+  "description": "Default DRYML object state layout written under objects/."
+}
+```
+
+Record closure copy/export uses authoritative record/spec JSON, not copied indexes:
+
+```python
+from dryml.records import copy_record_closure, plan_record_closure, record_export_include_paths
+
+report = copy_record_closure(
+    source_store,
+    destination_store,
+    seed_records=[record_id],
+    policy="closure",
+)
+
+plan = plan_record_closure(source_store, seed_records=[record_id], policy="closure")
+include_paths = record_export_include_paths(plan)
+```
+
+`record_export_include_paths(plan)` returns paths such as `records/items/<record-id>.json`, `records/specs/representation/<repr-id>.json`, and `products/<record-id>/` when products are included. It omits `records/indexes/` by default. Passing these paths to `ZipExportStore` preserves store-relative object-dir/product-dir refs; reopen the destination and rebuild the reference index if an index is needed there.
+
+Repo-level federation is exposed as `repo.records`. It delegates to each store's `RecordStoreIO` and supports locating records/specs, reading located refs, querying CDef mentions, finding operation specs, and copying one unambiguous closure to a destination store.
 
 ## Record Envelopes
 
@@ -174,4 +248,4 @@ Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewrit
 
 ## Non-Goals
 
-Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Sprint 2 adds operation-call metadata, recursive scanners, and store-local reference queries, but dispatch/runtime/world behavior, adapter resolution, and automatic save/export record policies remain future work.
+Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Dispatch/runtime/world behavior, provider probing, adapter execution, generated execution provenance, blob storage, and a public Artifact API remain future titled-sprint work.

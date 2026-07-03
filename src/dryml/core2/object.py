@@ -230,9 +230,21 @@ class Object(metaclass=Dryml):
             *,
             store=None,
             alias: str | None = None,
+            record_policy=None,
+            record_options=None,
             options=None):
         from .repo import save_object
-        save_object(self, repo=repo, main=main, revision=revision, store=store, alias=alias, options=options)
+        save_object(
+            self,
+            repo=repo,
+            main=main,
+            revision=revision,
+            store=store,
+            alias=alias,
+            record_policy=record_policy,
+            record_options=record_options,
+            options=options,
+        )
 
     def save_state_to_dir(self, dest_dir: str, revision: str|None = None):
         pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))

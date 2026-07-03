@@ -409,15 +409,25 @@ class Repo:
             store=None,
             revision: RevisionType | str | None = None,
             alias: str | None = None,
-            ephemeral_depth: int | None = 0) -> RepoSaveOptions:
+            ephemeral_depth: int | None = 0,
+            record_policy=None,
+            record_options=None) -> RepoSaveOptions:
+        from dryml.records.policy import RecordPolicyOptions, normalize_record_policy
+
         if options is not None:
-            return options
+            return replace(
+                options,
+                record_policy=normalize_record_policy(options.record_policy),
+                record_options=options.record_options or RecordPolicyOptions(),
+            )
         return RepoSaveOptions(
             main=main,
             store=store,
             revision=revision,
             alias=alias,
             ephemeral_depth=ephemeral_depth,
+            record_policy=normalize_record_policy(record_policy),
+            record_options=record_options or RecordPolicyOptions(),
         )
 
     def save_object(
@@ -428,6 +438,9 @@ class Repo:
             revision=None,
             alias: str | None = None,
             ephemeral_depth: int | None = 0,
+            *,
+            record_policy=None,
+            record_options=None,
             options: RepoSaveOptions | None = None):
         save_options = self._save_options(
             options=options,
@@ -436,6 +449,8 @@ class Repo:
             revision=revision,
             alias=alias,
             ephemeral_depth=ephemeral_depth,
+            record_policy=record_policy,
+            record_options=record_options,
         )
         store = self._ensure_store(save_options.store)
         revision = manage_revision(obj, save_options.revision)
@@ -450,6 +465,10 @@ class Repo:
             ephemeral_depth=save_options.ephemeral_depth,
         )
         execute_save_plan(self, plan)
+        if save_options.record_policy != "none":
+            from dryml.records.policy import apply_save_record_policy
+
+            apply_save_record_policy(self, plan, save_options)
 
         if save_options.main:
             self.set_main_def(obj.definition, store=store)
@@ -463,6 +482,9 @@ class Repo:
             store=None,
             revision: RevisionType | str | None = None,
             ephemeral_depth: int | None = 0,
+            *,
+            record_policy=None,
+            record_options=None,
             options: RepoSaveOptions | None = None):
         save_options = self._save_options(
             options=options,
@@ -470,6 +492,8 @@ class Repo:
             store=store,
             revision=revision,
             ephemeral_depth=ephemeral_depth,
+            record_policy=record_policy,
+            record_options=record_options,
         )
         if obj is None:
             # Save all loaded objects in the cache
@@ -697,6 +721,14 @@ class Repo:
         from .query import DefinitionQuery
 
         return DefinitionQuery.from_source(self, selector)
+
+    @property
+    def records(self):
+        """Return a repo-level facade over store-owned record sidecars."""
+
+        from dryml.records.federation import RepoRecordFederation
+
+        return RepoRecordFederation(self)
 
     def definition_graph(self, value) -> "ConcreteDefinitionGraph":
         from .cdef_graph import ConcreteDefinitionGraph
@@ -1159,6 +1191,9 @@ def save_object(
         store=None,
         alias: str | None = None,
         ephemeral_depth: int | None = 0,
+        *,
+        record_policy=None,
+        record_options=None,
         options: RepoSaveOptions | None = None):
     with manage_repo(repo=repo) as sub_repo:
         if options is None:
@@ -1170,6 +1205,8 @@ def save_object(
             revision=revision,
             alias=alias,
             ephemeral_depth=ephemeral_depth,
+            record_policy=record_policy,
+            record_options=record_options,
         )
         sub_repo.save_object(obj, options=save_options)
 

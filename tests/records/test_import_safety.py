@@ -52,3 +52,15 @@ for name in ["dryml.core2", "dryml.execute", "dryml.context", "dryml.environment
     assert name not in sys.modules, name
         """
     )
+
+
+def test_policy_and_export_imports_are_lightweight():
+    run_probe(
+        """
+import sys
+import dryml.records.policy
+import dryml.records.export
+for name in ["dryml.core2", "dryml.operations", "dryml.execute", "dryml.context", "dryml.environments", "tensorflow", "torch", "jax", "ray"]:
+    assert name not in sys.modules, name
+        """
+    )

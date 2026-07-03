@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from dryml.records.policy import DEFAULT_RECORD_POLICY, RecordPolicy, RecordPolicyOptions
+
 
 InstancePolicy = Literal["reuse", "new"]
 # "reuse": return cached instance if present
@@ -32,6 +34,8 @@ class RepoSaveOptions:
     revision: Any = None
     alias: str | None = None
     ephemeral_depth: int | None = 0
+    record_policy: RecordPolicy = DEFAULT_RECORD_POLICY
+    record_options: RecordPolicyOptions = field(default_factory=RecordPolicyOptions)
 
 
 RepoGraphMissingPolicy = Literal["raise", "skip", "load"]
