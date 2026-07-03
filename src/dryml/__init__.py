@@ -9,6 +9,7 @@ _SUBMODULE_EXPORTS = {
     "execute": "dryml.execute",
     "environments": "dryml.environments",
     "formats": "dryml.formats",
+    "records": "dryml.records",
 }
 
 _CORE2_EXPORTS = {
@@ -67,6 +68,7 @@ __all__ = [
     "execute",
     "environments",
     "formats",
+    "records",
     "config",
     "configure",
     "reset_config",

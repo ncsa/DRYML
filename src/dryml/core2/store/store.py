@@ -41,6 +41,14 @@ class Store(ABC):
         """Return the store-local directory for an object's definition."""
         return self._object_dir(cdef)
 
+    @property
+    def records(self) -> "RecordStoreIO":
+        """Return the optional record/spec sidecar IO facade for this store."""
+
+        from dryml.records.store import RecordStoreIO
+
+        return RecordStoreIO(self)
+
     def _def_file(self, cdef: "ConcreteDefinition") -> str:
         return os.path.join(self.object_dir(cdef), "def.pkl")
 

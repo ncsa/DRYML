@@ -1,6 +1,6 @@
 # DRYML Formats
 
-`dryml.formats` contains generic, dependency-light helpers used by DRYML metadata layers. It is not an environment-specific API and does not implement record stores, operation specs, worlds, runtime dispatch, or object-state persistence.
+`dryml.formats` contains generic, dependency-light helpers used by DRYML metadata layers. It is not an environment-specific API and does not implement record stores, operation specs, worlds, runtime dispatch, or object-state persistence. Store-owned records and specs are documented in [DRYML Records](records.md).
 
 ## Canonical JSON
 

@@ -10,16 +10,17 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 2. [Objects and Definitions](objects_and_defs.md)
 3. [Immutable Definition Graph](immutable_definition_graph.md)
 4. [Formats](formats.md)
-5. [Environments](environments.md)
-6. [Repos and Stores](repos.md)
-7. [Tensor Specs](tensor_specs.md)
-8. [Contexts](context.md)
-9. [Data API](data.md)
-10. [Models API](models.md)
-11. [Artifacts API](artifacts.md)
-12. [Query Index Backend Contracts](query_index_backend_contracts.md)
-13. [Testing Workflow](testing.md)
-14. [Release Notes](release_notes.md)
+5. [Records](records.md)
+6. [Environments](environments.md)
+7. [Repos and Stores](repos.md)
+8. [Tensor Specs](tensor_specs.md)
+9. [Contexts](context.md)
+10. [Data API](data.md)
+11. [Models API](models.md)
+12. [Artifacts API](artifacts.md)
+13. [Query Index Backend Contracts](query_index_backend_contracts.md)
+14. [Testing Workflow](testing.md)
+15. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -28,6 +29,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - A `ConcreteDefinition` is a fully resolved, stable identity for an object.
 - `Ref` records a non-materializing exact or selector reference in a definition graph.
 - `dryml.formats` provides canonical JSON, content IDs, generic envelopes, and reserved-reference parsing for metadata layers.
+- `dryml.records` provides optional store-owned JSON record/spec sidecars without changing object identity.
 - An environment record describes observed Python/software facts without changing object identity.
 - An `Object` is the runtime instance associated with a concrete definition.
 - A `Repo` manages live objects, persistent stores, aliases, queries, saves, and loads.

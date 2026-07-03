@@ -6,6 +6,7 @@ from io import IOBase
 import glob
 import tempfile
 import os
+import pickle
 
 from .store import Store
 from ..utils.general import pickle_save, pickle_load
@@ -159,6 +160,18 @@ class ZipExportStore(Store):
         self.include_paths = set(include_paths)
         self._main_def: ConcreteDefinition | None = None
 
+    @property
+    def base_dir(self) -> str:
+        """Return the source directory being exported."""
+
+        return self.src_dir
+
+    @property
+    def object_root_dir(self) -> str:
+        """Return the object root in the source directory."""
+
+        return os.path.join(self.src_dir, "objects")
+
     # --- Store interface: membership / index ---
 
     def has(self, cdef: ConcreteDefinition) -> bool:
@@ -168,6 +181,12 @@ class ZipExportStore(Store):
     def hydrate_index(self) -> Iterable[ConcreteDefinition]:
         # Nothing to hydrate; exporter doesn't enumerate objects.
         return ()
+
+    def _object_dir(self, cdef: ConcreteDefinition) -> str:
+        """Return the source object directory path for interface completeness."""
+
+        digest = cdef.stable_hash()
+        return os.path.join(self.object_root_dir, digest[:2], digest)
 
     # --- Store interface: per-object IO ---
 
@@ -237,4 +256,4 @@ class ZipExportStore(Store):
         pass
 
     def __repr__(self) -> str:
-        return f"{type(self)}(base_dir: {self._base_dir} dest: {self.zip_dest})"
+        return f"{type(self)}(base_dir: {self.src_dir} dest: {self.zip_dest})"

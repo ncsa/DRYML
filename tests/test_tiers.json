@@ -10,6 +10,7 @@
     "jax": "heavy",
     "models": "heavy",
     "multi_framework": "heavy",
+    "records": "smoke",
     "tf": "heavy",
     "torch": "heavy"
   },
