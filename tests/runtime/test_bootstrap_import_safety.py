@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import types
 
@@ -36,21 +37,61 @@ def test_bootstrap_plan_builds_without_heavy_imports_and_applies_env(monkeypatch
 def test_fake_already_imported_framework_conflict_is_clear(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
     spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"torch": {"num_threads": 2}}, "device_visibility": {"policy": "assigned"}})
-    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.RuntimeAllocationView(accelerators={"gpu": (0,)}))
+    plan = runtime.build_runtime_bootstrap_plan(
+        spec,
+        runtime.RuntimeAllocationView(accelerators={"gpu": (0,)}),
+        policy=runtime.FrameworkBootstrapPolicy(("plain", "torch"), strict_preimport=True),
+    )
 
     with pytest.raises(FrameworkImportSafetyError) as excinfo:
         runtime.apply_runtime_bootstrap_plan(plan, environ={})
     assert excinfo.value.context["framework"] == "torch"
 
 
-def test_default_bootstrap_policy_validates_major_frameworks(monkeypatch):
+def test_framework_bootstrap_policy_can_validate_major_frameworks(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
     spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"plain": {}}, "device_visibility": {"policy": "assigned"}})
-    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.RuntimeAllocationView(cpus=(0,)))
+    plan = runtime.build_runtime_bootstrap_plan(
+        spec,
+        runtime.RuntimeAllocationView(cpus=(0,)),
+        policy=runtime.FrameworkBootstrapPolicy(("plain", "torch", "tensorflow", "jax"), strict_preimport=True),
+    )
 
     with pytest.raises(FrameworkImportSafetyError) as excinfo:
         runtime.apply_runtime_bootstrap_plan(plan, environ={})
     assert excinfo.value.context["framework"] == "torch"
+
+
+def test_default_bootstrap_policy_validates_declared_frameworks_only(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tensorflow", types.ModuleType("tensorflow"))
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"plain": {}}, "device_visibility": {"policy": "assigned"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.RuntimeAllocationView(cpus=(0,)))
+    env = {}
+
+    runtime.apply_runtime_bootstrap_plan(plan, environ=env)
+
+    assert env[runtime.BOOTSTRAP_MARKER_ENV] == "1"
+
+
+def test_activate_runtime_bootstrap_restores_environment(monkeypatch):
+    monkeypatch.delenv(runtime.BOOTSTRAP_MARKER_ENV, raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "before")
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"tensorflow": {}}, "device_visibility": {"policy": "assigned"}})
+    allocation = runtime.RuntimeAllocationView(accelerators={"gpu": (3,)})
+    plan = runtime.build_runtime_bootstrap_plan(spec, allocation)
+
+    with runtime.enter_runtime(runtime.RuntimeMode.WORKER, allocation, spec):
+        with runtime.activate_runtime_bootstrap(plan) as state:
+            assert state.frameworks == {"plain", "tensorflow"}
+            assert runtime.active_runtime_bootstrap() is state
+            assert runtime.BOOTSTRAP_MARKER_ENV in state.env_updates
+            assert runtime.active_runtime_bootstrap().mode is runtime.RuntimeMode.WORKER
+            assert os.environ[runtime.BOOTSTRAP_MARKER_ENV] == "1"
+            assert os.environ["CUDA_VISIBLE_DEVICES"] == "3"
+
+    assert runtime.active_runtime_bootstrap() is None
+    assert runtime.BOOTSTRAP_MARKER_ENV not in os.environ
+    assert os.environ["CUDA_VISIBLE_DEVICES"] == "before"
 
 
 def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):

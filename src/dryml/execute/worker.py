@@ -5,7 +5,7 @@ import traceback
 
 from dryml.core2 import Repo
 from dryml.core2.canonical import to_canonical
-from dryml.runtime import RuntimeAllocationView, RuntimeContextSpec, RuntimeMode, apply_runtime_bootstrap_plan, build_runtime_bootstrap_plan, enter_runtime
+from dryml.runtime import RuntimeAllocationView, RuntimeContextSpec, RuntimeMode, activate_runtime_bootstrap, build_runtime_bootstrap_plan, enter_runtime
 
 from .protocol import (
     ExecutionResponse,
@@ -59,8 +59,8 @@ def execute_request(request, *, runtime_mode: RuntimeMode | str | None = Runtime
         spec = _runtime_spec_from_legacy_context_reqs(request.context_reqs, mode=mode)
         with enter_runtime(mode, allocation, spec):
             plan = build_runtime_bootstrap_plan(spec, allocation)
-            apply_runtime_bootstrap_plan(plan)
-            return run_call()
+            with activate_runtime_bootstrap(plan, restore_environ=False):
+                return run_call()
     except BaseException as exc:
         return ExecutionResponse.failure(exc, traceback.format_exc())
 

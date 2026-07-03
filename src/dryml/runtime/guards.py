@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import sys
 from collections.abc import Mapping
 from typing import Any
 
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
-from .context import active_runtime
+from .context import active_runtime, active_runtime_bootstrap
 from .errors import FrameworkImportSafetyError, NoAllocationError, RuntimeTransitionError
 from .modes import RuntimeMode
 
@@ -93,26 +91,38 @@ def assert_no_workload_allocation() -> None:
         )
 
 
-def assert_framework_import_safe(framework_name: str, desired_visibility: Any = None) -> None:
-    """Raise unless runtime bootstrap can safely precede framework import."""
+def assert_framework_import_configured(framework_name: str, desired_visibility: Any = None) -> None:
+    """Raise unless current context has configured framework bootstrap."""
 
-    bootstrapped = os.environ.get(BOOTSTRAP_MARKER_ENV) == "1"
-    if framework_name in sys.modules and not bootstrapped:
+    bootstrap = active_runtime_bootstrap()
+    if bootstrap is None:
         raise FrameworkImportSafetyError(
-            "framework was imported before runtime visibility setup",
+            "framework import requires active runtime bootstrap",
             context={"framework": framework_name, "desired_visibility": desired_visibility, "fix": "build/apply runtime visibility before importing frameworks"},
         )
+    if framework_name not in bootstrap.frameworks:
+        raise FrameworkImportSafetyError(
+            "framework import was not configured by active runtime bootstrap",
+            context={"framework": framework_name, "configured_frameworks": sorted(bootstrap.frameworks), "fix": "include framework in RuntimeContextSpec.frameworks before bootstrap"},
+        )
+
+
+def assert_framework_import_safe(framework_name: str, desired_visibility: Any = None) -> None:
+    """Compatibility alias for configured framework import checks."""
+
+    assert_framework_import_configured(framework_name, desired_visibility=desired_visibility)
+
+
+def require_workload_allocation(reason: str | None = None) -> RuntimeAllocationView:
+    """Require worker/inline runtime mode with an active workload allocation."""
+
     runtime = active_runtime()
     if runtime.mode not in {RuntimeMode.WORKER, RuntimeMode.INLINE} or is_no_allocation(runtime.allocation):
         raise FrameworkImportSafetyError(
-            "framework import requires worker/inline runtime with allocation",
-            context={"framework": framework_name, "mode": runtime.mode.value, "allocation": repr(runtime.allocation), "fix": "enter worker/inline runtime before importing framework modules"},
+            "workload resources require worker/inline runtime with allocation",
+            context={"mode": runtime.mode.value, "reason": reason, "allocation": repr(runtime.allocation), "fix": "enter worker/inline runtime before materializing workload objects"},
         )
-    if not bootstrapped:
-        raise FrameworkImportSafetyError(
-            "framework import requires applied runtime bootstrap",
-            context={"framework": framework_name, "mode": runtime.mode.value, "fix": "apply_runtime_bootstrap_plan(..., phase='pre_import') before importing framework modules"},
-        )
+    return runtime.allocation
 
 
 def _combine_legacy_compute_reqs(reqs: Any) -> dict[str, Any]:
@@ -184,4 +194,4 @@ def _memory_bytes(value: Any) -> int | None:
     return value
 
 
-__all__ = ["BOOTSTRAP_MARKER_ENV", "assert_framework_import_safe", "assert_no_workload_allocation", "require_allocation", "require_allocation_for_legacy_compute_reqs", "require_worker_allocation"]
+__all__ = ["BOOTSTRAP_MARKER_ENV", "assert_framework_import_configured", "assert_framework_import_safe", "assert_no_workload_allocation", "require_allocation", "require_allocation_for_legacy_compute_reqs", "require_worker_allocation", "require_workload_allocation"]
