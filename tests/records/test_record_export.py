@@ -78,6 +78,9 @@ def test_closure_works_with_missing_and_dirty_ref_index(tmp_path):
 
 def test_none_and_descriptive_export_policies_are_bounded(tmp_path):
     store, seed, *_ = _seed_store(tmp_path)
+    io = RecordStoreIO(store)
+    product_path = io.resolve_storage_ref(StorageRef.product_dir(seed.record_id, path="artifact"), create=True)
+    (product_path / "data.txt").write_text("product", encoding="utf-8")
     none_plan = plan_record_closure(store, seed_records=[seed.record_id], policy="none")
     assert none_plan.records == ()
     assert none_plan.specs == ()
@@ -87,6 +90,28 @@ def test_none_and_descriptive_export_policies_are_bounded(tmp_path):
     assert descriptive_plan.records == (seed.record_id,)
     assert descriptive_plan.specs == ()
     assert descriptive_plan.products == ()
+
+    descriptive_products = plan_record_closure(
+        store,
+        seed_records=[seed.record_id],
+        policy="descriptive",
+        options=RecordPolicyOptions(include_products=True),
+    )
+    assert descriptive_products.records == (seed.record_id,)
+    assert descriptive_products.specs == ()
+    assert descriptive_products.products == (seed.record_id,)
+
+    product_dest = DirStore(tmp_path / "dest_descriptive_products")
+    product_report = copy_record_closure(
+        store,
+        product_dest,
+        seed_records=[seed.record_id],
+        policy="descriptive",
+        options=RecordPolicyOptions(include_products=True),
+    )
+    assert product_report.products_copied == (seed.record_id,)
+    copied = RecordStoreIO(product_dest).resolve_storage_ref(StorageRef.product_dir(seed.record_id, path="artifact"))
+    assert copied.joinpath("data.txt").read_text(encoding="utf-8") == "product"
 
     dest = DirStore(tmp_path / "dest_none")
     report = copy_record_closure(store, dest, seed_records=[seed.record_id], policy="none")

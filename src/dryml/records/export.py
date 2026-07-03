@@ -93,13 +93,15 @@ def plan_record_closure(
     if resolved_policy == RECORD_POLICY_DESCRIPTIVE:
         records.update(record_queue)
         specs.update(spec_queue)
+        if include_products:
+            products.update(_existing_product_record_ids(source_io, records))
         return RecordClosurePlan(
             policy=resolved_policy,
             source_store_ref=source_io._store_ref(),
             destination_store_ref=destination_ref,
             records=tuple(sorted(records)),
             specs=tuple(sorted(specs)),
-            products=(),
+            products=tuple(sorted(products)),
         )
 
     if resolved_policy == RECORD_POLICY_ALL:
