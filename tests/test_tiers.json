@@ -6,6 +6,7 @@
     "data": "medium",
     "environments": "medium",
     "execute": "medium",
+    "formats": "smoke",
     "jax": "heavy",
     "models": "heavy",
     "multi_framework": "heavy",

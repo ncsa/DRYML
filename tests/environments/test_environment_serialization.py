@@ -4,6 +4,7 @@ from pathlib import Path
 import dryml.environments as envs
 from dryml.environments.ids import content_id
 from dryml.environments.serialization import canonical_json_bytes, canonical_json_dumps, deep_freeze_json, json_ready
+from dryml.formats.ids import content_id as format_content_id
 
 
 def test_schema_constants_are_visible():
@@ -54,6 +55,23 @@ def test_content_id_changes_with_schema_version_and_data():
     assert first == content_id("envrec", 1, {"value": 1})
     assert first != content_id("envrec", 2, {"value": 1})
     assert first != content_id("envrec", 1, {"value": 2})
+
+
+def test_environment_ids_match_generic_format_ids():
+    record = envs.EnvironmentRecord(
+        python=envs.PythonRecord("3.11.8", "CPython"),
+        platform=envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
+        distributions={"dryml": envs.PackageRecord("dryml", "0.3.0")},
+        dryml=envs.DrymlRuntimeRecord(schema_versions={"environment_record": 1}),
+    )
+    requirement = envs.EnvironmentRequirement(requirements=("dryml>=0.3",))
+    spec = envs.PythonExecutableSpec("/usr/bin/python", env={"A": "B"})
+    lock = envs.EnvironmentLockRef("conda-lock", "file:///tmp/conda-lock.yml", digest="sha256:abc")
+
+    assert record.id == format_content_id("envrec", record.schema_version, record.to_data())
+    assert requirement.id == format_content_id("envreq", requirement.schema_version, requirement.to_data())
+    assert spec.id == format_content_id("envspec", spec.schema_version, spec.to_data())
+    assert lock.id == format_content_id("envlock", lock.schema_version, lock.to_data())
 
 
 def test_from_data_ignores_unknown_fields_and_preserves_schema_version():
