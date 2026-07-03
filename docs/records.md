@@ -25,7 +25,8 @@ records/
         annotation/<annotation-id>.json
         generic/<spec-id>.json
     indexes/
-        optional accelerator data
+        ref-index-v1.json
+        ref-index-v1.dirty
 products/
     <record-id>/
         derived product bytes
@@ -81,7 +82,7 @@ Specs use the same envelope pattern with family-specific schemas and ID prefixes
 | `annotation` | `annotation` | `dryml.annotation.v1` | `annotation` |
 | `generic` | `generic` | caller supplied | `spec` |
 
-Operation, world, runtime, and annotation specs are placeholders in Sprint 1. They are interned JSON specs only; they do not implement execution, dispatch, worlds, providers, or runtime behavior.
+Operation specs now support Sprint 2 `function_call` and `method_call` payloads through `dryml.operations`. They are interned JSON specs only; they do not implement execution, dispatch, worlds, providers, or runtime behavior. World, runtime, and annotation specs remain metadata placeholders.
 
 Spec envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload` for the same identity reason as records.
 
@@ -99,6 +100,46 @@ Record refs serialize compactly as the raw record ID. Located refs serialize as 
 ```
 
 Located refs are stable within the current repo/session. They are not guaranteed to be globally dereferenceable.
+
+## Reference Scanning
+
+`dryml.records.scanner` scans validated record/spec `payload` JSON for reserved DRYML references. Metadata and top-level IDs are not scanned by default because they are not semantic identity fields.
+
+The scanner recognizes:
+
+- raw CDef IDs such as `cdef-v4-...` as materializing CDef mentions;
+- non-materializing CDef refs such as `ref(cdef-v4-...)`;
+- reserved content IDs such as `record-v1-*`, `op-v1-*`, `repr-v1-*`, `envreq-v1-*`, `worldreq-v1-*`, `world-v1-*`, and `runtime-v1-*`;
+- exact literal escapes such as `{"$literal": "cdef-v4-..."}` as opaque values that produce no mention.
+
+Malformed literal escapes and malformed reserved-looking strings fail loudly instead of being ignored.
+
+Known typed keys are also recognized and validated. Examples include `subject_cdef_id`, `owner_cdef_id`, `input_cdef_ids`, `output_cdef_ids`, `operation_id`, `representation_id`, `environment_requirement_id`, `world_requirement_id`, `world_id`, `runtime_id`, `record_id`, and `derived_from`. Prefix mismatches such as `operation_id="repr-v1-*"` are rejected.
+
+Scanner output uses deterministic JSON Pointer paths such as `/payload/storage/0/subject_cdef_id`.
+
+## Reference Index
+
+`RecordStoreIO.rebuild_ref_index()` rebuilds a store-local JSON index at:
+
+```text
+records/indexes/ref-index-v1.json
+```
+
+The index is derived data. It contains source records/specs plus scanner mentions and can be deleted and rebuilt from authoritative JSON sidecars. It is canonical JSON and does not use SQLite.
+
+When `write_record()` or `write_spec()` changes canonical bytes after an index exists, `RecordStoreIO` writes `records/indexes/ref-index-v1.dirty`. Idempotent writes of identical bytes do not mark the index dirty.
+
+Query helpers include:
+
+```python
+records.find_mentions(target_id=cdef_id, target_kind="cdef")
+records.find_records_mentioning_cdef(cdef_id)
+records.find_specs_mentioning_cdef(cdef_id, family="operation")
+records.find_operation_specs_for_cdef(cdef_id, cdef_semantics="materialize")
+```
+
+`refresh="auto"` rebuilds when the index is missing, dirty, or corrupt. `refresh=True` always rebuilds. `refresh=False` requires a present, clean, valid index and raises a clear index error otherwise.
 
 ## StorageRef
 
@@ -129,8 +170,8 @@ located = records.write_record(record)
 loaded = records.read_record(located.record_id)
 ```
 
-Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewriting the same ID with identical bytes is idempotent. Rewriting the same ID with different bytes is rejected unless the caller explicitly opts into overwrite behavior.
+Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewriting the same ID with identical bytes is idempotent. Rewriting the same ID with different bytes is rejected unless the caller explicitly opts into overwrite behavior. Changed record/spec writes mark the optional reference index dirty when index tracking already exists.
 
 ## Non-Goals
 
-Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Recursive scanners, provenance queries, operation call semantics, dispatch/runtime/world behavior, adapter resolution, and automatic save/export record policies are future work.
+Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Sprint 2 adds operation-call metadata, recursive scanners, and store-local reference queries, but dispatch/runtime/world behavior, adapter resolution, and automatic save/export record policies remain future work.

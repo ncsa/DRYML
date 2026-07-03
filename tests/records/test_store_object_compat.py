@@ -5,6 +5,7 @@ from pathlib import Path
 from dryml.core2 import Object, Repo, load_object
 from dryml.core2.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
+from dryml.operations import make_function_call_spec
 from dryml.records import RecordStoreIO, StorageRef, make_record, make_spec
 
 
@@ -70,3 +71,33 @@ def test_sidecars_do_not_change_cdef_hashes_or_hydrate_index(tmp_path):
     assert obj.definition.stable_hash() == before
     assert [cdef.stable_hash() for cdef in store.hydrate_index()] == [before]
     assert io.read_record(record_ref.record_id)["payload"] == {"x": 1}
+
+
+def test_operation_specs_and_ref_index_do_not_affect_object_save_load(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = RecordCompatLeaf("x", repo=repo)
+    repo.save_object(obj, main=True)
+    repo.flush()
+    before = obj.definition.stable_hash()
+    cdef_id = format_cdef_id(before)
+    io = RecordStoreIO(store)
+
+    op_ref = io.write_spec(make_function_call_spec("pkg.mod:run", args=[cdef_id]), family="operation")
+    io.rebuild_ref_index()
+
+    assert obj.definition.stable_hash() == before
+    assert [cdef.stable_hash() for cdef in store.hydrate_index()] == [before]
+    assert io.find_operation_specs_for_cdef(cdef_id, refresh=False)[0].spec_id == op_ref.spec_id
+    assert load_object(repo=DirStore(tmp_path / "store")).definition == obj.definition
+
+
+def test_repo_save_does_not_create_operation_specs_or_ref_index(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = RecordCompatLeaf("x", repo=repo)
+
+    repo.save(obj)
+
+    assert not (tmp_path / "store" / "records" / "specs" / "operation").exists()
+    assert not (tmp_path / "store" / "records" / "indexes" / "ref-index-v1.json").exists()

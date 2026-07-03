@@ -6,7 +6,7 @@ import os
 import tempfile
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dryml.formats.canonical import canonical_json_bytes, canonical_json_load_bytes
 from dryml.formats.errors import CanonicalJSONError, ContentIDError
@@ -57,6 +57,20 @@ class RecordStoreIO:
         return self.records_dir / "indexes"
 
     @property
+    def ref_index_path(self) -> Path:
+        """Return the optional JSON reference-index path."""
+
+        from .index import RECORD_REF_INDEX_FILENAME
+
+        return self.indexes_dir / RECORD_REF_INDEX_FILENAME
+
+    @property
+    def ref_index_dirty_path(self) -> Path:
+        """Return the optional JSON reference-index dirty marker path."""
+
+        return self.indexes_dir / "ref-index-v1.dirty"
+
+    @property
     def products_dir(self) -> Path:
         """Return ``<base>/products``."""
 
@@ -91,7 +105,9 @@ class RecordStoreIO:
         validate_record(attached)
         record_id = attached["id"]
         path = self._record_path(record_id)
-        self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
+        changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
+        if changed:
+            self._mark_ref_index_dirty_if_tracking()
         return LocatedRecordRef(store_ref=self._store_ref(), record_id=record_id)
 
     def read_record(self, record_id: str) -> dict[str, Any]:
@@ -141,7 +157,9 @@ class RecordStoreIO:
         if resolved_family is None:
             raise SpecValidationError("spec family is required for unknown spec ID prefix", context={"spec_id": spec_id})
         path = self._spec_path(spec_id, resolved_family)
-        self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
+        changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
+        if changed:
+            self._mark_ref_index_dirty_if_tracking()
         return LocatedSpecRef(store_ref=self._store_ref(), spec_id=spec_id, kind=resolved_family)
 
     def read_spec(self, spec_id: str, *, family: str | None = None) -> dict[str, Any]:
@@ -234,6 +252,130 @@ class RecordStoreIO:
             return path
         raise StorageRefError("blob storage refs cannot be resolved in Sprint 1", context={"blob_id": storage_ref.blob_id})
 
+    def mark_ref_index_dirty(self) -> None:
+        """Mark the optional record reference index as stale."""
+
+        self.indexes_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.ref_index_dirty_path.with_suffix(self.ref_index_dirty_path.suffix + ".tmp")
+        tmp_path.write_text("dirty\n", encoding="utf-8")
+        os.replace(tmp_path, self.ref_index_dirty_path)
+
+    def clear_ref_index_dirty(self) -> None:
+        """Clear the optional record reference index dirty marker if present."""
+
+        try:
+            self.ref_index_dirty_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def ref_index_is_dirty(self) -> bool:
+        """Return whether the optional reference index is marked dirty."""
+
+        return self.ref_index_dirty_path.exists()
+
+    def rebuild_ref_index(self):
+        """Rebuild ``records/indexes/ref-index-v1.json`` from record/spec JSON."""
+
+        from .index import RecordRefIndexRebuildReport, build_record_ref_index
+
+        index, records_scanned, specs_scanned = build_record_ref_index(self)
+        payload = canonical_json_bytes(index.to_json())
+        changed = not self.ref_index_path.exists() or self.ref_index_path.read_bytes() != payload
+        self.indexes_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", dir=self.indexes_dir, prefix=f".{self.ref_index_path.name}.", delete=False) as tmp:
+                tmp.write(payload)
+                tmp_path = Path(tmp.name)
+            os.replace(tmp_path, self.ref_index_path)
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink()
+        self.clear_ref_index_dirty()
+        return RecordRefIndexRebuildReport(
+            store_ref=self._store_ref(),
+            changed=changed,
+            source_count=index.source_count,
+            mention_count=index.mention_count,
+            records_scanned=records_scanned,
+            specs_scanned=specs_scanned,
+            index_path=str(self.ref_index_path),
+        )
+
+    def read_ref_index(self):
+        """Read and validate the optional JSON reference index."""
+
+        from .index import RecordRefIndexMissing, RecordRefIndexValidationError, validate_record_ref_index
+
+        if not self.ref_index_path.exists():
+            raise RecordRefIndexMissing("record reference index is missing", context={"path": str(self.ref_index_path)})
+        try:
+            data = canonical_json_load_bytes(self.ref_index_path.read_bytes())
+        except (OSError, CanonicalJSONError) as exc:
+            raise RecordRefIndexValidationError("record reference index could not be read", context={"error": str(exc)}) from exc
+        return validate_record_ref_index(data)
+
+    def find_mentions(
+        self,
+        *,
+        target_id: str | None = None,
+        target_kind: str | None = None,
+        cdef_semantics: str | None = None,
+        source_kind: str | None = None,
+        source_family: str | None = None,
+        refresh: bool | Literal["auto"] = "auto",
+    ):
+        """Query reference mentions from the optional JSON reference index."""
+
+        index = self._ref_index_for_query(refresh=refresh)
+        return index.filter_mentions(
+            target_id=target_id,
+            target_kind=target_kind,
+            cdef_semantics=cdef_semantics,
+            source_kind=source_kind,
+            source_family=source_family,
+        )
+
+    def find_records_mentioning_cdef(
+        self,
+        cdef_id: str,
+        *,
+        cdef_semantics: Literal["materialize", "reference"] | None = None,
+        refresh: bool | Literal["auto"] = "auto",
+    ) -> tuple[LocatedRecordRef, ...]:
+        """Return located records whose payloads mention *cdef_id*."""
+
+        parse_cdef_id(cdef_id)
+        index = self._ref_index_for_query(refresh=refresh)
+        mentions = index.filter_mentions(target_id=cdef_id, target_kind="cdef", cdef_semantics=cdef_semantics, source_kind="record")
+        return index.located_record_refs(mentions)
+
+    def find_specs_mentioning_cdef(
+        self,
+        cdef_id: str,
+        *,
+        family: str | None = None,
+        cdef_semantics: Literal["materialize", "reference"] | None = None,
+        refresh: bool | Literal["auto"] = "auto",
+    ) -> tuple[LocatedSpecRef, ...]:
+        """Return located specs whose payloads mention *cdef_id*."""
+
+        parse_cdef_id(cdef_id)
+        index = self._ref_index_for_query(refresh=refresh)
+        mentions = index.filter_mentions(target_id=cdef_id, target_kind="cdef", cdef_semantics=cdef_semantics, source_kind="spec", source_family=family)
+        return index.located_spec_refs(mentions)
+
+    def find_operation_specs_for_cdef(
+        self,
+        cdef_id: str,
+        *,
+        cdef_semantics: Literal["materialize", "reference"] | None = None,
+        refresh: bool | Literal["auto"] = "auto",
+    ) -> tuple[LocatedSpecRef, ...]:
+        """Return located operation specs whose payloads mention *cdef_id*."""
+
+        return self.find_specs_mentioning_cdef(cdef_id, family="operation", cdef_semantics=cdef_semantics, refresh=refresh)
+
     def _record_path(self, record_id: str) -> Path:
         return self.items_dir / f"{record_id}.json"
 
@@ -246,14 +388,39 @@ class RecordStoreIO:
             return str(catalog_key())
         return os.path.abspath(os.fspath(self.store.base_dir))
 
+    def _mark_ref_index_dirty_if_tracking(self) -> None:
+        if self.ref_index_path.exists() or self.indexes_dir.exists():
+            self.mark_ref_index_dirty()
+
+    def _ref_index_for_query(self, *, refresh: bool | Literal["auto"]):
+        from .index import RecordRefIndexDirty, RecordRefIndexMissing, RecordRefIndexValidationError
+
+        if refresh is True:
+            self.rebuild_ref_index()
+            return self.read_ref_index()
+        if refresh is False:
+            if self.ref_index_is_dirty():
+                raise RecordRefIndexDirty("record reference index is dirty", context={"path": str(self.ref_index_dirty_path)})
+            return self.read_ref_index()
+        if refresh != "auto":
+            raise RecordIOError("refresh must be True, False, or 'auto'", context={"refresh": refresh})
+        try:
+            if self.ref_index_is_dirty():
+                raise RecordRefIndexDirty("record reference index is dirty")
+            return self.read_ref_index()
+        except (RecordRefIndexMissing, RecordRefIndexDirty, RecordRefIndexValidationError):
+            self.rebuild_ref_index()
+            return self.read_ref_index()
+
     @staticmethod
-    def _write_json(path: Path, data: Mapping[str, Any], *, overwrite: bool, error_cls: type[RecordIOError]) -> None:
+    def _write_json(path: Path, data: Mapping[str, Any], *, overwrite: bool, error_cls: type[RecordIOError]) -> bool:
         payload = canonical_json_bytes(data)
-        if path.exists() and not overwrite:
+        if path.exists():
             existing = path.read_bytes()
             if existing == payload:
-                return
-            raise error_cls("sidecar already exists with different canonical bytes")
+                return False
+            if not overwrite:
+                raise error_cls("sidecar already exists with different canonical bytes")
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = None
         try:
@@ -261,6 +428,7 @@ class RecordStoreIO:
                 tmp.write(payload)
                 tmp_path = Path(tmp.name)
             os.replace(tmp_path, path)
+            return True
         finally:
             if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink()

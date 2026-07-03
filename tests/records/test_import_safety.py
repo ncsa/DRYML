@@ -40,3 +40,15 @@ assert "torch" not in sys.modules
 assert "tensorflow" not in sys.modules
         """
     )
+
+
+def test_scanner_and_index_imports_are_lightweight():
+    run_probe(
+        """
+import sys
+import dryml.records.scanner
+import dryml.records.index
+for name in ["dryml.core2", "dryml.execute", "dryml.context", "dryml.environments", "tensorflow", "torch", "jax", "ray"]:
+    assert name not in sys.modules, name
+        """
+    )
