@@ -79,17 +79,22 @@ class ProcessAllocation:
         if not isinstance(accelerators, Mapping):
             raise WorldSpecValidationError("allocation accelerators must be a mapping")
         env = data.get("env") or {}
+        devices = resources.get("devices") or {}
+        metadata = data.get("metadata") or {}
+        for name, value in (("env", env), ("devices", devices), ("metadata", metadata)):
+            if not isinstance(value, Mapping):
+                raise WorldSpecValidationError(f"process allocation {name} must be a mapping")
         return cls(
             replica=_as_nonneg_int("replica", data.get("replica")),
             rank=_as_nonneg_int("rank", data.get("rank")),
             local_rank=_as_nonneg_int("local_rank", data.get("local_rank")),
             cpus=tuple(_as_nonneg_int("cpu", cpu) for cpu in resources.get("cpus", ())),
             memory=parse_byte_size(resources.get("memory")),
-            accelerators={str(key): tuple(value) for key, value in accelerators.items()},
-            devices=dict(resources.get("devices") or {}),
+            accelerators={str(key): tuple(_require_sequence(f"accelerators.{key}", value)) for key, value in accelerators.items()},
+            devices=dict(devices),
             environment=data.get("environment"),
             env={str(key): str(value) for key, value in env.items()},
-            metadata=dict(data.get("metadata") or {}),
+            metadata=dict(metadata),
         )
 
     def to_data(self) -> dict[str, Any]:
@@ -210,6 +215,12 @@ def _as_nonneg_int(name: str, value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise WorldSpecValidationError(f"{name} must be an integer >= 0", context={"value": value})
     return value
+
+
+def _require_sequence(path: str, value: Any) -> tuple[Any, ...]:
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        raise WorldSpecValidationError("allocation sequence must be a non-string sequence", context={"path": path, "type": type(value).__name__})
+    return tuple(value)
 
 
 __all__ = [

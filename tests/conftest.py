@@ -4,6 +4,10 @@ import builtins
 import os
 import sys
 
+_CORE_HELPERS = os.path.join(os.path.dirname(__file__), "core")
+if _CORE_HELPERS not in sys.path:
+    sys.path.insert(0, _CORE_HELPERS)
+
 pytest_plugins = ("timing_plugin",)
 
 try:

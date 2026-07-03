@@ -1,4 +1,7 @@
+import pytest
+
 import dryml.worlds as worlds
+from dryml.worlds.errors import WorldSpecValidationError
 
 
 def allocation_roles(gpus=()):
@@ -43,3 +46,21 @@ def test_allocation_is_separate_from_requested_world_spec():
     assert world_spec["schema"] == "dryml.world.v1"
     assert allocation_spec["schema"] == "dryml.world_allocation.v1"
     assert world_spec["id"] != allocation_spec["id"]
+
+
+def test_allocation_rejects_scalar_accelerator_assignment():
+    with pytest.raises(WorldSpecValidationError):
+        worlds.WorldAllocation.from_data(
+            {
+                "roles": {
+                    "trainer": [
+                        {
+                            "replica": 0,
+                            "rank": 0,
+                            "local_rank": 0,
+                            "resources": {"accelerators": {"gpu": "cuda0"}},
+                        }
+                    ]
+                }
+            }
+        )

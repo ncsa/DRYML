@@ -23,12 +23,14 @@ World and runtime specs are canonical JSON sidecars written through `RecordStore
 
 ## Runtime Setup Order
 
-Workers and explicit inline execution should derive a `RuntimeAllocationView` from `WorldAllocation`, enter runtime mode, build/apply device visibility and bootstrap plans, then import frameworks or materialize objects.
+Workers and explicit inline execution should derive a `RuntimeAllocationView` from `WorldAllocation`, enter runtime mode, build/apply device visibility and bootstrap plans, then import frameworks or materialize objects. Framework-backed DRYML modules should import heavy frameworks only after `apply_runtime_bootstrap_plan(..., phase="pre_import")` has marked the process bootstrapped.
 
-Orchestrator and probe processes default to hidden workload accelerators through the `none` device visibility policy. Worker processes default to `assigned`, exposing only assigned devices such as `CUDA_VISIBLE_DEVICES=0`.
+Orchestrator and probe processes default to hidden workload accelerators through the `none` device visibility policy. Worker processes default to `assigned`, exposing only assigned devices such as `CUDA_VISIBLE_DEVICES=0` and hiding unassigned CUDA, HIP/ROCR, and XLA devices.
+
+Legacy `Compute.__compute_reqs__` dictionaries are still supported as a transitional bridge. They are checked against the active `RuntimeAllocationView`; a CPU-only allocation does not satisfy a legacy GPU requirement.
 
 ## Legacy Packages
 
 `dryml.context` is retained as a legacy compatibility surface for older code. New code should use `dryml.worlds` and `dryml.runtime` directly.
 
-`dryml.execute` is retained as legacy local pickled-callable execution pending dispatch v2. Its worker entry path now enters `dryml.runtime` worker mode instead of using `dryml.context` as the architectural center.
+`dryml.execute` is retained as legacy local pickled-callable execution pending dispatch v2. Its subprocess worker entry path enters `dryml.runtime` worker mode and applies runtime bootstrap before loading the callable or materializing objects. Inline execution stays in the caller's current runtime and rejects legacy resource requirements unless a future explicit inline-allocation path is added.

@@ -43,6 +43,16 @@ def test_fake_already_imported_framework_conflict_is_clear(monkeypatch):
     assert excinfo.value.context["framework"] == "torch"
 
 
+def test_default_bootstrap_policy_validates_major_frameworks(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"plain": {}}, "device_visibility": {"policy": "assigned"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.RuntimeAllocationView(cpus=(0,)))
+
+    with pytest.raises(FrameworkImportSafetyError) as excinfo:
+        runtime.apply_runtime_bootstrap_plan(plan, environ={})
+    assert excinfo.value.context["framework"] == "torch"
+
+
 def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):
     calls = {}
 
@@ -63,7 +73,7 @@ def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):
         }
     )
     allocation = runtime.RuntimeAllocationView(cpus=(2, 3), accelerators={"gpu": (0,)})
-    plan = runtime.build_runtime_bootstrap_plan(spec, allocation)
+    plan = runtime.build_runtime_bootstrap_plan(spec, allocation, policy=runtime.FrameworkBootstrapPolicy(("plain",)))
 
     runtime.apply_runtime_bootstrap_plan(plan)
 

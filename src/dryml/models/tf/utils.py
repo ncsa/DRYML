@@ -1,29 +1,46 @@
 from __future__ import annotations
 
-import tensorflow as tf
 import inspect
 from typing import Any
 from collections.abc import Mapping
 
 
-class keras_train_spec_updater(tf.keras.callbacks.Callback):
-    def __init__(self, train_spec, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.train_spec = train_spec
+def _tensorflow():
+    from dryml.runtime import assert_framework_import_safe
 
-    def on_epoch_end(self, epoch, logs=None):
-        # Advance the train spec at end of an epoch
-        self.train_spec.advance()
+    assert_framework_import_safe("tensorflow")
+    import tensorflow as tf
+    return tf
 
 
-class keras_callback_wrapper(tf.keras.callbacks.Callback):
-    def __init__(self, callback, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.callback = callback
+class keras_train_spec_updater:
+    def __new__(cls, train_spec, *args, **kwargs):
+        tf = _tensorflow()
 
-    def on_epoch_end(self, epoch, logs=None):
-        # Call the callback at the end of the epoch
-        self.callback()
+        class _KerasTrainSpecUpdater(tf.keras.callbacks.Callback):
+            def __init__(self, train_spec, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.train_spec = train_spec
+
+            def on_epoch_end(self, epoch, logs=None):
+                self.train_spec.advance()
+
+        return _KerasTrainSpecUpdater(train_spec, *args, **kwargs)
+
+
+class keras_callback_wrapper:
+    def __new__(cls, callback, *args, **kwargs):
+        tf = _tensorflow()
+
+        class _KerasCallbackWrapper(tf.keras.callbacks.Callback):
+            def __init__(self, callback, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.callback = callback
+
+            def on_epoch_end(self, epoch, logs=None):
+                self.callback()
+
+        return _KerasCallbackWrapper(callback, *args, **kwargs)
 
 
 def save_tf_obj_weights(obj, path):
@@ -80,7 +97,7 @@ def tf_signature_discovery(
       Python call signature where possible.
     """
     import numpy as np
-    import tensorflow as tf
+    tf = _tensorflow()
 
     example_kwargs = dict(example_kwargs or {})
 
@@ -293,7 +310,6 @@ def tf_signature_discovery(
 
     # 3) Keras symbolic model signature if present.
     try:
-        import tensorflow as tf  # noqa: F401
         if isinstance(obj, tf.keras.Model):
             sym = _discover_symbolic_keras_signature(obj)
             if sym is not None:

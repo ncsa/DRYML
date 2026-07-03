@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -50,6 +51,10 @@ def check_world_spec_satisfies_requirement(world: WorldSpec, requirement: WorldR
         _check_count(role_req.resources.memory, memory, f"/roles/{role_name}/process/resources/memory", issues)
         for accel, constraint in role_req.resources.accelerators.items():
             _check_count(constraint, role_spec.process.resources.accelerators.get(accel, 0), f"/roles/{role_name}/process/resources/accelerators/{accel}", issues)
+        for device, constraint in role_req.resources.devices.items():
+            _check_count(constraint, _count_resource_value(role_spec.process.resources.devices.get(device)), f"/roles/{role_name}/process/resources/devices/{device}", issues)
+        for name, constraint in role_req.resources.named.items():
+            _check_count(constraint, _count_resource_value(role_spec.process.resources.named.get(name)), f"/roles/{role_name}/process/resources/named/{name}", issues)
         _check_topology(role_req.topology, role_spec.replicas, f"/roles/{role_name}/topology", issues)
     return CompatibilityReport(tuple(issues))
 
@@ -70,6 +75,10 @@ def check_allocation_satisfies_requirement(allocation: WorldAllocation, requirem
             _check_count(role_req.resources.memory, process.memory or 0, f"{base}/memory", issues)
             for accel, constraint in role_req.resources.accelerators.items():
                 _check_count(constraint, len(process.accelerators.get(accel, ())), f"{base}/accelerators/{accel}", issues)
+            for device, constraint in role_req.resources.devices.items():
+                _check_count(constraint, _count_resource_value(process.devices.get(device)), f"{base}/devices/{device}", issues)
+            for name, constraint in role_req.resources.named.items():
+                _check_count(constraint, _count_resource_value(process.metadata.get(name)), f"{base}/named/{name}", issues)
         _check_topology(role_req.topology, len(allocations), f"/roles/{role_name}/topology", issues)
     return CompatibilityReport(tuple(issues))
 
@@ -84,12 +93,33 @@ def _check_topology(topology: dict[str, Any] | Any, replicas: int, path: str, is
         return
     if topology.get("single_process") is True and replicas != 1:
         issues.append(_issue(f"{path}/single_process", "single_process requires exactly one replica", expected=True, actual=replicas))
-    for key in sorted(set(topology) - {"single_process", "collectives", "shared_filesystem"}):
-        issues.append(CompatibilityIssue("warning", f"{path}/{key}", "unsupported topology field was ignored", actual=topology[key]))
+    for key in sorted(set(topology) - {"single_process"}):
+        value = topology[key]
+        if key in {"collectives", "shared_filesystem"} and value not in (None, False):
+            issues.append(_issue(f"{path}/{key}", "topology field is not enforced by this compatibility checker", expected="unsupported/false", actual=value))
+        elif key not in {"collectives", "shared_filesystem"}:
+            issues.append(CompatibilityIssue("warning", f"{path}/{key}", "unsupported topology field was ignored", actual=value))
 
 
 def _issue(path: str, message: str, *, expected: Any = None, actual: Any = None) -> CompatibilityIssue:
     return CompatibilityIssue("error", path, message, expected=expected, actual=actual, source="world_requirement")
+
+
+def _count_resource_value(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (str, bytes)):
+        return 1
+    if isinstance(value, Mapping):
+        return len(value)
+    try:
+        return len(value)
+    except TypeError:
+        return 1
 
 
 __all__ = [

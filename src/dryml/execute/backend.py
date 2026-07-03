@@ -55,7 +55,7 @@ class InlineFuture(ExecutionFuture):
         self._response = None
         self._exception = None
         try:
-            self._response = execute_request(request)
+            self._response = execute_request(request, runtime_mode=None)
         except BaseException as exc:
             self._exception = exc
 
@@ -86,6 +86,8 @@ class InlineBackend(BackendBase):
     def submit(self, request, *, env: Mapping[str, str] | None = None) -> ExecutionFuture:
         if env:
             raise ValueError("InlineBackend cannot apply child-only environment overrides.")
+        if request.context_reqs:
+            raise ExecutionError("InlineBackend cannot satisfy legacy resource requirements without an explicit active runtime allocation.")
         return InlineFuture(request)
 
 

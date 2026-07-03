@@ -10,6 +10,7 @@ from typing import Any
 from .allocation import NoAllocation, RuntimeAllocationView
 from .devices import DeviceVisibilityPlan, apply_device_visibility_plan, build_device_visibility_plan
 from .frameworks import FrameworkBootstrapAdapter, FrameworkBootstrapResult, default_adapters
+from .guards import BOOTSTRAP_MARKER_ENV
 from .specs import RuntimeContextSpec
 
 
@@ -39,7 +40,7 @@ def build_runtime_bootstrap_plan(runtime_spec: RuntimeContextSpec | Mapping[str,
     adapter_map = dict(default_adapters())
     if adapters:
         adapter_map.update(adapters)
-    selected = policy.frameworks if policy else tuple(dict.fromkeys(("plain", *spec.frameworks.keys())))
+    selected = (policy or FrameworkBootstrapPolicy()).frameworks
     framework_results = {name: adapter_map[name].build_plan(spec, allocation_view, visibility_plan) for name in selected if name in adapter_map}
     env_updates: dict[str, str] = dict(visibility_plan.env_updates)
     env_updates.update({str(key): str(value) for key, value in (env or {}).items()})
@@ -62,6 +63,7 @@ def apply_runtime_bootstrap_plan(plan: RuntimeBootstrapPlan, *, phase: str = "pr
             adapter_map[name].apply_pre_import(result, environ=environ)
         target = os.environ if environ is None else environ
         target.update(plan.env_updates)
+        target[BOOTSTRAP_MARKER_ENV] = "1"
         return
     if phase == "post_import":
         for name, result in plan.framework_results.items():

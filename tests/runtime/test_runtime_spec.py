@@ -26,3 +26,11 @@ def test_runtime_spec_id_changes_with_semantic_content_and_rejects_bad_payload()
     bad["payload"] = {"mode": "bad"}
     with pytest.raises(RuntimeSpecError):
         runtime.validate_runtime_spec(bad)
+
+
+def test_runtime_spec_rejects_non_mapping_framework_config():
+    with pytest.raises(RuntimeSpecError):
+        runtime.make_runtime_spec(frameworks={"torch": "bad"})
+
+    with pytest.raises(RuntimeSpecError):
+        runtime.RuntimeContextSpec.from_data({"frameworks": {"torch": "bad"}})

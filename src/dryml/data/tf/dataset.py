@@ -1,8 +1,16 @@
-from dryml.data import Dataset, \
-    NumpyDataset, util
+from __future__ import annotations
+
+from dryml.data import Dataset, GeneratorDataset, util
 from typing import Callable
-import tensorflow as tf
 import numpy as np
+
+
+def _tensorflow():
+    from dryml.runtime import assert_framework_import_safe
+
+    assert_framework_import_safe("tensorflow")
+    import tensorflow as tf
+    return tf
 
 
 class TFDataset(Dataset):
@@ -76,6 +84,7 @@ class TFDataset(Dataset):
         Apply a function to the X component of Dataset
         """
 
+        tf = _tensorflow()
         return TFDataset(
             self.ds.map(
                 lambda *t: func(t),
@@ -110,6 +119,7 @@ class TFDataset(Dataset):
         Get length of dataset. Will return Infinite if infinite,
         and unknown if it can't be determined.
         """
+        tf = _tensorflow()
         cardinality = self.ds.cardinality()
         if cardinality == tf.data.INFINITE_CARDINALITY:
             return np.inf
@@ -119,7 +129,7 @@ class TFDataset(Dataset):
 
     def numpy(self):
         """
-        Produce NumpyDataset from this TFDataset
+        Produce a Python generator-backed dataset from this TFDataset.
         """
 
         def numpy_transform(el):
@@ -133,11 +143,9 @@ class TFDataset(Dataset):
                 util.nestize(numpy_transform),
                 self.data_gen())
 
-        return NumpyDataset(
+        return GeneratorDataset(
             numpy_generator,
-            indexed=self.indexed,
-            supervised=self.supervised,
-            batch_size=self.batch_size)
+        )
 
     def tf(self):
         """

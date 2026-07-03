@@ -47,3 +47,24 @@ def test_allocation_satisfies_requirement_and_reports_gpu_failure():
     report = worlds.check_allocation_satisfies_requirement(bad, requirement())
     assert not report.ok
     assert any(issue.path.endswith("/accelerators/gpu") for issue in report.issues)
+
+
+def test_devices_and_named_requirements_are_checked():
+    req = worlds.WorldRequirement.from_data(
+        {"roles": {"trainer": {"resources": {"devices": {"infiniband": {"min": 1}}, "named": {"license": {"exact": 1}}}}}}
+    )
+    world = worlds.WorldSpec.from_data({"roles": {"trainer": {"process": {"resources": {"devices": {}, "named": {}}}}}})
+    report = worlds.check_world_spec_satisfies_requirement(world, req)
+    paths = {issue.path for issue in report.issues if issue.severity == "error"}
+
+    assert "/roles/trainer/process/resources/devices/infiniband" in paths
+    assert "/roles/trainer/process/resources/named/license" in paths
+
+
+def test_asserted_unimplemented_topology_is_not_ok():
+    req = worlds.WorldRequirement.from_data({"roles": {"trainer": {"topology": {"collectives": True}}}})
+    world = worlds.WorldSpec.from_data({"roles": {"trainer": {}}})
+    report = worlds.check_world_spec_satisfies_requirement(world, req)
+
+    assert not report.ok
+    assert any(issue.path.endswith("/collectives") for issue in report.issues)

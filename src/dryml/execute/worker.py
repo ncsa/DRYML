@@ -5,7 +5,7 @@ import traceback
 
 from dryml.core2 import Repo
 from dryml.core2.canonical import to_canonical
-from dryml.runtime import RuntimeAllocationView, RuntimeMode, enter_runtime
+from dryml.runtime import RuntimeAllocationView, RuntimeContextSpec, RuntimeMode, apply_runtime_bootstrap_plan, build_runtime_bootstrap_plan, enter_runtime
 
 from .protocol import (
     ExecutionResponse,
@@ -14,7 +14,7 @@ from .protocol import (
 )
 
 
-def execute_request(request) -> ExecutionResponse:
+def execute_request(request, *, runtime_mode: RuntimeMode | str | None = RuntimeMode.WORKER) -> ExecutionResponse:
     transfer_store = request.transfer_store.open()
     result_store = request.result_store.open()
     repo = Repo(stores=[transfer_store, result_store])
@@ -52,7 +52,14 @@ def execute_request(request) -> ExecutionResponse:
         )
 
     try:
-        with enter_runtime(RuntimeMode.WORKER, _allocation_from_legacy_context_reqs(request.context_reqs)):
+        if runtime_mode is None:
+            return run_call()
+        mode = RuntimeMode.coerce(runtime_mode)
+        allocation = _allocation_from_legacy_context_reqs(request.context_reqs)
+        spec = _runtime_spec_from_legacy_context_reqs(request.context_reqs, mode=mode)
+        with enter_runtime(mode, allocation, spec):
+            plan = build_runtime_bootstrap_plan(spec, allocation)
+            apply_runtime_bootstrap_plan(plan)
             return run_call()
     except BaseException as exc:
         return ExecutionResponse.failure(exc, traceback.format_exc())
@@ -80,6 +87,26 @@ def _allocation_from_legacy_context_reqs(context_reqs) -> RuntimeAllocationView:
         accelerators={"gpu": tuple(range(gpus))} if gpus else {},
         metadata={"source": "dryml.execute legacy context_reqs"},
     )
+
+
+def _runtime_spec_from_legacy_context_reqs(context_reqs, *, mode: RuntimeMode) -> RuntimeContextSpec:
+    framework_names = {"plain"}
+    for name in (context_reqs or {}):
+        framework_names.add(_legacy_framework_name(name))
+    return RuntimeContextSpec.from_data(
+        {
+            "mode": mode.value,
+            "device_visibility": {"policy": "assigned"},
+            "frameworks": {name: {} for name in sorted(framework_names)},
+            "metadata": {"source": "dryml.execute legacy context_reqs"},
+        }
+    )
+
+
+def _legacy_framework_name(name) -> str:
+    if name == "tf":
+        return "tensorflow"
+    return str(name)
 
 
 def main(argv=None) -> int:

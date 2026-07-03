@@ -54,17 +54,17 @@ def build_device_visibility_plan(runtime_spec: RuntimeContextSpec | Mapping[str,
             raise DeviceVisibilityError("inherit visibility requires explicit opt-in", context={"mode": resolved_mode.value})
         return DeviceVisibilityPlan(resolved_policy, {}, {}, remap_assigned=False)
     if resolved_policy is DeviceVisibilityPolicy.NONE:
-        return DeviceVisibilityPlan(resolved_policy, _hidden_env(), {"gpu": ()})
+        return DeviceVisibilityPlan(resolved_policy, _hidden_env(), {"gpu": (), "rocm": (), "xla": ()})
     if resolved_policy is DeviceVisibilityPolicy.ASSIGNED:
         if is_no_allocation(allocation_view):
             raise DeviceVisibilityError("assigned visibility requires an allocation", context={"mode": resolved_mode.value, "allocation": repr(allocation_view)})
-        gpu_ids = tuple(str(item) for item in allocation_view.accelerators.get("gpu", ()))
-        return DeviceVisibilityPlan(resolved_policy, {"CUDA_VISIBLE_DEVICES": ",".join(gpu_ids)}, {"gpu": gpu_ids})
+        visible = _visible_from_mapping(allocation_view.accelerators)
+        return DeviceVisibilityPlan(resolved_policy, _visible_env(visible), visible)
     if resolved_policy is DeviceVisibilityPolicy.EXPLICIT:
         if not isinstance(explicit, Mapping):
             raise DeviceVisibilityError("explicit visibility requires a device map")
-        gpu_ids = tuple(str(item) for item in explicit.get("gpu", ()))
-        return DeviceVisibilityPlan(resolved_policy, {"CUDA_VISIBLE_DEVICES": ",".join(gpu_ids)}, {"gpu": gpu_ids}, remap_assigned=False)
+        visible = _visible_from_mapping(explicit)
+        return DeviceVisibilityPlan(resolved_policy, _visible_env(visible), visible, remap_assigned=False)
     raise DeviceVisibilityError("unknown device visibility policy", context={"policy": resolved_policy})
 
 
@@ -86,6 +86,22 @@ def _default_policy(mode: RuntimeMode) -> DeviceVisibilityPolicy:
 
 def _hidden_env() -> dict[str, str]:
     return {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "XLA_VISIBLE_DEVICES": ""}
+
+
+def _visible_from_mapping(devices: Mapping[str, Any]) -> dict[str, tuple[str, ...]]:
+    gpu_ids = tuple(str(item) for item in devices.get("gpu", devices.get("cuda", ())))
+    rocm_ids = tuple(str(item) for item in devices.get("rocm", devices.get("hip", devices.get("amd", ()))) )
+    xla_ids = tuple(str(item) for item in devices.get("xla", ()))
+    return {"gpu": gpu_ids, "rocm": rocm_ids, "xla": xla_ids}
+
+
+def _visible_env(devices: Mapping[str, tuple[str, ...]]) -> dict[str, str]:
+    return {
+        "CUDA_VISIBLE_DEVICES": ",".join(devices.get("gpu", ())),
+        "HIP_VISIBLE_DEVICES": ",".join(devices.get("rocm", ())),
+        "ROCR_VISIBLE_DEVICES": ",".join(devices.get("rocm", ())),
+        "XLA_VISIBLE_DEVICES": ",".join(devices.get("xla", ())),
+    }
 
 
 __all__ = ["DeviceVisibilityPlan", "DeviceVisibilityPolicy", "apply_device_visibility_plan", "build_device_visibility_plan"]

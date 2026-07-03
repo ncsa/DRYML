@@ -41,14 +41,23 @@ class RuntimeContextSpec:
         for name, value in (("device_visibility", device_visibility), ("frameworks", frameworks), ("limits", limits), ("env", env)):
             if not isinstance(value, Mapping):
                 raise RuntimeSpecError(f"{name} must be a mapping")
+        metadata = data.get("metadata") or {}
+        if not isinstance(metadata, Mapping):
+            raise RuntimeSpecError("metadata must be a mapping")
+        for key, value in frameworks.items():
+            if not isinstance(value, Mapping):
+                raise RuntimeSpecError("framework config must be a mapping", context={"framework": key, "type": type(value).__name__})
+        world_allocation_id = data.get("world_allocation_id")
+        if world_allocation_id is not None and not isinstance(world_allocation_id, str):
+            raise RuntimeSpecError("world_allocation_id must be a string")
         return cls(
             mode=RuntimeMode.coerce(data.get("mode", RuntimeMode.ORCHESTRATOR.value)),
             device_visibility=dict(device_visibility),
             frameworks={str(key): dict(value or {}) for key, value in frameworks.items()},
             limits=dict(limits),
             env={str(key): str(value) for key, value in env.items()},
-            metadata=dict(data.get("metadata") or {}),
-            world_allocation_id=data.get("world_allocation_id"),
+            metadata=dict(metadata),
+            world_allocation_id=world_allocation_id,
         )
 
     def to_data(self) -> dict[str, Any]:
@@ -70,15 +79,17 @@ class RuntimeContextSpec:
 def make_runtime_spec(*, mode: RuntimeMode | str = RuntimeMode.ORCHESTRATOR, device_visibility: Mapping[str, Any] | None = None, frameworks: Mapping[str, Mapping[str, Any]] | None = None, limits: Mapping[str, Any] | None = None, env: Mapping[str, str] | None = None, metadata: Mapping[str, Any] | None = None, world_allocation_id: str | None = None, kind: str = "runtime_context") -> dict[str, Any]:
     """Build a canonical ``runtime`` spec envelope."""
 
-    runtime_spec = RuntimeContextSpec(
-        mode=RuntimeMode.coerce(mode),
-        device_visibility=dict(device_visibility or {}),
-        frameworks={str(key): dict(value or {}) for key, value in (frameworks or {}).items()},
-        limits=dict(limits or {}),
-        env={str(key): str(value) for key, value in (env or {}).items()},
-        metadata=dict(metadata or {}),
-        world_allocation_id=world_allocation_id,
-    )
+    payload = {
+        "mode": RuntimeMode.coerce(mode).value,
+        "device_visibility": device_visibility or {},
+        "frameworks": frameworks or {},
+        "limits": limits or {},
+        "env": env or {},
+        "metadata": metadata or {},
+    }
+    if world_allocation_id is not None:
+        payload["world_allocation_id"] = world_allocation_id
+    runtime_spec = RuntimeContextSpec.from_data(payload)
     return make_spec(family="runtime", kind=kind, payload=runtime_spec.to_data())
 
 
