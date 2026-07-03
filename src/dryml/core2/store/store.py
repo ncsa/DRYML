@@ -41,6 +41,21 @@ class Store(ABC):
         """Return the store-local directory for an object's definition."""
         return self._object_dir(cdef)
 
+    def object_dir_for_cdef_id(self, cdef_id: str) -> str:
+        """Return the store-local object directory for a full CDef ID string.
+
+        Stores with non-standard object layouts may override this hook. The base
+        implementation matches the current shard layout and requires a full
+        64-character CDef digest.
+        """
+
+        from dryml.formats.refs import parse_cdef_id
+
+        parsed = parse_cdef_id(cdef_id)
+        if len(parsed.digest) != 64:
+            raise ValueError("object-dir refs require a full CDef digest for direct resolution")
+        return os.path.join(self.object_root_dir, parsed.digest[:2], parsed.digest)
+
     @property
     def records(self) -> "RecordStoreIO":
         """Return the optional record/spec sidecar IO facade for this store."""

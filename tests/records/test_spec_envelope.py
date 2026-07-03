@@ -63,3 +63,12 @@ def test_spec_rejects_mismatched_existing_id():
 
     with pytest.raises(SpecValidationError, match="does not match"):
         validate_spec(wrong, family="representation")
+
+
+def test_spec_rejects_unknown_top_level_fields_and_wrong_id_version():
+    spec = make_spec(family="representation", kind="repr", payload={})
+
+    with pytest.raises(SpecValidationError, match="unknown top-level"):
+        validate_spec(dict(spec, semantic="top"), family="representation")
+    with pytest.raises(SpecValidationError, match="schema version"):
+        spec_family_for_id("repr-v2-" + "a" * 64)

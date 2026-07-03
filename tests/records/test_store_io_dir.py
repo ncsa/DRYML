@@ -1,5 +1,6 @@
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +8,16 @@ from dryml.core2.store.dir import DirStore
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.refs import format_cdef_id
 from dryml.records import RecordIOError, RecordStoreIO, StorageRef, StorageRefError, attach_record_id, attach_spec_id, make_record, make_spec
+
+
+class HookedDirStore(DirStore):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.resolved_cdef_ids = []
+
+    def object_dir_for_cdef_id(self, cdef_id):
+        self.resolved_cdef_ids.append(cdef_id)
+        return super().object_dir_for_cdef_id(cdef_id)
 
 
 def test_fresh_dirstore_without_records_lists_empty(tmp_path):
@@ -82,3 +93,15 @@ def test_object_dir_resolution_requires_existing_full_digest(tmp_path):
         io.resolve_storage_ref(StorageRef.object_dir(format_cdef_id("a" * 16)))
 
     assert not os.path.exists(io.records_dir / "indexes")
+
+
+def test_object_dir_resolution_uses_store_resolver_hook(tmp_path):
+    store = HookedDirStore(tmp_path / "store")
+    cdef_id = format_cdef_id("b" * 64)
+    object_dir = store.object_dir_for_cdef_id(cdef_id)
+    os.makedirs(object_dir)
+
+    path = RecordStoreIO(store).resolve_storage_ref(StorageRef.object_dir(cdef_id))
+
+    assert path == Path(object_dir)
+    assert store.resolved_cdef_ids == [cdef_id, cdef_id]

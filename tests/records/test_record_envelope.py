@@ -39,6 +39,8 @@ def test_record_id_stable_and_payload_sensitive_but_metadata_ignored():
         ({"schema": "dryml.record.v1", "schema_version": 2, "kind": "stored_state", "payload": {}}, "schema_version"),
         ({"schema": "dryml.record.v1", "schema_version": 1, "kind": "stored_state", "payload": []}, "payload"),
         ({"schema": "dryml.record.v1", "schema_version": 1, "kind": "stored_state", "payload": {}, "metadata": []}, "metadata"),
+        ({"schema": "dryml.record.v1", "schema_version": 1, "kind": "unknown", "payload": {}}, "kind"),
+        ({"schema": "dryml.record.v1", "schema_version": 1, "kind": "stored_state", "payload": {}, "semantic": "top"}, "unknown top-level"),
     ],
 )
 def test_validate_record_rejects_malformed_records(record, match):

@@ -61,6 +61,8 @@ Records use the generic `dryml.formats` envelope shape:
 
 The record ID is computed from `schema`, `schema_version`, `kind`, and `payload`. It excludes `id`, `metadata`, file path, store locator, mtimes, and index contents. If a timestamp, backend version, or environment fact should affect identity, put it in `payload`, not `metadata`.
 
+Record envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload`. Sprint 1 record kinds are a closed set: `stored_state`, `data`, `execution`, `adapter`, `program`, `probe_report`, `compatibility_report`, and `lowering_report`.
+
 ## Spec Envelopes
 
 Specs use the same envelope pattern with family-specific schemas and ID prefixes:
@@ -81,9 +83,11 @@ Specs use the same envelope pattern with family-specific schemas and ID prefixes
 
 Operation, world, runtime, and annotation specs are placeholders in Sprint 1. They are interned JSON specs only; they do not implement execution, dispatch, worlds, providers, or runtime behavior.
 
+Spec envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload` for the same identity reason as records.
+
 ## References
 
-`RecordRef(record_id)` and `SpecRef(spec_id, kind=None)` validate content IDs without choosing a store. `LocatedRecordRef(store_ref, record_id)` and `LocatedSpecRef(store_ref, spec_id, kind=None)` add a store locator string for a specific copy.
+`RecordRef(record_id)` and `SpecRef(spec_id, kind=None)` validate content IDs without choosing a store. Unqualified `SpecRef` values must still use a known Sprint 1 spec prefix and schema version. `LocatedRecordRef(store_ref, record_id)` and `LocatedSpecRef(store_ref, spec_id, kind=None)` add a store locator string for a specific copy.
 
 Record refs serialize compactly as the raw record ID. Located refs serialize as objects:
 
@@ -110,7 +114,7 @@ StorageRef.blob("blob-v1-...", role="weights")
 
 Paths must be POSIX-style relative paths. Absolute paths, drive-prefixed paths, backslashes, empty components, and `..` traversal are rejected. `path="."` means the logical root.
 
-`RecordStoreIO.resolve_storage_ref()` resolves `object-dir` refs to the existing object directory and `product-dir` refs under `products/<record-id>/`. Product directories may be created with `create=True`; object directories are never fabricated. Blob resolution is a placeholder until blob storage exists.
+`RecordStoreIO.resolve_storage_ref()` resolves `object-dir` refs through `store.object_dir_for_cdef_id(cdef_id)` when the store provides that hook. The base `Store` hook matches the current `objects/<first-two-hex>/<digest>` layout and requires a full 64-hex CDef digest. Future store backends can override the hook without changing record JSON. Product-dir refs resolve under `products/<record-id>/`. Product directories may be created with `create=True`; object directories are never fabricated. Blob resolution is a placeholder until blob storage exists.
 
 ## Store IO
 

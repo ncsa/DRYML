@@ -207,9 +207,19 @@ class RecordStoreIO:
         storage_ref = ref if isinstance(ref, StorageRef) else StorageRef.from_json(ref)
         if storage_ref.kind == "object-dir":
             cdef = parse_cdef_id(storage_ref.subject_cdef_id)  # type: ignore[arg-type]
-            if len(cdef.digest) != 64:
-                raise StorageRefError("object-dir refs require a full CDef digest for direct resolution", context={"subject_cdef_id": cdef.raw})
-            root = Path(os.fspath(self.store.object_root_dir)) / cdef.digest[:2] / cdef.digest
+            resolver = getattr(self.store, "object_dir_for_cdef_id", None)
+            try:
+                if callable(resolver):
+                    root = Path(os.fspath(resolver(cdef.raw)))
+                else:
+                    if len(cdef.digest) != 64:
+                        raise StorageRefError("object-dir refs require a full CDef digest for direct resolution", context={"subject_cdef_id": cdef.raw})
+                    root = Path(os.fspath(self.store.object_root_dir)) / cdef.digest[:2] / cdef.digest
+            except StorageRefError:
+                raise
+            except Exception as exc:
+                message = str(exc) or "object-dir storage ref could not be resolved"
+                raise StorageRefError(message, context={"subject_cdef_id": cdef.raw, "error": str(exc)}) from exc
             path = root if storage_ref.path == "." else root / storage_ref.path
             if create:
                 raise StorageRefError("object-dir storage refs cannot create object directories")

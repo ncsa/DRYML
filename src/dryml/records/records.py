@@ -10,11 +10,13 @@ from dryml.formats.errors import ContentIDError, EnvelopeError
 from dryml.formats.ids import content_id, parse_content_id
 
 from .errors import RecordValidationError
+from .kinds import RECORD_KINDS
 
 
 RECORD_SCHEMA = "dryml.record.v1"
 RECORD_SCHEMA_VERSION = 1
 RECORD_ID_PREFIX = "record"
+_RECORD_TOP_LEVEL_FIELDS = frozenset({"schema", "schema_version", "id", "kind", "payload", "metadata"})
 
 
 def make_record(
@@ -93,6 +95,11 @@ def _validate_record_shape(record: Mapping[str, Any], *, kind: str | None = None
             "record schema_version mismatch",
             context={"expected": RECORD_SCHEMA_VERSION, "observed": record.get("schema_version")},
         )
+    unknown = set(record) - _RECORD_TOP_LEVEL_FIELDS
+    if unknown:
+        raise RecordValidationError("record contains unknown top-level fields", context={"fields": sorted(unknown)})
+    if record["kind"] not in RECORD_KINDS:
+        raise RecordValidationError("unknown record kind", context={"kind": record["kind"]})
 
 
 def _validate_record_id(record_id: str) -> None:

@@ -39,6 +39,15 @@ def test_spec_ref_json_round_trip_and_kind_prefix_validation():
         SpecRef(spec_id, kind="operation")
 
 
+def test_spec_ref_rejects_non_spec_prefix_and_wrong_schema_version():
+    with pytest.raises(SpecValidationError):
+        SpecRef(content_id("record", 1, {}))
+    with pytest.raises(SpecValidationError):
+        SpecRef(content_id("repr", 2, {}), kind="representation")
+    with pytest.raises(SpecValidationError):
+        SpecRef(content_id("repr", 2, {}))
+
+
 def test_located_spec_ref_json_round_trip_and_store_ref_required():
     spec_id = content_id("op", 1, {"x": 1})
     ref = LocatedSpecRef("store://local", spec_id, kind="operation")

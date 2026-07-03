@@ -146,18 +146,26 @@ def _validate_spec_id(spec_id: str, kind: str | None = None) -> None:
         parts = parse_content_id(spec_id)
     except ContentIDError as exc:
         raise SpecValidationError("invalid spec ID", context=exc.context) from exc
+    expected_kind = SPEC_FAMILY_BY_PREFIX.get(parts.prefix)
+    if expected_kind is None:
+        raise SpecValidationError("spec ID prefix is not a known spec family", context={"prefix": parts.prefix})
+    expected_version = SPEC_FAMILIES[expected_kind].schema_version
+    if parts.schema_version != expected_version:
+        raise SpecValidationError(
+            "spec ID schema version does not match spec family",
+            context={"kind": expected_kind, "expected_version": expected_version, "observed_version": parts.schema_version},
+        )
+    if kind is not None and kind not in SPEC_FAMILIES:
+        raise SpecValidationError("unknown spec ref kind", context={"kind": kind})
     if kind is None:
         return
-    if kind not in SPEC_FAMILIES:
-        raise SpecValidationError("unknown spec ref kind", context={"kind": kind})
     expected_prefix = SPEC_FAMILIES[kind].prefix
     if parts.prefix != expected_prefix:
         raise SpecValidationError(
             "spec ref kind does not match ID prefix",
             context={"kind": kind, "expected_prefix": expected_prefix, "observed_prefix": parts.prefix},
         )
-    expected_kind = SPEC_FAMILY_BY_PREFIX.get(parts.prefix)
-    if expected_kind is not None and expected_kind != kind:
+    if expected_kind != kind:
         raise SpecValidationError(
             "spec ref kind does not match known family",
             context={"kind": kind, "expected_kind": expected_kind},

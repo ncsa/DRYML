@@ -13,6 +13,9 @@ from .errors import SpecValidationError
 from .kinds import SPEC_FAMILIES, SPEC_FAMILY_BY_PREFIX, SPEC_FAMILY_BY_SCHEMA
 
 
+_SPEC_TOP_LEVEL_FIELDS = frozenset({"schema", "schema_version", "id", "kind", "payload", "metadata"})
+
+
 def make_spec(
     *,
     family: str,
@@ -94,7 +97,16 @@ def spec_family_for_id(spec_id: str) -> str | None:
         parts = parse_content_id(spec_id)
     except ContentIDError as exc:
         raise SpecValidationError("invalid spec ID", context=exc.context) from exc
-    return SPEC_FAMILY_BY_PREFIX.get(parts.prefix)
+    family = SPEC_FAMILY_BY_PREFIX.get(parts.prefix)
+    if family is None:
+        return None
+    expected_version = _family_info(family).schema_version
+    if parts.schema_version != expected_version:
+        raise SpecValidationError(
+            "spec ID schema version does not match spec family",
+            context={"family": family, "expected_version": expected_version, "observed_version": parts.schema_version},
+        )
+    return family
 
 
 def spec_dir_name(family: str) -> str:
@@ -122,6 +134,9 @@ def _validate_spec_shape(spec: Mapping[str, Any], *, family: str | None = None, 
             "spec schema_version mismatch",
             context={"expected": info.schema_version, "observed": spec.get("schema_version")},
         )
+    unknown = set(spec) - _SPEC_TOP_LEVEL_FIELDS
+    if unknown:
+        raise SpecValidationError("spec contains unknown top-level fields", context={"fields": sorted(unknown)})
     if "id" in spec:
         _validate_spec_id(spec["id"], family=resolved_family)
     return resolved_family
