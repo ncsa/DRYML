@@ -2,7 +2,7 @@
 
 `dryml.records` provides optional store-owned JSON sidecars for metadata that should not be part of DRYML object identity. Records and specs are canonical JSON documents owned by a store. They are not `Object` instances, do not participate in the object graph, and do not change `ConcreteDefinition` hashes or object state bytes.
 
-Save/export record policies are explicit. Calling `repo.save()` without a policy, or with `record_policy="none"`, writes the existing object layout only and creates no `records/`, no `products/`, and no record reference index. More inclusive policies must be requested by name.
+Save/export record policies are explicit. The default policy is now `descriptive`: calling `repo.save()` without a policy writes the existing object layout and emits direct descriptive sidecars for saved object state. Use `record_policy="none"` when a save must write object bytes only and create no `records/`, no `products/`, and no record reference index.
 
 ## Sidecar Layout
 
@@ -40,13 +40,13 @@ The public policy values are:
 
 | Policy | Behavior |
 |---|---|
-| `none` | Default. Save object bytes only. Do not create record/spec/product/index sidecars. |
-| `descriptive` | Save object bytes and emit direct `stored_state` records plus the default object-state representation spec. |
+| `none` | Save object bytes only. Do not create record/spec/product/index sidecars. |
+| `descriptive` | Default. Save object bytes and emit direct `stored_state` records plus the default object-state representation spec. For copy/export planning, include explicit seed records/specs only and do not expand referenced specs. |
 | `closure` | Include seed records and specs referenced by those records/specs. Do not follow provenance ancestry or products by default. |
 | `provenance` | Explicitly include record lineage such as `derived_from`, consumed/produced records, and existing execution/adapter/probe records that mention seeds. |
-| `all` | Include all records and specs in the selected source store. Products are included by default for `all`; indexes are still omitted as authoritative data. |
+| `all` | Include all records and specs in the selected source store. Existing product directories are included by default for `all`; indexes are still omitted as authoritative data. |
 
-Policy options are available through `RecordPolicyOptions`. `include_products=None` means the policy default: false for `none`, `descriptive`, `closure`, and `provenance`, and true for `all`. Set `include_products=True` to copy product directories for included records. Set `rebuild_index=True` to rebuild `records/indexes/ref-index-v1.json` after writes or copies. Set `overwrite_sidecars=True` only when replacing existing record/spec/product sidecars is intended. `include_indexes` defaults to false; indexes are derived and should normally be rebuilt in the destination rather than copied.
+Policy options are available through `RecordPolicyOptions`. `include_products=None` means the policy default: false for `none`, `descriptive`, `closure`, and `provenance`, and true for `all`. Set `include_products=True` to copy existing product directories for included records. Records without product directories are valid and are skipped. Set `rebuild_index=True` to rebuild `records/indexes/ref-index-v1.json` after writes or copies. Set `overwrite_sidecars=True` only when replacing existing record/spec/product sidecars is intended. Indexes are derived and should be rebuilt in the destination rather than copied.
 
 Example descriptive save:
 

@@ -15,12 +15,12 @@ class RecordCompatLeaf(Object):
         self.value = value
 
 
-def test_repo_save_does_not_create_records_by_default(tmp_path):
+def test_repo_save_policy_none_does_not_create_records(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = RecordCompatLeaf("x", repo=repo)
 
-    repo.save(obj)
+    repo.save(obj, record_policy="none")
 
     assert not (tmp_path / "store" / "records").exists()
 
@@ -28,7 +28,7 @@ def test_repo_save_does_not_create_records_by_default(tmp_path):
 def test_load_main_works_without_records(tmp_path):
     store = DirStore(tmp_path / "store")
     obj = RecordCompatLeaf("x")
-    obj.save(repo=store)
+    obj.save(repo=store, record_policy="none")
 
     reopened = DirStore(tmp_path / "store")
     assert not (tmp_path / "store" / "records").exists()

@@ -18,7 +18,7 @@ from dryml.records import (
 
 
 def test_policy_validation_and_representation_spec_are_stable():
-    assert normalize_record_policy(None) == "none"
+    assert normalize_record_policy(None) == "descriptive"
     assert normalize_record_policy("all") == "all"
     with pytest.raises(RecordPolicyError):
         normalize_record_policy("everything")
@@ -32,8 +32,19 @@ def test_policy_validation_and_representation_spec_are_stable():
     assert left["payload"]["storage_kind"] == "object-dir"
 
 
-def test_repo_save_default_none_and_options_create_no_records(tmp_path):
-    for kwargs in ({}, {"record_policy": "none"}, {"options": RepoSaveOptions(record_policy="none")}):
+def test_repo_save_default_is_descriptive(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=[store])
+
+    repo.save(objects.HelloStr(msg="test"))
+
+    io = RecordStoreIO(store)
+    assert len(list(io.iter_record_ids())) == 1
+    assert len(list(io.iter_spec_ids(family="representation"))) == 1
+
+
+def test_repo_save_explicit_none_and_options_create_no_records(tmp_path):
+    for kwargs in ({"record_policy": "none"}, {"options": RepoSaveOptions(record_policy="none")}):
         store = DirStore(tmp_path / f"store_{len(list(tmp_path.iterdir()))}")
         repo = Repo(stores=[store])
         repo.save(objects.HelloStr(msg="test"), **kwargs)

@@ -36,12 +36,7 @@ _PROVENANCE_RECORD_KINDS = {
     "compatibility_report",
     "lowering_report",
 }
-_PROVENANCE_RECORD_ROLES = {
-    "derived_from",
-    "record",
-    "consumed_record",
-    "produced_record",
-}
+_PROVENANCE_RECORD_ROLES = {"derived_from", "record", "consumed_record", "produced_record"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +65,6 @@ def plan_record_closure(
     """Build a record/spec/product closure from authoritative JSON sidecars."""
 
     resolved_policy = normalize_record_policy(policy)
-    if resolved_policy in {RECORD_POLICY_NONE, RECORD_POLICY_DESCRIPTIVE}:
-        resolved_policy = RECORD_POLICY_CLOSURE
     resolved_options = RecordPolicyOptions() if options is None else options
     source_io = source_store.records
     destination_ref = None if destination_store is None else destination_store.records._store_ref()
@@ -87,12 +80,34 @@ def plan_record_closure(
     provenance_targets.update(record_queue)
     provenance_targets.update(spec_id for _, spec_id in spec_queue)
 
+    if resolved_policy == RECORD_POLICY_NONE:
+        return RecordClosurePlan(
+            policy=resolved_policy,
+            source_store_ref=source_io._store_ref(),
+            destination_store_ref=destination_ref,
+            records=(),
+            specs=(),
+            products=(),
+        )
+
+    if resolved_policy == RECORD_POLICY_DESCRIPTIVE:
+        records.update(record_queue)
+        specs.update(spec_queue)
+        return RecordClosurePlan(
+            policy=resolved_policy,
+            source_store_ref=source_io._store_ref(),
+            destination_store_ref=destination_ref,
+            records=tuple(sorted(records)),
+            specs=tuple(sorted(specs)),
+            products=(),
+        )
+
     if resolved_policy == RECORD_POLICY_ALL:
         records.update(source_io.iter_record_ids())
         for spec in source_io.iter_specs():
             specs.add((spec_family_for_id(spec["id"]), spec["id"]))
         if include_products:
-            products.update(records)
+            products.update(_existing_product_record_ids(source_io, records))
         return RecordClosurePlan(
             policy=resolved_policy,
             source_store_ref=source_io._store_ref(),
@@ -109,7 +124,7 @@ def plan_record_closure(
                 continue
             record = source_io.read_record(record_id)
             records.add(record_id)
-            if include_products:
+            if include_products and source_io.product_root(record_id).exists():
                 products.add(record_id)
             for mention in scan_record_refs(record):
                 if resolved_policy == RECORD_POLICY_PROVENANCE:
@@ -142,14 +157,9 @@ def plan_record_closure(
         if resolved_policy == RECORD_POLICY_PROVENANCE:
             provenance_targets.update(records)
             provenance_targets.update(spec_id for _, spec_id in specs)
-            added = _queue_reverse_provenance_records(source_io, provenance_targets, records, record_queue)
+            added = _queue_reverse_provenance_records(source_io, records, record_queue)
             if added:
                 continue
-
-    if include_products:
-        for record_id in sorted(products):
-            if not source_io.product_root(record_id).exists():
-                warnings.append(f"missing product root for {record_id}")
 
     return RecordClosurePlan(
         policy=resolved_policy,
@@ -209,8 +219,6 @@ def copy_record_closure(
     for record_id in plan.products:
         if _copy_product_root(source_io, dest_io, record_id, overwrite=resolved_options.overwrite_sidecars):
             products_copied.append(record_id)
-        elif policy_includes_products(resolved_policy, resolved_options):
-            raise RecordExportError("missing product root", context={"record_id": record_id})
         else:
             warnings.append(f"missing product root for {record_id}")
 
@@ -301,13 +309,15 @@ def _expand_mention(
         spec_queue.append(spec_key)
 
 
-def _queue_reverse_provenance_records(source_io: Any, targets: set[str], records: set[str], queue: deque[str]) -> bool:
-    if not targets:
+def _queue_reverse_provenance_records(source_io: Any, records: set[str], queue: deque[str]) -> bool:
+    if not records:
         return False
     queued = False
     mentions = source_io.find_mentions(refresh="auto")
     for mention in mentions:
-        if mention.source_kind != "record" or mention.target_id not in targets:
+        if mention.source_kind != "record" or mention.target_id not in records:
+            continue
+        if mention.typed_role not in _PROVENANCE_RECORD_ROLES:
             continue
         if mention.source_id in records or mention.source_id in queue:
             continue
@@ -317,6 +327,10 @@ def _queue_reverse_provenance_records(source_io: Any, targets: set[str], records
         queue.append(mention.source_id)
         queued = True
     return queued
+
+
+def _existing_product_record_ids(source_io: Any, record_ids: Iterable[str]) -> tuple[str, ...]:
+    return tuple(record_id for record_id in sorted(record_ids) if source_io.product_root(record_id).exists())
 
 
 def _copy_product_root(source_io: Any, dest_io: Any, record_id: str, *, overwrite: bool) -> bool:

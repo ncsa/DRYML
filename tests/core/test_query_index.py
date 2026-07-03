@@ -1452,7 +1452,7 @@ def test_exact_store_probe_confirms_persisted_definition_after_hash_hit(tmp_path
     repo = Repo(stores=store)
     stored = IndexLeaf("stored", repo=repo)
     queried = IndexLeaf("queried", repo=repo)
-    repo.save_object(stored)
+    repo.save_object(stored, record_policy="none")
 
     repo2 = Repo(stores=DirStore(store.base_dir, query_index="memory"))
 

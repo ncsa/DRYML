@@ -12,7 +12,7 @@ def test_object_save_load_still_works_without_environment_records(store_resource
     obj = objects.HelloStr(msg="environment guard")
     repo = Repo([store])
     repo.add_objects(obj)
-    repo.save()
+    repo.save(record_policy="none")
 
     assert not (Path(store.base_dir) / "records").exists()
     assert not (Path(store.base_dir) / "environment").exists()

@@ -22,7 +22,7 @@ RECORD_POLICY_DESCRIPTIVE: RecordPolicy = "descriptive"
 RECORD_POLICY_CLOSURE: RecordPolicy = "closure"
 RECORD_POLICY_PROVENANCE: RecordPolicy = "provenance"
 RECORD_POLICY_ALL: RecordPolicy = "all"
-DEFAULT_RECORD_POLICY: RecordPolicy = RECORD_POLICY_NONE
+DEFAULT_RECORD_POLICY: RecordPolicy = RECORD_POLICY_DESCRIPTIVE
 RECORD_POLICIES: tuple[RecordPolicy, ...] = (
     RECORD_POLICY_NONE,
     RECORD_POLICY_DESCRIPTIVE,
@@ -51,14 +51,13 @@ class RecordPolicyOptions:
     """Options controlling explicit record-policy side effects.
 
     ``include_products=None`` means use the selected policy default: currently
-    only ``all`` includes products by default. Indexes are derived data and are
-    omitted unless callers explicitly request rebuilding after writes.
+    only ``all`` includes existing product directories by default. Indexes are
+    derived data and are omitted unless callers request rebuilding after writes.
     """
 
     include_products: bool | None = None
     rebuild_index: bool = False
     overwrite_sidecars: bool = False
-    include_indexes: bool = False
     representation_kind: str = _DEFAULT_REPRESENTATION_KIND
     representation_payload: Mapping[str, Any] | None = None
     record_metadata: Mapping[str, Any] | None = None

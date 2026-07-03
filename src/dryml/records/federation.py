@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from .errors import RecordExportError, RecordNotFoundError, SpecNotFoundError
+from .errors import RecordExportError, RecordNotFoundError
 from .export import copy_record_closure
 from .policy import RecordPolicy, RecordPolicyOptions, RecordPolicyReport
 from .refs import LocatedRecordRef, LocatedSpecRef, RecordRef, SpecRef
@@ -38,12 +38,9 @@ class RepoRecordFederation:
         refs = []
         for store in self.stores():
             record_io = store.records
-            try:
-                if record_io.has_spec(spec_id, family=family):
-                    spec = record_io.read_spec(spec_id, family=family)
-                    refs.append(LocatedSpecRef(record_io._store_ref(), spec_id, family or _spec_family(spec)))
-            except Exception:
-                continue
+            if record_io.has_spec(spec_id, family=family):
+                spec = record_io.read_spec(spec_id, family=family)
+                refs.append(LocatedSpecRef(record_io._store_ref(), spec_id, family or _spec_family(spec)))
         return tuple(sorted(refs, key=lambda ref: (ref.store_ref, ref.kind or "", ref.spec_id)))
 
     def read_record(self, ref: LocatedRecordRef) -> dict[str, Any]:
@@ -109,6 +106,12 @@ class RepoRecordFederation:
         raise RecordNotFoundError("store ref is not part of this repo", context={"store_ref": store_ref})
 
     def _source_store_for_seeds(self, seed_records, seed_specs) -> Any:
+        explicit_store_refs = _located_seed_store_refs(seed_records, seed_specs)
+        if len(explicit_store_refs) == 1:
+            return self._store_for_ref(next(iter(explicit_store_refs)))
+        if len(explicit_store_refs) > 1:
+            raise RecordExportError("record closure seeds span multiple source stores", context={"stores": sorted(explicit_store_refs)})
+
         stores = set()
         for record_id in _record_seed_ids(seed_records):
             for ref in self.find_record(record_id):
@@ -140,6 +143,17 @@ def _spec_seed_ids(seeds) -> tuple[tuple[str, str | None], ...]:
         else:
             ids.append((seed.spec_id, seed.kind))
     return tuple(ids)
+
+
+def _located_seed_store_refs(seed_records, seed_specs) -> set[str]:
+    refs = set()
+    for seed in seed_records:
+        if isinstance(seed, LocatedRecordRef):
+            refs.add(seed.store_ref)
+    for seed in seed_specs:
+        if isinstance(seed, LocatedSpecRef):
+            refs.add(seed.store_ref)
+    return refs
 
 
 def _spec_family(spec: dict[str, Any]) -> str | None:

@@ -3,7 +3,7 @@ import pytest
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
-from dryml.records import RecordExportError, RecordStoreIO, make_record, make_spec
+from dryml.records import LocatedRecordRef, RecordExportError, RecordStoreIO, make_record, make_spec
 
 
 def _cdef(char="a"):
@@ -49,3 +49,8 @@ def test_repo_records_ambiguous_source_requires_source_store(tmp_path):
 
     report = repo.records.copy_closure(dest, source_store=store1, seed_records=[ref.record_id])
     assert report.records_written
+
+    located = LocatedRecordRef(RecordStoreIO(store1)._store_ref(), ref.record_id)
+    located_dest = DirStore(tmp_path / "located_dest")
+    located_report = repo.records.copy_closure(located_dest, seed_records=[located])
+    assert located_report.records_written

@@ -1,7 +1,5 @@
-from io import BytesIO
 import zipfile
-
-import pytest
+from io import BytesIO
 
 import core2_objects as objects
 from dryml.core2.repo import Repo
@@ -9,7 +7,6 @@ from dryml.core2.store.dir import DirStore
 from dryml.core2.store.zip import ZipExportStore, ZipStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
-    RecordExportError,
     RecordPolicyOptions,
     RecordStoreIO,
     StorageRef,
@@ -46,7 +43,7 @@ def _seed_store(tmp_path):
         )
     )
     execution = io.write_record(make_record(kind="execution", payload={"consumed_records": [seed.record_id]}))
-    adapter = io.write_record(make_record(kind="adapter", payload={"operation_id": op_ref.spec_id}))
+    adapter = io.write_record(make_record(kind="adapter", payload={"record_id": seed.record_id}))
     unrelated_record = io.write_record(make_record(kind="data", payload={"subject_cdef_id": _cdef("c")}))
     return store, seed, ancestor, execution, adapter, unrelated_record, (repr_ref, op_ref, env_ref, unrelated_spec)
 
@@ -79,6 +76,26 @@ def test_closure_works_with_missing_and_dirty_ref_index(tmp_path):
     assert plan.records == (seed.record_id,)
 
 
+def test_none_and_descriptive_export_policies_are_bounded(tmp_path):
+    store, seed, *_ = _seed_store(tmp_path)
+    none_plan = plan_record_closure(store, seed_records=[seed.record_id], policy="none")
+    assert none_plan.records == ()
+    assert none_plan.specs == ()
+    assert none_plan.products == ()
+
+    descriptive_plan = plan_record_closure(store, seed_records=[seed.record_id], policy="descriptive")
+    assert descriptive_plan.records == (seed.record_id,)
+    assert descriptive_plan.specs == ()
+    assert descriptive_plan.products == ()
+
+    dest = DirStore(tmp_path / "dest_none")
+    report = copy_record_closure(store, dest, seed_records=[seed.record_id], policy="none")
+    assert report.policy == "none"
+    assert report.records_written == ()
+    assert report.specs_written == ()
+    assert list(RecordStoreIO(dest).iter_record_ids()) == []
+
+
 def test_provenance_and_all_are_explicit(tmp_path):
     store, seed, ancestor, execution, adapter, unrelated_record, specs = _seed_store(tmp_path)
     provenance = plan_record_closure(store, seed_records=[seed.record_id], policy="provenance")
@@ -92,16 +109,18 @@ def test_provenance_and_all_are_explicit(tmp_path):
     assert {ref.spec_id for ref in specs} <= {spec_id for _, spec_id in all_plan.specs}
 
 
-def test_all_includes_products_by_default_and_indexes_never_exported(tmp_path):
+def test_all_includes_existing_products_by_default_and_indexes_never_exported(tmp_path):
     store, seed, *_ = _seed_store(tmp_path)
     io = RecordStoreIO(store)
     product_path = io.resolve_storage_ref(StorageRef.product_dir(seed.record_id, path="artifact"), create=True)
     (product_path / "data.txt").write_text("product", encoding="utf-8")
+    no_product = io.write_record(make_record(kind="stored_state", payload={"subject_cdef_id": _cdef("e")}))
     io.rebuild_ref_index()
 
     plan = plan_record_closure(store, policy="all")
     paths = record_export_include_paths(plan)
     assert f"products/{seed.record_id}/" in paths
+    assert f"products/{no_product.record_id}/" not in paths
     assert all(not path.startswith("records/indexes/") for path in paths)
 
 
@@ -132,7 +151,7 @@ def test_copy_record_closure_dir_to_dir_and_rebuilds_destination_index(tmp_path)
     assert not (dest_io.records_dir / "indexes" / "source-index.json").exists()
 
 
-def test_copy_record_closure_product_copy_and_missing_product_error(tmp_path):
+def test_copy_record_closure_product_copy_ignores_records_without_products(tmp_path):
     store, seed, *_ = _seed_store(tmp_path)
     io = RecordStoreIO(store)
     product_path = io.resolve_storage_ref(StorageRef.product_dir(seed.record_id, path="artifact"), create=True)
@@ -147,8 +166,13 @@ def test_copy_record_closure_product_copy_and_missing_product_error(tmp_path):
 
     missing_dest = DirStore(tmp_path / "missing_dest")
     missing_record = io.write_record(make_record(kind="stored_state", payload={"subject_cdef_id": _cdef("e")}))
-    with pytest.raises(RecordExportError):
-        copy_record_closure(store, missing_dest, seed_records=[missing_record.record_id], options=RecordPolicyOptions(include_products=True))
+    missing_report = copy_record_closure(
+        store,
+        missing_dest,
+        seed_records=[missing_record.record_id],
+        options=RecordPolicyOptions(include_products=True),
+    )
+    assert missing_report.products_copied == ()
 
 
 def test_record_export_include_paths_and_zip_export(tmp_path):
