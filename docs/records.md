@@ -114,7 +114,7 @@ The scanner recognizes:
 
 Malformed literal escapes and malformed reserved-looking strings fail loudly instead of being ignored.
 
-Known typed keys are also recognized and validated. Examples include `subject_cdef_id`, `owner_cdef_id`, `input_cdef_ids`, `output_cdef_ids`, `operation_id`, `representation_id`, `environment_requirement_id`, `world_requirement_id`, `world_id`, `runtime_id`, `record_id`, and `derived_from`. Prefix mismatches such as `operation_id="repr-v1-*"` are rejected.
+Known typed keys are also recognized and validated. Examples include `subject_cdef_id`, `owner_cdef_id`, `input_cdef_ids`, `output_cdef_ids`, `operation_id`, `representation_id`, `environment_requirement_id`, `world_requirement_id`, `world_id`, `runtime_id`, `record_id`, and `derived_from`. Prefix mismatches such as `operation_id="repr-v1-*"` are rejected. For currently known DRYML record/spec prefixes, typed keys also require the current schema version, such as `record-v1-*` and `op-v1-*`. The future `env-v*` prefix accepted by `environment_id` is prefix-compatible only until that schema is introduced.
 
 Scanner output uses deterministic JSON Pointer paths such as `/payload/storage/0/subject_cdef_id`.
 
@@ -126,7 +126,7 @@ Scanner output uses deterministic JSON Pointer paths such as `/payload/storage/0
 records/indexes/ref-index-v1.json
 ```
 
-The index is derived data. It contains source records/specs plus scanner mentions and can be deleted and rebuilt from authoritative JSON sidecars. It is canonical JSON and does not use SQLite.
+The index is derived data. It contains source records/specs plus scanner mentions and can be deleted and rebuilt from authoritative JSON sidecars. It is canonical JSON and does not use SQLite. A valid index whose stored `store_ref` no longer matches the current store is treated as stale: `refresh="auto"` rebuilds it, while `refresh=False` raises a validation error.
 
 When `write_record()` or `write_spec()` changes canonical bytes after an index exists, `RecordStoreIO` writes `records/indexes/ref-index-v1.dirty`. Idempotent writes of identical bytes do not mark the index dirty.
 

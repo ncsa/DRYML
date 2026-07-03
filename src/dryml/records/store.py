@@ -313,7 +313,14 @@ class RecordStoreIO:
             data = canonical_json_load_bytes(self.ref_index_path.read_bytes())
         except (OSError, CanonicalJSONError) as exc:
             raise RecordRefIndexValidationError("record reference index could not be read", context={"error": str(exc)}) from exc
-        return validate_record_ref_index(data)
+        index = validate_record_ref_index(data)
+        expected_store_ref = self._store_ref()
+        if index.store_ref != expected_store_ref:
+            raise RecordRefIndexValidationError(
+                "record reference index store_ref does not match current store",
+                context={"expected": expected_store_ref, "observed": index.store_ref},
+            )
+        return index
 
     def find_mentions(
         self,

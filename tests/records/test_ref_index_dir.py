@@ -64,6 +64,24 @@ def test_ref_index_dirty_missing_corrupt_and_queries(tmp_path):
     assert io.find_specs_mentioning_cdef(cdef("d"), refresh=False) == ()
 
 
+def test_ref_index_store_ref_mismatch_rebuilds_on_auto_and_fails_when_refresh_false(tmp_path):
+    io = RecordStoreIO(DirStore(tmp_path / "store"))
+    spec_ref = io.write_spec(make_spec(family="operation", kind="function_call", payload={"function": "pkg.mod:run", "args": [cdef()], "kwargs": {}}), family="operation")
+    io.rebuild_ref_index()
+    data = io.read_ref_index().to_json()
+    data["store_ref"] = "dryml.core2.store.dir.DirStore:/old/location"
+    io.ref_index_path.write_bytes(canonical_json_bytes(data))
+
+    with pytest.raises(RecordRefIndexValidationError, match="store_ref"):
+        io.find_mentions(refresh=False)
+
+    mentions = io.find_mentions(target_id=cdef(), refresh="auto")
+
+    assert mentions
+    assert io.read_ref_index().store_ref == io._store_ref()
+    assert io.find_operation_specs_for_cdef(cdef(), refresh=False)[0].spec_id == spec_ref.spec_id
+
+
 def test_idempotent_writes_do_not_mark_dirty(tmp_path):
     io = RecordStoreIO(DirStore(tmp_path / "store"))
     record = make_record(kind="stored_state", payload={"subject_cdef_id": cdef()})

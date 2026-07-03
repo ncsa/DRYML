@@ -11,7 +11,7 @@ from dryml.formats.ids import parse_content_id
 from dryml.formats.refs import parse_cdef_id, parse_reserved_ref
 
 from .errors import RecordValidationError, SpecValidationError
-from .kinds import SPEC_FAMILIES
+from .kinds import SPEC_FAMILIES, SPEC_FAMILY_BY_PREFIX
 from .records import attach_record_id, validate_record
 from .specs import attach_spec_id, spec_family_for_id, validate_spec
 
@@ -65,18 +65,7 @@ class ReferenceMention:
     typed_role: str | None = None
 
     def __post_init__(self) -> None:
-        if self.source_kind not in {"record", "spec"}:
-            raise RecordValidationError("reference mention has invalid source_kind", context={"source_kind": self.source_kind})
-        if self.source_kind == "record":
-            _parse_content_id_as(self.source_id, "record")
-            if self.source_family is not None:
-                raise RecordValidationError("record mentions must not have source_family")
-        else:
-            parts = _parse_content_id_as(self.source_id, None)
-            if self.source_family not in SPEC_FAMILIES:
-                raise SpecValidationError("spec mention has unknown source_family", context={"source_family": self.source_family})
-            if SPEC_FAMILIES[self.source_family].prefix != parts.prefix:  # type: ignore[index]
-                raise SpecValidationError("spec mention source_family does not match source_id", context={"source_family": self.source_family})
+        _validate_scan_source(self.source_kind, self.source_id, self.source_family)
         if not isinstance(self.path, str) or not self.path.startswith("/"):
             raise RecordValidationError("reference mention path must be a JSON Pointer", context={"path": self.path})
         if self.target_kind == "cdef":
@@ -146,6 +135,7 @@ def scan_json_refs(
 ) -> tuple[ReferenceMention, ...]:
     """Scan JSON-ready data for reserved refs and typed reference keys."""
 
+    _validate_scan_source(source_kind, source_id, source_family)
     mentions: list[ReferenceMention] = []
     _scan_value(value, source_kind=source_kind, source_id=source_id, source_family=source_family, path=base_path, mentions=mentions)
     return _sort_dedupe(mentions)
@@ -279,6 +269,7 @@ def _typed_mention(
     parts = _parse_content_id_as(value, None)
     if prefixes is not None and parts.prefix not in prefixes:
         raise RecordValidationError("typed content reference prefix mismatch", context={"key": key, "expected": prefixes, "observed": parts.prefix})
+    _validate_typed_content_schema_version(key, parts.prefix, parts.schema_version)
     return ReferenceMention(
         source_kind=source_kind,
         source_id=source_id,
@@ -361,6 +352,44 @@ def _mention_sort_key(mention: ReferenceMention) -> tuple[Any, ...]:
 
 def _escape_json_pointer(segment: str) -> str:
     return segment.replace("~", "~0").replace("/", "~1")
+
+
+def _validate_scan_source(source_kind: str, source_id: str, source_family: str | None) -> None:
+    if source_kind == "record":
+        parts = _parse_content_id_as(source_id, "record")
+        if parts.schema_version != 1:
+            raise RecordValidationError("record source ID must use record-v1 prefix", context={"source_id": source_id, "schema_version": parts.schema_version})
+        if source_family is not None:
+            raise RecordValidationError("record mentions must not have source_family")
+        return
+    if source_kind == "spec":
+        parts = _parse_content_id_as(source_id, None)
+        if source_family not in SPEC_FAMILIES:
+            raise SpecValidationError("spec source has unknown source_family", context={"source_family": source_family})
+        info = SPEC_FAMILIES[source_family]
+        if info.prefix != parts.prefix:
+            raise SpecValidationError("spec source_family does not match source_id", context={"source_family": source_family})
+        if info.schema_version != parts.schema_version:
+            raise SpecValidationError(
+                "spec source ID schema version does not match source_family",
+                context={"source_family": source_family, "expected_version": info.schema_version, "observed_version": parts.schema_version},
+            )
+        return
+    raise RecordValidationError("scan source_kind must be record or spec", context={"source_kind": source_kind})
+
+
+def _validate_typed_content_schema_version(key: str, prefix: str, schema_version: int) -> None:
+    if prefix == "record":
+        expected_version = 1
+    elif prefix in SPEC_FAMILY_BY_PREFIX:
+        expected_version = SPEC_FAMILIES[SPEC_FAMILY_BY_PREFIX[prefix]].schema_version
+    else:
+        return
+    if schema_version != expected_version:
+        raise RecordValidationError(
+            "typed content reference schema version mismatch",
+            context={"key": key, "prefix": prefix, "expected_version": expected_version, "observed_version": schema_version},
+        )
 
 
 def _parse_content_id_as(value: str, prefix: str | None):

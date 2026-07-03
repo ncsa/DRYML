@@ -1,7 +1,7 @@
 import pytest
 
 from dryml.formats.refs import format_cdef_id, format_ref_cdef
-from dryml.records import RecordValidationError, attach_record_id, make_record, scan_json_refs, scan_record_refs
+from dryml.records import RecordValidationError, SpecValidationError, attach_record_id, make_record, scan_json_refs, scan_record_refs
 
 
 def cdef(char="a"):
@@ -29,6 +29,19 @@ def test_scanner_ignores_literal_escape_and_rejects_malformed_refs():
         scan_json_refs({"x": {"$literal": cdef(), "extra": True}}, source_kind="record", source_id=cid("record"))
     with pytest.raises(RecordValidationError):
         scan_json_refs({"x": "op-v1-short"}, source_kind="record", source_id=cid("record"))
+
+
+def test_scan_json_refs_validates_source_even_without_mentions():
+    with pytest.raises(RecordValidationError):
+        scan_json_refs({}, source_kind="record", source_id="not-a-record-id")
+    with pytest.raises(RecordValidationError):
+        scan_json_refs({}, source_kind="record", source_id="record-v2-" + "a" * 64)
+    with pytest.raises(RecordValidationError):
+        scan_json_refs({}, source_kind="record", source_id=cid("record"), source_family="operation")
+    with pytest.raises(RecordValidationError):
+        scan_json_refs({}, source_kind="unknown", source_id=cid("record"))
+    with pytest.raises(SpecValidationError):
+        scan_json_refs({}, source_kind="spec", source_id=cid("repr"), source_family="operation")
 
 
 def test_typed_keys_are_validated_and_paths_are_escaped():
@@ -73,3 +86,5 @@ def test_typed_key_shape_and_prefix_mismatches_are_rejected():
         scan_json_refs({"input_cdef_ids": cdef()}, source_kind="record", source_id=cid("record"))
     with pytest.raises(RecordValidationError):
         scan_json_refs({"operation_id": cid("repr")}, source_kind="record", source_id=cid("record"))
+    with pytest.raises(RecordValidationError):
+        scan_json_refs({"operation_id": "op-v2-" + "a" * 64}, source_kind="record", source_id=cid("record"))
