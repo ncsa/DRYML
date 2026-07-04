@@ -1,0 +1,334 @@
+"""Local subprocess backend for ``dryml.dispatch``."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+from dryml.environments import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec, spec_from_data
+from dryml.records import ExecutionCancellationInfo, ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, ProductWriteSession, StorageRef, write_execution_record
+
+from .errors import DispatchCancelled, DispatchLaunchError, DispatchTimeout, WorkerProtocolError
+from .protocol import WorkerHandshakeResponse, WorkerResponse, read_json_file, save_envelope, write_json_file
+
+
+BACKEND_IDENTITY = {"name": "dryml.local_subprocess", "kind": "local_subprocess", "version": "1"}
+
+
+@dataclass(slots=True)
+class LocalSubprocessFuture:
+    """Future representing one local subprocess dispatch worker."""
+
+    process: subprocess.Popen
+    plan: Any
+    work_dir: str
+    request_path: str
+    handshake_path: str
+    response_path: str
+    stdout_path: str
+    stderr_path: str
+    preserve_work_dir: bool = False
+    cancel_grace: float = 0.5
+
+    _response: WorkerResponse | None = None
+    _exception: BaseException | None = None
+    _cancelled: bool = False
+
+    def done(self) -> bool:
+        """Return whether the worker process has exited."""
+
+        return self.process.poll() is not None
+
+    def result(self, timeout: float | None = None) -> WorkerResponse:
+        """Wait for the worker and return its compact response."""
+
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            self.cancel(reason="timeout")
+            self._response = self._parent_failure_response("timeout", error={"type": "TimeoutError", "message": "dispatch timed out"})
+            self._cleanup()
+            raise DispatchTimeout("dispatch timed out") from exc
+        except KeyboardInterrupt:
+            self.cancel(reason="KeyboardInterrupt")
+            raise
+        self._read_response()
+        if self._exception is not None:
+            raise self._exception
+        assert self._response is not None
+        self._persist_logs(self._response.execution_record_id)
+        self._cleanup()
+        return self._response
+
+    def exception(self, timeout: float | None = None) -> BaseException | None:
+        """Return the exception raised by ``result()``, if any."""
+
+        try:
+            self.result(timeout=timeout)
+        except BaseException as exc:
+            return exc
+        return None
+
+    def cancel(self, *, grace: float | None = None, reason: str = "user") -> bool:
+        """Cancel the process using SIGINT, SIGTERM, then SIGKILL where needed."""
+
+        if self.done():
+            return False
+        self._cancelled = True
+        _report("dryml.dispatch.worker.cancel", "Cancelling local subprocess worker", operation_id=self.plan.envelope.operation_id, data={"pid": self.process.pid, "reason": reason})
+        wait = self.cancel_grace if grace is None else grace
+        methods: list[str] = []
+        for sig_name, sig_value in (("SIGINT", signal.SIGINT), ("SIGTERM", signal.SIGTERM)):
+            methods.append(sig_name)
+            self._signal(sig_value)
+            if self._wait(wait):
+                self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": sig_name, "escalated": len(methods) > 1, "reason": reason})
+                return True
+        methods.append("SIGKILL")
+        self.kill()
+        self._wait(wait)
+        self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": "SIGKILL", "escalated": True, "reason": reason})
+        return True
+
+    def terminate(self, *, grace: float | None = None) -> None:
+        """Terminate the worker process group."""
+
+        if self.done():
+            return
+        self._signal(signal.SIGTERM)
+        if not self._wait(self.cancel_grace if grace is None else grace):
+            self.kill()
+
+    def kill(self) -> None:
+        """Kill the worker process group."""
+
+        if self.done():
+            return
+        if os.name == "posix":
+            try:
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+        else:
+            self.process.kill()
+
+    def _signal(self, sig: signal.Signals) -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(self.process.pid, sig)
+            else:
+                self.process.send_signal(sig)
+        except ProcessLookupError:
+            pass
+
+    def _wait(self, timeout: float) -> bool:
+        try:
+            self.process.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    def _read_response(self) -> None:
+        if self._response is not None or self._exception is not None:
+            return
+        try:
+            if os.path.exists(self.handshake_path):
+                handshake = WorkerHandshakeResponse.from_json(read_json_file(self.handshake_path))
+                _report("dryml.dispatch.worker.handshake", "Checking worker handshake", operation_id=self.plan.envelope.operation_id, data={"status": handshake.status, "pid": handshake.pid})
+            if not os.path.exists(self.response_path):
+                self._response = self._parent_failure_response("failed", error={"type": "WorkerProtocolError", "message": "worker exited without response", "exit_code": self.process.returncode})
+                return
+            self._response = WorkerResponse.from_json(read_json_file(self.response_path))
+        except Exception as exc:
+            self._response = self._parent_failure_response("failed", error={"type": type(exc).__name__, "message": str(exc), "exit_code": self.process.returncode})
+
+    def _parent_failure_response(self, status: str, *, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None) -> WorkerResponse:
+        record_id = _write_execution_record(
+            self.plan.store,
+            self.plan.envelope,
+            status=status,
+            error=error,
+            cancellation=cancellation,
+            diagnostics=({"message": "parent-side dispatch failure", "returncode": self.process.returncode},),
+            stdout_path=self.stdout_path,
+            stderr_path=self.stderr_path,
+        )
+        response = WorkerResponse(
+            status=status,
+            operation_id=self.plan.envelope.operation_id,
+            dispatch_id=self.plan.dispatch_spec.get("id"),
+            recipe_id=self.plan.execution_recipe.get("id"),
+            execution_record_id=record_id,
+            error=error,
+            cancellation=cancellation,
+            diagnostics=({"message": "parent-side dispatch failure"},),
+        )
+        try:
+            write_json_file(self.response_path, response.to_json())
+        except Exception:
+            pass
+        self._persist_logs(record_id)
+        return response
+
+    def _persist_logs(self, record_id: str | None) -> None:
+        if not record_id:
+            return
+        try:
+            records = self.plan.store.records
+            product_dir = records.resolve_storage_ref(StorageRef.self_product(path=".", role="logs"), record_id=record_id, create=True)
+            for source, name in ((self.stdout_path, "stdout.txt"), (self.stderr_path, "stderr.txt")):
+                if os.path.exists(source):
+                    shutil.copyfile(source, product_dir / name)
+        except Exception:
+            pass
+
+    def _cleanup(self) -> None:
+        if not self.preserve_work_dir:
+            shutil.rmtree(self.work_dir, ignore_errors=True)
+
+
+class LocalSubprocessBackend:
+    """Popen-based local backend for one dispatch worker process."""
+
+    name = "local_subprocess"
+
+    def __init__(self, *, preserve_work_dir: bool = False, handshake_timeout: float = 10.0):
+        self.preserve_work_dir = preserve_work_dir
+        self.handshake_timeout = handshake_timeout
+
+    def submit(self, plan: Any) -> LocalSubprocessFuture:
+        """Launch a worker subprocess for *plan*."""
+
+        work_dir = tempfile.mkdtemp(prefix="dryml-dispatch-")
+        request_path = os.path.join(work_dir, "request.json")
+        handshake_path = os.path.join(work_dir, "handshake.json")
+        response_path = os.path.join(work_dir, "response.json")
+        stdout_path = os.path.join(work_dir, "stdout.txt")
+        stderr_path = os.path.join(work_dir, "stderr.txt")
+        envelope = plan.envelope
+        save_envelope(request_path, envelope)
+        cmd, child_env = build_worker_command(envelope.environment_spec)
+        cmd.extend(["-m", "dryml.dispatch.worker", "--request", request_path, "--handshake", handshake_path, "--response", response_path])
+        _report("dryml.dispatch.worker.launch", "Launching local subprocess worker", operation_id=envelope.operation_id, data={"cmd": _command_summary(cmd), "work_dir": work_dir})
+        try:
+            stdout = open(stdout_path, "w", encoding="utf-8")
+            stderr = open(stderr_path, "w", encoding="utf-8")
+            try:
+                process = subprocess.Popen(cmd, env=child_env, stdout=stdout, stderr=stderr, cwd=work_dir, start_new_session=(os.name == "posix"))
+            finally:
+                stdout.close()
+                stderr.close()
+        except Exception as exc:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise DispatchLaunchError("failed to launch local subprocess worker", context={"error": str(exc)}) from exc
+        return LocalSubprocessFuture(process, plan, work_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, self.preserve_work_dir)
+
+
+def build_worker_command(environment_spec: Mapping[str, Any] | None) -> tuple[list[str], dict[str, str]]:
+    """Build the executable prefix and environment for a worker launch."""
+
+    spec = spec_from_data(environment_spec or CurrentEnvironmentSpec().to_data())
+    child_env = os.environ.copy()
+    executable = sys.executable
+    prefix: list[str] | None = None
+    env_overrides: Mapping[str, str] = {}
+    pythonpath_policy = "dryml-source"
+    extra_pythonpath: tuple[str, ...] = ()
+    if isinstance(spec, CurrentEnvironmentSpec):
+        executable = sys.executable
+    elif isinstance(spec, PythonExecutableSpec):
+        executable = spec.executable
+        env_overrides = spec.env
+        pythonpath_policy = spec.pythonpath_policy
+        extra_pythonpath = spec.extra_pythonpath
+    elif isinstance(spec, CondaEnvironmentSpec):
+        env_overrides = spec.env
+        pythonpath_policy = spec.pythonpath_policy
+        extra_pythonpath = spec.extra_pythonpath
+        if spec.launch_mode == "direct":
+            executable = spec.direct_python_executable()
+        else:
+            prefix = [spec.conda_executable, "run"]
+            if spec.prefix:
+                prefix.extend(["-p", spec.prefix])
+            elif spec.name:
+                prefix.extend(["-n", spec.name])
+            else:
+                raise DispatchLaunchError("conda-run launch requires prefix or name")
+            prefix.extend(["--no-capture-output", "--", "python"])
+    else:
+        raise DispatchLaunchError("unsupported environment spec for local subprocess", context={"kind": getattr(spec, "kind", None)})
+    child_env.update({str(key): str(value) for key, value in env_overrides.items()})
+    _apply_pythonpath_policy(child_env, pythonpath_policy, extra_pythonpath)
+    return (prefix or [executable]), child_env
+
+
+def _apply_pythonpath_policy(env: dict[str, str], policy: str, extra_pythonpath: tuple[str, ...]) -> None:
+    if policy not in {"none", "inherit", "explicit", "dryml-source"}:
+        raise DispatchLaunchError("unsupported pythonpath_policy", context={"policy": policy})
+    for path in extra_pythonpath:
+        if not isinstance(path, str) or not path:
+            raise DispatchLaunchError("extra_pythonpath entries must be non-empty strings")
+    if policy == "none":
+        return
+    paths: list[str] = []
+    if policy == "inherit":
+        existing = os.environ.get("PYTHONPATH")
+        if existing:
+            paths.extend(existing.split(os.pathsep))
+    elif policy == "dryml-source":
+        source_root = Path(__file__).resolve().parents[2]
+        paths.append(str(source_root))
+    paths.extend(extra_pythonpath)
+    if paths or policy == "explicit":
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(path for path in paths if path))
+
+
+def _write_execution_record(store: Any, envelope: Any, *, status: str, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), stdout_path: str | None = None, stderr_path: str | None = None, consumed_cdef_ids: tuple[str, ...] = (), produced_cdef_ids: tuple[str, ...] = (), result_record_ids: tuple[str, ...] = ()) -> str | None:
+    if envelope.record_policy == "none" or store is None:
+        return None
+    logs = (
+        ExecutionLogRef("stdout", StorageRef.self_product(path="stdout.txt", role="stdout"), "text/plain"),
+        ExecutionLogRef("stderr", StorageRef.self_product(path="stderr.txt", role="stderr"), "text/plain"),
+    )
+    execution = ExecutionRecord(
+        execution_kind="python",
+        operation_id=envelope.operation_id,
+        backend=BACKEND_IDENTITY,
+        status=status,
+        dispatch_id=envelope.dispatch_spec.get("id"),
+        recipe_id=envelope.execution_recipe.get("id"),
+        consumed_cdef_ids=consumed_cdef_ids,
+        produced_cdef_ids=produced_cdef_ids,
+        produced_records=result_record_ids,
+        logs=logs,
+        error=ExecutionErrorInfo.from_json(error) if error else None,
+        cancellation=ExecutionCancellationInfo.from_json(cancellation) if cancellation else None,
+        diagnostics=diagnostics,
+    )
+    _report("dryml.dispatch.execution_record.write", "Writing execution record", operation_id=envelope.operation_id, data={"status": status})
+    return write_execution_record(store.records, execution).record_id
+
+
+def _report(name: str, message: str, *, operation_id: str | None = None, data: Mapping[str, Any] | None = None) -> None:
+    try:
+        from dryml import reporting
+
+        reporting.step(name, message, operation_id=operation_id, data=data or {})
+    except Exception:
+        pass
+
+
+def _command_summary(cmd: list[str]) -> list[str]:
+    return [cmd[0], *cmd[1:4], "..."] if len(cmd) > 4 else cmd
+
+
+__all__ = ["BACKEND_IDENTITY", "LocalSubprocessBackend", "LocalSubprocessFuture", "build_worker_command"]

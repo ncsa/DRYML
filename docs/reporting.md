@@ -77,5 +77,16 @@ Record resolution and local fake adapter execution emit structured events at orc
 | `dryml.records.execution.write` | Write execution provenance records. |
 | `dryml.records.execution.query` | Query execution provenance records. |
 | `dryml.records.execution.export` | Include execution provenance in an explicit provenance export closure. |
+| `dryml.dispatch.plan.start` | Build a dispatch plan. |
+| `dryml.dispatch.requirements.gather` | Gather dispatch requirements/defaults. |
+| `dryml.dispatch.requirements.merge` | Merge explicit overrides and defaults. |
+| `dryml.dispatch.store.prepare` | Prepare same-host DirStore marshalling. |
+| `dryml.dispatch.worker.launch` | Launch the local subprocess worker. |
+| `dryml.dispatch.worker.handshake` | Validate worker protocol and store accessibility. |
+| `dryml.dispatch.worker.execute` | Run the operation in the worker. |
+| `dryml.dispatch.worker.cancel` | Cancel a local subprocess worker. |
+| `dryml.dispatch.result.save` | Save dispatch outputs or output refs. |
+| `dryml.dispatch.execution_record.write` | Write execution provenance for dispatch. |
+| `dryml.dispatch.complete` | Complete dispatch and return a compact result. |
 
 `quiet` remains silent. `steps` shows lifecycle messages. `details` includes selected record IDs, representation IDs, adapter names, and output record IDs. Reporting remains fail-soft unless strict mode is enabled.

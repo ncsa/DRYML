@@ -38,3 +38,5 @@ Legacy `Compute.__compute_reqs__` dictionaries are still supported as a transiti
 `dryml.context` is retained as a legacy compatibility surface for older code. New code should use `dryml.worlds` and `dryml.runtime` directly.
 
 `dryml.execute` is retained as legacy local pickled-callable execution pending dispatch v2. Its subprocess worker entry path enters `dryml.runtime` worker mode and applies runtime bootstrap before loading the callable or materializing objects. Inline execution stays in the caller's current runtime and rejects legacy resource requirements unless a future explicit inline-allocation path is added.
+
+`dryml.dispatch.LocalSubprocessBackend` is the new spec/record/runtime-aware local path. Its worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default, applies assigned device visibility, and only then imports target functions or materializes CDef arguments from shared `DirStore` refs. This preserves the runtime setup order required for later multi-worker orchestration.

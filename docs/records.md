@@ -322,6 +322,15 @@ Log refs use `StorageRef` data. Self product-dir refs avoid placing an execution
 
 Query helpers scan authoritative JSON and do not require the optional index:
 
+Local subprocess dispatch uses the same pattern for captured worker logs. When provenance is enabled, stdout/stderr are captured from process start and copied under:
+
+```text
+products/<execution-record-id>/stdout.txt
+products/<execution-record-id>/stderr.txt
+```
+
+The execution record stores self product refs for those files, so absolute worker paths and temporary launch directories do not enter record identity.
+
 ```python
 records = store.records.find_execution_records(operation_id=op_id, status="ok")
 records = repo.records.find_execution_records(consumed_record_id=record_id)

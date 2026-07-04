@@ -1,61 +1,99 @@
-# DRYML Dispatch Metadata
+# DRYML Dispatch
 
-`dryml.dispatch` currently defines metadata only. It does not launch workers, import targets, materialize objects, create environments, send cancellation signals, or replace `dryml.execute`.
+`dryml.dispatch` now contains both the canonical metadata plane and the first real execution backend: a one-operation local subprocess worker. `dryml.execute` remains available as the legacy pickled-callable compatibility path; deletion or rerouting of `dryml.execute` is intentionally deferred.
 
-## DispatchSpec
+## Metadata
 
-`DispatchSpec` is request intent: the operation the user asked for plus policies and overrides that should affect dispatch identity.
+`DispatchSpec` is request intent: operation ID plus policies and overrides that affect dispatch identity. `ExecutionRecipe` is resolved plan metadata: backend, environment/runtime choices, store strategy, input/output plan, and log plan. Both are canonical JSON specs, not DRYML Objects.
 
 ```python
 import dryml.operations as ops
-from dryml.dispatch import attach_dispatch_id, make_dispatch_spec
+from dryml.dispatch import attach_dispatch_id, attach_recipe_id, make_dispatch_spec, make_execution_recipe
 
-operation = ops.attach_operation_id(ops.make_function_call_spec("my_pkg.train:run"))
-dispatch = attach_dispatch_id(
-    make_dispatch_spec(
-        operation_id=operation["id"],
-        operation=operation,
-        records={"record_policy": "descriptive", "provenance": True},
-        execution={"backend": "local_subprocess"},
-    )
-)
-```
-
-Dispatch specs are store specs in family `dispatch`, schema `dryml.dispatch.v1`, and use `dispatch-v1-*` IDs. Operation identity remains separate: changing operation payload changes the `op-v1-*` ID, while changing dispatch policy changes the `dispatch-v1-*` ID.
-
-Function-call and method-call operation specs may be embedded for self-contained tests and examples, but embedded operation IDs must match `operation_id`. Embedded operation specs are normalized into envelope metadata as `embedded_operation` and do not affect dispatch identity; `operation_id` is the identity-bearing operation field.
-
-Method-call dispatch uses the same dispatch wrapper:
-
-```python
-method_operation = ops.attach_operation_id(
-    ops.make_method_call_spec("cdef-v4-...", "train", kwargs={"epochs": 10})
-)
-method_dispatch = attach_dispatch_id(make_dispatch_spec(operation_id=method_operation["id"], operation=method_operation))
-```
-
-## ExecutionRecipe
-
-`ExecutionRecipe` is resolved plan metadata. It records choices that a future backend can consume, such as backend identity, selected environment/world/runtime IDs, input plans, output plans, probe reports, and constraints.
-
-```python
-from dryml.dispatch import attach_recipe_id, make_execution_recipe
-
+operation = ops.attach_operation_id(ops.make_function_call_spec("my_pkg.train:run", args=[1, 2]))
+dispatch = attach_dispatch_id(make_dispatch_spec(operation_id=operation["id"], operation=operation))
 recipe = attach_recipe_id(
     make_execution_recipe(
         dispatch_id=dispatch["id"],
         operation_id=operation["id"],
         backend={"name": "dryml.local_subprocess", "kind": "local_subprocess"},
-        input_plan={"materialize_cdefs": []},
-        output_plan={"record_policy": "descriptive"},
     )
 )
 ```
 
-Recipes are store specs in family `execution_recipe`, schema `dryml.execution_recipe.v1`, and use `recipe-v1-*` IDs. A recipe is not an execution history record and does not prove anything actually ran.
+An `ExecutionEnvelope` is launch-time worker protocol data. It may include absolute same-host `DirStore` paths, work directories, and pickle file paths. Those fields are deliberately excluded from `DispatchSpec` and `ExecutionRecipe` identity.
 
-## Boundaries
+## Local Subprocess
 
-`ExecutionRecord` is the optional history record for what happened. Dispatch specs and recipes are not DRYML Objects, are not stored under `objects/`, and do not affect `ConcreteDefinition` identity.
+The high-level API plans and runs one function or method operation in a clean child process:
 
-Real local subprocess dispatch v2 is a later sprint. That sprint can consume `DispatchSpec` and `ExecutionRecipe` and emit `ExecutionRecord` provenance.
+```python
+from dryml.dispatch import Dispatcher, LocalSubprocessBackend
+
+dispatcher = Dispatcher(backend=LocalSubprocessBackend(), store=repo.default_store)
+result = dispatcher.run(operation, record_policy="descriptive")
+```
+
+Convenience wrapper:
+
+```python
+result = dryml.dispatch.run(operation, backend="local_subprocess", store=repo.default_store)
+```
+
+Function-call dispatch uses an import path and imports the target only inside the worker after runtime activation:
+
+```python
+operation = ops.attach_operation_id(ops.make_function_call_spec("my_pkg.math:add", args=[1, 2]))
+result = dispatcher.run(operation)
+```
+
+Method-call dispatch materializes the subject CDef from the shared/output store in the worker:
+
+```python
+operation = ops.attach_operation_id(ops.make_method_call_spec("cdef-v4-...", "train", kwargs={"epochs": 1}))
+result = dispatcher.run(operation)
+```
+
+`FunctionRef`/import-path function calls and method calls are the preferred portable path. `PickledCallable` exists only as an explicit same-Python convenience and is marked non-portable in the recipe constraints.
+
+## Worker Protocol
+
+The local backend launches `python -m dryml.dispatch.worker` with JSON request, handshake, and response files in a per-dispatch work directory. Child stdout/stderr are captured to separate files from process start, so user output cannot corrupt protocol JSON.
+
+The worker handshake reports protocol version, Python/platform, pid, supported operation kinds, call transports, store kinds, record schemas, runtime modes, environment kind, process-group support, and store accessibility. Missing features, protocol mismatch, or inaccessible store paths return structured failed/unsupported responses.
+
+## Store Marshalling
+
+Local subprocess dispatch prefers same-host `DirStore` handoff:
+
+```text
+parent writes/has objects and sidecars in DirStore
+worker opens the same absolute DirStore path through WorkerStoreRef
+worker materializes CDef args and writes outputs/records/products back
+parent reads compact result refs and records
+```
+
+`WorkerStoreRef` roles are `input`, `work`, `output`, and `shared`; modes are `read`, `write`, and `readwrite`. Request/response JSON carries CDef IDs and record IDs, not object state bytes.
+
+## Runtime And Environment
+
+The worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default and assigned device visibility before target import or object materialization. Supported launch specs are current Python, explicit Python executable, and Conda command construction/direct prefix launch where available.
+
+Python path policies are:
+
+| Policy | Behavior |
+|---|---|
+| `none` | Do not alter `PYTHONPATH` beyond the child environment. |
+| `inherit` | Use parent `PYTHONPATH`. |
+| `explicit` | Use only `extra_pythonpath`. |
+| `dryml-source` | Add the current DRYML source root, then `extra_pythonpath`. |
+
+## Results, Logs, And Records
+
+`DispatchResult` returns compact fields: status, operation/dispatch/recipe IDs, execution record ID, canonical literal or CDef result refs, produced record IDs, stdout/stderr refs, and diagnostics.
+
+When provenance is enabled, `ExecutionRecord` sidecars are emitted for success, user-code failure, timeout, cancellation, and parent-side protocol failures when metadata permits. stdout/stderr products use self product refs such as `products/<execution-record-id>/stdout.txt` and `stderr.txt`.
+
+## Cancellation
+
+`LocalSubprocessFuture.cancel()` starts POSIX process-group cancellation with SIGINT, escalates to SIGTERM, then SIGKILL when needed. `result(timeout=...)` cancels and records timeout provenance. `KeyboardInterrupt` while waiting cancels the worker and re-raises.
