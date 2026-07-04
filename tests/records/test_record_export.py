@@ -45,7 +45,18 @@ def _seed_store(tmp_path):
             },
         )
     )
-    execution = io.write_record(make_record(kind="execution", payload={"consumed_records": [seed.record_id]}))
+    execution = io.write_record(
+        make_record(
+            kind="execution",
+            payload={
+                "execution_kind": "python",
+                "operation_id": op_ref.spec_id,
+                "backend": {"name": "dryml.fake"},
+                "status": "ok",
+                "consumed_records": [{"record_id": seed.record_id, "required": True}],
+            },
+        )
+    )
     adapter = io.write_record(make_record(kind="adapter", payload={"record_id": seed.record_id}))
     unrelated_record = io.write_record(make_record(kind="data", payload={"subject_cdef_id": _cdef("c")}))
     return store, seed, ancestor, execution, adapter, unrelated_record, (repr_ref, op_ref, env_ref, unrelated_spec)

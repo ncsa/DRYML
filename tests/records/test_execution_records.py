@@ -1,5 +1,6 @@
 import pytest
 
+from dryml.formats.canonical import canonical_json_bytes
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.formats.ids import content_id
@@ -18,11 +19,13 @@ from dryml.records import (
     RecordValidationError,
     StorageRef,
     StoredStateRecord,
+    attach_record_id,
     copy_record_closure,
     default_object_state_representation_spec,
     execution_record_for_adapter_result,
     execution_record_for_probe_report,
     find_execution_records,
+    make_record,
     typed_record_from_envelope,
     unsupported_compiler_execution_record,
 )
@@ -68,6 +71,8 @@ def test_execution_status_variants_validate(status):
         kwargs["error"] = ExecutionErrorInfo(type="ValueError", message="bad")
     if status == "cancelled":
         kwargs["cancellation"] = ExecutionCancellationInfo(method="SIGTERM", reason="test")
+    if status == "timeout":
+        kwargs["error"] = ExecutionErrorInfo(type="TimeoutError", message="timed out")
     record = _execution(**kwargs)
 
     assert ExecutionRecord.from_envelope(record.to_envelope()).status == status
@@ -82,6 +87,7 @@ def test_probe_adapter_and_compiler_helpers():
     probe = execution_record_for_probe_report(Probe())
     assert probe.execution_kind == "probe"
     assert probe.probe_report_ids == (_id("record", "probe"),)
+    assert probe.produced_record_ids == (_id("record", "probe"),)
 
     adapter = AdapterRecord(adapter={"name": "fake"}, source_record_id=_id("record", "s"), source_representation_id=_id("repr", "s"), target_record_id=_id("record", "t"), target_representation_id=_id("repr", "t"), produced_records=(_id("record", "t"),), derived_from=(_id("record", "s"),))
     adapter_result = type("Result", (), {"status": "ok", "adapter_records": (_id("record", "adapter"),), "target_records": (_id("record", "t"),)})()
@@ -90,9 +96,10 @@ def test_probe_adapter_and_compiler_helpers():
 
     assert adapter.to_envelope()["kind"] == "adapter"
     assert adapter_exec.execution_kind == "adapter"
-    assert adapter_exec.produced_record_ids == (_id("record", "t"),)
+    assert adapter_exec.produced_record_ids == (_id("record", "t"), _id("record", "adapter"))
     assert compiler.status == "unsupported"
     assert compiler.execution_kind == "compiler"
+    assert compiler.produced_record_ids == (_id("record", "program"),)
 
 
 def test_execution_record_invalid_shapes_fail():
@@ -104,6 +111,27 @@ def test_execution_record_invalid_shapes_fail():
         _execution(operation_id=_id("repr"))
     with pytest.raises(RecordValidationError, match="JSON array"):
         ExecutionRecord.from_envelope({**_execution().to_envelope(), "payload": {**_execution().to_payload(), "consumed_records": "not-a-list"}})
+
+
+def test_execution_status_context_invariants_fail():
+    with pytest.raises(RecordValidationError, match="ok execution records must not include error"):
+        _execution(error={"message": "boom"})
+    with pytest.raises(RecordValidationError, match="require error or diagnostics"):
+        _execution(status="failed")
+    with pytest.raises(RecordValidationError, match="require cancellation"):
+        _execution(status="cancelled")
+    with pytest.raises(RecordValidationError, match="cancellation is only valid"):
+        _execution(status="failed", error={"message": "boom"}, cancellation={"method": "SIGTERM"})
+
+
+def test_execution_timing_validation():
+    record = _execution(started_at="2026-07-04T12:34:56Z", ended_at="2026-07-04T12:34:56.123Z", duration_ms=1.25)
+    assert record.duration_ms == 1.25
+
+    with pytest.raises(RecordValidationError, match="RFC3339 UTC"):
+        _execution(started_at="2026-07-04 12:34:56")
+    with pytest.raises(RecordValidationError, match="finite"):
+        _execution(duration_ms=float("nan"))
 
 
 def test_execution_queries_store_and_repo_with_deleted_index(tmp_path):
@@ -125,10 +153,30 @@ def test_execution_queries_store_and_repo_with_deleted_index(tmp_path):
     assert io1.find_execution_records(produced_record_id=produced) == (first,)
     assert io1.find_execution_records(dispatch_id=_id("dispatch")) == (first,)
     assert io1.find_execution_records(recipe_id=_id("recipe")) == (first,)
-    assert io1.find_execution_records(status="ok") == (first,)
-    assert io1.find_execution_records(execution_kind="python") == (first,)
+    assert io1.find_execution_records(status="OK") == (first,)
+    assert io1.find_execution_records(execution_kind="PYTHON") == (first,)
+    with pytest.raises(RecordValidationError, match="status"):
+        io1.find_execution_records(status="bogus")
+    with pytest.raises(RecordValidationError, match="execution_kind"):
+        io1.find_execution_records(execution_kind="worker")
     assert set(repo.records.find_execution_records(operation_id=op_id)) == {first, second}
     assert find_execution_records(repo, status="failed") == (second,)
+
+
+def test_generic_execution_writes_are_strict_and_queries_identify_bad_records(tmp_path):
+    store = DirStore(tmp_path / "store")
+    io = RecordStoreIO(store)
+    malformed = make_record(kind="execution", payload={"operation_id": _id("op")})
+
+    with pytest.raises(RecordValidationError, match="invalid execution record"):
+        io.write_record(malformed)
+
+    attached = attach_record_id(malformed)
+    io.items_dir.mkdir(parents=True, exist_ok=True)
+    io.items_dir.joinpath(f"{attached['id']}.json").write_bytes(canonical_json_bytes(attached))
+    with pytest.raises(RecordValidationError) as excinfo:
+        io.find_execution_records(operation_id=_id("op"))
+    assert excinfo.value.context["record_id"] == attached["id"]
 
 
 def test_execution_log_product_export_and_missing_products(tmp_path):

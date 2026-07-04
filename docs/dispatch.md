@@ -23,7 +23,7 @@ dispatch = attach_dispatch_id(
 
 Dispatch specs are store specs in family `dispatch`, schema `dryml.dispatch.v1`, and use `dispatch-v1-*` IDs. Operation identity remains separate: changing operation payload changes the `op-v1-*` ID, while changing dispatch policy changes the `dispatch-v1-*` ID.
 
-Function-call and method-call operation specs may be embedded for self-contained tests and examples, but embedded operation IDs must match `operation_id`.
+Function-call and method-call operation specs may be embedded for self-contained tests and examples, but embedded operation IDs must match `operation_id`. Embedded operation specs are normalized into envelope metadata as `embedded_operation` and do not affect dispatch identity; `operation_id` is the identity-bearing operation field.
 
 Method-call dispatch uses the same dispatch wrapper:
 

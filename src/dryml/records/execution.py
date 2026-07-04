@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -19,6 +21,7 @@ from .storage import StorageRef
 
 EXECUTION_STATUSES = frozenset({"ok", "failed", "cancelled", "timeout", "unsupported", "skipped", "degraded"})
 EXECUTION_KINDS = frozenset({"python", "probe", "adapter", "compiler", "lowering", "internal", "unknown"})
+_RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 _COMMON_ID_FIELDS = {
     "dispatch_id": ("dispatch",),
@@ -292,8 +295,8 @@ class ExecutionRecord:
     )
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "execution_kind", _normalize_token(self.execution_kind, EXECUTION_KINDS, "execution_kind"))
-        object.__setattr__(self, "status", _normalize_token(self.status, EXECUTION_STATUSES, "status"))
+        object.__setattr__(self, "execution_kind", normalize_execution_kind(self.execution_kind))
+        object.__setattr__(self, "status", normalize_execution_status(self.status))
         _validate_id(self.operation_id, ("op",), "operation_id")
         object.__setattr__(self, "backend", _backend_identity(self.backend))
         for field_name, prefixes in _COMMON_ID_FIELDS.items():
@@ -302,16 +305,16 @@ class ExecutionRecord:
                 _validate_id(value, prefixes, field_name)
         for field_name in ("started_at", "ended_at"):
             value = getattr(self, field_name)
-            if value is not None and not isinstance(value, str):
-                raise RecordValidationError(f"{field_name} must be a string", context={"type": type(value).__name__})
-        if self.duration_ms is not None and (not isinstance(self.duration_ms, (int, float)) or isinstance(self.duration_ms, bool) or self.duration_ms < 0):
-            raise RecordValidationError("duration_ms must be a non-negative number", context={"duration_ms": self.duration_ms})
+            if value is not None:
+                _validate_timestamp(value, field_name)
+        _validate_duration(self.duration_ms)
         for field_name in ("input_cdef_ids", "output_cdef_ids", "consumed_cdef_ids", "produced_cdef_ids"):
             object.__setattr__(self, field_name, _cdef_id_tuple(getattr(self, field_name), field_name))
         for field_name in ("probe_report_ids", "adapter_record_ids", "program_record_ids"):
             object.__setattr__(self, field_name, _record_id_tuple(getattr(self, field_name), field_name))
         object.__setattr__(self, "consumed_records", _link_tuple(self.consumed_records, default_required=True, field_name="consumed_records"))
         object.__setattr__(self, "produced_records", _link_tuple(self.produced_records, default_required=False, field_name="produced_records"))
+        object.__setattr__(self, "produced_records", _with_specialized_outputs(self.produced_records, self.probe_report_ids, self.adapter_record_ids, self.program_record_ids))
         object.__setattr__(self, "logs", _log_tuple(self.logs))
         if self.error is not None:
             object.__setattr__(self, "error", self.error if isinstance(self.error, ExecutionErrorInfo) else ExecutionErrorInfo.from_json(self.error))
@@ -320,6 +323,7 @@ class ExecutionRecord:
         object.__setattr__(self, "diagnostics", tuple(_freeze_mapping(item, "diagnostics") for item in _json_sequence_value(self.diagnostics, "diagnostics")))
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
         object.__setattr__(self, "extra", _freeze_mapping(self.extra, "extra"))
+        _validate_status_context(self)
 
     @property
     def consumed_record_ids(self) -> tuple[str, ...]:
@@ -501,6 +505,18 @@ def execution_record_matches(record: Mapping[str, Any], **filters: Any) -> bool:
     return True
 
 
+def normalize_execution_status(value: Any) -> str:
+    """Return a normalized execution status token."""
+
+    return _normalize_token(value, EXECUTION_STATUSES, "status")
+
+
+def normalize_execution_kind(value: Any) -> str:
+    """Return a normalized execution-kind token."""
+
+    return _normalize_token(value, EXECUTION_KINDS, "execution_kind")
+
+
 def _payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
     payload = record.get("payload")
     if not isinstance(payload, Mapping):
@@ -532,6 +548,53 @@ def _backend_identity(value: Any) -> Mapping[str, Any]:
     if "metadata" in value and value["metadata"] is not None and not isinstance(value["metadata"], Mapping):
         raise RecordValidationError("backend.metadata must be a mapping", context={"type": type(value['metadata']).__name__})
     return _freeze_mapping(value, "backend")
+
+
+def _with_specialized_outputs(
+    produced_records: tuple[ExecutionRecordLink, ...],
+    probe_report_ids: tuple[str, ...],
+    adapter_record_ids: tuple[str, ...],
+    program_record_ids: tuple[str, ...],
+) -> tuple[ExecutionRecordLink, ...]:
+    result = list(produced_records)
+    seen = {link.record_id for link in result}
+    for role, record_ids in (
+        ("probe-report", probe_report_ids),
+        ("adapter-record", adapter_record_ids),
+        ("program-record", program_record_ids),
+    ):
+        for record_id in record_ids:
+            if record_id not in seen:
+                result.append(ExecutionRecordLink(record_id, role=role, required=False))
+                seen.add(record_id)
+    return tuple(result)
+
+
+def _validate_status_context(execution: ExecutionRecord) -> None:
+    if execution.status == "ok" and execution.error is not None:
+        raise RecordValidationError("ok execution records must not include error")
+    if execution.status == "ok" and execution.cancellation is not None:
+        raise RecordValidationError("ok execution records must not include cancellation")
+    if execution.status in {"failed", "timeout"} and execution.error is None and not execution.diagnostics:
+        raise RecordValidationError("failed and timeout execution records require error or diagnostics", context={"status": execution.status})
+    if execution.status == "cancelled" and execution.cancellation is None:
+        raise RecordValidationError("cancelled execution records require cancellation")
+    if execution.cancellation is not None and execution.status != "cancelled":
+        raise RecordValidationError("cancellation is only valid for cancelled execution records", context={"status": execution.status})
+
+
+def _validate_timestamp(value: Any, field_name: str) -> None:
+    if not isinstance(value, str):
+        raise RecordValidationError(f"{field_name} must be a string", context={"type": type(value).__name__})
+    if _RFC3339_UTC_RE.fullmatch(value) is None:
+        raise RecordValidationError(f"{field_name} must be an RFC3339 UTC timestamp", context={"value": value})
+
+
+def _validate_duration(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0 or not math.isfinite(value):
+        raise RecordValidationError("duration_ms must be a finite non-negative number", context={"duration_ms": value})
 
 
 def _link_tuple(value: Sequence[Any], *, default_required: bool, field_name: str) -> tuple[ExecutionRecordLink, ...]:
@@ -619,6 +682,8 @@ __all__ = [
     "find_execution_records_consuming",
     "find_execution_records_for_operation",
     "find_execution_records_producing",
+    "normalize_execution_kind",
+    "normalize_execution_status",
     "unsupported_compiler_execution_record",
     "write_execution_record",
 ]

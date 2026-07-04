@@ -102,7 +102,7 @@ Probe reports are persisted through the existing generic record envelope:
 
 Use `make_probe_report_record(...)`, `write_probe_report(...)`, and `probe_report_from_record(...)` for round trips through `RecordStoreIO`.
 
-`ProbeReport` remains the authoritative provider/probe output. `ExecutionRecord` can be written separately as optional provenance for how a probe attempt ran, including failed or unsupported probe execution. Execution provenance may point at produced probe-report record IDs through `probe_report_ids`, but it does not replace the probe report payload.
+`ProbeReport` remains the authoritative provider/probe output. `ExecutionRecord` can be written separately as optional provenance for how a probe attempt ran, including failed or unsupported probe execution. Execution provenance may point at produced probe-report record IDs through `probe_report_ids`; typed execution records also normalize those IDs into `produced_records` links so provenance export and produced-record queries follow the same graph. Execution provenance does not replace the probe report payload.
 
 ## Annotation Integration
 

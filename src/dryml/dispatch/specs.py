@@ -82,14 +82,25 @@ def validate_dispatch_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
         raise DispatchSpecError("dispatch payload requires operation_id")
     operation_id = validate_id(payload["operation_id"], ("op",), "operation_id")
     normalized_payload: dict[str, Any] = {"operation_id": operation_id}
+    embedded_operation = None
     if "operation" in payload:
         try:
-            operation = validate_operation_spec(payload["operation"])
+            embedded_operation = validate_operation_spec(payload["operation"])
         except OperationSpecError as exc:
             raise DispatchSpecError("embedded operation spec is invalid", context=exc.context) from exc
-        if operation.get("id") != operation_id:
-            raise DispatchSpecError("embedded operation ID must match operation_id", context={"operation_id": operation_id, "embedded_id": operation.get("id")})
-        normalized_payload["operation"] = operation
+        if embedded_operation.get("id") != operation_id:
+            raise DispatchSpecError("embedded operation ID must match operation_id", context={"operation_id": operation_id, "embedded_id": embedded_operation.get("id")})
+    metadata = dict(spec.get("metadata") or {})
+    if "embedded_operation" in metadata:
+        try:
+            metadata_operation = validate_operation_spec(metadata["embedded_operation"])
+        except OperationSpecError as exc:
+            raise DispatchSpecError("embedded operation spec is invalid", context=exc.context) from exc
+        if metadata_operation.get("id") != operation_id:
+            raise DispatchSpecError("embedded operation ID must match operation_id", context={"operation_id": operation_id, "embedded_id": metadata_operation.get("id")})
+        if embedded_operation is not None and metadata_operation != embedded_operation:
+            raise DispatchSpecError("payload and metadata embedded operations must match")
+        embedded_operation = metadata_operation
     for field in sorted(_MAPPING_FIELDS):
         if field in payload:
             normalized_payload[field] = dict(json_ready_mapping(payload[field], field))
@@ -101,6 +112,10 @@ def validate_dispatch_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
             raise DispatchSpecError("invalid dispatch records.record_policy", context=exc.context) from exc
     normalized = dict(spec)
     normalized["payload"] = normalized_payload
+    if embedded_operation is not None:
+        metadata["embedded_operation"] = embedded_operation
+    if metadata:
+        normalized["metadata"] = metadata
     if existing_id is not None:
         normalized["id"] = existing_id
     try:

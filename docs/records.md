@@ -295,6 +295,8 @@ Manifest paths are relative POSIX paths and include byte size plus SHA-256 diges
 
 `ExecutionRecord` is the typed wrapper for optional `kind="execution"` provenance. Required payload fields are `execution_kind`, `operation_id`, `backend`, and `status`. Status values are `ok`, `failed`, `cancelled`, `timeout`, `unsupported`, `skipped`, and `degraded`. Execution kinds are `python`, `probe`, `adapter`, `compiler`, `lowering`, `internal`, and `unknown`.
 
+Status context is validated. `ok` records must not carry `error` or `cancellation`; `failed` and `timeout` records require `error` or `diagnostics`; `cancelled` records require `cancellation`; and cancellation facts are only valid on cancelled records. `started_at` and `ended_at` use RFC3339 UTC strings such as `2026-07-04T12:34:56Z`, and `duration_ms` must be finite and non-negative.
+
 Consumed and produced records use structured links:
 
 ```json
@@ -326,6 +328,8 @@ records = repo.records.find_execution_records(consumed_record_id=record_id)
 ```
 
 `record_policy="provenance"` includes execution records that mention seed records through consumed/produced links. `none`, `descriptive`, and `closure` do not accidentally expand execution provenance, while `all` includes execution records as ordinary records. Product log directories are copied only when product options include products.
+
+Specialized produced IDs such as `probe_report_ids`, `adapter_record_ids`, and `program_record_ids` are also normalized into `produced_records` links by the typed wrapper. This keeps provenance closure and `produced_record_id` queries on one canonical graph.
 
 Representative payloads:
 

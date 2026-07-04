@@ -103,6 +103,13 @@ class RecordStoreIO:
 
         attached = attach_record_id(record)
         validate_record(attached)
+        if attached.get("kind") == "execution":
+            from .execution import ExecutionRecord
+
+            try:
+                ExecutionRecord.from_envelope(attached)
+            except RecordValidationError as exc:
+                raise RecordValidationError("invalid execution record", context={"record_id": attached.get("id"), **exc.context}) from exc
         record_id = attached["id"]
         path = self._record_path(record_id)
         changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
@@ -280,13 +287,17 @@ class RecordStoreIO:
     ) -> tuple[LocatedRecordRef, ...]:
         """Scan authoritative JSON for execution provenance records."""
 
-        from .execution import execution_record_matches
+        from .execution import execution_record_matches, normalize_execution_kind, normalize_execution_status
 
         _validate_optional_query_id(operation_id, "op", "operation_id")
         _validate_optional_query_id(dispatch_id, "dispatch", "dispatch_id")
         _validate_optional_query_id(recipe_id, "recipe", "recipe_id")
         _validate_optional_query_id(consumed_record_id, "record", "consumed_record_id")
         _validate_optional_query_id(produced_record_id, "record", "produced_record_id")
+        if status is not None:
+            status = normalize_execution_status(status)
+        if execution_kind is not None:
+            execution_kind = normalize_execution_kind(execution_kind)
         if refresh not in {True, False, "auto"}:
             raise RecordIOError("refresh must be True, False, or 'auto'", context={"refresh": refresh})
         try:
@@ -299,16 +310,20 @@ class RecordStoreIO:
         for record in self.iter_records():
             if record.get("kind") != "execution":
                 continue
-            if execution_record_matches(
-                record,
-                operation_id=operation_id,
-                dispatch_id=dispatch_id,
-                recipe_id=recipe_id,
-                consumed_record_id=consumed_record_id,
-                produced_record_id=produced_record_id,
-                status=status,
-                execution_kind=execution_kind,
-            ):
+            try:
+                matches = execution_record_matches(
+                    record,
+                    operation_id=operation_id,
+                    dispatch_id=dispatch_id,
+                    recipe_id=recipe_id,
+                    consumed_record_id=consumed_record_id,
+                    produced_record_id=produced_record_id,
+                    status=status,
+                    execution_kind=execution_kind,
+                )
+            except RecordValidationError as exc:
+                raise RecordValidationError("invalid execution record", context={"record_id": record.get("id"), **exc.context}) from exc
+            if matches:
                 refs.append(LocatedRecordRef(self._store_ref(), record["id"]))
         try:
             from dryml import reporting

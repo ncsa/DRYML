@@ -50,8 +50,11 @@ def test_dispatch_spec_stable_ids_and_policy_validation():
 def test_dispatch_embedded_operation_must_match():
     operation = ops.attach_operation_id(ops.make_function_call_spec("pkg.mod:fn", args=[_cdef()]))
     dispatch = attach_dispatch_id(make_dispatch_spec(operation_id=operation["id"], operation=operation))
+    by_id = attach_dispatch_id(make_dispatch_spec(operation_id=operation["id"]))
 
-    assert dispatch["payload"]["operation"]["id"] == operation["id"]
+    assert dispatch["metadata"]["embedded_operation"]["id"] == operation["id"]
+    assert "operation" not in dispatch["payload"]
+    assert dispatch["id"] == by_id["id"]
 
     with pytest.raises(DispatchSpecError, match="match"):
         make_dispatch_spec(operation_id=_op("b"), operation=operation)
@@ -63,6 +66,7 @@ def test_method_call_dispatch_and_specs_are_not_objects():
 
     assert dispatch["kind"] == "dispatch"
     assert dispatch["schema"] == "dryml.dispatch.v1"
+    assert dispatch["payload"] == {"operation_id": operation["id"]}
     assert not hasattr(dispatch, "definition")
 
 
