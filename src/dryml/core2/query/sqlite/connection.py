@@ -59,6 +59,12 @@ class SQLiteConnectionManager:
             if key[0] == pid:
                 self._connections.pop(key).close()
 
+    def __del__(self):
+        try:
+            self.close_all_current_process()
+        except Exception:
+            pass
+
     def _initialize_connection(self, con, *, readonly: bool) -> None:
         con.execute("PRAGMA foreign_keys = ON")
         con.execute(f"PRAGMA busy_timeout = {int(float(self.config.busy_timeout) * 1000)}")

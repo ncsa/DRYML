@@ -49,3 +49,17 @@ def test_configured_framework_import_is_separate_from_workload_allocation():
             runtime.assert_framework_import_configured("tensorflow")
             with pytest.raises(FrameworkImportSafetyError):
                 runtime.require_workload_allocation("materialize TensorFlow dataset")
+
+
+def test_import_configured_framework_reuses_already_imported_module(monkeypatch):
+    fake = type(sys)("already_imported_framework")
+    monkeypatch.setitem(sys.modules, "already_imported_framework", fake)
+
+    assert runtime.import_configured_framework("already_imported_framework") is fake
+
+
+def test_import_configured_framework_guards_new_import(monkeypatch):
+    monkeypatch.delitem(sys.modules, "not_imported_framework", raising=False)
+
+    with pytest.raises(FrameworkImportSafetyError):
+        runtime.import_configured_framework("not_imported_framework")

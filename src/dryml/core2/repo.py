@@ -89,6 +89,7 @@ class Repo:
         self.obj_config = {}
         self.config = dict(config or {})
         self.alias_index = {}
+        self._closed = False
         # Compatibility facade and live cache overlay. Store-owned indexes handle
         # persistent sources; this aggregate remains the memory backend and cache
         # source for existing APIs and `known()` cache federation.
@@ -1026,14 +1027,22 @@ class Repo:
             store.commit()
 
     def close(self, flush=True):
+        if self._closed:
+            return
         if flush:
             self.flush()
         self._query_index.close()
+        self._closed = True
 
     def __del__(self):
-        if self.save_objs_on_deletion:
-            self.save()
-            self.close(flush=True)
+        try:
+            if self.save_objs_on_deletion:
+                self.save()
+                self.close(flush=True)
+            else:
+                self.close(flush=False)
+        except Exception:
+            pass
 
     def clear_cache(self, strong=False, weak=True):
         if strong:

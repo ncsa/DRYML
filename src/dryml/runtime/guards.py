@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -115,10 +116,19 @@ def assert_framework_import_safe(framework_name: str, desired_visibility: Any = 
 
 
 def import_configured_framework(framework_name: str, module_name: str | None = None):
-    """Import a framework module only after runtime bootstrap configured it."""
+    """Import a framework module, guarding imports that would first load it.
 
+    If user/test code already imported the framework, this helper reuses that
+    module. Runtime bootstrap is the barrier before DRYML itself newly imports a
+    heavy framework; it is not a retroactive blocker after the framework is
+    already loaded in the process.
+    """
+
+    target = module_name or framework_name
+    if target in sys.modules or framework_name in sys.modules:
+        return importlib.import_module(target)
     assert_framework_import_configured(framework_name)
-    return importlib.import_module(module_name or framework_name)
+    return importlib.import_module(target)
 
 
 def require_workload_allocation(reason: str | None = None) -> RuntimeAllocationView:
