@@ -117,20 +117,20 @@ def resolve_world_requirement(target: Any, *, provider_fragments: Iterable[Annot
     return resolve_requirements(target, provider_fragments=provider_fragments).world
 
 
-def resolve_world_default(target: Any, *, overrides: Mapping[str, Any] | None = None) -> WorldSpec | None:
+def resolve_world_default(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = (), overrides: Mapping[str, Any] | None = None) -> WorldSpec | None:
     """Resolve world defaults for *target*."""
 
     if overrides is not None and WORLD not in overrides:
         overrides = {WORLD: overrides}
-    return resolve_defaults(target, overrides=overrides).world
+    return resolve_defaults(target, provider_fragments=provider_fragments, overrides=overrides).world
 
 
-def resolve_runtime_default(target: Any, *, overrides: Mapping[str, Any] | None = None) -> RuntimeContextSpec | None:
+def resolve_runtime_default(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = (), overrides: Mapping[str, Any] | None = None) -> RuntimeContextSpec | None:
     """Resolve runtime defaults for *target*."""
 
     if overrides is not None and RUNTIME not in overrides:
         overrides = {RUNTIME: overrides}
-    return resolve_defaults(target, overrides=overrides).runtime
+    return resolve_defaults(target, provider_fragments=provider_fragments, overrides=overrides).runtime
 
 
 def _merge_environment_requirements(fragments: tuple[AnnotationFragment, ...], issues: list[AnnotationIssue]) -> EnvironmentRequirement | None:
@@ -204,7 +204,7 @@ def _merge_mapping_fragments(fragments: tuple[AnnotationFragment, ...], *, issue
         elif policy == "append":
             data = _append_merge(data, dict(fragment.fragment))
         elif policy == "error_on_conflict":
-            conflicts = _conflict_issues(data, fragment.fragment, namespace=namespace, sources=(fragment.source,))
+            conflicts = _conflict_issues(data, fragment.fragment, namespace=namespace, sources=_sources(fragments))
             if issues is not None:
                 issues.extend(conflicts)
             if not conflicts:

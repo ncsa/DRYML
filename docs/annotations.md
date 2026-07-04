@@ -76,3 +76,7 @@ with dryml.runtime.activate(mode="worker", allocation=allocation, spec=runtime_s
 ```
 
 Future dispatch/provider work can consume the same fragments, apply overrides, validate requirements, and then enter the runtime barrier in the correct worker process.
+
+## Dynamic Provider Fragments
+
+`dryml.providers` supplies target-environment probe reports for dynamic facts that require importing provider, framework, or user code. Probe reports expose ordinary `AnnotationFragment` objects through `ProbeReport.annotation_fragments(...)`; pass those fragments via `provider_fragments=` to reuse the same merge and conflict reporting path as static decorators. See `docs/providers.md` for the subprocess protocol, record shape, and cache hooks.
