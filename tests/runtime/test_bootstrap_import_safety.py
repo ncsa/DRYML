@@ -111,6 +111,35 @@ def test_activate_runtime_bootstrap_restores_environment(monkeypatch):
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "before"
 
 
+def test_activate_convenience_enters_runtime_and_bootstrap(monkeypatch):
+    monkeypatch.delenv(runtime.BOOTSTRAP_MARKER_ENV, raising=False)
+    allocation = runtime.RuntimeAllocationView(cpus=(0,), accelerators={"gpu": (2,)})
+    spec = {
+        "mode": "worker",
+        "frameworks": {"tensorflow": {}},
+        "device_visibility": {"policy": "assigned"},
+    }
+
+    with runtime.activate(allocation=allocation, spec=spec) as state:
+        assert runtime.active_runtime().mode is runtime.RuntimeMode.WORKER
+        assert runtime.active_runtime().allocation == allocation
+        assert runtime.active_runtime_bootstrap() is state
+        assert state.frameworks == {"plain", "tensorflow"}
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
+        assert os.environ[runtime.BOOTSTRAP_MARKER_ENV] == "1"
+
+    assert runtime.active_runtime().mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert runtime.active_runtime_bootstrap() is None
+    assert runtime.BOOTSTRAP_MARKER_ENV not in os.environ
+
+
+def test_activate_convenience_mode_overrides_mapping_spec_default():
+    allocation = runtime.RuntimeAllocationView(cpus=(0,))
+
+    with runtime.activate(mode="worker", allocation=allocation, spec={"device_visibility": {"policy": "assigned"}}):
+        assert runtime.active_runtime().mode is runtime.RuntimeMode.WORKER
+
+
 def test_activate_runtime_bootstrap_requires_matching_active_runtime():
     allocation = runtime.RuntimeAllocationView(accelerators={"gpu": (0,)})
     spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"tensorflow": {}}, "device_visibility": {"policy": "assigned"}})

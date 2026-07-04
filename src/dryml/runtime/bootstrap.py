@@ -5,15 +5,16 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterator
 
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
-from .context import RuntimeBootstrapState, active_runtime, reset_runtime_bootstrap, set_runtime_bootstrap
+from .context import RuntimeBootstrapState, active_runtime, enter_runtime, reset_runtime_bootstrap, set_runtime_bootstrap
 from .devices import DeviceVisibilityPlan, apply_device_visibility_plan, build_device_visibility_plan
 from .frameworks import FrameworkBootstrapAdapter, FrameworkBootstrapResult, default_adapters
 from .errors import RuntimeTransitionError
 from .guards import BOOTSTRAP_MARKER_ENV
+from .modes import RuntimeMode
 from .specs import RuntimeContextSpec
 
 
@@ -97,6 +98,52 @@ def activate_runtime_bootstrap(plan: RuntimeBootstrapPlan, *, restore_environ: b
             _restore_environ(snapshot)
 
 
+@contextmanager
+def activate(
+    *,
+    mode: RuntimeMode | str | None = None,
+    allocation: RuntimeAllocationView | Any = NoAllocation,
+    spec: RuntimeContextSpec | Mapping[str, Any] | None = None,
+    env: Mapping[str, str] | None = None,
+    policy: FrameworkBootstrapPolicy | None = None,
+    restore_environ: bool = True,
+    allow_process_controls: bool = False,
+    adapters: Mapping[str, FrameworkBootstrapAdapter] | None = None,
+) -> Iterator[RuntimeBootstrapState]:
+    """Enter runtime mode and activate bootstrap in one scoped barrier.
+
+    This is a convenience API for explicit worker/probe/backend setup. It keeps
+    the same validation as the lower-level primitives: the generated bootstrap
+    plan must match the active runtime state before any effects are applied.
+    """
+
+    runtime_spec = _activation_spec(spec, mode)
+    plan = build_runtime_bootstrap_plan(runtime_spec, allocation, env=env, policy=policy, adapters=adapters)
+    with enter_runtime(runtime_spec.mode, allocation, runtime_spec):
+        with activate_runtime_bootstrap(
+            plan,
+            restore_environ=restore_environ,
+            allow_process_controls=allow_process_controls,
+            adapters=adapters,
+        ) as state:
+            yield state
+
+
+def _activation_spec(spec: RuntimeContextSpec | Mapping[str, Any] | None, mode: RuntimeMode | str | None) -> RuntimeContextSpec:
+    if isinstance(spec, Mapping):
+        data = dict(spec)
+        if mode is not None:
+            data["mode"] = RuntimeMode.coerce(mode).value
+        return RuntimeContextSpec.from_data(data)
+    if spec is None:
+        if mode is None:
+            return RuntimeContextSpec()
+        return replace(RuntimeContextSpec(), mode=RuntimeMode.coerce(mode))
+    if mode is None:
+        return spec
+    return replace(spec, mode=RuntimeMode.coerce(mode))
+
+
 def _validate_plan_matches_active_runtime(plan: RuntimeBootstrapPlan) -> None:
     runtime = active_runtime()
     if runtime.mode is not plan.runtime_spec.mode:
@@ -152,4 +199,4 @@ def _restore_environ(snapshot: Mapping[str, str | None]) -> None:
             os.environ[key] = value
 
 
-__all__ = ["FrameworkBootstrapPolicy", "RuntimeBootstrapPlan", "activate_runtime_bootstrap", "apply_runtime_bootstrap_plan", "build_runtime_bootstrap_plan"]
+__all__ = ["FrameworkBootstrapPolicy", "RuntimeBootstrapPlan", "activate", "activate_runtime_bootstrap", "apply_runtime_bootstrap_plan", "build_runtime_bootstrap_plan"]

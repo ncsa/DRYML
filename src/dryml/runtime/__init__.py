@@ -6,7 +6,7 @@ control-plane code do not accidentally capture workload accelerators.
 """
 
 from dryml.runtime.allocation import NoAllocation, RuntimeAllocationView
-from dryml.runtime.bootstrap import FrameworkBootstrapPolicy, RuntimeBootstrapPlan, activate_runtime_bootstrap, apply_runtime_bootstrap_plan, build_runtime_bootstrap_plan
+from dryml.runtime.bootstrap import FrameworkBootstrapPolicy, RuntimeBootstrapPlan, activate, activate_runtime_bootstrap, apply_runtime_bootstrap_plan, build_runtime_bootstrap_plan
 from dryml.runtime.context import RuntimeBootstrapState, RuntimeState, active_runtime, active_runtime_bootstrap, active_runtime_mode, enter_runtime, reset_runtime
 from dryml.runtime.devices import DeviceVisibilityPlan, DeviceVisibilityPolicy, apply_device_visibility_plan, build_device_visibility_plan
 from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_allocation_for_legacy_compute_reqs, require_worker_allocation, require_workload_allocation
@@ -25,6 +25,7 @@ __all__ = [
     "RuntimeContextSpec",
     "RuntimeMode",
     "RuntimeState",
+    "activate",
     "activate_runtime_bootstrap",
     "active_runtime",
     "active_runtime_bootstrap",
