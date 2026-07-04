@@ -55,6 +55,68 @@ def test_connection_manager_is_process_thread_local(tmp_path):
     manager.close_all_current_process()
 
 
+def test_connection_manager_shares_same_thread_connections_until_all_owners_close(tmp_path):
+    config = SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete")
+    left = SQLiteConnectionManager(config)
+    right = SQLiteConnectionManager(config)
+    sqlite3 = require_sqlite()
+
+    con = left.connection()
+    assert right.connection() is con
+
+    left.close_current()
+    assert con.execute("SELECT 1").fetchone()[0] == 1
+    right.close_current()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
+
+
+def test_connection_manager_active_lease_survives_owner_closes(tmp_path):
+    config = SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete")
+    left = SQLiteConnectionManager(config)
+    right = SQLiteConnectionManager(config)
+    sqlite3 = require_sqlite()
+
+    with left.lease() as con:
+        assert right.connection() is con
+        left.close_current()
+        right.close_current()
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
+
+
+def test_connection_manager_reopens_externally_closed_cached_connection(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+    con.close()
+
+    reopened = manager.connection()
+
+    assert reopened is not con
+    assert reopened.execute("SELECT 1").fetchone()[0] == 1
+    manager.close_current()
+
+
+def test_connection_manager_path_invalidation_reopens_other_manager(tmp_path):
+    config = SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete")
+    left = SQLiteConnectionManager(config)
+    right = SQLiteConnectionManager(config)
+    sqlite3 = require_sqlite()
+
+    con = left.connection()
+    assert right.connection() is con
+    right.close_path_current_process()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
+
+    reopened = left.connection()
+    assert reopened is not con
+    assert reopened.execute("SELECT 1").fetchone()[0] == 1
+    left.close_current()
+
+
 def test_connection_is_opened_lazily(tmp_path):
     path = tmp_path / "index.sqlite"
     manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(path, journal_mode="delete"))

@@ -8,6 +8,8 @@ import numpy as np
 
 from dryml.core2 import definition_mode
 from dryml.core2.repo import Repo, default_repo
+from dryml.core2.query.sqlite import sqlite_available
+from dryml.core2.store.dir import DirStore
 from dryml.core2.dtype import dtype
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.core2.cardinality import Cardinality
@@ -112,6 +114,34 @@ def test_save_3(primary_store_set):
     repo.save()
 
     assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_closing_old_repo_does_not_break_new_repo_on_same_dirstore(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo1 = Repo(stores=[store])
+    repo1.add_objects(objects.HelloStr(msg="test"))
+    repo1.save()
+    repo2 = Repo(stores=[store])
+
+    assert repo2.find_defs(None, refresh=False).count() == 1
+    repo1.close(flush=False)
+
+    assert repo2.find_defs(None, refresh=False).count() == 1
+    repo2.close(flush=False)
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_closing_repo_during_shared_sqlite_read_view_does_not_close_view(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    repo = Repo(stores=[store])
+    repo.add_objects(objects.HelloStr(msg="test"))
+    repo.save()
+    index = store.open_query_index()
+
+    with index.read_view() as view:
+        repo.close(flush=False)
+        assert len(view.all_stored_ids()) == 1
 
 
 @pytest.fixture

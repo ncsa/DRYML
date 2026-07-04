@@ -231,17 +231,21 @@ class SQLiteStoreQueryIndex:
     @contextmanager
     def read_view(self, *, include_cached: bool = True):
         self._ensure_ready()
-        con = self._connections.connection(readonly=True)
-        con.execute("BEGIN")
-        view = None
-        try:
-            generation = _read_generation(con)
-            view = SQLiteQueryIndexReadView(con, source_key=self.source_key, generation=generation)
-            yield view
-        finally:
-            if view is not None:
-                view.close()
-            con.execute("ROLLBACK")
+        with self._connections.lease(readonly=True) as con:
+            con.execute("BEGIN")
+            view = None
+            try:
+                generation = _read_generation(con)
+                view = SQLiteQueryIndexReadView(con, source_key=self.source_key, generation=generation)
+                yield view
+            finally:
+                if view is not None:
+                    view.close()
+                try:
+                    con.execute("ROLLBACK")
+                except Exception:
+                    self._connections.close_current()
+                    raise
 
     def refresh(self, policy, *, stats=None) -> None:
         if policy is False:
@@ -338,7 +342,7 @@ class SQLiteStoreQueryIndex:
         if self.store is None or not hasattr(self.store, "hydrate_index"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
 
-        self._connections.close_all_current_process()
+        self._connections.close_path_current_process()
         self._remove_existing_index(quarantine=quarantine_existing)
         self.initialize_empty(build_state="building")
         scanned = 0
@@ -762,22 +766,21 @@ class SQLiteStoreQueryIndex:
 
     def _run_write_transaction(self, operation):
         def attempt_write():
-            con = None
-            began = False
-            try:
-                con = self._connections.connection(readonly=False)
-                con.execute("BEGIN IMMEDIATE")
-                began = True
-                result = operation(con)
-                con.execute("COMMIT")
-                return result
-            except Exception:
-                if began and con is not None:
-                    try:
-                        con.execute("ROLLBACK")
-                    except Exception:
-                        self._connections.close_current()
-                raise
+            with self._connections.lease(readonly=False) as con:
+                began = False
+                try:
+                    con.execute("BEGIN IMMEDIATE")
+                    began = True
+                    result = operation(con)
+                    con.execute("COMMIT")
+                    return result
+                except Exception:
+                    if began:
+                        try:
+                            con.execute("ROLLBACK")
+                        except Exception:
+                            self._connections.close_current()
+                    raise
 
         return self._run_sqlite_busy_retry(attempt_write, action="write transaction")
 
