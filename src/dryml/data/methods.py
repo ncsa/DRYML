@@ -183,7 +183,8 @@ class Cast(Method):
 
     @traits(backend="tf")
     def tf_call(self, x):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
         return tf.cast(x, self.dtype.tf())
 
     @traits(backend="torch")
@@ -244,25 +245,29 @@ class ArgMax(Method):
 
     @traits(backend="tf")
     def tf_call(self, x):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         return tf.argmax(x, axis=self.axis, output_type=tf.int64)
 
     @traits(backend="tf", batch_mode="batched")
     def tf_batched(self, x):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         return tf.argmax(x, axis=self._runtime_axis(batched=True), output_type=tf.int64)
 
     @traits(backend="torch")
     def torch_call(self, x):
-        import torch
+        from dryml.runtime import import_configured_framework
+        torch = import_configured_framework("torch")
 
         return torch.argmax(x, dim=self.axis)
 
     @traits(backend="torch", batch_mode="batched")
     def torch_batched(self, x):
-        import torch
+        from dryml.runtime import import_configured_framework
+        torch = import_configured_framework("torch")
 
         return torch.argmax(x, dim=self._runtime_axis(batched=True))
 
@@ -281,13 +286,15 @@ class Flatten(Method):
 
     @traits(backend="tf")
     def tf_call(self, x):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         return tf.reshape(x, [-1])
 
     @traits(backend="tf", batch_mode="batched")
     def tf_batched(self, x):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         return tf.reshape(x, [tf.shape(x)[0], -1])
 
@@ -323,7 +330,8 @@ class Scale(Method):
 
     @traits(backend="tf")
     def tf_call(self, x):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         x = tf.cast(x, self.dtype.tf())
         return (x - self.mean) / self.std

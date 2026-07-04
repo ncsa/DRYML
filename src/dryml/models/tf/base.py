@@ -16,6 +16,12 @@ from dryml.tf.tensor_spec import as_tensor_spec as tf_as_tensor_spec
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
 
 
+def _tensorflow():
+    from dryml.runtime import import_configured_framework
+
+    return import_configured_framework("tensorflow")
+
+
 def _unwrap_backend_obj(obj):
     return obj.obj if hasattr(obj, "obj") else obj
 
@@ -139,7 +145,7 @@ class Wrapper(Serializable):
         self._restore_status = None
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         ckpt_dir = revision_path("object", "ckpt", dest_dir, revision=revision)
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -152,7 +158,7 @@ class Wrapper(Serializable):
         manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         ckpt_dir = revision_path("object", "ckpt", src_dir, revision=revision)
         latest = tf.train.latest_checkpoint(ckpt_dir)
@@ -179,7 +185,7 @@ class Optimizer(Wrapper):
         self._restore_status = None
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         ckpt_dir = revision_path("optimizer", "ckpt", dest_dir, revision=revision)
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -191,7 +197,7 @@ class Optimizer(Wrapper):
         manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         ckpt_dir = revision_path("optimizer", "ckpt", src_dir, revision=revision)
         latest = tf.train.latest_checkpoint(ckpt_dir)
@@ -237,7 +243,7 @@ class Model(BaseModel, Serializable):
         if input_spec is None or spec_tree_is_batched(input_spec):
             return self, self(first_value)
 
-        import tensorflow as tf
+        tf = _tensorflow()
 
         def bound_model(x):
             batched = _tree_to_tf_model_batch(tf, x, input_spec)
@@ -267,7 +273,7 @@ class Model(BaseModel, Serializable):
             return super().infer_output_spec(input_spec)
 
         import warnings
-        import tensorflow as tf
+        tf = _tensorflow()
 
         sample = map_leaves(fake_from_spec_tree(input_spec), tf.convert_to_tensor)
         try:
@@ -296,7 +302,7 @@ class Model(BaseModel, Serializable):
         return maybe_unbatch_output_spec(tf_as_tensor_spec(output, batched=True), input_spec)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         ckpt_dir = revision_path("model", "ckpt", dest_dir, revision=revision)
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -308,7 +314,7 @@ class Model(BaseModel, Serializable):
         manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         ckpt_dir = revision_path("model", "ckpt", src_dir, revision=revision)
         latest = tf.train.latest_checkpoint(ckpt_dir)
@@ -380,7 +386,7 @@ class BasicTraining(TrainFunction):
         self.verbose = verbose
 
     def __call__(self, exp):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         train_data = self._prepare_data(exp.train_data, for_training=True)
         train_xy = self._xy_data(train_data)
@@ -511,7 +517,7 @@ class Training(BasicTraining):
     """Low-level TensorFlow training loop for arbitrary TF-callable DRYML models."""
 
     def __call__(self, exp):
-        import tensorflow as tf
+        tf = _tensorflow()
 
         train_data = self._prepare_data(exp.train_data, for_training=True)
         train_xy = self._xy_data(train_data)

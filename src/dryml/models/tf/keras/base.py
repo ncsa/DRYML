@@ -14,7 +14,8 @@ class Sequential(Model):
         return args, kwargs
 
     def __init__(self, layer_defs=(), output_spec=None):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         self.layer_defs = tuple(layer_defs)
         layers = []

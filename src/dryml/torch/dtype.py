@@ -5,7 +5,8 @@ from dryml.core2.dtype import DType, normalize_dtype
 
 
 def _dtype_torch(self):
-    import torch
+    from dryml.runtime import import_configured_framework
+    torch = import_configured_framework("torch")
 
     table = {
         "bool": torch.bool,

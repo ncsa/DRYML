@@ -209,7 +209,8 @@ class TFDSAdapter(SourceDataset):
         assume_batched: bool | None = None,
         spec: SpecTree | None = None,
     ):
-        import tensorflow_datasets as tfds
+        from dryml.runtime import import_configured_framework
+        tfds = import_configured_framework("tensorflow", "tensorflow_datasets")
 
         self.dataset = tfds.load(
             name,
@@ -276,8 +277,9 @@ class TorchDatasetAdapter(SourceDataset):
         infer_spec: bool = False,
     ):
         try:
-            import torch.utils.data as tud  # type: ignore
-        except Exception as e:
+            from dryml.runtime import import_configured_framework
+            tud = import_configured_framework("torch", "torch.utils.data")
+        except ImportError as e:
             raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
 
         if not isinstance(dataset, (tud.Dataset, tud.IterableDataset)):
@@ -295,8 +297,9 @@ class TorchDatasetAdapter(SourceDataset):
 
     def __iter__(self) -> Iterator[Any]:
         try:
-            import torch.utils.data as tud  # type: ignore
-        except Exception as e:
+            from dryml.runtime import import_configured_framework
+            tud = import_configured_framework("torch", "torch.utils.data")
+        except ImportError as e:
             raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
 
         if isinstance(self.dataset, tud.IterableDataset):
@@ -313,8 +316,9 @@ class TorchDatasetAdapter(SourceDataset):
 
     def peek(self) -> Any:
         try:
-            import torch.utils.data as tud  # type: ignore
-        except Exception as e:
+            from dryml.runtime import import_configured_framework
+            tud = import_configured_framework("torch", "torch.utils.data")
+        except ImportError as e:
             raise ImportError("PyTorch is required for TorchDatasetAdapter.") from e
 
         if isinstance(self.dataset, tud.IterableDataset):

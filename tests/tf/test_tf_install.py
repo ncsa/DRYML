@@ -1,5 +1,6 @@
 import pytest
 
+import dryml.runtime as runtime
 from dryml.core2.backend import discover_backend
 import numpy as np
 
@@ -9,6 +10,12 @@ import dryml.tf as dryml_tf
 from dryml.core2.dtype import DType
 from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
 from dryml.core2.backend import discover_backend
+
+
+def _runtime_bootstrap(framework_name):
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "probe", "frameworks": {framework_name: {}}, "device_visibility": {"policy": "none"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation)
+    return runtime.enter_runtime(runtime.RuntimeMode.PROBE, runtime.NoAllocation, spec), runtime.activate_runtime_bootstrap(plan)
 
 
 def test_tf_dtype_from_dtype_object():
@@ -92,7 +99,10 @@ def test_tf_roundtrip_dense_if_forward_methods_installed():
     if not hasattr(spec, "tf"):
         pytest.skip("TensorSpec.tf() is not installed.")
 
-    tf_spec = spec.tf(include_batch=True)
+    runtime_scope, bootstrap_scope = _runtime_bootstrap("tensorflow")
+    with runtime_scope:
+        with bootstrap_scope:
+            tf_spec = spec.tf(include_batch=True)
 
     assert isinstance(tf_spec, tf.TensorSpec)
     assert tuple(tf_spec.shape.as_list()) == (None, 32)
@@ -112,7 +122,10 @@ def test_tf_roundtrip_ragged_if_forward_methods_installed():
     if not hasattr(spec, "tf"):
         pytest.skip("TensorSpec.tf() is not installed.")
 
-    tf_spec = spec.tf(include_batch=True)
+    runtime_scope, bootstrap_scope = _runtime_bootstrap("tensorflow")
+    with runtime_scope:
+        with bootstrap_scope:
+            tf_spec = spec.tf(include_batch=True)
 
     assert isinstance(tf_spec, tf.RaggedTensorSpec)
     assert tuple(tf_spec.shape.as_list()) == (None, 8)

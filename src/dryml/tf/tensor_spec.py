@@ -17,7 +17,8 @@ def dims_to_tf(shape):
 
 
 def _tensor_spec_tf(self, *, include_batch: bool = True, name: str | None = None):
-    import tensorflow as tf
+    from dryml.runtime import import_configured_framework
+    tf = import_configured_framework("tensorflow")
 
     shape = self.framework_shape(include_batch=include_batch)
     tf_shape = dims_to_tf(shape)
@@ -112,12 +113,9 @@ def as_tensor_spec(
         If True, interpret the leading axis as batch.
     """
     def leaf_to_spec(x: Any) -> TensorSpec:
-        import tensorflow as tf
+        type_name = type(x).__name__
 
-        if not isinstance(x, tf.TypeSpec):
-            x = tf.type_spec_from_value(x)
-
-        if isinstance(x, tf.RaggedTensorSpec):
+        if type_name == "RaggedTensorSpec":
             shape = _tf_shape_to_dryml(x.shape)
             sample_shape, batch = _split_batch(shape, batched=batched)
 
@@ -132,7 +130,7 @@ def as_tensor_spec(
                 backend="tf",
             )
 
-        if isinstance(x, tf.SparseTensorSpec):
+        if type_name == "SparseTensorSpec":
             shape = _tf_shape_to_dryml(x.shape)
             sample_shape, batch = _split_batch(shape, batched=batched)
 
@@ -146,7 +144,7 @@ def as_tensor_spec(
                 backend="tf",
             )
 
-        if isinstance(x, tf.TensorSpec):
+        if type_name == "TensorSpec" or (hasattr(x, "shape") and hasattr(x, "dtype")):
             shape = _tf_shape_to_dryml(x.shape)
             sample_shape, batch = _split_batch(shape, batched=batched)
 
@@ -159,6 +157,6 @@ def as_tensor_spec(
                 backend="tf",
             )
 
-        raise TypeError(f"Unsupported TensorFlow spec/value type: {type(x).__name__}")
+        raise TypeError(f"Unsupported TensorFlow spec/value type: {type_name}")
 
     return map_leaves(x, leaf_to_spec)

@@ -1,6 +1,10 @@
 import pytest
+import os
 import sys
 
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+import dryml.runtime as runtime
 jax = pytest.importorskip("jax")
 if not hasattr(jax, "ShapeDtypeStruct"):
     sys.modules.pop("jax", None)
@@ -12,6 +16,12 @@ import numpy as np
 from dryml.core2.dtype import DType
 from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
 from dryml.core2.backend import discover_backend
+
+
+def _runtime_bootstrap(framework_name):
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "probe", "frameworks": {framework_name: {}}, "device_visibility": {"policy": "none"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation)
+    return runtime.enter_runtime(runtime.RuntimeMode.PROBE, runtime.NoAllocation, spec), runtime.activate_runtime_bootstrap(plan)
 
 
 def test_jax_dtype_from_dtype_object():
@@ -65,7 +75,10 @@ def test_jax_roundtrip_dense_if_forward_methods_installed():
     if not hasattr(spec, "jax"):
         pytest.skip("TensorSpec.jax() is not installed.")
 
-    jax_spec = spec.jax()
+    runtime_scope, bootstrap_scope = _runtime_bootstrap("jax")
+    with runtime_scope:
+        with bootstrap_scope:
+            jax_spec = spec.jax()
 
     assert isinstance(jax_spec, jax.ShapeDtypeStruct)
     assert jax_spec.shape == (8, 32)
@@ -78,8 +91,11 @@ def test_jax_dynamic_dim_rejected_if_forward_methods_installed():
     if not hasattr(spec, "jax"):
         pytest.skip("TensorSpec.jax() is not installed.")
 
-    with pytest.raises(ValueError):
-        spec.jax()
+    runtime_scope, bootstrap_scope = _runtime_bootstrap("jax")
+    with runtime_scope:
+        with bootstrap_scope:
+            with pytest.raises(ValueError):
+                spec.jax()
 
 
 def test_jax_backend_detectors():

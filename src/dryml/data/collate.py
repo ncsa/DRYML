@@ -50,7 +50,8 @@ def default_collate(items: list[Any]) -> Any:
 
     # torch tensor
     try:
-        import torch
+        from dryml.runtime import import_configured_framework
+        torch = import_configured_framework("torch")
         if isinstance(first, torch.Tensor):
             return torch.stack(items, dim=0)
     except Exception:
@@ -58,7 +59,8 @@ def default_collate(items: list[Any]) -> Any:
 
     # tf tensor
     try:
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
         if tf.is_tensor(first):
             return tf.stack(items, axis=0)
     except Exception:

@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from typing import Any
 
 
@@ -7,5 +8,7 @@ def is_jax_available() -> bool:
 
 
 def is_jax_value(x: Any) -> bool:
-    import jax
+    jax = sys.modules.get("jax")
+    if jax is None:
+        return False
     return isinstance(x, (jax.Array, jax.ShapeDtypeStruct))

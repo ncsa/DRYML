@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Mapping
 from typing import Any
 
@@ -113,6 +114,13 @@ def assert_framework_import_safe(framework_name: str, desired_visibility: Any = 
     assert_framework_import_configured(framework_name, desired_visibility=desired_visibility)
 
 
+def import_configured_framework(framework_name: str, module_name: str | None = None):
+    """Import a framework module only after runtime bootstrap configured it."""
+
+    assert_framework_import_configured(framework_name)
+    return importlib.import_module(module_name or framework_name)
+
+
 def require_workload_allocation(reason: str | None = None) -> RuntimeAllocationView:
     """Require worker/inline runtime mode with an active workload allocation."""
 
@@ -194,4 +202,4 @@ def _memory_bytes(value: Any) -> int | None:
     return value
 
 
-__all__ = ["BOOTSTRAP_MARKER_ENV", "assert_framework_import_configured", "assert_framework_import_safe", "assert_no_workload_allocation", "require_allocation", "require_allocation_for_legacy_compute_reqs", "require_worker_allocation", "require_workload_allocation"]
+__all__ = ["BOOTSTRAP_MARKER_ENV", "assert_framework_import_configured", "assert_framework_import_safe", "assert_no_workload_allocation", "import_configured_framework", "require_allocation", "require_allocation_for_legacy_compute_reqs", "require_worker_allocation", "require_workload_allocation"]

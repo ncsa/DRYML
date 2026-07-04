@@ -1,5 +1,6 @@
 import importlib
 import os
+import subprocess
 import sys
 import types
 
@@ -8,6 +9,7 @@ import pytest
 import dryml.runtime as runtime
 import dryml.runtime.frameworks as runtime_frameworks
 from dryml.runtime.errors import FrameworkImportSafetyError
+from dryml.runtime.errors import RuntimeTransitionError
 
 
 def test_importing_runtime_does_not_import_heavy_frameworks(monkeypatch):
@@ -62,6 +64,21 @@ def test_framework_bootstrap_policy_can_validate_major_frameworks(monkeypatch):
     assert excinfo.value.context["framework"] == "torch"
 
 
+def test_strict_policy_defaults_to_declared_frameworks(monkeypatch):
+    monkeypatch.setitem(sys.modules, "tensorflow", types.ModuleType("tensorflow"))
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"tensorflow": {}}, "device_visibility": {"policy": "assigned"}})
+    plan = runtime.build_runtime_bootstrap_plan(
+        spec,
+        runtime.RuntimeAllocationView(cpus=(0,)),
+        policy=runtime.FrameworkBootstrapPolicy(strict_preimport=True),
+    )
+
+    assert set(plan.framework_results) == {"plain", "tensorflow"}
+    with pytest.raises(FrameworkImportSafetyError) as excinfo:
+        runtime.apply_runtime_bootstrap_plan(plan, environ={})
+    assert excinfo.value.context["framework"] == "tensorflow"
+
+
 def test_default_bootstrap_policy_validates_declared_frameworks_only(monkeypatch):
     monkeypatch.setitem(sys.modules, "tensorflow", types.ModuleType("tensorflow"))
     spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"plain": {}}, "device_visibility": {"policy": "assigned"}})
@@ -94,6 +111,35 @@ def test_activate_runtime_bootstrap_restores_environment(monkeypatch):
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "before"
 
 
+def test_activate_runtime_bootstrap_requires_matching_active_runtime():
+    allocation = runtime.RuntimeAllocationView(accelerators={"gpu": (0,)})
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "frameworks": {"tensorflow": {}}, "device_visibility": {"policy": "assigned"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, allocation)
+
+    with pytest.raises(RuntimeTransitionError) as excinfo:
+        with runtime.activate_runtime_bootstrap(plan):
+            pass
+    assert excinfo.value.context["active_mode"] == "orchestrator"
+
+
+def test_activate_runtime_bootstrap_rejects_process_controls_by_default(monkeypatch):
+    allocation = runtime.RuntimeAllocationView(cpus=(0,))
+    spec = runtime.RuntimeContextSpec.from_data(
+        {
+            "mode": "worker",
+            "frameworks": {"plain": {"set_cpu_affinity": True}},
+            "device_visibility": {"policy": "assigned"},
+        }
+    )
+    plan = runtime.build_runtime_bootstrap_plan(spec, allocation)
+
+    with runtime.enter_runtime(runtime.RuntimeMode.WORKER, allocation, spec):
+        with pytest.raises(RuntimeTransitionError) as excinfo:
+            with runtime.activate_runtime_bootstrap(plan):
+                pass
+    assert "plain" in excinfo.value.context["controls"]
+
+
 def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):
     calls = {}
 
@@ -120,3 +166,47 @@ def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):
 
     assert calls["affinity"] == (0, {2, 3})
     assert calls["rlimit"] == (runtime_frameworks.resource.RLIMIT_AS, (128 * 1024**2, 128 * 1024**2))
+
+
+def test_worker_bootstrap_imports_fake_framework_in_fresh_subprocess(tmp_path):
+    module_path = tmp_path / "fakeframework.py"
+    module_path.write_text("VALUE = 'loaded'\n", encoding="utf-8")
+    code = f"""
+import os
+import sys
+import dryml.runtime as runtime
+
+def runtime_framework_result():
+    from dryml.runtime.frameworks import FrameworkBootstrapResult
+    return FrameworkBootstrapResult()
+
+def runtime_framework_adapter():
+    class Adapter:
+        name = "fakeframework"
+        def build_plan(self, runtime_spec, allocation_view, visibility_plan):
+            return runtime_framework_result()
+        def validate_before_import(self, result):
+            return None
+        def apply_pre_import(self, result, *, environ=None):
+            return None
+        def apply_post_import(self, result):
+            return None
+    return Adapter()
+
+sys.path.insert(0, {str(tmp_path)!r})
+allocation = runtime.RuntimeAllocationView(cpus=(0,), accelerators={{"gpu": (5,)}})
+spec = runtime.RuntimeContextSpec.from_data({{
+    "mode": "worker",
+    "frameworks": {{"fakeframework": {{}}}},
+    "device_visibility": {{"policy": "assigned"}},
+}})
+
+with runtime.enter_runtime(runtime.RuntimeMode.WORKER, allocation, spec):
+    plan = runtime.build_runtime_bootstrap_plan(spec, allocation, adapters={{"fakeframework": runtime_framework_adapter()}})
+    with runtime.activate_runtime_bootstrap(plan, adapters={{"fakeframework": runtime_framework_adapter()}}):
+        module = runtime.import_configured_framework("fakeframework")
+        print(os.environ["CUDA_VISIBLE_DEVICES"] + ":" + module.VALUE)
+"""
+    result = subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
+
+    assert result.stdout.strip() == "5:loaded"

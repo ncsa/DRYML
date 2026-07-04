@@ -1,6 +1,7 @@
 import pytest
 import sys
 
+import dryml.runtime as runtime
 from dryml.core2.backend import discover_backend
 import numpy as np
 
@@ -14,6 +15,12 @@ from dryml.core2.dtype import DType
 from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
 from dryml.core2.backend import discover_backend
 from dryml.torch import TorchTensorSpec
+
+
+def _runtime_bootstrap(framework_name):
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "probe", "frameworks": {framework_name: {}}, "device_visibility": {"policy": "none"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation)
+    return runtime.enter_runtime(runtime.RuntimeMode.PROBE, runtime.NoAllocation, spec), runtime.activate_runtime_bootstrap(plan)
 
 
 def test_torch_dtype_from_dtype_object():
@@ -85,7 +92,10 @@ def test_torch_roundtrip_dense_if_forward_methods_installed():
     if not hasattr(spec, "torch"):
         pytest.skip("TensorSpec.torch() is not installed.")
 
-    torch_spec = spec.torch()
+    runtime_scope, bootstrap_scope = _runtime_bootstrap("torch")
+    with runtime_scope:
+        with bootstrap_scope:
+            torch_spec = spec.torch()
 
     assert isinstance(torch_spec, TorchTensorSpec)
     assert torch_spec.shape == (Dynamic, 32)
@@ -104,7 +114,10 @@ def test_torch_roundtrip_sparse_if_forward_methods_installed():
     if not hasattr(spec, "torch"):
         pytest.skip("TensorSpec.torch() is not installed.")
 
-    torch_spec = spec.torch()
+    runtime_scope, bootstrap_scope = _runtime_bootstrap("torch")
+    with runtime_scope:
+        with bootstrap_scope:
+            torch_spec = spec.torch()
 
     assert isinstance(torch_spec, TorchTensorSpec)
     assert torch_spec.shape == (16, 8)

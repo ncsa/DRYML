@@ -5,10 +5,17 @@ import types
 import numpy as np
 import pytest
 
+import dryml.runtime as runtime
 from dryml.core2 import ConfigRef, Repo
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.tensor_spec import TensorSpec
 from dryml.data import TFDSAdapter, NpyFileDataset
+
+
+def _tf_runtime_bootstrap():
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "probe", "frameworks": {"tensorflow": {}}, "device_visibility": {"policy": "none"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation)
+    return runtime.enter_runtime(runtime.RuntimeMode.PROBE, runtime.NoAllocation, spec), runtime.activate_runtime_bootstrap(plan)
 
 
 def test_npy_file_dataset_loads_sorted_files_from_config_ref(tmp_path):
@@ -71,7 +78,10 @@ def test_tfds_adapter_numpy_mode_infers_spec_and_iterates(monkeypatch):
     ]
     calls = _install_fake_tfds(monkeypatch, _FakeTFDS(items))
 
-    ds = TFDSAdapter("mnist", split="train[:2]", as_supervised=True, as_numpy=True)
+    runtime_scope, bootstrap_scope = _tf_runtime_bootstrap()
+    with runtime_scope:
+        with bootstrap_scope:
+            ds = TFDSAdapter("mnist", split="train[:2]", as_supervised=True, as_numpy=True)
 
     assert calls[0][0] == ("mnist",)
     assert calls[0][1]["split"] == "train[:2]"
@@ -87,7 +97,10 @@ def test_tfds_adapter_numpy_mode_infers_spec_and_iterates(monkeypatch):
 def test_tfds_adapter_real_mnist_numpy_mode():
     pytest.importorskip("tensorflow_datasets")
 
-    ds = TFDSAdapter("mnist", split="train[:2]", as_supervised=True, as_numpy=True)
+    runtime_scope, bootstrap_scope = _tf_runtime_bootstrap()
+    with runtime_scope:
+        with bootstrap_scope:
+            ds = TFDSAdapter("mnist", split="train[:2]", as_supervised=True, as_numpy=True)
 
     assert ds.spec[0] == TensorSpec("uint8", shape=(28, 28, 1), backend="numpy")
     assert ds.spec[1] == TensorSpec("int64", shape=(), backend="numpy")
@@ -107,7 +120,10 @@ def test_tfds_adapter_numpy_mode_does_not_import_tensorflow(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
-    ds = TFDSAdapter("fake", as_supervised=True, as_numpy=True)
+    runtime_scope, bootstrap_scope = _tf_runtime_bootstrap()
+    with runtime_scope:
+        with bootstrap_scope:
+            ds = TFDSAdapter("fake", as_supervised=True, as_numpy=True)
 
     assert ds.spec[0] == TensorSpec("float32", shape=(2,), backend="numpy")
 
@@ -116,7 +132,13 @@ def test_tfds_adapter_maps_unknown_and_infinite_cardinality(monkeypatch):
     items = [(np.zeros((2,), dtype=np.float32), np.int64(0))]
 
     _install_fake_tfds(monkeypatch, _FakeTFDS(items, cardinality=-2))
-    assert TFDSAdapter("fake", as_supervised=True, as_numpy=True).__len__() == Cardinality.UNKNOWN
+    runtime_scope, bootstrap_scope = _tf_runtime_bootstrap()
+    with runtime_scope:
+        with bootstrap_scope:
+            assert TFDSAdapter("fake", as_supervised=True, as_numpy=True).__len__() == Cardinality.UNKNOWN
 
     _install_fake_tfds(monkeypatch, _FakeTFDS(items, cardinality=-1))
-    assert TFDSAdapter("fake", as_supervised=True, as_numpy=True).__len__() == Cardinality.INFINITE
+    runtime_scope, bootstrap_scope = _tf_runtime_bootstrap()
+    with runtime_scope:
+        with bootstrap_scope:
+            assert TFDSAdapter("fake", as_supervised=True, as_numpy=True).__len__() == Cardinality.INFINITE

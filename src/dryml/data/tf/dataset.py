@@ -6,11 +6,9 @@ import numpy as np
 
 
 def _tensorflow():
-    from dryml.runtime import assert_framework_import_safe
+    from dryml.runtime import import_configured_framework
 
-    assert_framework_import_safe("tensorflow")
-    import tensorflow as tf
-    return tf
+    return import_configured_framework("tensorflow")
 
 
 class TFDataset(Dataset):
@@ -158,7 +156,8 @@ class TFDataset(Dataset):
         Create TorchDataset from this dataset
         """
 
-        import torch
+        from dryml.runtime import import_configured_framework
+        torch = import_configured_framework("torch")
         from dryml.data.torch import TorchDataset, TorchIterableDatasetWrapper
 
         def tf_to_torch(el):

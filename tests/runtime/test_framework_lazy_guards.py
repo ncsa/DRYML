@@ -28,6 +28,18 @@ def test_importing_tf_utils_does_not_import_tensorflow(monkeypatch):
     assert "tensorflow" not in sys.modules
 
 
+def test_importing_torch_dataset_package_does_not_import_torch(monkeypatch):
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+
+    module = importlib.import_module("dryml.data.torch")
+
+    assert module.__all__ == ["TorchDataset", "TorchIterableDatasetWrapper", "transforms"]
+    assert "torch" not in sys.modules
+    with pytest.raises(FrameworkImportSafetyError):
+        _ = module.TorchDataset
+    assert "torch" not in sys.modules
+
+
 def test_configured_framework_import_is_separate_from_workload_allocation():
     spec = runtime.RuntimeContextSpec.from_data({"mode": "probe", "frameworks": {"tensorflow": {}}, "device_visibility": {"policy": "none"}})
     plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation)

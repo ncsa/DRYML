@@ -8,10 +8,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from .allocation import NoAllocation, RuntimeAllocationView
-from .context import RuntimeBootstrapState, reset_runtime_bootstrap, set_runtime_bootstrap
+from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
+from .context import RuntimeBootstrapState, active_runtime, reset_runtime_bootstrap, set_runtime_bootstrap
 from .devices import DeviceVisibilityPlan, apply_device_visibility_plan, build_device_visibility_plan
 from .frameworks import FrameworkBootstrapAdapter, FrameworkBootstrapResult, default_adapters
+from .errors import RuntimeTransitionError
 from .guards import BOOTSTRAP_MARKER_ENV
 from .specs import RuntimeContextSpec
 
@@ -20,7 +21,7 @@ from .specs import RuntimeContextSpec
 class FrameworkBootstrapPolicy:
     """Controls which lightweight framework adapters participate in bootstrap."""
 
-    frameworks: tuple[str, ...] = ("plain",)
+    frameworks: tuple[str, ...] | None = None
     strict_preimport: bool = False
 
 
@@ -44,7 +45,7 @@ def build_runtime_bootstrap_plan(runtime_spec: RuntimeContextSpec | Mapping[str,
     adapter_map = dict(default_adapters())
     if adapters:
         adapter_map.update(adapters)
-    selected = policy.frameworks if policy else tuple(dict.fromkeys(("plain", *spec.frameworks.keys())))
+    selected = policy.frameworks if policy and policy.frameworks is not None else tuple(dict.fromkeys(("plain", *spec.frameworks.keys())))
     framework_results = {name: adapter_map[name].build_plan(spec, allocation_view, visibility_plan) for name in selected if name in adapter_map}
     env_updates: dict[str, str] = dict(visibility_plan.env_updates)
     env_updates.update({str(key): str(value) for key, value in (env or {}).items()})
@@ -78,9 +79,12 @@ def apply_runtime_bootstrap_plan(plan: RuntimeBootstrapPlan, *, phase: str = "pr
 
 
 @contextmanager
-def activate_runtime_bootstrap(plan: RuntimeBootstrapPlan, *, restore_environ: bool = True, adapters: Mapping[str, FrameworkBootstrapAdapter] | None = None) -> Iterator[RuntimeBootstrapState]:
+def activate_runtime_bootstrap(plan: RuntimeBootstrapPlan, *, restore_environ: bool = True, allow_process_controls: bool = False, adapters: Mapping[str, FrameworkBootstrapAdapter] | None = None) -> Iterator[RuntimeBootstrapState]:
     """Activate *plan* in the current context and optionally restore env vars."""
 
+    _validate_plan_matches_active_runtime(plan)
+    if restore_environ and not allow_process_controls:
+        _reject_process_controls(plan)
     snapshot = _snapshot_environ(plan) if restore_environ else None
     state = _state_from_plan(plan)
     token = set_runtime_bootstrap(state)
@@ -91,6 +95,33 @@ def activate_runtime_bootstrap(plan: RuntimeBootstrapPlan, *, restore_environ: b
         reset_runtime_bootstrap(token)
         if snapshot is not None:
             _restore_environ(snapshot)
+
+
+def _validate_plan_matches_active_runtime(plan: RuntimeBootstrapPlan) -> None:
+    runtime = active_runtime()
+    if runtime.mode is not plan.runtime_spec.mode:
+        raise RuntimeTransitionError(
+            "runtime bootstrap plan mode does not match active runtime",
+            context={"active_mode": runtime.mode.value, "plan_mode": plan.runtime_spec.mode.value, "fix": "enter the matching runtime mode before activating bootstrap"},
+        )
+    if is_no_allocation(runtime.allocation) != is_no_allocation(plan.allocation_view) or (not is_no_allocation(runtime.allocation) and runtime.allocation != plan.allocation_view):
+        raise RuntimeTransitionError(
+            "runtime bootstrap plan allocation does not match active runtime",
+            context={"active_allocation": repr(runtime.allocation), "plan_allocation": repr(plan.allocation_view), "fix": "build bootstrap plan from the active runtime allocation"},
+        )
+
+
+def _reject_process_controls(plan: RuntimeBootstrapPlan) -> None:
+    controls = {
+        name: {"cpu_affinity": result.cpu_affinity, "memory_limit": result.memory_limit}
+        for name, result in plan.framework_results.items()
+        if result.cpu_affinity is not None or result.memory_limit is not None
+    }
+    if controls:
+        raise RuntimeTransitionError(
+            "runtime bootstrap process controls require explicit opt-in in reusable processes",
+            context={"controls": controls, "fix": "pass allow_process_controls=True or use a dedicated worker process"},
+        )
 
 
 def _state_from_plan(plan: RuntimeBootstrapPlan) -> RuntimeBootstrapState:

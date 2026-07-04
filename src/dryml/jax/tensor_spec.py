@@ -12,7 +12,8 @@ def _tensor_spec_jax(
     sharding=None,
     weak_type: bool = False,
 ):
-    import jax
+    from dryml.runtime import import_configured_framework
+    jax = import_configured_framework("jax")
 
     if self.layout is not Layout.DENSE:
         raise TypeError("Default TensorSpec.jax() only supports dense tensors.")

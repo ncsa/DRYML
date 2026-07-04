@@ -18,13 +18,15 @@ class ImageNormalize(Method):
 
     @traits(backend="tf")
     def tf_call(self, image):
-        import tensorflow as tf
+        from dryml.runtime import import_configured_framework
+        tf = import_configured_framework("tensorflow")
 
         return tf.cast(image, tf.float32) / 255.0
 
     @traits(backend="torch")
     def torch_call(self, image):
-        import torch
+        from dryml.runtime import import_configured_framework
+        torch = import_configured_framework("torch")
 
         return image.to(torch.float32) / 255.0
 

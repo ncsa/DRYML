@@ -14,7 +14,8 @@ def _tensor_spec_torch(
     device: str | None = None,
     requires_grad: bool | None = None,
 ):
-    import torch
+    from dryml.runtime import import_configured_framework
+    torch = import_configured_framework("torch")
     from .spec import TorchTensorSpec
 
     shape = self.framework_shape(include_batch=include_batch)

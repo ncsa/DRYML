@@ -1,9 +1,16 @@
-from dryml.data import Dataset, \
-    NumpyDataset, util
+from dryml.data import Dataset, GeneratorDataset, util
 from typing import Callable
-import torch
 import numpy as np
 from dryml.data.util import taker, skiper, nested_batcher
+
+
+def _torch():
+    from dryml.runtime import import_configured_framework
+
+    return import_configured_framework("torch")
+
+
+torch = _torch()
 
 
 class TorchIterableDatasetWrapper(torch.utils.data.IterableDataset):
@@ -199,12 +206,9 @@ class TorchDataset(Dataset):
 
     def numpy(self):
         dataset = self.map_el(lambda el: el.detach().numpy())
-        return NumpyDataset(
+        return GeneratorDataset(
             dataset.data_gen,
-            indexed=dataset.indexed,
-            supervised=dataset.supervised,
-            batch_size=dataset.batch_size,
-            size=dataset.size)
+        )
 
     def tf(self):
         return self.numpy().tf()

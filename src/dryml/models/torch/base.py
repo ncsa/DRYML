@@ -21,6 +21,12 @@ from dryml.models.utils import (
 from dryml.torch.tensor_spec import as_tensor_spec as torch_as_tensor_spec
 
 
+def _torch():
+    from dryml.runtime import import_configured_framework
+
+    return import_configured_framework("torch")
+
+
 def _resolve_device(torch):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -127,13 +133,13 @@ class Wrapper(Serializable):
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         if hasattr(self.obj, "state_dict"):
-            import torch
+            torch = _torch()
 
             torch.save(self.obj.state_dict(), revision_path("state", "pth", dest_dir, revision=revision))
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
         if hasattr(self.obj, "load_state_dict"):
-            import torch
+            torch = _torch()
 
             state_path = revision_path("state", "pth", src_dir, revision=revision)
             self.obj.load_state_dict(torch.load(state_path, map_location="cpu"))
@@ -153,12 +159,12 @@ class Optimizer(Serializable):
         self.obj = self.cls(parameters, *args, **kwargs)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
-        import torch
+        torch = _torch()
 
         torch.save(self.obj.state_dict(), revision_path("optimizer", "pth", dest_dir, revision=revision))
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
-        import torch
+        torch = _torch()
 
         state_path = revision_path("optimizer", "pth", src_dir, revision=revision)
         if os.path.exists(state_path):
@@ -179,7 +185,7 @@ class Model(BaseModel, Serializable):
         self.output_spec = output_spec
 
     def __call__(self, x, *args, **kwargs):
-        import torch
+        torch = _torch()
 
         device = _resolve_device(torch)
         x = _tree_to_torch(x, torch, device=device)
@@ -189,7 +195,7 @@ class Model(BaseModel, Serializable):
         if input_spec is None or spec_tree_is_batched(input_spec):
             return self, self(first_value)
 
-        import torch
+        torch = _torch()
 
         device = _resolve_device(torch)
 
@@ -213,7 +219,7 @@ class Model(BaseModel, Serializable):
             self.obj.to(device)
 
     def prep_train(self):
-        import torch
+        torch = _torch()
 
         device = _resolve_device(torch)
         self.to_device(device)
@@ -221,7 +227,7 @@ class Model(BaseModel, Serializable):
             self.obj.train(True)
 
     def prep_eval(self):
-        import torch
+        torch = _torch()
 
         device = _resolve_device(torch)
         self.to_device(device)
@@ -229,12 +235,12 @@ class Model(BaseModel, Serializable):
             self.obj.eval()
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
-        import torch
+        torch = _torch()
 
         torch.save(self.obj.state_dict(), revision_path("state", "pth", dest_dir, revision=revision))
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
-        import torch
+        torch = _torch()
 
         state_path = revision_path("state", "pth", src_dir, revision=revision)
         self.obj.load_state_dict(torch.load(state_path, map_location=self.device or "cpu"))
@@ -243,7 +249,7 @@ class Model(BaseModel, Serializable):
         if self.output_spec is not None:
             return super().infer_output_spec(input_spec)
 
-        import torch
+        torch = _torch()
 
         was_training = bool(getattr(self.obj, "training", False))
         self.prep_eval()
@@ -312,7 +318,7 @@ class Training(TrainFunction):
         self.verbose = verbose
 
     def __call__(self, exp):
-        import torch
+        torch = _torch()
 
         train_data = prepare_training_data(
             exp.train_data,
@@ -507,7 +513,7 @@ class Sequential(Model):
         return args, kwargs
 
     def __init__(self, layer_defs=(), output_spec=None):
-        import torch
+        torch = _torch()
 
         self.layer_defs = tuple(layer_defs)
         self.device = None

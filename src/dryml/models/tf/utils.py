@@ -6,11 +6,9 @@ from collections.abc import Mapping
 
 
 def _tensorflow():
-    from dryml.runtime import assert_framework_import_safe
+    from dryml.runtime import import_configured_framework
 
-    assert_framework_import_safe("tensorflow")
-    import tensorflow as tf
-    return tf
+    return import_configured_framework("tensorflow")
 
 
 class keras_train_spec_updater:

@@ -6,7 +6,8 @@ from dryml.core2.dtype import DType, normalize_dtype
 
 
 def _dtype_tf(self):
-    import tensorflow as tf
+    from dryml.runtime import import_configured_framework
+    tf = import_configured_framework("tensorflow")
 
     table = {
         "bool": tf.bool,
@@ -37,10 +38,7 @@ def dtype(x: Any) -> DType:
     Convert a TensorFlow dtype-like object, TensorFlow spec, or TensorFlow value
     to a DRYML DType.
     """
-    import tensorflow as tf  # type: ignore
-
     if hasattr(x, "dtype"):
         x = x.dtype
 
-    tf_dtype = tf.dtypes.as_dtype(x)
-    return normalize_dtype(tf_dtype.name)
+    return normalize_dtype(x)
