@@ -40,6 +40,7 @@ def test_dryml_source_prefers_module_checkout_over_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     _, env = build_worker_command(PythonExecutableSpec(sys.executable, pythonpath_policy="dryml-source").to_data())
+    source_root = Path(env["PYTHONPATH"])
 
-    assert Path(env["PYTHONPATH"]).name == "src"
-    assert Path(env["PYTHONPATH"]) != tmp_path / "src"
+    assert (source_root / "dryml").is_dir()
+    assert source_root != tmp_path / "src"
