@@ -48,6 +48,14 @@ with dryml.config(reporting={"level": "debug", "reporter": capture}):
     dryml.reporting.step("dryml.example", "Doing work")
 ```
 
+Passing a reporter directly enables `debug` reporting when the current reporting level is `quiet`:
+
+```python
+dryml.configure(reporting=dryml.reporting.CaptureReporter())
+```
+
+Progress reporting is fail-soft by default: malformed event payloads or reporter failures are dropped and logged at debug level so reporting does not change DRYML semantics. Use `strict=True` in tests or diagnostics when reporting failures should raise.
+
 ## Subprocess Protocols
 
 Provider probes and future workers must keep protocol stdout machine-readable. Reporting events in child processes are either suppressed, captured, sent through structured protocol fields, or emitted by the parent after decoding worker results. The provider probe worker redirects internal stdout/stderr while constructing its JSON response.

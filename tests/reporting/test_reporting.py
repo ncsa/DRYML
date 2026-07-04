@@ -1,5 +1,8 @@
 import json
+import logging
 import os
+
+import pytest
 
 import dryml
 import dryml.annotations as ann
@@ -21,6 +24,11 @@ def provider_registry():
     registry = providers.ProviderRegistry()
     registry.register_ref(providers.ProviderRef("fake", "providers.fake_provider"))
     return registry
+
+
+class FailingReporter(reporting.Reporter):
+    def emit(self, event, config):
+        raise RuntimeError("reporter failed")
 
 
 def test_env_reporting_defaults(monkeypatch):
@@ -86,6 +94,60 @@ def test_capture_reporter_collects_events_without_stdout(capsys):
 
     assert [event.name for event in capture.events] == ["dryml.test.step", "dryml.test.debug"]
     assert capsys.readouterr().out == ""
+
+
+def test_direct_reporter_config_defaults_to_debug_when_base_is_quiet(capsys):
+    capture = reporting.CaptureReporter()
+
+    dryml.configure(reporting=capture)
+    reporting.debug("dryml.test.debug", "Captured through direct reporter")
+
+    assert dryml.status()["reporting"]["level"] == "debug"
+    assert [event.name for event in capture.events] == ["dryml.test.debug"]
+    assert capsys.readouterr().out == ""
+
+
+def test_boolean_reporting_config_parsing():
+    dryml.configure(reporting={"level": "details", "include_ids": "false", "include_timing": "0", "strict": "yes"})
+
+    status = dryml.status()["reporting"]
+    assert status["include_ids"] is False
+    assert status["include_timing"] is False
+    assert status["strict"] is True
+
+    with pytest.raises(ValueError, match="include_ids"):
+        dryml.configure(reporting={"include_ids": "sometimes"})
+
+
+def test_logging_reporter_does_not_accumulate_null_handlers():
+    logger = logging.getLogger("dryml.reporting")
+    before = sum(isinstance(handler, logging.NullHandler) for handler in logger.handlers)
+    dryml.configure(reporting={"level": "steps", "stream": "logging"})
+
+    for index in range(3):
+        reporting.step("dryml.test.logging", f"Logging event {index}")
+
+    after = sum(isinstance(handler, logging.NullHandler) for handler in logger.handlers)
+    assert after <= max(before, 1)
+
+
+def test_reporting_emit_is_fail_soft_by_default():
+    dryml.configure(reporting="details")
+
+    assert reporting.detail("dryml.test.bad", "Bad payload", data={"object": object()}) is None
+
+    dryml.configure(reporting={"level": "steps", "reporter": FailingReporter()})
+    assert reporting.step("dryml.test.fail", "Reporter failure") is None
+
+
+def test_reporting_strict_mode_raises_event_and_reporter_errors():
+    dryml.configure(reporting={"level": "details", "strict": True})
+    with pytest.raises(ValueError, match="JSON-ready"):
+        reporting.detail("dryml.test.bad", "Bad payload", data={"object": object()})
+
+    dryml.configure(reporting={"level": "steps", "strict": True, "reporter": FailingReporter()})
+    with pytest.raises(RuntimeError, match="reporter failed"):
+        reporting.step("dryml.test.fail", "Reporter failure")
 
 
 def test_config_context_temporarily_overrides_reporting(capsys):

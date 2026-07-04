@@ -101,7 +101,8 @@ class LoggingReporter(Reporter):
 
     def __init__(self, logger_name: str = "dryml.reporting") -> None:
         self.logger = logging.getLogger(logger_name)
-        self.logger.addHandler(logging.NullHandler())
+        if not any(isinstance(handler, logging.NullHandler) for handler in self.logger.handlers):
+            self.logger.addHandler(logging.NullHandler())
 
     def emit(self, event: DrymlEvent, config: "ReportingConfig") -> None:
         level = logging.DEBUG if event.level == "debug" else logging.INFO
@@ -132,6 +133,7 @@ class ReportingConfig:
     format: ReportFormat = "text"
     include_ids: bool = True
     include_timing: bool = True
+    strict: bool = False
     reporter: Reporter | None = None
 
     def __post_init__(self) -> None:
@@ -141,6 +143,9 @@ class ReportingConfig:
         object.__setattr__(self, "level", level)
         object.__setattr__(self, "stream", stream)
         object.__setattr__(self, "format", fmt)
+        object.__setattr__(self, "include_ids", _coerce_bool(self.include_ids, "include_ids"))
+        object.__setattr__(self, "include_timing", _coerce_bool(self.include_timing, "include_timing"))
+        object.__setattr__(self, "strict", _coerce_bool(self.strict, "strict"))
 
     @classmethod
     def from_value(cls, value: Any = None, *, base: "ReportingConfig | None" = None) -> "ReportingConfig":
@@ -152,21 +157,23 @@ class ReportingConfig:
             return value
         if isinstance(value, Reporter):
             current = base or cls(level="debug")
-            return cls(current.level, current.stream, current.format, current.include_ids, current.include_timing, value)
+            level = "debug" if current.level == "quiet" else current.level
+            return cls(current.level if current.level != "quiet" else level, current.stream, current.format, current.include_ids, current.include_timing, current.strict, value)
         if isinstance(value, str):
             current = base or cls()
-            return cls(value, current.stream, current.format, current.include_ids, current.include_timing, current.reporter)
+            return cls(value, current.stream, current.format, current.include_ids, current.include_timing, current.strict, current.reporter)
         if isinstance(value, Mapping):
             current = base or cls()
-            unknown = set(value) - {"level", "stream", "format", "include_ids", "include_timing", "reporter"}
+            unknown = set(value) - {"level", "stream", "format", "include_ids", "include_timing", "strict", "reporter"}
             if unknown:
                 raise ValueError(f"unknown reporting config fields: {sorted(unknown)}")
             return cls(
                 level=value.get("level", current.level),
                 stream=value.get("stream", current.stream),
                 format=value.get("format", current.format),
-                include_ids=bool(value.get("include_ids", current.include_ids)),
-                include_timing=bool(value.get("include_timing", current.include_timing)),
+                include_ids=value.get("include_ids", current.include_ids),
+                include_timing=value.get("include_timing", current.include_timing),
+                strict=value.get("strict", current.strict),
                 reporter=value.get("reporter", current.reporter),
             )
         raise ValueError(f"unsupported reporting config value {value!r}")
@@ -180,6 +187,7 @@ class ReportingConfig:
             "format": self.format,
             "include_ids": self.include_ids,
             "include_timing": self.include_timing,
+            "strict": self.strict,
             "reporter": None if self.reporter is None else type(self.reporter).__name__,
         }
 
@@ -200,17 +208,23 @@ def emit(name: str, message: str, *, level: EventLevel = "step", **fields: Any) 
     cfg = _current_reporting_config()
     if not _enabled(cfg, level):
         return None
-    data = fields.pop("data", {}) or {}
-    if fields:
-        known = {"phase", "operation_id", "environment_id", "world_id", "runtime_id", "record_id", "provider_id"}
-        event_fields = {key: fields.pop(key) for key in tuple(fields) if key in known}
-        data = {**fields, **dict(data)}
-    else:
-        event_fields = {}
-    timestamp = time.time() if cfg.include_timing else None
-    event = DrymlEvent(name=name, message=message, level=level, data=data, timestamp=timestamp, **event_fields)
-    _reporter_for(cfg).emit(event, cfg)
-    return event
+    try:
+        data = fields.pop("data", {}) or {}
+        if fields:
+            known = {"phase", "operation_id", "environment_id", "world_id", "runtime_id", "record_id", "provider_id"}
+            event_fields = {key: fields.pop(key) for key in tuple(fields) if key in known}
+            data = {**fields, **dict(data)}
+        else:
+            event_fields = {}
+        timestamp = time.time() if cfg.include_timing else None
+        event = DrymlEvent(name=name, message=message, level=level, data=data, timestamp=timestamp, **event_fields)
+        _reporter_for(cfg).emit(event, cfg)
+        return event
+    except Exception:
+        if cfg.strict:
+            raise
+        logging.getLogger("dryml.reporting").debug("reporting event dropped", exc_info=True)
+        return None
 
 
 def step(name: str, message: str, **fields: Any) -> DrymlEvent | None:
@@ -250,7 +264,7 @@ def _reporter_for(config: ReportingConfig) -> Reporter:
     if config.level == "quiet" or config.stream == "none":
         return NullReporter()
     if config.stream == "logging":
-        return LoggingReporter()
+        return _logging_reporter()
     return StdoutReporter()
 
 
@@ -281,6 +295,30 @@ def _normalize_token(value: Any, field_name: str, allowed: set[str]) -> str:
     if token not in allowed:
         raise ValueError(f"reporting {field_name} must be one of {sorted(allowed)}, got {value!r}")
     return token
+
+
+def _coerce_bool(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "y", "on"}:
+            return True
+        if token in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"reporting {field_name} must be a boolean, got {value!r}")
+
+
+_LOGGING_REPORTER: LoggingReporter | None = None
+
+
+def _logging_reporter() -> LoggingReporter:
+    global _LOGGING_REPORTER
+    if _LOGGING_REPORTER is None:
+        _LOGGING_REPORTER = LoggingReporter()
+    return _LOGGING_REPORTER
 
 
 def _freeze_json_mapping(value: Mapping[str, Any], path: str) -> Mapping[str, Any]:
