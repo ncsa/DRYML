@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 from dryml.dispatch.backends import build_worker_command
 from dryml.environments import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec
@@ -31,3 +32,14 @@ def test_conda_command_construction():
     cmd, _ = build_worker_command(spec.to_data())
 
     assert cmd[:4] == ["conda", "run", "-n", "dryml-test"]
+
+
+def test_dryml_source_prefers_module_checkout_over_cwd(tmp_path, monkeypatch):
+    unrelated = tmp_path / "src" / "dryml"
+    unrelated.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    _, env = build_worker_command(PythonExecutableSpec(sys.executable, pythonpath_policy="dryml-source").to_data())
+
+    assert Path(env["PYTHONPATH"]).name == "src"
+    assert Path(env["PYTHONPATH"]) != tmp_path / "src"

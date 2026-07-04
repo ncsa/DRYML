@@ -33,3 +33,27 @@ def test_result_object_saved_to_store(tmp_path, target_module):
     assert result.status == "ok"
     assert result.result_canonical.startswith("cdef-v4-")
     assert result.result_cdef_ids == (result.result_canonical,)
+    assert result.produced_record_ids == ()
+
+
+def test_dispatch_specs_persisted_with_execution_record(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    env = _env(target_module)
+    op = attach_operation_id(make_function_call_spec("dispatch_target:add", args=[3, 4]))
+
+    result = Dispatcher(store=store).run(op, environment=env)
+
+    assert store.records.read_spec(result.dispatch_id, family="dispatch")["id"] == result.dispatch_id
+    assert store.records.read_spec(result.recipe_id, family="execution_recipe")["id"] == result.recipe_id
+    assert store.records.read_spec(result.operation_id, family="operation")["id"] == result.operation_id
+
+
+def test_dispatch_result_exposes_error(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    env = _env(target_module)
+    op = attach_operation_id(make_function_call_spec("dispatch_target:fail"))
+
+    result = Dispatcher(store=store).run(op, environment=env)
+
+    assert result.status == "failed"
+    assert result.error["type"] == "ValueError"

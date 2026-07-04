@@ -19,4 +19,18 @@ def test_handshake_success_and_missing_store_failure(tmp_path, target_module):
     bad_envelope = dataclasses.replace(plan.envelope, store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path / "missing")),))
     bad_plan = dataclasses.replace(plan, envelope=bad_envelope)
     response = dispatcher.submit(bad_plan).result(timeout=10)
-    assert response.status == "failed"
+    assert response.status == "unsupported"
+
+
+def test_unsupported_feature_handshake_is_authoritative(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    env = PythonExecutableSpec(sys.executable, pythonpath_policy="explicit", extra_pythonpath=(str(target_module.parent),)).to_data()
+    op = attach_operation_id(make_function_call_spec("dispatch_target:add", args=[1, 2]))
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(op, environment=env)
+    bad_envelope = dataclasses.replace(plan.envelope, handshake={"min_protocol": 1, "required_features": ["missing.feature"]})
+
+    response = dispatcher.submit(dataclasses.replace(plan, envelope=bad_envelope)).result(timeout=10)
+
+    assert response.status == "unsupported"
+    assert response.error["type"] == "WorkerHandshakeError"

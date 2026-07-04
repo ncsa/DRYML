@@ -417,6 +417,8 @@ class DispatchResult:
     stdout_ref: Mapping[str, Any] | None = None
     stderr_ref: Mapping[str, Any] | None = None
     diagnostics: tuple[Mapping[str, Any], ...] = ()
+    error: Mapping[str, Any] | None = None
+    cancellation: Mapping[str, Any] | None = None
 
     @classmethod
     def from_worker_response(cls, response: WorkerResponse) -> "DispatchResult":
@@ -435,6 +437,8 @@ class DispatchResult:
             stdout_ref=response.stdout_ref,
             stderr_ref=response.stderr_ref,
             diagnostics=response.diagnostics,
+            error=response.error,
+            cancellation=response.cancellation,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -454,6 +458,8 @@ class DispatchResult:
                 "stdout_ref": self.stdout_ref,
                 "stderr_ref": self.stderr_ref,
                 "diagnostics": list(self.diagnostics),
+                "error": self.error,
+                "cancellation": self.cancellation,
             },
             "dispatch result",
         )

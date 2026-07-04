@@ -42,7 +42,20 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
     try:
         envelope = load_envelope(ns.request)
-        stores, store_status = _open_and_validate_stores(envelope)
+        stores, store_status, supported, diagnostics = _open_and_validate_stores(envelope)
+        if not supported:
+            handshake = _handshake(envelope, status="unsupported", store_status=store_status, diagnostics=diagnostics)
+            write_json_file(ns.handshake, handshake.to_json())
+            response = WorkerResponse(
+                status="unsupported",
+                operation_id=envelope.operation_id,
+                dispatch_id=envelope.dispatch_spec.get("id"),
+                recipe_id=envelope.execution_recipe.get("id"),
+                error={"type": "WorkerHandshakeError", "message": "worker handshake unsupported"},
+                diagnostics=diagnostics,
+            )
+            write_json_file(ns.response, response.to_json())
+            return 1
         repo = Repo(stores=stores)
         handshake = _handshake(envelope, status="ok", store_status=store_status)
         write_json_file(ns.handshake, handshake.to_json())
@@ -76,11 +89,11 @@ def _open_and_validate_stores(envelope: ExecutionEnvelope):
             diagnostics.append({"message": str(exc), "type": type(exc).__name__, "context": getattr(exc, "context", {})})
     request = WorkerHandshakeRequest.from_json(envelope.handshake)
     missing = sorted(set(request.required_features) - set(FEATURES))
-    if diagnostics or request.min_protocol > DISPATCH_WORKER_PROTOCOL_VERSION or missing:
-        details = tuple(diagnostics + ([{"message": "missing required worker features", "features": missing}] if missing else []))
-        handshake = _handshake(envelope, status="unsupported", store_status=statuses, diagnostics=details)
-        raise RuntimeError("worker handshake unsupported: " + repr(handshake.to_json()))
-    return stores, statuses
+    if request.min_protocol > DISPATCH_WORKER_PROTOCOL_VERSION:
+        diagnostics.append({"message": "unsupported worker protocol version", "min_protocol": request.min_protocol, "worker_protocol": DISPATCH_WORKER_PROTOCOL_VERSION})
+    if missing:
+        diagnostics.append({"message": "missing required worker features", "features": missing})
+    return stores, statuses, not diagnostics, tuple(diagnostics)
 
 
 def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = ()) -> WorkerHandshakeResponse:
@@ -121,7 +134,7 @@ def _execute(envelope: ExecutionEnvelope, repo: Repo, store: Any) -> WorkerRespo
             recipe_id=envelope.execution_recipe.get("id"),
             result_canonical=canonical,
             result_cdef_ids=produced_cdefs,
-            produced_record_ids=(record_id,) if record_id else (),
+            produced_record_ids=(),
             execution_record_id=record_id,
             stdout_ref=StorageRef.self_product(path="stdout.txt", role="stdout").to_json() if record_id else None,
             stderr_ref=StorageRef.self_product(path="stderr.txt", role="stderr").to_json() if record_id else None,
@@ -147,6 +160,7 @@ def _failure_response(envelope: ExecutionEnvelope, exc: BaseException, *, store:
 def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *, error: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), consumed_cdef_ids: tuple[str, ...] = (), produced_cdef_ids: tuple[str, ...] = ()) -> str | None:
     if envelope.record_policy == "none" or store is None:
         return None
+    _persist_provenance_specs(store, envelope)
     _report("dryml.dispatch.result.save", "Saving dispatch outputs", operation_id=envelope.operation_id, data={"status": status})
     logs = (
         ExecutionLogRef("stdout", StorageRef.self_product(path="stdout.txt", role="stdout"), "text/plain"),
@@ -167,6 +181,13 @@ def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *
     )
     _report("dryml.dispatch.execution_record.write", "Writing execution record", operation_id=envelope.operation_id, data={"status": status})
     return write_execution_record(store.records, execution).record_id
+
+
+def _persist_provenance_specs(store: Any, envelope: ExecutionEnvelope) -> None:
+    record_io = store.records
+    record_io.write_spec(envelope.operation_spec, family="operation")
+    record_io.write_spec(envelope.dispatch_spec, family="dispatch")
+    record_io.write_spec(envelope.execution_recipe, family="execution_recipe")
 
 
 def _dryml_version() -> str | None:

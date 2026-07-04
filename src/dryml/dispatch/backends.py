@@ -37,10 +37,12 @@ class LocalSubprocessFuture:
     stderr_path: str
     preserve_work_dir: bool = False
     cancel_grace: float = 0.5
+    handshake_timeout: float = 10.0
 
     _response: WorkerResponse | None = None
     _exception: BaseException | None = None
     _cancelled: bool = False
+    _handshake: WorkerHandshakeResponse | None = None
 
     def done(self) -> bool:
         """Return whether the worker process has exited."""
@@ -51,9 +53,10 @@ class LocalSubprocessFuture:
         """Wait for the worker and return its compact response."""
 
         try:
+            self.wait_for_handshake(timeout=self.handshake_timeout)
             self.process.wait(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            self.cancel(reason="timeout")
+            self.cancel(reason="timeout", record=False)
             self._response = self._parent_failure_response("timeout", error={"type": "TimeoutError", "message": "dispatch timed out"})
             self._cleanup()
             raise DispatchTimeout("dispatch timed out") from exc
@@ -77,7 +80,26 @@ class LocalSubprocessFuture:
             return exc
         return None
 
-    def cancel(self, *, grace: float | None = None, reason: str = "user") -> bool:
+    def wait_for_handshake(self, *, timeout: float | None = None) -> WorkerHandshakeResponse | None:
+        """Wait for and validate the worker handshake phase."""
+
+        if self._handshake is not None:
+            return self._handshake
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if os.path.exists(self.handshake_path):
+                self._handshake = WorkerHandshakeResponse.from_json(read_json_file(self.handshake_path))
+                _report("dryml.dispatch.worker.handshake", "Checking worker handshake", operation_id=self.plan.envelope.operation_id, data={"status": self._handshake.status, "pid": self._handshake.pid})
+                return self._handshake
+            if self.done():
+                return None
+            if deadline is not None and time.monotonic() >= deadline:
+                self.cancel(reason="handshake_timeout", record=False)
+                self._response = self._parent_failure_response("failed", error={"type": "WorkerHandshakeError", "message": "worker handshake timed out"})
+                return None
+            time.sleep(0.01)
+
+    def cancel(self, *, grace: float | None = None, reason: str = "user", record: bool = True) -> bool:
         """Cancel the process using SIGINT, SIGTERM, then SIGKILL where needed."""
 
         if self.done():
@@ -90,12 +112,14 @@ class LocalSubprocessFuture:
             methods.append(sig_name)
             self._signal(sig_value)
             if self._wait(wait):
-                self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": sig_name, "escalated": len(methods) > 1, "reason": reason})
+                if record:
+                    self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": sig_name, "escalated": len(methods) > 1, "reason": reason})
                 return True
         methods.append("SIGKILL")
         self.kill()
         self._wait(wait)
-        self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": "SIGKILL", "escalated": True, "reason": reason})
+        if record:
+            self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": "SIGKILL", "escalated": True, "reason": reason})
         return True
 
     def terminate(self, *, grace: float | None = None) -> None:
@@ -140,13 +164,15 @@ class LocalSubprocessFuture:
         if self._response is not None or self._exception is not None:
             return
         try:
-            if os.path.exists(self.handshake_path):
-                handshake = WorkerHandshakeResponse.from_json(read_json_file(self.handshake_path))
-                _report("dryml.dispatch.worker.handshake", "Checking worker handshake", operation_id=self.plan.envelope.operation_id, data={"status": handshake.status, "pid": handshake.pid})
+            self.wait_for_handshake(timeout=0)
             if not os.path.exists(self.response_path):
                 self._response = self._parent_failure_response("failed", error={"type": "WorkerProtocolError", "message": "worker exited without response", "exit_code": self.process.returncode})
                 return
-            self._response = WorkerResponse.from_json(read_json_file(self.response_path))
+            response = WorkerResponse.from_json(read_json_file(self.response_path))
+            if self._handshake is not None and self._handshake.status != "ok" and response.status == "ok":
+                self._response = self._parent_failure_response("failed", error={"type": "WorkerHandshakeError", "message": "worker returned ok after non-ok handshake"})
+                return
+            self._response = response
         except Exception as exc:
             self._response = self._parent_failure_response("failed", error={"type": type(exc).__name__, "message": str(exc), "exit_code": self.process.returncode})
 
@@ -191,6 +217,9 @@ class LocalSubprocessFuture:
             pass
 
     def _cleanup(self) -> None:
+        for path in self.plan.envelope.launch.get("cleanup_paths", ()):  # type: ignore[union-attr]
+            if isinstance(path, str):
+                shutil.rmtree(path, ignore_errors=True)
         if not self.preserve_work_dir:
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
@@ -229,7 +258,9 @@ class LocalSubprocessBackend:
         except Exception as exc:
             shutil.rmtree(work_dir, ignore_errors=True)
             raise DispatchLaunchError("failed to launch local subprocess worker", context={"error": str(exc)}) from exc
-        return LocalSubprocessFuture(process, plan, work_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, self.preserve_work_dir)
+        future = LocalSubprocessFuture(process, plan, work_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, self.preserve_work_dir, handshake_timeout=self.handshake_timeout)
+        future.wait_for_handshake(timeout=self.handshake_timeout)
+        return future
 
 
 def build_worker_command(environment_spec: Mapping[str, Any] | None) -> tuple[list[str], dict[str, str]]:
@@ -294,16 +325,20 @@ def _apply_pythonpath_policy(env: dict[str, str], policy: str, extra_pythonpath:
 def _dryml_source_root() -> Path:
     """Return the import root for DRYML source in checkouts or installs."""
 
-    checkout_src = Path.cwd() / "src"
-    if (checkout_src / "dryml").is_dir():
-        return checkout_src.resolve()
     package_dir = Path(__file__).resolve().parents[1]
+    if package_dir.parent.name == "src" and (package_dir.parent / "dryml").is_dir():
+        return package_dir.parent
+    cwd = Path.cwd()
+    checkout_src = cwd / "src"
+    if (cwd / "pyproject.toml").is_file() and (checkout_src / "dryml").is_dir():
+        return checkout_src.resolve()
     return package_dir.parent
 
 
 def _write_execution_record(store: Any, envelope: Any, *, status: str, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), stdout_path: str | None = None, stderr_path: str | None = None, consumed_cdef_ids: tuple[str, ...] = (), produced_cdef_ids: tuple[str, ...] = (), result_record_ids: tuple[str, ...] = ()) -> str | None:
     if envelope.record_policy == "none" or store is None:
         return None
+    _persist_provenance_specs(store, envelope)
     logs = (
         ExecutionLogRef("stdout", StorageRef.self_product(path="stdout.txt", role="stdout"), "text/plain"),
         ExecutionLogRef("stderr", StorageRef.self_product(path="stderr.txt", role="stderr"), "text/plain"),
@@ -325,6 +360,13 @@ def _write_execution_record(store: Any, envelope: Any, *, status: str, error: Ma
     )
     _report("dryml.dispatch.execution_record.write", "Writing execution record", operation_id=envelope.operation_id, data={"status": status})
     return write_execution_record(store.records, execution).record_id
+
+
+def _persist_provenance_specs(store: Any, envelope: Any) -> None:
+    record_io = store.records
+    record_io.write_spec(envelope.operation_spec, family="operation")
+    record_io.write_spec(envelope.dispatch_spec, family="dispatch")
+    record_io.write_spec(envelope.execution_recipe, family="execution_recipe")
 
 
 def _report(name: str, message: str, *, operation_id: str | None = None, data: Mapping[str, Any] | None = None) -> None:

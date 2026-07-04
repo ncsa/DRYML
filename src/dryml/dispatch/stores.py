@@ -60,6 +60,8 @@ def open_worker_store(ref: WorkerStoreRef) -> DirStore:
         raise WorkerHandshakeError("unsupported store ref kind", context={"kind": ref.kind})
     if not os.path.isdir(ref.path):
         raise WorkerHandshakeError("worker store path is not accessible", context={"path": ref.path, "label": ref.label})
+    if ref.mode == "read":
+        raise WorkerHandshakeError("read-only worker store refs are not yet enforced by DirStore", context={"path": ref.path, "label": ref.label, "mode": ref.mode})
     return DirStore(ref.path, query_index=ref.query_index)
 
 

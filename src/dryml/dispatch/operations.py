@@ -52,7 +52,9 @@ def execute_operation(operation_spec: dict[str, Any], *, repo: Repo, envelope_la
         with open(path, "rb") as f:
             func = pickle.load(f)
         call = resolve_call_arguments(operation_spec, materialize_cdef=lambda cdef_id: _materialize_cdef(repo, cdef_id), make_cdef_ref=lambda cdef_id: cdef_id)
-        return func(*call.args, **call.kwargs), _consumed_cdefs(operation_spec)
+        identity_arg_count = launch.get("identity_arg_count")
+        args = call.args[:identity_arg_count] if isinstance(identity_arg_count, int) else call.args
+        return func(*args, **call.kwargs), _consumed_cdefs(operation_spec)
 
     call = resolve_call_arguments(operation_spec, materialize_cdef=lambda cdef_id: _materialize_cdef(repo, cdef_id), make_cdef_ref=lambda cdef_id: cdef_id)
     if call.kind == "function_call":

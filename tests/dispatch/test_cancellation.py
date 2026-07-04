@@ -34,3 +34,4 @@ def test_timeout_records_timeout(tmp_path, target_module):
     with pytest.raises(DispatchTimeout):
         future.result(timeout=0.1)
     assert store.records.find_execution_records(status="timeout")
+    assert store.records.find_execution_records(status="cancelled") == ()

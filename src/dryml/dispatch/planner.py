@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -67,7 +68,7 @@ class Dispatcher:
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
         runtime_data = runtime or RuntimeContextSpec(mode=RuntimeMode.WORKER, device_visibility={"policy": "assigned"}, metadata={"source": "dryml.dispatch.local_subprocess"}).to_data()
-        allocation_data = {"role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": [], "accelerators": {}, "env": {}, "metadata": {"backend": "local_subprocess"}}
+        allocation_data = {"role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": _local_cpu_ids(), "accelerators": {}, "env": {}, "metadata": {"backend": "local_subprocess"}}
         marshal = select_marshal_plan(target_store, query_index="none")
         require_supported_plan(marshal)
         _report("dryml.dispatch.store.prepare", "Preparing shared DirStore marshalling", operation_id=op_spec.get("id"), data={"strategy": marshal.strategy})
@@ -136,8 +137,11 @@ class Dispatcher:
         work_dir = tempfile.mkdtemp(prefix="dryml-dispatch-pickle-")
         pickle_path = os.path.join(work_dir, "callable.pkl")
         write_pickled_callable(func, pickle_path)
-        op = attach_operation_id(make_function_call_spec("dryml.dispatch.operations:import_function", args=list(args), kwargs=dict(kwargs)))
-        return op, {"call_transport": "pickle_small", "pickle_path": pickle_path, "portable": False, "same_environment_only": True}
+        with open(pickle_path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        identity_marker = {"$literal": f"dryml.pickled_callable.sha256:{digest}"}
+        op = attach_operation_id(make_function_call_spec("dryml.dispatch.operations:import_function", args=[*args, identity_marker], kwargs=dict(kwargs)))
+        return op, {"call_transport": "pickle_small", "pickle_path": pickle_path, "identity_arg_count": len(args), "pickle_sha256": digest, "portable": False, "same_environment_only": True, "cleanup_paths": [work_dir]}
 
 
 def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchResult:
@@ -194,6 +198,15 @@ def allocation_from_json(data: Mapping[str, Any] | None) -> RuntimeAllocationVie
         env=data.get("env") or {},
         metadata=data.get("metadata") or {},
     )
+
+
+def _local_cpu_ids() -> list[int]:
+    try:
+        affinity = os.sched_getaffinity(0)
+    except Exception:
+        count = os.cpu_count() or 1
+        return list(range(max(1, count)))
+    return sorted(int(cpu) for cpu in affinity) or [0]
 
 
 def _report(name: str, message: str, *, operation_id: str | None = None, data: Mapping[str, Any] | None = None) -> None:
