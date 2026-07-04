@@ -110,6 +110,7 @@ def _attach_generic_fragment(cls: type, fragment: RequirementFragment) -> None:
             schema_versions=fragment.schema_versions,
         ),
         source,
+        merge_policy=fragment.mode,
     )
     attach_fragment(cls, annotation)
 

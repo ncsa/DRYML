@@ -31,7 +31,17 @@ def fragments_for_class(cls: type, *, namespace: str | None = None, kind: str | 
     """Return class fragments in deterministic base-to-subclass MRO order."""
 
     fragments: list[AnnotationFragment] = []
-    bases = [base for base in cls.__mro__[1:] if base is not object] + [cls]
+    bases: list[type] = []
+    for base in cls.__mro__[1:]:
+        if base is object:
+            continue
+        insert_at = len(bases)
+        for index, existing in enumerate(bases):
+            if issubclass(existing, base):
+                insert_at = index
+                break
+        bases.insert(insert_at, base)
+    bases.append(cls)
     for base in bases:
         fragments.extend(_own_fragments(base))
     return _filter(tuple(fragments), namespace=namespace, kind=kind)

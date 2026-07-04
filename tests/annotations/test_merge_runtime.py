@@ -26,3 +26,32 @@ def test_runtime_default_convenience_accepts_direct_override_payload():
 
     spec = ann.resolve_runtime_default(train, overrides={"frameworks": {"torch": {"num_threads": 2}}})
     assert spec.frameworks["torch"]["num_threads"] == 2
+
+
+def test_runtime_default_fragment_is_mode_neutral_until_resolution():
+    @runtime.default(torch={"num_threads": 4})
+    def train():
+        pass
+
+    fragment = ann.fragments_for(train, namespace="runtime", kind="default")[0]
+    assert "mode" not in fragment.fragment
+    assert ann.resolve_runtime_default(train).mode is runtime.RuntimeMode.ORCHESTRATOR
+
+
+def test_runtime_override_can_clear_framework_defaults():
+    @runtime.default(torch={"num_threads": 4})
+    def train():
+        pass
+
+    spec = ann.resolve_runtime_default(train, overrides={"frameworks": {}})
+    assert spec.frameworks == {}
+
+
+def test_runtime_merge_policy_replace():
+    @ann.default(namespace="runtime", fragment={"frameworks": {"torch": {"num_threads": 2}}}, merge_policy="replace", priority=1)
+    @ann.default(namespace="runtime", fragment={"frameworks": {"plain": {}}}, priority=0)
+    def train():
+        pass
+
+    spec = ann.resolve_runtime_default(train)
+    assert set(spec.frameworks) == {"torch"}

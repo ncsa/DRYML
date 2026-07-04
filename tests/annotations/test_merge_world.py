@@ -34,3 +34,12 @@ def test_world_default_convenience_accepts_direct_override_payload():
 
     world = ann.resolve_world_default(train, overrides={"roles": {"main": {"process": {"resources": {"cpus": 6}}}}})
     assert world.roles["main"].process.resources.cpus == 6
+
+
+def test_world_override_can_clear_default_accelerators():
+    @dryml.world.default(cpus=2, accelerators={"gpu": 1})
+    def train():
+        pass
+
+    world = ann.resolve_world_default(train, overrides={"roles": {"main": {"process": {"resources": {"accelerators": {}}}}}})
+    assert world.roles["main"].process.resources.accelerators == {}

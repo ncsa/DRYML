@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from dryml.runtime.specs import RuntimeContextSpec
-
 from .decorators import default as default_fragment
 from .namespaces import RUNTIME
 
@@ -13,21 +11,26 @@ _RESERVED = {"device_visibility", "limits", "env", "metadata", "world_allocation
 
 
 def runtime_default_fragment(**kwargs: Any) -> dict[str, Any]:
-    """Normalize runtime default kwargs into a RuntimeContextSpec payload."""
+    """Normalize runtime default kwargs into a partial runtime payload.
+
+    Runtime annotation defaults are mode-neutral unless ``mode=`` is explicit;
+    dispatch or an explicit runtime activation chooses worker/probe/inline mode.
+    """
 
     reserved = {key: kwargs.pop(key) for key in tuple(kwargs) if key in _RESERVED and key != "source"}
     frameworks = {str(key): value for key, value in kwargs.items()}
     payload = {
-        "mode": reserved.get("mode", "orchestrator"),
         "device_visibility": reserved.get("device_visibility") or {},
         "frameworks": frameworks,
         "limits": reserved.get("limits") or {},
         "env": reserved.get("env") or {},
         "metadata": reserved.get("metadata") or {},
     }
+    if reserved.get("mode") is not None:
+        payload["mode"] = reserved["mode"]
     if reserved.get("world_allocation_id") is not None:
         payload["world_allocation_id"] = reserved["world_allocation_id"]
-    return RuntimeContextSpec.from_data(payload).to_data()
+    return payload
 
 
 def default(**kwargs: Any):

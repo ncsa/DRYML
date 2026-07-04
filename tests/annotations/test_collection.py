@@ -31,3 +31,19 @@ def test_class_method_and_multiple_inheritance_order():
 
     assert [f.fragment["requirements"][0] for f in ann.fragments_for_class(C, namespace="environment")] == ["a", "b"]
     assert [f.namespace for f in ann.fragments_for_callable(C().run)] == ["environment", "environment", "world"]
+
+
+def test_deep_inheritance_order_is_base_to_subclass():
+    @ann.require(namespace="environment", fragment={"requirements": ["base"]})
+    class Base:
+        pass
+
+    @ann.require(namespace="environment", fragment={"requirements": ["mid"]})
+    class Mid(Base):
+        pass
+
+    @ann.require(namespace="environment", fragment={"requirements": ["leaf"]})
+    class Leaf(Mid):
+        pass
+
+    assert [f.fragment["requirements"][0] for f in ann.fragments_for_class(Leaf, namespace="environment")] == ["base", "mid", "leaf"]

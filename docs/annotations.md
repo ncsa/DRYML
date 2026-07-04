@@ -23,7 +23,7 @@ def train(model, dataset):
 
 `dryml.world.default(...)` declares an overrideable requested world shape. Defaults are suggestions and can be replaced by user overrides, but the final world spec must still satisfy hard world requirements.
 
-`dryml.runtime.default(...)` declares process-local runtime defaults such as framework settings, device visibility policy, limits, environment overrides, and metadata. It does not call `enter_runtime(...)`, `activate(...)`, mutate `os.environ`, or import torch, TensorFlow, or JAX.
+`dryml.runtime.default(...)` declares process-local runtime defaults such as framework settings, device visibility policy, limits, environment overrides, and metadata. Runtime defaults are mode-neutral unless `mode=` is explicit; dispatch or an explicit activation chooses worker/probe/inline mode. The decorator does not call `enter_runtime(...)`, `activate(...)`, mutate `os.environ`, or import torch, TensorFlow, or JAX.
 
 ## Generic API
 
@@ -40,6 +40,8 @@ def analyze():
 
 Fragments are collected with `fragments_for(...)`, `fragments_for_class(...)`, `fragments_for_callable(...)`, or `collect_fragments(...)`. Provider/probe code can participate later by passing synthetic `AnnotationFragment` instances through `provider_fragments=`.
 
+Generic mapping fragments support `merge_policy="merge"` by default. The small policy set for early provider/default composition is `merge`, `replace`, `append`, and `error_on_conflict`.
+
 ## Resolution
 
 Use resolution helpers to merge metadata without executing it:
@@ -52,9 +54,11 @@ if not result.report.ok:
 
 `resolve_requirements(...)` merges hard requirements. `resolve_defaults(...)` merges defaults and applies user overrides. `resolve(...)` validates the final default world spec against hard world requirements and returns structured `AnnotationIssue` entries with source traces.
 
+Overrides are applied after defaults. Empty mappings in overrides replace the corresponding default mapping, so `{"frameworks": {}}` clears runtime framework defaults. For explicit nested control, use `{"$replace": value}` to replace a subtree or `{"$delete": True}` to delete a key.
+
 ## Legacy Environment Decorators
 
-The existing `dryml.environments.req`, `add_req`, `override_req`, `fragments_for_class`, and `requirements_for_class` APIs remain supported. Legacy environment decorators also attach equivalent generic environment requirement fragments so the annotation resolver can see them.
+The existing `dryml.environments.req`, `add_req`, `override_req`, `fragments_for_class`, and `requirements_for_class` APIs remain supported. Legacy environment decorators also attach equivalent generic environment requirement fragments so the annotation resolver can see them. The generic resolver preserves legacy `override_req` replacement behavior while returning structured source traces.
 
 ## Argument-Role Annotations
 
