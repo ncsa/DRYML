@@ -43,7 +43,11 @@ class SQLiteConnectionManager:
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             con = sqlite3.connect(str(path), timeout=timeout, isolation_level=None, check_same_thread=True)
-        self._initialize_connection(con, readonly=readonly)
+        try:
+            self._initialize_connection(con, readonly=readonly)
+        except Exception:
+            con.close()
+            raise
         self._connections[key] = con
         return con
 

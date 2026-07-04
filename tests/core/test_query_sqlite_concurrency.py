@@ -13,6 +13,7 @@ from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.query.model import QueryIndexBusy, QueryIndexError
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core2.query.sqlite.index as sqlite_index_module
 from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core2.repo_plan import SaveAction, SavePlan, execute_save_plan
 from dryml.core2.store.dir import DirStore
@@ -367,6 +368,55 @@ emit({{"generation": result.generation, "changed": result.changed}})
         assert set(row[0] for row in con.execute("SELECT document_frequency FROM feature_tokens")) == {1}
     finally:
         con.close()
+
+
+def test_write_transaction_retries_busy_connection_open(tmp_path, monkeypatch):
+    path = tmp_path / "index.sqlite"
+    idx = _index(path, timeout=0.01, retries=2)
+    sqlite3 = require_sqlite()
+    original_connection = idx._connections.connection
+    calls = {"count": 0}
+
+    def flaky_connection(*, readonly=False):
+        if not readonly and calls["count"] == 0:
+            calls["count"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return original_connection(readonly=readonly)
+
+    monkeypatch.setattr(idx._connections, "connection", flaky_connection)
+    try:
+        idx.initialize_empty()
+    finally:
+        idx.close()
+
+    assert calls["count"] == 1
+    assert _generation(path) == 0
+
+
+def test_preflight_retries_busy_schema_validation(tmp_path, monkeypatch):
+    path = tmp_path / "index.sqlite"
+    idx = _index(path, timeout=0.01, retries=2)
+    idx.initialize_empty()
+    sqlite3 = require_sqlite()
+    original_validate = sqlite_index_module.validate_schema
+    calls = {"count": 0}
+
+    def flaky_validate(*args, **kwargs):
+        if calls["count"] == 0:
+            calls["count"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_index_module, "validate_schema", flaky_validate)
+    try:
+        root = _cdef("preflight-retry")
+        result = idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+    finally:
+        idx.close()
+
+    assert calls["count"] == 1
+    assert result.changed
+    assert _stored_root_count(path) == 1
 
 
 def test_busy_retry_exhaustion_reports_query_index_busy(tmp_path):

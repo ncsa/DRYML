@@ -322,7 +322,9 @@ class Model(BaseModel, Serializable):
             return
         self._pending_restore_path = latest
         self._restore_checkpoint = tf.train.Checkpoint(model=self.obj)
-        self._restore_status = self._restore_checkpoint.restore(latest)
+        # DRYML restores model state here; optimizer slot values in Keras
+        # checkpoints may be absent from the target object and are expected.
+        self._restore_status = self._restore_checkpoint.restore(latest).expect_partial()
 
     def restore_pending(self):
         if self._pending_restore_path is None:
@@ -410,6 +412,9 @@ class BasicTraining(TrainFunction):
             exp.model.restore_pending()
         fit_kwargs = dict(self.fit_kwargs)
         fit_kwargs.setdefault("verbose", self.verbose)
+        # DRYML shuffles before converting to tf.data.Dataset; Keras ignores
+        # fit(shuffle=True) for Dataset inputs and emits a warning.
+        fit_kwargs["shuffle"] = False
         callbacks = self._callbacks(tf)
         callbacks.extend(fit_kwargs.pop("callbacks", []) or [])
 

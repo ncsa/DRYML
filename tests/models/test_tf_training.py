@@ -247,6 +247,7 @@ def test_tf_basic_training_repeats_finite_dataset_for_multiple_epochs():
     assert exp.state.epoch == 2
     assert exp.state.step == 4
     assert not any("Your input ran out of data" in str(warning.message) for warning in caught)
+    assert not any("shuffle=True" in str(warning.message) for warning in caught)
 
 
 def test_tf_training_gradient_tape_trains_autoencoder():

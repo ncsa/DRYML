@@ -4,3 +4,32 @@ requires = [
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore:__array__ implementation doesn't accept a copy keyword.*:DeprecationWarning:keras\\.src\\.backend\\.tensorflow\\.core",
+]
+markers = [
+    "speed_smoke: auto-applied DRYML timing tier",
+    "speed_medium: auto-applied DRYML timing tier",
+    "speed_heavy: auto-applied DRYML timing tier",
+    "category_annotations: auto-applied DRYML test category",
+    "category_artifacts: auto-applied DRYML test category",
+    "category_code: auto-applied DRYML test category",
+    "category_core: auto-applied DRYML test category",
+    "category_data: auto-applied DRYML test category",
+    "category_environments: auto-applied DRYML test category",
+    "category_execute: auto-applied DRYML test category",
+    "category_formats: auto-applied DRYML test category",
+    "category_integration: auto-applied DRYML test category",
+    "category_jax: auto-applied DRYML test category",
+    "category_models: auto-applied DRYML test category",
+    "category_multi_framework: auto-applied DRYML test category",
+    "category_operations: auto-applied DRYML test category",
+    "category_records: auto-applied DRYML test category",
+    "category_runtime: auto-applied DRYML test category",
+    "category_tf: auto-applied DRYML test category",
+    "category_torch: auto-applied DRYML test category",
+    "category_worlds: auto-applied DRYML test category",
+    "category_uncategorized: auto-applied DRYML test category",
+]
