@@ -3,15 +3,18 @@ import importlib
 __version__ = "0.3.0-dev"
 
 _SUBMODULE_EXPORTS = {
+    "annotations": "dryml.annotations",
     "context": "dryml.context",
     "core2": "dryml.core2",
     "artifacts": "dryml.artifacts",
+    "env": "dryml.env",
     "execute": "dryml.execute",
     "environments": "dryml.environments",
     "formats": "dryml.formats",
     "operations": "dryml.operations",
     "records": "dryml.records",
     "runtime": "dryml.runtime",
+    "world": "dryml.world",
     "worlds": "dryml.worlds",
 }
 
@@ -65,15 +68,18 @@ def __getattr__(name):
     raise AttributeError(f"module 'dryml' has no attribute {name!r}")
 
 __all__ = [
+    "annotations",
     "context",
     "core2",
     "artifacts",
+    "env",
     "execute",
     "environments",
     "formats",
     "operations",
     "records",
     "runtime",
+    "world",
     "worlds",
     "config",
     "configure",

@@ -80,7 +80,38 @@ def _fragment_source(target: type, mode: str) -> str:
 def _attach_fragment(cls: type, fragment: RequirementFragment) -> type:
     own = tuple(cls.__dict__.get(FRAGMENT_ATTR, ()))
     setattr(cls, FRAGMENT_ATTR, own + (fragment,))
+    _attach_generic_fragment(cls, fragment)
     return cls
+
+
+def _attach_generic_fragment(cls: type, fragment: RequirementFragment) -> None:
+    from dryml.annotations.decorators import attach_fragment
+    from dryml.annotations.env import normalize_environment_requirement_fragment
+    from dryml.annotations.model import AnnotationFragment, AnnotationTarget, SourceTrace
+    from dryml.annotations.namespaces import ENVIRONMENT
+
+    source = SourceTrace(
+        "decorator",
+        AnnotationTarget("class", cls.__module__, cls.__qualname__),
+        label=fragment.source,
+        namespace=ENVIRONMENT,
+        metadata={"legacy_environment_fragment_mode": fragment.mode},
+    )
+    annotation = AnnotationFragment(
+        ENVIRONMENT,
+        "requirement",
+        normalize_environment_requirement_fragment(
+            python=fragment.python,
+            requirements=fragment.requirements,
+            excludes=fragment.excludes,
+            capabilities=fragment.capabilities,
+            tags=fragment.tags,
+            dryml_protocol=fragment.dryml_protocol,
+            schema_versions=fragment.schema_versions,
+        ),
+        source,
+    )
+    attach_fragment(cls, annotation)
 
 
 def req(**kwargs: Any):

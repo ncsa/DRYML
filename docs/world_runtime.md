@@ -27,6 +27,8 @@ Workers and explicit inline execution should derive a `RuntimeAllocationView` fr
 
 For explicit backend/power-user setup, `dryml.runtime.activate(...)` combines `enter_runtime(...)`, `build_runtime_bootstrap_plan(...)`, and `activate_runtime_bootstrap(...)` into one scoped barrier. It remains a runtime primitive; normal user-facing requirement/default sugar is expected to live in the planned annotation and dispatch layers.
 
+The annotation layer now provides that declaration surface through `dryml.env.req(...)`, `dryml.world.req(...)`, `dryml.world.default(...)`, and `dryml.runtime.default(...)`. These decorators attach sidecar planning metadata only: they do not allocate resources, enter runtime, apply environment variables, import heavy frameworks, or change `ConcreteDefinition` identity. See `docs/annotations.md` for merge, override, conflict-report, and legacy `dryml.environments` compatibility details.
+
 Orchestrator and probe processes default to hidden workload accelerators through the `none` device visibility policy. Worker processes default to `assigned`, exposing only assigned devices such as `CUDA_VISIBLE_DEVICES=0` and hiding unassigned CUDA, HIP/ROCR, and XLA devices.
 
 Legacy `Compute.__compute_reqs__` dictionaries are still supported as a transitional bridge. They are checked against the active `RuntimeAllocationView`; a CPU-only allocation does not satisfy a legacy GPU requirement.
