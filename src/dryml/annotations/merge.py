@@ -8,6 +8,7 @@ from typing import Any
 
 from dryml.environments.requirements import EnvironmentRequirement
 from dryml.environments.utils import normalize_distribution_name
+from dryml import reporting
 from dryml.runtime.specs import RuntimeContextSpec
 from dryml.worlds.compatibility import check_world_spec_satisfies_requirement
 from dryml.worlds.specs import WorldRequirement, WorldSpec
@@ -89,6 +90,11 @@ def resolve(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = (
     """Resolve requirements and defaults, validating defaults against hard requirements."""
 
     provider_fragments = tuple(provider_fragments)
+    reporting.step(
+        "dryml.annotations.resolve",
+        "Gathering environment/world/runtime requirements",
+        data={"provider_fragments": len(provider_fragments), "has_overrides": overrides is not None},
+    )
     requirements = resolve_requirements(target, provider_fragments=provider_fragments)
     defaults = resolve_defaults(target, provider_fragments=provider_fragments, overrides=overrides)
     issues = list(requirements.report.issues) + list(defaults.report.issues)
@@ -102,6 +108,19 @@ def resolve(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = (
             for issue in report.issues:
                 issues.append(AnnotationIssue(issue.severity, WORLD, issue.path, issue.message, issue.expected, issue.actual, sources))
     combined = AnnotationReport(tuple(issues))
+    reporting.detail(
+        "dryml.annotations.resolve.result",
+        "Merged requirements and defaults",
+        data={
+            "requirement_fragments": len(requirements.fragments),
+            "default_fragments": len(defaults.fragments),
+            "issues": len(combined.issues),
+            "has_environment_requirement": requirements.environment is not None,
+            "has_world_requirement": requirements.world is not None,
+            "has_world_default": defaults.world is not None,
+            "has_runtime_default": defaults.runtime is not None,
+        },
+    )
     return ResolutionResult(requirements, defaults, combined)
 
 

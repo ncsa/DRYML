@@ -45,9 +45,12 @@ def main(argv: list[str] | None = None) -> int:
 def handle_json_request(raw: str) -> dict[str, Any]:
     """Handle one worker JSON protocol request."""
 
+    stdout = io.StringIO()
+    stderr = io.StringIO()
     try:
         envelope = json.loads(raw)
-        report = run_worker_request(envelope)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            report = run_worker_request(envelope)
         return {"schema": PROVIDER_PROBE_RESPONSE_SCHEMA, "schema_version": PROVIDER_PROBE_SCHEMA_VERSION, "ok": report.status != "failed", "probe_report": report.to_data()}
     except Exception as exc:
         report = _protocol_failure(str(exc), exception=exc)

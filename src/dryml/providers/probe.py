@@ -12,6 +12,7 @@ from typing import Any
 from dryml.environments import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec, build_probe_env
 from dryml.environments.specs import EnvironmentSpec
 from dryml.operations import attach_operation_id
+from dryml import reporting
 from dryml.runtime import RuntimeMode, attach_runtime_id, make_runtime_spec
 
 from .identity import ProviderRef
@@ -38,16 +39,38 @@ def run_probe(
     runtime_spec = attach_runtime_id(make_runtime_spec(mode=RuntimeMode.PROBE, device_visibility={"policy": request.probe_policy.device_visibility}))
     environment_spec = _environment_spec_data(environment)
     request = replace(request, environment_spec=environment_spec, runtime_spec=runtime_spec)
+    reporting.step(
+        "dryml.providers.probe.start",
+        "Probing target environment",
+        operation_id=getattr(request, "operation_id", None),
+        environment_id=environment_spec.get("id"),
+        runtime_id=runtime_spec.get("id"),
+        data={"environment_kind": environment_spec.get("kind"), "request_kind": request.request_kind},
+    )
     try:
         provider_refs = _resolve_provider_refs(request, providers=providers, registry=registry)
     except Exception as exc:
-        return _runner_failure(request, "provider_resolution_failed", str(exc), exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "provider_resolution_failed", str(exc), exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=())
+        return report
+    reporting.detail(
+        "dryml.providers.probe.refs",
+        "Resolved provider probe inputs",
+        operation_id=getattr(request, "operation_id", None),
+        environment_id=environment_spec.get("id"),
+        runtime_id=runtime_spec.get("id"),
+        data={"providers": [ref.name for ref in provider_refs], "provider_modules": [ref.module for ref in provider_refs]},
+    )
     if isinstance(environment, ContainerEnvironmentSpec):
-        return _runner_failure(request, "unsupported_environment_spec", "container provider probes are not implemented", environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "unsupported_environment_spec", "container provider probes are not implemented", environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=provider_refs)
+        return report
     try:
         command, env = _command_for_environment(environment)
     except Exception as exc:
-        return _runner_failure(request, "unsupported_environment_spec", str(exc), exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "unsupported_environment_spec", str(exc), exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=provider_refs)
+        return report
     envelope = {
         "schema": PROVIDER_PROBE_REQUEST_SCHEMA,
         "schema_version": 1,
@@ -67,17 +90,27 @@ def run_probe(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        return _runner_failure(request, "probe_timeout", f"provider probe timed out after {timeout} seconds", stdout=_text(exc.stdout), stderr=_text(exc.stderr), environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "probe_timeout", f"provider probe timed out after {timeout} seconds", stdout=_text(exc.stdout), stderr=_text(exc.stderr), environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=provider_refs)
+        return report
     except OSError as exc:
-        return _runner_failure(request, "probe_failed", f"provider probe could not start: {exc}", exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "probe_failed", f"provider probe could not start: {exc}", exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=provider_refs)
+        return report
     if completed.returncode != 0:
         parsed = _parse_worker_response(completed.stdout, request, stderr=completed.stderr, returncode=completed.returncode)
         if parsed is not None:
+            _report_probe_complete(parsed, provider_refs=provider_refs)
             return parsed
-        return _runner_failure(request, "probe_failed", f"provider probe exited with status {completed.returncode}", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "probe_failed", f"provider probe exited with status {completed.returncode}", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=provider_refs)
+        return report
     parsed = _parse_worker_response(completed.stdout, request, stderr=completed.stderr, returncode=completed.returncode)
     if parsed is None:
-        return _runner_failure(request, "malformed_worker_output", "provider probe returned malformed JSON", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        report = _runner_failure(request, "malformed_worker_output", "provider probe returned malformed JSON", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment_spec, runtime_spec=runtime_spec)
+        _report_probe_complete(report, provider_refs=provider_refs)
+        return report
+    _report_probe_complete(parsed, provider_refs=provider_refs)
     return parsed
 
 
@@ -178,6 +211,30 @@ def _runner_failure(request: ProviderRequest | None, code: str, message: str, *,
         status="failed",
         diagnostics=(issue,),
         metadata={"stdout": stdout, "stderr": stderr, "returncode": returncode},
+    )
+
+
+def _report_probe_complete(report: ProbeReport, *, provider_refs: tuple[ProviderRef, ...]) -> None:
+    reporting.step(
+        "dryml.providers.probe.complete",
+        f"Provider probe {report.status}",
+        operation_id=report.operation_id,
+        environment_id=report.environment_spec_id,
+        runtime_id=report.runtime_id,
+        data={"status": report.status, "providers": [ref.name for ref in provider_refs], "provider_reports": len(report.reports)},
+    )
+    reporting.detail(
+        "dryml.providers.probe.result",
+        "Provider probe report summary",
+        operation_id=report.operation_id,
+        environment_id=report.environment_spec_id,
+        runtime_id=report.runtime_id,
+        data={
+            "status": report.status,
+            "diagnostics": len(report.diagnostics),
+            "provider_statuses": [provider_report.status for provider_report in report.reports],
+            "has_successful_provider_report": report.has_successful_provider_report,
+        },
     )
 
 

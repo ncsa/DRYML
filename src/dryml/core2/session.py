@@ -5,6 +5,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from dryml.reporting import ReportingConfig, config_from_env
+
 
 ObjectMode = Literal["fresh", "definition", "concrete", "selector", "space", "load_or_build"]
 CacheMode = Literal["none", "weak", "strong"]
@@ -19,10 +21,19 @@ class SessionConfig:
     repo: Any = None
     object_mode: ObjectMode = "fresh"
     cache: CacheMode = "weak"
+    reporting: ReportingConfig = None
     repo_owned: bool = False
 
+    def __post_init__(self) -> None:
+        if self.reporting is None:
+            object.__setattr__(self, "reporting", config_from_env())
 
-_DEFAULT_CONFIG = SessionConfig()
+
+def _default_config() -> SessionConfig:
+    return SessionConfig()
+
+
+_DEFAULT_CONFIG = _default_config()
 _current_config: ContextVar[SessionConfig] = ContextVar(
     "dryml_session_config",
     default=_DEFAULT_CONFIG,
@@ -81,7 +92,8 @@ def _merged_config(
         *,
         repo=_UNSET,
         object_mode=_UNSET,
-        cache=_UNSET) -> SessionConfig:
+        cache=_UNSET,
+        reporting=_UNSET) -> SessionConfig:
     updates = {}
 
     if repo is not _UNSET:
@@ -95,12 +107,15 @@ def _merged_config(
     if cache is not _UNSET:
         updates["cache"] = _validate_cache(cache)
 
+    if reporting is not _UNSET:
+        updates["reporting"] = ReportingConfig.from_value(reporting, base=base.reporting)
+
     return replace(base, **updates)
 
 
-def configure(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET) -> SessionConfig:
+def configure(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET, reporting=_UNSET) -> SessionConfig:
     old = get_config()
-    new = _merged_config(old, repo=repo, object_mode=object_mode, cache=cache)
+    new = _merged_config(old, repo=repo, object_mode=object_mode, cache=cache, reporting=reporting)
     _current_config.set(new)
 
     if repo is not _UNSET and old.repo is not new.repo:
@@ -109,9 +124,9 @@ def configure(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET) -> SessionConfig
 
 
 @contextmanager
-def config(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET):
+def config(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET, reporting=_UNSET):
     old = get_config()
-    new = _merged_config(old, repo=repo, object_mode=object_mode, cache=cache)
+    new = _merged_config(old, repo=repo, object_mode=object_mode, cache=cache, reporting=reporting)
     token = _current_config.set(new)
     try:
         yield new
@@ -123,9 +138,10 @@ def config(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET):
 
 def reset_config() -> SessionConfig:
     old = get_config()
-    _current_config.set(_DEFAULT_CONFIG)
+    default = _default_config()
+    _current_config.set(default)
     _close_owned_repo(old)
-    return _DEFAULT_CONFIG
+    return default
 
 
 def close_configured_repo() -> None:
@@ -138,6 +154,7 @@ def status() -> dict[str, Any]:
         "repo": cfg.repo,
         "object_mode": cfg.object_mode,
         "cache": cfg.cache,
+        "reporting": cfg.reporting.to_data(),
         "repo_owned": cfg.repo_owned,
     }
 
