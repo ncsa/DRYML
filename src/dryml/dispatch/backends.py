@@ -285,11 +285,20 @@ def _apply_pythonpath_policy(env: dict[str, str], policy: str, extra_pythonpath:
         if existing:
             paths.extend(existing.split(os.pathsep))
     elif policy == "dryml-source":
-        source_root = Path(__file__).resolve().parents[2]
-        paths.append(str(source_root))
+        paths.append(str(_dryml_source_root()))
     paths.extend(extra_pythonpath)
     if paths or policy == "explicit":
         env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(path for path in paths if path))
+
+
+def _dryml_source_root() -> Path:
+    """Return the import root for DRYML source in checkouts or installs."""
+
+    checkout_src = Path.cwd() / "src"
+    if (checkout_src / "dryml").is_dir():
+        return checkout_src.resolve()
+    package_dir = Path(__file__).resolve().parents[1]
+    return package_dir.parent
 
 
 def _write_execution_record(store: Any, envelope: Any, *, status: str, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), stdout_path: str | None = None, stderr_path: str | None = None, consumed_cdef_ids: tuple[str, ...] = (), produced_cdef_ids: tuple[str, ...] = (), result_record_ids: tuple[str, ...] = ()) -> str | None:
