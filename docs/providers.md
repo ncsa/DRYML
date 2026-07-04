@@ -102,6 +102,8 @@ Probe reports are persisted through the existing generic record envelope:
 
 Use `make_probe_report_record(...)`, `write_probe_report(...)`, and `probe_report_from_record(...)` for round trips through `RecordStoreIO`.
 
+`ProbeReport` remains the authoritative provider/probe output. `ExecutionRecord` can be written separately as optional provenance for how a probe attempt ran, including failed or unsupported probe execution. Execution provenance may point at produced probe-report record IDs through `probe_report_ids`, but it does not replace the probe report payload.
+
 ## Annotation Integration
 
 Provider output feeds the existing annotation resolver as ordinary `AnnotationFragment` objects:

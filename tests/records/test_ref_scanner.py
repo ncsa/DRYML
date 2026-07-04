@@ -54,12 +54,19 @@ def test_typed_keys_are_validated_and_paths_are_escaped():
                 "input_cdef_ids": [cdef("c")],
                 "output_cdef_ids": [cdef("d")],
                 "operation_id": cid("op"),
+                "dispatch_id": cid("dispatch"),
+                "recipe_id": cid("recipe"),
                 "representation_id": cid("repr"),
                 "environment_requirement_id": cid("envreq"),
                 "world_requirement_id": cid("worldreq"),
                 "world_id": cid("world"),
                 "runtime_id": cid("runtime"),
                 "derived_from": [cid("record", "b")],
+                "probe_report_ids": [cid("record", "1")],
+                "adapter_record_ids": [cid("record", "2")],
+                "program_record_ids": [cid("record", "3")],
+                "consumed_records": [{"record_id": cid("record", "4"), "role": "source", "metadata": {"x": cdef("f")}}],
+                "produced_records": [{"record_id": cid("record", "5"), "subject_cdef_id": cdef("1")}],
                 "a/b~c": cdef("e"),
             },
         )
@@ -72,11 +79,19 @@ def test_typed_keys_are_validated_and_paths_are_escaped():
     assert by_path["/payload/input_cdef_ids/0"].typed_role == "input"
     assert by_path["/payload/output_cdef_ids/0"].typed_role == "output"
     assert by_path["/payload/operation_id"].prefix == "op"
+    assert by_path["/payload/dispatch_id"].prefix == "dispatch"
+    assert by_path["/payload/recipe_id"].prefix == "recipe"
     assert by_path["/payload/representation_id"].prefix == "repr"
     assert by_path["/payload/environment_requirement_id"].prefix == "envreq"
     assert by_path["/payload/world_requirement_id"].prefix == "worldreq"
     assert by_path["/payload/runtime_id"].prefix == "runtime"
     assert by_path["/payload/derived_from/0"].typed_role == "derived_from"
+    assert by_path["/payload/probe_report_ids/0"].typed_role == "probe_report"
+    assert by_path["/payload/adapter_record_ids/0"].typed_role == "adapter_record"
+    assert by_path["/payload/program_record_ids/0"].typed_role == "program_record"
+    assert by_path["/payload/consumed_records/0/record_id"].typed_role == "consumed_record"
+    assert by_path["/payload/produced_records/0/record_id"].typed_role == "produced_record"
+    assert by_path["/payload/produced_records/0/subject_cdef_id"].typed_role == "subject"
     assert by_path["/payload/a~1b~0c"].target_id == cdef("e")
     assert list(mentions) == sorted(mentions, key=lambda m: (m.source_kind, m.source_family or "", m.source_id, m.path, m.target_kind, m.target_id, m.ref_kind, m.typed_key or "", m.typed_role or ""))
 
@@ -88,3 +103,5 @@ def test_typed_key_shape_and_prefix_mismatches_are_rejected():
         scan_json_refs({"operation_id": cid("repr")}, source_kind="record", source_id=cid("record"))
     with pytest.raises(RecordValidationError):
         scan_json_refs({"operation_id": "op-v2-" + "a" * 64}, source_kind="record", source_id=cid("record"))
+    with pytest.raises(RecordValidationError):
+        scan_json_refs({"consumed_records": [{"role": "missing-id"}]}, source_kind="record", source_id=cid("record"))

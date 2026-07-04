@@ -14,6 +14,7 @@ from dryml.formats.refs import parse_cdef_id
 from .errors import RecordValidationError, StorageRefError
 from .records import make_record, validate_record
 from .storage import StorageRef
+from .execution import ExecutionRecord
 
 
 _COMMON_IDS = {
@@ -379,7 +380,7 @@ class AdapterRecord:
         return make_record(kind=self.kind, payload=self.to_payload(), metadata=self.metadata)
 
 
-TypedRecord = StoredStateRecord | DataRecord | ProgramRecord | AdapterRecord
+TypedRecord = StoredStateRecord | DataRecord | ProgramRecord | AdapterRecord | ExecutionRecord
 
 
 def typed_record_from_envelope(record: Mapping[str, Any]) -> TypedRecord:
@@ -395,6 +396,8 @@ def typed_record_from_envelope(record: Mapping[str, Any]) -> TypedRecord:
         return ProgramRecord.from_envelope(record)
     if kind == AdapterRecord.kind:
         return AdapterRecord.from_envelope(record)
+    if kind == ExecutionRecord.kind:
+        return ExecutionRecord.from_envelope(record)
     raise RecordValidationError("record kind has no typed wrapper", context={"kind": kind})
 
 
@@ -481,6 +484,7 @@ def _put_optional(payload: dict[str, Any], key: str, value: Any) -> None:
 __all__ = [
     "AdapterRecord",
     "DataRecord",
+    "ExecutionRecord",
     "ProgramRecord",
     "StoredStateRecord",
     "TypedRecord",

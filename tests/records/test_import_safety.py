@@ -64,3 +64,14 @@ for name in ["dryml.core2", "dryml.operations", "dryml.execute", "dryml.context"
     assert name not in sys.modules, name
         """
     )
+
+
+def test_dispatch_import_is_lightweight():
+    run_probe(
+        """
+import sys
+import dryml.dispatch
+for name in ["dryml.core2", "dryml.execute", "dryml.context", "dryml.environments", "tensorflow", "torch", "jax", "ray"]:
+    assert name not in sys.modules, name
+        """
+    )

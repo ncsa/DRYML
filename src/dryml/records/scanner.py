@@ -30,6 +30,9 @@ _TYPED_KEYS: dict[str, tuple[str, str, bool, tuple[str, ...] | None]] = {
     "produced_cdef_ids": ("cdef", "produced", True, None),
     "operation_id": ("content_id", "operation", False, ("op",)),
     "operation_ids": ("content_id", "operation", True, ("op",)),
+    "dispatch_id": ("content_id", "dispatch", False, ("dispatch",)),
+    "recipe_id": ("content_id", "recipe", False, ("recipe",)),
+    "execution_record_id": ("content_id", "execution_record", False, ("record",)),
     "representation_id": ("content_id", "representation", False, ("repr",)),
     "source_representation_id": ("content_id", "source_representation", False, ("repr",)),
     "target_representation_id": ("content_id", "target_representation", False, ("repr",)),
@@ -46,6 +49,11 @@ _TYPED_KEYS: dict[str, tuple[str, str, bool, tuple[str, ...] | None]] = {
     "source_record_id": ("content_id", "source_record", False, ("record",)),
     "target_record_id": ("content_id", "target_record", False, ("record",)),
     "record_ids": ("content_id", "record", True, ("record",)),
+    "consumed_record_ids": ("content_id", "consumed_record", True, ("record",)),
+    "produced_record_ids": ("content_id", "produced_record", True, ("record",)),
+    "probe_report_ids": ("content_id", "probe_report", True, ("record",)),
+    "adapter_record_ids": ("content_id", "adapter_record", True, ("record",)),
+    "program_record_ids": ("content_id", "program_record", True, ("record",)),
     "derived_from": ("content_id", "derived_from", True, ("record",)),
     "consumed_records": ("content_id", "consumed_record", True, ("record",)),
     "produced_records": ("content_id", "produced_record", True, ("record",)),
@@ -231,6 +239,27 @@ def _scan_typed_key(
         if not isinstance(value, list):
             raise RecordValidationError("typed reference key requires a list", context={"key": key, "type": type(value).__name__})
         for index, item in enumerate(value):
+            if key in {"consumed_records", "produced_records"} and isinstance(item, Mapping):
+                if "record_id" not in item:
+                    raise RecordValidationError("structured execution record link requires record_id", context={"key": key, "path": f"{path}/{index}"})
+                mentions.append(_typed_mention(key, role, item["record_id"], target_type, prefixes, source_kind, source_id, source_family, f"{path}/{index}/record_id"))
+                for child_key in sorted(item):
+                    if child_key == "record_id":
+                        continue
+                    child_path = f"{path}/{index}/{_escape_json_pointer(str(child_key))}"
+                    if child_key in _TYPED_KEYS:
+                        _scan_typed_key(
+                            child_key,
+                            item[child_key],
+                            source_kind=source_kind,
+                            source_id=source_id,
+                            source_family=source_family,
+                            path=child_path,
+                            mentions=mentions,
+                        )
+                    else:
+                        _scan_value(item[child_key], source_kind=source_kind, source_id=source_id, source_family=source_family, path=child_path, mentions=mentions)
+                continue
             mentions.append(_typed_mention(key, role, item, target_type, prefixes, source_kind, source_id, source_family, f"{path}/{index}"))
         return
     if isinstance(value, list):

@@ -85,6 +85,14 @@ class RepoRecordFederation:
             refs.extend(store.records.find_operation_specs_for_cdef(cdef_id, **kwargs))
         return _dedupe_located_specs(refs)
 
+    def find_execution_records(self, **filters) -> tuple[LocatedRecordRef, ...]:
+        """Return execution provenance records across repo stores."""
+
+        refs = []
+        for store in self.stores():
+            refs.extend(store.records.find_execution_records(**filters))
+        return _dedupe_located_records(refs)
+
     def copy_closure(
         self,
         destination_store: Any,

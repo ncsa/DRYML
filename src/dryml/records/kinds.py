@@ -33,6 +33,8 @@ class SpecFamily:
 SPEC_FAMILIES: dict[str, SpecFamily] = {
     "representation": SpecFamily("representation", "dryml.representation.v1", "repr", "representation"),
     "operation": SpecFamily("operation", "dryml.operation.v1", "op", "operation"),
+    "dispatch": SpecFamily("dispatch", "dryml.dispatch.v1", "dispatch", "dispatch"),
+    "execution_recipe": SpecFamily("execution_recipe", "dryml.execution_recipe.v1", "recipe", "execution_recipe"),
     "environment_record": SpecFamily("environment_record", "dryml.environments.record.v1", "envrec", "environment_record"),
     "environment_requirement": SpecFamily("environment_requirement", "dryml.environments.requirement.v1", "envreq", "environment_requirement"),
     "environment_spec": SpecFamily("environment_spec", "dryml.environments.spec.v1", "envspec", "environment_spec"),

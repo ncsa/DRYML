@@ -108,6 +108,8 @@ class RecordStoreIO:
         changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
         if changed:
             self._mark_ref_index_dirty_if_tracking()
+        if attached.get("kind") == "execution":
+            _report_execution_write(attached)
         return LocatedRecordRef(store_ref=self._store_ref(), record_id=record_id)
 
     def read_record(self, record_id: str) -> dict[str, Any]:
@@ -262,6 +264,58 @@ class RecordStoreIO:
             if storage_kind is not None and not _payload_has_storage_kind(payload, storage_kind):
                 continue
             refs.append(LocatedRecordRef(self._store_ref(), record["id"]))
+        return tuple(sorted(refs, key=lambda ref: ref.record_id))
+
+    def find_execution_records(
+        self,
+        *,
+        operation_id: str | None = None,
+        dispatch_id: str | None = None,
+        recipe_id: str | None = None,
+        consumed_record_id: str | None = None,
+        produced_record_id: str | None = None,
+        status: str | None = None,
+        execution_kind: str | None = None,
+        refresh: bool | Literal["auto"] = "auto",
+    ) -> tuple[LocatedRecordRef, ...]:
+        """Scan authoritative JSON for execution provenance records."""
+
+        from .execution import execution_record_matches
+
+        _validate_optional_query_id(operation_id, "op", "operation_id")
+        _validate_optional_query_id(dispatch_id, "dispatch", "dispatch_id")
+        _validate_optional_query_id(recipe_id, "recipe", "recipe_id")
+        _validate_optional_query_id(consumed_record_id, "record", "consumed_record_id")
+        _validate_optional_query_id(produced_record_id, "record", "produced_record_id")
+        if refresh not in {True, False, "auto"}:
+            raise RecordIOError("refresh must be True, False, or 'auto'", context={"refresh": refresh})
+        try:
+            from dryml import reporting
+
+            reporting.step("dryml.records.execution.query", "Querying execution provenance", operation_id=operation_id, data={"status": status, "execution_kind": execution_kind})
+        except Exception:
+            pass
+        refs: list[LocatedRecordRef] = []
+        for record in self.iter_records():
+            if record.get("kind") != "execution":
+                continue
+            if execution_record_matches(
+                record,
+                operation_id=operation_id,
+                dispatch_id=dispatch_id,
+                recipe_id=recipe_id,
+                consumed_record_id=consumed_record_id,
+                produced_record_id=produced_record_id,
+                status=status,
+                execution_kind=execution_kind,
+            ):
+                refs.append(LocatedRecordRef(self._store_ref(), record["id"]))
+        try:
+            from dryml import reporting
+
+            reporting.detail("dryml.records.execution.query", "Execution provenance query complete", operation_id=operation_id, data={"matches": len(refs)})
+        except Exception:
+            pass
         return tuple(sorted(refs, key=lambda ref: ref.record_id))
 
     def resolve_storage_ref(
@@ -528,6 +582,37 @@ def _payload_has_storage_kind(payload: Mapping[str, Any], storage_kind: str) -> 
         if item.get("kind") == storage_kind:
             return True
     return False
+
+
+def _validate_optional_query_id(value: str | None, prefix: str, field_name: str) -> None:
+    if value is None:
+        return
+    _validate_content_id(value, prefix, RecordValidationError)
+
+
+def _report_execution_write(record: Mapping[str, Any]) -> None:
+    try:
+        from dryml import reporting
+
+        payload = record.get("payload") or {}
+        consumed = payload.get("consumed_records") or ()
+        produced = payload.get("produced_records") or ()
+        reporting.step(
+            "dryml.records.execution.write",
+            "Writing execution provenance",
+            operation_id=payload.get("operation_id"),
+            record_id=record.get("id"),
+            data={
+                "dispatch_id": payload.get("dispatch_id"),
+                "recipe_id": payload.get("recipe_id"),
+                "status": payload.get("status"),
+                "execution_kind": payload.get("execution_kind"),
+                "consumed_records": len(consumed) if isinstance(consumed, list) else 0,
+                "produced_records": len(produced) if isinstance(produced, list) else 0,
+            },
+        )
+    except Exception:
+        pass
 
 
 __all__ = ["RecordStoreIO"]

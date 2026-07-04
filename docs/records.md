@@ -13,6 +13,8 @@ records/
     items/
         <record-id>.json
     specs/
+        dispatch/<dispatch-id>.json
+        execution_recipe/<recipe-id>.json
         representation/<repr-id>.json
         operation/<op-id>.json
         environment_record/<envrec-id>.json
@@ -146,6 +148,8 @@ Specs use the same envelope pattern with family-specific schemas and ID prefixes
 |---|---|---|---|
 | `representation` | `representation` | `dryml.representation.v1` | `repr` |
 | `operation` | `operation` | `dryml.operation.v1` | `op` |
+| `dispatch` | `dispatch` | `dryml.dispatch.v1` | `dispatch` |
+| `execution_recipe` | `execution_recipe` | `dryml.execution_recipe.v1` | `recipe` |
 | `environment_record` | `environment_record` | `dryml.environments.record.v1` | `envrec` |
 | `environment_requirement` | `environment_requirement` | `dryml.environments.requirement.v1` | `envreq` |
 | `environment_spec` | `environment_spec` | `dryml.environments.spec.v1` | `envspec` |
@@ -156,7 +160,7 @@ Specs use the same envelope pattern with family-specific schemas and ID prefixes
 | `annotation` | `annotation` | `dryml.annotation.v1` | `annotation` |
 | `generic` | `generic` | caller supplied | `spec` |
 
-Operation specs now support Sprint 2 `function_call` and `method_call` payloads through `dryml.operations`. They are interned JSON specs only; they do not implement execution, dispatch, worlds, providers, or runtime behavior. World, runtime, and annotation specs remain metadata placeholders.
+Operation specs now support Sprint 2 `function_call` and `method_call` payloads through `dryml.operations`. They are interned JSON specs only; they do not implement execution, dispatch, worlds, providers, or runtime behavior. Dispatch specs describe request intent with `dispatch-v1-*` IDs. Execution recipes describe resolved plan metadata with `recipe-v1-*` IDs. World, runtime, and annotation specs remain metadata placeholders.
 
 Spec envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload` for the same identity reason as records.
 
@@ -183,12 +187,12 @@ The scanner recognizes:
 
 - raw CDef IDs such as `cdef-v4-...` as materializing CDef mentions;
 - non-materializing CDef refs such as `ref(cdef-v4-...)`;
-- reserved content IDs such as `record-v1-*`, `op-v1-*`, `repr-v1-*`, `envreq-v1-*`, `worldreq-v1-*`, `world-v1-*`, and `runtime-v1-*`;
+- reserved content IDs such as `record-v1-*`, `op-v1-*`, `dispatch-v1-*`, `recipe-v1-*`, `repr-v1-*`, `envreq-v1-*`, `worldreq-v1-*`, `world-v1-*`, and `runtime-v1-*`;
 - exact literal escapes such as `{"$literal": "cdef-v4-..."}` as opaque values that produce no mention.
 
 Malformed literal escapes and malformed reserved-looking strings fail loudly instead of being ignored.
 
-Known typed keys are also recognized and validated. Examples include `subject_cdef_id`, `owner_cdef_id`, `input_cdef_ids`, `output_cdef_ids`, `operation_id`, `representation_id`, `environment_requirement_id`, `world_requirement_id`, `world_id`, `runtime_id`, `record_id`, and `derived_from`. Prefix mismatches such as `operation_id="repr-v1-*"` are rejected. For currently known DRYML record/spec prefixes, typed keys also require the current schema version, such as `record-v1-*` and `op-v1-*`. The future `env-v*` prefix accepted by `environment_id` is prefix-compatible only until that schema is introduced.
+Known typed keys are also recognized and validated. Examples include `subject_cdef_id`, `owner_cdef_id`, `input_cdef_ids`, `output_cdef_ids`, `operation_id`, `dispatch_id`, `recipe_id`, `representation_id`, `environment_spec_id`, `world_allocation_id`, `runtime_id`, `record_id`, `derived_from`, `probe_report_ids`, `adapter_record_ids`, `program_record_ids`, and structured `consumed_records[*].record_id` / `produced_records[*].record_id`. Prefix mismatches such as `operation_id="repr-v1-*"` are rejected. For currently known DRYML record/spec prefixes, typed keys also require the current schema version, such as `record-v1-*` and `op-v1-*`. The future `env-v*` prefix accepted by `environment_id` is prefix-compatible only until that schema is introduced.
 
 Scanner output uses deterministic JSON Pointer paths such as `/payload/storage/0/subject_cdef_id`.
 
@@ -287,6 +291,68 @@ Manifest paths are relative POSIX paths and include byte size plus SHA-256 diges
 
 `AdapterRecord` is lineage for representation conversion. It records source/target record IDs, source/target representation IDs, produced records, `derived_from`, status, and diagnostics. It is not a replacement for `ExecutionRecord`; execution provenance remains optional and is not required for load/adapt.
 
+## Execution Records
+
+`ExecutionRecord` is the typed wrapper for optional `kind="execution"` provenance. Required payload fields are `execution_kind`, `operation_id`, `backend`, and `status`. Status values are `ok`, `failed`, `cancelled`, `timeout`, `unsupported`, `skipped`, and `degraded`. Execution kinds are `python`, `probe`, `adapter`, `compiler`, `lowering`, `internal`, and `unknown`.
+
+Consumed and produced records use structured links:
+
+```json
+{
+  "record_id": "record-v1-...",
+  "role": "model-state",
+  "representation_id": "repr-v1-...",
+  "subject_cdef_id": "cdef-v4-...",
+  "required": true,
+  "metadata": {}
+}
+```
+
+Log refs use `StorageRef` data. Self product-dir refs avoid placing an execution record's own ID in its payload before the ID exists:
+
+```json
+{
+  "stream": "stdout",
+  "storage": {"kind": "product-dir", "path": "stdout.txt", "role": "stdout"},
+  "content_type": "text/plain"
+}
+```
+
+Query helpers scan authoritative JSON and do not require the optional index:
+
+```python
+records = store.records.find_execution_records(operation_id=op_id, status="ok")
+records = repo.records.find_execution_records(consumed_record_id=record_id)
+```
+
+`record_policy="provenance"` includes execution records that mention seed records through consumed/produced links. `none`, `descriptive`, and `closure` do not accidentally expand execution provenance, while `all` includes execution records as ordinary records. Product log directories are copied only when product options include products.
+
+Representative payloads:
+
+```json
+{"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "ok"}
+```
+
+```json
+{"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "failed", "error": {"type": "ValueError", "message": "bad input"}}
+```
+
+```json
+{"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "cancelled", "cancellation": {"requested": true, "method": "SIGTERM", "escalated": false}}
+```
+
+```json
+{"execution_kind": "probe", "operation_id": "op-v1-...", "backend": {"name": "dryml.provider_probe"}, "status": "ok", "probe_report_ids": ["record-v1-..."]}
+```
+
+```json
+{"execution_kind": "adapter", "operation_id": "op-v1-...", "backend": {"name": "dryml.adapter"}, "status": "ok", "consumed_records": [{"record_id": "record-v1-..."}], "produced_records": [{"record_id": "record-v1-..."}], "adapter_record_ids": ["record-v1-..."]}
+```
+
+```json
+{"execution_kind": "compiler", "operation_id": "op-v1-...", "backend": {"name": "dryml.compiler"}, "status": "unsupported", "program_record_ids": ["record-v1-..."]}
+```
+
 ## Store IO
 
 Use `RecordStoreIO(store)` or the convenience `store.records` property:
@@ -304,4 +370,4 @@ Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewrit
 
 ## Non-Goals
 
-Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Full dispatch v2, generated `ExecutionRecord` provenance, real framework adapters, blob storage, compiler/JIT execution, and the public Artifact API remain future titled-sprint work.
+Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Full dispatch v2, real worker launch, real framework adapters, blob storage, compiler/JIT execution, and the public Artifact API remain future titled-sprint work.

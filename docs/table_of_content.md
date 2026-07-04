@@ -13,16 +13,17 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 5. [Records](records.md)
 6. [Representations and Adapters](representations_adapters.md)
 7. [Operations](operations.md)
-8. [Environments](environments.md)
-9. [Repos and Stores](repos.md)
-10. [Tensor Specs](tensor_specs.md)
-11. [Contexts](context.md)
-12. [Data API](data.md)
-13. [Models API](models.md)
-14. [Artifacts API](artifacts.md)
-15. [Query Index Backend Contracts](query_index_backend_contracts.md)
-16. [Testing Workflow](testing.md)
-17. [Release Notes](release_notes.md)
+8. [Dispatch Metadata](dispatch.md)
+9. [Environments](environments.md)
+10. [Repos and Stores](repos.md)
+11. [Tensor Specs](tensor_specs.md)
+12. [Contexts](context.md)
+13. [Data API](data.md)
+14. [Models API](models.md)
+15. [Artifacts API](artifacts.md)
+16. [Query Index Backend Contracts](query_index_backend_contracts.md)
+17. [Testing Workflow](testing.md)
+18. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -34,6 +35,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `dryml.records` provides optional store-owned JSON record/spec sidecars without changing object identity.
 - Representation specs and fake/local adapter plans describe product formats and conversions without dispatch v2.
 - `dryml.operations` provides canonical operation-call specs and CDef/ref argument semantics without dispatching work.
+- `dryml.dispatch` provides request-intent dispatch specs and resolved execution recipes without worker launch.
 - An environment record describes observed Python/software facts without changing object identity.
 - An `Object` is the runtime instance associated with a concrete definition.
 - A `Repo` manages live objects, persistent stores, aliases, queries, saves, and loads.

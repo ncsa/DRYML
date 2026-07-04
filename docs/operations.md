@@ -99,3 +99,5 @@ assert located.spec_id.startswith("op-v1-")
 ```
 
 Operation specs remain sidecar metadata under `records/specs/operation/`.
+
+Future dispatch metadata wraps operation IDs without changing operation identity. `DispatchSpec` records request policy/override intent with `dispatch-v1-*` IDs, while `ExecutionRecipe` records resolved plan metadata with `recipe-v1-*` IDs. Neither executes the operation.

@@ -72,5 +72,10 @@ Record resolution and local fake adapter execution emit structured events at orc
 | `dryml.records.adapter.run` | Run one local fake adapter step. |
 | `dryml.records.product.write` | Commit product bytes and record sidecar. |
 | `dryml.records.adapter.record` | Write adapter lineage records. |
+| `dryml.dispatch.spec.build` | Build dispatch request-intent metadata. |
+| `dryml.dispatch.recipe.build` | Build resolved execution recipe metadata. |
+| `dryml.records.execution.write` | Write execution provenance records. |
+| `dryml.records.execution.query` | Query execution provenance records. |
+| `dryml.records.execution.export` | Include execution provenance in an explicit provenance export closure. |
 
 `quiet` remains silent. `steps` shows lifecycle messages. `details` includes selected record IDs, representation IDs, adapter names, and output record IDs. Reporting remains fail-soft unless strict mode is enabled.

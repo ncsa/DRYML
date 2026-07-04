@@ -1,0 +1,624 @@
+"""Typed execution provenance records and query helpers."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
+
+from dryml.formats import CanonicalJSONError, deep_freeze_json, json_ready
+from dryml.formats.errors import ContentIDError, ReferenceParseError
+from dryml.formats.ids import parse_content_id
+from dryml.formats.refs import parse_cdef_id
+
+from .errors import RecordValidationError
+from .records import make_record, validate_record
+from .refs import LocatedRecordRef
+from .storage import StorageRef
+
+
+EXECUTION_STATUSES = frozenset({"ok", "failed", "cancelled", "timeout", "unsupported", "skipped", "degraded"})
+EXECUTION_KINDS = frozenset({"python", "probe", "adapter", "compiler", "lowering", "internal", "unknown"})
+
+_COMMON_ID_FIELDS = {
+    "dispatch_id": ("dispatch",),
+    "recipe_id": ("recipe",),
+    "environment_id": ("envrec", "env"),
+    "environment_record_id": ("envrec",),
+    "environment_spec_id": ("envspec",),
+    "environment_requirement_id": ("envreq",),
+    "world_requirement_id": ("worldreq",),
+    "world_id": ("world",),
+    "world_allocation_id": ("worldalloc",),
+    "runtime_id": ("runtime",),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecordLink:
+    """Structured consumed/produced record link in an execution payload."""
+
+    record_id: str
+    role: str | None = None
+    representation_id: str | None = None
+    subject_cdef_id: str | None = None
+    required: bool = True
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _validate_id(self.record_id, ("record",), "record_id")
+        if self.role is not None and not isinstance(self.role, str):
+            raise RecordValidationError("execution record link role must be a string", context={"type": type(self.role).__name__})
+        if self.representation_id is not None:
+            _validate_id(self.representation_id, ("repr",), "representation_id")
+        if self.subject_cdef_id is not None:
+            _validate_cdef_id(self.subject_cdef_id, "subject_cdef_id")
+        if not isinstance(self.required, bool):
+            raise RecordValidationError("execution record link required must be boolean", context={"type": type(self.required).__name__})
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
+
+    @classmethod
+    def from_json(cls, value: Any, *, default_required: bool) -> "ExecutionRecordLink":
+        """Build a link from JSON-ready persisted data."""
+
+        if isinstance(value, str):
+            return cls(record_id=value, required=default_required)
+        if not isinstance(value, Mapping):
+            raise RecordValidationError("execution record link must be a mapping", context={"type": type(value).__name__})
+        unknown = set(value) - {"record_id", "role", "representation_id", "subject_cdef_id", "required", "metadata"}
+        if unknown:
+            raise RecordValidationError("execution record link contains unknown fields", context={"fields": sorted(unknown)})
+        if "record_id" not in value:
+            raise RecordValidationError("execution record link requires record_id")
+        return cls(
+            record_id=value["record_id"],
+            role=value.get("role"),
+            representation_id=value.get("representation_id"),
+            subject_cdef_id=value.get("subject_cdef_id"),
+            required=value.get("required", default_required),
+            metadata=value.get("metadata") or {},
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the canonical JSON form of this link."""
+
+        data: dict[str, Any] = {"record_id": self.record_id, "required": self.required}
+        _put_optional(data, "role", self.role)
+        _put_optional(data, "representation_id", self.representation_id)
+        _put_optional(data, "subject_cdef_id", self.subject_cdef_id)
+        if self.metadata:
+            data["metadata"] = json_ready(self.metadata)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLogRef:
+    """Store-relative stdout/stderr/log product reference."""
+
+    stream: str
+    storage: StorageRef | Mapping[str, Any]
+    content_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stream, str) or not self.stream:
+            raise RecordValidationError("execution log stream must be a non-empty string")
+        try:
+            storage = self.storage if isinstance(self.storage, StorageRef) else StorageRef.from_json(self.storage)
+        except Exception as exc:
+            raise RecordValidationError("invalid execution log storage ref", context=getattr(exc, "context", {})) from exc
+        if self.content_type is not None and not isinstance(self.content_type, str):
+            raise RecordValidationError("execution log content_type must be a string", context={"type": type(self.content_type).__name__})
+        object.__setattr__(self, "storage", storage)
+
+    @classmethod
+    def from_json(cls, value: Any) -> "ExecutionLogRef":
+        """Build a log ref from JSON-ready persisted data."""
+
+        if not isinstance(value, Mapping):
+            raise RecordValidationError("execution log ref must be a mapping", context={"type": type(value).__name__})
+        unknown = set(value) - {"stream", "storage", "content_type"}
+        if unknown:
+            raise RecordValidationError("execution log ref contains unknown fields", context={"fields": sorted(unknown)})
+        if "storage" not in value:
+            raise RecordValidationError("execution log ref requires storage")
+        return cls(value.get("stream"), value["storage"], value.get("content_type"))
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the canonical JSON form of this log ref."""
+
+        data = {"stream": self.stream, "storage": self.storage.to_json()}
+        _put_optional(data, "content_type", self.content_type)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionErrorInfo:
+    """Normalized error information for failed executions."""
+
+    type: str | None = None
+    message: str | None = None
+    traceback: str | None = None
+    exit_code: int | None = None
+    signal: str | int | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in ("type", "message", "traceback"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise RecordValidationError(f"execution error {name} must be a string", context={"type": type(value).__name__})
+        if self.exit_code is not None and not isinstance(self.exit_code, int):
+            raise RecordValidationError("execution error exit_code must be an int", context={"type": type(self.exit_code).__name__})
+        if self.signal is not None and not isinstance(self.signal, (str, int)):
+            raise RecordValidationError("execution error signal must be string, int, or null", context={"type": type(self.signal).__name__})
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
+
+    @classmethod
+    def from_json(cls, value: Any) -> "ExecutionErrorInfo":
+        """Build error info from a JSON-ready mapping."""
+
+        if not isinstance(value, Mapping):
+            raise RecordValidationError("execution error must be a mapping", context={"type": type(value).__name__})
+        unknown = set(value) - {"type", "message", "traceback", "exit_code", "signal", "metadata"}
+        if unknown:
+            raise RecordValidationError("execution error contains unknown fields", context={"fields": sorted(unknown)})
+        return cls(value.get("type"), value.get("message"), value.get("traceback"), value.get("exit_code"), value.get("signal"), value.get("metadata") or {})
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the canonical JSON form."""
+
+        data: dict[str, Any] = {}
+        for key in ("type", "message", "traceback", "exit_code", "signal"):
+            _put_optional(data, key, getattr(self, key))
+        if self.metadata:
+            data["metadata"] = json_ready(self.metadata)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCancellationInfo:
+    """Normalized cancellation facts for cancelled executions."""
+
+    requested: bool = True
+    method: str | None = None
+    escalated: bool = False
+    reason: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.requested, bool):
+            raise RecordValidationError("cancellation requested must be boolean")
+        if not isinstance(self.escalated, bool):
+            raise RecordValidationError("cancellation escalated must be boolean")
+        for name in ("method", "reason"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, str):
+                raise RecordValidationError(f"cancellation {name} must be a string")
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
+
+    @classmethod
+    def from_json(cls, value: Any) -> "ExecutionCancellationInfo":
+        """Build cancellation info from a JSON-ready mapping."""
+
+        if not isinstance(value, Mapping):
+            raise RecordValidationError("execution cancellation must be a mapping", context={"type": type(value).__name__})
+        unknown = set(value) - {"requested", "method", "escalated", "reason", "metadata"}
+        if unknown:
+            raise RecordValidationError("execution cancellation contains unknown fields", context={"fields": sorted(unknown)})
+        return cls(value.get("requested", True), value.get("method"), value.get("escalated", False), value.get("reason"), value.get("metadata") or {})
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the canonical JSON form."""
+
+        data = {"requested": self.requested, "escalated": self.escalated}
+        _put_optional(data, "method", self.method)
+        _put_optional(data, "reason", self.reason)
+        if self.metadata:
+            data["metadata"] = json_ready(self.metadata)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecord:
+    """Typed wrapper for immutable ``kind='execution'`` provenance records."""
+
+    execution_kind: str
+    operation_id: str
+    backend: Mapping[str, Any]
+    status: str
+    dispatch_id: str | None = None
+    recipe_id: str | None = None
+    environment_id: str | None = None
+    environment_record_id: str | None = None
+    environment_spec_id: str | None = None
+    environment_requirement_id: str | None = None
+    world_requirement_id: str | None = None
+    world_id: str | None = None
+    world_allocation_id: str | None = None
+    runtime_id: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    duration_ms: int | float | None = None
+    input_cdef_ids: tuple[str, ...] = ()
+    output_cdef_ids: tuple[str, ...] = ()
+    consumed_cdef_ids: tuple[str, ...] = ()
+    produced_cdef_ids: tuple[str, ...] = ()
+    consumed_records: tuple[ExecutionRecordLink | str | Mapping[str, Any], ...] = ()
+    produced_records: tuple[ExecutionRecordLink | str | Mapping[str, Any], ...] = ()
+    probe_report_ids: tuple[str, ...] = ()
+    adapter_record_ids: tuple[str, ...] = ()
+    program_record_ids: tuple[str, ...] = ()
+    logs: tuple[ExecutionLogRef | Mapping[str, Any], ...] = ()
+    error: ExecutionErrorInfo | Mapping[str, Any] | None = None
+    cancellation: ExecutionCancellationInfo | Mapping[str, Any] | None = None
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    extra: Mapping[str, Any] = field(default_factory=dict)
+
+    kind: ClassVar[str] = "execution"
+    _known_payload_keys: ClassVar[frozenset[str]] = frozenset(
+        {
+            "execution_kind",
+            "operation_id",
+            "backend",
+            "status",
+            "dispatch_id",
+            "recipe_id",
+            "environment_id",
+            "environment_record_id",
+            "environment_spec_id",
+            "environment_requirement_id",
+            "world_requirement_id",
+            "world_id",
+            "world_allocation_id",
+            "runtime_id",
+            "started_at",
+            "ended_at",
+            "duration_ms",
+            "input_cdef_ids",
+            "output_cdef_ids",
+            "consumed_cdef_ids",
+            "produced_cdef_ids",
+            "consumed_records",
+            "produced_records",
+            "probe_report_ids",
+            "adapter_record_ids",
+            "program_record_ids",
+            "logs",
+            "error",
+            "cancellation",
+            "diagnostics",
+        }
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "execution_kind", _normalize_token(self.execution_kind, EXECUTION_KINDS, "execution_kind"))
+        object.__setattr__(self, "status", _normalize_token(self.status, EXECUTION_STATUSES, "status"))
+        _validate_id(self.operation_id, ("op",), "operation_id")
+        object.__setattr__(self, "backend", _backend_identity(self.backend))
+        for field_name, prefixes in _COMMON_ID_FIELDS.items():
+            value = getattr(self, field_name)
+            if value is not None:
+                _validate_id(value, prefixes, field_name)
+        for field_name in ("started_at", "ended_at"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, str):
+                raise RecordValidationError(f"{field_name} must be a string", context={"type": type(value).__name__})
+        if self.duration_ms is not None and (not isinstance(self.duration_ms, (int, float)) or isinstance(self.duration_ms, bool) or self.duration_ms < 0):
+            raise RecordValidationError("duration_ms must be a non-negative number", context={"duration_ms": self.duration_ms})
+        for field_name in ("input_cdef_ids", "output_cdef_ids", "consumed_cdef_ids", "produced_cdef_ids"):
+            object.__setattr__(self, field_name, _cdef_id_tuple(getattr(self, field_name), field_name))
+        for field_name in ("probe_report_ids", "adapter_record_ids", "program_record_ids"):
+            object.__setattr__(self, field_name, _record_id_tuple(getattr(self, field_name), field_name))
+        object.__setattr__(self, "consumed_records", _link_tuple(self.consumed_records, default_required=True, field_name="consumed_records"))
+        object.__setattr__(self, "produced_records", _link_tuple(self.produced_records, default_required=False, field_name="produced_records"))
+        object.__setattr__(self, "logs", _log_tuple(self.logs))
+        if self.error is not None:
+            object.__setattr__(self, "error", self.error if isinstance(self.error, ExecutionErrorInfo) else ExecutionErrorInfo.from_json(self.error))
+        if self.cancellation is not None:
+            object.__setattr__(self, "cancellation", self.cancellation if isinstance(self.cancellation, ExecutionCancellationInfo) else ExecutionCancellationInfo.from_json(self.cancellation))
+        object.__setattr__(self, "diagnostics", tuple(_freeze_mapping(item, "diagnostics") for item in _json_sequence_value(self.diagnostics, "diagnostics")))
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
+        object.__setattr__(self, "extra", _freeze_mapping(self.extra, "extra"))
+
+    @property
+    def consumed_record_ids(self) -> tuple[str, ...]:
+        """Return record IDs from structured consumed-record links."""
+
+        return tuple(link.record_id for link in self.consumed_records)
+
+    @property
+    def produced_record_ids(self) -> tuple[str, ...]:
+        """Return record IDs from structured produced-record links."""
+
+        return tuple(link.record_id for link in self.produced_records)
+
+    @classmethod
+    def from_envelope(cls, record: Mapping[str, Any]) -> "ExecutionRecord":
+        """Validate and wrap a generic execution record envelope."""
+
+        validate_record(record, kind=cls.kind)
+        payload = _payload(record)
+        extra = {key: payload[key] for key in payload if key not in cls._known_payload_keys}
+        for required in ("execution_kind", "operation_id", "backend", "status"):
+            if required not in payload:
+                raise RecordValidationError("execution payload missing required field", context={"field": required})
+        return cls(
+            execution_kind=payload["execution_kind"],
+            operation_id=payload["operation_id"],
+            backend=payload["backend"],
+            status=payload["status"],
+            dispatch_id=payload.get("dispatch_id"),
+            recipe_id=payload.get("recipe_id"),
+            environment_id=payload.get("environment_id"),
+            environment_record_id=payload.get("environment_record_id"),
+            environment_spec_id=payload.get("environment_spec_id"),
+            environment_requirement_id=payload.get("environment_requirement_id"),
+            world_requirement_id=payload.get("world_requirement_id"),
+            world_id=payload.get("world_id"),
+            world_allocation_id=payload.get("world_allocation_id"),
+            runtime_id=payload.get("runtime_id"),
+            started_at=payload.get("started_at"),
+            ended_at=payload.get("ended_at"),
+            duration_ms=payload.get("duration_ms"),
+            input_cdef_ids=_json_sequence(payload, "input_cdef_ids"),
+            output_cdef_ids=_json_sequence(payload, "output_cdef_ids"),
+            consumed_cdef_ids=_json_sequence(payload, "consumed_cdef_ids"),
+            produced_cdef_ids=_json_sequence(payload, "produced_cdef_ids"),
+            consumed_records=_json_sequence(payload, "consumed_records"),
+            produced_records=_json_sequence(payload, "produced_records"),
+            probe_report_ids=_json_sequence(payload, "probe_report_ids"),
+            adapter_record_ids=_json_sequence(payload, "adapter_record_ids"),
+            program_record_ids=_json_sequence(payload, "program_record_ids"),
+            logs=_json_sequence(payload, "logs"),
+            error=payload.get("error"),
+            cancellation=payload.get("cancellation"),
+            diagnostics=_json_sequence(payload, "diagnostics"),
+            metadata=record.get("metadata") or {},
+            extra=extra,
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the canonical generic execution-record payload."""
+
+        payload = dict(json_ready(self.extra))
+        payload.update({"execution_kind": self.execution_kind, "operation_id": self.operation_id, "backend": json_ready(self.backend), "status": self.status})
+        for field_name in _COMMON_ID_FIELDS:
+            _put_optional(payload, field_name, getattr(self, field_name))
+        for field_name in ("started_at", "ended_at", "duration_ms"):
+            _put_optional(payload, field_name, getattr(self, field_name))
+        for field_name in ("input_cdef_ids", "output_cdef_ids", "consumed_cdef_ids", "produced_cdef_ids", "probe_report_ids", "adapter_record_ids", "program_record_ids"):
+            values = getattr(self, field_name)
+            if values:
+                payload[field_name] = list(values)
+        if self.consumed_records:
+            payload["consumed_records"] = [link.to_json() for link in self.consumed_records]
+        if self.produced_records:
+            payload["produced_records"] = [link.to_json() for link in self.produced_records]
+        if self.logs:
+            payload["logs"] = [log.to_json() for log in self.logs]
+        if self.error is not None:
+            payload["error"] = self.error.to_json()
+        if self.cancellation is not None:
+            payload["cancellation"] = self.cancellation.to_json()
+        if self.diagnostics:
+            payload["diagnostics"] = [json_ready(item) for item in self.diagnostics]
+        return payload
+
+    def to_envelope(self) -> dict[str, Any]:
+        """Return a validated generic record envelope."""
+
+        return make_record(kind=self.kind, payload=self.to_payload(), metadata=self.metadata)
+
+
+def execution_record_for_result(**kwargs: Any) -> ExecutionRecord:
+    """Build a generic execution record from normalized result metadata."""
+
+    return ExecutionRecord(**kwargs)
+
+
+def execution_record_for_probe_report(probe_report: Any, *, operation_id: str | None = None, probe_report_id: str | None = None, **kwargs: Any) -> ExecutionRecord:
+    """Create optional execution provenance for a provider probe report."""
+
+    op_id = operation_id or getattr(probe_report, "operation_id", None)
+    if op_id is None and isinstance(probe_report, Mapping):
+        op_id = (probe_report.get("payload") or probe_report).get("operation_id")
+    status = getattr(probe_report, "status", None) or (probe_report.get("status") if isinstance(probe_report, Mapping) else None) or "ok"
+    record_id = probe_report_id or getattr(probe_report, "report_id", None)
+    produced = tuple(kwargs.pop("produced_records", ()))
+    probe_ids = tuple(kwargs.pop("probe_report_ids", ()))
+    if record_id:
+        probe_ids = tuple(dict.fromkeys((*probe_ids, record_id)))
+    return ExecutionRecord(execution_kind="probe", operation_id=op_id, backend=kwargs.pop("backend", {"name": "dryml.provider_probe", "kind": "probe"}), status=status, probe_report_ids=probe_ids, produced_records=produced, **kwargs)
+
+
+def execution_record_for_adapter_result(adapter_result: Any, *, operation_id: str, backend: Mapping[str, Any] | None = None, **kwargs: Any) -> ExecutionRecord:
+    """Create optional execution provenance for an adapter execution result."""
+
+    status = getattr(adapter_result, "status", "ok")
+    produced = tuple(kwargs.pop("produced_records", ()))
+    adapter_ids = tuple(kwargs.pop("adapter_record_ids", ()))
+    for ref in getattr(adapter_result, "adapter_records", ()):
+        adapter_ids = (*adapter_ids, getattr(ref, "record_id", ref))
+    for ref in getattr(adapter_result, "target_records", ()):
+        produced = (*produced, getattr(ref, "record_id", ref))
+    return ExecutionRecord(execution_kind="adapter", operation_id=operation_id, backend=backend or {"name": "dryml.adapter", "kind": "adapter"}, status=status, produced_records=produced, adapter_record_ids=tuple(dict.fromkeys(adapter_ids)), **kwargs)
+
+
+def unsupported_compiler_execution_record(*, operation_id: str, backend: Mapping[str, Any] | None = None, execution_kind: str = "compiler", **kwargs: Any) -> ExecutionRecord:
+    """Create an unsupported compiler/lowering provenance record."""
+
+    return ExecutionRecord(execution_kind=execution_kind, operation_id=operation_id, backend=backend or {"name": "dryml.compiler", "kind": execution_kind}, status="unsupported", **kwargs)
+
+
+def write_execution_record(record_io: Any, execution: ExecutionRecord | Mapping[str, Any], *, overwrite: bool = False) -> LocatedRecordRef:
+    """Write an execution record through ``RecordStoreIO`` with validation."""
+
+    envelope = execution.to_envelope() if isinstance(execution, ExecutionRecord) else ExecutionRecord.from_envelope(execution).to_envelope()
+    return record_io.write_record(envelope, overwrite=overwrite)
+
+
+def find_execution_records(repo_or_store: Any, **filters: Any) -> tuple[LocatedRecordRef, ...]:
+    """Find execution provenance records on a store, repo, or federation."""
+
+    records = getattr(repo_or_store, "records", repo_or_store)
+    if hasattr(records, "find_execution_records"):
+        return records.find_execution_records(**filters)
+    raise RecordValidationError("object does not expose execution-record queries", context={"type": type(repo_or_store).__name__})
+
+
+def find_execution_records_for_operation(repo_or_store: Any, operation_id: str, **filters: Any) -> tuple[LocatedRecordRef, ...]:
+    """Find execution records for one operation ID."""
+
+    return find_execution_records(repo_or_store, operation_id=operation_id, **filters)
+
+
+def find_execution_records_consuming(repo_or_store: Any, record_id: str, **filters: Any) -> tuple[LocatedRecordRef, ...]:
+    """Find execution records consuming a record ID."""
+
+    return find_execution_records(repo_or_store, consumed_record_id=record_id, **filters)
+
+
+def find_execution_records_producing(repo_or_store: Any, record_id: str, **filters: Any) -> tuple[LocatedRecordRef, ...]:
+    """Find execution records producing a record ID."""
+
+    return find_execution_records(repo_or_store, produced_record_id=record_id, **filters)
+
+
+def execution_record_matches(record: Mapping[str, Any], **filters: Any) -> bool:
+    """Return whether an execution record envelope matches query filters."""
+
+    execution = ExecutionRecord.from_envelope(record)
+    if filters.get("operation_id") is not None and execution.operation_id != filters["operation_id"]:
+        return False
+    for name in ("dispatch_id", "recipe_id", "status", "execution_kind"):
+        if filters.get(name) is not None and getattr(execution, name) != filters[name]:
+            return False
+    if filters.get("consumed_record_id") is not None and filters["consumed_record_id"] not in execution.consumed_record_ids:
+        return False
+    if filters.get("produced_record_id") is not None and filters["produced_record_id"] not in execution.produced_record_ids:
+        return False
+    return True
+
+
+def _payload(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = record.get("payload")
+    if not isinstance(payload, Mapping):
+        raise RecordValidationError("typed record payload must be a mapping", context={"type": type(payload).__name__})
+    return payload
+
+
+def _normalize_token(value: Any, allowed: frozenset[str], field_name: str) -> str:
+    if not isinstance(value, str):
+        raise RecordValidationError(f"{field_name} must be a string", context={"type": type(value).__name__})
+    normalized = value.strip().lower()
+    if normalized not in allowed:
+        raise RecordValidationError(f"invalid {field_name}", context={"value": value, "allowed": sorted(allowed)})
+    return normalized
+
+
+def _backend_identity(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RecordValidationError("backend must be a mapping", context={"type": type(value).__name__})
+    unknown = set(value) - {"name", "kind", "version", "provider", "metadata"}
+    if unknown:
+        raise RecordValidationError("backend contains unknown fields", context={"fields": sorted(unknown)})
+    name = value.get("name")
+    if not isinstance(name, str) or not name:
+        raise RecordValidationError("backend.name must be a non-empty string")
+    for key in ("kind", "version", "provider"):
+        if key in value and value[key] is not None and not isinstance(value[key], str):
+            raise RecordValidationError(f"backend.{key} must be a string", context={"type": type(value[key]).__name__})
+    if "metadata" in value and value["metadata"] is not None and not isinstance(value["metadata"], Mapping):
+        raise RecordValidationError("backend.metadata must be a mapping", context={"type": type(value['metadata']).__name__})
+    return _freeze_mapping(value, "backend")
+
+
+def _link_tuple(value: Sequence[Any], *, default_required: bool, field_name: str) -> tuple[ExecutionRecordLink, ...]:
+    items = _json_sequence_value(value, field_name)
+    return tuple(item if isinstance(item, ExecutionRecordLink) else ExecutionRecordLink.from_json(item, default_required=default_required) for item in items)
+
+
+def _log_tuple(value: Sequence[Any]) -> tuple[ExecutionLogRef, ...]:
+    items = _json_sequence_value(value, "logs")
+    return tuple(item if isinstance(item, ExecutionLogRef) else ExecutionLogRef.from_json(item) for item in items)
+
+
+def _record_id_tuple(value: Sequence[str], field_name: str) -> tuple[str, ...]:
+    items = _json_sequence_value(value, field_name)
+    result = tuple(items)
+    for item in result:
+        _validate_id(item, ("record",), field_name)
+    return result
+
+
+def _cdef_id_tuple(value: Sequence[str], field_name: str) -> tuple[str, ...]:
+    items = _json_sequence_value(value, field_name)
+    return tuple(_validate_cdef_id(item, field_name) for item in items)
+
+
+def _json_sequence(payload: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in payload or payload[field_name] is None:
+        return ()
+    return _json_sequence_value(payload[field_name], field_name)
+
+
+def _json_sequence_value(value: Any, field_name: str) -> Any:
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise RecordValidationError(f"{field_name} must be a JSON array, not a string" if isinstance(value, str) else f"{field_name} must be a JSON array", context={"type": type(value).__name__})
+    return value
+
+
+def _validate_cdef_id(value: Any, field_name: str) -> str:
+    try:
+        return parse_cdef_id(value).raw
+    except ReferenceParseError as exc:
+        raise RecordValidationError(f"invalid {field_name}", context=exc.context) from exc
+
+
+def _validate_id(value: Any, prefixes: tuple[str, ...], field_name: str) -> None:
+    if not isinstance(value, str):
+        raise RecordValidationError(f"{field_name} must be a string", context={"type": type(value).__name__})
+    try:
+        parts = parse_content_id(value)
+    except ContentIDError as exc:
+        raise RecordValidationError(f"invalid {field_name}", context=exc.context) from exc
+    if parts.prefix not in prefixes or parts.schema_version != 1:
+        raise RecordValidationError(f"{field_name} prefix mismatch", context={"value": value, "expected": prefixes})
+
+
+def _freeze_mapping(value: Mapping[str, Any], path: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise RecordValidationError("execution record JSON field must be a mapping", context={"path": path, "type": type(value).__name__})
+    try:
+        frozen = deep_freeze_json(value)
+    except CanonicalJSONError as exc:
+        raise RecordValidationError("execution record JSON field is not canonical JSON", context={"path": path, **exc.context}) from exc
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
+def _put_optional(payload: dict[str, Any], key: str, value: Any) -> None:
+    if value is not None:
+        payload[key] = value
+
+
+__all__ = [
+    "EXECUTION_KINDS",
+    "EXECUTION_STATUSES",
+    "ExecutionCancellationInfo",
+    "ExecutionErrorInfo",
+    "ExecutionLogRef",
+    "ExecutionRecord",
+    "ExecutionRecordLink",
+    "execution_record_for_adapter_result",
+    "execution_record_for_probe_report",
+    "execution_record_for_result",
+    "execution_record_matches",
+    "find_execution_records",
+    "find_execution_records_consuming",
+    "find_execution_records_for_operation",
+    "find_execution_records_producing",
+    "unsupported_compiler_execution_record",
+    "write_execution_record",
+]

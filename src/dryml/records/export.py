@@ -175,6 +175,7 @@ def plan_record_closure(
     )
 
 
+
 def copy_record_closure(
     source_store: Any,
     destination_store: Any,
@@ -332,6 +333,7 @@ def _queue_reverse_provenance_records(source_io: Any, records: set[str], queue: 
         record = source_io.read_record(mention.source_id)
         if record.get("kind") not in _PROVENANCE_RECORD_KINDS:
             continue
+        _report_provenance_export(record, mention.target_id)
         queue.append(mention.source_id)
         queued = True
     return queued
@@ -372,6 +374,22 @@ def _require_prefix(value: str, prefix: str) -> None:
     parts = parse_content_id(value)
     if parts.prefix != prefix:
         raise RecordClosureError("content ID prefix mismatch", context={"value": value, "expected": prefix, "observed": parts.prefix})
+
+
+def _report_provenance_export(record: Mapping[str, Any], target_id: str) -> None:
+    try:
+        from dryml import reporting
+
+        payload = record.get("payload") or {}
+        reporting.detail(
+            "dryml.records.execution.export",
+            "Including execution provenance in export closure",
+            operation_id=payload.get("operation_id"),
+            record_id=record.get("id"),
+            data={"target_id": target_id, "kind": record.get("kind"), "status": payload.get("status"), "execution_kind": payload.get("execution_kind")},
+        )
+    except Exception:
+        pass
 
 
 __all__ = [

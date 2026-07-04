@@ -8,8 +8,11 @@ import dryml
 import dryml.annotations as ann
 import dryml.environments as envs
 import dryml.operations as ops
+import dryml.dispatch as dispatch
 import dryml.providers as providers
 import dryml.reporting as reporting
+from dryml.core2.store.dir import DirStore
+from dryml.records import ExecutionRecord, RecordStoreIO, make_record, plan_record_closure
 
 
 def teardown_function():
@@ -199,3 +202,36 @@ def test_worker_protocol_stdout_is_json_only_when_reporting_enabled(monkeypatch)
     assert report.status == "ok"
     assert "hello from provider" in report.reports[0].stdout
     assert all("DRYML:" not in text for text in (report.reports[0].stdout or "", report.reports[0].stderr or ""))
+
+
+def test_dispatch_and_execution_reporting_events(tmp_path):
+    capture = reporting.CaptureReporter()
+    dryml.configure(reporting={"level": "details", "reporter": capture})
+    operation = ops.attach_operation_id(operation_spec())
+    dispatch_spec = dispatch.attach_dispatch_id(dispatch.make_dispatch_spec(operation_id=operation["id"]))
+    recipe = dispatch.attach_recipe_id(dispatch.make_execution_recipe(dispatch_id=dispatch_spec["id"], operation_id=operation["id"], backend={"name": "dryml.fake"}))
+    store = DirStore(tmp_path / "store")
+    io = RecordStoreIO(store)
+    io.write_spec(operation, family="operation")
+    io.write_spec(dispatch_spec, family="dispatch")
+    io.write_spec(recipe, family="execution_recipe")
+    seed = io.write_record(make_record(kind="stored_state", payload={"subject_cdef_id": "cdef-v4-" + "a" * 64}))
+    execution = ExecutionRecord(
+        execution_kind="python",
+        operation_id=operation["id"],
+        dispatch_id=dispatch_spec["id"],
+        recipe_id=recipe["id"],
+        backend={"name": "dryml.fake"},
+        status="ok",
+        consumed_records=(seed.record_id,),
+    )
+    io.write_record(execution.to_envelope())
+    io.find_execution_records(operation_id=operation["id"])
+    plan_record_closure(store, seed_records=[seed.record_id], policy="provenance")
+
+    names = [event.name for event in capture.events]
+    assert "dryml.dispatch.spec.build" in names
+    assert "dryml.dispatch.recipe.build" in names
+    assert "dryml.records.execution.write" in names
+    assert "dryml.records.execution.query" in names
+    assert "dryml.records.execution.export" in names
