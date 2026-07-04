@@ -253,6 +253,12 @@ class ProbeReport:
 
         return self.status == "ok" and not any(issue.severity == "error" for issue in self.diagnostics)
 
+    @property
+    def has_successful_provider_report(self) -> bool:
+        """Return whether any provider produced a useful successful report."""
+
+        return any(report.status == "ok" for report in self.reports)
+
     def to_data(self) -> dict[str, Any]:
         """Return JSON-ready aggregate report payload data."""
 
@@ -329,6 +335,23 @@ def as_provider_fragments(report: ProbeReport, *, cached: bool = False) -> tuple
     """Return provider fragments from a probe report."""
 
     return report.annotation_fragments(cached=cached)
+
+
+def aggregate_probe_status(reports: Iterable[ProviderReport]) -> str:
+    """Return aggregate probe status from provider report statuses."""
+
+    statuses = tuple(report.status for report in reports)
+    if not statuses:
+        return "skipped"
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if any(status == "ok" for status in statuses):
+        return "ok"
+    if all(status == "unsupported" for status in statuses):
+        return "unsupported"
+    if any(status == "degraded" for status in statuses):
+        return "degraded"
+    return "skipped"
 
 
 def _report_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -410,6 +433,7 @@ __all__ = [
     "ProviderIssue",
     "ProviderReport",
     "RepresentationInspectionReport",
+    "aggregate_probe_status",
     "as_provider_fragments",
     "report_from_data",
 ]

@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from dryml.environments import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec, build_probe_env
@@ -34,11 +35,19 @@ def run_probe(
     """Run a provider probe in a subprocess and return a structured report."""
 
     environment = environment or CurrentEnvironmentSpec()
-    provider_refs = _resolve_provider_refs(request, providers=providers, registry=registry)
-    if isinstance(environment, ContainerEnvironmentSpec):
-        return _runner_failure(request, "unsupported_environment_spec", "container provider probes are not implemented", environment_spec=environment.to_data())
-    command, env = _command_for_environment(environment)
     runtime_spec = attach_runtime_id(make_runtime_spec(mode=RuntimeMode.PROBE, device_visibility={"policy": request.probe_policy.device_visibility}))
+    environment_spec = _environment_spec_data(environment)
+    request = replace(request, environment_spec=environment_spec, runtime_spec=runtime_spec)
+    try:
+        provider_refs = _resolve_provider_refs(request, providers=providers, registry=registry)
+    except Exception as exc:
+        return _runner_failure(request, "provider_resolution_failed", str(exc), exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
+    if isinstance(environment, ContainerEnvironmentSpec):
+        return _runner_failure(request, "unsupported_environment_spec", "container provider probes are not implemented", environment_spec=environment_spec, runtime_spec=runtime_spec)
+    try:
+        command, env = _command_for_environment(environment)
+    except Exception as exc:
+        return _runner_failure(request, "unsupported_environment_spec", str(exc), exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
     envelope = {
         "schema": PROVIDER_PROBE_REQUEST_SCHEMA,
         "schema_version": 1,
@@ -58,17 +67,17 @@ def run_probe(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        return _runner_failure(request, "probe_timeout", f"provider probe timed out after {timeout} seconds", stdout=_text(exc.stdout), stderr=_text(exc.stderr), environment_spec=environment.to_data(), runtime_spec=runtime_spec)
+        return _runner_failure(request, "probe_timeout", f"provider probe timed out after {timeout} seconds", stdout=_text(exc.stdout), stderr=_text(exc.stderr), environment_spec=environment_spec, runtime_spec=runtime_spec)
     except OSError as exc:
-        return _runner_failure(request, "probe_failed", f"provider probe could not start: {exc}", environment_spec=environment.to_data(), runtime_spec=runtime_spec)
+        return _runner_failure(request, "probe_failed", f"provider probe could not start: {exc}", exception=exc, environment_spec=environment_spec, runtime_spec=runtime_spec)
     if completed.returncode != 0:
         parsed = _parse_worker_response(completed.stdout, request, stderr=completed.stderr, returncode=completed.returncode)
         if parsed is not None:
             return parsed
-        return _runner_failure(request, "probe_failed", f"provider probe exited with status {completed.returncode}", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment.to_data(), runtime_spec=runtime_spec)
+        return _runner_failure(request, "probe_failed", f"provider probe exited with status {completed.returncode}", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment_spec, runtime_spec=runtime_spec)
     parsed = _parse_worker_response(completed.stdout, request, stderr=completed.stderr, returncode=completed.returncode)
     if parsed is None:
-        return _runner_failure(request, "malformed_worker_output", "provider probe returned malformed JSON", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment.to_data(), runtime_spec=runtime_spec)
+        return _runner_failure(request, "malformed_worker_output", "provider probe returned malformed JSON", stdout=completed.stdout, stderr=completed.stderr, returncode=completed.returncode, environment_spec=environment_spec, runtime_spec=runtime_spec)
     return parsed
 
 
@@ -116,6 +125,12 @@ def _resolve_provider_refs(request: ProviderRequest, *, providers: Iterable[str 
     return tuple(refs)
 
 
+def _environment_spec_data(environment: EnvironmentSpec) -> dict[str, Any]:
+    data = dict(environment.to_data())
+    data["id"] = environment.id
+    return data
+
+
 def _command_for_environment(environment: EnvironmentSpec) -> tuple[list[str], dict[str, str] | None]:
     if isinstance(environment, CurrentEnvironmentSpec):
         return [sys.executable, *PROVIDER_WORKER_COMMAND], build_probe_env(base=None, overrides=None, pythonpath_policy="inherit")
@@ -149,9 +164,9 @@ def _parse_worker_response(stdout: str, request: ProviderRequest, *, stderr: str
     return report
 
 
-def _runner_failure(request: ProviderRequest | None, code: str, message: str, *, stdout: str | None = None, stderr: str | None = None, returncode: int | None = None, environment_spec: Mapping[str, Any] | None = None, runtime_spec: Mapping[str, Any] | None = None) -> ProbeReport:
+def _runner_failure(request: ProviderRequest | None, code: str, message: str, *, exception: BaseException | None = None, stdout: str | None = None, stderr: str | None = None, returncode: int | None = None, environment_spec: Mapping[str, Any] | None = None, runtime_spec: Mapping[str, Any] | None = None) -> ProbeReport:
     metadata = {"returncode": returncode}
-    issue = ProviderIssue(code, "error", message, metadata=metadata)
+    issue = ProviderIssue(code, "error", message, exception_type=type(exception).__name__ if exception is not None else None, metadata=metadata)
     return ProbeReport(
         request=None if request is None else request.to_data(),
         operation_id=getattr(request, "operation_id", None),

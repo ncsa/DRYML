@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 import dryml.annotations as ann
@@ -22,6 +23,9 @@ class Provider(DrymlProvider):
             raise RuntimeError("intentional fake provider failure")
         if options.get("sleep"):
             time.sleep(float(options["sleep"]))
+        if options.get("noisy"):
+            print("hello from provider")
+            print("warning from provider", file=sys.stderr)
         fragments = (
             ann.AnnotationFragment("environment", "requirement", {"requirements": ["numpy>=1"]}, ann.SourceTrace("provider")),
             ann.AnnotationFragment("world", "requirement", {"roles": {"main": {"resources": {"cpus": {"min": 1}}}}}, ann.SourceTrace("provider")),

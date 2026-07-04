@@ -50,6 +50,52 @@ def test_current_environment_and_python_executable_subprocess_probe(monkeypatch)
     assert metadata["xla_visible_devices"] == ""
 
 
+def test_provider_stdout_stderr_are_captured_without_corrupting_protocol(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.path.abspath("tests"))
+    report = providers.probe_operation(operation_spec(), environment=envs.CurrentEnvironmentSpec(), providers=("fake",), registry=registry(), provider_options={"fake": {"noisy": True}}, timeout=30)
+
+    assert report.status == "ok"
+    assert "hello from provider" in report.reports[0].stdout
+    assert "warning from provider" in report.reports[0].stderr
+
+
+def test_direct_run_probe_normalizes_environment_and_runtime_metadata(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.path.abspath("tests"))
+    request = providers.OperationInspectionRequest(operation_spec=operation_spec(), provider_names=("fake",))
+
+    report = providers.run_probe(request, environment=envs.CurrentEnvironmentSpec(), registry=registry(), timeout=30)
+
+    assert report.status == "ok"
+    assert report.environment_spec["id"].startswith("envspec-v1-")
+    assert report.environment_spec_id == report.environment_spec["id"]
+    assert report.runtime_id.startswith("runtime-v1-")
+    assert report.reports[0].environment_spec_id == report.environment_spec_id
+    assert report.reports[0].runtime_id == report.runtime_id
+
+
+def test_run_probe_planning_failures_are_structured():
+    request = providers.OperationInspectionRequest(operation_spec=operation_spec())
+
+    no_provider = providers.run_probe(request, environment=envs.CurrentEnvironmentSpec())
+    no_registry = providers.run_probe(providers.OperationInspectionRequest(operation_spec=operation_spec(), provider_names=("fake",)), environment=envs.CurrentEnvironmentSpec())
+
+    assert no_provider.status == "failed"
+    assert no_provider.diagnostics[0].code == "provider_resolution_failed"
+    assert no_registry.status == "failed"
+    assert no_registry.diagnostics[0].code == "provider_resolution_failed"
+
+
+def test_all_unsupported_provider_reports_aggregate_as_unsupported(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.path.abspath("tests"))
+    request = providers.RepresentationInspectionRequest(provider_names=("fake",))
+
+    report = providers.run_probe(request, environment=envs.CurrentEnvironmentSpec(), registry=registry(), timeout=30)
+
+    assert report.status == "unsupported"
+    assert report.has_successful_provider_report is False
+    assert report.reports[0].status == "unsupported"
+
+
 def test_provider_failure_and_import_error_are_structured(monkeypatch):
     monkeypatch.setenv("PYTHONPATH", os.path.abspath("tests"))
     failing = providers.probe_operation(operation_spec(), providers=("fake",), registry=registry(), provider_options={"fake": {"fail": True}}, timeout=30)
@@ -60,6 +106,17 @@ def test_provider_failure_and_import_error_are_structured(monkeypatch):
     assert failing.reports[0].issues[0].code == "provider_failed"
     assert import_error.status == "failed"
     assert import_error.reports[0].issues[0].code == "provider_failed"
+
+
+def test_identity_mismatch_is_structured_provider_failure(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", os.path.abspath("tests"))
+    ref = providers.ProviderRef("expected", "providers.fake_mismatch_provider")
+
+    report = providers.probe_operation(operation_spec(), providers=(ref,), registry=registry(ref), timeout=30)
+
+    assert report.status == "failed"
+    assert report.reports[0].provider_identity.name == "expected"
+    assert "identity name" in report.reports[0].issues[0].message
 
 
 def test_timeout_nonzero_and_malformed_worker_output(tmp_path, monkeypatch):

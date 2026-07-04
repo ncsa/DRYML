@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from collections.abc import Mapping
@@ -15,7 +17,7 @@ from dryml.runtime import FrameworkBootstrapPolicy, NoAllocation, RuntimeContext
 from .errors import ProviderError, ProviderProtocolError
 from .identity import ProviderRef
 from .registry import load_provider_ref
-from .reports import OperationInspectionReport, ProbeReport, ProviderIssue, ProviderReport, report_from_data
+from .reports import OperationInspectionReport, ProbeReport, ProviderIssue, ProviderReport, aggregate_probe_status, report_from_data
 from .requests import OperationInspectionRequest, ProbePolicy, request_from_data
 
 
@@ -64,20 +66,25 @@ def run_worker_request(envelope: Mapping[str, Any]) -> ProbeReport:
     with activate(mode=RuntimeMode.PROBE, allocation=NoAllocation, spec=runtime_spec, policy=FrameworkBootstrapPolicy(strict_preimport=probe_policy.strict_preimport), restore_environ=False):
         for ref in providers:
             identity = ref.fallback_identity()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
             try:
-                provider = load_provider_ref(ref)
-                identity = provider.identity
-                provider_reports.append(_with_context_ids(_run_provider(provider, request), request, runtime_envelope))
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    provider = load_provider_ref(ref)
+                    identity = provider.identity
+                    report = _run_provider(provider, request)
+                provider_reports.append(_with_streams(_with_context_ids(report, request, runtime_envelope), stdout.getvalue(), stderr.getvalue()))
             except Exception as exc:
                 report_type = _report_type_for_request(request)
-                provider_reports.append(_with_context_ids(report_type.failed(identity, request, f"provider failed: {exc}", exception=exc), request, runtime_envelope))
+                report = report_type.failed(identity, request, f"provider failed: {exc}", exception=exc)
+                provider_reports.append(_with_streams(_with_context_ids(report, request, runtime_envelope), stdout.getvalue(), stderr.getvalue()))
         runtime = active_runtime()
         bootstrap = active_runtime_bootstrap()
         diagnostics.append(ProviderIssue("runtime_mode", "info", "probe worker runtime mode", actual=runtime.mode.value))
         diagnostics.append(ProviderIssue("runtime_allocation", "info", "probe worker allocation", actual=repr(runtime.allocation)))
         if bootstrap is not None:
             diagnostics.append(ProviderIssue("device_visibility", "info", "probe worker device visibility", actual=bootstrap.env_updates))
-    status = "ok" if all(report.status in {"ok", "unsupported"} for report in provider_reports) else "failed"
+    status = aggregate_probe_status(provider_reports)
     return ProbeReport(
         request=request.to_data(),
         reports=tuple(provider_reports),
@@ -101,7 +108,10 @@ def _parse_envelope(envelope: Mapping[str, Any]):
     if unknown:
         raise ProviderProtocolError("provider probe request has unknown fields", context={"fields": sorted(unknown)})
     request = request_from_data(envelope.get("request") or {})
-    providers = tuple(ProviderRef.from_data(item) for item in envelope.get("providers") or ())
+    provider_payloads = envelope.get("providers") or ()
+    if not isinstance(provider_payloads, list | tuple):
+        raise ProviderProtocolError("providers must be a JSON array", context={"type": type(provider_payloads).__name__})
+    providers = tuple(ProviderRef.from_data(item) for item in provider_payloads)
     if not providers:
         raise ProviderProtocolError("provider probe request requires at least one provider")
     probe_policy = ProbePolicy.from_data(envelope.get("probe_policy") or (request.probe_policy.to_data() if request.probe_policy else None))
@@ -156,6 +166,22 @@ def _with_context_ids(report: ProviderReport, request: Any, runtime_envelope: Ma
         environment_spec_id=report.environment_spec_id or environment_spec_id,
         runtime_id=report.runtime_id or runtime_envelope.get("id"),
     )
+
+
+def _with_streams(report: ProviderReport, stdout: str, stderr: str) -> ProviderReport:
+    return replace(
+        report,
+        stdout=_join_streams(report.stdout, stdout),
+        stderr=_join_streams(report.stderr, stderr),
+    )
+
+
+def _join_streams(existing: str | None, captured: str) -> str | None:
+    if not captured:
+        return existing
+    if not existing:
+        return captured
+    return existing + captured
 
 
 def _report_type_for_request(request: Any):

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 from dryml.formats import CanonicalJSONError, deep_freeze_json, json_ready
@@ -36,7 +36,7 @@ class ProbePolicy:
             raise ProviderValidationError("allow_materialization is not supported by provider probes yet", context={"code": "unsupported_probe_policy"})
         if self.allow_workload_allocation:
             raise ProviderValidationError("provider probes cannot hold workload allocations", context={"code": "unsupported_probe_policy"})
-        if self.device_visibility not in {"none", "inherit", "explicit"}:
+        if self.device_visibility not in {"none", "inherit"}:
             raise ProviderValidationError("unsupported provider probe device visibility", context={"device_visibility": self.device_visibility})
         if self.timeout is not None and (not isinstance(self.timeout, int | float) or self.timeout < 0):
             raise ProviderValidationError("probe timeout must be non-negative or None", context={"timeout": self.timeout})
@@ -100,7 +100,7 @@ class ProviderRequest:
             raise ProviderValidationError("unsupported provider request schema version", context={"schema_version": self.schema_version})
         object.__setattr__(self, "environment_spec", None if self.environment_spec is None else _freeze_json_mapping(self.environment_spec, "environment_spec"))
         object.__setattr__(self, "runtime_spec", None if self.runtime_spec is None else _freeze_json_mapping(self.runtime_spec, "runtime_spec"))
-        object.__setattr__(self, "provider_names", tuple(str(name) for name in self.provider_names))
+        object.__setattr__(self, "provider_names", _coerce_string_tuple(self.provider_names, "provider_names"))
         object.__setattr__(self, "provider_options", _freeze_json_mapping(self.provider_options, "provider_options"))
         object.__setattr__(self, "annotation_context", _freeze_json_mapping(self.annotation_context, "annotation_context"))
         object.__setattr__(self, "metadata", _freeze_json_mapping(self.metadata, "metadata"))
@@ -141,7 +141,7 @@ class ProviderRequest:
             "request_key": data.get("request_key"),
             "environment_spec": data.get("environment_spec"),
             "runtime_spec": data.get("runtime_spec"),
-            "provider_names": tuple(data.get("provider_names") or ()),
+            "provider_names": _json_string_sequence(data.get("provider_names"), "provider_names"),
             "provider_options": data.get("provider_options") or {},
             "annotation_context": data.get("annotation_context") or {},
             "probe_policy": ProbePolicy.from_data(data.get("probe_policy")),
@@ -262,6 +262,26 @@ def _validate_request_data(data: Mapping[str, Any], request_kind: str, extra_fie
         raise ProviderValidationError("provider request has unknown fields", context={"fields": sorted(unknown)})
     if data.get("request_kind") != request_kind:
         raise ProviderValidationError("provider request kind mismatch", context={"expected": request_kind, "observed": data.get("request_kind")})
+
+
+def _coerce_string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str | bytes | bytearray):
+        raise ProviderValidationError(f"{field_name} must be a sequence of strings, not a string", context={field_name: value})
+    if not isinstance(value, Iterable):
+        raise ProviderValidationError(f"{field_name} must be a sequence of strings", context={"type": type(value).__name__})
+    return tuple(str(item) for item in value)
+
+
+def _json_string_sequence(value: Any, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list | tuple):
+        raise ProviderValidationError(f"{field_name} must be a JSON array", context={field_name: value, "type": type(value).__name__})
+    if any(not isinstance(item, str) for item in value):
+        raise ProviderValidationError(f"{field_name} values must be strings", context={field_name: value})
+    return tuple(value)
 
 
 def _freeze_json_mapping(value: Mapping[str, Any], path: str) -> Mapping[str, Any]:

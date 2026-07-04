@@ -20,8 +20,10 @@ def test_identity_round_trip_and_stable_provider_id():
     [
         lambda: providers.ProviderIdentity("bad name"),
         lambda: providers.ProviderIdentity("ok", metadata={1: "bad"}),
+        lambda: providers.ProviderIdentity("ok", capabilities="abc"),
         lambda: providers.ProviderRef("fake", "bad-module"),
         lambda: providers.ProviderRef("fake", "providers.fake_provider", "bad qual"),
+        lambda: providers.ProviderRef("fake", "providers.fake_provider", capabilities="abc"),
     ],
 )
 def test_malformed_identity_and_ref_validation(factory):
@@ -55,3 +57,10 @@ def test_register_instance_and_unsupported_method():
     report = provider.inspect_representations(request)
     assert report.status == "unsupported"
     assert report.issues[0].code == "unsupported"
+
+
+def test_load_provider_ref_rejects_identity_mismatch():
+    with pytest.raises(providers.ProviderValidationError, match="name does not match"):
+        providers.load_provider_ref(providers.ProviderRef("expected", "providers.fake_mismatch_provider"))
+    with pytest.raises(providers.ProviderValidationError, match="version does not match"):
+        providers.load_provider_ref(providers.ProviderRef("actual", "providers.fake_mismatch_provider", version_hint="1"))

@@ -17,6 +17,10 @@ def test_request_round_trip_and_malformed_operation_rejection():
     assert request.operation_id.startswith("op-v1-")
     with pytest.raises(providers.ProviderValidationError):
         providers.OperationInspectionRequest(operation_spec={"bad": "shape"})
+    malformed = request.to_data()
+    malformed["provider_names"] = "fake"
+    with pytest.raises(providers.ProviderValidationError, match="provider_names"):
+        providers.request_from_data(malformed)
 
 
 def test_probe_policy_rejects_materialization_and_workload_allocation():
@@ -24,6 +28,8 @@ def test_probe_policy_rejects_materialization_and_workload_allocation():
         providers.ProbePolicy(allow_materialization=True)
     with pytest.raises(providers.ProviderValidationError, match="workload"):
         providers.ProbePolicy(allow_workload_allocation=True)
+    with pytest.raises(providers.ProviderValidationError, match="device visibility"):
+        providers.ProbePolicy(device_visibility="explicit")
 
 
 def test_report_round_trip_and_provider_fragment_sources():
@@ -46,3 +52,16 @@ def test_structured_failed_report():
     report = providers.OperationInspectionReport.failed(identity, None, "boom", exception=RuntimeError("boom"))
     assert report.status == "failed"
     assert report.issues[0].exception_type == "RuntimeError"
+
+
+def test_aggregate_probe_status_and_successful_provider_flag():
+    identity = providers.ProviderIdentity("fake")
+    unsupported = providers.OperationInspectionReport.unsupported(identity, None)
+    ok = providers.OperationInspectionReport(identity, "ok")
+    failed = providers.OperationInspectionReport.failed(identity, None, "boom")
+
+    assert providers.aggregate_probe_status((unsupported,)) == "unsupported"
+    assert providers.aggregate_probe_status((unsupported, ok)) == "ok"
+    assert providers.aggregate_probe_status((ok, failed)) == "failed"
+    assert providers.ProbeReport(reports=(unsupported,)).has_successful_provider_report is False
+    assert providers.ProbeReport(reports=(unsupported, ok)).has_successful_provider_report is True

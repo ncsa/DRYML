@@ -90,6 +90,10 @@ def load_provider_ref(ref: ProviderRef) -> Any:
     identity = getattr(provider, "identity", None)
     if not isinstance(identity, ProviderIdentity):
         raise ProviderValidationError("loaded provider must expose ProviderIdentity identity", context={"name": ref.name})
+    if identity.name != ref.name:
+        raise ProviderValidationError("loaded provider identity name does not match ProviderRef", context={"expected": ref.name, "observed": identity.name})
+    if ref.version_hint is not None and identity.version != ref.version_hint:
+        raise ProviderValidationError("loaded provider identity version does not match ProviderRef", context={"expected": ref.version_hint, "observed": identity.version})
     return provider
 
 

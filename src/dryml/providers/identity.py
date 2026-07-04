@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -38,7 +38,7 @@ class ProviderIdentity:
             object.__setattr__(self, "module", _validate_dotted(self.module, "module"))
         if self.qualname is not None:
             object.__setattr__(self, "qualname", _validate_dotted(self.qualname, "qualname"))
-        object.__setattr__(self, "capabilities", tuple(sorted({str(item) for item in self.capabilities})))
+        object.__setattr__(self, "capabilities", _coerce_string_tuple(self.capabilities, "capabilities", sort_unique=True))
         object.__setattr__(self, "metadata", _freeze_json_mapping(self.metadata, "metadata"))
         if self.schema_version != PROVIDER_ID_SCHEMA_VERSION:
             raise ProviderValidationError("unsupported provider identity schema version", context={"schema_version": self.schema_version})
@@ -79,7 +79,7 @@ class ProviderIdentity:
             version=data.get("version"),
             module=data.get("module"),
             qualname=data.get("qualname"),
-            capabilities=tuple(data.get("capabilities") or ()),
+            capabilities=_json_string_sequence(data.get("capabilities"), "capabilities"),
             metadata=data.get("metadata") or {},
             schema_version=data.get("schema_version", PROVIDER_ID_SCHEMA_VERSION),
         )
@@ -110,7 +110,7 @@ class ProviderRef:
         object.__setattr__(self, "qualname", _validate_dotted(self.qualname, "qualname"))
         if self.version_hint is not None:
             object.__setattr__(self, "version_hint", str(self.version_hint))
-        object.__setattr__(self, "capabilities", tuple(sorted({str(item) for item in self.capabilities})))
+        object.__setattr__(self, "capabilities", _coerce_string_tuple(self.capabilities, "capabilities", sort_unique=True))
         object.__setattr__(self, "metadata", _freeze_json_mapping(self.metadata, "metadata"))
         if self.schema_version != PROVIDER_ID_SCHEMA_VERSION:
             raise ProviderValidationError("unsupported provider ref schema version", context={"schema_version": self.schema_version})
@@ -147,7 +147,7 @@ class ProviderRef:
             module=data.get("module"),
             qualname=data.get("qualname", "Provider"),
             version_hint=data.get("version_hint"),
-            capabilities=tuple(data.get("capabilities") or ()),
+            capabilities=_json_string_sequence(data.get("capabilities"), "capabilities"),
             metadata=data.get("metadata") or {},
             schema_version=data.get("schema_version", PROVIDER_ID_SCHEMA_VERSION),
         )
@@ -163,6 +163,29 @@ def _validate_dotted(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or _DOTTED_RE.fullmatch(value) is None:
         raise ProviderValidationError(f"provider {field_name} must be a dotted Python path", context={field_name: value})
     return value
+
+
+def _coerce_string_tuple(value: Any, field_name: str, *, sort_unique: bool = False) -> tuple[str, ...]:
+    if value is None:
+        items: tuple[Any, ...] = ()
+    elif isinstance(value, str | bytes | bytearray):
+        raise ProviderValidationError(f"provider {field_name} must be a sequence of strings, not a string", context={field_name: value})
+    elif isinstance(value, Iterable):
+        items = tuple(value)
+    else:
+        raise ProviderValidationError(f"provider {field_name} must be a sequence of strings", context={"type": type(value).__name__})
+    result = tuple(str(item) for item in items)
+    return tuple(sorted(set(result))) if sort_unique else result
+
+
+def _json_string_sequence(value: Any, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list | tuple):
+        raise ProviderValidationError(f"provider {field_name} must be a JSON array", context={field_name: value, "type": type(value).__name__})
+    if any(not isinstance(item, str) for item in value):
+        raise ProviderValidationError(f"provider {field_name} values must be strings", context={field_name: value})
+    return tuple(value)
 
 
 def _freeze_json_mapping(value: Mapping[str, Any], path: str) -> Mapping[str, Any]:
