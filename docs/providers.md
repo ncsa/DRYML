@@ -115,6 +115,46 @@ result = dryml.annotations.resolve(
 
 Fresh reports rewrite fragment sources to `SourceTrace(kind="provider")`. Reports loaded from records should use `report.annotation_fragments(cached=True)`, which rewrites sources to `SourceTrace(kind="cached_probe")` and preserves provider name, version, operation ID, environment IDs, runtime ID, and probe report ID in source metadata.
 
+## Representation And Adapter Payloads
+
+Provider reports also carry a generic JSON-ready `report_payload`. Annotation fragments remain separate from representation/adapter payloads.
+
+Representation inspection reports can include observed or supported representation specs:
+
+```json
+{
+  "representations": [
+    {
+      "representation_spec": {
+        "schema": "dryml.representation.v1",
+        "kind": "fake.raw_state",
+        "payload": {}
+      },
+      "applies_to": {"record_kinds": ["stored_state"]},
+      "notes": []
+    }
+  ]
+}
+```
+
+Adapter planning reports can include adapter descriptors:
+
+```json
+{
+  "adapters": [
+    {
+      "name": "fake.normalize_state",
+      "version": "1",
+      "source": {"kind": "fake.raw_state"},
+      "target": {"kind": "fake.normalized_state"},
+      "cost": 1.0
+    }
+  ]
+}
+```
+
+The orchestrator can deserialize these descriptors without importing provider modules or framework packages.
+
 ## Cache Hooks
 
 `ProbeCacheKey` and `ProbeCache` provide an explicit exact-match cache. Store-backed lookup helpers scan `probe_report` records and validate JSON payloads. Cached reports are never authoritative unless the caller asks for them.

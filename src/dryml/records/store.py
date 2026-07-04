@@ -219,7 +219,55 @@ class RecordStoreIO:
         for spec_id in self.iter_spec_ids(family=family):
             yield self.read_spec(spec_id, family=family)
 
-    def resolve_storage_ref(self, ref: StorageRef | Mapping[str, Any], *, create: bool = False) -> Path:
+    def find_records(
+        self,
+        *,
+        kind: str | None = None,
+        subject_cdef_id: str | None = None,
+        owner_cdef_id: str | None = None,
+        representation_id: str | None = None,
+        operation_id: str | None = None,
+        source_record_id: str | None = None,
+        target_record_id: str | None = None,
+        derived_from: str | None = None,
+        storage_kind: str | None = None,
+    ) -> tuple[LocatedRecordRef, ...]:
+        """Scan authoritative record JSON and return records matching payload filters."""
+
+        refs: list[LocatedRecordRef] = []
+        for record in self.iter_records():
+            if kind is not None and record.get("kind") != kind:
+                continue
+            payload = record.get("payload") or {}
+            if not isinstance(payload, Mapping):
+                raise RecordValidationError("record payload must be a mapping", context={"record_id": record.get("id")})
+            if subject_cdef_id is not None and payload.get("subject_cdef_id") != subject_cdef_id:
+                continue
+            if owner_cdef_id is not None and payload.get("owner_cdef_id") != owner_cdef_id:
+                continue
+            if representation_id is not None and payload.get("representation_id") != representation_id:
+                continue
+            if operation_id is not None and payload.get("operation_id") != operation_id:
+                continue
+            if source_record_id is not None and payload.get("source_record_id") != source_record_id:
+                continue
+            if target_record_id is not None and payload.get("target_record_id") != target_record_id:
+                continue
+            if derived_from is not None and derived_from not in tuple(payload.get("derived_from") or ()):
+                continue
+            if storage_kind is not None and not _payload_has_storage_kind(payload, storage_kind):
+                continue
+            refs.append(LocatedRecordRef(self._store_ref(), record["id"]))
+        return tuple(sorted(refs, key=lambda ref: ref.record_id))
+
+    def resolve_storage_ref(
+        self,
+        ref: StorageRef | Mapping[str, Any],
+        *,
+        create: bool = False,
+        record_id: str | None = None,
+        containing_record_id: str | None = None,
+    ) -> Path:
         """Resolve a logical storage reference inside this store."""
 
         storage_ref = ref if isinstance(ref, StorageRef) else StorageRef.from_json(ref)
@@ -245,7 +293,10 @@ class RecordStoreIO:
                 raise StorageRefError("object-dir storage ref does not exist", context={"subject_cdef_id": cdef.raw})
             return path
         if storage_ref.kind == "product-dir":
-            root = self.product_root(storage_ref.record_id, create=create)  # type: ignore[arg-type]
+            resolved_record_id = storage_ref.record_id or record_id or containing_record_id
+            if resolved_record_id is None:
+                raise StorageRefError("self product-dir refs require a containing record ID")
+            root = self.product_root(resolved_record_id, create=create)
             path = root if storage_ref.path == "." else root / storage_ref.path
             if create:
                 path.mkdir(parents=True, exist_ok=True)
@@ -461,6 +512,18 @@ def _validate_content_id(value: str, prefix: str | None, error_cls: type[Excepti
             f"content ID must use {prefix}-v1 prefix",
             context={"value": value, "prefix": parts.prefix, "schema_version": parts.schema_version},
         )
+
+
+def _payload_has_storage_kind(payload: Mapping[str, Any], storage_kind: str) -> bool:
+    storage = payload.get("storage") or ()
+    if not isinstance(storage, list | tuple):
+        raise RecordValidationError("record storage must be a list", context={"type": type(storage).__name__})
+    for item in storage:
+        if not isinstance(item, Mapping):
+            raise RecordValidationError("record storage entry must be a mapping", context={"type": type(item).__name__})
+        if item.get("kind") == storage_kind:
+            return True
+    return False
 
 
 __all__ = ["RecordStoreIO"]

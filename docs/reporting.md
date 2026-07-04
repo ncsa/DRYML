@@ -59,3 +59,18 @@ Progress reporting is fail-soft by default: malformed event payloads or reporter
 ## Subprocess Protocols
 
 Provider probes and future workers must keep protocol stdout machine-readable. Reporting events in child processes are either suppressed, captured, sent through structured protocol fields, or emitted by the parent after decoding worker results. The provider probe worker redirects internal stdout/stderr while constructing its JSON response.
+
+## Record And Adapter Events
+
+Record resolution and local fake adapter execution emit structured events at orchestration boundaries:
+
+| Event | Purpose |
+|---|---|
+| `dryml.records.state.find` | Scan/select stored-state records. |
+| `dryml.records.representation.check` | Check representation compatibility. |
+| `dryml.records.adapter.plan` | Plan zero-, one-, or multi-step adapter paths. |
+| `dryml.records.adapter.run` | Run one local fake adapter step. |
+| `dryml.records.product.write` | Commit product bytes and record sidecar. |
+| `dryml.records.adapter.record` | Write adapter lineage records. |
+
+`quiet` remains silent. `steps` shows lifecycle messages. `details` includes selected record IDs, representation IDs, adapter names, and output record IDs. Reporting remains fail-soft unless strict mode is enabled.

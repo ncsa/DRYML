@@ -49,6 +49,12 @@ class StorageRef:
         return cls("product-dir", path=path, role=role, record_id=record_id)
 
     @classmethod
+    def self_product(cls, *, path: str = ".", role: str | None = None) -> "StorageRef":
+        """Create a self product-dir reference resolved with a containing record ID."""
+
+        return cls("product-dir", path=path, role=role)
+
+    @classmethod
     def blob(cls, blob_id: str, *, role: str | None = None) -> "StorageRef":
         """Create a reference to a content-addressed blob placeholder."""
 
@@ -95,9 +101,10 @@ class StorageRef:
                 raise StorageRefError("object-dir storage refs require only subject_cdef_id", context={"fields": sorted(present)})
             _validate_cdef_id(self.subject_cdef_id)
         elif self.kind == "product-dir":
-            if present != {"record_id"}:
-                raise StorageRefError("product-dir storage refs require only record_id", context={"fields": sorted(present)})
-            _validate_content_id(self.record_id, "record", "record ID")
+            if present not in ({"record_id"}, set()):
+                raise StorageRefError("product-dir storage refs require only record_id or no ID for self refs", context={"fields": sorted(present)})
+            if self.record_id is not None:
+                _validate_content_id(self.record_id, "record", "record ID")
         else:
             if present != {"blob_id"}:
                 raise StorageRefError("blob storage refs require only blob_id", context={"fields": sorted(present)})

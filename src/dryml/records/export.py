@@ -36,7 +36,7 @@ _PROVENANCE_RECORD_KINDS = {
     "compatibility_report",
     "lowering_report",
 }
-_PROVENANCE_RECORD_ROLES = {"derived_from", "record", "consumed_record", "produced_record"}
+_PROVENANCE_RECORD_ROLES = {"derived_from", "record", "source_record", "target_record", "consumed_record", "produced_record"}
 
 
 @dataclass(frozen=True, slots=True)

@@ -43,6 +43,14 @@ class RepoRecordFederation:
                 refs.append(LocatedSpecRef(record_io._store_ref(), spec_id, family or _spec_family(spec)))
         return tuple(sorted(refs, key=lambda ref: (ref.store_ref, ref.kind or "", ref.spec_id)))
 
+    def find_records(self, **filters) -> tuple[LocatedRecordRef, ...]:
+        """Scan stores in repo order and return records matching payload filters."""
+
+        refs = []
+        for store in self.stores():
+            refs.extend(store.records.find_records(**filters))
+        return tuple(refs)
+
     def read_record(self, ref: LocatedRecordRef) -> dict[str, Any]:
         """Read a located record from its owning repo store."""
 

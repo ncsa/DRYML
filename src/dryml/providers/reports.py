@@ -93,6 +93,7 @@ class ProviderReport:
     issues: tuple[ProviderIssue, ...] = ()
     stdout: str | None = None
     stderr: str | None = None
+    report_payload: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
     schema_version: int = REPORT_SCHEMA_VERSION
 
@@ -103,6 +104,7 @@ class ProviderReport:
             raise ProviderReportError("unsupported provider report schema version", context={"schema_version": self.schema_version})
         object.__setattr__(self, "fragments", tuple(_coerce_fragment(fragment) for fragment in self.fragments))
         object.__setattr__(self, "issues", tuple(_coerce_issue(issue) for issue in self.issues))
+        object.__setattr__(self, "report_payload", _freeze_json_mapping(self.report_payload, "report.report_payload"))
         object.__setattr__(self, "metadata", _freeze_json_mapping(self.metadata, "report.metadata"))
 
     @classmethod
@@ -154,6 +156,7 @@ class ProviderReport:
             "issues": [issue.to_data() for issue in self.issues],
             "stdout": self.stdout,
             "stderr": self.stderr,
+            "report_payload": json_ready(self.report_payload),
             "metadata": json_ready(self.metadata),
         }
 
@@ -179,14 +182,14 @@ class OperationInspectionReport(ProviderReport):
 
 @dataclass(frozen=True, slots=True)
 class RepresentationInspectionReport(ProviderReport):
-    """Structural report placeholder for representation inspection."""
+    """Report carrying representation observations/specs in ``report_payload``."""
 
     report_kind: ClassVar[str] = "representation_inspection"
 
 
 @dataclass(frozen=True, slots=True)
 class AdapterPlanningReport(ProviderReport):
-    """Structural report placeholder for adapter planning."""
+    """Report carrying adapter descriptors in ``report_payload``."""
 
     report_kind: ClassVar[str] = "adapter_planning"
 
@@ -367,6 +370,7 @@ def _report_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
         "issues": tuple(ProviderIssue.from_data(issue) for issue in data.get("issues") or ()),
         "stdout": data.get("stdout"),
         "stderr": data.get("stderr"),
+        "report_payload": data.get("report_payload") or {},
         "metadata": data.get("metadata") or {},
         "schema_version": data.get("schema_version", REPORT_SCHEMA_VERSION),
     }
@@ -375,7 +379,7 @@ def _report_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
 def _validate_report_data(data: Mapping[str, Any], report_kind: str) -> None:
     if not isinstance(data, Mapping):
         raise ProviderReportError("provider report must be a mapping", context={"type": type(data).__name__})
-    allowed = {"schema_version", "report_kind", "status", "provider_identity", "request_key", "operation_id", "environment_id", "environment_spec_id", "runtime_id", "annotation_fragments", "issues", "stdout", "stderr", "metadata"}
+    allowed = {"schema_version", "report_kind", "status", "provider_identity", "request_key", "operation_id", "environment_id", "environment_spec_id", "runtime_id", "annotation_fragments", "issues", "stdout", "stderr", "report_payload", "metadata"}
     unknown = set(data) - allowed
     if unknown:
         raise ProviderReportError("provider report has unknown fields", context={"fields": sorted(unknown)})

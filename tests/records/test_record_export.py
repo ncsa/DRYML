@@ -7,10 +7,13 @@ from dryml.core2.store.dir import DirStore
 from dryml.core2.store.zip import ZipExportStore, ZipStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
+    AdapterRecord,
     RecordPolicyOptions,
     RecordStoreIO,
     StorageRef,
+    StoredStateRecord,
     copy_record_closure,
+    default_object_state_representation_spec,
     make_record,
     make_spec,
     plan_record_closure,
@@ -231,3 +234,38 @@ def test_legacy_zip_export_without_records_remains_compatible(tmp_path):
         names = set(zf.namelist())
     assert all(not name.startswith("records/") for name in names)
     assert f"records/items/{seed.record_id}.json" not in names
+
+
+def test_typed_record_closure_and_self_product_export(tmp_path):
+    source = DirStore(tmp_path / "source")
+    dest = DirStore(tmp_path / "dest")
+    io = RecordStoreIO(source)
+    spec = default_object_state_representation_spec()
+    io.write_spec(spec, family="representation")
+    source_state = io.write_record(StoredStateRecord(_cdef(), spec["id"], (StorageRef.self_product(role="source"),)).to_envelope())
+    io.product_root(source_state.record_id, create=True).joinpath("state.txt").write_text("source", encoding="utf-8")
+    target_state = io.write_record(StoredStateRecord(_cdef(), spec["id"], (StorageRef.self_product(role="target"),), derived_from=(source_state.record_id,)).to_envelope())
+    io.product_root(target_state.record_id, create=True).joinpath("state.txt").write_text("target", encoding="utf-8")
+    adapter = AdapterRecord(
+        adapter={"name": "fake.copy"},
+        source_record_id=source_state.record_id,
+        source_representation_id=spec["id"],
+        target_record_id=target_state.record_id,
+        target_representation_id=spec["id"],
+        produced_records=(target_state.record_id,),
+        derived_from=(source_state.record_id,),
+    )
+    adapter_ref = io.write_record(adapter.to_envelope())
+
+    closure = plan_record_closure(source, seed_records=[target_state.record_id], policy="closure")
+    assert ("representation", spec["id"]) in closure.specs
+    provenance = plan_record_closure(source, seed_records=[target_state.record_id], policy="provenance")
+    assert source_state.record_id in provenance.records
+    assert adapter_ref.record_id in provenance.records
+    assert target_state.record_id not in provenance.products
+
+    report = copy_record_closure(source, dest, seed_records=[target_state.record_id], options=RecordPolicyOptions(include_products=True))
+    dest_io = RecordStoreIO(dest)
+    copied = dest_io.read_record(target_state.record_id)
+    assert dest_io.resolve_storage_ref(copied["payload"]["storage"][0], record_id=target_state.record_id).joinpath("state.txt").read_text(encoding="utf-8") == "target"
+    assert target_state.record_id in report.products_copied

@@ -231,6 +231,62 @@ Paths must be POSIX-style relative paths. Absolute paths, drive-prefixed paths, 
 
 `RecordStoreIO.resolve_storage_ref()` resolves `object-dir` refs through `store.object_dir_for_cdef_id(cdef_id)` when the store provides that hook. The base `Store` hook matches the current `objects/<first-two-hex>/<digest>` layout and requires a full 64-hex CDef digest. Future store backends can override the hook without changing record JSON. Product-dir refs resolve under `products/<record-id>/`. Product directories may be created with `create=True`; object directories are never fabricated. Blob resolution is a placeholder until blob storage exists.
 
+Product-dir refs may omit `record_id` inside a record payload:
+
+```json
+{
+  "kind": "product-dir",
+  "path": ".",
+  "role": "target-state"
+}
+```
+
+This is a self product-dir ref. It resolves against the containing record ID, avoiding the circular identity problem of putting a record's own ID in its payload before the ID exists:
+
+```python
+storage = StorageRef.self_product(path=".", role="target-state")
+path = store.records.resolve_storage_ref(storage, record_id=record["id"], create=True)
+```
+
+Explicit cross-record product refs still include `record_id` and continue to resolve under that other product root. The reference scanner indexes explicit `record_id` product refs but does not invent a self-reference mention for omitted IDs.
+
+## Typed Records And Representations
+
+The generic JSON envelope remains authoritative. `StoredStateRecord`, `DataRecord`, `ProgramRecord`, and `AdapterRecord` are ergonomic wrappers that validate payload shape and round-trip through `make_record(...)`. Existing descriptive save records parse as `StoredStateRecord`; their object bytes remain under `objects/` and are not moved.
+
+`RepresentationSpec` wraps the existing `family="representation"` spec envelope. `RepresentationRequirement` supports conservative deterministic checks by exact representation ID, kind, version, parameter equality, required trait subset, and storage-kind subset. Unknown provider/framework semantics do not imply compatibility.
+
+Store-local discovery can scan source JSON without the optional index:
+
+```python
+store.records.find_records(kind="stored_state", subject_cdef_id=cdef_id)
+```
+
+Repo-level helpers in `dryml.records` include `find_stored_state_records(...)`, `find_compatible_state_record(...)`, and `resolve_state_record(...)`. Normal not-found and unsupported outcomes return structured `RecordResolutionReport` data instead of raising.
+
+## Product Manifests
+
+`ProductWriteSession` stages bytes first, computes a `ProductManifest`, attaches the canonical record ID, moves files under `products/<record-id>/`, then writes the record sidecar:
+
+```python
+with ProductWriteSession(store.records) as session:
+    session.write_text("state.json", "{}")
+    manifest = session.manifest()
+    record = StoredStateRecord(
+        subject_cdef_id=cdef_id,
+        representation_id=repr_id,
+        storage=(StorageRef.self_product(role="target-state"),),
+        manifest=manifest.to_json(),
+    )
+    result = session.commit_record(record.to_envelope())
+```
+
+Manifest paths are relative POSIX paths and include byte size plus SHA-256 digest. Product bytes do not affect CDef identity; they only affect record identity if their manifest is placed in the record payload.
+
+## Adapter Lineage
+
+`AdapterRecord` is lineage for representation conversion. It records source/target record IDs, source/target representation IDs, produced records, `derived_from`, status, and diagnostics. It is not a replacement for `ExecutionRecord`; execution provenance remains optional and is not required for load/adapt.
+
 ## Store IO
 
 Use `RecordStoreIO(store)` or the convenience `store.records` property:
@@ -248,4 +304,4 @@ Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewrit
 
 ## Non-Goals
 
-Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Dispatch/runtime/world behavior, provider probing, adapter execution, generated execution provenance, blob storage, and a public Artifact API remain future titled-sprint work.
+Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Full dispatch v2, generated `ExecutionRecord` provenance, real framework adapters, blob storage, compiler/JIT execution, and the public Artifact API remain future titled-sprint work.

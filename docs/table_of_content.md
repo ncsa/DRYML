@@ -11,17 +11,18 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 3. [Immutable Definition Graph](immutable_definition_graph.md)
 4. [Formats](formats.md)
 5. [Records](records.md)
-6. [Operations](operations.md)
-7. [Environments](environments.md)
-8. [Repos and Stores](repos.md)
-9. [Tensor Specs](tensor_specs.md)
-10. [Contexts](context.md)
-11. [Data API](data.md)
-12. [Models API](models.md)
-13. [Artifacts API](artifacts.md)
-14. [Query Index Backend Contracts](query_index_backend_contracts.md)
-15. [Testing Workflow](testing.md)
-16. [Release Notes](release_notes.md)
+6. [Representations and Adapters](representations_adapters.md)
+7. [Operations](operations.md)
+8. [Environments](environments.md)
+9. [Repos and Stores](repos.md)
+10. [Tensor Specs](tensor_specs.md)
+11. [Contexts](context.md)
+12. [Data API](data.md)
+13. [Models API](models.md)
+14. [Artifacts API](artifacts.md)
+15. [Query Index Backend Contracts](query_index_backend_contracts.md)
+16. [Testing Workflow](testing.md)
+17. [Release Notes](release_notes.md)
 
 ## Core Concepts
 
@@ -31,6 +32,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `Ref` records a non-materializing exact or selector reference in a definition graph.
 - `dryml.formats` provides canonical JSON, content IDs, generic envelopes, and reserved-reference parsing for metadata layers.
 - `dryml.records` provides optional store-owned JSON record/spec sidecars without changing object identity.
+- Representation specs and fake/local adapter plans describe product formats and conversions without dispatch v2.
 - `dryml.operations` provides canonical operation-call specs and CDef/ref argument semantics without dispatching work.
 - An environment record describes observed Python/software facts without changing object identity.
 - An `Object` is the runtime instance associated with a concrete definition.
