@@ -164,8 +164,8 @@ class RepresentationRequirement:
             representation_id=data.get("representation_id"),
             version=data.get("version"),
             parameters=data.get("parameters") or {},
-            required_traits=tuple(data.get("required_traits") or ()),
-            storage_kinds=tuple(data.get("storage_kinds") or ()),
+            required_traits=_json_string_tuple(data.get("required_traits") if "required_traits" in data else None, "required_traits"),
+            storage_kinds=_json_string_tuple(data.get("storage_kinds") if "storage_kinds" in data else None, "storage_kinds"),
         )
 
 
@@ -304,11 +304,19 @@ def _freeze_mapping(value: Mapping[str, Any], path: str) -> Mapping[str, Any]:
 
 def _string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
-        raise SpecValidationError(f"representation {field_name} must be a list", context={"type": type(value).__name__})
+        raise SpecValidationError(f"representation {field_name} must be a JSON array", context={"type": type(value).__name__})
     result = tuple(value)
     if any(not isinstance(item, str) or not item for item in result):
         raise SpecValidationError(f"representation {field_name} entries must be non-empty strings")
     return result
+
+
+def _json_string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise SpecValidationError(f"representation {field_name} must be a JSON array of strings, not a string")
+    return _string_tuple(value, field_name)
 
 
 __all__ = [

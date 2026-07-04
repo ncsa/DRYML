@@ -294,7 +294,7 @@ class ProbeReport:
             raise ProviderReportError("probe report has unknown fields", context={"fields": sorted(unknown)})
         return cls(
             request=data.get("request"),
-            reports=tuple(report_from_data(report) for report in data.get("reports") or ()),
+            reports=tuple(report_from_data(report) for report in _json_sequence(data, "reports")),
             operation_id=data.get("operation_id"),
             environment_spec=data.get("environment_spec"),
             environment_spec_id=data.get("environment_spec_id"),
@@ -303,7 +303,7 @@ class ProbeReport:
             runtime_id=data.get("runtime_id"),
             probe_policy=data.get("probe_policy") or {},
             status=data.get("status", "ok"),
-            diagnostics=tuple(ProviderIssue.from_data(issue) for issue in data.get("diagnostics") or ()),
+            diagnostics=tuple(ProviderIssue.from_data(issue) for issue in _json_sequence(data, "diagnostics")),
             metadata=data.get("metadata") or {},
             schema=data.get("schema", PROBE_REPORT_SCHEMA),
             schema_version=data.get("schema_version", REPORT_SCHEMA_VERSION),
@@ -366,8 +366,8 @@ def _report_kwargs(data: Mapping[str, Any]) -> dict[str, Any]:
         "environment_id": data.get("environment_id"),
         "environment_spec_id": data.get("environment_spec_id"),
         "runtime_id": data.get("runtime_id"),
-        "fragments": tuple(AnnotationFragment.from_data(fragment) for fragment in data.get("annotation_fragments") or ()),
-        "issues": tuple(ProviderIssue.from_data(issue) for issue in data.get("issues") or ()),
+        "fragments": tuple(AnnotationFragment.from_data(fragment) for fragment in _json_sequence(data, "annotation_fragments")),
+        "issues": tuple(ProviderIssue.from_data(issue) for issue in _json_sequence(data, "issues")),
         "stdout": data.get("stdout"),
         "stderr": data.get("stderr"),
         "report_payload": data.get("report_payload") or {},
@@ -385,6 +385,19 @@ def _validate_report_data(data: Mapping[str, Any], report_kind: str) -> None:
         raise ProviderReportError("provider report has unknown fields", context={"fields": sorted(unknown)})
     if data.get("report_kind") != report_kind:
         raise ProviderReportError("provider report kind mismatch", context={"expected": report_kind, "observed": data.get("report_kind")})
+
+
+def _json_sequence(data: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in data:
+        return ()
+    value = data[field_name]
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise ProviderReportError(f"provider report {field_name} must be a JSON array, not a string")
+    if not isinstance(value, (list, tuple)):
+        raise ProviderReportError(f"provider report {field_name} must be a JSON array", context={"type": type(value).__name__})
+    return value
 
 
 def _with_provider_source(fragment: AnnotationFragment, report: ProviderReport, *, source_kind: str, probe_report_id: str | None) -> AnnotationFragment:

@@ -592,6 +592,17 @@ def test_candidate_relation_invalid_after_read_view(tmp_path):
         next(view.iter_relation_cdef_batches(plan.relation(), batch_size=1))
 
 
+def test_nested_read_views_are_explicitly_unsupported(tmp_path):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("nested-read").definition
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    with index.read_view():
+        with pytest.raises(QueryIndexError, match="Nested SQLite read views"):
+            with index.read_view():
+                pass
+
+
 def test_candidate_relation_keyset_cursor_roundtrip(tmp_path):
     index = sqlite_index(tmp_path)
     roots = [SQLiteLeaf(f"cursor-{idx}").definition for idx in range(3)]

@@ -253,8 +253,12 @@ class RecordStoreIO:
                 continue
             if target_record_id is not None and payload.get("target_record_id") != target_record_id:
                 continue
-            if derived_from is not None and derived_from not in tuple(payload.get("derived_from") or ()):
-                continue
+            if derived_from is not None:
+                derived_values = payload.get("derived_from") or ()
+                if isinstance(derived_values, str) or not isinstance(derived_values, (list, tuple)):
+                    raise RecordValidationError("record derived_from must be a list", context={"record_id": record.get("id"), "type": type(derived_values).__name__})
+                if derived_from not in tuple(derived_values):
+                    continue
             if storage_kind is not None and not _payload_has_storage_kind(payload, storage_kind):
                 continue
             refs.append(LocatedRecordRef(self._store_ref(), record["id"]))

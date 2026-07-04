@@ -285,7 +285,7 @@ def adapter_descriptors_from_report(report: Any) -> tuple[AdapterDescriptor, ...
 
     payload = getattr(report, "report_payload", None) or {}
     adapters = payload.get("adapters") if isinstance(payload, Mapping) else None
-    return tuple(AdapterDescriptor.from_json(item) for item in adapters or ())
+    return tuple(AdapterDescriptor.from_json(item) for item in _json_sequence(adapters, "adapters"))
 
 
 def _descriptors_from(registry: AdapterRegistry | None, descriptors: Iterable[AdapterDescriptor | Mapping[str, Any]] | None) -> tuple[AdapterDescriptor, ...]:
@@ -376,6 +376,16 @@ def _call_runner(runner: AdapterRunner, context: AdapterExecutionContext) -> Map
     except (TypeError, ValueError):
         pass
     return runner(context=context, session=context.session, source_record=context.source_record, step=context.step)
+
+
+def _json_sequence(value: Any, field_name: str) -> Any:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise RecordValidationError(f"adapter report {field_name} must be a JSON array, not a string")
+    if not isinstance(value, (list, tuple)):
+        raise RecordValidationError(f"adapter report {field_name} must be a JSON array", context={"type": type(value).__name__})
+    return value
 
 
 def _adapter_payload(descriptor: AdapterDescriptor) -> dict[str, Any]:

@@ -1,9 +1,11 @@
 import dryml
+import pytest
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
     RepresentationRequirement,
+    SpecValidationError,
     StorageRef,
     StoredStateRecord,
     find_compatible_state_record,
@@ -51,6 +53,27 @@ def test_resolution_reports_not_found_and_works_without_index(tmp_path):
     store.records.ref_index_path.unlink()
     result = find_compatible_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.raw_state"))
     assert result.status == "ok"
+
+
+def test_resolution_reports_missing_representation_spec(tmp_path):
+    store = DirStore(tmp_path / "store")
+    spec = make_representation_spec("fake.raw_state", storage_kinds=("product-dir",))
+    record = StoredStateRecord(_cdef(), spec["id"], (StorageRef.self_product(role="state"),))
+    ref = store.records.write_record(record.to_envelope())
+    repo = Repo(stores=[store])
+
+    result = find_compatible_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.raw_state"))
+
+    assert result.status == "failed"
+    assert result.report.issues[0].code == "missing_representation_spec"
+    assert result.report.issues[0].record_id == ref.record_id
+    assert result.report.issues[0].representation_id == spec["id"]
+
+
+def test_representation_requirement_rejects_string_sequences():
+    for field in ("required_traits", "storage_kinds"):
+        with pytest.raises(SpecValidationError):
+            RepresentationRequirement.from_json({field: "gpu"})
 
 
 def test_resolution_reporting_details(tmp_path):

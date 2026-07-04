@@ -1,4 +1,5 @@
 import dryml
+import pytest
 
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
@@ -6,6 +7,7 @@ from dryml.formats.refs import format_cdef_id
 from dryml.records import (
     AdapterDescriptor,
     AdapterRegistry,
+    RecordValidationError,
     RepresentationRequirement,
     StorageRef,
     StoredStateRecord,
@@ -39,7 +41,11 @@ def test_adapter_descriptor_registry_and_paths(tmp_path):
 
     zero = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.raw_state"), adapters=registry).adapter_plan
     assert zero is None
-    planned = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.normalized_state"), adapters=registry).adapter_plan
+    planned_result = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.normalized_state"), adapters=registry)
+    assert planned_result.status == "requires_adapter"
+    assert planned_result.selected is None
+    assert planned_result.adapter_source.ref.record_id == _.record_id
+    planned = planned_result.adapter_plan
     assert planned.steps[0].descriptor.name == "fake.normalize"
     assert registry.descriptors()[0].to_json()["source"] == {"kind": "fake.raw_state"}
 
@@ -53,6 +59,7 @@ def test_multi_step_cycle_avoidance_and_cost_ordering(tmp_path):
     registry.register(AdapterDescriptor("to_mid", RepresentationRequirement(kind="fake.raw_state"), RepresentationRequirement(kind="fake.mid_state"), cost=1.0))
     registry.register(AdapterDescriptor("to_target", RepresentationRequirement(kind="fake.mid_state"), RepresentationRequirement(kind="fake.normalized_state"), cost=1.0))
     result = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.normalized_state"), adapters=registry)
+    assert result.status == "requires_adapter"
     assert [step.descriptor.name for step in result.adapter_plan.steps] == ["to_mid", "to_target"]
 
 
@@ -95,3 +102,13 @@ def test_missing_runner_returns_unsupported(tmp_path):
     registry.register(AdapterDescriptor("fake.normalize", RepresentationRequirement(kind="fake.raw_state"), RepresentationRequirement(kind="fake.normalized_state")))
     plan = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.normalized_state"), adapters=registry).adapter_plan
     assert run_adapter_plan(plan, repo=repo, store=store, registry=registry).status == "unsupported"
+
+
+def test_adapter_descriptors_from_report_rejects_string_sequences():
+    from dryml.records import adapter_descriptors_from_report
+
+    class Report:
+        report_payload = {"adapters": "fake.normalize"}
+
+    with pytest.raises(RecordValidationError):
+        adapter_descriptors_from_report(Report())

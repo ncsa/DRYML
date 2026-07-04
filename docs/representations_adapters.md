@@ -46,7 +46,7 @@ result = resolve_state_record(
 )
 ```
 
-An existing compatible stored-state record is selected before planning adapters. Normal `not_found` and `unsupported` outcomes are reported structurally.
+An existing compatible stored-state record is selected before planning adapters. `status="ok"` means `selected` is directly loadable and satisfies the requested representation. If an adapter path is available but has not run yet, resolution returns `status="requires_adapter"` with `adapter_plan` and `adapter_source`; `selected` remains empty so callers do not mistake the source record for the target representation. Normal `not_found`, `unsupported`, and missing or invalid representation-spec outcomes are reported structurally.
 
 ## Fake Adapter Example
 
@@ -73,6 +73,8 @@ registry.register(
 
 `run_adapter_plan(...)` resolves source storage, gives the runner a `ProductWriteSession`, writes target products under `products/<target-record-id>/`, writes the target state/data/program record with a self product-dir ref, writes an `AdapterRecord`, and returns located refs.
 
+Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records in this sprint; durable failure provenance is deferred to future `ExecutionRecord` or failed-adapter records.
+
 No real Torch, TensorFlow, JAX, DeepSpeed, Conda worker, subprocess dispatch, cancellation, or worker handshake is implemented here. Future dispatch v2 can consume adapter plans and emit `ExecutionRecord` provenance later.
 
 ## Product Identity
@@ -83,7 +85,7 @@ Self product-dir refs avoid record-ID circularity:
 {"kind": "product-dir", "path": ".", "role": "target-state"}
 ```
 
-Resolve them with the containing record ID. Product bytes do not affect CDef identity. Product manifests can affect record identity because they live in the record payload.
+Resolve them with the containing record ID. Product bytes do not affect CDef identity. Product manifests can affect record identity because they live in the record payload. Use `validate_product_availability(...)` before treating product-backed records as complete or before exporting/copying product-backed closures.
 
 ## Non-Goals
 

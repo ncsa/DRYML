@@ -24,6 +24,7 @@ from .policy import (
     normalize_record_policy,
     policy_includes_products,
 )
+from .products import validate_product_availability
 from .refs import LocatedRecordRef, LocatedSpecRef, RecordRef, SpecRef
 from .scanner import ReferenceMention, scan_record_refs, scan_spec_refs
 from .specs import spec_dir_name, spec_family_for_id
@@ -198,6 +199,19 @@ def copy_record_closure(
         options=resolved_options,
     )
 
+    products_copied = []
+    warnings = list(plan.warnings)
+    if policy_includes_products(resolved_policy, resolved_options):
+        for record_id in plan.records:
+            issues = validate_product_availability(source_io, source_io.read_record(record_id))
+            if issues:
+                raise RecordExportError("source record has unavailable products", context={"record_id": record_id, "issues": [issue.to_json() for issue in issues]})
+        for record_id in plan.products:
+            if _copy_product_root(source_io, dest_io, record_id, overwrite=resolved_options.overwrite_sidecars):
+                products_copied.append(record_id)
+            else:
+                warnings.append(f"missing product root for {record_id}")
+
     specs_written = []
     records_written = []
     for family, spec_id in plan.specs:
@@ -215,14 +229,6 @@ def copy_record_closure(
                 overwrite=resolved_options.overwrite_sidecars,
             )
         )
-
-    products_copied = []
-    warnings = list(plan.warnings)
-    for record_id in plan.products:
-        if _copy_product_root(source_io, dest_io, record_id, overwrite=resolved_options.overwrite_sidecars):
-            products_copied.append(record_id)
-        else:
-            warnings.append(f"missing product root for {record_id}")
 
     indexes_rebuilt = False
     if resolved_options.rebuild_index:
@@ -345,11 +351,20 @@ def _copy_product_root(source_io: Any, dest_io: Any, record_id: str, *, overwrit
             raise RecordExportError("destination product root already exists", context={"record_id": record_id})
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir():
-        shutil.copytree(source, dest)
-    else:
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, dest / Path(source).name)
+    tmp = dest.parent / f".copying-{record_id}"
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    try:
+        if source.is_dir():
+            shutil.copytree(source, tmp)
+        else:
+            tmp.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, tmp / Path(source).name)
+        tmp.replace(dest)
+    except Exception:
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
     return True
 
 

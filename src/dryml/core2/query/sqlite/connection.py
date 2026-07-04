@@ -112,6 +112,12 @@ class SQLiteConnectionManager:
         pid = os.getpid()
         self._release_owned_keys(lambda key: key[0] == pid)
 
+    def active_lease_count(self, *, readonly: bool = False) -> int:
+        key = self._key(readonly=readonly)
+        with _REGISTRY_LOCK:
+            entry = _CONNECTION_REGISTRY.get(key)
+            return 0 if entry is None else entry.lease_count
+
     def close_path_current_process(self) -> None:
         """Close unused current-process connections for this database path."""
 

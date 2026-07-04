@@ -39,6 +39,7 @@ def test_descriptive_save_fake_adapter_and_normal_load(tmp_path):
         runner=runner,
     )
     result = resolve_state_record(repo, cdef_id, RepresentationRequirement(representation_id=normalized["id"]), adapters=registry)
+    assert result.status == "requires_adapter"
     assert result.adapter_plan is not None
     executed = run_adapter_plan(result.adapter_plan, repo=repo, store=store, registry=registry)
     assert executed.status == "ok"

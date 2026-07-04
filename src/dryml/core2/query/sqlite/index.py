@@ -231,6 +231,8 @@ class SQLiteStoreQueryIndex:
     @contextmanager
     def read_view(self, *, include_cached: bool = True):
         self._ensure_ready()
+        if self._connections.active_lease_count(readonly=True):
+            raise QueryIndexError("Nested SQLite read views are unsupported for one process/thread/path.")
         with self._connections.lease(readonly=True) as con:
             con.execute("BEGIN")
             view = None

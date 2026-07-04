@@ -17,6 +17,7 @@ from dryml.formats import json_ready
 from .errors import RecordIOError, RecordValidationError, StorageRefError
 from .records import attach_record_id, validate_record
 from .refs import LocatedRecordRef
+from .storage import StorageRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +70,7 @@ class ProductManifest:
 
         if not isinstance(data, Mapping):
             raise RecordValidationError("product manifest must be a mapping", context={"type": type(data).__name__})
-        return cls(tuple(ProductManifestEntry.from_json(entry) for entry in data.get("entries") or ()))
+        return cls(tuple(ProductManifestEntry.from_json(entry) for entry in _json_sequence(data, "entries")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,28 @@ class ProductWriteResult:
     located: LocatedRecordRef
     manifest: ProductManifest
     product_root: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ProductAvailabilityIssue:
+    """One missing product path referenced by a record sidecar."""
+
+    code: str
+    message: str
+    record_id: str
+    path: str
+    storage_index: int | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """Return JSON-ready issue data."""
+
+        return {
+            "code": self.code,
+            "message": self.message,
+            "record_id": self.record_id,
+            "path": self.path,
+            "storage_index": self.storage_index,
+        }
 
 
 class ProductWriteSession:
@@ -204,6 +227,39 @@ def commit_product_record(session: ProductWriteSession, record: Mapping[str, Any
     return session.commit_record(record, overwrite=overwrite)
 
 
+def validate_product_availability(record_io: Any, record: Mapping[str, Any]) -> tuple[ProductAvailabilityIssue, ...]:
+    """Return missing product paths referenced by a record sidecar.
+
+    JSON record/spec sidecars remain authoritative, but product-backed records
+    should not be copied or treated as complete when their ``product-dir``
+    storage roots or manifest entries are absent.
+    """
+
+    attached = attach_record_id(record)
+    validate_record(attached)
+    record_id = attached["id"]
+    payload = attached.get("payload") or {}
+    if not isinstance(payload, Mapping):
+        raise RecordValidationError("record payload must be a mapping", context={"record_id": record_id})
+    issues: list[ProductAvailabilityIssue] = []
+    for index, storage_data in enumerate(_json_sequence(payload, "storage")):
+        storage_ref = storage_data if isinstance(storage_data, StorageRef) else StorageRef.from_json(storage_data)
+        if storage_ref.kind != "product-dir":
+            continue
+        path = record_io.resolve_storage_ref(storage_ref, record_id=record_id)
+        if not path.exists():
+            issues.append(ProductAvailabilityIssue("missing_product_path", "record product storage path is missing", record_id, path.as_posix(), index))
+    manifest_data = payload.get("manifest")
+    if isinstance(manifest_data, Mapping):
+        root = record_io.product_root(record_id)
+        manifest = ProductManifest.from_json(manifest_data)
+        for entry in manifest.entries:
+            path = root / entry.path
+            if not path.exists():
+                issues.append(ProductAvailabilityIssue("missing_manifest_entry", "record product manifest entry is missing", record_id, path.as_posix(), None))
+    return tuple(issues)
+
+
 def _manifest_for_root(root: Path) -> ProductManifest:
     entries = []
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
@@ -230,11 +286,26 @@ def _validate_product_path(path: str) -> None:
         raise RecordValidationError("product file path cannot be the root")
 
 
+def _json_sequence(data: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in data:
+        return ()
+    value = data[field_name]
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise RecordValidationError(f"product manifest {field_name} must be a JSON array, not a string")
+    if not isinstance(value, (list, tuple)):
+        raise RecordValidationError(f"product manifest {field_name} must be a JSON array", context={"type": type(value).__name__})
+    return value
+
+
 __all__ = [
     "ProductManifest",
     "ProductManifestEntry",
+    "ProductAvailabilityIssue",
     "ProductWriteResult",
     "ProductWriteSession",
     "commit_product_record",
     "stage_product_file",
+    "validate_product_availability",
 ]

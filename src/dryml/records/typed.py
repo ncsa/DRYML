@@ -89,7 +89,7 @@ class StoredStateRecord:
         return cls(
             subject_cdef_id=payload.get("subject_cdef_id"),
             representation_id=payload.get("representation_id"),
-            storage=tuple(payload.get("storage") or ()),
+            storage=_json_sequence(payload, "storage"),
             owner_cdef_id=payload.get("owner_cdef_id"),
             owner_path=payload.get("owner_path"),
             environment_id=payload.get("environment_id"),
@@ -100,7 +100,7 @@ class StoredStateRecord:
             runtime_id=payload.get("runtime_id"),
             state_role=payload.get("state_role"),
             manifest=payload.get("manifest"),
-            derived_from=tuple(payload.get("derived_from") or ()),
+            derived_from=_json_sequence(payload, "derived_from"),
             metadata=record.get("metadata") or {},
             extra=extra,
         )
@@ -179,11 +179,11 @@ class DataRecord:
             subject_cdef_id=payload.get("subject_cdef_id"),
             operation_id=payload.get("operation_id"),
             representation_id=payload.get("representation_id"),
-            storage=tuple(payload.get("storage") or ()),
+            storage=_json_sequence(payload, "storage"),
             data_role=payload.get("data_role"),
             manifest=payload.get("manifest"),
             preview=payload.get("preview"),
-            derived_from=tuple(payload.get("derived_from") or ()),
+            derived_from=_json_sequence(payload, "derived_from"),
             metadata=record.get("metadata") or {},
             extra=extra,
         )
@@ -249,13 +249,13 @@ class ProgramRecord:
         return cls(
             operation_id=payload.get("operation_id"),
             representation_id=payload.get("representation_id"),
-            storage=tuple(payload.get("storage") or ()),
+            storage=_json_sequence(payload, "storage"),
             target=payload.get("target") or {},
             entrypoints=payload.get("entrypoints") or {},
             provider=payload.get("provider") or {},
             toolchain=payload.get("toolchain") or {},
             manifest=payload.get("manifest"),
-            derived_from=tuple(payload.get("derived_from") or ()),
+            derived_from=_json_sequence(payload, "derived_from"),
             metadata=record.get("metadata") or {},
             extra=extra,
         )
@@ -345,10 +345,10 @@ class AdapterRecord:
             source_representation_id=payload.get("source_representation_id"),
             target_record_id=payload.get("target_record_id"),
             target_representation_id=payload.get("target_representation_id"),
-            produced_records=tuple(payload.get("produced_records") or ()),
-            derived_from=tuple(payload.get("derived_from") or ()),
+            produced_records=_json_sequence(payload, "produced_records"),
+            derived_from=_json_sequence(payload, "derived_from"),
             status=payload.get("status", "ok"),
-            diagnostics=tuple(payload.get("diagnostics") or ()),
+            diagnostics=_json_sequence(payload, "diagnostics"),
             metadata=record.get("metadata") or {},
             extra=extra,
         )
@@ -424,6 +424,17 @@ def _record_id_tuple(value: tuple[str, ...] | list[str], field_name: str) -> tup
     for item in result:
         _validate_id(item, ("record",), field_name)
     return result
+
+
+def _json_sequence(payload: Mapping[str, Any], field_name: str) -> Any:
+    if field_name not in payload:
+        return ()
+    value = payload[field_name]
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        raise RecordValidationError(f"{field_name} must be a JSON array, not a string")
+    return value
 
 
 def _validate_cdef_id(value: Any, field_name: str) -> None:

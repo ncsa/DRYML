@@ -1,3 +1,5 @@
+import pytest
+
 import dryml.providers as providers
 from dryml.formats import json_ready
 from dryml.records import AdapterDescriptor, RepresentationRequirement, adapter_descriptors_from_report
@@ -22,3 +24,8 @@ def test_adapter_planning_payload_probe_round_trip_and_extraction():
     extracted = adapter_descriptors_from_report(round_trip.reports[0])
     assert extracted[0].name == "fake.normalize"
     assert round_trip.annotation_fragments() == ()
+
+
+def test_probe_report_rejects_string_sequence_fields():
+    with pytest.raises(providers.ProviderReportError):
+        providers.ProbeReport.from_data({"reports": "not-a-list"})

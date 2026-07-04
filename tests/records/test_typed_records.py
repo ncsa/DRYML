@@ -75,3 +75,25 @@ def test_typed_record_dispatch_and_invalid_payloads():
         StoredStateRecord(_cdef(), _repr(), ())
     with pytest.raises(RecordValidationError):
         AdapterRecord(adapter={}, source_record_id=_record(), source_representation_id=_repr({"a": 1}), target_representation_id=_repr({"b": 1}))
+
+
+def test_typed_record_from_envelope_rejects_string_sequences():
+    stored = StoredStateRecord(_cdef(), _repr(), (StorageRef.object_dir(_cdef()),)).to_envelope()
+    stored["payload"]["storage"] = "not-a-list"
+    with pytest.raises(RecordValidationError):
+        StoredStateRecord.from_envelope(stored)
+
+    source = _record("source")
+    target = _record("target")
+    adapter = AdapterRecord(
+        adapter={"name": "fake.normalize"},
+        source_record_id=source,
+        source_representation_id=_repr({"source": 1}),
+        target_record_id=target,
+        target_representation_id=_repr({"target": 1}),
+        produced_records=(target,),
+        derived_from=(source,),
+    ).to_envelope()
+    adapter["payload"]["produced_records"] = "not-a-list"
+    with pytest.raises(RecordValidationError):
+        AdapterRecord.from_envelope(adapter)

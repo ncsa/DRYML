@@ -80,10 +80,12 @@ from .specs import (
 from .products import (
     ProductManifest,
     ProductManifestEntry,
+    ProductAvailabilityIssue,
     ProductWriteResult,
     ProductWriteSession,
     commit_product_record,
     stage_product_file,
+    validate_product_availability,
 )
 from .representations import (
     RepresentationCompatibilityReport,
@@ -134,6 +136,7 @@ __all__ = [
     "DataRecord",
     "ProductManifest",
     "ProductManifestEntry",
+    "ProductAvailabilityIssue",
     "ProductWriteResult",
     "ProductWriteSession",
     "ProgramRecord",
@@ -210,6 +213,7 @@ __all__ = [
     "stage_product_file",
     "typed_record_from_envelope",
     "validate_record",
+    "validate_product_availability",
     "validate_record_ref_index",
     "validate_representation_spec",
     "validate_spec",
