@@ -175,7 +175,7 @@ def resolve_state_record(
 
     req = requirement if isinstance(requirement, RepresentationRequirement) else RepresentationRequirement.from_json(requirement)
     existing = find_compatible_state_record(repo, cdef_id, req)
-    if existing.status == "ok":
+    if existing.status in {"ok", "failed"}:
         return existing
     if adapters is None:
         return existing
@@ -183,6 +183,9 @@ def resolve_state_record(
 
     issues: list[RecordResolutionIssue] = []
     candidates = _state_candidates(repo, cdef_id, issues=issues)
+    if issues and not candidates:
+        report = RecordResolutionReport("failed", tuple(issues), candidates_considered=0)
+        return StateResolutionResult("failed", report=report)
     plan = find_adapter_path(tuple(candidates), req, registry=adapters)
     if plan.status == "ok":
         if not plan.steps:

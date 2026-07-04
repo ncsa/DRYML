@@ -4,6 +4,7 @@ from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
+    AdapterRegistry,
     RepresentationRequirement,
     SpecValidationError,
     StorageRef,
@@ -11,6 +12,7 @@ from dryml.records import (
     find_compatible_state_record,
     find_stored_state_records,
     make_representation_spec,
+    resolve_state_record,
 )
 
 
@@ -68,6 +70,20 @@ def test_resolution_reports_missing_representation_spec(tmp_path):
     assert result.report.issues[0].code == "missing_representation_spec"
     assert result.report.issues[0].record_id == ref.record_id
     assert result.report.issues[0].representation_id == spec["id"]
+
+
+def test_adapter_enabled_resolution_keeps_broken_metadata_status_failed(tmp_path):
+    store = DirStore(tmp_path / "store")
+    spec = make_representation_spec("fake.raw_state", storage_kinds=("product-dir",))
+    ref = store.records.write_record(StoredStateRecord(_cdef(), spec["id"], (StorageRef.self_product(role="state"),)).to_envelope())
+    repo = Repo(stores=[store])
+
+    result = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.normalized_state"), adapters=AdapterRegistry())
+
+    assert result.status == "failed"
+    assert result.adapter_plan is None
+    assert result.report.issues[0].code == "missing_representation_spec"
+    assert result.report.issues[0].record_id == ref.record_id
 
 
 def test_representation_requirement_rejects_string_sequences():
