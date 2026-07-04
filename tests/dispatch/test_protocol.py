@@ -47,3 +47,16 @@ def test_protocol_invalid_shapes_reject_strings(tmp_path):
         WorkerResponse.from_json({"status": "ok", "result_cdef_ids": "not-a-list"})
     with pytest.raises(Exception, match="protocol"):
         WorkerHandshakeResponse.from_json({"status": "ok", "protocol_schema": "wrong", "protocol_version": 999, "pid": 1, "features": [], "operation_kinds": [], "call_transports": [], "store_ref_kinds": [], "record_schemas": {}, "runtime_modes": []})
+
+
+def test_worker_response_status_context_invariants():
+    with pytest.raises(Exception, match="ok worker responses"):
+        WorkerResponse(status="ok", error={"message": "bad"})
+    with pytest.raises(Exception, match="require error or diagnostics"):
+        WorkerResponse(status="failed")
+    with pytest.raises(Exception, match="require cancellation"):
+        WorkerResponse(status="cancelled")
+    with pytest.raises(Exception, match="only valid"):
+        WorkerResponse(status="failed", diagnostics=({"message": "bad"},), cancellation={"requested": True})
+
+    assert WorkerResponse(status="unsupported", diagnostics=({"message": "unsupported"},)).status == "unsupported"

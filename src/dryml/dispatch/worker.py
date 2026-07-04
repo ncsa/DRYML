@@ -15,6 +15,7 @@ from dryml.runtime import RuntimeMode, activate
 from dryml.runtime.specs import RuntimeContextSpec
 
 from .backends import BACKEND_IDENTITY
+from .errors import WorkerProtocolError
 from .operations import canonicalize_result, execute_operation
 from .planner import allocation_from_json
 from .protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, DISPATCH_WORKER_PROTOCOL_VERSION, ExecutionEnvelope, WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, load_envelope, write_json_file
@@ -42,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
     try:
         envelope = load_envelope(ns.request)
+        _validate_envelope_ids(envelope)
         stores, store_status, supported, diagnostics = _open_and_validate_stores(envelope)
         if not supported:
             handshake = _handshake(envelope, status="unsupported", store_status=store_status, diagnostics=diagnostics)
@@ -94,6 +96,26 @@ def _open_and_validate_stores(envelope: ExecutionEnvelope):
     if missing:
         diagnostics.append({"message": "missing required worker features", "features": missing})
     return stores, statuses, not diagnostics, tuple(diagnostics)
+
+
+def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
+    operation_id = envelope.operation_spec.get("id")
+    dispatch_id = envelope.dispatch_spec.get("id")
+    dispatch_operation_id = envelope.dispatch_spec.get("payload", {}).get("operation_id")
+    recipe_payload = envelope.execution_recipe.get("payload", {})
+    recipe_operation_id = recipe_payload.get("operation_id")
+    recipe_dispatch_id = recipe_payload.get("dispatch_id")
+    mismatches = {}
+    if operation_id is None:
+        mismatches["operation_spec.id"] = operation_id
+    if dispatch_operation_id != operation_id:
+        mismatches["dispatch_spec.payload.operation_id"] = dispatch_operation_id
+    if recipe_operation_id != operation_id:
+        mismatches["execution_recipe.payload.operation_id"] = recipe_operation_id
+    if recipe_dispatch_id != dispatch_id:
+        mismatches["execution_recipe.payload.dispatch_id"] = recipe_dispatch_id
+    if mismatches:
+        raise WorkerProtocolError("execution envelope operation/dispatch/recipe IDs are inconsistent", context={"operation_id": operation_id, "dispatch_id": dispatch_id, "mismatches": mismatches})
 
 
 def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = ()) -> WorkerHandshakeResponse:

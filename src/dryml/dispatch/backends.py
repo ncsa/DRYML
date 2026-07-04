@@ -169,8 +169,8 @@ class LocalSubprocessFuture:
                 self._response = self._parent_failure_response("failed", error={"type": "WorkerProtocolError", "message": "worker exited without response", "exit_code": self.process.returncode})
                 return
             response = WorkerResponse.from_json(read_json_file(self.response_path))
-            if self._handshake is not None and self._handshake.status != "ok" and response.status == "ok":
-                self._response = self._parent_failure_response("failed", error={"type": "WorkerHandshakeError", "message": "worker returned ok after non-ok handshake"})
+            if response.status == "ok" and (self._handshake is None or self._handshake.status != "ok"):
+                self._response = self._parent_failure_response("failed", error={"type": "WorkerHandshakeError", "message": "worker returned ok without an ok handshake"})
                 return
             self._response = response
         except Exception as exc:

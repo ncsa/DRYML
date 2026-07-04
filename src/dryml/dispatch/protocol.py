@@ -337,6 +337,11 @@ class WorkerResponse:
         for field_name in ("result_cdef_ids", "updated_cdef_ids", "produced_record_ids"):
             object.__setattr__(self, field_name, _string_tuple(getattr(self, field_name), field_name))
         object.__setattr__(self, "diagnostics", tuple(_diagnostics(self.diagnostics)))
+        if self.error is not None and not isinstance(self.error, Mapping):
+            raise WorkerProtocolError("worker response error must be a mapping", context={"type": type(self.error).__name__})
+        if self.cancellation is not None and not isinstance(self.cancellation, Mapping):
+            raise WorkerProtocolError("worker response cancellation must be a mapping", context={"type": type(self.cancellation).__name__})
+        _validate_response_context(self)
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "WorkerResponse":
@@ -519,6 +524,25 @@ def _diagnostics(value: Any) -> tuple[Mapping[str, Any], ...]:
             raise WorkerProtocolError("diagnostics items must be mappings", context={"type": type(item).__name__})
         result.append(dict(item))
     return tuple(result)
+
+
+def _validate_response_context(response: WorkerResponse) -> None:
+    if response.status == "ok":
+        if response.error is not None:
+            raise WorkerProtocolError("ok worker responses must not include error")
+        if response.cancellation is not None:
+            raise WorkerProtocolError("ok worker responses must not include cancellation")
+        return
+    if response.status == "cancelled":
+        if response.cancellation is None:
+            raise WorkerProtocolError("cancelled worker responses require cancellation")
+        if response.error is not None:
+            raise WorkerProtocolError("cancelled worker responses must not include error")
+        return
+    if response.cancellation is not None:
+        raise WorkerProtocolError("cancellation is only valid on cancelled worker responses")
+    if response.status in {"failed", "timeout", "unsupported"} and response.error is None and not response.diagnostics:
+        raise WorkerProtocolError("failed, timeout, and unsupported worker responses require error or diagnostics", context={"status": response.status})
 
 
 def _json_ready(value: Any, field_name: str) -> Any:
