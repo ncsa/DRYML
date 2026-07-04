@@ -29,7 +29,8 @@ def requirement_fragment(
 
     if extra:
         raise TypeError(f"unknown world requirement fields: {', '.join(sorted(extra))}")
-    payload = {"roles": dict(roles)} if roles is not None else {"roles": {role: {"replicas": replicas or {"exact": 1}, "resources": _resources(cpus, memory, accelerators, devices, named), "topology": dict(topology or {})}}}
+    role_replicas = replicas if replicas is not None else {"exact": 1}
+    payload = {"roles": dict(roles)} if roles is not None else {"roles": {role: {"replicas": role_replicas, "resources": _resources(cpus, memory, accelerators, devices, named), "topology": dict(topology or {})}}}
     return WorldRequirement.from_data(payload).to_data()
 
 

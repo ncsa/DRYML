@@ -40,7 +40,7 @@ def analyze():
 
 Fragments are collected with `fragments_for(...)`, `fragments_for_class(...)`, `fragments_for_callable(...)`, or `collect_fragments(...)`. Provider/probe code can participate later by passing synthetic `AnnotationFragment` instances through `provider_fragments=`.
 
-Generic mapping fragments support `merge_policy="merge"` by default. The small policy set for early provider/default composition is `merge`, `replace`, `append`, and `error_on_conflict`.
+Generic mapping fragments support `merge_policy="merge"` by default. The small policy set for early provider/default composition is `merge`, `replace`, `append`, and `error_on_conflict`. Environment requirements use namespace-specific `base`, `add`, and `override` semantics instead of the mapping policy set.
 
 ## Resolution
 
@@ -53,6 +53,8 @@ if not result.report.ok:
 ```
 
 `resolve_requirements(...)` merges hard requirements. `resolve_defaults(...)` merges defaults and applies user overrides. `resolve(...)` validates the final default world spec against hard world requirements and returns structured `AnnotationIssue` entries with source traces.
+
+Runtime requirement fragments can be collected through the low-level `namespace="runtime"` API, but public runtime requirement sugar and runtime-default compatibility enforcement are intentionally deferred. Treat `resolve_requirements(...).runtime` as metadata for future dispatch/provider work, not as a launch-ready compatibility check.
 
 Overrides are applied after defaults. Empty mappings in overrides replace the corresponding default mapping, so `{"frameworks": {}}` clears runtime framework defaults. For explicit nested control, use `{"$replace": value}` to replace a subtree or `{"$delete": True}` to delete a key.
 

@@ -55,3 +55,14 @@ def test_runtime_merge_policy_replace():
 
     spec = ann.resolve_runtime_default(train)
     assert set(spec.frameworks) == {"torch"}
+
+
+def test_runtime_requirement_fragments_are_collected_but_not_enforced_yet():
+    @ann.require(namespace="runtime", fragment={"frameworks": {"torch": {"num_threads": 8}}})
+    @runtime.default(torch={"num_threads": 2})
+    def train():
+        pass
+
+    result = ann.resolve(train)
+    assert result.report.ok
+    assert result.requirements.runtime == {"frameworks": {"torch": {"num_threads": 8}}}

@@ -70,14 +70,18 @@ def resolve_defaults(target: Any, *, provider_fragments: Iterable[AnnotationFrag
     fragments = collect_fragments((target,), provider_fragments=provider_fragments, kind="default")
     issues: list[AnnotationIssue] = []
     overrides = overrides or {}
+    world_sources = _sources(_namespace_fragments(fragments, WORLD))
+    runtime_sources = _sources(_namespace_fragments(fragments, RUNTIME))
     world_data = _merge_mapping_fragments(_namespace_fragments(fragments, WORLD), issues=issues, namespace=WORLD)
     if WORLD in overrides:
         world_data = _deep_merge(world_data, dict(overrides[WORLD]), empty_mapping_replaces=True)
+        world_sources = world_sources + (_override_source(WORLD),)
     runtime_data = _merge_mapping_fragments(_namespace_fragments(fragments, RUNTIME), issues=issues, namespace=RUNTIME)
     if RUNTIME in overrides:
         runtime_data = _deep_merge(runtime_data, dict(overrides[RUNTIME]), empty_mapping_replaces=True)
-    world = _world_spec_or_issue(world_data, issues, _sources(_namespace_fragments(fragments, WORLD))) if world_data else None
-    runtime = _runtime_spec_or_issue(runtime_data, issues, _sources(_namespace_fragments(fragments, RUNTIME))) if runtime_data else None
+        runtime_sources = runtime_sources + (_override_source(RUNTIME),)
+    world = _world_spec_or_issue(world_data, issues, world_sources) if world_data else None
+    runtime = _runtime_spec_or_issue(runtime_data, issues, runtime_sources) if runtime_data else None
     return ResolvedDefaults(world, runtime, fragments, AnnotationReport(tuple(issues)))
 
 
@@ -88,10 +92,13 @@ def resolve(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = (
     requirements = resolve_requirements(target, provider_fragments=provider_fragments)
     defaults = resolve_defaults(target, provider_fragments=provider_fragments, overrides=overrides)
     issues = list(requirements.report.issues) + list(defaults.report.issues)
+    overrides = overrides or {}
     if requirements.world is not None and defaults.world is not None:
         report = check_world_spec_satisfies_requirement(defaults.world, requirements.world)
         if not report.ok:
-            sources = _sources(_namespace_fragments(requirements.fragments + defaults.fragments, WORLD)) + (_override_source(WORLD),)
+            sources = _sources(_namespace_fragments(requirements.fragments + defaults.fragments, WORLD))
+            if WORLD in overrides:
+                sources = sources + (_override_source(WORLD),)
             for issue in report.issues:
                 issues.append(AnnotationIssue(issue.severity, WORLD, issue.path, issue.message, issue.expected, issue.actual, sources))
     combined = AnnotationReport(tuple(issues))
@@ -139,6 +146,9 @@ def _merge_environment_requirements(fragments: tuple[AnnotationFragment, ...], i
             continue
         saw_payload = True
         mode = fragment.merge_policy or fragment.source.metadata.get("legacy_environment_fragment_mode") or "add"
+        if mode not in {"base", "add", "override"}:
+            issues.append(AnnotationIssue("error", ENVIRONMENT, "/merge_policy", "unsupported environment requirement merge policy", expected="base|add|override", actual=mode, sources=(fragment.source,)))
+            continue
         if mode == "override":
             for key in ("requirements", "excludes", "capabilities", "tags"):
                 if payload.get(key):
@@ -293,36 +303,40 @@ def _package_conflict_issues(requirements: tuple[str, ...], sources: tuple[Sourc
         spec_texts = [str(req.specifier) for req in reqs if str(req.specifier)]
         if len(spec_texts) < 2:
             continue
-        combined = SpecifierSet(",".join(spec_texts))
-        if not _specifier_has_candidate(combined):
+        if _specifier_has_obvious_conflict(SpecifierSet(",".join(spec_texts))):
             issues.append(AnnotationIssue("error", ENVIRONMENT, f"/requirements/{name}", "conflicting package requirement specifiers", expected="satisfiable specifier set", actual=", ".join(spec_texts), sources=sources))
     return issues
 
 
-def _specifier_has_candidate(specifier: SpecifierSet) -> bool:
-    candidates = {"0", "0.0.1", "0.1", "0.9", "1", "1.0", "1.5", "2", "2.0", "3", "10", "100"}
+def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
+    exact_versions: set[Version] = set()
+    lower: tuple[Version, bool] | None = None
+    upper: tuple[Version, bool] | None = None
     for spec in specifier:
-        candidates.add(spec.version)
         try:
             version = Version(spec.version)
         except InvalidVersion:
-            continue
-        release = list(version.release)
-        if release:
-            bumped = release[:]
-            bumped[-1] += 1
-            candidates.add(".".join(str(part) for part in bumped))
-            candidates.add(str(release[0] + 1))
-            if release[-1] > 0:
-                lowered = release[:]
-                lowered[-1] -= 1
-                candidates.add(".".join(str(part) for part in lowered))
-    for candidate in candidates:
-        try:
-            if Version(candidate) in specifier:
-                return True
-        except InvalidVersion:
-            continue
+            return False
+        if spec.operator == "==":
+            exact_versions.add(version)
+        elif spec.operator in {">", ">="}:
+            inclusive = spec.operator == ">="
+            if lower is None or version > lower[0] or (version == lower[0] and not inclusive and lower[1]):
+                lower = (version, inclusive)
+        elif spec.operator in {"<", "<="}:
+            inclusive = spec.operator == "<="
+            if upper is None or version < upper[0] or (version == upper[0] and not inclusive and upper[1]):
+                upper = (version, inclusive)
+    if len(exact_versions) > 1:
+        return True
+    if exact_versions:
+        exact = next(iter(exact_versions))
+        return exact not in specifier
+    if lower is not None and upper is not None:
+        if lower[0] > upper[0]:
+            return True
+        if lower[0] == upper[0] and (not lower[1] or not upper[1]):
+            return True
     return False
 
 

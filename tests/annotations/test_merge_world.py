@@ -43,3 +43,35 @@ def test_world_override_can_clear_default_accelerators():
 
     world = ann.resolve_world_default(train, overrides={"roles": {"main": {"process": {"resources": {"accelerators": {}}}}}})
     assert world.roles["main"].process.resources.accelerators == {}
+
+
+def test_world_requirement_default_conflict_without_override_does_not_blame_override():
+    @dryml.world.req(accelerators={"gpu": {"min": 1}})
+    @dryml.world.default(cpus=2)
+    def train():
+        pass
+
+    result = ann.resolve(train)
+    assert not result.report.ok
+    labels = {source.label for issue in result.report.issues for source in issue.sources}
+    assert "user override" not in labels
+
+
+def test_world_override_source_is_included_for_override_caused_invalid_spec():
+    @dryml.world.default(cpus=2)
+    def train():
+        pass
+
+    result = ann.resolve(train, overrides={"world": {"roles": {}}})
+    assert not result.report.ok
+    labels = {source.label for issue in result.report.issues for source in issue.sources}
+    assert "user override" in labels
+
+
+def test_world_zero_replicas_validates_instead_of_defaulting_to_one():
+    @dryml.world.req(replicas=0)
+    def train():
+        pass
+
+    req = ann.resolve_world_requirement(train)
+    assert req.roles["main"].replicas.to_data() == {"exact": 0}

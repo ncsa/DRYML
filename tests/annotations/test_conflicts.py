@@ -38,6 +38,16 @@ def test_conflicting_package_specifiers_report_issue():
     assert any(issue.path == "/requirements/numpy" for issue in result.report.issues)
 
 
+def test_narrow_satisfiable_package_specifiers_do_not_report_false_conflict():
+    @dryml.env.req(requirements=("numpy>1.0",))
+    @dryml.env.req(requirements=("numpy<1.1",))
+    def train():
+        pass
+
+    result = ann.resolve(train)
+    assert result.report.ok
+
+
 def test_invalid_environment_fragment_returns_structured_issue():
     @ann.require(namespace="environment", fragment={"requirements": ["not valid !!!"]})
     def train():
@@ -58,3 +68,13 @@ def test_error_on_conflict_merge_policy_reports_issue():
     result = ann.resolve(train)
     assert not result.report.ok
     assert any(issue.path == "/frameworks/torch/num_threads" for issue in result.report.issues)
+
+
+def test_environment_rejects_mapping_merge_policy():
+    @ann.require(namespace="environment", fragment={"requirements": ["dryml"]}, merge_policy="replace")
+    def train():
+        pass
+
+    result = ann.resolve(train)
+    assert not result.report.ok
+    assert any(issue.path == "/merge_policy" for issue in result.report.issues)
