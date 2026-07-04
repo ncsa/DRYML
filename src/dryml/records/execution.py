@@ -6,6 +6,7 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from dryml.formats import CanonicalJSONError, deep_freeze_json, json_ready
@@ -422,31 +423,47 @@ def execution_record_for_result(**kwargs: Any) -> ExecutionRecord:
 
 
 def execution_record_for_probe_report(probe_report: Any, *, operation_id: str | None = None, probe_report_id: str | None = None, **kwargs: Any) -> ExecutionRecord:
-    """Create optional execution provenance for a provider probe report."""
+    """Create optional execution provenance for a provider probe report.
 
-    op_id = operation_id or getattr(probe_report, "operation_id", None)
-    if op_id is None and isinstance(probe_report, Mapping):
-        op_id = (probe_report.get("payload") or probe_report).get("operation_id")
-    status = getattr(probe_report, "status", None) or (probe_report.get("status") if isinstance(probe_report, Mapping) else None) or "ok"
-    record_id = probe_report_id or getattr(probe_report, "report_id", None)
+    Probe report objects, payload mappings, and full record envelopes are
+    accepted. Status, diagnostics, and error details are copied when present so
+    failed probe reports produce valid execution provenance without callers
+    repeating the failure context.
+    """
+
+    op_id = operation_id or _source_field(probe_report, "operation_id")
+    status = _source_field(probe_report, "status") or "ok"
+    record_id = probe_report_id or _source_field(probe_report, "report_id") or _source_field(probe_report, "id")
     produced = tuple(kwargs.pop("produced_records", ()))
     probe_ids = tuple(kwargs.pop("probe_report_ids", ()))
+    diagnostics = _diagnostics_tuple(kwargs.pop("diagnostics", _source_field(probe_report, "diagnostics") or ()))
+    error = kwargs.pop("error", _source_field(probe_report, "error"))
     if record_id:
         probe_ids = tuple(dict.fromkeys((*probe_ids, record_id)))
-    return ExecutionRecord(execution_kind="probe", operation_id=op_id, backend=kwargs.pop("backend", {"name": "dryml.provider_probe", "kind": "probe"}), status=status, probe_report_ids=probe_ids, produced_records=produced, **kwargs)
+    return ExecutionRecord(execution_kind="probe", operation_id=op_id, backend=kwargs.pop("backend", {"name": "dryml.provider_probe", "kind": "probe"}), status=status, probe_report_ids=probe_ids, produced_records=produced, diagnostics=diagnostics, error=error, **kwargs)
 
 
 def execution_record_for_adapter_result(adapter_result: Any, *, operation_id: str, backend: Mapping[str, Any] | None = None, **kwargs: Any) -> ExecutionRecord:
-    """Create optional execution provenance for an adapter execution result."""
+    """Create optional execution provenance for an adapter execution result.
 
-    status = getattr(adapter_result, "status", "ok")
+    Adapter result objects, payload mappings, and full record envelopes are
+    accepted. Diagnostics, errors, adapter records, and target records are
+    copied when present so failed adapter results retain their failure context.
+    """
+
+    status = _source_field(adapter_result, "status") or "ok"
     produced = tuple(kwargs.pop("produced_records", ()))
     adapter_ids = tuple(kwargs.pop("adapter_record_ids", ()))
-    for ref in getattr(adapter_result, "adapter_records", ()):
+    diagnostics_value = kwargs.pop("diagnostics", _source_field(adapter_result, "diagnostics"))
+    if diagnostics_value is None:
+        diagnostics_value = _source_field(adapter_result, "issues") or ()
+    diagnostics = _diagnostics_tuple(diagnostics_value)
+    error = kwargs.pop("error", _source_field(adapter_result, "error"))
+    for ref in _source_sequence(adapter_result, "adapter_records"):
         adapter_ids = (*adapter_ids, getattr(ref, "record_id", ref))
-    for ref in getattr(adapter_result, "target_records", ()):
+    for ref in _source_sequence(adapter_result, "target_records"):
         produced = (*produced, getattr(ref, "record_id", ref))
-    return ExecutionRecord(execution_kind="adapter", operation_id=operation_id, backend=backend or {"name": "dryml.adapter", "kind": "adapter"}, status=status, produced_records=produced, adapter_record_ids=tuple(dict.fromkeys(adapter_ids)), **kwargs)
+    return ExecutionRecord(execution_kind="adapter", operation_id=operation_id, backend=backend or {"name": "dryml.adapter", "kind": "adapter"}, status=status, produced_records=produced, adapter_record_ids=tuple(dict.fromkeys(adapter_ids)), diagnostics=diagnostics, error=error, **kwargs)
 
 
 def unsupported_compiler_execution_record(*, operation_id: str, backend: Mapping[str, Any] | None = None, execution_kind: str = "compiler", **kwargs: Any) -> ExecutionRecord:
@@ -577,16 +594,28 @@ def _validate_status_context(execution: ExecutionRecord) -> None:
         raise RecordValidationError("ok execution records must not include cancellation")
     if execution.status in {"failed", "timeout"} and execution.error is None and not execution.diagnostics:
         raise RecordValidationError("failed and timeout execution records require error or diagnostics", context={"status": execution.status})
+    if execution.error is not None and not execution.diagnostics and _error_info_empty(execution.error):
+        raise RecordValidationError("execution error requires details or diagnostics", context={"status": execution.status})
     if execution.status == "cancelled" and execution.cancellation is None:
         raise RecordValidationError("cancelled execution records require cancellation")
     if execution.cancellation is not None and execution.status != "cancelled":
         raise RecordValidationError("cancellation is only valid for cancelled execution records", context={"status": execution.status})
 
 
+def _error_info_empty(error: ExecutionErrorInfo) -> bool:
+    return not any((error.type, error.message, error.traceback, error.exit_code is not None, error.signal is not None, error.metadata))
+
+
 def _validate_timestamp(value: Any, field_name: str) -> None:
     if not isinstance(value, str):
         raise RecordValidationError(f"{field_name} must be a string", context={"type": type(value).__name__})
     if _RFC3339_UTC_RE.fullmatch(value) is None:
+        raise RecordValidationError(f"{field_name} must be an RFC3339 UTC timestamp", context={"value": value})
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RecordValidationError(f"{field_name} must be an RFC3339 UTC timestamp", context={"value": value}) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise RecordValidationError(f"{field_name} must be an RFC3339 UTC timestamp", context={"value": value})
 
 
@@ -630,6 +659,47 @@ def _json_sequence_value(value: Any, field_name: str) -> Any:
     if isinstance(value, str) or not isinstance(value, (list, tuple)):
         raise RecordValidationError(f"{field_name} must be a JSON array, not a string" if isinstance(value, str) else f"{field_name} must be a JSON array", context={"type": type(value).__name__})
     return value
+
+
+def _source_payload(source: Any) -> Mapping[str, Any] | None:
+    if not isinstance(source, Mapping):
+        return None
+    payload = source.get("payload")
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _source_field(source: Any, field_name: str) -> Any:
+    value = getattr(source, field_name, None)
+    if value is not None:
+        return value
+    if isinstance(source, Mapping):
+        if field_name in source:
+            return source.get(field_name)
+        payload = _source_payload(source)
+        if payload is not None:
+            return payload.get(field_name)
+    return None
+
+
+def _source_sequence(source: Any, field_name: str) -> tuple[Any, ...]:
+    value = _source_field(source, field_name)
+    if value is None:
+        return ()
+    return tuple(_json_sequence_value(value, field_name))
+
+
+def _diagnostics_tuple(value: Any) -> tuple[Mapping[str, Any], ...]:
+    result = []
+    for item in _json_sequence_value(value, "diagnostics"):
+        if isinstance(item, Mapping):
+            result.append(item)
+        elif hasattr(item, "to_data"):
+            result.append(item.to_data())
+        elif hasattr(item, "to_json"):
+            result.append(item.to_json())
+        else:
+            result.append(item)
+    return tuple(result)
 
 
 def _validate_cdef_id(value: Any, field_name: str) -> str:

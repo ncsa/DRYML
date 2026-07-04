@@ -101,15 +101,16 @@ class RecordStoreIO:
     def write_record(self, record: Mapping[str, Any], *, overwrite: bool = False) -> LocatedRecordRef:
         """Validate and atomically write a record JSON sidecar."""
 
-        attached = attach_record_id(record)
-        validate_record(attached)
-        if attached.get("kind") == "execution":
+        if record.get("kind") == "execution":
             from .execution import ExecutionRecord
 
             try:
-                ExecutionRecord.from_envelope(attached)
+                attached = attach_record_id(ExecutionRecord.from_envelope(record).to_envelope())
             except RecordValidationError as exc:
-                raise RecordValidationError("invalid execution record", context={"record_id": attached.get("id"), **exc.context}) from exc
+                raise RecordValidationError("invalid execution record", context={"record_id": record.get("id"), **exc.context}) from exc
+        else:
+            attached = attach_record_id(record)
+            validate_record(attached)
         record_id = attached["id"]
         path = self._record_path(record_id)
         changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)

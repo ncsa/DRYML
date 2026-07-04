@@ -102,6 +102,43 @@ def test_probe_adapter_and_compiler_helpers():
     assert compiler.produced_record_ids == (_id("record", "program"),)
 
 
+def test_probe_helper_reads_envelope_payload_status_and_diagnostics():
+    op_id = _id("op")
+    probe_record = attach_record_id(
+        make_record(
+            kind="probe_report",
+            payload={"operation_id": op_id, "status": "failed", "diagnostics": [{"message": "probe failed"}]},
+        )
+    )
+    probe = execution_record_for_probe_report(probe_record)
+
+    assert probe.operation_id == op_id
+    assert probe.status == "failed"
+    assert probe.diagnostics == ({"message": "probe failed"},)
+    assert probe.probe_report_ids == (probe_record["id"],)
+
+
+def test_adapter_helper_copies_diagnostics_and_error():
+    adapter_result = type(
+        "Result",
+        (),
+        {
+            "status": "failed",
+            "target_records": (_id("record", "t"),),
+            "adapter_records": (_id("record", "adapter"),),
+            "diagnostics": ({"message": "adapter failed"},),
+            "error": {"message": "adapter crashed"},
+        },
+    )()
+
+    adapter_exec = execution_record_for_adapter_result(adapter_result, operation_id=_id("op"), consumed_records=(_id("record", "s"),))
+
+    assert adapter_exec.status == "failed"
+    assert adapter_exec.diagnostics == ({"message": "adapter failed"},)
+    assert adapter_exec.error == ExecutionErrorInfo(message="adapter crashed")
+    assert adapter_exec.produced_record_ids == (_id("record", "t"), _id("record", "adapter"))
+
+
 def test_execution_record_invalid_shapes_fail():
     with pytest.raises(RecordValidationError, match="status"):
         _execution(status="running")
@@ -122,6 +159,10 @@ def test_execution_status_context_invariants_fail():
         _execution(status="cancelled")
     with pytest.raises(RecordValidationError, match="cancellation is only valid"):
         _execution(status="failed", error={"message": "boom"}, cancellation={"method": "SIGTERM"})
+    with pytest.raises(RecordValidationError, match="requires details"):
+        _execution(status="failed", error={})
+
+    assert _execution(status="failed", error={}, diagnostics=({"message": "boom"},)).status == "failed"
 
 
 def test_execution_timing_validation():
@@ -130,6 +171,8 @@ def test_execution_timing_validation():
 
     with pytest.raises(RecordValidationError, match="RFC3339 UTC"):
         _execution(started_at="2026-07-04 12:34:56")
+    with pytest.raises(RecordValidationError, match="RFC3339 UTC"):
+        _execution(started_at="2026-99-99T99:99:99Z")
     with pytest.raises(RecordValidationError, match="finite"):
         _execution(duration_ms=float("nan"))
 
@@ -177,6 +220,30 @@ def test_generic_execution_writes_are_strict_and_queries_identify_bad_records(tm
     with pytest.raises(RecordValidationError) as excinfo:
         io.find_execution_records(operation_id=_id("op"))
     assert excinfo.value.context["record_id"] == attached["id"]
+
+
+def test_generic_execution_write_persists_normalized_envelope(tmp_path):
+    store = DirStore(tmp_path / "store")
+    io = RecordStoreIO(store)
+    probe_report_id = _id("record", "p")
+    shorthand = make_record(
+        kind="execution",
+        payload={
+            "execution_kind": "probe",
+            "operation_id": _id("op"),
+            "backend": {"name": "dryml.provider_probe", "kind": "probe"},
+            "status": "ok",
+            "probe_report_ids": [probe_report_id],
+        },
+    )
+    canonical = attach_record_id(ExecutionRecord.from_envelope(shorthand).to_envelope())
+
+    located = io.write_record(shorthand)
+    loaded = io.read_record(located.record_id)
+
+    assert located.record_id == canonical["id"]
+    assert loaded == canonical
+    assert loaded["payload"]["produced_records"] == [{"record_id": probe_report_id, "role": "probe-report", "required": False}]
 
 
 def test_execution_log_product_export_and_missing_products(tmp_path):
