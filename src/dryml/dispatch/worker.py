@@ -141,6 +141,9 @@ def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mappin
         environment_kind=envelope.environment_spec.get("kind"),
         process_group=(os.name == "posix"),
         store_status=store_status or {},
+        world_id=envelope.launch.get("world_id") or (envelope.allocation_view.get("env") or {}).get("DRYML_WORLD_ID"),
+        world_allocation_id=envelope.allocation_view.get("world_allocation_id") or envelope.launch.get("world_allocation_id"),
+        worker_key={key: envelope.allocation_view.get(key) for key in ("role", "replica", "rank", "local_rank")},
         diagnostics=diagnostics,
     )
 
@@ -216,6 +219,8 @@ def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *
 
 
 def _persist_provenance_specs(store: Any, envelope: ExecutionEnvelope) -> None:
+    if envelope.launch.get("parent_persisted_specs") is True:
+        return
     record_io = store.records
     record_io.write_spec(envelope.operation_spec, family="operation")
     record_io.write_spec(envelope.dispatch_spec, family="dispatch")

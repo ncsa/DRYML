@@ -48,3 +48,5 @@ Legacy `Compute.__compute_reqs__` dictionaries are still supported as a transiti
 The local coordinator launches all subprocesses, validates their handshakes, and releases a start barrier only after every required worker is ready. Workers do not import target modules or materialize CDefs until after the barrier, then enter `RuntimeMode.WORKER`, apply assigned device visibility, merge `DRYML_WORLD_*` environment facts, and execute user code.
 
 The stored `WorldAllocation` captures actual backend assignment. The launch envelope adds the computed `world_allocation_id` to the runtime view and process environment, avoiding a self-referential ID inside the canonical allocation payload. Per-worker execution records reference that allocation ID and include role/replica/rank/local-rank metadata.
+
+Local-world CPU and accelerator assignment is enforced through the runtime allocation view and device-visibility environment, not by OS-level CPU affinity or hard memory limits. CPU affinity and memory limits remain runtime process-control features that require explicit opt-in and are not enabled by the Sprint 10 local-world coordinator.

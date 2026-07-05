@@ -3,7 +3,8 @@ import sys
 import pytest
 
 from dryml.core2.store.dir import DirStore
-from dryml.dispatch import Dispatcher, LocalResourceInventory, LocalWorldFuture, WorldWorkerKey, allocate_local_world
+from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalWorldBackend, LocalWorldFuture, WorldWorkerKey, allocate_local_world
+from dryml.dispatch.worker import _wait_for_start_barrier
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
 
@@ -56,6 +57,32 @@ def test_allocate_local_world_fake_gpu_success_and_failure():
         raise AssertionError("expected accelerator planning failure")
 
 
+def test_world_worker_key_validation_and_collision_resistant_label():
+    with pytest.raises(Exception, match="role"):
+        WorldWorkerKey.from_json({"replica": 0, "rank": 0, "local_rank": 0})
+
+    left = WorldWorkerKey("a/b", 0, 0, 0)
+    right = WorldWorkerKey("a_b", 0, 1, 1)
+
+    assert left.label() == "a_b-0-r0"
+    assert right.label() == "a_b-0-r1"
+    assert left.label() != right.label()
+
+
+def test_plan_world_persists_all_specs_before_launch(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+
+    assert store.records.read_spec(plan.operation_spec["id"], family="operation")["id"] == plan.operation_spec["id"]
+    assert store.records.read_spec(plan.dispatch_spec["id"], family="dispatch")["id"] == plan.dispatch_spec["id"]
+    assert store.records.read_spec(plan.execution_recipe["id"], family="execution_recipe")["id"] == plan.execution_recipe["id"]
+    assert store.records.read_spec(plan.world_spec["id"], family="world")["id"] == plan.world_spec["id"]
+    assert store.records.read_spec(plan.world_allocation_spec["id"], family="world_allocation")["id"] == plan.world_allocation_spec["id"]
+
+
 def test_run_world_two_roles_returns_runtime_and_env_facts(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"trainer": {"replicas": 1, "process": {"resources": {"cpus": 1}}}, "data": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
@@ -82,6 +109,24 @@ def test_run_world_two_roles_returns_runtime_and_env_facts(tmp_path, target_modu
         assert facts["env_world_allocation_id"] == result.world_allocation_id
         assert facts["is_no_allocation"] is False
         assert facts["import_mode"] == "worker"
+
+
+def test_world_handshake_reports_allocation_facts(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    future = dispatcher.submit_world(plan)
+
+    handshakes = future.wait_for_handshakes(timeout=5)
+    future.cancel(reason="test")
+
+    for key, handshake in handshakes.items():
+        assert handshake is not None
+        assert handshake.worker_key == key.to_json()
+        assert handshake.world_id == plan.world_spec["id"]
+        assert handshake.world_allocation_id == plan.world_allocation_spec["id"]
 
 
 def test_run_world_replicated_role(tmp_path, target_module):
@@ -124,6 +169,54 @@ def test_explicit_world_cancel_reaches_all_workers(tmp_path, target_module):
 
     assert result.status == "cancelled"
     assert all(worker.status == "cancelled" for worker in result.workers.values())
+
+
+def test_world_timeout_records_worker_timeouts_not_cancellations(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:sleep_forever"))
+    dispatcher = Dispatcher(backend=LocalWorldBackend(cancel_grace=0.05), store=store)
+
+    result = dispatcher.run_world(op, world=world, environment=_env(target_module), inventory=_inventory(), timeout=0.1)
+
+    assert result.status == "timeout"
+    assert all(worker.status == "timeout" for worker in result.workers.values())
+    records = [store.records.read_record(record_id) for record_id in result.execution_record_ids]
+    assert {record["payload"]["status"] for record in records} == {"timeout"}
+    assert store.records.find_execution_records(status="cancelled") == ()
+
+
+def test_worker_start_barrier_timeout_uses_coordination_timeout(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    worker_plan = plan.worker_plans[0]
+    launch = dict(worker_plan.envelope.launch)
+    launch["coordination"] = {
+        "worker_key": worker_plan.key.to_json(),
+        "start_path": str(tmp_path / "missing-start.json"),
+        "cancel_path": str(tmp_path / "missing-cancel.json"),
+        "start_timeout": 0.01,
+    }
+    envelope = ExecutionEnvelope(
+        dispatch_spec=worker_plan.envelope.dispatch_spec,
+        execution_recipe=worker_plan.envelope.execution_recipe,
+        operation_spec=worker_plan.envelope.operation_spec,
+        environment_spec=worker_plan.envelope.environment_spec,
+        runtime_spec=worker_plan.envelope.runtime_spec,
+        allocation_view=worker_plan.envelope.allocation_view,
+        store_refs=worker_plan.envelope.store_refs,
+        transfer=worker_plan.envelope.transfer,
+        record_policy=worker_plan.envelope.record_policy,
+        launch=launch,
+    )
+
+    response = _wait_for_start_barrier(envelope, store)
+
+    assert response.status == "timeout"
+    record = store.records.read_record(response.execution_record_id)
+    assert record["payload"]["status"] == "timeout"
 
 
 def test_keyboard_interrupt_cancels_world_workers(tmp_path, target_module, monkeypatch):

@@ -252,6 +252,9 @@ class WorkerHandshakeResponse:
     environment_kind: str | None = None
     process_group: bool = False
     store_status: Mapping[str, Any] = field(default_factory=dict)
+    world_id: str | None = None
+    world_allocation_id: str | None = None
+    worker_key: Mapping[str, Any] | None = None
     diagnostics: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
@@ -277,6 +280,9 @@ class WorkerHandshakeResponse:
             environment_kind=data.get("environment_kind"),
             process_group=bool(data.get("process_group", False)),
             store_status=data.get("store_status") or {},
+            world_id=data.get("world_id"),
+            world_allocation_id=data.get("world_allocation_id"),
+            worker_key=data.get("worker_key"),
             diagnostics=tuple(_diagnostics(data.get("diagnostics") or ())),
         )
 
@@ -285,6 +291,8 @@ class WorkerHandshakeResponse:
             raise WorkerProtocolError("invalid handshake status", context={"status": self.status})
         if self.protocol_schema != DISPATCH_WORKER_PROTOCOL_SCHEMA or self.protocol_version != DISPATCH_WORKER_PROTOCOL_VERSION:
             raise WorkerProtocolError("unsupported worker protocol", context={"schema": self.protocol_schema, "version": self.protocol_version})
+        if self.worker_key is not None and not isinstance(self.worker_key, Mapping):
+            raise WorkerProtocolError("handshake worker_key must be a mapping", context={"type": type(self.worker_key).__name__})
 
     def to_json(self) -> dict[str, Any]:
         """Return the JSON-ready handshake response."""
@@ -307,6 +315,9 @@ class WorkerHandshakeResponse:
                 "environment_kind": self.environment_kind,
                 "process_group": self.process_group,
                 "store_status": self.store_status,
+                "world_id": self.world_id,
+                "world_allocation_id": self.world_allocation_id,
+                "worker_key": self.worker_key,
                 "diagnostics": list(self.diagnostics),
             },
             "handshake response",
@@ -551,7 +562,7 @@ def _validate_coordination(coordination: Any, allocation_view: Mapping[str, Any]
         return
     if not isinstance(coordination, Mapping):
         raise WorkerProtocolError("coordination metadata must be a mapping", context={"type": type(coordination).__name__})
-    unknown = set(coordination) - {"group_id", "worker_key", "start_path", "cancel_path", "heartbeat_path"}
+    unknown = set(coordination) - {"group_id", "worker_key", "start_path", "cancel_path", "heartbeat_path", "start_timeout"}
     if unknown:
         raise WorkerProtocolError("coordination metadata contains unknown fields", context={"fields": sorted(unknown)})
     for field_name in ("start_path", "cancel_path", "heartbeat_path"):

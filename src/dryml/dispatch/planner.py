@@ -181,11 +181,15 @@ class Dispatcher:
                 constraints={"portable": launch.get("call_transport") != "pickle_small", "local_only": True},
             )
         )
+        if record_policy != "none":
+            target_store.records.write_spec(op_spec, family="operation")
+            target_store.records.write_spec(dispatch, family="dispatch")
+            target_store.records.write_spec(recipe, family="execution_recipe")
         worker_plans = []
         for key in allocation_plan.worker_keys:
             allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"])
             launch_data = dict(launch)
-            launch_data.update({"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id"), "world_spec": world_spec, "world_allocation_spec": allocation_spec})
+            launch_data.update({"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id"), "world_spec": world_spec, "world_allocation_spec": allocation_spec, "parent_persisted_specs": record_policy != "none"})
             envelope = ExecutionEnvelope(
                 dispatch_spec=dispatch,
                 execution_recipe=recipe,

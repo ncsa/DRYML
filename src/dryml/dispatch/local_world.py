@@ -20,7 +20,7 @@ from .protocol import DispatchResult, ExecutionEnvelope, WorkerHandshakeResponse
 
 
 LOCAL_WORLD_BACKEND_IDENTITY = {"name": "dryml.local_world", "kind": "local_world", "version": "1"}
-_FATAL_STATUSES = frozenset({"failed", "timeout", "unsupported"})
+_FATAL_STATUSES = frozenset({"failed", "timeout", "unsupported", "cancelled"})
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -32,13 +32,23 @@ class WorldWorkerKey:
     rank: int
     local_rank: int
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, str) or not self.role:
+            raise DispatchPlanningError("world worker role must be a non-empty string", context={"role": self.role})
+        _nonneg_int(self.replica, "replica")
+        _nonneg_int(self.rank, "rank")
+        _nonneg_int(self.local_rank, "local_rank")
+
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> "WorldWorkerKey":
         """Build a worker key from JSON protocol data."""
 
         if not isinstance(data, Mapping):
             raise DispatchPlanningError("world worker key must be a mapping", context={"type": type(data).__name__})
-        return cls(str(data.get("role")), _nonneg_int(data.get("replica"), "replica"), _nonneg_int(data.get("rank"), "rank"), _nonneg_int(data.get("local_rank"), "local_rank"))
+        role = data.get("role")
+        if not isinstance(role, str) or not role:
+            raise DispatchPlanningError("world worker role must be a non-empty string", context={"role": role})
+        return cls(role, _nonneg_int(data.get("replica"), "replica"), _nonneg_int(data.get("rank"), "rank"), _nonneg_int(data.get("local_rank"), "local_rank"))
 
     def to_json(self) -> dict[str, Any]:
         """Return a canonical JSON representation."""
@@ -49,7 +59,7 @@ class WorldWorkerKey:
         """Return a filesystem-safe worker label."""
 
         safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in self.role)
-        return f"{safe}-{self.replica}"
+        return f"{safe}-{self.replica}-r{self.rank}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +206,7 @@ class LocalWorldBackend:
                 response_path = os.path.join(worker_dir, "response.json")
                 stdout_path = os.path.join(worker_dir, "stdout.txt")
                 stderr_path = os.path.join(worker_dir, "stderr.txt")
-                envelope = _with_coordination(worker_plan.envelope, group_dir=group_dir, start_path=start_path, cancel_path=cancel_path, worker_key=worker_plan.key)
+                envelope = _with_coordination(worker_plan.envelope, group_dir=group_dir, start_path=start_path, cancel_path=cancel_path, worker_key=worker_plan.key, start_timeout=self.start_timeout)
                 launch_plan = WorkerLaunchPlan(worker_plan.key, worker_plan.dispatch_spec, worker_plan.execution_recipe, envelope, worker_plan.store)
                 save_envelope(request_path, envelope)
                 cmd, child_env = build_worker_command(envelope.environment_spec)
@@ -255,6 +265,7 @@ class LocalWorldFuture:
                 if os.path.exists(future.handshake_path):
                     try:
                         handshake = WorkerHandshakeResponse.from_json(read_json_file(future.handshake_path))
+                        _validate_handshake_allocation(key, handshake, self.plan)
                         future._handshake = handshake
                         handshakes[key] = handshake
                     except Exception:
@@ -307,7 +318,7 @@ class LocalWorldFuture:
                             future.process.wait(timeout=self.cancel_grace)
                     break
                 if deadline is not None and time.monotonic() >= deadline:
-                    self.cancel(reason="timeout")
+                    self._timeout_live()
                     self._result = self._aggregate(handshakes=handshakes, status_override="timeout", cancellation={"requested": True, "reason": "timeout"})
                     self._cleanup()
                     return self._result
@@ -349,6 +360,22 @@ class LocalWorldFuture:
         for future in self.workers.values():
             if not future.done() and future._response is None:
                 future.cancel(grace=self.cancel_grace, reason=reason)
+
+    def _timeout_live(self) -> None:
+        self._cancelled = True
+        self._cancel_reason = "timeout"
+        try:
+            write_json_file(self.cancel_path, {"cancelled": True, "reason": "timeout", "time": time.time()})
+        except Exception:
+            pass
+        for future in self.workers.values():
+            was_live = not future.done()
+            if was_live:
+                future.cancel(grace=self.cancel_grace, reason="timeout", record=False)
+            if future._response is None:
+                future._read_response()
+            if was_live or future._response is None or future._response.status == "cancelled":
+                future._response = future._parent_failure_response("timeout", error={"type": "TimeoutError", "message": "local world dispatch timed out"})
 
     def _aggregate(self, *, handshakes: Mapping[WorldWorkerKey, WorkerHandshakeResponse | None] | None = None, status_override: str | None = None, cancellation: Mapping[str, Any] | None = None) -> WorldDispatchResult:
         worker_results: dict[WorldWorkerKey, DispatchResult] = {}
@@ -476,10 +503,20 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
     return LocalWorldAllocationPlan(world_spec=world_spec, world_allocation=WorldAllocation.from_data(allocation_spec["payload"]), world_allocation_spec=allocation_spec, worker_keys=tuple(keys))
 
 
-def _with_coordination(envelope: ExecutionEnvelope, *, group_dir: str, start_path: str, cancel_path: str, worker_key: WorldWorkerKey) -> ExecutionEnvelope:
+def _with_coordination(envelope: ExecutionEnvelope, *, group_dir: str, start_path: str, cancel_path: str, worker_key: WorldWorkerKey, start_timeout: float) -> ExecutionEnvelope:
     launch = dict(envelope.launch)
-    launch["coordination"] = {"group_id": Path(group_dir).name, "worker_key": worker_key.to_json(), "start_path": os.path.abspath(start_path), "cancel_path": os.path.abspath(cancel_path), "heartbeat_path": os.path.abspath(os.path.join(group_dir, "workers", worker_key.label(), "heartbeat.json"))}
+    launch["coordination"] = {"group_id": Path(group_dir).name, "worker_key": worker_key.to_json(), "start_path": os.path.abspath(start_path), "cancel_path": os.path.abspath(cancel_path), "heartbeat_path": os.path.abspath(os.path.join(group_dir, "workers", worker_key.label(), "heartbeat.json")), "start_timeout": float(start_timeout)}
     return ExecutionEnvelope(dispatch_spec=envelope.dispatch_spec, execution_recipe=envelope.execution_recipe, operation_spec=envelope.operation_spec, environment_spec=envelope.environment_spec, runtime_spec=envelope.runtime_spec, allocation_view=envelope.allocation_view, store_refs=envelope.store_refs, transfer=envelope.transfer, result_policy=envelope.result_policy, record_policy=envelope.record_policy, reporting=envelope.reporting, handshake=envelope.handshake, launch=launch)
+
+
+def _validate_handshake_allocation(key: WorldWorkerKey, handshake: WorkerHandshakeResponse, plan: LocalWorldPlan) -> None:
+    expected = key.to_json()
+    if handshake.worker_key != expected:
+        raise DispatchPlanningError("worker handshake key does not match launch plan", context={"expected": expected, "observed": handshake.worker_key})
+    if handshake.world_id != plan.world_spec.get("id"):
+        raise DispatchPlanningError("worker handshake world_id does not match launch plan", context={"expected": plan.world_spec.get("id"), "observed": handshake.world_id})
+    if handshake.world_allocation_id != plan.world_allocation_spec.get("id"):
+        raise DispatchPlanningError("worker handshake world_allocation_id does not match launch plan", context={"expected": plan.world_allocation_spec.get("id"), "observed": handshake.world_allocation_id})
 
 
 def _aggregate_status(statuses: Any) -> str:
