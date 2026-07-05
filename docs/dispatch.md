@@ -88,6 +88,8 @@ The worker process environment also includes `DRYML_WORLD_ID`, `DRYML_WORLD_ALLO
 
 The local-world backend creates one group work directory, launches one subprocess per role/replica, waits for all handshakes, then writes a start marker. If a required worker fails, times out, reports unsupported, or misses protocol files, siblings are cancelled. `LocalWorldFuture.cancel(...)`, `result(timeout=...)`, and `KeyboardInterrupt` cancellation all target the whole worker group.
 
+Pre-start control-plane failures keep their status shape: malformed or mismatched handshakes report `failed`, unsupported handshakes report `unsupported`, and handshake timeouts report `timeout`; they are not collapsed into user cancellation. `result(timeout=...)` applies to post-handshake execution waiting after the configured handshake timeout phase.
+
 Local-world dispatch is local-only: all workers run on the same host and share the same `DirStore` path. Distributed rendezvous, collectives, Ray/Slurm/cloud launch, containers, SSH, role-specific runtime-spec selection, and heterogeneous role-specific Python executables are deferred. Role `process.env` values and DRYML role/rank facts are applied per worker; the software `EnvironmentSpec` and `RuntimeContextSpec` are currently homogeneous across the world.
 
 ## Worker Protocol
@@ -128,7 +130,7 @@ Python path policies are:
 
 When provenance is enabled, operation, dispatch, and execution-recipe specs are written beside the execution record so provenance refs are store-resolvable. `ExecutionRecord` sidecars are emitted for success, user-code failure, timeout, cancellation, and parent-side protocol failures when metadata permits. stdout/stderr products use self product refs such as `products/<execution-record-id>/stdout.txt` and `stderr.txt`.
 
-In local-world mode, the requested `WorldSpec`, operation spec, dispatch spec, execution recipe, and actual `WorldAllocation` spec are written by the parent before worker execution records reference them. Per-worker execution records are the Sprint 10 provenance authority; each includes `world_id`, `world_allocation_id`, worker key payload data, and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured independently and copied into each worker execution record's product directory.
+In local-world mode, `plan_world(...)` writes the requested `WorldSpec`, operation spec, dispatch spec, execution recipe, and actual `WorldAllocation` spec when provenance is enabled, before worker execution records reference them. Per-worker execution records are the Sprint 10 provenance authority; each includes `world_id`, `world_allocation_id`, worker key payload data, and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured independently and copied into each worker execution record's product directory.
 
 ## Cancellation
 

@@ -3,7 +3,8 @@ import sys
 import pytest
 
 from dryml.core2.store.dir import DirStore
-from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalWorldBackend, LocalWorldFuture, WorldWorkerKey, allocate_local_world
+from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
+from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHandshakeResponse, write_json_file
 from dryml.dispatch.worker import _wait_for_start_barrier
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
@@ -15,6 +16,89 @@ def _env(target_module):
 
 def _inventory():
     return LocalResourceInventory(cpus=(0, 1, 2, 3), accelerators={"gpu": (0, 1)}, metadata={"source": "test"})
+
+
+class _FakeProcess:
+    returncode = 0
+    pid = 1
+
+    def poll(self):
+        return 0
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class _FakeWorldWorkerFuture:
+    def __init__(self, tmp_path, plan, key, *, handshake=None, done=False):
+        self.plan = plan.worker_plans[0]
+        self.key = key
+        self.work_dir = str(tmp_path / key.label())
+        (tmp_path / key.label()).mkdir(exist_ok=True)
+        self.handshake_path = str(tmp_path / key.label() / "handshake.json")
+        self.response_path = str(tmp_path / key.label() / "response.json")
+        self.stdout_path = str(tmp_path / key.label() / "stdout.txt")
+        self.stderr_path = str(tmp_path / key.label() / "stderr.txt")
+        self.process = _FakeProcess()
+        self._done = done
+        self._response = None
+        self._handshake = None
+        if handshake is not None:
+            write_json_file(self.handshake_path, handshake.to_json())
+
+    def done(self):
+        return self._done
+
+    def cancel(self, *, grace=None, reason="user", record=True):
+        self._done = True
+        if record and self._response is None:
+            self._response = WorkerResponse(status="cancelled", cancellation={"requested": True, "reason": reason}, diagnostics=({"message": "fake cancellation"},))
+        return True
+
+    def _read_response(self):
+        return None
+
+    def _parent_failure_response(self, status, *, error=None, cancellation=None):
+        self._response = WorkerResponse(status=status, operation_id=self.plan.envelope.operation_spec.get("id"), dispatch_id=self.plan.dispatch_spec.get("id"), recipe_id=self.plan.execution_recipe.get("id"), error=error, cancellation=cancellation, diagnostics=({"message": "fake parent failure"},))
+        return self._response
+
+    def _persist_logs(self, record_id):
+        return None
+
+
+def _handshake(plan, key, *, status="ok", worker_key=None, world_id=None, world_allocation_id=None, diagnostics=()):
+    return WorkerHandshakeResponse(
+        status=status,
+        protocol_schema=DISPATCH_WORKER_PROTOCOL_SCHEMA,
+        protocol_version=1,
+        dryml_version=None,
+        python_version="3.x",
+        platform="test",
+        pid=1,
+        features=("operation.function_call",),
+        operation_kinds=("function_call",),
+        call_transports=("import_ref",),
+        store_ref_kinds=("dir_store",),
+        record_schemas={"record": 1},
+        runtime_modes=("worker",),
+        world_id=world_id if world_id is not None else plan.world_spec["id"],
+        world_allocation_id=world_allocation_id if world_allocation_id is not None else plan.world_allocation_spec["id"],
+        worker_key=worker_key if worker_key is not None else key.to_json(),
+        diagnostics=diagnostics,
+    )
+
+
+def _fake_future(tmp_path, plan, worker_futures, *, handshake_timeout=0.05):
+    return LocalWorldFuture(
+        plan=plan,
+        group_work_dir=str(tmp_path / "group"),
+        start_path=str(tmp_path / "group" / "start.json"),
+        cancel_path=str(tmp_path / "group" / "cancel.json"),
+        workers=worker_futures,
+        preserve_work_dir=True,
+        handshake_timeout=handshake_timeout,
+        cancel_grace=0.01,
+    )
 
 
 def test_allocate_local_world_two_roles_and_gpu():
@@ -127,6 +211,75 @@ def test_world_handshake_reports_allocation_facts(tmp_path, target_module):
         assert handshake.worker_key == key.to_json()
         assert handshake.world_id == plan.world_spec["id"]
         assert handshake.world_allocation_id == plan.world_allocation_spec["id"]
+
+
+def test_handshake_allocation_mismatch_reports_failed_not_cancelled(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    first, second = plan.worker_plans[0].key, plan.worker_plans[1].key
+    bad_key = {**first.to_json(), "rank": 99}
+    worker_futures = {
+        first: _FakeWorldWorkerFuture(tmp_path, plan, first, handshake=_handshake(plan, first, worker_key=bad_key)),
+        second: _FakeWorldWorkerFuture(tmp_path, plan, second, handshake=_handshake(plan, second)),
+    }
+
+    result = _fake_future(tmp_path, plan, worker_futures).result(timeout=1)
+
+    assert result.status == "failed"
+    assert result.cancellation is None
+    assert any(item.get("error_type") == "DispatchPlanningError" for item in result.diagnostics)
+    assert any("key" in item.get("error_message", "") for item in result.diagnostics)
+
+
+def test_unsupported_handshake_reports_unsupported_not_cancelled(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    first, second = plan.worker_plans[0].key, plan.worker_plans[1].key
+    worker_futures = {
+        first: _FakeWorldWorkerFuture(tmp_path, plan, first, handshake=_handshake(plan, first, status="unsupported", diagnostics=({"message": "missing feature"},))),
+        second: _FakeWorldWorkerFuture(tmp_path, plan, second, handshake=_handshake(plan, second)),
+    }
+
+    result = _fake_future(tmp_path, plan, worker_futures).result(timeout=1)
+
+    assert result.status == "unsupported"
+    assert result.cancellation is None
+    assert any(item.get("handshake_status") == "unsupported" for item in result.diagnostics)
+
+
+def test_missing_handshake_reports_failed_not_cancelled(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    key = plan.worker_plans[0].key
+    worker_futures = {key: _FakeWorldWorkerFuture(tmp_path, plan, key, done=True)}
+
+    result = _fake_future(tmp_path, plan, worker_futures).result(timeout=1)
+
+    assert result.status == "failed"
+    assert result.cancellation is None
+    assert any(item.get("reason") == "missing_handshake" for item in result.diagnostics)
+
+
+def test_handshake_timeout_reports_timeout_not_cancelled(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    key = plan.worker_plans[0].key
+    worker_futures = {key: _FakeWorldWorkerFuture(tmp_path, plan, key, done=False)}
+
+    result = _fake_future(tmp_path, plan, worker_futures, handshake_timeout=0.0).result(timeout=1)
+
+    assert result.status == "timeout"
+    assert result.cancellation is None
+    assert all(worker.status == "timeout" for worker in result.workers.values())
+    assert any(item.get("reason") == "handshake_timeout" for item in result.diagnostics)
 
 
 def test_run_world_replicated_role(tmp_path, target_module):

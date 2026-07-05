@@ -249,6 +249,8 @@ class LocalWorldFuture:
     _cancelled: bool = False
     _result: WorldDispatchResult | None = None
     _cancel_reason: str | None = None
+    _control_failure_status: str | None = None
+    _control_diagnostics: tuple[Mapping[str, Any], ...] = ()
 
     def wait_for_handshakes(self, timeout: float | None = None) -> Mapping[WorldWorkerKey, WorkerHandshakeResponse | None]:
         """Wait for every worker handshake, then release the start barrier."""
@@ -268,15 +270,23 @@ class LocalWorldFuture:
                         _validate_handshake_allocation(key, handshake, self.plan)
                         future._handshake = handshake
                         handshakes[key] = handshake
-                    except Exception:
+                    except Exception as exc:
                         handshakes[key] = None
+                        self._set_control_failure("failed", "handshake_failed", key=key, error=exc)
                         self.cancel(reason="handshake_failed")
                         return handshakes
                 elif future.done():
+                    self._set_control_failure("failed", "missing_handshake", key=key)
                     self.cancel(reason="missing_handshake")
                     return handshakes
             bad = {key: handshake for key, handshake in handshakes.items() if handshake is not None and handshake.status != "ok"}
             if bad:
+                status = "unsupported" if any(handshake.status == "unsupported" for handshake in bad.values()) else "failed"
+                diagnostics = tuple(
+                    {"message": "worker handshake was not ok", "reason": "handshake_unsupported" if status == "unsupported" else "handshake_failed", "worker": key.to_json(), "handshake_status": handshake.status, "handshake_diagnostics": list(handshake.diagnostics)}
+                    for key, handshake in bad.items()
+                )
+                self._set_control_failure(status, "handshake_unsupported" if status == "unsupported" else "handshake_failed", diagnostics=diagnostics)
                 self.cancel(reason="handshake_unsupported")
                 return handshakes
             if all(handshake is not None and handshake.status == "ok" for handshake in handshakes.values()):
@@ -285,7 +295,8 @@ class LocalWorldFuture:
                 self._started = True
                 return handshakes
             if time.monotonic() >= deadline:
-                self.cancel(reason="handshake_timeout")
+                self._set_control_failure("timeout", "handshake_timeout")
+                self._timeout_live(message="local world worker handshake timed out")
                 return handshakes
             time.sleep(0.01)
 
@@ -297,7 +308,9 @@ class LocalWorldFuture:
         try:
             handshakes = self.wait_for_handshakes(timeout=self.handshake_timeout)
             if self._cancelled and not self._started:
-                self._result = self._aggregate(handshakes=handshakes, cancellation={"requested": True, "reason": self._cancel_reason or "cancelled"})
+                status_override = self._control_failure_status
+                cancellation = None if status_override is not None else {"requested": True, "reason": self._cancel_reason or "cancelled"}
+                self._result = self._aggregate(handshakes=handshakes, status_override=status_override, cancellation=cancellation)
                 self._cleanup()
                 return self._result
             deadline = None if timeout is None else time.monotonic() + timeout
@@ -361,7 +374,7 @@ class LocalWorldFuture:
             if not future.done() and future._response is None:
                 future.cancel(grace=self.cancel_grace, reason=reason)
 
-    def _timeout_live(self) -> None:
+    def _timeout_live(self, *, message: str = "local world dispatch timed out") -> None:
         self._cancelled = True
         self._cancel_reason = "timeout"
         try:
@@ -375,11 +388,30 @@ class LocalWorldFuture:
             if future._response is None:
                 future._read_response()
             if was_live or future._response is None or future._response.status == "cancelled":
-                future._response = future._parent_failure_response("timeout", error={"type": "TimeoutError", "message": "local world dispatch timed out"})
+                future._response = future._parent_failure_response("timeout", error={"type": "TimeoutError", "message": message})
+
+    def _set_control_failure(self, status: str, reason: str, *, key: WorldWorkerKey | None = None, error: BaseException | None = None, diagnostics: tuple[Mapping[str, Any], ...] = ()) -> None:
+        if self._control_failure_status is None:
+            self._control_failure_status = status
+        items = list(self._control_diagnostics)
+        if diagnostics:
+            items.extend(dict(item) for item in diagnostics)
+        else:
+            item: dict[str, Any] = {"message": "local world handshake failed", "reason": reason}
+            if key is not None:
+                item["worker"] = key.to_json()
+            if error is not None:
+                item["error_type"] = type(error).__name__
+                item["error_message"] = str(error)
+                context = getattr(error, "context", None)
+                if context:
+                    item["error_context"] = dict(context)
+            items.append(item)
+        self._control_diagnostics = tuple(items)
 
     def _aggregate(self, *, handshakes: Mapping[WorldWorkerKey, WorkerHandshakeResponse | None] | None = None, status_override: str | None = None, cancellation: Mapping[str, Any] | None = None) -> WorldDispatchResult:
         worker_results: dict[WorldWorkerKey, DispatchResult] = {}
-        diagnostics: list[Mapping[str, Any]] = []
+        diagnostics: list[Mapping[str, Any]] = [dict(item) for item in self._control_diagnostics]
         first_error: Mapping[str, Any] | None = None
         first_cancel: Mapping[str, Any] | None = dict(cancellation) if cancellation else None
         for key, future in self.workers.items():
@@ -397,8 +429,10 @@ class LocalWorldFuture:
             if first_cancel is None and result.cancellation is not None:
                 first_cancel = result.cancellation
         status = status_override or _aggregate_status(result.status for result in worker_results.values())
-        if handshakes is not None and any(handshake is None or handshake.status != "ok" for handshake in handshakes.values()):
-            status = "cancelled" if self._cancelled else "failed"
+        if status_override is None and handshakes is not None and any(handshake is None or handshake.status != "ok" for handshake in handshakes.values()):
+            status = self._control_failure_status or ("cancelled" if self._cancelled else "failed")
+        if self._control_failure_status is not None and status == self._control_failure_status:
+            first_cancel = None
         primary = _select_primary(worker_results)
         execution_record_ids = tuple(result.execution_record_id for result in worker_results.values() if result.execution_record_id)
         produced_record_ids = tuple(record_id for result in worker_results.values() for record_id in result.produced_record_ids)
