@@ -115,6 +115,107 @@ class Dispatcher:
 
         return self.backend.submit(plan)
 
+    def plan_world(
+        self,
+        operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable,
+        *,
+        world: Mapping[str, Any] | Any | None,
+        store: Any | None = None,
+        environment: Any | Mapping[str, Any] | None = None,
+        runtime: Mapping[str, Any] | None = None,
+        record_policy: str = "descriptive",
+        allow_pickle: bool = False,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        inventory: Any | None = None,
+        oversubscribe: bool = False,
+    ):
+        """Build a coordinated local-world dispatch plan.
+
+        The first local-world operation policy intentionally runs the same
+        operation spec in every allocated role/replica worker. User code can
+        branch on ``dryml.runtime.require_workload_allocation(...)`` or the
+        ``DRYML_WORLD_*`` environment variables.
+        """
+
+        from .local_world import LOCAL_WORLD_BACKEND_IDENTITY, LocalWorldPlan, WorkerLaunchPlan, allocate_local_world
+
+        _report("dryml.dispatch.world.plan.start", "Building local world dispatch plan")
+        target_store = store or self.store
+        if target_store is None:
+            raise DispatchPlanningError("Dispatcher.plan_world requires a store for shared DirStore marshalling")
+        op_spec, launch = self._normalize_operation(operation, allow_pickle=allow_pickle, args=args, kwargs=kwargs or {})
+        env_data = _environment_data(environment)
+        if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
+            raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
+        runtime_data = runtime or RuntimeContextSpec(mode=RuntimeMode.WORKER, device_visibility={"policy": "assigned"}, metadata={"source": "dryml.dispatch.local_world"}).to_data()
+        allocation_plan = allocate_local_world(world, inventory=inventory, oversubscribe=oversubscribe)
+        world_spec = allocation_plan.world_spec
+        allocation_spec = allocation_plan.world_allocation_spec
+        _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
+        if record_policy != "none":
+            target_store.records.write_spec(world_spec, family="world")
+            target_store.records.write_spec(allocation_spec, family="world_allocation")
+        marshal = select_marshal_plan(target_store, query_index="none")
+        require_supported_plan(marshal)
+        dispatch = attach_dispatch_id(
+            make_dispatch_spec(
+                operation_id=op_spec["id"],
+                operation=op_spec,
+                environment={"policy": "current", "spec": env_data},
+                world={"policy": "local_world", "spec": world_spec},
+                runtime={"policy": "worker", "spec": runtime_data},
+                records={"record_policy": record_policy, "provenance": record_policy != "none"},
+                execution={"backend": "local_world"},
+            )
+        )
+        recipe = attach_recipe_id(
+            make_execution_recipe(
+                dispatch_id=dispatch["id"],
+                operation_id=op_spec["id"],
+                backend=LOCAL_WORLD_BACKEND_IDENTITY,
+                input_plan={"materialize_cdefs": [], "ref_cdefs": []},
+                output_plan={"record_policy": record_policy, "provenance": record_policy != "none"},
+                store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
+                log_plan={"stdout": "capture_per_worker", "stderr": "capture_per_worker"},
+                constraints={"portable": launch.get("call_transport") != "pickle_small", "local_only": True},
+            )
+        )
+        worker_plans = []
+        for key in allocation_plan.worker_keys:
+            allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"])
+            launch_data = dict(launch)
+            launch_data.update({"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id"), "world_spec": world_spec, "world_allocation_spec": allocation_spec})
+            envelope = ExecutionEnvelope(
+                dispatch_spec=dispatch,
+                execution_recipe=recipe,
+                operation_spec=op_spec,
+                environment_spec=env_data,
+                runtime_spec=runtime_data,
+                allocation_view=_allocation_to_json(allocation, world_id=world_spec.get("id")),
+                store_refs=marshal.store_refs,
+                transfer={"strategy": marshal.strategy},
+                record_policy=record_policy,
+                launch=launch_data,
+            )
+            worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))
+        return LocalWorldPlan(dispatch, recipe, op_spec, world_spec, allocation_spec, tuple(worker_plans), target_store)
+
+    def submit_world(self, plan: Any):
+        """Submit a local-world plan to the local-world coordinator."""
+
+        from .local_world import LocalWorldBackend
+
+        backend = self.backend if isinstance(self.backend, LocalWorldBackend) else LocalWorldBackend()
+        return backend.submit(plan)
+
+    def run_world(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, **kwargs: Any):
+        """Plan, launch, and wait for an explicit local-world dispatch."""
+
+        plan = self.plan_world(operation, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
+        future = self.submit_world(plan)
+        return future.result(timeout=kwargs.get("timeout"))
+
     def run(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, **kwargs: Any) -> DispatchResult:
         """Plan, submit, wait, and return a public ``DispatchResult``."""
 
@@ -152,6 +253,12 @@ def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, 
     else:
         backend_obj = backend
     return Dispatcher(backend=backend_obj, store=store).run(operation, **kwargs)
+
+
+def run_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, store: Any | None = None, **kwargs: Any):
+    """Convenience wrapper for ``Dispatcher(...).run_world(...)``."""
+
+    return Dispatcher(store=store).run_world(operation, **kwargs)
 
 
 def submit(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any):
@@ -200,6 +307,26 @@ def allocation_from_json(data: Mapping[str, Any] | None) -> RuntimeAllocationVie
     )
 
 
+def _allocation_to_json(allocation: RuntimeAllocationView, *, world_id: str | None = None) -> dict[str, Any]:
+    env = dict(allocation.env)
+    if world_id is not None:
+        env["DRYML_WORLD_ID"] = world_id
+    if allocation.world_allocation_id is not None:
+        env["DRYML_WORLD_ALLOCATION_ID"] = allocation.world_allocation_id
+    return {
+        "world_allocation_id": allocation.world_allocation_id,
+        "role": allocation.role,
+        "replica": allocation.replica,
+        "rank": allocation.rank,
+        "local_rank": allocation.local_rank,
+        "cpus": list(allocation.cpus),
+        "memory": allocation.memory,
+        "accelerators": {key: list(value) for key, value in sorted(allocation.accelerators.items())},
+        "env": env,
+        "metadata": dict(allocation.metadata),
+    }
+
+
 def _local_cpu_ids() -> list[int]:
     try:
         affinity = os.sched_getaffinity(0)
@@ -218,4 +345,4 @@ def _report(name: str, message: str, *, operation_id: str | None = None, data: M
         pass
 
 
-__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "run", "submit"]
+__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "run", "run_world", "submit"]

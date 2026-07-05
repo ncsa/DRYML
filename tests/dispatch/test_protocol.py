@@ -60,3 +60,27 @@ def test_worker_response_status_context_invariants():
         WorkerResponse(status="failed", diagnostics=({"message": "bad"},), cancellation={"requested": True})
 
     assert WorkerResponse(status="unsupported", diagnostics=({"message": "unsupported"},)).status == "unsupported"
+
+
+def test_coordination_metadata_validates_worker_key_and_paths(tmp_path):
+    allocation = {"role": "trainer", "replica": 0, "rank": 1, "local_rank": 1}
+    envelope = ExecutionEnvelope(
+        dispatch_spec=_envelope(tmp_path).dispatch_spec,
+        execution_recipe=_envelope(tmp_path).execution_recipe,
+        operation_spec=_envelope(tmp_path).operation_spec,
+        allocation_view=allocation,
+        store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path)),),
+        launch={"coordination": {"worker_key": dict(allocation), "start_path": str(tmp_path / "start.json"), "cancel_path": str(tmp_path / "cancel.json")}},
+    )
+
+    assert envelope.launch["coordination"]["worker_key"]["role"] == "trainer"
+
+    bad = envelope.to_json()
+    bad["launch"]["coordination"]["start_path"] = "relative.json"
+    with pytest.raises(Exception, match="absolute"):
+        ExecutionEnvelope.from_json(bad)
+
+    bad = envelope.to_json()
+    bad["launch"]["coordination"]["worker_key"]["rank"] = 99
+    with pytest.raises(Exception, match="worker_key"):
+        ExecutionEnvelope.from_json(bad)

@@ -56,6 +56,40 @@ result = dispatcher.run(operation)
 
 `FunctionRef`/import-path function calls and method calls are the preferred portable path. `PickledCallable` exists only as an explicit same-Python convenience and is marked non-portable in the recipe constraints.
 
+## Local Worlds
+
+`Dispatcher.run_world(...)` is the explicit Sprint 10 entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
+
+```python
+from dryml.dispatch import Dispatcher
+
+result = Dispatcher(store=repo.default_store).run_world(
+    operation,
+    world={
+        "trainer": {"replicas": 1, "process": {"resources": {"cpus": 2}}},
+        "data": {"replicas": 1, "process": {"resources": {"cpus": 1}}},
+    },
+)
+```
+
+The first implementation runs the same `OperationSpec` in every allocated role/replica. User code can branch on the active runtime allocation:
+
+```python
+import dryml.runtime as rt
+
+def worker_main():
+    alloc = rt.require_workload_allocation("run role-aware operation")
+    return {"role": alloc.role, "replica": alloc.replica, "rank": alloc.rank}
+```
+
+The worker process environment also includes `DRYML_WORLD_ID`, `DRYML_WORLD_ALLOCATION_ID`, `DRYML_WORLD_ROLE`, `DRYML_WORLD_REPLICA`, `DRYML_WORLD_RANK`, `DRYML_WORLD_LOCAL_RANK`, `DRYML_WORLD_SIZE`, and `DRYML_WORLD_ROLE_SIZE`.
+
+`WorldDispatchResult` contains aggregate `status`, `dispatch_id`, `recipe_id`, `world_id`, `world_allocation_id`, `primary`, `workers`, `execution_record_ids`, diagnostics, error, and cancellation fields. Worker results are keyed by `WorldWorkerKey(role, replica, rank, local_rank)`. The primary result is `main` replica 0 if present, else `worker` replica 0, else the first sorted worker. Aggregate status is conservative: any timeout, failure, cancellation, or unsupported worker prevents an `ok` aggregate.
+
+The local-world backend creates one group work directory, launches one subprocess per role/replica, waits for all handshakes, then writes a start marker. If a required worker fails, times out, reports unsupported, or misses protocol files, siblings are cancelled. `LocalWorldFuture.cancel(...)`, `result(timeout=...)`, and `KeyboardInterrupt` cancellation all target the whole worker group.
+
+Local-world dispatch is local-only: all workers run on the same host and share the same `DirStore` path. Distributed rendezvous, collectives, Ray/Slurm/cloud launch, containers, SSH, and heterogeneous role-specific Python executables are deferred.
+
 ## Worker Protocol
 
 The local backend launches `python -m dryml.dispatch.worker` with JSON request, handshake, and response files in a per-dispatch work directory. Child stdout/stderr are captured to separate files from process start, so user output cannot corrupt protocol JSON.
@@ -93,6 +127,8 @@ Python path policies are:
 `DispatchResult` returns compact fields: status, operation/dispatch/recipe IDs, execution record ID, canonical literal or CDef result refs, operation-produced record IDs, stdout/stderr refs, diagnostics, error, and cancellation. `WorkerResponse` enforces the same basic status context as execution records: ok responses do not carry errors, failed/timeout/unsupported responses include error details or diagnostics, and cancelled responses include cancellation facts. `execution_record_id` is provenance and is kept separate from `produced_record_ids`, which are reserved for records produced by the operation itself.
 
 When provenance is enabled, operation, dispatch, and execution-recipe specs are written beside the execution record so provenance refs are store-resolvable. `ExecutionRecord` sidecars are emitted for success, user-code failure, timeout, cancellation, and parent-side protocol failures when metadata permits. stdout/stderr products use self product refs such as `products/<execution-record-id>/stdout.txt` and `stderr.txt`.
+
+In local-world mode, the requested `WorldSpec` and actual `WorldAllocation` spec are written before worker execution records reference them. Per-worker execution records are the Sprint 10 provenance authority; each includes `world_id`, `world_allocation_id`, worker key payload data, and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured independently and copied into each worker execution record's product directory.
 
 ## Cancellation
 

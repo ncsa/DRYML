@@ -40,3 +40,11 @@ Legacy `Compute.__compute_reqs__` dictionaries are still supported as a transiti
 `dryml.execute` is retained as legacy local pickled-callable execution pending dispatch v2. Its subprocess worker entry path enters `dryml.runtime` worker mode and applies runtime bootstrap before loading the callable or materializing objects. Inline execution stays in the caller's current runtime and rejects legacy resource requirements unless a future explicit inline-allocation path is added.
 
 `dryml.dispatch.LocalSubprocessBackend` is the new spec/record/runtime-aware local path. Its worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default, applies assigned device visibility, and only then imports target functions or materializes CDef arguments from shared `DirStore` refs. This preserves the runtime setup order required for later multi-worker orchestration.
+
+## Local Multi-Worker Runtime
+
+`dryml.dispatch.run_world(...)` and `Dispatcher.run_world(...)` allocate a requested `WorldSpec` into a stored `WorldAllocation` with one `ProcessAllocation` per role replica. Rank and local rank are deterministic: sorted role name, then replica index. Each worker receives `WorldAllocation.runtime_view(role, replica, world_allocation_id=...)`, so CPU-only workers still have a real `RuntimeAllocationView` rather than `NoAllocation`.
+
+The local coordinator launches all subprocesses, validates their handshakes, and releases a start barrier only after every required worker is ready. Workers do not import target modules or materialize CDefs until after the barrier, then enter `RuntimeMode.WORKER`, apply assigned device visibility, merge `DRYML_WORLD_*` environment facts, and execute user code.
+
+The stored `WorldAllocation` captures actual backend assignment. The launch envelope adds the computed `world_allocation_id` to the runtime view and process environment, avoiding a self-referential ID inside the canonical allocation payload. Per-worker execution records reference that allocation ID and include role/replica/rank/local-rank metadata.

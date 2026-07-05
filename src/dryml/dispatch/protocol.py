@@ -130,6 +130,7 @@ class ExecutionEnvelope:
         except Exception as exc:
             raise WorkerProtocolError("invalid record_policy", context=getattr(exc, "context", {})) from exc
         object.__setattr__(self, "store_refs", _store_ref_tuple(self.store_refs))
+        _validate_coordination(self.launch.get("coordination"), self.allocation_view)
 
     @property
     def operation_id(self) -> str | None:
@@ -543,6 +544,28 @@ def _validate_response_context(response: WorkerResponse) -> None:
         raise WorkerProtocolError("cancellation is only valid on cancelled worker responses")
     if response.status in {"failed", "timeout", "unsupported"} and response.error is None and not response.diagnostics:
         raise WorkerProtocolError("failed, timeout, and unsupported worker responses require error or diagnostics", context={"status": response.status})
+
+
+def _validate_coordination(coordination: Any, allocation_view: Mapping[str, Any]) -> None:
+    if coordination is None:
+        return
+    if not isinstance(coordination, Mapping):
+        raise WorkerProtocolError("coordination metadata must be a mapping", context={"type": type(coordination).__name__})
+    unknown = set(coordination) - {"group_id", "worker_key", "start_path", "cancel_path", "heartbeat_path"}
+    if unknown:
+        raise WorkerProtocolError("coordination metadata contains unknown fields", context={"fields": sorted(unknown)})
+    for field_name in ("start_path", "cancel_path", "heartbeat_path"):
+        value = coordination.get(field_name)
+        if value is not None and (not isinstance(value, str) or not os.path.isabs(value)):
+            raise WorkerProtocolError("coordination paths must be absolute", context={"field": field_name, "path": value})
+    key = coordination.get("worker_key")
+    if key is None:
+        return
+    if not isinstance(key, Mapping):
+        raise WorkerProtocolError("coordination worker_key must be a mapping")
+    for field_name in ("role", "replica", "rank", "local_rank"):
+        if key.get(field_name) != allocation_view.get(field_name):
+            raise WorkerProtocolError("coordination worker_key does not match allocation view", context={"field": field_name, "worker_key": key.get(field_name), "allocation_view": allocation_view.get(field_name)})
 
 
 def _json_ready(value: Any, field_name: str) -> Any:

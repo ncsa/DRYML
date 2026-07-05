@@ -1,0 +1,552 @@
+"""Local multi-worker world orchestration for ``dryml.dispatch``."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from dryml.worlds import WorldAllocation, WorldSpec, attach_world_allocation_id, attach_world_id, make_world_allocation_spec, make_world_spec, validate_world_spec
+
+from .backends import LocalSubprocessFuture, build_worker_command
+from .errors import DispatchLaunchError, DispatchPlanningError
+from .protocol import DispatchResult, ExecutionEnvelope, WorkerHandshakeResponse, WorkerResponse, read_json_file, save_envelope, write_json_file
+
+
+LOCAL_WORLD_BACKEND_IDENTITY = {"name": "dryml.local_world", "kind": "local_world", "version": "1"}
+_FATAL_STATUSES = frozenset({"failed", "timeout", "unsupported"})
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class WorldWorkerKey:
+    """Stable JSON-friendly key for one local world worker."""
+
+    role: str
+    replica: int
+    rank: int
+    local_rank: int
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> "WorldWorkerKey":
+        """Build a worker key from JSON protocol data."""
+
+        if not isinstance(data, Mapping):
+            raise DispatchPlanningError("world worker key must be a mapping", context={"type": type(data).__name__})
+        return cls(str(data.get("role")), _nonneg_int(data.get("replica"), "replica"), _nonneg_int(data.get("rank"), "rank"), _nonneg_int(data.get("local_rank"), "local_rank"))
+
+    def to_json(self) -> dict[str, Any]:
+        """Return a canonical JSON representation."""
+
+        return {"role": self.role, "replica": self.replica, "rank": self.rank, "local_rank": self.local_rank}
+
+    def label(self) -> str:
+        """Return a filesystem-safe worker label."""
+
+        safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in self.role)
+        return f"{safe}-{self.replica}"
+
+
+@dataclass(frozen=True, slots=True)
+class LocalResourceInventory:
+    """Small explicit local resource inventory used by the deterministic planner."""
+
+    cpus: tuple[int, ...]
+    accelerators: Mapping[str, tuple[str | int, ...]] = field(default_factory=dict)
+    memory: int | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        cpus = tuple(_nonneg_int(cpu, "cpu") for cpu in self.cpus)
+        if not cpus:
+            raise DispatchPlanningError("local resource inventory requires at least one CPU")
+        if len(set(cpus)) != len(cpus):
+            raise DispatchPlanningError("local resource inventory CPUs must be unique", context={"cpus": cpus})
+        if not isinstance(self.accelerators, Mapping):
+            raise DispatchPlanningError("local resource inventory accelerators must be a mapping")
+        normalized: dict[str, tuple[str | int, ...]] = {}
+        for name, values in self.accelerators.items():
+            if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
+                raise DispatchPlanningError("accelerator inventory values must be sequences", context={"accelerator": name})
+            normalized[str(name)] = tuple(values)
+        object.__setattr__(self, "cpus", cpus)
+        object.__setattr__(self, "accelerators", normalized)
+        object.__setattr__(self, "metadata", dict(self.metadata))
+
+    @classmethod
+    def local(cls) -> "LocalResourceInventory":
+        """Build inventory from CPU affinity and optional test accelerator env."""
+
+        try:
+            cpus = tuple(sorted(int(cpu) for cpu in os.sched_getaffinity(0)))
+        except Exception:
+            cpus = tuple(range(os.cpu_count() or 1))
+        return cls(cpus=cpus or (0,), accelerators=_accelerators_from_env(), metadata={"source": "local"})
+
+    def summary(self) -> dict[str, Any]:
+        """Return a reporting/debug summary without importing frameworks."""
+
+        return {"cpus": list(self.cpus), "accelerators": {key: list(value) for key, value in sorted(self.accelerators.items())}, "memory": self.memory, "metadata": dict(self.metadata)}
+
+
+@dataclass(frozen=True, slots=True)
+class LocalWorldAllocationPlan:
+    """Expanded deterministic local allocation result."""
+
+    world_spec: Mapping[str, Any]
+    world_allocation: WorldAllocation
+    world_allocation_spec: Mapping[str, Any]
+    worker_keys: tuple[WorldWorkerKey, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerLaunchPlan:
+    """Launch plan for one role/replica worker in a local world."""
+
+    key: WorldWorkerKey
+    dispatch_spec: Mapping[str, Any]
+    execution_recipe: Mapping[str, Any]
+    envelope: ExecutionEnvelope
+    store: Any
+
+
+@dataclass(frozen=True, slots=True)
+class LocalWorldPlan:
+    """Resolved launch plan for a coordinated local worker group."""
+
+    dispatch_spec: Mapping[str, Any]
+    execution_recipe: Mapping[str, Any]
+    operation_spec: Mapping[str, Any]
+    world_spec: Mapping[str, Any]
+    world_allocation_spec: Mapping[str, Any]
+    worker_plans: tuple[WorkerLaunchPlan, ...]
+    store: Any
+    group_work_dir: str | None = None
+    preserve_work_dir: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class WorldDispatchResult:
+    """Aggregate result for explicit local-world dispatch."""
+
+    status: str
+    dispatch_id: str | None
+    recipe_id: str | None
+    world_id: str | None
+    world_allocation_id: str | None
+    primary: DispatchResult | None
+    workers: Mapping[WorldWorkerKey, DispatchResult]
+    execution_record_ids: tuple[str, ...] = ()
+    produced_record_ids: tuple[str, ...] = ()
+    diagnostics: tuple[Mapping[str, Any], ...] = ()
+    error: Mapping[str, Any] | None = None
+    cancellation: Mapping[str, Any] | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """Return a JSON-ready aggregate result."""
+
+        return {
+            "status": self.status,
+            "dispatch_id": self.dispatch_id,
+            "recipe_id": self.recipe_id,
+            "world_id": self.world_id,
+            "world_allocation_id": self.world_allocation_id,
+            "primary": self.primary.to_json() if self.primary else None,
+            "workers": [{"key": key.to_json(), "result": result.to_json()} for key, result in sorted(self.workers.items())],
+            "execution_record_ids": list(self.execution_record_ids),
+            "produced_record_ids": list(self.produced_record_ids),
+            "diagnostics": list(self.diagnostics),
+            "error": self.error,
+            "cancellation": self.cancellation,
+        }
+
+
+class LocalWorldBackend:
+    """Popen-based coordinator for one same-host local worker group."""
+
+    name = "local_world"
+
+    def __init__(self, *, preserve_work_dir: bool = False, handshake_timeout: float = 10.0, start_timeout: float = 10.0, cancel_grace: float = 0.5):
+        self.preserve_work_dir = preserve_work_dir
+        self.handshake_timeout = handshake_timeout
+        self.start_timeout = start_timeout
+        self.cancel_grace = cancel_grace
+
+    def submit(self, plan: LocalWorldPlan) -> "LocalWorldFuture":
+        """Launch all workers and return a group future."""
+
+        group_dir = plan.group_work_dir or tempfile.mkdtemp(prefix="dryml-local-world-")
+        workers_dir = os.path.join(group_dir, "workers")
+        os.makedirs(workers_dir, exist_ok=True)
+        start_path = os.path.join(group_dir, "start.json")
+        cancel_path = os.path.join(group_dir, "cancel.json")
+        write_json_file(os.path.join(group_dir, "group.json"), {"dispatch_id": plan.dispatch_spec.get("id"), "recipe_id": plan.execution_recipe.get("id"), "world_id": plan.world_spec.get("id"), "world_allocation_id": plan.world_allocation_spec.get("id"), "worker_count": len(plan.worker_plans)})
+        futures: dict[WorldWorkerKey, LocalSubprocessFuture] = {}
+        try:
+            for worker_plan in plan.worker_plans:
+                worker_dir = os.path.join(workers_dir, worker_plan.key.label())
+                os.makedirs(worker_dir, exist_ok=True)
+                request_path = os.path.join(worker_dir, "request.json")
+                handshake_path = os.path.join(worker_dir, "handshake.json")
+                response_path = os.path.join(worker_dir, "response.json")
+                stdout_path = os.path.join(worker_dir, "stdout.txt")
+                stderr_path = os.path.join(worker_dir, "stderr.txt")
+                envelope = _with_coordination(worker_plan.envelope, group_dir=group_dir, start_path=start_path, cancel_path=cancel_path, worker_key=worker_plan.key)
+                launch_plan = WorkerLaunchPlan(worker_plan.key, worker_plan.dispatch_spec, worker_plan.execution_recipe, envelope, worker_plan.store)
+                save_envelope(request_path, envelope)
+                cmd, child_env = build_worker_command(envelope.environment_spec)
+                child_env.update({str(key): str(value) for key, value in (envelope.allocation_view.get("env") or {}).items()})
+                cmd.extend(["-m", "dryml.dispatch.worker", "--request", request_path, "--handshake", handshake_path, "--response", response_path])
+                _report("dryml.dispatch.world.launch", "Launching local worker", operation_id=envelope.operation_id, data={"worker": worker_plan.key.to_json(), "work_dir": worker_dir})
+                stdout = open(stdout_path, "w", encoding="utf-8")
+                stderr = open(stderr_path, "w", encoding="utf-8")
+                try:
+                    process = subprocess.Popen(cmd, env=child_env, stdout=stdout, stderr=stderr, cwd=worker_dir, start_new_session=(os.name == "posix"))
+                finally:
+                    stdout.close()
+                    stderr.close()
+                futures[worker_plan.key] = LocalSubprocessFuture(process, launch_plan, worker_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, True, cancel_grace=self.cancel_grace, handshake_timeout=self.handshake_timeout)
+        except Exception as exc:
+            for future in futures.values():
+                future.cancel(reason="launch_failure")
+            if not self.preserve_work_dir and not plan.preserve_work_dir:
+                shutil.rmtree(group_dir, ignore_errors=True)
+            if isinstance(exc, DispatchLaunchError):
+                raise
+            raise DispatchLaunchError("failed to launch local world worker group", context={"error": str(exc)}) from exc
+        return LocalWorldFuture(plan=plan, group_work_dir=group_dir, start_path=start_path, cancel_path=cancel_path, workers=futures, preserve_work_dir=self.preserve_work_dir or plan.preserve_work_dir, handshake_timeout=self.handshake_timeout, start_timeout=self.start_timeout, cancel_grace=self.cancel_grace)
+
+
+@dataclass(slots=True)
+class LocalWorldFuture:
+    """Future coordinating handshakes, start barrier, results, and cancellation."""
+
+    plan: LocalWorldPlan
+    group_work_dir: str
+    start_path: str
+    cancel_path: str
+    workers: Mapping[WorldWorkerKey, LocalSubprocessFuture]
+    preserve_work_dir: bool = False
+    handshake_timeout: float = 10.0
+    start_timeout: float = 10.0
+    cancel_grace: float = 0.5
+    _started: bool = False
+    _cancelled: bool = False
+    _result: WorldDispatchResult | None = None
+    _cancel_reason: str | None = None
+
+    def wait_for_handshakes(self, timeout: float | None = None) -> Mapping[WorldWorkerKey, WorkerHandshakeResponse | None]:
+        """Wait for every worker handshake, then release the start barrier."""
+
+        if self._started:
+            return {key: future._handshake for key, future in self.workers.items()}
+        _report("dryml.dispatch.world.handshake.wait", "Waiting for worker handshakes", operation_id=self.plan.operation_spec.get("id"), data={"worker_count": len(self.workers)})
+        deadline = time.monotonic() + (self.handshake_timeout if timeout is None else timeout)
+        handshakes: dict[WorldWorkerKey, WorkerHandshakeResponse | None] = {key: None for key in self.workers}
+        while True:
+            for key, future in self.workers.items():
+                if handshakes[key] is not None:
+                    continue
+                if os.path.exists(future.handshake_path):
+                    try:
+                        handshake = WorkerHandshakeResponse.from_json(read_json_file(future.handshake_path))
+                        future._handshake = handshake
+                        handshakes[key] = handshake
+                    except Exception:
+                        handshakes[key] = None
+                        self.cancel(reason="handshake_failed")
+                        return handshakes
+                elif future.done():
+                    self.cancel(reason="missing_handshake")
+                    return handshakes
+            bad = {key: handshake for key, handshake in handshakes.items() if handshake is not None and handshake.status != "ok"}
+            if bad:
+                self.cancel(reason="handshake_unsupported")
+                return handshakes
+            if all(handshake is not None and handshake.status == "ok" for handshake in handshakes.values()):
+                _report("dryml.dispatch.world.start", "Starting local world workers", operation_id=self.plan.operation_spec.get("id"), data={"worker_count": len(self.workers)})
+                write_json_file(self.start_path, {"status": "ok", "started_at": time.time()})
+                self._started = True
+                return handshakes
+            if time.monotonic() >= deadline:
+                self.cancel(reason="handshake_timeout")
+                return handshakes
+            time.sleep(0.01)
+
+    def result(self, timeout: float | None = None) -> WorldDispatchResult:
+        """Wait for the group and return an aggregate result."""
+
+        if self._result is not None:
+            return self._result
+        try:
+            handshakes = self.wait_for_handshakes(timeout=self.handshake_timeout)
+            if self._cancelled and not self._started:
+                self._result = self._aggregate(handshakes=handshakes, cancellation={"requested": True, "reason": self._cancel_reason or "cancelled"})
+                self._cleanup()
+                return self._result
+            deadline = None if timeout is None else time.monotonic() + timeout
+            fatal_seen = False
+            while True:
+                for key, future in self.workers.items():
+                    if future.done() and future._response is None:
+                        future._read_response()
+                        if future._response and future._response.status in _FATAL_STATUSES:
+                            _report("dryml.dispatch.world.worker.failed", "Worker failed; cancelling local world", operation_id=self.plan.operation_spec.get("id"), data={"worker": key.to_json(), "status": future._response.status})
+                            self._cancel_live(reason="sibling_failure")
+                            fatal_seen = True
+                if all(future.done() or future._response is not None for future in self.workers.values()):
+                    break
+                if fatal_seen:
+                    for future in self.workers.values():
+                        if not future.done():
+                            future.process.wait(timeout=self.cancel_grace)
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    self.cancel(reason="timeout")
+                    self._result = self._aggregate(handshakes=handshakes, status_override="timeout", cancellation={"requested": True, "reason": "timeout"})
+                    self._cleanup()
+                    return self._result
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            self.cancel(reason="KeyboardInterrupt")
+            raise
+        self._result = self._aggregate()
+        self._cleanup()
+        return self._result
+
+    def cancel(self, reason: str = "user") -> bool:
+        """Cancel all live workers and write a cooperative cancel marker."""
+
+        self._cancelled = True
+        self._cancel_reason = reason
+        _report("dryml.dispatch.world.cancel", "Cancelling local worker group", operation_id=self.plan.operation_spec.get("id"), data={"reason": reason})
+        try:
+            write_json_file(self.cancel_path, {"cancelled": True, "reason": reason, "time": time.time()})
+        except Exception:
+            pass
+        cancelled = False
+        for future in self.workers.values():
+            cancelled = future.cancel(grace=self.cancel_grace, reason=reason) or cancelled
+        return cancelled
+
+    def done(self) -> bool:
+        """Return whether every worker is done."""
+
+        return all(future.done() for future in self.workers.values())
+
+    def _cancel_live(self, *, reason: str) -> None:
+        self._cancelled = True
+        self._cancel_reason = reason
+        try:
+            write_json_file(self.cancel_path, {"cancelled": True, "reason": reason, "time": time.time()})
+        except Exception:
+            pass
+        for future in self.workers.values():
+            if not future.done() and future._response is None:
+                future.cancel(grace=self.cancel_grace, reason=reason)
+
+    def _aggregate(self, *, handshakes: Mapping[WorldWorkerKey, WorkerHandshakeResponse | None] | None = None, status_override: str | None = None, cancellation: Mapping[str, Any] | None = None) -> WorldDispatchResult:
+        worker_results: dict[WorldWorkerKey, DispatchResult] = {}
+        diagnostics: list[Mapping[str, Any]] = []
+        first_error: Mapping[str, Any] | None = None
+        first_cancel: Mapping[str, Any] | None = dict(cancellation) if cancellation else None
+        for key, future in self.workers.items():
+            if future._response is None:
+                future._read_response()
+            if future._response is None:
+                future._response = future._parent_failure_response("failed", error={"type": "WorkerProtocolError", "message": "worker produced no response"})
+            response = future._response
+            future._persist_logs(response.execution_record_id)
+            result = DispatchResult.from_worker_response(response)
+            worker_results[key] = result
+            diagnostics.extend(result.diagnostics)
+            if first_error is None and result.error is not None:
+                first_error = result.error
+            if first_cancel is None and result.cancellation is not None:
+                first_cancel = result.cancellation
+        status = status_override or _aggregate_status(result.status for result in worker_results.values())
+        if handshakes is not None and any(handshake is None or handshake.status != "ok" for handshake in handshakes.values()):
+            status = "cancelled" if self._cancelled else "failed"
+        primary = _select_primary(worker_results)
+        execution_record_ids = tuple(result.execution_record_id for result in worker_results.values() if result.execution_record_id)
+        produced_record_ids = tuple(record_id for result in worker_results.values() for record_id in result.produced_record_ids)
+        _report("dryml.dispatch.world.complete", "Local world dispatch complete", operation_id=self.plan.operation_spec.get("id"), data={"status": status, "worker_statuses": {key.label(): result.status for key, result in worker_results.items()}, "world_allocation_id": self.plan.world_allocation_spec.get("id"), "execution_record_ids": list(execution_record_ids)})
+        return WorldDispatchResult(status=status, dispatch_id=self.plan.dispatch_spec.get("id"), recipe_id=self.plan.execution_recipe.get("id"), world_id=self.plan.world_spec.get("id"), world_allocation_id=self.plan.world_allocation_spec.get("id"), primary=primary, workers=worker_results, execution_record_ids=execution_record_ids, produced_record_ids=produced_record_ids, diagnostics=tuple(diagnostics), error=first_error, cancellation=first_cancel)
+
+    def _cleanup(self) -> None:
+        if not self.preserve_work_dir:
+            shutil.rmtree(self.group_work_dir, ignore_errors=True)
+
+
+def normalize_world_spec(world: Mapping[str, Any] | WorldSpec | None) -> Mapping[str, Any]:
+    """Normalize a world object, spec envelope, or raw roles mapping."""
+
+    if world is None:
+        return attach_world_id(make_world_spec({"worker": {"replicas": 1, "process": {"resources": {"cpus": 0}}}}, backend={"kind": "local_world", "parameters": {}}))
+    if isinstance(world, WorldSpec):
+        return attach_world_id(make_world_spec(world))
+    if not isinstance(world, Mapping):
+        raise DispatchPlanningError("world must be a WorldSpec or mapping", context={"type": type(world).__name__})
+    if world.get("schema") == "dryml.world.v1":
+        validate_world_spec(world)
+        return attach_world_id(world)
+    return attach_world_id(make_world_spec(world, backend={"kind": "local_world", "parameters": {}}))
+
+
+def is_multi_worker_world(world_spec: Mapping[str, Any]) -> bool:
+    """Return whether a normalized world spec requests multiple workers."""
+
+    world_obj = WorldSpec.from_data(world_spec["payload"])
+    counts = [role.replicas for role in world_obj.roles.values()]
+    return len(counts) > 1 or sum(counts) > 1
+
+
+def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False) -> LocalWorldAllocationPlan:
+    """Expand and allocate a local ``WorldSpec`` deterministically."""
+
+    _report("dryml.dispatch.world.allocate", "Allocating local world resources")
+    world_spec = normalize_world_spec(world)
+    world_obj = WorldSpec.from_data(world_spec["payload"])
+    inv = inventory or LocalResourceInventory.local()
+    cpu_cursor = 0
+    accelerator_cursors = {key: 0 for key in inv.accelerators}
+    world_size = sum(role.replicas for role in world_obj.roles.values())
+    roles: dict[str, list[dict[str, Any]]] = {}
+    keys: list[WorldWorkerKey] = []
+    rank = 0
+    role_sizes = {name: role.replicas for name, role in world_obj.roles.items()}
+    for role_name in sorted(world_obj.roles):
+        role = world_obj.roles[role_name]
+        roles[role_name] = []
+        for replica in range(role.replicas):
+            key = WorldWorkerKey(role_name, replica, rank, rank)
+            keys.append(key)
+            requested_cpus = role.process.resources.cpus or 1
+            if not oversubscribe and requested_cpus > len(inv.cpus):
+                raise DispatchPlanningError("local world CPU request exceeds inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "inventory_cpus": len(inv.cpus)})
+            if not oversubscribe and cpu_cursor + requested_cpus > len(inv.cpus):
+                raise DispatchPlanningError("local world CPU requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "remaining_cpus": len(inv.cpus) - cpu_cursor})
+            if oversubscribe:
+                cpus = tuple(inv.cpus[(cpu_cursor + idx) % len(inv.cpus)] for idx in range(requested_cpus))
+                cpu_cursor = (cpu_cursor + requested_cpus) % len(inv.cpus)
+            else:
+                cpus = tuple(inv.cpus[cpu_cursor : cpu_cursor + requested_cpus])
+                cpu_cursor += requested_cpus
+            accelerators: dict[str, tuple[str | int, ...]] = {}
+            for acc_name, count in role.process.resources.accelerators.items():
+                available = inv.accelerators.get(acc_name, ())
+                cursor = accelerator_cursors.get(acc_name, 0)
+                if cursor + count > len(available):
+                    raise DispatchPlanningError("local world accelerator request exceeds explicit inventory", context={"role": role_name, "replica": replica, "accelerator": acc_name, "requested": count, "available": len(available)})
+                accelerators[acc_name] = tuple(available[cursor : cursor + count])
+                accelerator_cursors[acc_name] = cursor + count
+            env = dict(role.process.env)
+            env.update(
+                {
+                    "DRYML_WORLD_ID": str(world_spec.get("id")),
+                    "DRYML_WORLD_ROLE": role_name,
+                    "DRYML_WORLD_REPLICA": str(replica),
+                    "DRYML_WORLD_RANK": str(rank),
+                    "DRYML_WORLD_LOCAL_RANK": str(rank),
+                    "DRYML_WORLD_SIZE": str(world_size),
+                    "DRYML_WORLD_ROLE_SIZE": str(role_sizes[role_name]),
+                }
+            )
+            allocation = {
+                "replica": replica,
+                "rank": rank,
+                "local_rank": rank,
+                "resources": {"cpus": list(cpus), "accelerators": {name: list(values) for name, values in sorted(accelerators.items())}},
+                "environment": role.process.environment,
+                "env": env,
+                "metadata": {"allocation_policy": "disjoint_local" if not oversubscribe else "oversubscribed_local", "world_size": world_size, "role_size": role_sizes[role_name]},
+            }
+            if role.process.resources.memory is not None:
+                allocation["resources"]["memory"] = role.process.resources.to_data()["memory"]
+            roles[role_name].append(allocation)
+            rank += 1
+    backend = dict(LOCAL_WORLD_BACKEND_IDENTITY)
+    backend["host"] = os.uname().nodename if hasattr(os, "uname") else "localhost"
+    allocation_spec = attach_world_allocation_id(make_world_allocation_spec(roles, backend=backend, kind="local_world_allocation", metadata={"world_id": world_spec.get("id")}))
+    return LocalWorldAllocationPlan(world_spec=world_spec, world_allocation=WorldAllocation.from_data(allocation_spec["payload"]), world_allocation_spec=allocation_spec, worker_keys=tuple(keys))
+
+
+def _with_coordination(envelope: ExecutionEnvelope, *, group_dir: str, start_path: str, cancel_path: str, worker_key: WorldWorkerKey) -> ExecutionEnvelope:
+    launch = dict(envelope.launch)
+    launch["coordination"] = {"group_id": Path(group_dir).name, "worker_key": worker_key.to_json(), "start_path": os.path.abspath(start_path), "cancel_path": os.path.abspath(cancel_path), "heartbeat_path": os.path.abspath(os.path.join(group_dir, "workers", worker_key.label(), "heartbeat.json"))}
+    return ExecutionEnvelope(dispatch_spec=envelope.dispatch_spec, execution_recipe=envelope.execution_recipe, operation_spec=envelope.operation_spec, environment_spec=envelope.environment_spec, runtime_spec=envelope.runtime_spec, allocation_view=envelope.allocation_view, store_refs=envelope.store_refs, transfer=envelope.transfer, result_policy=envelope.result_policy, record_policy=envelope.record_policy, reporting=envelope.reporting, handshake=envelope.handshake, launch=launch)
+
+
+def _aggregate_status(statuses: Any) -> str:
+    values = tuple(statuses)
+    for status in ("timeout", "failed", "cancelled", "unsupported"):
+        if status in values:
+            return status
+    return "ok" if values and all(status == "ok" for status in values) else "failed"
+
+
+def _select_primary(results: Mapping[WorldWorkerKey, DispatchResult]) -> DispatchResult | None:
+    if not results:
+        return None
+    for role in ("main", "worker"):
+        for key, result in sorted(results.items()):
+            if key.role == role and key.replica == 0:
+                return result
+    return results[sorted(results)[0]]
+
+
+def _accelerators_from_env() -> dict[str, tuple[str | int, ...]]:
+    raw = os.environ.get("DRYML_LOCAL_ACCELERATORS", "").strip()
+    if not raw:
+        return {}
+    result: dict[str, tuple[str | int, ...]] = {}
+    for group in raw.split(";"):
+        if not group:
+            continue
+        if "=" not in group:
+            raise DispatchPlanningError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
+        name, values = group.split("=", 1)
+        parsed: list[str | int] = []
+        for value in values.split(","):
+            value = value.strip()
+            if not value:
+                continue
+            parsed.append(int(value) if value.isdigit() else value)
+        result[name.strip()] = tuple(parsed)
+    return result
+
+
+def _nonneg_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise DispatchPlanningError(f"{name} must be an integer >= 0", context={"value": value})
+    return value
+
+
+def _report(name: str, message: str, *, operation_id: str | None = None, data: Mapping[str, Any] | None = None) -> None:
+    try:
+        from dryml import reporting
+
+        reporting.step(name, message, operation_id=operation_id, data=data or {})
+    except Exception:
+        pass
+
+
+__all__ = [
+    "LOCAL_WORLD_BACKEND_IDENTITY",
+    "LocalResourceInventory",
+    "LocalWorldAllocationPlan",
+    "LocalWorldBackend",
+    "LocalWorldFuture",
+    "LocalWorldPlan",
+    "WorkerLaunchPlan",
+    "WorldDispatchResult",
+    "WorldWorkerKey",
+    "allocate_local_world",
+    "is_multi_worker_world",
+    "normalize_world_spec",
+]

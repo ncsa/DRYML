@@ -6,6 +6,7 @@ import argparse
 import os
 import platform
 import sys
+import time
 import traceback
 from typing import Any, Mapping
 
@@ -61,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         repo = Repo(stores=stores)
         handshake = _handshake(envelope, status="ok", store_status=store_status)
         write_json_file(ns.handshake, handshake.to_json())
+        barrier_response = _wait_for_start_barrier(envelope, stores[0] if stores else None)
+        if barrier_response is not None:
+            write_json_file(ns.response, barrier_response.to_json())
+            return 1
         response = _execute(envelope, repo, stores[0] if stores else None)
         write_json_file(ns.response, response.to_json())
         return 0 if response.status == "ok" else 1
@@ -144,7 +149,7 @@ def _execute(envelope: ExecutionEnvelope, repo: Repo, store: Any) -> WorkerRespo
     allocation = allocation_from_json(envelope.allocation_view)
     runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec or {"mode": "worker", "device_visibility": {"policy": "assigned"}})
     try:
-        with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, restore_environ=False):
+        with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, env=allocation.env, restore_environ=False):
             _report("dryml.dispatch.worker.execute", "Running operation in worker", operation_id=envelope.operation_id)
             result, consumed_cdefs = execute_operation(dict(envelope.operation_spec), repo=repo, envelope_launch=dict(envelope.launch))
             canonical, produced_cdefs = canonicalize_result(result, repo=repo, store=store, record_policy=envelope.record_policy)
@@ -179,7 +184,7 @@ def _failure_response(envelope: ExecutionEnvelope, exc: BaseException, *, store:
     )
 
 
-def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *, error: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), consumed_cdef_ids: tuple[str, ...] = (), produced_cdef_ids: tuple[str, ...] = ()) -> str | None:
+def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), consumed_cdef_ids: tuple[str, ...] = (), produced_cdef_ids: tuple[str, ...] = ()) -> str | None:
     if envelope.record_policy == "none" or store is None:
         return None
     _persist_provenance_specs(store, envelope)
@@ -191,15 +196,20 @@ def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *
     execution = ExecutionRecord(
         execution_kind="python",
         operation_id=envelope.operation_id,
-        backend=BACKEND_IDENTITY,
+        backend=_backend_identity(envelope),
         status=status,
         dispatch_id=envelope.dispatch_spec.get("id"),
         recipe_id=envelope.execution_recipe.get("id"),
+        world_id=envelope.launch.get("world_id"),
+        world_allocation_id=envelope.allocation_view.get("world_allocation_id") or envelope.launch.get("world_allocation_id"),
         consumed_cdef_ids=consumed_cdef_ids,
         produced_cdef_ids=produced_cdef_ids,
         logs=logs,
         error=ExecutionErrorInfo.from_json(error) if error else None,
+        cancellation=cancellation,
         diagnostics=diagnostics,
+        metadata=_execution_metadata(envelope),
+        extra=_execution_extra(envelope),
     )
     _report("dryml.dispatch.execution_record.write", "Writing execution record", operation_id=envelope.operation_id, data={"status": status})
     return write_execution_record(store.records, execution).record_id
@@ -210,6 +220,68 @@ def _persist_provenance_specs(store: Any, envelope: ExecutionEnvelope) -> None:
     record_io.write_spec(envelope.operation_spec, family="operation")
     record_io.write_spec(envelope.dispatch_spec, family="dispatch")
     record_io.write_spec(envelope.execution_recipe, family="execution_recipe")
+    if isinstance(envelope.launch.get("world_spec"), Mapping):
+        record_io.write_spec(envelope.launch["world_spec"], family="world")
+    if isinstance(envelope.launch.get("world_allocation_spec"), Mapping):
+        record_io.write_spec(envelope.launch["world_allocation_spec"], family="world_allocation")
+
+
+def _wait_for_start_barrier(envelope: ExecutionEnvelope, store: Any) -> WorkerResponse | None:
+    coordination = envelope.launch.get("coordination") or {}
+    start_path = coordination.get("start_path")
+    if not start_path:
+        return None
+    cancel_path = coordination.get("cancel_path")
+    timeout = float(coordination.get("start_timeout", 60.0))
+    deadline = time.monotonic() + timeout
+    while True:
+        if os.path.exists(start_path):
+            return None
+        if cancel_path and os.path.exists(cancel_path):
+            cancellation = {"requested": True, "reason": "start_barrier_cancelled"}
+            record_id = _write_worker_record(envelope, store, "cancelled", cancellation=cancellation, diagnostics=({"message": "worker cancelled before start barrier release"},))
+            return WorkerResponse(status="cancelled", operation_id=envelope.operation_id, dispatch_id=envelope.dispatch_spec.get("id"), recipe_id=envelope.execution_recipe.get("id"), execution_record_id=record_id, cancellation=cancellation, diagnostics=({"message": "worker cancelled before start barrier release"},))
+        if time.monotonic() >= deadline:
+            error = {"type": "TimeoutError", "message": "worker timed out waiting for start barrier"}
+            record_id = _write_worker_record(envelope, store, "timeout", error=error, diagnostics=({"message": "worker start barrier timeout"},))
+            return WorkerResponse(status="timeout", operation_id=envelope.operation_id, dispatch_id=envelope.dispatch_spec.get("id"), recipe_id=envelope.execution_recipe.get("id"), execution_record_id=record_id, error=error, diagnostics=({"message": "worker start barrier timeout"},))
+        time.sleep(0.01)
+
+
+def _backend_identity(envelope: ExecutionEnvelope) -> Mapping[str, Any]:
+    if envelope.execution_recipe.get("payload", {}).get("backend", {}).get("kind") == "local_world":
+        return {"name": "dryml.local_world", "kind": "local_world", "version": "1"}
+    return BACKEND_IDENTITY
+
+
+def _execution_metadata(envelope: ExecutionEnvelope) -> dict[str, Any]:
+    alloc = envelope.allocation_view
+    metadata = dict(alloc.get("metadata") or {})
+    for field_name in ("role", "replica", "rank", "local_rank"):
+        metadata[field_name] = alloc.get(field_name)
+    env = alloc.get("env") or {}
+    for key, name in (("DRYML_WORLD_SIZE", "world_size"), ("DRYML_WORLD_ROLE_SIZE", "role_size")):
+        if key in env:
+            try:
+                metadata[name] = int(env[key])
+            except Exception:
+                metadata[name] = env[key]
+    coordination = envelope.launch.get("coordination") or {}
+    if coordination.get("group_id"):
+        metadata["coordination_group_id"] = coordination.get("group_id")
+    return metadata
+
+
+def _execution_extra(envelope: ExecutionEnvelope) -> dict[str, Any]:
+    alloc = envelope.allocation_view
+    return {
+        "worker_key": {
+            "role": alloc.get("role"),
+            "replica": alloc.get("replica"),
+            "rank": alloc.get("rank"),
+            "local_rank": alloc.get("local_rank"),
+        }
+    }
 
 
 def _dryml_version() -> str | None:

@@ -346,10 +346,12 @@ def _write_execution_record(store: Any, envelope: Any, *, status: str, error: Ma
     execution = ExecutionRecord(
         execution_kind="python",
         operation_id=envelope.operation_id,
-        backend=BACKEND_IDENTITY,
+        backend=_backend_identity(envelope),
         status=status,
         dispatch_id=envelope.dispatch_spec.get("id"),
         recipe_id=envelope.execution_recipe.get("id"),
+        world_id=envelope.launch.get("world_id"),
+        world_allocation_id=envelope.allocation_view.get("world_allocation_id") or envelope.launch.get("world_allocation_id"),
         consumed_cdef_ids=consumed_cdef_ids,
         produced_cdef_ids=produced_cdef_ids,
         produced_records=result_record_ids,
@@ -357,6 +359,8 @@ def _write_execution_record(store: Any, envelope: Any, *, status: str, error: Ma
         error=ExecutionErrorInfo.from_json(error) if error else None,
         cancellation=ExecutionCancellationInfo.from_json(cancellation) if cancellation else None,
         diagnostics=diagnostics,
+        metadata=_execution_metadata(envelope),
+        extra=_execution_extra(envelope),
     )
     _report("dryml.dispatch.execution_record.write", "Writing execution record", operation_id=envelope.operation_id, data={"status": status})
     return write_execution_record(store.records, execution).record_id
@@ -367,6 +371,47 @@ def _persist_provenance_specs(store: Any, envelope: Any) -> None:
     record_io.write_spec(envelope.operation_spec, family="operation")
     record_io.write_spec(envelope.dispatch_spec, family="dispatch")
     record_io.write_spec(envelope.execution_recipe, family="execution_recipe")
+    if isinstance(envelope.launch.get("world_spec"), Mapping):
+        record_io.write_spec(envelope.launch["world_spec"], family="world")
+    if isinstance(envelope.launch.get("world_allocation_spec"), Mapping):
+        record_io.write_spec(envelope.launch["world_allocation_spec"], family="world_allocation")
+
+
+def _backend_identity(envelope: Any) -> Mapping[str, Any]:
+    if envelope.execution_recipe.get("payload", {}).get("backend", {}).get("kind") == "local_world":
+        return {"name": "dryml.local_world", "kind": "local_world", "version": "1"}
+    return BACKEND_IDENTITY
+
+
+def _execution_metadata(envelope: Any) -> dict[str, Any]:
+    alloc = envelope.allocation_view or {}
+    metadata = dict(alloc.get("metadata") or {})
+    for field_name in ("role", "replica", "rank", "local_rank"):
+        if field_name in alloc:
+            metadata[field_name] = alloc.get(field_name)
+    env = alloc.get("env") or {}
+    for key, name in (("DRYML_WORLD_SIZE", "world_size"), ("DRYML_WORLD_ROLE_SIZE", "role_size")):
+        if key in env:
+            try:
+                metadata[name] = int(env[key])
+            except Exception:
+                metadata[name] = env[key]
+    coordination = envelope.launch.get("coordination") or {}
+    if coordination.get("group_id"):
+        metadata["coordination_group_id"] = coordination.get("group_id")
+    return metadata
+
+
+def _execution_extra(envelope: Any) -> dict[str, Any]:
+    alloc = envelope.allocation_view or {}
+    return {
+        "worker_key": {
+            "role": alloc.get("role"),
+            "replica": alloc.get("replica"),
+            "rank": alloc.get("rank"),
+            "local_rank": alloc.get("local_rank"),
+        }
+    }
 
 
 def _report(name: str, message: str, *, operation_id: str | None = None, data: Mapping[str, Any] | None = None) -> None:
