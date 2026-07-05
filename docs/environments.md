@@ -2,7 +2,7 @@
 
 `dryml.environments` describes Python/software environments without changing DRYML object identity, Repo behavior, Store layout, or materialization semantics.
 
-The module is intentionally lightweight. Importing `dryml.environments` does not import `dryml.context`, Repo internals, TensorFlow, PyTorch, JAX, Ray, Conda Python APIs, or dispatch code.
+The module is intentionally lightweight. Importing `dryml.environments` does not import Repo internals, TensorFlow, PyTorch, JAX, Ray, Conda Python APIs, or dispatch code.
 
 ## Inspect Current Environment
 

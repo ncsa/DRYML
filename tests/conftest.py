@@ -19,26 +19,6 @@ else:
     install()
     ics.configureOutput(frame_filters=[_pwe])
 
-def pytest_sessionstart(session):
-    if os.environ.get("DRYML_TEST_BOOTSTRAP_CONTEXTS") != "1":
-        return
-
-    from dryml.context.context_tracker import add_context
-
-    # import jax needs to go before tensorflow
-    # Enforce special loading order to prevent crash
-    # https://github.com/pytorch/pytorch/issues/101152
-    #import torch  # noqa: F401
-    #import tensorflow as tf  # noqa: F401
-
-    for ctx_name in ("jax", "torch", "tf"):
-        try:
-            add_context(ctx_name)
-        except Exception:
-            sys.modules.pop(ctx_name, None)
-            pass
-
-
 __all__ = [
     store_resource_factory,
     primary_store_set,

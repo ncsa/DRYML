@@ -168,63 +168,47 @@ TensorShape([10, 10])
 
 We can also see that `tf` turns the Dataset into a `TFDataset` which is backed by a `tf.data.Dataset`. Thus the elements retrievable become tensorflow `Tensor`s. Similarly, `torch` turns the `Dataset` into a `TorchDataset` which is backed by a `torch.utils.data.IterableDataset`.
 
-### DRYML Context
+### Runtime, Worlds, And Dispatch
 
-The DRYML API provides a context system to manage the allocation of compute devices like GPUs. It also provides a decorator `dryml.context.compute_context` which can be applied to any method we want to launch in a separate process with a specific set of context requirements. This allows the user to prevent code which allocates memory on a device like a GPU from running unless you explicitly allow it. `Object` supports this as well with the `load_compute_imp` and `save_compute_imp` methods which manage an `Object`'s transition into and out of 'compute mode' in which an `Object` may allocate memory on a device. This is especially useful for situations when we may want to compare results from a `tensorflow` based model and a `pytorch` based model. We can wrap a method with `compute_context` and then request a context with requirements `{'tf': {}}` for the `tensorflow` model, and requirements `{'torch': {}}` for the `pytorch` model.
+DRYML now separates software requirements, resource planning, process-local runtime state, and execution.
 
-The user can specify the amount or even specific resources with a context requirement for example:
-
-```python
-{
-    'tf': {'gpu/1': 0.5},
-    'torch': {'gpu/1': 0.5},
-}
-```
-
-Let's look at a simple example. We'll first define a method which loads a tensorflow dataset, but first checks whether the context can support it. It then returns the first element of that dataset. Then we'll decorate that method so we can execute it in a separate process with certain contexts. We'll then try a couple contexts and see what happens!
+Use `dryml.env.req(...)` for software/package compatibility, `dryml.world.req(...)` for hard CPU/GPU/memory/topology requirements, `dryml.world.default(...)` for overrideable requested resources, and `dryml.runtime.default(...)` for process-local runtime defaults. These decorators attach metadata only; dispatch or explicit runtime activation is responsible for running work with an allocation.
 
 ```python
->>> def test_method():
-...     import dryml
-...     import tensorflow_datasets as tfds
-...     from dryml.data.tf import TFDataset
-...     dryml.context.context_check({'tf': {}})
-...     (test_ds,) = tfds.load(
-...         'mnist',
-...         split=['test'],
-...         shuffle_files=True,
-...         as_supervised=True)
-...     test_ds = TFDataset(
-...         test_ds,
-...         supervised=True)
-...     return test_ds.unbatch().numpy().peek()
-...
->>> test_method = dryml.context.compute_context()(test_method)
->>> test_method()
-Exception encountered in context thread! pid: 724396
-Traceback (most recent call last):
-  File "/data0/matthew/Software/NCSA/DRYML/src/dryml/context/process.py", line 34, in run
-    super().run()
-  File "/data0/matthew/Software/NCSA/DRYML/venv_dryml_dev/lib/python3.8/multiprocessing/process.py", line 108, in run
-    self._target(*self._args, **self._kwargs)
-  File "/data0/matthew/Software/NCSA/DRYML/src/dryml/context/process.py", line 186, in __call__
-    self.final_call(f, ctx_send_q, ctx_ret_q, *args, **kwargs)
-  File "/data0/matthew/Software/NCSA/DRYML/src/dryml/context/process.py", line 129, in final_call
-    res = f(*args, **kwargs)
-  File "<stdin>", line 5, in test_method
-  File "/data0/matthew/Software/NCSA/DRYML/src/dryml/context/context_tracker.py", line 420, in context_check
-    raise ContextIncompatibilityError(
-dryml.context.context_tracker.ContextIncompatibilityError: Context doesn't satisfy requirements {'tf': {}}
+import dryml
 
-Traceback (most recent call last):
-  File "<stdin>", line 1, in <module>
-  File "/data0/matthew/Software/NCSA/DRYML/src/dryml/context/process.py", line 370, in wrapped_func
-    raise e
-dryml.context.context_tracker.ContextIncompatibilityError: Context doesn't satisfy requirements {'tf': {}}
->>> x, y = test_method(call_context_reqs={'tf': {}})
-2022-10-06 15:27:33.318424: W tensorflow/core/kernels/data/cache_dataset_ops.cc:768] The calling iterator did not fully read the dataset being cached. In order to avoid unexpected truncation of the dataset, the partially cached contents of the dataset  will be discarded. This can happen if you have an input pipeline similar to `dataset.cache().take(k).repeat()`. You should use `dataset.take(k).cache().repeat()` instead.
->>> x.shape
-(28, 28, 1)
->>> y.shape
-()
+
+@dryml.env.req(packages={"numpy": ">=1.26"})
+@dryml.world.req(cpus={"min": 1})
+@dryml.world.default(cpus=1, memory="1GiB")
+@dryml.runtime.default(mode="worker", device_visibility={"policy": "assigned"})
+def add(x, y):
+    dryml.runtime.require_worker_allocation("add() runs as dispatched workload code")
+    return x + y
 ```
+
+Local execution goes through `dryml.dispatch` and canonical operation specs:
+
+```python
+import dryml
+
+operation = dryml.operations.attach_operation_id(
+    dryml.operations.make_function_call_spec("my_package.tasks:add", args=[2, 3])
+)
+result = dryml.dispatch.run(operation, backend="local_subprocess")
+assert result.status == "ok"
+assert result.result_canonical == 5
+```
+
+Runtime guards validate active process state. In orchestrator mode there is no workload allocation, so workload-only code fails clearly until it is run in a worker or explicit inline runtime with an allocation:
+
+```python
+import dryml
+
+try:
+    dryml.runtime.require_allocation("training needs assigned workload resources")
+except dryml.runtime.NoAllocationError as exc:
+    print(exc.context["fix"])
+```
+
+World specs plan resources. Runtime allocation views activate resources in the current process. Environment requirements remain software-only. Operation specs and dispatch specs are metadata, not DRYML Objects.

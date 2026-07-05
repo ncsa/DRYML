@@ -1,6 +1,6 @@
 # DRYML Dispatch
 
-`dryml.dispatch` now contains both the canonical metadata plane and the first real execution backend: a one-operation local subprocess worker. `dryml.execute` remains available as the legacy pickled-callable compatibility path; deletion or rerouting of `dryml.execute` is intentionally deferred.
+`dryml.dispatch` contains both the canonical metadata plane and the reference local execution backend: a one-operation local subprocess worker.
 
 ## Metadata
 

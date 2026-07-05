@@ -251,8 +251,8 @@ def _resolve_module_name(name: str, package: str | None = None) -> str:
     Examples
     --------
     _resolve_module_name("jax") -> "jax"
-    _resolve_module_name(".jax.context", package="dryml.context")
-        -> "dryml.context.jax.context"
+    _resolve_module_name(".frameworks.torch", package="dryml.runtime")
+        -> "dryml.runtime.frameworks.torch"
     """
     if name.startswith("."):
         if package is None:

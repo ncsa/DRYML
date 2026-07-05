@@ -4,12 +4,10 @@ __version__ = "0.3.0-dev"
 
 _SUBMODULE_EXPORTS = {
     "annotations": "dryml.annotations",
-    "context": "dryml.context",
     "core2": "dryml.core2",
     "dispatch": "dryml.dispatch",
     "artifacts": "dryml.artifacts",
     "env": "dryml.env",
-    "execute": "dryml.execute",
     "environments": "dryml.environments",
     "formats": "dryml.formats",
     "operations": "dryml.operations",
@@ -72,12 +70,10 @@ def __getattr__(name):
 
 __all__ = [
     "annotations",
-    "context",
     "core2",
     "dispatch",
     "artifacts",
     "env",
-    "execute",
     "environments",
     "formats",
     "operations",

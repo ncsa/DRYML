@@ -1,99 +1,52 @@
-# Contexts
+# Runtime, Worlds, And Dispatch
 
-Status: draft.
+Status: current.
 
-DRYML contexts describe runtime execution constraints. They help code declare and check requirements such as backend compatibility, CPU/GPU resources, memory, and process bootstrap settings.
+DRYML separates execution concerns into four layers:
 
-## Core Functions
+- `dryml.environments` describes software compatibility, such as Python versions and package requirements.
+- `dryml.worlds` describes resource and topology requirements and requested launch shapes.
+- `dryml.runtime` describes process-local mode, active allocation, device visibility, framework bootstrap, and guards.
+- `dryml.dispatch` runs operation specs in local subprocess workers and records execution metadata.
 
-The public context API includes:
-
-- `active_context()`
-- `use_context(...)`
-- `set_context(...)`
-- `add_context(...)`
-- `clear_context()`
-- `check_context(...)`
-
-Typical use:
+## Declaring Requirements
 
 ```python
-from dryml.context import use_context, check_context
+import dryml
 
-with use_context({"plain": {"num_cpus": 1}}):
-    check_context({"plain": {"num_cpus": 1}})
+
+@dryml.env.req(packages={"torch": ">=2.4"})
+@dryml.world.req(cpus={"min": 2}, accelerators={"gpu": {"min": 1}})
+@dryml.world.default(cpus=4, memory="16GiB", accelerators={"gpu": 1})
+@dryml.runtime.default(mode="worker", device_visibility={"policy": "assigned"})
+def train(model, data):
+    allocation = dryml.runtime.require_worker_allocation("train() uses workload resources")
+    return {"role": allocation.role, "cpus": allocation.cpus}
 ```
 
-## Resource Specs
+Decorators attach metadata only. They do not allocate resources, enter runtime, import frameworks, or spawn workers.
 
-`ResourceSpec` normalizes resource requests. Requests can include CPUs, GPUs, specific device resources, and memory.
-
-The resource pool tracks available resources and allocates them to active contexts. Failed allocation raises `InsufficientResourcesError`.
-
-## Context Containers
-
-The active context is represented as a context container. It can hold one or more backend-specific compute contexts, such as plain Python, TensorFlow, PyTorch, or JAX contexts.
-
-Contexts can be added, replaced, and cleared. `use_context(...)` is the normal scoped interface.
-
-## Backend Contexts
-
-DRYML includes backend context classes for:
-
-- plain execution
-- TensorFlow
-- PyTorch
-- JAX
-
-Backend contexts can validate the current runtime and apply best-effort runtime effects. For example, a backend context may check whether the runtime is compatible before executing backend-specific code.
-
-## Context Checks
-
-`check_context(...)` verifies that objects or object graphs can run in the active context. This is intended to catch incompatible execution environments before work starts.
-
-Objects can contribute context requirements. The checker combines requirements and compares them with the active context.
-
-## Exceptions
-
-Important exceptions:
-
-- `ContextError`: base context exception.
-- `NoContextError`: no active context was available.
-- `WrongContextError`: active context does not match required context.
-- `InsufficientResourcesError`: requested resources could not be allocated.
-- `ContextAlreadyActiveError`: an already-active context was activated again.
-- `ContextIncompatibilityError`: runtime/backend incompatibility.
-- `ContextBootstrapError`: failure while preparing process bootstrap state.
-
-## Example Pattern
+## Running Work
 
 ```python
-from dryml.context import use_context
+import dryml
 
-requirements = {
-    "plain": {
-        "num_cpus": 2,
-        "num_gpus": 0,
-    }
-}
-
-with use_context(requirements):
-    # Build, load, train, or evaluate objects here.
-    pass
+operation = dryml.operations.attach_operation_id(
+    dryml.operations.make_function_call_spec("my_project.training:train", args=["cdef-v4-model", "cdef-v4-data"])
+)
+result = dryml.dispatch.run(operation, backend="local_subprocess")
 ```
 
-## Bootstrap Notes
+Use function and method operation specs for portable dispatch. `PickledCallable` is only a same-environment convenience path.
 
-Contexts can provide environment information for workers. This matters for execution systems where child processes need environment variables, resource assignments, or backend-specific initialization.
+## Runtime Guards
 
-## Common Pitfalls
+Use `dryml.runtime.require_allocation(...)` or `require_worker_allocation(...)` in workload code. Use `assert_no_workload_allocation(...)` in orchestrator/probe code.
 
-- Do not assume a GPU exists just because a backend library is installed.
-- Keep context scopes short and explicit.
-- Release contexts with context managers instead of manually managing global state when possible.
-- Treat backend-specific runtime effects as process-local.
+Missing allocation errors point to the runtime layer because active allocation is process-local state. Unsatisfied CPU/GPU/memory constraints belong to `dryml.world.req(...)` and world compatibility checks. Missing package/software constraints belong to `dryml.env.req(...)` and environment compatibility checks.
 
 ## Related Docs
 
-- [Tensor Specs](tensor_specs.md)
-- [Models API](models.md)
+- [Annotations](annotations.md)
+- [Dispatch](dispatch.md)
+- [World/Runtime Split](world_runtime.md)

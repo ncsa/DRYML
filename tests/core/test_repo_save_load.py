@@ -116,6 +116,56 @@ def test_save_3(primary_store_set):
     assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
 
+def test_repo_save_on_close_persists_on_clean_context_exit(tmp_path):
+    store = DirStore(tmp_path / "store")
+
+    with Repo(stores=store, save_on_close=True) as repo:
+        repo.add_objects(objects.HelloStr(msg="clean"))
+
+    reopened = Repo(stores=DirStore(store.base_dir))
+    loaded = reopened.get(build_missing=False).one()
+
+    assert loaded.str_message == "clean"
+
+
+def test_repo_save_on_close_does_not_persist_on_exception_exit(tmp_path):
+    store = DirStore(tmp_path / "store")
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        with Repo(stores=store, save_on_close=True) as repo:
+            repo.add_objects(objects.HelloStr(msg="dirty"))
+            raise RuntimeError("corrupt")
+
+    reopened = Repo(stores=DirStore(store.base_dir))
+
+    assert reopened.find_defs(None).count() == 0
+
+
+def test_repo_close_save_true_persists_live_objects(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    repo.add_objects(objects.HelloStr(msg="explicit"))
+
+    repo.close(save=True)
+
+    reopened = Repo(stores=DirStore(store.base_dir))
+    loaded = reopened.get(build_missing=False).one()
+
+    assert loaded.str_message == "explicit"
+
+
+def test_repo_close_save_false_does_not_persist_live_objects(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    repo.add_objects(objects.HelloStr(msg="unsaved"))
+
+    repo.close(save=False)
+
+    reopened = Repo(stores=DirStore(store.base_dir))
+
+    assert reopened.find_defs(None).count() == 0
+
+
 @pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
 def test_closing_old_repo_does_not_break_new_repo_on_same_dirstore(tmp_path):
     store = DirStore(tmp_path / "store", query_index="sqlite")

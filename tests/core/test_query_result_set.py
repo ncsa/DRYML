@@ -182,3 +182,33 @@ def test_fixed_resultset_universe_rejects_domain_switch(tmp_path):
 
     with pytest.raises(QueryDomainError, match="Cannot switch"):
         nested_defs.query(Definition(ResultLeaf, SKIP_ARGS)).stored().defs()
+
+
+def test_object_resultset_apply_mutates_only_selected_objects(tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    first = ResultLeaf("first", repo=repo)
+    second = ResultLeaf("second", repo=repo)
+    repo.save_object(first)
+    repo.save_object(second)
+
+    results = repo.find_defs(Definition(ResultLeaf, "first")).objects()
+    returned = results.apply(lambda obj, suffix: setattr(obj, "name", obj.name + suffix), "-updated")
+
+    assert returned is results
+    assert first.name == "first-updated"
+    assert second.name == "second"
+
+
+def test_definition_resultset_apply_materializes_then_applies(tmp_path):
+    repo = Repo(stores=DirStore(tmp_path / "store"))
+    first = ResultLeaf("first", repo=repo)
+    second = ResultLeaf("second", repo=repo)
+    repo.save_object(first)
+    repo.save_object(second)
+
+    results = repo.find_defs(Definition(ResultLeaf, "second"))
+    returned = results.apply(lambda obj: setattr(obj, "name", "changed"))
+
+    assert returned.one() is second
+    assert first.name == "first"
+    assert second.name == "changed"

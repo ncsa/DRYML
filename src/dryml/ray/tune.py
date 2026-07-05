@@ -15,7 +15,7 @@ class Tune2ObjectSaver(object):
             train_state: TrainSpec = None,
             repo: Repo = None,
             test_ds: Dataset = None,
-            ctx_reqs=None,
+            world_requirements=None,
             tmp_checkpoint_dir='/tmp',
             metrics={}):
         if model is None:
@@ -34,9 +34,7 @@ class Tune2ObjectSaver(object):
             raise ValueError("Must pass test data for metrics")
         self.test_ds = test_ds
 
-        if ctx_reqs is None:
-            raise ValueError("Must pass ctx_reqs so they can be saved")
-        self.ctx_reqs = ctx_reqs
+        self.world_requirements = world_requirements
 
         self.metrics = metrics
         self.tmp_checkpoint_dir = tmp_checkpoint_dir
@@ -65,8 +63,8 @@ class Tune2ObjectSaver(object):
         # Save model to checkpoint
         self.model.save_self(f"{temp_checkpoint_dir}/model.dry")
         self.train_state.save(f"{temp_checkpoint_dir}/train_state.pkl")
-        with open(f"{temp_checkpoint_dir}/ctx_reqs.pkl", 'wb') as f:
-            f.write(pickle.dumps(self.ctx_reqs))
+        with open(f"{temp_checkpoint_dir}/world_requirements.pkl", 'wb') as f:
+            f.write(pickle.dumps(self.world_requirements))
 
         checkpoint = Checkpoint.from_directory(path=temp_checkpoint_dir)
 
@@ -115,13 +113,13 @@ class Tune2Trainer(object):
                     os.path.join(checkpoint_dir, "model.dry"),
                     repo=repo)
 
-                # Retrieve requested context requirements
-                ctx_filepath = os.path.join(checkpoint_dir, "ctx_reqs.pkl")
-                if os.path.exists(ctx_filepath):
-                    with open(ctx_filepath, 'rb') as f:
-                        ctx_reqs = pickle.loads(f.read())
+                # Retrieve requested world/resource requirements.
+                world_filepath = os.path.join(checkpoint_dir, "world_requirements.pkl")
+                if os.path.exists(world_filepath):
+                    with open(world_filepath, 'rb') as f:
+                        world_requirements = pickle.loads(f.read())
                 else:
-                    ctx_reqs = None
+                    world_requirements = None
 
         else:
             # Initialize train spec
@@ -131,21 +129,14 @@ class Tune2Trainer(object):
             model_dict = model_gen(config, repo=repo)
 
             model = model_dict['model']
-            if 'ctx_reqs' in model_dict:
-                ctx_reqs = model_dict['ctx_reqs']
+            if 'world_requirements' in model_dict:
+                world_requirements = model_dict['world_requirements']
             else:
-                ctx_reqs = model.dry_context_requirements()
+                world_requirements = None
 
-        # Get data pipeline reqs
-        if 'data_ctx' in prep_dict:
-            data_ctx_reqs = prep_dict['data_ctx']()
-
-            # Combine data and model contexts
-            ctx_reqs = dryml.context.combine_reqs(
-                ctx_reqs, data_ctx_reqs)
-
-        # Acquire context
-        dryml.context.set_context(ctx_reqs)
+        if 'data_world' in prep_dict:
+            data_world_requirements = prep_dict['data_world']()
+            world_requirements = tuple(req for req in (world_requirements, data_world_requirements) if req is not None)
 
         # Start data pipelines
         data_dict = data_gen()
@@ -158,7 +149,7 @@ class Tune2Trainer(object):
             train_state=train_state,
             repo=repo,
             test_ds=test_ds,
-            ctx_reqs=ctx_reqs,
+            world_requirements=world_requirements,
             metrics=self.metrics,)
         callbacks = [obj_saver]
 
@@ -193,7 +184,7 @@ class Tune1ObjectSaver(object):
             train_state: TrainSpec = None,
             repo: Repo = None,
             test_ds: Dataset = None,
-            ctx_reqs=None,
+            world_requirements=None,
             metrics={}):
         if model is None:
             raise ValueError("Must pass a model.")
@@ -211,9 +202,7 @@ class Tune1ObjectSaver(object):
             raise ValueError("Must pass test data for metrics")
         self.test_ds = test_ds
 
-        if ctx_reqs is None:
-            raise ValueError("Must pass ctx_reqs so they can be saved")
-        self.ctx_reqs = ctx_reqs
+        self.world_requirements = world_requirements
 
         self.metrics = metrics
 
@@ -231,8 +220,8 @@ class Tune1ObjectSaver(object):
             # Save model to checkpoint
             self.model.save_self(f"{checkpoint_dir}/model.dry")
             self.train_state.save(f"{checkpoint_dir}/train_state.pkl")
-            with open(f"{checkpoint_dir}/ctx_reqs.pkl", 'wb') as f:
-                f.write(pickle.dumps(self.ctx_reqs))
+            with open(f"{checkpoint_dir}/world_requirements.pkl", 'wb') as f:
+                f.write(pickle.dumps(self.world_requirements))
 
         # Compute test set metrics
         metric_values = {}
@@ -277,13 +266,13 @@ class Tune1Trainer(object):
                 os.path.join(checkpoint_dir, "model.dry"),
                 repo=repo)
 
-            # Retrieve requested context requirements
-            ctx_filepath = os.path.join(checkpoint_dir, "ctx_reqs.pkl")
-            if os.path.exists(ctx_filepath):
-                with open(ctx_filepath, 'rb') as f:
-                    ctx_reqs = pickle.loads(f.read())
+            # Retrieve requested world/resource requirements.
+            world_filepath = os.path.join(checkpoint_dir, "world_requirements.pkl")
+            if os.path.exists(world_filepath):
+                with open(world_filepath, 'rb') as f:
+                    world_requirements = pickle.loads(f.read())
             else:
-                ctx_reqs = None
+                world_requirements = None
 
         else:
             # Initialize train spec
@@ -293,21 +282,14 @@ class Tune1Trainer(object):
             model_dict = model_gen(config, repo=repo)
 
             model = model_dict['model']
-            if 'ctx_reqs' in model_dict:
-                ctx_reqs = model_dict['ctx_reqs']
+            if 'world_requirements' in model_dict:
+                world_requirements = model_dict['world_requirements']
             else:
-                ctx_reqs = model.dry_context_requirements()
+                world_requirements = None
 
-        # Get data pipeline reqs
-        if 'data_ctx' in prep_dict:
-            data_ctx_reqs = prep_dict['data_ctx']()
-
-            # Combine data and model contexts
-            ctx_reqs = dryml.context.combine_reqs(
-                ctx_reqs, data_ctx_reqs)
-
-        # Acquire context
-        dryml.context.set_context(ctx_reqs)
+        if 'data_world' in prep_dict:
+            data_world_requirements = prep_dict['data_world']()
+            world_requirements = tuple(req for req in (world_requirements, data_world_requirements) if req is not None)
 
         # Start data pipelines
         data_dict = data_gen()
@@ -320,7 +302,7 @@ class Tune1Trainer(object):
             train_state=train_state,
             repo=repo,
             test_ds=test_ds,
-            ctx_reqs=ctx_reqs,
+            world_requirements=world_requirements,
             metrics=self.metrics,)
         callbacks = [obj_saver]
 

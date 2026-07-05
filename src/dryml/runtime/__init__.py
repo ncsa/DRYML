@@ -10,7 +10,7 @@ from dryml.runtime.bootstrap import FrameworkBootstrapPolicy, RuntimeBootstrapPl
 from dryml.runtime.context import RuntimeBootstrapState, RuntimeState, active_runtime, active_runtime_bootstrap, active_runtime_mode, enter_runtime, reset_runtime
 from dryml.runtime.devices import DeviceVisibilityPlan, DeviceVisibilityPolicy, apply_device_visibility_plan, build_device_visibility_plan
 from dryml.runtime.decorators import default
-from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_allocation_for_legacy_compute_reqs, require_worker_allocation, require_workload_allocation
+from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_worker_allocation, require_workload_allocation
 from dryml.runtime.modes import RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec, attach_runtime_id, compute_runtime_id, make_runtime_spec, validate_runtime_spec
 
@@ -45,7 +45,6 @@ __all__ = [
     "import_configured_framework",
     "make_runtime_spec",
     "require_allocation",
-    "require_allocation_for_legacy_compute_reqs",
     "require_worker_allocation",
     "require_workload_allocation",
     "reset_runtime",

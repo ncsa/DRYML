@@ -31,13 +31,9 @@ The annotation layer now provides that declaration surface through `dryml.env.re
 
 Orchestrator and probe processes default to hidden workload accelerators through the `none` device visibility policy. Worker processes default to `assigned`, exposing only assigned devices such as `CUDA_VISIBLE_DEVICES=0` and hiding unassigned CUDA, HIP/ROCR, and XLA devices.
 
-Legacy `Compute.__compute_reqs__` dictionaries are still supported as a transitional bridge. They are checked against the active `RuntimeAllocationView`; a CPU-only allocation does not satisfy a legacy GPU requirement.
+`Compute` subclasses use runtime allocation guards only. Resource shape requirements belong in world annotations or `WorldRequirement` values and should be validated before entering worker runtime.
 
-## Legacy Packages
-
-`dryml.context` is retained as a legacy compatibility surface for older code. New code should use `dryml.worlds` and `dryml.runtime` directly.
-
-`dryml.execute` is retained as legacy local pickled-callable execution pending dispatch v2. Its subprocess worker entry path enters `dryml.runtime` worker mode and applies runtime bootstrap before loading the callable or materializing objects. Inline execution stays in the caller's current runtime and rejects legacy resource requirements unless a future explicit inline-allocation path is added.
+## Local Dispatch
 
 `dryml.dispatch.LocalSubprocessBackend` is the new spec/record/runtime-aware local path. Its worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default, applies assigned device visibility, and only then imports target functions or materializes CDef arguments from shared `DirStore` refs. This preserves the runtime setup order required for later multi-worker orchestration.
 

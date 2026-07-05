@@ -5,27 +5,17 @@ from dryml.runtime import RuntimeAllocationView, RuntimeMode, enter_runtime
 from dryml.runtime.errors import NoAllocationError
 
 
-class GpuCompute(Compute):
-    __compute_reqs__ = {"torch": {"num_gpus": 1}}
+class RuntimeGuardedCompute(Compute):
+    pass
 
 
-def test_compute_requirement_fails_with_no_allocation():
+def test_compute_pre_init_requires_runtime_allocation():
     with pytest.raises(NoAllocationError):
-        GpuCompute.__pre_init__()
+        RuntimeGuardedCompute.__pre_init__()
 
 
-def test_compute_requirement_fails_with_cpu_only_allocation():
+def test_compute_pre_init_accepts_cpu_only_worker_allocation():
     allocation = RuntimeAllocationView(cpus=(0, 1))
 
     with enter_runtime(RuntimeMode.WORKER, allocation):
-        with pytest.raises(NoAllocationError) as excinfo:
-            GpuCompute.__pre_init__()
-
-    assert excinfo.value.context["failures"]["num_gpus"] == {"required": 1, "actual": 0}
-
-
-def test_compute_requirement_passes_with_matching_gpu_allocation():
-    allocation = RuntimeAllocationView(cpus=(0, 1), accelerators={"gpu": (0,)})
-
-    with enter_runtime(RuntimeMode.WORKER, allocation):
-        GpuCompute.__pre_init__()
+        RuntimeGuardedCompute.__pre_init__()

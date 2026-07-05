@@ -1,9 +1,8 @@
-def __getattr__(name):
-    if name == "TFDataset":
-        from dryml.data.tf.dataset import TFDataset
-        return TFDataset
-    raise AttributeError(name)
+"""TensorFlow data namespace.
 
-__all__ = [
-    "TFDataset",
-]
+Legacy ``TFDataset`` has been removed. Use ``dryml.data.TFDSAdapter`` for
+TensorFlow Datasets sources and core ``dryml.data`` transforms for batching,
+mapping, shuffling, and conversion.
+"""
+
+__all__ = []

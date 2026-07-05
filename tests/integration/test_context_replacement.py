@@ -6,14 +6,15 @@ from dryml.worlds.legacy import lower_legacy_resource_requirement, lower_legacy_
 
 def test_new_world_runtime_code_does_not_import_context():
     root = Path(__file__).parents[2] / "src" / "dryml"
+    removed_module = "dryml." + "context"
     for package in (root / "worlds", root / "runtime"):
         for path in package.glob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
-                    assert all(alias.name != "dryml.context" for alias in node.names)
+                    assert all(alias.name != removed_module for alias in node.names)
                 if isinstance(node, ast.ImportFrom):
-                    assert node.module != "dryml.context"
+                    assert node.module != removed_module
 
 
 def test_legacy_resource_lowering_routes_to_worlds():

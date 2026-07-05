@@ -176,6 +176,10 @@ class DefinitionResultSet:
             )
         return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
 
+    def apply(self, func, *args, **kwargs):
+        """Materialize this definition set and apply ``func`` to each object."""
+        return self.objects().apply(func, *args, **kwargs)
+
     def replicas(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:
         return self._replicas.get(cdef, ())
 
@@ -494,3 +498,13 @@ class ObjectResultSet(Mapping):
 
     def first(self) -> Object | None:
         return next(iter(self._objects.values())) if self._objects else None
+
+    def apply(self, func, *args, **kwargs) -> "ObjectResultSet":
+        """Apply ``func`` to every loaded object in deterministic result order.
+
+        The result set itself is returned so callers can chain additional result
+        set operations while mutating or inspecting only the selected objects.
+        """
+        for obj in self._objects.values():
+            func(obj, *args, **kwargs)
+        return self

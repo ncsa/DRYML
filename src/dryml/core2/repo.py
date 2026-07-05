@@ -79,7 +79,16 @@ class Repo:
 
 
     # Helper class for saving objects
-    def __init__(self, stores=None, config: Mapping[str, Any] | None = None):
+    def __init__(self, stores=None, config: Mapping[str, Any] | None = None, *, save_on_close: bool = False):
+        """Create a repository over optional backing stores.
+
+        Args:
+            stores: Store objects or store locations backing this repository.
+            config: Runtime-only repository configuration values.
+            save_on_close: When true, explicit close and clean context-manager
+                exit save live cached objects before closing. Exception exits do
+                not autosave, so potentially corrupted objects are not persisted.
+        """
         # Initialize caches
         self.weak_obj_cache = weakref.WeakValueDictionary()
         self.strong_obj_cache = {}
@@ -90,6 +99,7 @@ class Repo:
         self.config = dict(config or {})
         self.alias_index = {}
         self._closed = False
+        self.save_on_close = save_on_close
         # Compatibility facade and live cache overlay. Store-owned indexes handle
         # persistent sources; this aggregate remains the memory backend and cache
         # source for existing APIs and `known()` cache federation.
@@ -1026,21 +1036,39 @@ class Repo:
             store.write_aliases(self.alias_index)
             store.commit()
 
-    def close(self, flush=True):
+    def close(self, flush=True, *, save: bool | None = None):
+        """Close repo-owned query resources and optionally persist live objects.
+
+        Args:
+            flush: Commit store metadata before closing.
+            save: When true, save live cached objects before closing. ``None``
+                uses the repository's ``save_on_close`` setting.
+        """
         if self._closed:
             return
+        if save is None:
+            save = self.save_on_close
+        if save:
+            self.save()
         if flush:
             self.flush()
         self._query_index.close()
         self._closed = True
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close(save=self.save_on_close and exc_type is None)
+        return False
+
     def __del__(self):
         try:
             if self.save_objs_on_deletion:
                 self.save()
-                self.close(flush=True)
+                self.close(flush=True, save=False)
             else:
-                self.close(flush=False)
+                self.close(flush=False, save=False)
         except Exception:
             pass
 
