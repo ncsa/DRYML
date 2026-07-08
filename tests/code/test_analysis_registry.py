@@ -81,3 +81,14 @@ def test_string_algorithms_argument_is_single_algorithm(requirement_targets):
 
     assert result.facts_of_kind("source")
     assert not result.diagnostics_of_code("dryml.code.unknown_analyzer")
+
+
+def test_context_metadata_propagates_to_import_path_targets(requirement_targets):
+    result = code.analyze(
+        "dryml_requirement_targets:plain_importable_function",
+        algorithms="source",
+        context=code.CodeAnalysisContext(metadata={"run_id": "audit"}),
+    )
+
+    assert result.facts_of_kind("source")
+    assert result.target.metadata["run_id"] == "audit"

@@ -118,7 +118,7 @@ def normalize_target(
             return target_from_import_path(target.import_path, allow_import=allow_import, spec=target)
         return CodeTarget(spec=target, metadata=metadata or {})
     if isinstance(target, str):
-        return target_from_import_path(target, allow_import=allow_import)
+        return target_from_import_path(target, allow_import=allow_import, metadata=metadata)
     if method_name is not None:
         cls = target if inspect.isclass(target) else type(target) if target is not None else None
         return target_from_definition_method(subject_ref, cls, method_name)
@@ -139,6 +139,7 @@ def target_from_import_path(
     *,
     allow_import: bool = True,
     spec: CodeTargetSpec | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> CodeTarget:
     """Create a target from an import path, optionally resolving it.
 
@@ -146,13 +147,14 @@ def target_from_import_path(
         path: Import path of the form ``module:qualname``.
         allow_import: Whether to import and resolve the object.
         spec: Optional existing spec to preserve metadata.
+        metadata: Optional metadata to add when creating a new import-path spec.
 
     Returns:
         A target with diagnostics for malformed or unresolved paths.
     """
 
     diagnostics: list[DiagnosticFact] = []
-    target_spec = spec or CodeTargetSpec("import_path", import_path=path)
+    target_spec = spec or CodeTargetSpec("import_path", import_path=path, metadata=metadata or {})
     parsed = _parse_import_path(path)
     if parsed is None:
         diagnostics.append(DiagnosticFact(
