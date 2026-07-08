@@ -240,6 +240,72 @@ def target_from_method(method: Callable[..., Any], *, metadata: Mapping[str, Any
     )
 
 
+def target_from_class_attribute(
+    cls: type,
+    name: str,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> CodeTarget:
+    """Create a target from a raw class attribute without descriptor binding.
+
+    Args:
+        cls: Class owning the attribute.
+        name: Attribute name to inspect with :func:`inspect.getattr_static`.
+        metadata: Optional serializable metadata to add to the target spec.
+
+    Returns:
+        A target preserving the raw descriptor for analyzers that need to inspect
+        ``staticmethod`` or ``classmethod`` metadata attached to the descriptor.
+    """
+
+    diagnostics: list[DiagnosticFact] = []
+    try:
+        raw_descriptor = inspect.getattr_static(cls, name)
+    except AttributeError as exc:
+        diagnostics.append(DiagnosticFact(
+            severity="error",
+            code="dryml.code.class_attribute_missing",
+            message=f"Class attribute {name!r} is not present on {cls.__qualname__!r}.",
+            source={"target_kind": "class_attribute", "attribute_name": name},
+            data={"error": repr(exc)},
+        ))
+        raw_descriptor = None
+
+    obj = getattr(cls, name, None)
+    if isinstance(raw_descriptor, classmethod):
+        kind = "class_method"
+    elif isinstance(raw_descriptor, staticmethod):
+        kind = "static_method"
+    elif inspect.isfunction(_unwrap_descriptor(raw_descriptor)):
+        kind = "unbound_method"
+    else:
+        kind = "unknown"
+
+    local_metadata = {
+        "module": getattr(_unwrap_descriptor(raw_descriptor), "__module__", getattr(cls, "__module__", None)),
+        "qualname": getattr(_unwrap_descriptor(raw_descriptor), "__qualname__", None),
+        "owner_module": getattr(cls, "__module__", None),
+        "owner_qualname": getattr(cls, "__qualname__", None),
+        **dict(metadata or {}),
+    }
+    spec = CodeTargetSpec(
+        kind,
+        import_path=_object_import_path(raw_descriptor),
+        method_name=name,
+        metadata=local_metadata,
+    )
+    return CodeTarget(
+        spec=spec,
+        obj=obj,
+        owner=cls,
+        attribute_name=name,
+        raw_descriptor=raw_descriptor,
+        unwrapped=_unwrap_descriptor(raw_descriptor),
+        metadata=metadata or {},
+        diagnostics=tuple(diagnostics),
+    )
+
+
 def target_from_definition_method(
     subject_ref: str | None,
     cls: type | None,
@@ -346,6 +412,7 @@ __all__ = [
     "CodeTargetSpec",
     "normalize_target",
     "target_from_callable",
+    "target_from_class_attribute",
     "target_from_definition_method",
     "target_from_import_path",
     "target_from_method",

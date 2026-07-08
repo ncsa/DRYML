@@ -44,3 +44,14 @@ def test_no_final_requirement_merging(requirement_targets):
     result = code.analyze(requirement_targets.LightningModel, algorithms=("direct_annotations",))
 
     assert len(_requirements(result, "environment")) == 2
+
+
+def test_descriptor_target_collects_outer_decorated_classmethod_and_staticmethod(requirement_targets):
+    classmethod_target = code.target_from_class_attribute(requirement_targets.ClassMethodTargets, "outer_decorated")
+    staticmethod_target = code.target_from_class_attribute(requirement_targets.StaticMethodTargets, "outer_decorated")
+
+    classmethod_result = code.analyze(classmethod_target, algorithms=("direct_annotations",))
+    staticmethod_result = code.analyze(staticmethod_target, algorithms=("direct_annotations",))
+
+    assert _requirements(classmethod_result, "environment")[0].fragment["requirements"] == ["outer-classmethod>=1"]
+    assert _requirements(staticmethod_result, "environment")[0].fragment["requirements"] == ["outer-staticmethod>=1"]

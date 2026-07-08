@@ -63,3 +63,22 @@ def test_source_spec_and_unknown_targets_are_serializable():
     assert spec.to_data()["source_spec"]["kind"] == "function"
     assert unknown.spec.kind == "unknown"
     json.dumps(unknown.spec.to_data())
+
+
+def test_class_attribute_target_preserves_raw_descriptors(requirement_targets):
+    classmethod_target = code.target_from_class_attribute(requirement_targets.ClassMethodTargets, "outer_decorated")
+    staticmethod_target = code.target_from_class_attribute(requirement_targets.StaticMethodTargets, "outer_decorated")
+
+    assert classmethod_target.spec.kind == "class_method"
+    assert staticmethod_target.spec.kind == "static_method"
+    assert classmethod_target.raw_descriptor is not classmethod_target.obj
+    assert staticmethod_target.raw_descriptor is not staticmethod_target.obj
+    assert classmethod_target.spec.method_name == "outer_decorated"
+    assert staticmethod_target.spec.metadata["owner_qualname"] == "StaticMethodTargets"
+
+
+def test_missing_class_attribute_target_diagnostic(requirement_targets):
+    target = code.target_from_class_attribute(requirement_targets.StaticMethodTargets, "missing")
+
+    assert target.spec.kind == "unknown"
+    assert target.diagnostics[0].code == "dryml.code.class_attribute_missing"

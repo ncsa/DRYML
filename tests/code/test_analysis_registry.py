@@ -61,3 +61,23 @@ def test_unknown_analyzer_becomes_diagnostic(requirement_targets):
     result = code.analyze(requirement_targets.plain_importable_function, algorithms=("does_not_exist",))
 
     assert result.diagnostics_of_code("dryml.code.unknown_analyzer")
+
+
+def test_context_validates_algorithms_policy_and_metadata(requirement_targets):
+    context = code.CodeAnalysisContext(algorithms="source", metadata={"run_id": "audit"})
+    result = code.analyze(requirement_targets.plain_importable_function, context=context)
+
+    assert context.algorithms == ("source",)
+    assert result.facts_of_kind("source")
+    assert result.target.metadata["run_id"] == "audit"
+    with pytest.raises(ValueError):
+        code.CodeAnalysisContext(diagnostics_policy="invalid")
+    with pytest.raises(TypeError):
+        code.CodeAnalysisContext(metadata=[("not", "mapping")])
+
+
+def test_string_algorithms_argument_is_single_algorithm(requirement_targets):
+    result = code.analyze(requirement_targets.plain_importable_function, algorithms="source")
+
+    assert result.facts_of_kind("source")
+    assert not result.diagnostics_of_code("dryml.code.unknown_analyzer")

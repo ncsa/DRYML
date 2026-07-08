@@ -48,6 +48,8 @@ Core public types:
 - `CodeAnalysisContext`: analysis options such as selected algorithms, source/import permissions, annotation inclusion, method-contract inclusion, and diagnostics policy.
 - `CodeAnalysisResult`: aggregate target, facts, diagnostics, `ok`, filtering helpers, and JSON-compatible serialization.
 
+`CodeAnalysisContext.metadata` is analysis-run metadata supplied by the caller. During local analysis it is copied into normalized target metadata so serialized results can retain caller provenance, but analyzers should not interpret it as dispatch requirements or make execution decisions from it.
+
 Example:
 
 ```python
@@ -115,6 +117,7 @@ Dispatch integration is intentionally deferred. Sprint 1 does not change dispatc
 - Should facts be dataclasses, records specs, or both?
 - Which diagnostics must be JSON-compatible in Sprint 1?
 - How much source-backed fallback should be accepted before probes are required?
+- Should later probe/dispatch metadata use a source-text policy such as `metadata_only`, `include_text`, or `hash_only` instead of always serializing full source text?
 
 ## Follow-Up Sprints
 

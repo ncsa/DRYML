@@ -47,7 +47,15 @@ class CodeAnalysisContext:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "algorithms", tuple(self.algorithms or ()))
+        if isinstance(self.algorithms, str):
+            algorithms = (self.algorithms,)
+        else:
+            algorithms = tuple(self.algorithms or ())
+        if self.diagnostics_policy not in {"collect", "raise"}:
+            raise ValueError("diagnostics_policy must be 'collect' or 'raise'.")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("metadata must be a mapping.")
+        object.__setattr__(self, "algorithms", algorithms)
         object.__setattr__(self, "metadata", json_compatible(self.metadata))
 
 
@@ -190,9 +198,9 @@ def analyze(
 
     context = context or CodeAnalysisContext()
     if algorithms is not None:
-        context = replace(context, algorithms=tuple(algorithms))
+        context = replace(context, algorithms=(algorithms,) if isinstance(algorithms, str) else tuple(algorithms))
     selected = context.algorithms or DEFAULT_ALGORITHMS
-    code_target = normalize_target(target, allow_import=context.allow_import)
+    code_target = normalize_target(target, allow_import=context.allow_import, metadata=context.metadata)
     result = CodeAnalysisResult(target=code_target.spec, diagnostics=code_target.diagnostics)
 
     for name in selected:
@@ -238,11 +246,11 @@ def _ensure_builtin_analyzers() -> None:
     global _BUILTINS_REGISTERED
     if _BUILTINS_REGISTERED:
         return
-    _BUILTINS_REGISTERED = True
     from .algorithms import ast_access, callables, direct_annotations, method_contracts, source, symbol_capture
 
     for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts):
         register_analyzer(module.ANALYZER, replace=True)
+    _BUILTINS_REGISTERED = True
 
 
 __all__ = [
