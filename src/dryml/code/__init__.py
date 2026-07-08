@@ -9,6 +9,7 @@ from .analysis import (
     register_analyzer,
 )
 from .callable_info import CallableInfo, analyze_callable
+from .compiler_info import CompilerInfo
 from .facts import (
     ASTAccessFact,
     AnnotationFact,
@@ -22,7 +23,6 @@ from .facts import (
     SourceFact,
     SymbolFact,
 )
-from .method import Method, traits
 from .source import SourceInfo, func_source_extract, get_source_info
 from .targets import (
     CodeTarget,
@@ -35,6 +35,7 @@ from .targets import (
     target_from_method,
 )
 from .traits import Traits
+from .method import Method, traits
 
 __all__ = [
     "ASTAccessFact",
@@ -48,6 +49,7 @@ __all__ = [
     "CodeFact",
     "CodeTarget",
     "CodeTargetSpec",
+    "CompilerInfo",
     "DiagnosticFact",
     "FunctionAnalyzer",
     "Method",

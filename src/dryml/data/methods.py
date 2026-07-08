@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dryml.code import Method, traits
+from dryml.core2.methods import Method, traits
 from dryml.core2.dtype import normalize_dtype
 from dryml.core2.tensor_spec import Dynamic, SpecTree, map_spec_tree
 

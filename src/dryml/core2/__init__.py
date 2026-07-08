@@ -17,6 +17,7 @@ from dryml.core2.config import CONFIG_MISSING, ConfigError, ConfigRef
 from dryml.core2.factory import FactorySpec
 from dryml.core2.session import configure, reset_config, status
 from dryml.core2.symbol import ImportRef, SourceSpec, resolve_symbol, symbol_ref
+from dryml.core2.methods import BatchMode, CompilerInfo, Method, Traits, traits
 from dryml.core2.cdef_graph import (
     CDefEdge,
     CDefNode,
@@ -105,6 +106,11 @@ __all__ = [
     "SourceSpec",
     "symbol_ref",
     "resolve_symbol",
+    "BatchMode",
+    "CompilerInfo",
+    "Method",
+    "Traits",
+    "traits",
     "CDefEdge",
     "CDefNode",
     "CDefOccurrence",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dryml.code as code
-from dryml.code.method import Method, traits
+from dryml.core2.methods import Method, traits
 
 
 class ExampleMethod(Method):

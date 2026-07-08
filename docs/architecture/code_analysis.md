@@ -6,7 +6,7 @@ Sprint 1 implementation note for the reusable `dryml.code` analysis API.
 
 ## Current State
 
-`dryml.code` contains a fact-oriented analysis layer plus compatibility helper modules for callable inspection, source extraction, AST access collection, `Method`, and method traits. `dryml.core2.symbol` owns import references and source-backed symbol references. The helper modules now delegate to analyzer implementations under `dryml.code.algorithms`.
+`dryml.code` contains a fact-oriented analysis layer plus compatibility helper modules for callable inspection, source extraction, and AST access collection. `dryml.core2.symbol` owns import references and source-backed symbol references. `dryml.core2.methods` owns method semantic objects such as `Method`, `Traits`, `CompilerInfo`, and the `traits` decorator. The helper modules now delegate to analyzer implementations under `dryml.code.algorithms` or re-export core semantic names for compatibility.
 
 ## Problem Statement
 
@@ -84,11 +84,23 @@ Compatibility imports remain available:
 
 ## Relationship to core2.symbol
 
-`core2.symbol` already provides stable `ImportRef` and `SourceSpec` primitives. `core2` must not depend on `dryml.code`; `dryml.code` may depend on `core2`. This keeps the core semantic model independent of higher-level analysis algorithms.
+`core2.symbol` already provides stable `ImportRef` and `SourceSpec` primitives. `core2.methods` provides stable method semantic primitives. `core2` must not depend on `dryml.code`; `dryml.code` may depend on `core2`. This keeps the core semantic model independent of higher-level analysis algorithms.
 
 ## Relationship to Method and Method Handles
 
-`Method`, method handles, `Traits`, and `CompilerInfo` likely belong closer to stable semantic model primitives, for example a future `core2.methods` area. Sprint 1 does not move them; `method_contracts` only exposes minimal facts. Method/core2 migration remains deferred to Sprint 2.
+`Method`, `Traits`, `CompilerInfo`, `BatchMode` re-export convenience, and the `traits` decorator now live under `dryml.core2.methods`. `dryml.code` re-exports these names for compatibility, but code-analysis algorithms only inspect method facts; they do not own the semantic model. Future method handle or signature semantic APIs should also live under `dryml.core2.methods` if they are introduced.
+
+Preferred import:
+
+```python
+from dryml.core2.methods import Method, Traits, CompilerInfo, traits
+```
+
+Compatibility imports remain supported:
+
+```python
+from dryml.code import Method, Traits, CompilerInfo, traits
+```
 
 ## Relationship to dispatch and probes
 
@@ -98,7 +110,6 @@ Dispatch integration is intentionally deferred. Sprint 1 does not change dispatc
 
 ## Non-Goals
 
-- This note does not move `Method`.
 - This note does not add code probes.
 - This note does not add dynamic tracing.
 
@@ -107,8 +118,11 @@ Dispatch integration is intentionally deferred. Sprint 1 does not change dispatc
 - `src/dryml/code/callable_info.py`
 - `src/dryml/code/source.py`
 - `src/dryml/code/ast_tools.py`
-- `src/dryml/code/method.py`
-- `src/dryml/code/traits.py`
+- `src/dryml/core2/methods/method.py`
+- `src/dryml/core2/methods/traits.py`
+- `src/dryml/core2/methods/compiler_info.py`
+- `src/dryml/code/method.py` compatibility wrapper
+- `src/dryml/code/traits.py` compatibility wrapper
 - `src/dryml/core2/symbol.py`
 - `src/dryml/core2/tensor_spec.py`
 
@@ -122,6 +136,6 @@ Dispatch integration is intentionally deferred. Sprint 1 does not change dispatc
 ## Follow-Up Sprints
 
 - Sprint 1: fact-oriented code analyzer API.
-- Sprint 2: Method/method-handle placement review.
+- Sprint 2: Method semantic model moved to `dryml.core2.methods`.
 - Sprint 5: code probe worker.
 - Sprint 9: optional dynamic tracing algorithm.

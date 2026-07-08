@@ -1,13 +1,5 @@
-from dataclasses import dataclass
+"""Compatibility export for DRYML method compiler metadata."""
 
-@dataclass(frozen=True, slots=True)
-class CompilerInfo:
-    pure: bool = True
-    elementwise: bool = False
-    shape_preserving: bool = False
-    opaque: bool = False
-    static_argnames: tuple[str, ...] = ()
-    tags: frozenset[str] = frozenset()
+from dryml.core2.methods.compiler_info import CompilerInfo
 
-
-
+__all__ = ["CompilerInfo"]

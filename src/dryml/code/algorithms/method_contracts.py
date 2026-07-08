@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, FunctionAnalyzer
-from dryml.code.facts import DiagnosticFact, MethodContractFact
+from dryml.code.facts import MethodContractFact
 from dryml.code.targets import CodeTarget
+from dryml.core2.methods import Method
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
@@ -10,17 +11,6 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 
     if not context.include_method_contracts:
         return CodeAnalysisResult(target=target.spec)
-    try:
-        from dryml.code.method import Method
-    except Exception as exc:
-        return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
-            severity="warning",
-            code="dryml.code.method_contract_unsupported",
-            message="Method contract analysis could not import dryml.code.method.",
-            source={"analyzer": "method_contracts", "target_kind": target.spec.kind},
-            data={"error": repr(exc)},
-        ),))
-
     obj = target.obj
     cls = obj if isinstance(obj, type) else type(obj) if isinstance(obj, Method) else None
     if cls is None or not issubclass(cls, Method):
