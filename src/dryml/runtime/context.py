@@ -31,6 +31,7 @@ class RuntimeBootstrapState:
     mode: RuntimeMode
     frameworks: frozenset[str] = field(default_factory=frozenset)
     env_updates: Mapping[str, str] = field(default_factory=dict)
+    framework_results: Mapping[str, Any] = field(default_factory=dict)
     allocation_fingerprint: str | None = None
     strict_preimport: bool = False
 

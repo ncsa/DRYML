@@ -160,11 +160,13 @@ Local execution goes through `dryml.dispatch` and canonical operation specs:
 
 ```python
 import dryml
+from dryml.core2.store.dir import DirStore
 
 operation = dryml.operations.attach_operation_id(
     dryml.operations.make_function_call_spec("my_package.tasks:add", args=[2, 3])
 )
-result = dryml.dispatch.run(operation, backend="local_subprocess")
+store = DirStore("dryml-workdir/store", query_index="none")
+result = dryml.dispatch.run(operation, backend="local_subprocess", store=store)
 assert result.status == "ok"
 assert result.result_canonical == 5
 ```

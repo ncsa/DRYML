@@ -179,6 +179,7 @@ def _state_from_plan(plan: RuntimeBootstrapPlan) -> RuntimeBootstrapState:
         mode=plan.runtime_spec.mode,
         frameworks=frozenset(plan.framework_results),
         env_updates=env_updates,
+        framework_results=plan.framework_results,
         allocation_fingerprint=repr(plan.allocation_view),
         strict_preimport=plan.strict_preimport,
     )

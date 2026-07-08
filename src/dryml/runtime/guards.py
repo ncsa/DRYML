@@ -83,9 +83,28 @@ def import_configured_framework(framework_name: str, module_name: str | None = N
 
     target = module_name or framework_name
     if target in sys.modules or framework_name in sys.modules:
-        return importlib.import_module(target)
+        module = importlib.import_module(target)
+        _apply_framework_post_import(framework_name)
+        return module
     assert_framework_import_configured(framework_name)
-    return importlib.import_module(target)
+    module = importlib.import_module(target)
+    _apply_framework_post_import(framework_name)
+    return module
+
+
+def _apply_framework_post_import(framework_name: str) -> None:
+    bootstrap = active_runtime_bootstrap()
+    if bootstrap is None or framework_name not in bootstrap.frameworks:
+        return
+    result = bootstrap.framework_results.get(framework_name)
+    if result is None:
+        return
+
+    from .frameworks import default_adapters
+
+    adapter = default_adapters().get(framework_name)
+    if adapter is not None:
+        adapter.apply_post_import(result)
 
 
 def require_workload_allocation(reason: str | None = None) -> RuntimeAllocationView:

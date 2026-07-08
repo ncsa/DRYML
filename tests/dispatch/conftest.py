@@ -59,6 +59,7 @@ def target_module(tmp_path):
                     "mode": active_runtime_mode().value,
                     "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV),
                     "marker": getattr(module, "MARKER", None),
+                    "threads": getattr(module, "THREADS", None),
                 }
 
             def allocation_facts():
