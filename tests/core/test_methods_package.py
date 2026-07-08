@@ -90,8 +90,10 @@ def test_traits_defaults_conversion_matching_specificity_and_hashability():
     assert both.backend is Backend.numpy
     assert both.batch_mode is BatchMode.batched
     assert default.match(numpy)
-    with pytest.raises(AttributeError):
-        default.match(numpy, strict=True)
+    assert default.match(numpy, strict=True) is False
+    assert default.match(Traits(), strict=True) is True
+    assert numpy.match(Traits(backend=Backend.numpy), strict=True) is True
+    assert both.match(Traits(backend=Backend.numpy, batch_mode=BatchMode.batched), strict=True) is True
     assert not Traits(backend="numpy").match(Traits(backend="tf"))
     assert not Traits(batch_mode="batched").match(Traits(batch_mode="element"))
     assert [default.specificity, numpy.specificity, batched.specificity, both.specificity] == [0, 1, 1, 2]
@@ -113,7 +115,7 @@ def test_traits_decorator_attaches_metadata_and_preserves_callable():
 
 def test_method_subclass_collection_dispatch_and_user_call_preservation():
     assert len(Echo.__trait_impls__) == 2
-    assert Echo().__call__ is not Method._dispatch_call
+    assert Echo.__call__ is Method._dispatch_call
     assert Echo().resolve_impl(Traits(backend="numpy"))("x") == ("numpy", "x")
     assert Echo().resolve_impl(Traits(backend=None))("x") == ("numpy", "x")
     assert ManualCall()("x") == ("manual", "x")
@@ -166,6 +168,15 @@ def test_core2_methods_import_does_not_import_dryml_code():
     script = """
 import sys
 import dryml.core2.methods
+assert 'dryml.code' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_core2_import_does_not_import_dryml_code():
+    script = """
+import sys
+import dryml.core2
 assert 'dryml.code' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", script], check=True)

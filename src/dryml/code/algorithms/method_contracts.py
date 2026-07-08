@@ -7,7 +7,7 @@ from dryml.core2.methods import Method
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
-    """Emit minimal DRYML Method contract facts without moving Method."""
+    """Emit minimal DRYML Method contract facts from core2 semantics."""
 
     if not context.include_method_contracts:
         return CodeAnalysisResult(target=target.spec)

@@ -39,8 +39,8 @@ class Traits:
 
         if strict:
             return (
-                self.backend == rhs.backend and
-                self.batch_mode == rhs.batch_mode)
+                self.backend is rhs.backend and
+                self.batch_mode is rhs.batch_mode)
 
         if self.backend is not None and rhs.backend is not None and self.backend != rhs.backend:
             return False
