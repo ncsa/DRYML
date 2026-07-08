@@ -4,142 +4,118 @@
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
 [![codecov](https://codecov.io/gh/ncsa/dryml/branch/main/graph/badge.svg?token=ELz0TSuOzo)](https://codecov.io/gh/ncsa/dryml)
 
-Don't Repeat Yourself Machine Learning: A Machine Learning library to reduce code duplication, automate testing, perform hyper paramter searches, and ease model serialization.
+**Don't Repeat Yourself Machine Learning:** A meta-library library to reduce code duplication, automate model testing, perform hyper parameters searches, simplify model/experiment naming, encourage object separability, ease code analysis, automate model testing, perform hyper parameter searches, and improve serialization.
 
-DRYML aims to empower the Machine Learning practitioner to spend less time writing boilerplate code, and more time implementing new techniques. DRYML provides a model serialization framework along with serialization implementation for many common ML frameworks and model types, a framework for defining and training models on a specific problem, and a system to compare models from different ML frameworks on the same footing.
+DRYML provides `Definition` a new graph-based object identity model enabling users to describe complex composite objects using simple components. A `Definition` is a kind of 'super' factory object,  you specify the class you want to create followed by its args, then kwargs just like you would pass its constructor. However, `Definition` can be arbitrarily nested allowing the user to describe these composite objects.
 
-## DRYML Programming Philosophy
+`Definition` forms the starting point though, using `.concretize()`, a `Definition` object can be 'resolved' into a `ConcreteDefinition` where all default args are filled in, and unique ids are populated. `ConcreteDefinition` uniquely identifies a specific object, is immutable and hashable. `ConcreteDefinition` can also be used as a recipe to build its `Object` using `.build()`. `ConcreteDefinition` itself is lightweight and is easy to serialize and pass around.
 
-### Easy Object Serialization
+When DRYML serializes an `Object` to disk, it uses a `Repo` and one or more backing `Store`s. Stores can contain any number of other `Object`s. A `Definition` can be turned into a `Selector` with the `.as_selector()` method. `Selector`s form a graph query language enabling you to pick a particular `Object` out of the store. Thus ends the difficult task of creating unique names for all of your trained models! refer to them with their unique identity! `Definition`s and hence `Selector`s can also be under-specified and can be made to match multiple different objects. This enables you to quickly grab a particular class of `Object` from your `Store`s.
 
-All DRYML `Object`s can be uniquely identified, and serialized to disk. Once saved, you can load `Object`s directly from disk without having to first build a holding object as originally constructed. This allows for instance, Neural Net objects to be initialized with the correct parameters before loading the model weights without user intervention. Loading an `Object` consists of a single command `load_object`. Basic save/load logic is available for some major ML platforms, but the user is able and encouraged to implement new `Object`s with custom save/load methods and so is extendable to any ML system.
+`Definition`s can also be passed `Par`s which can define a distribution over possible values. Then `Definition`'s `.as_space()` method produces a `SearchSpace` object. `SearchSpace`'s `.sample()` method produces a `Definition` which is sampled from the defined space. `SearchSpace`'s `.support_selector()` method produces a `Selector` which matches any `ConcreteDefinition` that is producable by the `SearchSpace`. That's extremely useful for finding models in your `Store`s for a particular hyperparameter experiment!
 
-### Reuse Model Components
+![Definition / ConcreteDefinition relationship](docs/assets/dryml_definition_graph.svg)
 
-DRYML borrows from the Entity Component System (ECS) programming pattern, and many Model types are created from components which are attached to the model, and can be reused. These can include training procedure, optimization algorithm, loss function, and the underlying NN model itself. This compartmentalization allows us to enable hyperparameter searches over nearly any parameter of your ML algorithm from the NN topology, from the optimizer learning rate, to the training procedure. It also allows the user to define a complex training procedure once, and then reuse it for multiple related problems in the future. Centering the composability of training experiments also allows the user to separate the components after a training experiment is complete. Composable and Separable. DRYML also has defined training procedures for some common ML frameworks.
+DRYML aims to be as lightweight as possible. The user should be able to grab only the they need and nothing else. It does not pull in heavy dependencies unless the user wants them. Most `dryml` submodules are separable and can be used without the rest of DRYML's machinery as well. Use what you like and leave the rest!
 
-### Compare Models Between Frameworks
 
-Many ML Problems can be tackled by different ML Frameworks. DRYML's API places all supported Frameworks on equal footing. All models output data in the form of DRYML Datasets. This means metrics on Datasets can be reused for models in different frameworks and models from different frameworks can be compared directly, allowing the ML practictioner to make decisions about which method is best for their problem. Models can also be easily chained together
+# The DRYML Object Graph
 
-### Allow Frameworks to work together
-
-Modern ML frameworks such as tensorflow and pytorch are greedy about GPU use. DRYML implements a context system to enforce constraints on these frameworks when possible. The context system also provides a resource request API to allow the user to request the types of resources each framework is allowed to use. This allows elements from multiple frameworks to co-exist within the same data pipeline. For example, we can use a pytorch dataset and preprocessing with a tensorflow machine learning model.
-
-## Bringing ML Frameworks together
-
-The following ML Frameworks are currently supported, or planned to be supported
-
-* Tensorflow (Initial support complete)
-* Pytorch (Initial support complete)
-* Sklearn (Initial support complete)
-* XGBoost (Initial support complete)
-* Statsmodels (support planned)
-
-## DRYML Major Components
-
-### DRYML `Object` and `ObjectDef`
-
-The DRYML API provides the `Object` class which automatically implements all basic machinery for automatic object serialization. Any class you create which you want to serialize must inherit from the `Object` class. Here's a simple example:
+As an example, let's look at a torch `Experiment`. Here's how you might build it up:
 
 ```python
->>> from dryml import Object
->>> class Data(Object):
-...     def __init__(self, data):
-...         pass
-... 
->>> data_obj = Data([1, 2, 3, 4, 5])
->>> data_obj.dry_args
-([1, 2, 3, 4, 5],)
->>> data_obj.dry_kwargs
-{'dry_id': 'e18d670c-b3b8-41b3-a941-3c2f7bf0b11e'}
+import numpy as np
+import torch
+
+from dryml.data import ArrayDataset
+from dryml.models import Experiment
+from dryml.models.torch import Optimizer, Sequential, Training
+
+x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
+y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
+
+train_data = ArrayDataset((x, y))
+
+model = Sequential(layer_defs=(
+    ("Linear", (1, 1), {}),
+))
+
+optimizer = Optimizer(torch.optim.SGD, target=model, lr=0.01)
+
+train_fn = Training(
+    optimizer=optimizer,
+    loss_cls=torch.nn.MSELoss,
+    epochs=2,
+    batch_size=2,
+    verbose=0,
+)
+
+experiment = Experiment(
+    model=model,
+    train_fn=train_fn,
+    train_data=train_data,
+)
 ```
 
-We can see that `Object` gives the new `Data` class some extra powers! It remembers the arguments used to create it, and it receives a unique identifier (if you don't specify it yourself!). `data_obj` can also be easily serialized to disk with the `save_self` member method or `save_object` global method. Let's see that here:
+And here is a diagram of this object:
+![Composite Object: Experiment](docs/assets/dryml_experiment_concrete_definition.svg)
+
+For the object above, `experiment.definition` is a `ConcreteDefinition` rooted at
+`Experiment`, with child `ConcreteDefinition`s for the model, training function,
+optimizer, and dataset:
 
 ```python
->>> from dryml import save_object, load_object
->>> save_object(data_obj, 'test.dry')
-True
->>> new_obj = load_object('test.dry')
->>> new_obj
-{'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': ([1, 2, 3, 4, 5],), 'dry_kwargs': {'dry_id': 'e18d670c-b3b8-41b3-a941-3c2f7bf0b11e'}}
+mdl_cdef = ConcreteDefinition(
+    ImportRef(module="dryml.models.torch.base", qualname="Sequential"),
+    F(FactorySpec(target="Linear", args=(1, 1), kwargs=F{})),
+)
+ConcreteDefinition(
+    ImportRef(module="dryml.models.experiment", qualname="Experiment"),
+    model=mdl_cdef,
+    train_fn=ConcreteDefinition(
+        ImportRef(module="dryml.models.torch.base", qualname="Training"),
+        optimizer=ConcreteDefinition(
+            ImportRef(module="dryml.models.torch.base", qualname="Optimizer"),
+            ImportRef(module="torch.optim.sgd", qualname="SGD"),
+            target=mdl_cdef,
+            lr=0.01,
+        ),
+        loss_cls=ImportRef(module="torch.nn.modules.loss", qualname="MSELoss"),
+        epochs=2,
+        batch_size=2,
+        verbose=0,
+    ),
+    train_data=ConcreteDefinition(
+        ImportRef(module="dryml.data.source", qualname="ArrayDataset"),
+        F(
+            FNDArray(shape=(4, 1), dtype=float32, writeable=False),
+            FNDArray(shape=(4, 1), dtype=float32, writeable=False),
+        ),
+    ),
+)
 ```
 
-Now, why not just use `pickle` or `dill`? There is one major issue with that. `pickle` and `dill` tries to save every python object contained within the object you're trying to save. This will fail if your model object contains data which isn't supported by these major serialization platforms! Tensorflow tensors for example aren't supported.
+# Major DRYML submodules
 
-If we want to add the ability for an `Object` to store an internal state, we need to implement the `save_object_imp` and `load_object_imp` methods as well.
+| Submodule | Use it for |
+|---|---|
+| `dryml.core2` | Core `Object`, `Definition`, `ConcreteDefinition`, repository, store, selector, and graph-query machinery. |
+| `dryml.data` | Re-iterable datasets, source adapters, batching/shuffling, mapping, projection, and other dataset pipeline building blocks. |
+| `dryml.models` | Composable experiment/model abstractions, train functions, train state, and backend model wrappers. |
+| `dryml.tf`, `dryml.torch`, `dryml.jax`, `dryml.numpy` | Framework-specific dtype, tensor spec, and backend integration utilities without requiring every framework at import time. |
+| `dryml.environments` | Software environment requirements, compatibility checks, environment IDs, and environment probe records. |
+| `dryml.worlds` | Resource/topology requirements and allocations, such as CPU, memory, accelerator, role, and process specs. |
+| `dryml.runtime` | Process-local runtime mode, active allocation, device visibility, framework bootstrap, and import/workload guardrails. |
+| `dryml.annotations` | Decorators and metadata collection for attaching environment, world, and runtime requirements to code. |
+| `dryml.operations` | Portable function and method call specifications used by execution and dispatch layers. |
+| `dryml.dispatch` | Local subprocess/local-world execution, worker protocol, cancellation, logs, and dispatch result handling. |
+| `dryml.records` | Structured records for environments, execution, representations, products, logs, and sidecar metadata. |
+| `dryml.formats` | Stable IDs, refs, envelopes, and canonical serialization helpers for store and record metadata. |
+| `dryml.artifacts` | Lightweight artifact abstractions for scalars, datasets, and result products. |
 
-`data_obj` has another ability too. It has the method `definition` which builds an `ObjectDef` object matching the arguments `data_obj` was constructed with. Let's take a quick look at that.
+# DRYML Major Components
 
-```python
->>> obj_def = data_obj.definition()
->>> obj_def
-{'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': ([1, 2, 3, 4, 5],), 'dry_kwargs': {'dry_id': 'e18d670c-b3b8-41b3-a941-3c2f7bf0b11e'}}
->>> new_obj_2 = obj_def.build()
->>> new_obj_2
-{'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': ([1, 2, 3, 4, 5],), 'dry_kwargs': {'dry_id': 'e18d670c-b3b8-41b3-a941-3c2f7bf0b11e'}}
->>> new_obj_2.dry_args
-([1, 2, 3, 4, 5],)
-```
-
-So we can see that `ObjectDef` is a factory object creating objects matching the arguments used to initially construct `data_obj`!. 
-
-We can create new `ObjectDef`s directly and use it to create new objects with different definitions! Let's look at that here:
-
-```python
->>> from dryml import ObjectDef
->>> obj_def_2 = ObjectDef(Data, 3)
->>> obj_def_2
-{'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (3,), 'dry_kwargs': {}}
->>> test_obj_2 = obj_def_2.build()
->>> test_obj_2.dry_args
-(3,)
-```
-
-This is great for creating copies of an object which contains internal data that is randomly initialized. We can for example, create many copies of the same neural network, train them, and see how well each network trains.
-
-
-### DRYML `Repo` and `Selector`
-
-A major issue working with many machine learning models is we want to try different things, which means different models and parameters. This can get unyieldy as the variety of models we're interested in trying gets larger. DRYML introduces the `Repo` and `Selector` types to help solve this issue. Any `Object` can be added to a `Repo`, and `Repo`s methods can be used to automate saving, loading, and application of a method across a collection of `Objects`. `Selector` is a type which can match properties of an `Object`. It's created similarly to `ObjectDef` and is a callable object. When passed an `ObjectDef` or `Object`, it indicates with a `bool` whether that object is compatible with the `Selector`. With `Selector`, `Repo` can return only those objects contained which match the `Selector`. Let's look at this now.
-
-First, let's create a `Repo` and save a few objects.
-
-```python
->>> repo = Repo(directory='./test', create=True)
->>> obj_def = ObjectDef(Data, 1)
->>> obj_def
-{'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (1,), 'dry_kwargs': {}}
->>> for i in range(5):
-...     obj = obj_def.build()
-...     repo.add_object(obj)
-... 
->>> obj_def_2 = ObjectDef(Data, 2)
->>> for i in range(5):
-...     obj = obj_def_2.build()
-...     repo.add_object(obj)
-... 
->>> len(repo)
-10
-```
-
-Do now our repo has 10 objects, 5 of each type. Let's use a `Selector` to grab only those `Objects` with a 2.
-
-```python
->>> repo.get(Selector(Data, obj_args=(2,)))
-Traceback (most recent call last):
-  File "<stdin>", line 1, in <module>
-TypeError: __init__() got an unexpected keyword argument 'obj_args'
->>> repo.get(Selector(Data, args=(2,)))
-[{'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (2,), 'dry_kwargs': {'dry_id': '99d796f9-6bc6-4341-947e-94b1b89a9ff3'}}, {'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (2,), 'dry_kwargs': {'dry_id': 'b9208924-8714-448a-b280-d63eefa758a7'}}, {'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (2,), 'dry_kwargs': {'dry_id': 'deb0b98b-6ec7-4a98-a98f-81cd0c9b3f3f'}}, {'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (2,), 'dry_kwargs': {'dry_id': '77561cf0-bdf5-4ae0-b7d8-9b9302544cd8'}}, {'cls': <class '__main__.Data'>, 'dry_mut': False, 'dry_args': (2,), 'dry_kwargs': {'dry_id': 'c256d4c2-45d0-495a-8b67-e29f4d5e824f'}}]
->>> len(repo.get(Selector(Data, args=(2,))))
-5
-```
-
-And now we can work with the selected models!
-
-### DRYML Dataset
+## DRYML Dataset
 
 The DRYML API provides the `Dataset` class which represents a machine learning dataset. It presents a number of useful methods for working with data, and also transformations to change datasets defined within major machine learning systems like `tensorflow` or `pytorch` into a more relevant framework or data type. We'll create a small Dataset here, and look at the `unbatch`, and `peek` methods.
 
@@ -168,7 +144,7 @@ TensorShape([10, 10])
 
 We can also see that `tf` turns the Dataset into a `TFDataset` which is backed by a `tf.data.Dataset`. Thus the elements retrievable become tensorflow `Tensor`s. Similarly, `torch` turns the `Dataset` into a `TorchDataset` which is backed by a `torch.utils.data.IterableDataset`.
 
-### Runtime, Worlds, And Dispatch
+## Runtime, Worlds, And Dispatch
 
 DRYML now separates software requirements, resource planning, process-local runtime state, and execution.
 

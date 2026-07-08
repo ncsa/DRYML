@@ -131,3 +131,7 @@ dmypy.json
 # Vim
 *.swp
 *.swo
+
+# Latex
+*.aux
+*.pdf
