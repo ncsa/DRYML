@@ -7,6 +7,20 @@ import pytest
 @pytest.fixture()
 def target_module(tmp_path):
     module = tmp_path / "dispatch_target.py"
+    fake_torch = tmp_path / "torch.py"
+    fake_torch.write_text(
+        textwrap.dedent(
+            '''
+            MARKER = "fake-dispatch-torch"
+            THREADS = None
+
+            def set_num_threads(value):
+                global THREADS
+                THREADS = value
+            '''
+        ),
+        encoding="utf-8",
+    )
     module.write_text(
         textwrap.dedent(
             '''
@@ -16,7 +30,7 @@ def target_module(tmp_path):
             import time
 
             from dryml.core2.object import Pickleable
-            from dryml.runtime import BOOTSTRAP_MARKER_ENV, active_runtime, active_runtime_mode
+            from dryml.runtime import BOOTSTRAP_MARKER_ENV, active_runtime, active_runtime_mode, import_configured_framework
 
             IMPORT_RUNTIME_MODE = active_runtime_mode().value
 
@@ -38,6 +52,14 @@ def target_module(tmp_path):
 
             def runtime_status():
                 return {"mode": active_runtime_mode().value, "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV), "import_mode": IMPORT_RUNTIME_MODE}
+
+            def configured_torch_import_status():
+                module = import_configured_framework("torch")
+                return {
+                    "mode": active_runtime_mode().value,
+                    "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV),
+                    "marker": getattr(module, "MARKER", None),
+                }
 
             def allocation_facts():
                 runtime = active_runtime()

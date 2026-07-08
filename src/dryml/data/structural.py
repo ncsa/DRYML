@@ -5,21 +5,8 @@ import itertools
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.tensor_spec import SpecTree, batch_from_spec_tree, batch_spec_tree, unbatch_spec_tree
 from dryml.data.collate import default_collate
-from dryml.data.dataset import Dataset
+from dryml.data.dataset import Dataset, dataset_cardinality
 from dryml.data.split import default_split
-
-
-def _as_cardinality(value):
-    if isinstance(value, Cardinality):
-        return value
-    return Cardinality.finite(int(value))
-
-
-def _dataset_cardinality(dataset: Dataset) -> Cardinality:
-    try:
-        return _as_cardinality(dataset.__len__())
-    except NotImplementedError:
-        return Cardinality.UNKNOWN
 
 
 class Batch(Dataset):
@@ -51,7 +38,7 @@ class Batch(Dataset):
             yield collate(batch)
 
     def __len__(self) -> Cardinality:
-        src_cardinality = _dataset_cardinality(self.src)
+        src_cardinality = dataset_cardinality(self.src)
         if src_cardinality.is_infinite:
             return Cardinality.INFINITE
         if src_cardinality.is_unknown:
@@ -87,7 +74,7 @@ class Unbatch(Dataset):
 
     def __len__(self) -> Cardinality:
         if isinstance(self.src, Batch):
-            source_cardinality = _dataset_cardinality(self.src.src)
+            source_cardinality = dataset_cardinality(self.src.src)
             if source_cardinality.is_unknown:
                 return Cardinality.UNKNOWN
             if source_cardinality.is_infinite:
@@ -98,7 +85,7 @@ class Unbatch(Dataset):
                 n = (n // self.src.batch_size) * self.src.batch_size
             return Cardinality.finite(n)
 
-        src_cardinality = _dataset_cardinality(self.src)
+        src_cardinality = dataset_cardinality(self.src)
         if src_cardinality.is_infinite:
             batch = batch_from_spec_tree(self.src.spec)
             if isinstance(batch, int) and batch > 0:
@@ -118,9 +105,9 @@ class Take(Dataset):
         yield from itertools.islice(iter(self.src), self.n)
 
     def __len__(self) -> Cardinality:
-        src_cardinality = _dataset_cardinality(self.src)
+        src_cardinality = dataset_cardinality(self.src)
         if src_cardinality.is_unknown:
-            return Cardinality.finite(self.n)
+            return Cardinality.UNKNOWN
         if src_cardinality.is_infinite:
             return Cardinality.finite(self.n)
         return Cardinality.finite(min(self.n, src_cardinality.require_finite()))
@@ -144,7 +131,7 @@ class Skip(Dataset):
         yield from it
 
     def __len__(self) -> Cardinality:
-        src_cardinality = _dataset_cardinality(self.src)
+        src_cardinality = dataset_cardinality(self.src)
         if src_cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if src_cardinality.is_infinite:
@@ -171,7 +158,7 @@ class Repeat(Dataset):
     def __len__(self) -> Cardinality:
         if self.count is None:
             return Cardinality.INFINITE
-        src_cardinality = _dataset_cardinality(self.src)
+        src_cardinality = dataset_cardinality(self.src)
         if src_cardinality.is_unknown:
             return Cardinality.UNKNOWN
         if src_cardinality.is_infinite:
@@ -210,7 +197,7 @@ class Shuffle(Dataset):
                 pass
 
     def __len__(self) -> Cardinality:
-        return _dataset_cardinality(self.src)
+        return dataset_cardinality(self.src)
 
 
 __all__ = ["Batch", "Repeat", "Shuffle", "Skip", "Take", "Unbatch"]

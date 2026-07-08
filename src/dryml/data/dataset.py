@@ -10,6 +10,19 @@ from dryml.core2.tensor_spec import SpecTree
 T = TypeVar("T")
 
 
+def as_cardinality(value) -> Cardinality:
+    if isinstance(value, Cardinality):
+        return value
+    return Cardinality.finite(int(value))
+
+
+def dataset_cardinality(dataset: "Dataset") -> Cardinality:
+    try:
+        return as_cardinality(dataset.__len__())
+    except NotImplementedError:
+        return Cardinality.UNKNOWN
+
+
 class Dataset(Object, Generic[T]):
     """
     Base iterable dataset.
@@ -81,4 +94,4 @@ class Map(Dataset):
             yield impl(item)
 
     def __len__(self) -> Cardinality:
-        return self.src.__len__()
+        return dataset_cardinality(self.src)

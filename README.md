@@ -117,32 +117,25 @@ ConcreteDefinition(
 
 ## DRYML Dataset
 
-The DRYML API provides the `Dataset` class which represents a machine learning dataset. It presents a number of useful methods for working with data, and also transformations to change datasets defined within major machine learning systems like `tensorflow` or `pytorch` into a more relevant framework or data type. We'll create a small Dataset here, and look at the `unbatch`, and `peek` methods.
+The DRYML API provides the `Dataset` class for re-iterable machine learning datasets. Source adapters such as `ArrayDataset`, `TFDSAdapter`, and `TorchDatasetAdapter` bring external data into the DRYML dataset API, while transforms such as `Batch`, `Unbatch`, `Map`, and `Shuffle` build reusable data pipelines.
 
 ```python
 >>> import numpy as np
->>> num_examples = 32
->>> data_shape = (10, 10)
->>> data = np.random.random((num_examples,)+data_shape)
->>> data.shape
-(32, 10, 10)
->>> from dryml.data import NumpyDataset
->>> data_ds = NumpyDataset(data)
+>>> from dryml.data import ArrayDataset, Batch, Unbatch
+>>> data = np.random.random((32, 10, 10)).astype("float32")
+>>> data_ds = ArrayDataset(data)
 >>> data_ds.peek().shape
-(32, 10, 10)
+(10, 10)
 >>> type(data_ds.peek())
 <class 'numpy.ndarray'>
->>> type(data_ds.tf().unbatch().peek())
-<class 'tensorflow.python.framework.ops.EagerTensor'>
->>> data_ds.tf().peek().shape
-TensorShape([32, 10, 10])
->>> data_ds.tf().unbatch().peek().shape
-TensorShape([10, 10])
->>> type(data_ds.torch().peek())
-<class 'torch.Tensor'>
+>>> batched = Batch(data_ds, 8)
+>>> batched.peek().shape
+(8, 10, 10)
+>>> Unbatch(batched).peek().shape
+(10, 10)
 ```
 
-We can also see that `tf` turns the Dataset into a `TFDataset` which is backed by a `tf.data.Dataset`. Thus the elements retrievable become tensorflow `Tensor`s. Similarly, `torch` turns the `Dataset` into a `TorchDataset` which is backed by a `torch.utils.data.IterableDataset`.
+Use `TFDSAdapter` for TensorFlow Datasets sources and `TorchDatasetAdapter` for `torch.utils.data.Dataset` or `IterableDataset` sources. The old framework-specific `TFDataset` and `TorchDataset` wrappers have been removed in favor of these source adapters plus the core DRYML dataset transforms.
 
 ## Runtime, Worlds, And Dispatch
 

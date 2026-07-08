@@ -201,6 +201,31 @@ def test_shuffle_preserves_source_cardinality_modes(source_factory, expected):
     assert Shuffle(source_factory(), 3, seed=17).__len__() == expected
 
 
+@pytest.mark.parametrize(
+    ("source_factory", "expected"),
+    [
+        (_finite_dataset, Cardinality.finite(3)),
+        (_unknown_dataset, Cardinality.UNKNOWN),
+        (_infinite_dataset, Cardinality.finite(3)),
+        (_unavailable_dataset, Cardinality.UNKNOWN),
+    ],
+)
+def test_take_cardinality_handles_source_cardinality_modes(source_factory, expected):
+    assert Take(source_factory(), 3).__len__() == expected
+
+
+def test_map_preserves_unknown_for_unavailable_source_cardinality():
+    assert Map(_unavailable_dataset(), Cast("float32")).__len__() == Cardinality.UNKNOWN
+
+
+def test_zip_preserves_unknown_for_unavailable_source_cardinality():
+    assert Zip(_finite_dataset(), _unavailable_dataset()).__len__() == Cardinality.UNKNOWN
+
+
+def test_chain_preserves_unknown_for_unavailable_source_cardinality():
+    assert Chain(_finite_dataset(), _unavailable_dataset()).__len__() == Cardinality.UNKNOWN
+
+
 def test_shuffle_preserves_count_and_multiset_for_finite_sources():
     out = [_canonical(item) for item in Shuffle(_finite_dataset(7), 3, seed=23)]
 
