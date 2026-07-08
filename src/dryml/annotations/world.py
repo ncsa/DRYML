@@ -72,17 +72,31 @@ def default_fragment_data(
 
 
 def req(**kwargs: Any):
-    """Decorate a target with a hard world/resource requirement."""
+    """Decorate a target with a hard world/resource requirement.
+
+    Annotation metadata fields ``source``, ``priority``, and ``merge_policy``
+    are stored on the annotation fragment and are not included in the world
+    requirement payload.
+    """
 
     source = kwargs.pop("source", None)
-    return require(namespace=WORLD, fragment=requirement_fragment(**kwargs), source=source)
+    priority = kwargs.pop("priority", 0)
+    merge_policy = kwargs.pop("merge_policy", None)
+    return require(namespace=WORLD, fragment=requirement_fragment(**kwargs), source=source, priority=priority, merge_policy=merge_policy)
 
 
 def default(**kwargs: Any):
-    """Decorate a target with an overrideable default world spec."""
+    """Decorate a target with an overrideable default world spec.
+
+    Annotation metadata fields ``source``, ``priority``, and ``merge_policy``
+    are stored on the annotation fragment and are not included in the world
+    default payload.
+    """
 
     source = kwargs.pop("source", None)
-    return default_fragment(namespace=WORLD, fragment=default_fragment_data(**kwargs), source=source)
+    priority = kwargs.pop("priority", 0)
+    merge_policy = kwargs.pop("merge_policy", None)
+    return default_fragment(namespace=WORLD, fragment=default_fragment_data(**kwargs), source=source, priority=priority, merge_policy=merge_policy)
 
 
 def _resources(cpus: Any, memory: Any, accelerators: Mapping[str, Any] | None, devices: Mapping[str, Any] | None, named: Mapping[str, Any] | None) -> dict[str, Any]:

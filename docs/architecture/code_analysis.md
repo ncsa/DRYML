@@ -23,7 +23,7 @@ Dispatch, probes, annotations, and later analyzers need shared answers about Pyt
 - Source location and source text extraction.
 - Source-backed fallback data for non-importable functions/classes.
 - Symbol/import dependency discovery.
-- Direct annotation-fragment discovery as facts.
+- Direct annotation-fragment discovery and serialized annotation requirement-resolution metadata as facts.
 - Method contract facts.
 - Shape hints where they are code-derived.
 - AST access and method-call hints.
@@ -44,7 +44,7 @@ Core public types:
 - `CodeTarget`: local analysis wrapper. It may hold live Python objects and is not used for serialized output.
 - `CodeFact`: generic fact record with `kind`, `source`, and `data` fields.
 - `DiagnosticFact`: structured diagnostic with severity, code, and message.
-- `RequirementFact`: raw requirement/default annotation fragment fact. It preserves namespace, kind, priority, merge policy, and fragment data without merging.
+- `RequirementFact`: raw requirement/default annotation fragment fact. It preserves namespace, kind, priority, merge policy, fragment data, annotation source trace data, and serialized `RequirementResolution` data without selecting dispatch candidates.
 - `CodeAnalysisContext`: analysis options such as selected algorithms, source/import permissions, annotation inclusion, method-contract inclusion, and diagnostics policy.
 - `CodeAnalysisResult`: aggregate target, facts, diagnostics, `ok`, filtering helpers, and JSON-compatible serialization.
 
@@ -67,7 +67,7 @@ Built-in analyzers are registered by name:
 - `source`: source text and source-location facts.
 - `ast_access`: static attribute-access and method-call-like hints.
 - `symbol_capture`: `ImportRef`/`SourceSpec`-style symbol facts using `dryml.core2.symbol`.
-- `direct_annotations`: raw annotation and requirement facts using `dryml.annotations` collectors.
+- `direct_annotations`: raw annotation and requirement facts using the authoritative `dryml.annotations` collection/resolution APIs.
 - `method_contracts`: minimal DRYML `Method` contract metadata without moving `Method`.
 
 Analyzer failures become `DiagnosticFact(error)` by default. Setting `CodeAnalysisContext(diagnostics_policy="raise")` raises a `CodeAnalysisError` instead.
@@ -106,7 +106,7 @@ from dryml.code import Method, Traits, CompilerInfo, traits
 
 Dispatch should ask `dryml.code` for code facts and then apply requirement/candidate logic. Code probes should reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.
 
-Dispatch integration is intentionally deferred. Sprint 1 does not change dispatch planning defaults, operation normalization, environment/world candidate selection, runtime enforcement, or worker launch behavior. Code probe workers remain deferred to Sprint 5. Dynamic tracing remains deferred to Sprint 9.
+Dispatch integration is intentionally deferred. Sprint 3 lets `dryml.code.algorithms.direct_annotations` delegate merge semantics to `dryml.annotations`, but the analyzer still emits facts and diagnostics only. It does not select environments, allocate worlds, enforce runtime policy, launch workers, or decide candidate compatibility. Code probe workers remain deferred to Sprint 5. Dynamic tracing remains deferred to Sprint 9.
 
 ## Non-Goals
 

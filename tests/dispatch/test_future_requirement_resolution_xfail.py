@@ -35,7 +35,7 @@ def test_function_level_env_requirement_is_collected_during_dispatch_planning(tm
     assert "pandas>=2" in requirements
 
 
-@pytest.mark.xfail(reason="Sprint 3/Sprint 7: class + method requirement resolution not implemented yet", strict=True)
+@pytest.mark.xfail(reason="Sprint 7: dispatch does not consume annotation requirement resolution yet", strict=True)
 def test_dispatch_resolves_class_and_method_requirements(tmp_path):
     plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.LightningModel(), "train")
     resolved = plan.dispatch_spec["payload"]["requirements"]
@@ -51,7 +51,7 @@ def test_dispatch_explicit_world_must_satisfy_hard_world_requirement(tmp_path):
     assert plan.dispatch_spec["payload"]["requirement_report"]["ok"] is False
 
 
-@pytest.mark.xfail(reason="Sprint 3: precise classmethod/staticmethod collection not implemented yet", strict=True)
+@pytest.mark.xfail(reason="Sprint 7: dispatch does not consume descriptor-aware annotation resolution yet", strict=True)
 def test_classmethod_and_staticmethod_both_decorator_orders_are_collected(tmp_path):
     plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.ClassMethodTargets.outer_decorated, allow_pickle=True)
     requirements = plan.dispatch_spec["payload"]["requirements"]["environment"]["requirements"]

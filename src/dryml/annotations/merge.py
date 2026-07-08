@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 from dryml.environments.requirements import EnvironmentRequirement
 from dryml.environments.utils import normalize_distribution_name
+from dryml.formats import json_ready
 from dryml import reporting
 from dryml.runtime.specs import RuntimeContextSpec
 from dryml.worlds.compatibility import check_world_spec_satisfies_requirement
@@ -16,7 +17,7 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from .collect import collect_fragments
+from .collect import collect_fragments, fragments_for_definition_method, fragments_for_method
 from .model import AnnotationFragment, SourceTrace
 from .namespaces import ENVIRONMENT, RUNTIME, WORLD
 from .report import AnnotationIssue, AnnotationReport
@@ -52,6 +53,126 @@ class ResolutionResult:
     requirements: ResolvedRequirements
     defaults: ResolvedDefaults
     report: AnnotationReport
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementSourceTrace:
+    """Small JSON-ready explanation of where one requirement fragment came from.
+
+    Args:
+        namespace: Annotation namespace such as ``"environment"`` or
+            ``"world"``.
+        kind: Fragment kind, usually ``"requirement"`` or ``"default"``.
+        label: Human-readable source label.
+        target_label: Optional label for the decorated target.
+        module: Optional Python module for the decorated target.
+        qualname: Optional Python qualified name for the decorated target.
+        priority: Fragment priority metadata.
+        merge_policy: Fragment merge-policy metadata.
+        fragment_index: Stable index in the resolved fragment sequence.
+        data: Extra JSON-compatible trace metadata.
+    """
+
+    namespace: str
+    kind: str
+    label: str
+    target_label: str | None = None
+    module: str | None = None
+    qualname: str | None = None
+    priority: int = 0
+    merge_policy: str | None = None
+    fragment_index: int | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "data", json_ready(self.data))
+
+    def to_data(self) -> dict[str, Any]:
+        """Return a JSON-compatible trace mapping."""
+
+        return {
+            "namespace": self.namespace,
+            "kind": self.kind,
+            "label": self.label,
+            "target_label": self.target_label,
+            "module": self.module,
+            "qualname": self.qualname,
+            "priority": self.priority,
+            "merge_policy": self.merge_policy,
+            "fragment_index": self.fragment_index,
+            "data": json_ready(self.data),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementDiagnostic:
+    """JSON-ready diagnostic emitted while resolving annotation requirements."""
+
+    level: Literal["debug", "info", "warning", "error"]
+    code: str
+    message: str
+    target_label: str | None = None
+    data: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "data", json_ready(self.data))
+
+    def to_data(self) -> dict[str, Any]:
+        """Return a JSON-compatible diagnostic mapping."""
+
+        return {
+            "level": self.level,
+            "code": self.code,
+            "message": self.message,
+            "target_label": self.target_label,
+            "data": json_ready(self.data),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementResolution:
+    """Authoritative merged requirement/default result for annotation APIs.
+
+    Args:
+        environment_requirement: Merged hard environment requirement, if any.
+        world_requirement: Merged hard world requirement, if any.
+        runtime_requirement: Merged hard runtime requirement mapping, if any.
+        environment_default: Reserved for future environment defaults.
+        world_default: Merged default world specification, if any.
+        runtime_default: Merged default runtime context, if any.
+        fragments: Raw fragments used for this resolution, including provider
+            fragments after target fragments.
+        source_traces: JSON-ready source traces corresponding to fragments.
+        diagnostics: JSON-ready resolution diagnostics.
+        merge_report: Underlying annotation report containing merge issues.
+    """
+
+    environment_requirement: EnvironmentRequirement | None = None
+    world_requirement: WorldRequirement | None = None
+    runtime_requirement: Mapping[str, Any] | None = None
+    environment_default: Any | None = None
+    world_default: WorldSpec | None = None
+    runtime_default: RuntimeContextSpec | None = None
+    fragments: tuple[AnnotationFragment, ...] = ()
+    source_traces: tuple[RequirementSourceTrace, ...] = ()
+    diagnostics: tuple[RequirementDiagnostic, ...] = ()
+    merge_report: AnnotationReport | None = None
+
+    def to_data(self) -> dict[str, Any]:
+        """Return a JSON-compatible representation of this resolution."""
+
+        return {
+            "environment_requirement": _to_data_or_none(self.environment_requirement),
+            "world_requirement": _to_data_or_none(self.world_requirement),
+            "runtime_requirement": json_ready(self.runtime_requirement) if self.runtime_requirement is not None else None,
+            "environment_default": json_ready(self.environment_default) if self.environment_default is not None else None,
+            "world_default": _to_data_or_none(self.world_default),
+            "runtime_default": _to_data_or_none(self.runtime_default),
+            "fragments": [fragment.to_data() for fragment in self.fragments],
+            "source_traces": [trace.to_data() for trace in self.source_traces],
+            "diagnostics": [diagnostic.to_data() for diagnostic in self.diagnostics],
+            "merge_report": _report_to_data(self.merge_report),
+        }
 
 
 def resolve_requirements(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = ()) -> ResolvedRequirements:
@@ -122,6 +243,95 @@ def resolve(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = (
         },
     )
     return ResolutionResult(requirements, defaults, combined)
+
+
+def resolve_fragments(
+    fragments: Iterable[AnnotationFragment],
+    *,
+    provider_fragments: Iterable[AnnotationFragment] = (),
+    source: str | None = None,
+) -> RequirementResolution:
+    """Merge already-collected annotation fragments into one resolution.
+
+    Args:
+        fragments: Target fragments in collection order.
+        provider_fragments: Additional provider fragments appended after target
+            fragments.
+        source: Optional caller label recorded in trace metadata.
+
+    Returns:
+        A :class:`RequirementResolution` containing merged hard requirements,
+        defaults, raw fragments, source traces, diagnostics, and merge report.
+    """
+
+    ordered = tuple(fragments) + tuple(provider_fragments)
+    issues: list[AnnotationIssue] = []
+    requirement_fragments = tuple(fragment for fragment in ordered if fragment.kind == "requirement")
+    default_fragments = tuple(fragment for fragment in ordered if fragment.kind == "default")
+
+    environment_requirement = _merge_environment_requirements(_namespace_fragments(requirement_fragments, ENVIRONMENT), issues)
+    world_requirement = _merge_world_requirements(_namespace_fragments(requirement_fragments, WORLD), issues)
+    runtime_requirement = _merge_mapping_fragments(_namespace_fragments(requirement_fragments, RUNTIME), issues=issues, namespace=RUNTIME) or None
+
+    world_default_data = _merge_mapping_fragments(_namespace_fragments(default_fragments, WORLD), issues=issues, namespace=WORLD)
+    runtime_default_data = _merge_mapping_fragments(_namespace_fragments(default_fragments, RUNTIME), issues=issues, namespace=RUNTIME)
+    world_default = _world_spec_or_issue(world_default_data, issues, _sources(_namespace_fragments(default_fragments, WORLD))) if world_default_data else None
+    runtime_default = _runtime_spec_or_issue(runtime_default_data, issues, _sources(_namespace_fragments(default_fragments, RUNTIME))) if runtime_default_data else None
+
+    if world_requirement is not None and world_default is not None:
+        world_report = check_world_spec_satisfies_requirement(world_default, world_requirement)
+        if not world_report.ok:
+            sources = _sources(_namespace_fragments(requirement_fragments + default_fragments, WORLD))
+            for issue in world_report.issues:
+                issues.append(AnnotationIssue(issue.severity, WORLD, issue.path, issue.message, issue.expected, issue.actual, sources))
+
+    report = AnnotationReport(tuple(issues))
+    return RequirementResolution(
+        environment_requirement=environment_requirement,
+        world_requirement=world_requirement,
+        runtime_requirement=runtime_requirement,
+        world_default=world_default,
+        runtime_default=runtime_default,
+        fragments=ordered,
+        source_traces=_source_traces_for_fragments(ordered, source=source),
+        diagnostics=_diagnostics_from_report(report),
+        merge_report=report,
+    )
+
+
+def resolve_target_requirements(
+    target: Any,
+    *,
+    provider_fragments: Iterable[AnnotationFragment] = (),
+    namespace: str | None = None,
+    kind: str | None = None,
+) -> RequirementResolution:
+    """Collect and resolve requirements/defaults for a live target."""
+
+    fragments = collect_fragments(target, namespace=namespace, kind=kind)
+    return resolve_fragments(fragments, provider_fragments=provider_fragments)
+
+
+def resolve_method_requirements(
+    cls: type,
+    method_name: str,
+    *,
+    provider_fragments: Iterable[AnnotationFragment] = (),
+) -> RequirementResolution:
+    """Collect and resolve class plus method requirements for ``cls.method``."""
+
+    return resolve_fragments(fragments_for_method(cls, method_name), provider_fragments=provider_fragments)
+
+
+def resolve_definition_method_requirements(
+    defn: Any,
+    method_name: str,
+    *,
+    provider_fragments: Iterable[AnnotationFragment] = (),
+) -> RequirementResolution:
+    """Collect and resolve requirements for a Definition/CDef method target."""
+
+    return resolve_fragments(fragments_for_definition_method(defn, method_name), provider_fragments=provider_fragments)
 
 
 def resolve_environment_requirement(target: Any, *, provider_fragments: Iterable[AnnotationFragment] = ()) -> EnvironmentRequirement:
@@ -371,15 +581,103 @@ def _override_source(namespace: str) -> SourceTrace:
     return SourceTrace("override", namespace=namespace, label="user override")
 
 
+def _source_traces_for_fragments(fragments: tuple[AnnotationFragment, ...], *, source: str | None) -> tuple[RequirementSourceTrace, ...]:
+    return tuple(_source_trace_for_fragment(fragment, index, source=source) for index, fragment in enumerate(fragments))
+
+
+def _source_trace_for_fragment(fragment: AnnotationFragment, index: int, *, source: str | None) -> RequirementSourceTrace:
+    trace = fragment.source
+    target = trace.target
+    qualname = target.qualname if target is not None else None
+    module = target.module if target is not None else None
+    target_label = f"{module}:{qualname}" if module and qualname else qualname
+    label = trace.label or target_label or trace.kind
+    return RequirementSourceTrace(
+        namespace=fragment.namespace,
+        kind=fragment.kind,
+        label=label,
+        target_label=target_label,
+        module=module,
+        qualname=qualname,
+        priority=fragment.priority,
+        merge_policy=fragment.merge_policy,
+        fragment_index=index,
+        data={"source": trace.to_data(), **({"resolution_source": source} if source is not None else {})},
+    )
+
+
+def _diagnostics_from_report(report: AnnotationReport) -> tuple[RequirementDiagnostic, ...]:
+    return tuple(_diagnostic_from_issue(issue) for issue in report.issues)
+
+
+def _diagnostic_from_issue(issue: AnnotationIssue) -> RequirementDiagnostic:
+    target_label = None
+    if issue.sources:
+        source = issue.sources[0]
+        if source.target is not None:
+            module = source.target.module
+            qualname = source.target.qualname
+            target_label = f"{module}:{qualname}" if module and qualname else qualname
+        target_label = target_label or source.label
+    return RequirementDiagnostic(
+        level=issue.severity,
+        code="dryml.annotations.merge_issue",
+        message=issue.message,
+        target_label=target_label,
+        data={
+            "namespace": issue.namespace,
+            "path": issue.path,
+            "expected": issue.expected,
+            "actual": issue.actual,
+            "sources": [source.to_data() for source in issue.sources],
+        },
+    )
+
+
+def _to_data_or_none(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "to_data") and callable(value.to_data):
+        return value.to_data()
+    return json_ready(value)
+
+
+def _report_to_data(report: AnnotationReport | None) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    return {
+        "ok": report.ok,
+        "issues": [
+            {
+                "severity": issue.severity,
+                "namespace": issue.namespace,
+                "path": issue.path,
+                "message": issue.message,
+                "expected": issue.expected,
+                "actual": issue.actual,
+                "sources": [source.to_data() for source in issue.sources],
+            }
+            for issue in report.issues
+        ],
+    }
+
+
 __all__ = [
     "ResolvedDefaults",
     "ResolvedRequirements",
+    "RequirementDiagnostic",
+    "RequirementResolution",
+    "RequirementSourceTrace",
     "ResolutionResult",
     "resolve",
     "resolve_defaults",
+    "resolve_definition_method_requirements",
     "resolve_environment_requirement",
+    "resolve_fragments",
+    "resolve_method_requirements",
     "resolve_requirements",
     "resolve_runtime_default",
+    "resolve_target_requirements",
     "resolve_world_default",
     "resolve_world_requirement",
 ]

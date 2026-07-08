@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import dryml.code as code
 
 
@@ -55,3 +57,23 @@ def test_descriptor_target_collects_outer_decorated_classmethod_and_staticmethod
 
     assert _requirements(classmethod_result, "environment")[0].fragment["requirements"] == ["outer-classmethod>=1"]
     assert _requirements(staticmethod_result, "environment")[0].fragment["requirements"] == ["outer-staticmethod>=1"]
+
+
+def test_direct_annotations_resolves_descriptor_targets_and_serializes(requirement_targets):
+    target = code.target_from_class_attribute(requirement_targets.LightningModel, "train")
+
+    result = code.analyze(target, algorithms=("direct_annotations",))
+
+    requirement_facts = _requirements(result, "environment")
+
+
+    assert [fact.fragment["requirements"] for fact in requirement_facts] == [["torch>=2"], ["lightning>=2"]]
+    assert _requirements(result, "world")
+    assert "resolution" in requirement_facts[0].data
+    json.dumps(result.to_data(), sort_keys=True)
+
+
+def test_direct_annotations_emits_diagnostic_for_unsupported_live_target():
+    result = code.analyze(object(), algorithms=("direct_annotations",))
+
+    assert result.diagnostics_of_code("dryml.code.annotations_unsupported_target")

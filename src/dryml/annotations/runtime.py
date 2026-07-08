@@ -7,7 +7,7 @@ from typing import Any
 from .decorators import default as default_fragment
 from .namespaces import RUNTIME
 
-_RESERVED = {"device_visibility", "limits", "env", "metadata", "world_allocation_id", "mode", "source"}
+_RESERVED = {"device_visibility", "limits", "env", "metadata", "world_allocation_id", "mode", "source", "priority", "merge_policy"}
 
 
 def runtime_default_fragment(**kwargs: Any) -> dict[str, Any]:
@@ -34,10 +34,17 @@ def runtime_default_fragment(**kwargs: Any) -> dict[str, Any]:
 
 
 def default(**kwargs: Any):
-    """Decorate a target with an overrideable process-local runtime default."""
+    """Decorate a target with an overrideable process-local runtime default.
+
+    Annotation metadata fields ``source``, ``priority``, and ``merge_policy``
+    are stored on the annotation fragment and are not included in the runtime
+    default payload.
+    """
 
     source = kwargs.pop("source", None)
-    return default_fragment(namespace=RUNTIME, fragment=runtime_default_fragment(**kwargs), source=source)
+    priority = kwargs.pop("priority", 0)
+    merge_policy = kwargs.pop("merge_policy", None)
+    return default_fragment(namespace=RUNTIME, fragment=runtime_default_fragment(**kwargs), source=source, priority=priority, merge_policy=merge_policy)
 
 
 __all__ = ["default", "runtime_default_fragment"]

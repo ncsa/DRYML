@@ -8,7 +8,7 @@ Proposed Sprint 0 baseline note. Current-state claims are anchored to baseline c
 
 DRYML currently separates declaration, planning, and execution across several modules:
 
-- `dryml.annotations` stores sidecar metadata fragments on Python targets.
+- `dryml.annotations` stores sidecar metadata fragments on Python targets and owns the authoritative requirement collection/resolution APIs for live classes, functions, methods, and Definition/CDef method targets.
 - `dryml.dispatch.Dispatcher.plan(...)` builds a `DispatchSpec`, `ExecutionRecipe`, and worker `ExecutionEnvelope`.
 - `dryml.operations.OperationSpec` mappings are the canonical operation IR accepted by dispatch planning.
 - `dryml.runtime.RuntimeMode` records the current process role.
@@ -38,6 +38,12 @@ At `a6d3550`, `Dispatcher.plan(...)` behaves as follows:
 - Python callables with `allow_pickle=True` use the existing small-pickle transport through `dryml.dispatch.operations:import_function` and are restricted to the same Python environment.
 - Reporting includes requirement gather and merge steps, but dispatch does not yet resolve operation annotations into candidate checks.
 
+## Requirement Collection Boundary
+
+Sprint 3 adds `dryml.annotations.RequirementResolution` plus collection helpers such as `own_fragments`, `fragments_for_method`, `fragments_for_definition_method`, `resolve_target_requirements`, `resolve_method_requirements`, and `resolve_definition_method_requirements`. These APIs merge declared environment, world, and runtime requirements/defaults and preserve raw fragments, source traces, diagnostics, and report data.
+
+Dispatch still does not consume those results during planning in Sprint 3. Candidate environment/world/runtime selection and compatibility checks remain deferred to later dispatch sprints.
+
 ## Future Dispatch Planning Pipeline
 
 A later implementation should normalize user targets into an `OperationSpec`, collect code and annotation facts, merge hard requirements and defaults, select candidate environment/world/runtime data, check candidates against hard requirements, then launch through the backend. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
@@ -50,8 +56,8 @@ A later implementation should normalize user targets into an `OperationSpec`, co
 
 - This note does not specify exact implementation classes.
 - This note does not change dispatch behavior.
-- This note does not define final public API signatures.
-- Sprint 0 does not implement Python-shaped dispatch normalization, requirement resolution, or runtime enforcement policy.
+- This note does not specify exact dispatch integration classes.
+- Sprint 3 implements annotation requirement resolution APIs, but does not implement Python-shaped dispatch normalization, dispatch candidate checking, or runtime enforcement policy.
 
 ## Source Anchors
 

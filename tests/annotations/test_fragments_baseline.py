@@ -97,12 +97,12 @@ def test_classmethod_inner_decorator_order_current_behavior():
     assert _requirements(fragments) == ("inner-classmethod>=1",)
 
 
-def test_classmethod_outer_decorator_order_current_limitation():
+def test_classmethod_outer_decorator_order_supported_behavior():
     fragments = fragments_for_callable(targets.ClassMethodTargets.outer_decorated, namespace="environment")
     raw_fragments = fragments_for(targets.ClassMethodTargets.__dict__["outer_decorated"], namespace="environment")
 
     assert targets.ClassMethodTargets.outer_decorated() == "ClassMethodTargets"
-    assert fragments == ()
+    assert _requirements(fragments) == ("outer-classmethod>=1",)
     assert _requirements(raw_fragments) == ("outer-classmethod>=1",)
 
 
@@ -112,10 +112,10 @@ def test_staticmethod_inner_decorator_order_current_behavior():
     assert _requirements(fragments) == ("inner-staticmethod>=1",)
 
 
-def test_staticmethod_outer_decorator_order_current_limitation():
+def test_staticmethod_outer_decorator_order_supported_behavior():
     fragments = fragments_for_callable(targets.StaticMethodTargets.outer_decorated, namespace="environment")
     raw_fragments = fragments_for(targets.StaticMethodTargets.__dict__["outer_decorated"], namespace="environment")
 
     assert targets.StaticMethodTargets.outer_decorated() == "outer-static"
-    assert fragments == ()
+    assert _requirements(fragments) == ("outer-staticmethod>=1",)
     assert _requirements(raw_fragments) == ("outer-staticmethod>=1",)

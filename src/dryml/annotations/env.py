@@ -45,10 +45,22 @@ def normalize_environment_requirement_fragment(
 
 
 def req(**kwargs: Any):
-    """Decorate a target with a hard software-environment requirement."""
+    """Decorate a target with a hard software-environment requirement.
+
+    Args:
+        **kwargs: Environment requirement fields plus annotation metadata fields
+            ``source``, ``priority``, and ``merge_policy``. Metadata fields are
+            stored on the annotation fragment, not in the requirement payload.
+
+    Returns:
+        A decorator that attaches the requirement fragment without wrapping the
+        target.
+    """
 
     source = kwargs.pop("source", None)
-    return require(namespace=ENVIRONMENT, fragment=normalize_environment_requirement_fragment(**kwargs), source=source)
+    priority = kwargs.pop("priority", 0)
+    merge_policy = kwargs.pop("merge_policy", None)
+    return require(namespace=ENVIRONMENT, fragment=normalize_environment_requirement_fragment(**kwargs), source=source, priority=priority, merge_policy=merge_policy)
 
 
 __all__ = ["normalize_environment_requirement_fragment", "req"]
