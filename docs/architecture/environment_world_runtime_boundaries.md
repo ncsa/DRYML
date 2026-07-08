@@ -1,0 +1,73 @@
+# Environment, World, and Runtime Boundaries
+
+## Status
+
+Proposed Sprint 0 baseline note anchored to `a6d3550`.
+
+## Current State
+
+DRYML already has distinct modules for software environments, resource worlds, and process-local runtime state. Dispatch currently records current environment data, a requested single-worker world by default, and a worker runtime spec for local subprocess execution.
+
+## Definitions
+
+`environment` means Python, Conda, container, package, and software metadata or requirements.
+
+`world` means topology, resources, allocation request, or actual allocation.
+
+`runtime` means current process role, active allocation view, runtime spec, and eventual enforcement policy.
+
+`allocation` means actual resources assigned to a process from a world allocation.
+
+`enforcement` means how strictly DRYML checks environment/world/runtime constraints; it is not the same as runtime role.
+
+`probe` means a lightweight process role for inspection; it is not a workload worker and is not tied to the final workload world.
+
+## Environment vs World vs Runtime
+
+Environment probing and world allocation are separate concerns. A probe can inspect Python/package metadata without knowing the final GPU topology. A world spec can request CPUs, memory, accelerators, roles, and replicas without changing current Python packages. Runtime activation describes what the current process is allowed to see and do.
+
+## Probe Runtime Direction
+
+Probe processes do not need the final workload world and should normally run without GPU allocation. They should use `RuntimeMode.PROBE` and `NoAllocation`, producing facts and diagnostics rather than user workload results.
+
+## Notebook Current/Default State Direction
+
+Future `dryml.environments.current()` and `dryml.worlds.current()` APIs should represent notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` should mean the actual allocation of this process.
+
+## Dispatch Candidate Selection Direction
+
+Dispatch should combine current/default state, explicit kwargs, annotation defaults, and hard requirements into candidate selections. Explicit candidates override defaults but must still be checked against hard requirements unless a future policy says otherwise.
+
+## Notebook and Orchestration Examples
+
+In a notebook, a user may set a default requested world for later dispatch while the notebook process remains orchestrator mode with no workload allocation. During local worker execution, a child process enters worker mode with a real CPU-only allocation. During a code probe, a child process can enter probe mode with no workload allocation and inspect metadata safely.
+
+## Non-Goals
+
+- Sprint 0 does not add `dryml.environments.current()`.
+- Sprint 0 does not add `dryml.worlds.current()`.
+- Sprint 0 does not add runtime enforcement policy.
+- Sprint 0 does not implement environment or world registry/resolver behavior.
+
+## Source Anchors
+
+- `src/dryml/environments/__init__.py`
+- `src/dryml/environments/probe.py`
+- `src/dryml/environments/introspection.py`
+- `src/dryml/worlds/__init__.py`
+- `src/dryml/worlds/compatibility.py`
+- `src/dryml/runtime/context.py`
+- `src/dryml/runtime/modes.py`
+
+## Open Questions
+
+- Should current environment/world defaults be context-local or process-global?
+- What minimum environment facts are required before dispatch can resolve requirements?
+- Should probe scheduling be owned by dispatch or by a provider/probe service?
+
+## Follow-Up Sprints
+
+- Sprint 4: runtime enforcement and current env/world APIs.
+- Sprint 5: lightweight probe runtime.
+- Sprint 7: dispatch requirement checks.
+- Sprint 8: resolver and registry behavior.

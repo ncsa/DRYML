@@ -35,4 +35,5 @@ markers = [
     "category_torch: auto-applied DRYML test category",
     "category_worlds: auto-applied DRYML test category",
     "category_uncategorized: auto-applied DRYML test category",
+    "future_behavior: expected-failure tests documenting planned future behavior",
 ]
