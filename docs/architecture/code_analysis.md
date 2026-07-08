@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed Sprint 0 baseline note for review before the code-analysis API is introduced.
+Sprint 1 implementation note for the reusable `dryml.code` analysis API.
 
 ## Current State
 
-`dryml.code` contains small helper modules for callable inspection, source extraction, AST access collection, `Method`, and method traits. `dryml.core2.symbol` owns import references and source-backed symbol references. These helpers are useful but do not yet form a single fact-oriented analysis API.
+`dryml.code` contains a fact-oriented analysis layer plus compatibility helper modules for callable inspection, source extraction, AST access collection, `Method`, and method traits. `dryml.core2.symbol` owns import references and source-backed symbol references. The helper modules now delegate to analyzer implementations under `dryml.code.algorithms`.
 
 ## Problem Statement
 
@@ -34,9 +34,51 @@ Dispatch, probes, annotations, and later analyzers need shared answers about Pyt
 
 `dryml.code` should not select environments, allocate worlds, enforce runtime policy, launch workers, or decide dispatch compatibility. Those responsibilities belong to dispatch, worlds, runtime, and provider/probe layers.
 
-## Proposed Fact-Oriented API Direction
+## Fact-Oriented API
 
-Sprint 1 should introduce a public `dryml.code.analyze(...)`-style API that returns a structured result object. The result should contain facts and diagnostics rather than a launch decision. Facts should be serializable enough for dispatch and probes to persist or pass between processes.
+Sprint 1 introduces a public `dryml.code.analyze(...)` API that returns a structured `CodeAnalysisResult`. The result contains facts and diagnostics rather than a launch decision. Facts are serializable through `to_data()` so dispatch and future probes can persist or pass them between processes.
+
+Core public types:
+
+- `CodeTargetSpec`: serializable target representation. It records descriptive target kind, optional import path, optional source spec, optional method metadata, and JSON-compatible metadata.
+- `CodeTarget`: local analysis wrapper. It may hold live Python objects and is not used for serialized output.
+- `CodeFact`: generic fact record with `kind`, `source`, and `data` fields.
+- `DiagnosticFact`: structured diagnostic with severity, code, and message.
+- `RequirementFact`: raw requirement/default annotation fragment fact. It preserves namespace, kind, priority, merge policy, and fragment data without merging.
+- `CodeAnalysisContext`: analysis options such as selected algorithms, source/import permissions, annotation inclusion, method-contract inclusion, and diagnostics policy.
+- `CodeAnalysisResult`: aggregate target, facts, diagnostics, `ok`, filtering helpers, and JSON-compatible serialization.
+
+Example:
+
+```python
+import json
+import dryml.code as code
+
+result = code.analyze(run_training, algorithms=("callables", "source", "direct_annotations"))
+callable_facts = result.facts_of_kind("callable")
+json.dumps(result.to_data())
+```
+
+Built-in analyzers are registered by name:
+
+- `callables`: callable identity, signature, and importability facts.
+- `source`: source text and source-location facts.
+- `ast_access`: static attribute-access and method-call-like hints.
+- `symbol_capture`: `ImportRef`/`SourceSpec`-style symbol facts using `dryml.core2.symbol`.
+- `direct_annotations`: raw annotation and requirement facts using `dryml.annotations` collectors.
+- `method_contracts`: minimal DRYML `Method` contract metadata without moving `Method`.
+
+Analyzer failures become `DiagnosticFact(error)` by default. Setting `CodeAnalysisContext(diagnostics_policy="raise")` raises a `CodeAnalysisError` instead.
+
+Compatibility imports remain available:
+
+- `dryml.code.callable_info.CallableInfo`
+- `dryml.code.callable_info.analyze_callable`
+- `dryml.code.source.SourceInfo`
+- `dryml.code.source.get_source_info`
+- `dryml.code.source.func_source_extract`
+- `dryml.code.ast_tools.AccessCollector`
+- `dryml.code.ast_tools.collect_accesses_from_source`
 
 ## Relationship to core2.symbol
 
@@ -44,15 +86,16 @@ Sprint 1 should introduce a public `dryml.code.analyze(...)`-style API that retu
 
 ## Relationship to Method and Method Handles
 
-`Method`, method handles, `Traits`, and `CompilerInfo` likely belong closer to stable semantic model primitives, for example a future `core2.methods` area. Sprint 0 does not move them; it records the direction for review.
+`Method`, method handles, `Traits`, and `CompilerInfo` likely belong closer to stable semantic model primitives, for example a future `core2.methods` area. Sprint 1 does not move them; `method_contracts` only exposes minimal facts. Method/core2 migration remains deferred to Sprint 2.
 
 ## Relationship to dispatch and probes
 
 Dispatch should ask `dryml.code` for code facts and then apply requirement/candidate logic. Code probes should reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.
 
+Dispatch integration is intentionally deferred. Sprint 1 does not change dispatch planning defaults, operation normalization, environment/world candidate selection, runtime enforcement, or worker launch behavior. Code probe workers remain deferred to Sprint 5. Dynamic tracing remains deferred to Sprint 9.
+
 ## Non-Goals
 
-- This note does not implement `CodeFact` or `CodeAnalyzer`.
 - This note does not move `Method`.
 - This note does not add code probes.
 - This note does not add dynamic tracing.

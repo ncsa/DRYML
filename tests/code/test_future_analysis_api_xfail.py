@@ -27,25 +27,25 @@ def _load_targets():
 targets = _load_targets()
 
 
-@pytest.mark.xfail(reason="Sprint 1: dryml.code.analyze fact API not implemented yet", strict=True)
 def test_dryml_code_analyze_exists():
     assert callable(code.analyze)
 
 
-@pytest.mark.xfail(reason="Sprint 1: dryml.code.analyze fact API not implemented yet", strict=True)
 def test_dryml_code_analyze_returns_callable_and_source_facts():
     result = code.analyze(targets.plain_importable_function)
-    assert result.facts["callable"].qualname == "plain_importable_function"
-    assert result.facts["source"].text
+    assert result.facts_of_kind("callable")[0].data["qualname"] == "plain_importable_function"
+    assert result.facts_of_kind("source")[0].data["source"]
 
 
-@pytest.mark.xfail(reason="Sprint 1/Sprint 3: annotation facts are not exposed by dryml.code.analyze yet", strict=True)
 def test_dryml_code_analyze_returns_direct_annotation_facts():
     result = code.analyze(targets.run_training)
-    assert "pandas>=2" in result.facts["annotations"].requirements.environment.requirements
+    requirements = result.facts_of_kind("requirement")
+    assert any(
+        fact.namespace == "environment" and "pandas>=2" in fact.fragment["requirements"]
+        for fact in requirements
+    )
 
 
-@pytest.mark.xfail(reason="Sprint 1: serializable analysis result is not implemented yet", strict=True)
 def test_analysis_result_can_serialize_to_json_compatible_data():
     result = code.analyze(targets.plain_importable_function)
     assert result.to_data()["facts"]
