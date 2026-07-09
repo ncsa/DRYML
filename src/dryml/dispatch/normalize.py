@@ -37,6 +37,15 @@ from .operations import PickledCallable, write_pickled_callable
 
 
 NORMALIZATION_METADATA_VERSION = 1
+_RESERVED_NORMALIZATION_KEYS = frozenset(
+    {
+        "dryml.dispatch.normalized",
+        "dryml.dispatch.normalization_version",
+        "dryml.dispatch.user_target_kind",
+        "dryml.dispatch.transport",
+        "dryml.code_target",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,8 +202,12 @@ def normalize_callable_operation(
 
     explicit_pickle = isinstance(operation, PickledCallable)
     func = operation.callable if explicit_pickle else operation
-    if _is_bound_instance_method(func):
-        raise DispatchPlanningError("bound instance method dispatch is not supported for this target; use dispatch.submit(cdef, \"method\", ...)")
+    if _is_bound_instance_method(func) and not explicit_pickle:
+        raise DispatchPlanningError(
+            "bound instance method dispatch is not supported for this target; "
+            "use dispatch.submit(cdef, \"method\", ...), or PickledCallable(...) "
+            "for explicit same-environment pickle transport"
+        )
 
     importability = _callable_importability(func)
     if importability.path is not None and not explicit_pickle:
@@ -458,11 +471,9 @@ def _attach_normalization_metadata(
     result = dict(op)
     metadata = dict(result.get("metadata") or {})
     update = _normalization_metadata(user_target_kind, transport, code_target)
-    if preserve_existing:
-        for key, value in update.items():
-            metadata.setdefault(key, value)
-    else:
-        metadata.update(update)
+    for key in _RESERVED_NORMALIZATION_KEYS:
+        metadata.pop(key, None)
+    metadata.update(update)
     result["metadata"] = metadata
     try:
         return attach_operation_id(result)

@@ -359,4 +359,4 @@ def _report(name: str, message: str, *, operation_id: str | None = None, data: M
         pass
 
 
-__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "run", "run_world", "submit"]
+__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "plan", "run", "run_world", "submit"]

@@ -9,7 +9,7 @@ import pytest
 
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
-from dryml.dispatch import normalize_user_operation
+from dryml.dispatch import PickledCallable, normalize_user_operation
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.operations import attach_operation_id, make_function_call_spec
 
@@ -83,6 +83,11 @@ def test_callable_instance_and_bound_method_policy_is_explicit():
 
     with pytest.raises(DispatchPlanningError, match="bound instance method"):
         normalize_user_operation(BoundMethodTarget().method, allow_pickle=True)
+
+    explicit = normalize_user_operation(PickledCallable(BoundMethodTarget().method), args=(2,))
+    assert explicit.transport == "pickle_small"
+    assert explicit.launch["same_environment_only"] is True
+    assert explicit.live_annotation_targets[0].__self__.__class__ is BoundMethodTarget
 
 
 def test_cdef_checked_before_mapping_and_method_metadata_populated(tmp_path, target_module):

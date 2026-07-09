@@ -30,6 +30,30 @@ def test_explicit_function_call_operation_spec_remains_compatible(tmp_path, targ
     assert result.result_canonical == 5
 
 
+def test_explicit_operation_spec_preserves_user_metadata_but_replaces_reserved_keys(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="none")
+    op = attach_operation_id(
+        make_function_call_spec(
+            "operator:add",
+            args=[1, 2],
+            metadata={
+                "owner": "user",
+                "dryml.dispatch.transport": "stale",
+                "dryml.code_target": {"kind": "stale", "import_path": "stale:target"},
+            },
+        )
+    )
+
+    plan = Dispatcher(store=store).plan(op)
+    metadata = plan.envelope.operation_spec["metadata"]
+
+    assert metadata["owner"] == "user"
+    assert metadata["dryml.dispatch.transport"] == "operation_spec"
+    assert metadata["dryml.dispatch.user_target_kind"] == "operation_spec"
+    assert metadata["dryml.code_target"]["kind"] == "import_path"
+    assert metadata["dryml.code_target"]["import_path"] == "operator:add"
+
+
 def test_explicit_method_call_operation_spec_still_plans(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     op = attach_operation_id(make_method_call_spec("cdef-v4-" + "0" * 64, "plus", args=[1]))
