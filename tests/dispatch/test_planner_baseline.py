@@ -103,7 +103,11 @@ def test_planner_report_contains_requirement_gather_merge_steps(monkeypatch, tmp
 
 
 def test_planner_resolves_target_annotations_into_authoritative_metadata(tmp_path):
-    plan = Dispatcher(store=_store(tmp_path)).plan(targets.run_training, allow_pickle=True)
+    plan = Dispatcher(store=_store(tmp_path)).plan(
+        targets.run_training,
+        allow_pickle=True,
+        requirement_policy="ignore",
+    )
 
     requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]
     assert "pandas>=2" in requirements["environment_requirement"]["requirements"]

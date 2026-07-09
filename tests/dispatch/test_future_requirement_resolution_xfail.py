@@ -29,7 +29,11 @@ targets = _load_targets()
 
 
 def test_function_level_env_requirement_is_collected_during_dispatch_planning(tmp_path):
-    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.run_training, allow_pickle=True)
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        targets.run_training,
+        allow_pickle=True,
+        requirement_policy="ignore",
+    )
     requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]["environment_requirement"]["requirements"]
     assert "pandas>=2" in requirements
 
