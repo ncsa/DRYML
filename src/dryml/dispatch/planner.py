@@ -16,6 +16,7 @@ from .errors import DispatchPlanningError
 from .normalize import normalize_user_operation
 from .operations import PickledCallable
 from .protocol import DispatchResult, ExecutionEnvelope
+from .requirements import DispatchExplanation, DispatchPlanningResolution, explanation_for, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
 from .stores import require_supported_plan, select_marshal_plan
@@ -29,6 +30,7 @@ class DispatchPlan:
     execution_recipe: Mapping[str, Any]
     envelope: ExecutionEnvelope
     store: Any
+    resolution: DispatchPlanningResolution | None = None
 
 
 class Dispatcher:
@@ -49,16 +51,21 @@ class Dispatcher:
         environment: Any | Mapping[str, Any] | None = None,
         runtime: Mapping[str, Any] | None = None,
         world: Mapping[str, Any] | None = None,
+        requirement_policy: str | None = None,
+        analysis_policy: Any | None = None,
         record_policy: str = "descriptive",
         allow_pickle: bool = False,
         args: tuple[Any, ...] = (),
         kwargs: Mapping[str, Any] | None = None,
     ) -> DispatchPlan:
-        """Build DispatchSpec, ExecutionRecipe, and launch-only envelope.
+        """Build a requirement-checked dispatch plan and launch-only envelope.
 
         ``operation`` may be an explicit OperationSpec, an importable callable,
         a non-importable callable with ``allow_pickle=True``, or a DRYML
-        Definition/CDef/Object paired with ``method_name``.
+        Definition/CDef/Object paired with ``method_name``. Explicit candidates
+        select a target but never override hard requirements. ``requirement_policy``
+        is ``strict``, ``warn``, or ``ignore``; when omitted it follows active
+        runtime enforcement.
         """
 
         _report("dryml.dispatch.plan.start", "Building dispatch plan")
@@ -70,10 +77,27 @@ class Dispatcher:
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
         _report("dryml.dispatch.requirements.merge", "Merging requirements and defaults", operation_id=op_spec.get("id"))
-        env_data = _environment_data(environment)
+        resolution = resolve_dispatch_plan(
+            normalized,
+            environment=environment,
+            world=world,
+            runtime_spec=runtime,
+            requirement_policy=requirement_policy,
+            analysis_policy=analysis_policy,
+            emit_warnings=True,
+        )
+        if not resolution.launchable:
+            if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
+                raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
+            raise DispatchPlanningError(
+                "dispatch plan is not launchable; call dispatch.explain(...) for requirement diagnostics",
+                context={"planning": resolution.to_data()},
+            )
+        env_data = dict(resolution.environment_selection.candidate)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
-        runtime_data = runtime or RuntimeContextSpec(mode=RuntimeMode.WORKER, device_visibility={"policy": "assigned"}, metadata={"source": "dryml.dispatch.local_subprocess"}).to_data()
+        runtime_data = dict(resolution.runtime_selection.candidate)
+        world_data = dict(resolution.world_selection.candidate)
         allocation_data = {"role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": _local_cpu_ids(), "accelerators": {}, "env": {}, "metadata": {"backend": "local_subprocess"}}
         marshal = select_marshal_plan(target_store, query_index="none")
         require_supported_plan(marshal)
@@ -83,10 +107,11 @@ class Dispatcher:
                 operation_id=op_spec["id"],
                 operation=op_spec,
                 environment={"policy": "current", "spec": env_data},
-                world=world or {"policy": "single_worker"},
+                world={"policy": resolution.world_selection.source, "spec": world_data},
                 runtime={"policy": "worker", "spec": runtime_data},
                 records={"record_policy": record_policy, "provenance": record_policy != "none"},
                 execution={"backend": "local_subprocess"},
+                metadata=resolution.metadata(),
             )
         )
         _report("dryml.dispatch.recipe.build", "Building execution recipe", operation_id=op_spec.get("id"), data={"dispatch_id": dispatch["id"]})
@@ -100,6 +125,7 @@ class Dispatcher:
                 store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
                 log_plan={"stdout": "capture", "stderr": "capture"},
                 constraints={"portable": launch.get("call_transport") != "pickle_small"},
+                annotation_report=resolution.metadata(),
             )
         )
         envelope = ExecutionEnvelope(
@@ -112,9 +138,10 @@ class Dispatcher:
             store_refs=marshal.store_refs,
             transfer={"strategy": marshal.strategy},
             record_policy=record_policy,
+            reporting={"planning": resolution.metadata()},
             launch=launch,
         )
-        return DispatchPlan(dispatch, recipe, envelope, target_store)
+        return DispatchPlan(dispatch, recipe, envelope, target_store, resolution)
 
     def submit(
         self,
@@ -140,6 +167,8 @@ class Dispatcher:
         store: Any | None = None,
         environment: Any | Mapping[str, Any] | None = None,
         runtime: Mapping[str, Any] | None = None,
+        requirement_policy: str | None = None,
+        analysis_policy: Any | None = None,
         record_policy: str = "descriptive",
         allow_pickle: bool = False,
         args: tuple[Any, ...] = (),
@@ -164,11 +193,24 @@ class Dispatcher:
         normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
-        env_data = _environment_data(environment)
+        resolution = resolve_dispatch_plan(
+            normalized,
+            environment=environment,
+            world=world,
+            runtime_spec=runtime,
+            requirement_policy=requirement_policy,
+            analysis_policy=analysis_policy,
+            emit_warnings=True,
+        )
+        if not resolution.launchable:
+            if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
+                raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
+            raise DispatchPlanningError("dispatch world plan is not launchable; call dispatch.explain(...) for requirement diagnostics", context={"planning": resolution.to_data()})
+        env_data = dict(resolution.environment_selection.candidate)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
-        runtime_data = runtime or RuntimeContextSpec(mode=RuntimeMode.WORKER, device_visibility={"policy": "assigned"}, metadata={"source": "dryml.dispatch.local_world"}).to_data()
-        allocation_plan = allocate_local_world(world, inventory=inventory, oversubscribe=oversubscribe)
+        runtime_data = dict(resolution.runtime_selection.candidate)
+        allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=inventory, oversubscribe=oversubscribe)
         world_spec = allocation_plan.world_spec
         allocation_spec = allocation_plan.world_allocation_spec
         _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
@@ -186,6 +228,7 @@ class Dispatcher:
                 runtime={"policy": "worker", "spec": runtime_data},
                 records={"record_policy": record_policy, "provenance": record_policy != "none"},
                 execution={"backend": "local_world"},
+                metadata=resolution.metadata(),
             )
         )
         recipe = attach_recipe_id(
@@ -198,6 +241,7 @@ class Dispatcher:
                 store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
                 log_plan={"stdout": "capture_per_worker", "stderr": "capture_per_worker"},
                 constraints={"portable": launch.get("call_transport") != "pickle_small", "local_only": True},
+                annotation_report=resolution.metadata(),
             )
         )
         if record_policy != "none":
@@ -219,6 +263,7 @@ class Dispatcher:
                 store_refs=marshal.store_refs,
                 transfer={"strategy": marshal.strategy},
                 record_policy=record_policy,
+                reporting={"planning": resolution.metadata()},
                 launch=launch_data,
             )
             worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))
@@ -248,6 +293,41 @@ class Dispatcher:
         _report("dryml.dispatch.complete", "Dispatch complete", operation_id=response.operation_id, data={"status": response.status})
         return DispatchResult.from_worker_response(response)
 
+    def explain(
+        self,
+        operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable,
+        method_name: str | None = None,
+        *,
+        store: Any | None = None,
+        environment: Any | Mapping[str, Any] | None = None,
+        runtime: Mapping[str, Any] | None = None,
+        world: Mapping[str, Any] | None = None,
+        requirement_policy: str | None = None,
+        analysis_policy: Any | None = None,
+        allow_pickle: bool = False,
+        args: tuple[Any, ...] = (),
+        kwargs: Mapping[str, Any] | None = None,
+    ) -> DispatchExplanation:
+        """Explain a dispatch request without launching work or creating records.
+
+        Explanation follows the same one-time normalization, requirement policy,
+        candidate precedence, and checks as :meth:`plan`. It may run a bounded
+        code/environment probe when static discovery is incomplete.
+        """
+
+        target_store = store or self.store
+        if target_store is None:
+            raise DispatchPlanningError("Dispatcher.explain requires a store for method target normalization")
+        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
+        return explanation_for(
+            normalized,
+            environment=environment,
+            world=world,
+            runtime_spec=runtime,
+            requirement_policy=requirement_policy,
+            analysis_policy=analysis_policy,
+        )
+
 
 def plan(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchPlan:
     """Build a dispatch plan for a Python-shaped or explicit OperationSpec target."""
@@ -267,6 +347,14 @@ def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, met
     else:
         backend_obj = backend
     return Dispatcher(backend=backend_obj, store=store).run(operation, method_name, **kwargs)
+
+
+def explain(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchExplanation:
+    """Explain a Python-shaped or explicit operation without launching it."""
+
+    if backend not in (None, "local_subprocess"):
+        raise DispatchPlanningError("dispatch.explain currently supports the local_subprocess planner")
+    return Dispatcher(store=store).explain(operation, method_name, **kwargs)
 
 
 def run_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, store: Any | None = None, **kwargs: Any):
@@ -359,4 +447,4 @@ def _report(name: str, message: str, *, operation_id: str | None = None, data: M
         pass
 
 
-__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "plan", "run", "run_world", "submit"]
+__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "explain", "plan", "run", "run_world", "submit"]

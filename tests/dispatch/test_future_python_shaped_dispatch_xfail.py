@@ -31,7 +31,9 @@ def test_dispatch_submit_importable_function_builds_function_call_spec(tmp_path)
 
 
 def test_dispatch_submit_lambda_with_allow_pickle_embeds_plan_time_metadata(tmp_path):
-    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.local_lambda_with_annotation, allow_pickle=True)
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        targets.local_lambda_with_annotation, allow_pickle=True, requirement_policy="ignore"
+    )
     assert plan.envelope.launch["call_transport"] == "pickle_small"
     assert "callable_metadata" in plan.envelope.launch
     assert plan.envelope.launch["callable_metadata"]["qualname"] == "<lambda>"

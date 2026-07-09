@@ -40,10 +40,12 @@ def test_plan_defaults_environment_to_current_environment_spec_data(tmp_path):
     assert plan.envelope.environment_spec["kind"] == "current"
 
 
-def test_plan_defaults_world_to_single_worker_policy(tmp_path):
+def test_plan_defaults_world_to_checked_single_worker_fallback(tmp_path):
     plan = Dispatcher(store=_store(tmp_path)).plan(_operation())
 
-    assert plan.dispatch_spec["payload"]["world"] == {"policy": "single_worker"}
+    world = plan.dispatch_spec["payload"]["world"]
+    assert world["policy"] == "fallback"
+    assert world["spec"]["roles"]["main"]["replicas"] == 1
 
 
 def test_plan_accepts_explicit_environment_and_world(tmp_path):
@@ -52,9 +54,9 @@ def test_plan_accepts_explicit_environment_and_world(tmp_path):
 
     plan = Dispatcher(store=_store(tmp_path)).plan(_operation(), environment=environment, world=world)
 
-    assert plan.dispatch_spec["payload"]["environment"]["spec"] == environment
-    assert plan.envelope.environment_spec == environment
-    assert plan.dispatch_spec["payload"]["world"] == world
+    assert plan.dispatch_spec["payload"]["environment"]["spec"]["kind"] == "current"
+    assert plan.envelope.environment_spec["kind"] == "current"
+    assert plan.dispatch_spec["payload"]["world"] == {"policy": "explicit", "spec": world}
 
 
 def test_plan_accepts_operation_spec_mapping_and_attaches_operation_id(tmp_path):
@@ -100,8 +102,9 @@ def test_planner_report_contains_requirement_gather_merge_steps(monkeypatch, tmp
     assert "dryml.dispatch.requirements.merge" in names
 
 
-def test_planner_does_not_resolve_target_annotations_yet(tmp_path):
+def test_planner_resolves_target_annotations_into_authoritative_metadata(tmp_path):
     plan = Dispatcher(store=_store(tmp_path)).plan(targets.run_training, allow_pickle=True)
 
-    assert "pandas>=2" not in repr(plan.dispatch_spec)
+    requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]
+    assert "pandas>=2" in requirements["environment_requirement"]["requirements"]
     assert plan.dispatch_spec["payload"]["environment"]["policy"] == "current"

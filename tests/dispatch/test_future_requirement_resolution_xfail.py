@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from dryml.core2.store.dir import DirStore
-from dryml.dispatch import Dispatcher
+from dryml.dispatch import Dispatcher, PickledCallable
 
 
 pytestmark = pytest.mark.future_behavior
@@ -28,31 +28,31 @@ def _load_targets():
 targets = _load_targets()
 
 
-@pytest.mark.xfail(reason="Sprint 7: dispatch requirement resolution not implemented yet", strict=True)
 def test_function_level_env_requirement_is_collected_during_dispatch_planning(tmp_path):
     plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.run_training, allow_pickle=True)
-    requirements = plan.dispatch_spec["payload"]["requirements"]["environment"]["requirements"]
+    requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]["environment_requirement"]["requirements"]
     assert "pandas>=2" in requirements
 
 
-@pytest.mark.xfail(reason="Sprint 7: dispatch does not consume annotation requirement resolution yet", strict=True)
 def test_dispatch_resolves_class_and_method_requirements(tmp_path):
-    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.LightningModel(), "train")
-    resolved = plan.dispatch_spec["payload"]["requirements"]
-    assert "torch>=2" in resolved["environment"]["requirements"]
-    assert "lightning>=2" in resolved["environment"]["requirements"]
-    assert resolved["world"]["roles"]["main"]["resources"]["accelerators"]["gpu"]["min"] == 1
+    target = PickledCallable(targets.LightningModel().train)
+    explanation = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(target, allow_pickle=True)
+    resolved = explanation.requirements.to_data()
+    assert "torch>=2" in resolved["environment_requirement"]["requirements"]
+    assert "lightning>=2" in resolved["environment_requirement"]["requirements"]
+    assert resolved["world_requirement"]["roles"]["main"]["resources"]["accelerators"]["gpu"]["min"] == 1
 
 
-@pytest.mark.xfail(reason="Sprint 7: explicit world candidate compatibility check not implemented yet", strict=True)
 def test_dispatch_explicit_world_must_satisfy_hard_world_requirement(tmp_path):
-    cpu_only_world = {"policy": "single_worker", "spec": {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}}
-    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.LightningModel().train, allow_pickle=True, world=cpu_only_world)
-    assert plan.dispatch_spec["payload"]["requirement_report"]["ok"] is False
+    cpu_only_world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}
+    explanation = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(
+        PickledCallable(targets.LightningModel().train), allow_pickle=True, world=cpu_only_world
+    )
+    assert explanation.launchable is False
+    assert explanation.resolution.world_check.status == "incompatible"
 
 
-@pytest.mark.xfail(reason="Sprint 7: dispatch does not consume descriptor-aware annotation resolution yet", strict=True)
 def test_classmethod_and_staticmethod_both_decorator_orders_are_collected(tmp_path):
-    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(targets.ClassMethodTargets.outer_decorated, allow_pickle=True)
-    requirements = plan.dispatch_spec["payload"]["requirements"]["environment"]["requirements"]
+    explanation = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(targets.ClassMethodTargets.outer_decorated, allow_pickle=True)
+    requirements = explanation.requirements.to_data()["environment_requirement"]["requirements"]
     assert "outer-classmethod>=1" in requirements

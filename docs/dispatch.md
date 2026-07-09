@@ -56,6 +56,46 @@ result = dispatcher.run(operation)
 
 `FunctionRef`/import-path function calls and method calls are the preferred portable path. `PickledCallable` exists only as an explicit same-Python convenience and is marked non-portable in the recipe constraints.
 
+## Requirement-Aware Planning
+
+`plan`, `submit`, and `run` normalize an operation once, collect its static
+annotation facts, resolve requirements/defaults, select candidates, and check
+the selected candidates before launch. Explicit `environment=`, `world=`, and
+`runtime=` values choose candidates but do not bypass hard requirements.
+
+Candidate precedence is deterministic: environment uses explicit, annotation
+default, current context, then `CurrentEnvironmentSpec`; world uses explicit,
+annotation default, current context, then a single-worker fallback; runtime uses
+explicit, annotation default, then the local worker default. Planning reports
+the selected source and every considered slot. Sprint 7 does not search a
+registry after incompatibility or synthesize a new world.
+
+`requirement_policy` accepts `"strict"`, `"warn"`, or `"ignore"`. When it is
+omitted, active `RuntimeEnforcement.STRICT`, `.WARN`, and `.OFF` select strict,
+warn, and ignore respectively. Warn and ignore relax only requirement checks;
+they cannot bypass invalid operation structure, worker/allocation safety, or the
+same-environment restriction of `PickledCallable`/`pickle_small` transport.
+
+Use `explain(...)` to inspect the same pipeline without launching a worker,
+allocating workload resources, creating execution records, or running a user
+function body:
+
+```python
+explanation = dryml.dispatch.explain(
+    train_fn,
+    store=repo.default_store,
+    environment=my_environment,
+)
+print(explanation.launchable)
+print(explanation.resolution.environment_check.to_data())
+```
+
+Explanation may perform bounded static analysis or a lightweight code probe when
+static discovery is incomplete. It returns structured requirements, provenance,
+candidate selections, check reports, policy/enforcement, diagnostics, and
+launchability; it does not perform registry resolution, package solving, world
+synthesis, inventory discovery, or dynamic tracing.
+
 ## Local Worlds
 
 `Dispatcher.run_world(...)` is the explicit Sprint 10 entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.

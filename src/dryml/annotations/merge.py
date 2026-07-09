@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from dryml.environments.requirements import EnvironmentRequirement
+from dryml.environments.specs import spec_from_data
 from dryml.environments.utils import normalize_distribution_name
 from dryml.formats import json_ready
 from dryml import reporting
@@ -137,7 +138,7 @@ class RequirementResolution:
         environment_requirement: Merged hard environment requirement, if any.
         world_requirement: Merged hard world requirement, if any.
         runtime_requirement: Merged hard runtime requirement mapping, if any.
-        environment_default: Reserved for future environment defaults.
+        environment_default: Merged default environment specification, if any.
         world_default: Merged default world specification, if any.
         runtime_default: Merged default runtime context, if any.
         fragments: Raw fragments used for this resolution, including provider
@@ -273,8 +274,10 @@ def resolve_fragments(
     world_requirement = _merge_world_requirements(_namespace_fragments(requirement_fragments, WORLD), issues)
     runtime_requirement = _merge_mapping_fragments(_namespace_fragments(requirement_fragments, RUNTIME), issues=issues, namespace=RUNTIME) or None
 
+    environment_default_data = _merge_mapping_fragments(_namespace_fragments(default_fragments, ENVIRONMENT), issues=issues, namespace=ENVIRONMENT)
     world_default_data = _merge_mapping_fragments(_namespace_fragments(default_fragments, WORLD), issues=issues, namespace=WORLD)
     runtime_default_data = _merge_mapping_fragments(_namespace_fragments(default_fragments, RUNTIME), issues=issues, namespace=RUNTIME)
+    environment_default = _environment_spec_or_issue(environment_default_data, issues, _sources(_namespace_fragments(default_fragments, ENVIRONMENT))) if environment_default_data else None
     world_default = _world_spec_or_issue(world_default_data, issues, _sources(_namespace_fragments(default_fragments, WORLD))) if world_default_data else None
     runtime_default = _runtime_spec_or_issue(runtime_default_data, issues, _sources(_namespace_fragments(default_fragments, RUNTIME))) if runtime_default_data else None
 
@@ -290,6 +293,7 @@ def resolve_fragments(
         environment_requirement=environment_requirement,
         world_requirement=world_requirement,
         runtime_requirement=runtime_requirement,
+        environment_default=environment_default,
         world_default=world_default,
         runtime_default=runtime_default,
         fragments=ordered,
@@ -461,6 +465,14 @@ def _world_spec_or_issue(data: Mapping[str, Any], issues: list[AnnotationIssue],
         return WorldSpec.from_data(data)
     except Exception as exc:
         issues.append(AnnotationIssue("error", WORLD, "/", str(exc), sources=sources))
+        return None
+
+
+def _environment_spec_or_issue(data: Mapping[str, Any], issues: list[AnnotationIssue], sources: tuple[SourceTrace, ...]) -> Any | None:
+    try:
+        return spec_from_data(data)
+    except Exception as exc:
+        issues.append(AnnotationIssue("error", ENVIRONMENT, "/", str(exc), sources=sources))
         return None
 
 
