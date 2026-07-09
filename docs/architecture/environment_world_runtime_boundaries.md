@@ -32,6 +32,8 @@ Probe processes do not need the final workload world and should normally run wit
 
 `dryml.code.probe_target(...)` is the combined code-analysis probe surface. It can run in the current Python process, through `CurrentEnvironmentSpec`, or through an explicit Python executable worker. It may optionally include an `EnvironmentRecord` collected inside the process that ran the analysis. Unsupported environment launch paths return diagnostics rather than creating environments, solving packages, using containers, or synthesizing worlds.
 
+Current-process probes can inspect live local/notebook targets because they preserve the live `CodeTarget` wrapper. Worker/subprocess probes cross a JSON boundary and therefore require a serializable target reference such as an import path or source spec. Timeout enforcement is subprocess-based; current-process probes with timeouts route serializable targets through the current Python worker and reject live non-serializable targets with a diagnostic.
+
 ## Notebook Current/Default State
 
 `dryml.environments.current()` and `dryml.worlds.current()` represent context-local notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` means the actual allocation of this process. Setting a current world does not allocate resources and does not imply that the current process owns that world.

@@ -60,6 +60,29 @@ def test_python_executable_spec_probe_path():
     assert result.analysis.facts_of_kind("callable")
 
 
+def test_subprocess_probe_rejects_non_serializable_local_function():
+    def local_target():
+        return None
+
+    spec = PythonExecutableSpec(executable=sys.executable, pythonpath_policy="dryml-source")
+    result = code.probe_target(local_target, environment=spec, include_environment_record=False)
+
+    assert not result.ok
+    assert "code_probe.non_serializable_target" in {item.code for item in result.diagnostics}
+
+
+def test_current_import_path_timeout_routes_through_subprocess(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", FIXTURE_DIR)
+    result = code.probe_target(
+        "probe_slow_import:slow_target",
+        include_environment_record=False,
+        timeout=0.2,
+    )
+
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.timeout"
+
+
 def test_unsupported_environment_spec_returns_diagnostic():
     result = code.probe_target(TARGET, environment=ContainerEnvironmentSpec(image="example:latest"))
     assert not result.ok

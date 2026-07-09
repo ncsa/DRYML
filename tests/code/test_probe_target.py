@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 
+import dryml
 import dryml.code as code
 
 
@@ -42,6 +43,28 @@ def test_probe_direct_annotation_facts_for_function():
 
     assert result.ok
     assert _requirements(result)[0].fragment["requirements"] == ["probepkg>=1"]
+
+
+def test_probe_current_process_live_local_function_keeps_annotations():
+    @dryml.env.req(requirements=("localpkg>=1",))
+    def local_target():
+        return "not executed"
+
+    result = code.probe_target(local_target, include_environment_record=False)
+
+    assert result.ok
+    assert _requirements(result)[0].fragment["requirements"] == ["localpkg>=1"]
+    assert result.analysis.facts_of_kind("callable")
+
+
+def test_current_process_timeout_rejects_live_non_serializable_function():
+    def local_target():
+        return "not executed"
+
+    result = code.probe_target(local_target, include_environment_record=False, timeout=0.1)
+
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.timeout"
 
 
 def test_probe_method_classmethod_and_staticmethod_annotations():

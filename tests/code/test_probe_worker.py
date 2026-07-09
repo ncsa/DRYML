@@ -65,6 +65,18 @@ def test_worker_handles_missing_target_field():
     assert result.diagnostics[0].code == "code_probe.invalid_request"
 
 
+def test_worker_rejects_unsupported_schema_version():
+    payload = _request().to_data()
+    payload["schema_version"] = 999
+
+    completed = _run_worker(json.dumps(payload))
+    result = _result(completed)
+
+    assert completed.returncode == 0
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.invalid_request"
+
+
 def test_worker_handles_unknown_algorithm():
     completed = _run_worker(json.dumps(_request(algorithms=("missing_algorithm",)).to_data()))
 

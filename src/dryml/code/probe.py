@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from typing import Any
 from dryml import environments, runtime
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, analyze, available_analyzers
 from dryml.code.facts import DiagnosticFact, json_compatible
-from dryml.code.targets import CodeTargetSpec, normalize_target
+from dryml.code.targets import CodeTarget, CodeTargetSpec, normalize_target
 from dryml.environments.errors import EnvironmentSpecError
 from dryml.environments.records import EnvironmentRecord
 from dryml.environments.specs import (
@@ -104,6 +105,7 @@ class CodeProbeRequest:
 
         if not isinstance(data, Mapping):
             raise TypeError("CodeProbeRequest data must be a mapping")
+        _validate_schema_version(data)
         if "target" not in data:
             raise ValueError("CodeProbeRequest data is missing required 'target'")
         return cls(
@@ -168,6 +170,7 @@ class CodeProbeResult:
 
         if not isinstance(data, Mapping):
             raise TypeError("CodeProbeResult data must be a mapping")
+        _validate_schema_version(data)
         return cls(
             ok=bool(data.get("ok", False)),
             analysis=None if data.get("analysis") is None else CodeAnalysisResult.from_data(data["analysis"]),
@@ -235,6 +238,10 @@ def run_probe_request(request: CodeProbeRequest | Mapping[str, Any], *, environm
             diagnostics=(diagnostic("code_probe.invalid_request", "Invalid code probe request.", data={"error": repr(exc)}),),
         )
 
+    return _run_probe_request_normalized(normalized, analysis_target=normalized.target)
+
+
+def _run_probe_request_normalized(normalized: CodeProbeRequest, *, analysis_target: Any) -> CodeProbeResult:
     diagnostics: list[DiagnosticFact] = _request_diagnostics(normalized)
     if diagnostics:
         return CodeProbeResult(ok=False, analysis=None, environment_record=None, diagnostics=tuple(diagnostics))
@@ -271,7 +278,7 @@ def run_probe_request(request: CodeProbeRequest | Mapping[str, Any], *, environm
                     diagnostics_policy="collect",
                     metadata={"probe_policy": normalized.policy, **dict(normalized.metadata)},
                 )
-                analysis = analyze(normalized.target, algorithms=normalized.algorithms, context=context)
+                analysis = analyze(analysis_target, algorithms=normalized.algorithms, context=context)
     except Exception as exc:
         diagnostics.append(diagnostic("code_probe.unexpected_error", "Code probe failed unexpectedly.", data={"error": repr(exc)}))
 
@@ -307,6 +314,7 @@ def probe_target(
     than attempting package solving, container execution, or world synthesis.
     """
 
+    code_target: CodeTarget | None = None
     try:
         if isinstance(target, CodeTargetSpec):
             target_spec = target
@@ -347,10 +355,30 @@ def probe_target(
         metadata=metadata or {},
     )
     if environment is None or isinstance(environment, CurrentEnvironmentSpec):
+        if timeout is not None:
+            if _target_can_run_in_subprocess(target_spec):
+                env = build_probe_env(base=None, overrides=None, pythonpath_policy="inherit")
+                return probe_target_in_subprocess(request, [sys.executable, *PROBE_WORKER_ARGS], timeout=timeout, env=env)
+            return CodeProbeResult(
+                ok=False,
+                analysis=None,
+                environment_record=None,
+                diagnostics=(diagnostic(
+                    "code_probe.timeout",
+                    "Current-process timeout is unsupported for live non-serializable code probe targets.",
+                    data={"target": target_spec.to_data()},
+                ),),
+            )
+        if code_target is not None:
+            return _run_probe_request_normalized(request, analysis_target=code_target)
         return run_probe_request(request, environment=environment)
     if isinstance(environment, PythonExecutableSpec):
+        if not _target_can_run_in_subprocess(target_spec):
+            return _non_serializable_target_result(target_spec)
         return probe_target_in_subprocess(request, _python_command(environment), timeout=timeout, env=_python_env(environment))
     if isinstance(environment, CondaEnvironmentSpec):
+        if not _target_can_run_in_subprocess(target_spec):
+            return _non_serializable_target_result(target_spec)
         try:
             command = _conda_command(environment)
         except EnvironmentSpecError as exc:
@@ -447,6 +475,29 @@ def _coerce_algorithms(value: Iterable[str] | str | None) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
     return tuple(str(item) for item in value)
+
+
+def _validate_schema_version(data: Mapping[str, Any]) -> None:
+    version = data.get("schema_version", PROBE_SCHEMA_VERSION)
+    if version != PROBE_SCHEMA_VERSION:
+        raise ValueError(f"unsupported code probe schema_version {version!r}")
+
+
+def _target_can_run_in_subprocess(target: CodeTargetSpec) -> bool:
+    return bool(target.import_path or target.source_spec)
+
+
+def _non_serializable_target_result(target: CodeTargetSpec) -> CodeProbeResult:
+    return CodeProbeResult(
+        ok=False,
+        analysis=None,
+        environment_record=None,
+        diagnostics=(diagnostic(
+            "code_probe.non_serializable_target",
+            "Target cannot be probed in a subprocess without an import path or source spec.",
+            data={"target": target.to_data()},
+        ),),
+    )
 
 
 def _request_diagnostics(request: CodeProbeRequest) -> list[DiagnosticFact]:

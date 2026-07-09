@@ -60,7 +60,11 @@ Sprint 5 adds `dryml.code.probe_target(...)`, `dryml.code.run_probe_request(...)
 
 The default lightweight analyzer set is `callables`, `source`, `symbol_capture`, and `direct_annotations`. Probe mode may import a target module to resolve an import path, so module-level import side effects remain possible. Probe mode does not intentionally execute target function bodies, instantiate target classes, run dynamic tracing, synthesize worlds, allocate workload resources, or change dispatch selection.
 
-`python -m dryml.code.probe_worker --json` is the JSON worker protocol. It reads a serialized request from stdin and writes only serialized result JSON to stdout. Handled failures such as invalid JSON, unknown algorithms, import failures, unsupported environments, and subprocess timeouts are represented as `DiagnosticFact` entries with `code_probe.*` diagnostic codes.
+Current-process probes preserve the live `CodeTarget` wrapper for notebook/local functions, lambdas, and methods so local source/callable/annotation facts are not lost when a target has no stable import path. Subprocess probes require a serializable target reference, currently an import path or source spec, and return `code_probe.non_serializable_target` for live targets that cannot cross the JSON worker boundary.
+
+Timeout enforcement is parent-side for subprocess probes. When a current-process probe receives a timeout for an import-path/source-backed target, it routes through the current Python executable worker so the timeout can be enforced. Live non-serializable current-process targets cannot be safely interrupted, so they return a structured `code_probe.timeout` diagnostic instead of pretending an in-process timeout is enforceable.
+
+`python -m dryml.code.probe_worker --json` is the JSON worker protocol. It reads a schema-versioned serialized request from stdin and writes only serialized result JSON to stdout. Handled failures such as invalid JSON, unsupported schema versions, unknown algorithms, import failures, unsupported environments, and subprocess timeouts are represented as `DiagnosticFact` entries with `code_probe.*` diagnostic codes.
 
 ## Non-Goals
 
