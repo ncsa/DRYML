@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 
 
+FIXTURE_DIR = Path(__file__).parents[1] / "fixtures"
+if str(FIXTURE_DIR) not in sys.path:
+    sys.path.insert(0, str(FIXTURE_DIR))
+
+
 @pytest.fixture(scope="session")
 def requirement_targets():
     """Load reusable requirement targets under an importable module name."""

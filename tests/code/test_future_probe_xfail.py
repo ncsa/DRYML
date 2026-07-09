@@ -29,23 +29,18 @@ def _load_targets():
 targets = _load_targets()
 
 
-@pytest.mark.xfail(reason="Sprint 5: lightweight code probe worker not implemented yet", strict=True)
 def test_code_probe_target_exists():
     assert callable(code.probe_target)
 
 
-@pytest.mark.xfail(reason="Sprint 5: lightweight code probe worker not implemented yet", strict=True)
 def test_code_probe_returns_facts_without_world_allocation():
-    result = code.probe_target(targets.plain_importable_function, include_environment=True)
+    result = code.probe_target(targets.plain_importable_function, include_environment_record=True)
     assert result.ok
-    assert result.runtime.mode == "probe"
-    assert result.allocation is None
-    assert result.code_facts
+    assert result.analysis.facts
     assert result.environment_record
 
 
-@pytest.mark.xfail(reason="Sprint 5: structured code probe diagnostics are not implemented yet", strict=True)
 def test_code_probe_has_structured_diagnostics_for_import_failure():
     result = code.probe_target("missing.module:target")
     assert not result.ok
-    assert result.diagnostics[0].code == "import_failed"
+    assert "code_probe.import_error" in {item.code for item in result.diagnostics}

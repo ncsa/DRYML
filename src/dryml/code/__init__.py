@@ -23,6 +23,12 @@ from .facts import (
     SourceFact,
     SymbolFact,
 )
+from .probe import (
+    CodeProbeRequest,
+    CodeProbeResult,
+    probe_target,
+    run_probe_request,
+)
 from .source import SourceInfo, func_source_extract, get_source_info
 from .targets import (
     CodeTarget,
@@ -47,6 +53,8 @@ __all__ = [
     "CodeAnalysisError",
     "CodeAnalysisResult",
     "CodeFact",
+    "CodeProbeRequest",
+    "CodeProbeResult",
     "CodeTarget",
     "CodeTargetSpec",
     "CompilerInfo",
@@ -67,7 +75,9 @@ __all__ = [
     "get_analyzer",
     "get_source_info",
     "normalize_target",
+    "probe_target",
     "register_analyzer",
+    "run_probe_request",
     "target_from_callable",
     "target_from_class_attribute",
     "target_from_definition_method",

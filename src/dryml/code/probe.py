@@ -1,0 +1,538 @@
+"""Lightweight code probe request, result, and execution helpers.
+
+Code probes run the existing :mod:`dryml.code` analyzers under
+``RuntimeMode.PROBE``. They may import a target module to resolve an import path;
+that import can execute module-level Python code, so probe execution captures
+stdout/stderr and never intentionally executes target function bodies, dynamic
+tracing, workload allocation, package solving, or world synthesis.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import subprocess
+from collections.abc import Iterable, Mapping
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass, field
+from typing import Any
+
+from dryml import environments, runtime
+from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, analyze, available_analyzers
+from dryml.code.facts import DiagnosticFact, json_compatible
+from dryml.code.targets import CodeTargetSpec, normalize_target
+from dryml.environments.errors import EnvironmentSpecError
+from dryml.environments.records import EnvironmentRecord
+from dryml.environments.specs import (
+    CondaEnvironmentSpec,
+    ContainerEnvironmentSpec,
+    CurrentEnvironmentSpec,
+    EnvironmentSpec,
+    PythonExecutableSpec,
+)
+from dryml.environments.utils import build_probe_env
+
+
+PROBE_SCHEMA_VERSION = 1
+DEFAULT_PROBE_ALGORITHMS = ("callables", "source", "symbol_capture", "direct_annotations")
+PROBE_WORKER_ARGS = ("-m", "dryml.code.probe_worker", "--json")
+
+
+@dataclass(frozen=True, slots=True)
+class CodeProbeRequest:
+    """Serializable request for lightweight code analysis.
+
+    Args:
+        target: Serializable code target spec. Other target inputs are
+            normalized to a spec during construction.
+        algorithms: Analyzer names to run. Defaults to the lightweight analyzer
+            set used by Sprint 5.
+        include_environment_record: Whether to include an observed
+            ``EnvironmentRecord`` from the process running the probe.
+        args: Reserved JSON-compatible positional metadata. The probe does not
+            call the target with these arguments.
+        kwargs: Reserved JSON-compatible keyword metadata. The probe does not
+            call the target with these arguments.
+        runtime_mode: Only ``"probe"`` is supported in Sprint 5.
+        policy: Probe policy name. ``"lightweight"`` is the only behavioral
+            policy in Sprint 5.
+        timeout_s: Optional parent-side subprocess timeout in seconds.
+        metadata: JSON-compatible caller metadata passed to analyzers.
+    """
+
+    target: CodeTargetSpec
+    algorithms: tuple[str, ...] = DEFAULT_PROBE_ALGORITHMS
+    include_environment_record: bool = True
+    args: tuple[Any, ...] = ()
+    kwargs: Mapping[str, Any] = field(default_factory=dict)
+    runtime_mode: str = "probe"
+    policy: str = "lightweight"
+    timeout_s: float | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, CodeTargetSpec):
+            object.__setattr__(self, "target", normalize_target(self.target, metadata=self.metadata).spec)
+        object.__setattr__(self, "algorithms", _coerce_algorithms(self.algorithms))
+        object.__setattr__(self, "args", tuple(json_compatible(self.args)))
+        object.__setattr__(self, "kwargs", dict(json_compatible(self.kwargs)))
+        object.__setattr__(self, "runtime_mode", str(self.runtime_mode).strip().lower())
+        object.__setattr__(self, "policy", str(self.policy).strip().lower())
+        object.__setattr__(self, "metadata", dict(json_compatible(self.metadata)))
+        if self.timeout_s is not None:
+            object.__setattr__(self, "timeout_s", float(self.timeout_s))
+
+    def to_data(self) -> dict[str, Any]:
+        """Return JSON-compatible request data using schema version 1."""
+
+        return {
+            "schema_version": PROBE_SCHEMA_VERSION,
+            "target": self.target.to_data(),
+            "algorithms": list(self.algorithms),
+            "include_environment_record": self.include_environment_record,
+            "args": list(json_compatible(self.args)),
+            "kwargs": json_compatible(self.kwargs),
+            "runtime_mode": self.runtime_mode,
+            "policy": self.policy,
+            "timeout_s": self.timeout_s,
+            "metadata": json_compatible(self.metadata),
+        }
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> "CodeProbeRequest":
+        """Build a request from JSON-compatible mapping data."""
+
+        if not isinstance(data, Mapping):
+            raise TypeError("CodeProbeRequest data must be a mapping")
+        if "target" not in data:
+            raise ValueError("CodeProbeRequest data is missing required 'target'")
+        return cls(
+            target=CodeTargetSpec.from_data(data["target"]),
+            algorithms=tuple(data.get("algorithms") or DEFAULT_PROBE_ALGORITHMS),
+            include_environment_record=bool(data.get("include_environment_record", True)),
+            args=tuple(data.get("args") or ()),
+            kwargs=data.get("kwargs") or {},
+            runtime_mode=data.get("runtime_mode", "probe"),
+            policy=data.get("policy", "lightweight"),
+            timeout_s=data.get("timeout_s"),
+            metadata=data.get("metadata") or {},
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CodeProbeResult:
+    """Result of a lightweight code probe.
+
+    Args:
+        ok: Whether no error-severity diagnostics were emitted. Construction
+            normalizes this value from diagnostics so serialized failures remain
+            consistent.
+        analysis: Optional reusable code-analysis result.
+        environment_record: Optional observed environment record from the probe
+            process.
+        diagnostics: Structured request, analysis, environment, or worker
+            diagnostics.
+        stdout: Captured user-code stdout from import/analysis.
+        stderr: Captured user-code stderr from import/analysis or worker stderr
+            when subprocess protocol handling fails.
+    """
+
+    ok: bool
+    analysis: CodeAnalysisResult | None
+    environment_record: EnvironmentRecord | None
+    diagnostics: tuple[DiagnosticFact, ...] = ()
+    stdout: str | None = None
+    stderr: str | None = None
+
+    def __post_init__(self) -> None:
+        diagnostics = tuple(self.diagnostics or ())
+        object.__setattr__(self, "diagnostics", diagnostics)
+        object.__setattr__(self, "ok", probe_ok(diagnostics))
+
+    def to_data(self) -> dict[str, Any]:
+        """Return JSON-compatible result data using schema version 1."""
+
+        return {
+            "schema_version": PROBE_SCHEMA_VERSION,
+            "ok": self.ok,
+            "analysis": None if self.analysis is None else self.analysis.to_data(),
+            "environment_record": None if self.environment_record is None else self.environment_record.to_data(),
+            "diagnostics": [diagnostic.to_data() for diagnostic in self.diagnostics],
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+        }
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> "CodeProbeResult":
+        """Build a probe result from JSON-compatible mapping data."""
+
+        if not isinstance(data, Mapping):
+            raise TypeError("CodeProbeResult data must be a mapping")
+        return cls(
+            ok=bool(data.get("ok", False)),
+            analysis=None if data.get("analysis") is None else CodeAnalysisResult.from_data(data["analysis"]),
+            environment_record=(
+                None
+                if data.get("environment_record") is None
+                else EnvironmentRecord.from_data(data["environment_record"])
+            ),
+            diagnostics=tuple(DiagnosticFact.from_data(item) for item in data.get("diagnostics") or ()),
+            stdout=data.get("stdout"),
+            stderr=data.get("stderr"),
+        )
+
+
+def diagnostic(code: str, message: str, *, severity: str = "error", data: Mapping[str, Any] | None = None) -> DiagnosticFact:
+    """Construct a code-probe diagnostic fact."""
+
+    return DiagnosticFact(
+        severity=severity,
+        code=code,
+        message=message,
+        source={"component": "dryml.code.probe"},
+        data=data or {},
+    )
+
+
+def probe_ok(diagnostics: Iterable[DiagnosticFact]) -> bool:
+    """Return true when *diagnostics* contains no error-severity item."""
+
+    return not any(item.severity == "error" for item in diagnostics)
+
+
+def normalize_probe_request(request: CodeProbeRequest | Mapping[str, Any]) -> CodeProbeRequest:
+    """Normalize a request object or mapping and validate Sprint 5 policy."""
+
+    normalized = request if isinstance(request, CodeProbeRequest) else CodeProbeRequest.from_data(request)
+    if normalized.runtime_mode != "probe":
+        raise ValueError(f"unsupported code probe runtime_mode {normalized.runtime_mode!r}")
+    if normalized.policy != "lightweight":
+        raise ValueError(f"unsupported code probe policy {normalized.policy!r}")
+    return normalized
+
+
+def run_probe_request(request: CodeProbeRequest | Mapping[str, Any], *, environment: Any | None = None) -> CodeProbeResult:
+    """Execute a normalized code probe in the current process.
+
+    Args:
+        request: Probe request object or serialized request mapping.
+        environment: Optional current-process environment metadata. Sprint 5 does
+            not use this parameter to create or solve environments.
+
+    Returns:
+        A ``CodeProbeResult`` containing code facts, diagnostics, optional
+        environment record, and captured user output.
+    """
+
+    del environment
+    try:
+        normalized = normalize_probe_request(request)
+    except Exception as exc:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic("code_probe.invalid_request", "Invalid code probe request.", data={"error": repr(exc)}),),
+        )
+
+    diagnostics: list[DiagnosticFact] = _request_diagnostics(normalized)
+    if diagnostics:
+        return CodeProbeResult(ok=False, analysis=None, environment_record=None, diagnostics=tuple(diagnostics))
+
+    captured_stdout = io.StringIO()
+    captured_stderr = io.StringIO()
+    analysis: CodeAnalysisResult | None = None
+    environment_record: EnvironmentRecord | None = None
+
+    try:
+        with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
+            with runtime.enter_runtime(runtime.RuntimeMode.PROBE) as state:
+                if state.allocation is not runtime.NoAllocation:
+                    diagnostics.append(diagnostic(
+                        "code_probe.unexpected_error",
+                        "Probe runtime unexpectedly has a workload allocation.",
+                        data={"allocation": repr(state.allocation)},
+                    ))
+                if normalized.include_environment_record:
+                    try:
+                        environment_record = environments.inspect_current()
+                    except Exception as exc:
+                        diagnostics.append(diagnostic(
+                            "code_probe.environment_record_error",
+                            "Environment record collection failed.",
+                            data={"error": repr(exc)},
+                        ))
+                context = CodeAnalysisContext(
+                    algorithms=normalized.algorithms,
+                    allow_import=True,
+                    allow_source=True,
+                    allow_dynamic_execution=False,
+                    include_annotations=True,
+                    diagnostics_policy="collect",
+                    metadata={"probe_policy": normalized.policy, **dict(normalized.metadata)},
+                )
+                analysis = analyze(normalized.target, algorithms=normalized.algorithms, context=context)
+    except Exception as exc:
+        diagnostics.append(diagnostic("code_probe.unexpected_error", "Code probe failed unexpectedly.", data={"error": repr(exc)}))
+
+    if analysis is not None:
+        diagnostics.extend(_probe_diagnostics_from_analysis(analysis))
+        diagnostics.extend(analysis.diagnostics)
+
+    return CodeProbeResult(
+        ok=probe_ok(diagnostics),
+        analysis=analysis,
+        environment_record=environment_record,
+        diagnostics=tuple(diagnostics),
+        stdout=captured_stdout.getvalue() or None,
+        stderr=captured_stderr.getvalue() or None,
+    )
+
+
+def probe_target(
+    target: Any,
+    *,
+    environment: EnvironmentSpec | None = None,
+    algorithms: Iterable[str] | None = None,
+    include_environment_record: bool = True,
+    timeout: float | None = None,
+    policy: str = "lightweight",
+    metadata: Mapping[str, Any] | None = None,
+) -> CodeProbeResult:
+    """Normalize and probe a target in the current or requested Python environment.
+
+    Import-path targets may execute module-level code while being imported by
+    Python. Probe mode does not execute target function bodies or instantiate
+    classes. Unsupported environment specs return structured diagnostics rather
+    than attempting package solving, container execution, or world synthesis.
+    """
+
+    try:
+        if isinstance(target, CodeTargetSpec):
+            target_spec = target
+            target_kind = target.kind
+        elif isinstance(target, str):
+            target_spec = CodeTargetSpec.from_import_path(target)
+            target_kind = target_spec.kind
+        else:
+            code_target = normalize_target(target, metadata=metadata or {})
+            target_spec = code_target.spec
+            target_kind = code_target.spec.kind
+    except Exception as exc:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic("code_probe.target_normalization_error", "Code target normalization failed.", data={"error": repr(exc)}),),
+        )
+    if target_kind == "unknown":
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic(
+                "code_probe.target_normalization_error",
+                "Unsupported code probe target type.",
+                data={"target_type": type(target).__name__},
+            ),),
+        )
+
+    request = CodeProbeRequest(
+        target=target_spec,
+        algorithms=tuple(algorithms or DEFAULT_PROBE_ALGORITHMS),
+        include_environment_record=include_environment_record,
+        runtime_mode="probe",
+        policy=policy,
+        timeout_s=timeout,
+        metadata=metadata or {},
+    )
+    if environment is None or isinstance(environment, CurrentEnvironmentSpec):
+        return run_probe_request(request, environment=environment)
+    if isinstance(environment, PythonExecutableSpec):
+        return probe_target_in_subprocess(request, _python_command(environment), timeout=timeout, env=_python_env(environment))
+    if isinstance(environment, CondaEnvironmentSpec):
+        try:
+            command = _conda_command(environment)
+        except EnvironmentSpecError as exc:
+            return _unsupported_environment_result(environment, str(exc))
+        return probe_target_in_subprocess(request, command, timeout=timeout, env=_python_env(environment))
+    if isinstance(environment, ContainerEnvironmentSpec):
+        return _unsupported_environment_result(environment, "container code probing is not implemented")
+    return _unsupported_environment_result(environment, f"unsupported environment spec {type(environment).__name__}")
+
+
+def probe_target_in_subprocess(
+    request: CodeProbeRequest,
+    command: list[str],
+    *,
+    timeout: float | None,
+    env: Mapping[str, str] | None = None,
+) -> CodeProbeResult:
+    """Launch a probe worker command and decode its JSON result."""
+
+    payload = json.dumps(request.to_data(), sort_keys=True)
+    try:
+        completed = subprocess.run(
+            command,
+            input=payload,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=dict(env) if env is not None else None,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic("code_probe.timeout", f"Code probe timed out after {timeout} seconds."),),
+            stdout=exc.stdout if isinstance(exc.stdout, str) else None,
+            stderr=exc.stderr if isinstance(exc.stderr, str) else None,
+        )
+    except OSError as exc:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic("code_probe.unsupported_environment", "Code probe worker could not be started.", data={"error": repr(exc)}),),
+        )
+
+    try:
+        result = CodeProbeResult.from_data(json.loads(completed.stdout))
+    except Exception as exc:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic(
+                "code_probe.worker_protocol_error",
+                "Code probe worker did not emit valid result JSON.",
+                data={"error": repr(exc), "returncode": completed.returncode},
+            ),),
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+    if completed.returncode != 0:
+        extra = diagnostic(
+            "code_probe.worker_protocol_error",
+            f"Code probe worker exited with status {completed.returncode}.",
+            data={"returncode": completed.returncode},
+        )
+        return CodeProbeResult(
+            ok=False,
+            analysis=result.analysis,
+            environment_record=result.environment_record,
+            diagnostics=result.diagnostics + (extra,),
+            stdout=result.stdout,
+            stderr=result.stderr or completed.stderr or None,
+        )
+    return result
+
+
+def request_from_data(data: Mapping[str, Any]) -> CodeProbeRequest:
+    """Deserialize a code probe request."""
+
+    return CodeProbeRequest.from_data(data)
+
+
+def result_from_data(data: Mapping[str, Any]) -> CodeProbeResult:
+    """Deserialize a code probe result."""
+
+    return CodeProbeResult.from_data(data)
+
+
+def _coerce_algorithms(value: Iterable[str] | str | None) -> tuple[str, ...]:
+    if value is None:
+        return DEFAULT_PROBE_ALGORITHMS
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(item) for item in value)
+
+
+def _request_diagnostics(request: CodeProbeRequest) -> list[DiagnosticFact]:
+    diagnostics: list[DiagnosticFact] = []
+    if request.runtime_mode != "probe":
+        diagnostics.append(diagnostic(
+            "code_probe.unsupported_runtime_mode",
+            f"Unsupported code probe runtime mode {request.runtime_mode!r}.",
+            data={"runtime_mode": request.runtime_mode},
+        ))
+    available = set(available_analyzers())
+    for name in request.algorithms:
+        if name not in available:
+            diagnostics.append(diagnostic(
+                "code_probe.unknown_algorithm",
+                f"Unknown code probe analyzer {name!r}.",
+                data={"algorithm": name},
+            ))
+    return diagnostics
+
+
+def _probe_diagnostics_from_analysis(analysis: CodeAnalysisResult) -> tuple[DiagnosticFact, ...]:
+    diagnostics: list[DiagnosticFact] = []
+    if any(item.code == "dryml.code.import_failed" for item in analysis.diagnostics):
+        diagnostics.append(diagnostic(
+            "code_probe.import_error",
+            "Code probe target import failed.",
+            data={"target": analysis.target.to_data()},
+        ))
+    if any(item.code == "dryml.code.algorithm_failed" for item in analysis.diagnostics):
+        diagnostics.append(diagnostic(
+            "code_probe.analysis_error",
+            "Code probe analysis failed.",
+            data={"target": analysis.target.to_data()},
+        ))
+    return tuple(diagnostics)
+
+
+def _python_command(spec: PythonExecutableSpec) -> list[str]:
+    return [spec.executable, *PROBE_WORKER_ARGS]
+
+
+def _conda_command(spec: CondaEnvironmentSpec) -> list[str]:
+    if spec.launch_mode == "direct":
+        return [spec.direct_python_executable(), *PROBE_WORKER_ARGS]
+    if not spec.prefix and not spec.name:
+        raise EnvironmentSpecError("conda-run launch requires prefix or name")
+    command = [spec.conda_executable, "run"]
+    if spec.prefix:
+        command.extend(["-p", spec.prefix])
+    else:
+        command.extend(["-n", spec.name or ""])
+    command.extend(["--no-capture-output", "--", "python", *PROBE_WORKER_ARGS])
+    return command
+
+
+def _python_env(spec: PythonExecutableSpec | CondaEnvironmentSpec) -> dict[str, str]:
+    return build_probe_env(
+        base=None,
+        overrides=spec.env,
+        pythonpath_policy=spec.pythonpath_policy,
+        extra_pythonpath=spec.extra_pythonpath,
+    )
+
+
+def _unsupported_environment_result(environment: Any, message: str) -> CodeProbeResult:
+    data = environment.to_data() if hasattr(environment, "to_data") else {"type": type(environment).__name__}
+    return CodeProbeResult(
+        ok=False,
+        analysis=None,
+        environment_record=None,
+        diagnostics=(diagnostic("code_probe.unsupported_environment", message, data={"environment": data}),),
+    )
+
+
+__all__ = [
+    "CodeProbeRequest",
+    "CodeProbeResult",
+    "DEFAULT_PROBE_ALGORITHMS",
+    "PROBE_SCHEMA_VERSION",
+    "diagnostic",
+    "normalize_probe_request",
+    "probe_ok",
+    "probe_target",
+    "probe_target_in_subprocess",
+    "request_from_data",
+    "result_from_data",
+    "run_probe_request",
+]

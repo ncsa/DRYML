@@ -2,7 +2,7 @@
 
 ## Status
 
-Sprint 0 baseline note anchored to `a6d3550`, updated through Sprint 4 runtime enforcement and current/default APIs.
+Sprint 0 baseline note anchored to `a6d3550`, updated through Sprint 5 lightweight code probes.
 
 ## Current State
 
@@ -30,6 +30,8 @@ Environment probing and world allocation are separate concerns. A probe can insp
 
 Probe processes do not need the final workload world and should normally run without GPU allocation. They should use `RuntimeMode.PROBE` and `NoAllocation`, producing facts and diagnostics rather than user workload results.
 
+`dryml.code.probe_target(...)` is the combined code-analysis probe surface. It can run in the current Python process, through `CurrentEnvironmentSpec`, or through an explicit Python executable worker. It may optionally include an `EnvironmentRecord` collected inside the process that ran the analysis. Unsupported environment launch paths return diagnostics rather than creating environments, solving packages, using containers, or synthesizing worlds.
+
 ## Notebook Current/Default State
 
 `dryml.environments.current()` and `dryml.worlds.current()` represent context-local notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` means the actual allocation of this process. Setting a current world does not allocate resources and does not imply that the current process owns that world.
@@ -49,6 +51,7 @@ In a notebook, a user may set a default requested world for later dispatch while
 - Sprint 4 current/default APIs do not allocate resources.
 - Sprint 4 `worlds.discover_current()` does not synthesize worlds.
 - Sprint 4 runtime enforcement does not implement dispatch candidate checking.
+- Sprint 5 code probes do not execute target function bodies, dynamic tracing, workload workers, or dispatch candidate selection.
 - Sprint 0 does not implement environment or world registry/resolver behavior.
 
 ## Source Anchors
@@ -62,6 +65,8 @@ In a notebook, a user may set a default requested world for later dispatch while
 - `src/dryml/worlds/compatibility.py`
 - `src/dryml/runtime/context.py`
 - `src/dryml/runtime/modes.py`
+- `src/dryml/code/probe.py`
+- `src/dryml/code/probe_worker.py`
 
 ## Open Questions
 
@@ -71,6 +76,6 @@ In a notebook, a user may set a default requested world for later dispatch while
 ## Follow-Up Sprints
 
 - Sprint 4: runtime enforcement and current env/world APIs.
-- Sprint 5: lightweight probe runtime.
+- Sprint 5: lightweight code probe service.
 - Sprint 7: dispatch requirement checks.
 - Sprint 8: resolver and registry behavior.

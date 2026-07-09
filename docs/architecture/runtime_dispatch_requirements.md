@@ -54,6 +54,14 @@ A later implementation should normalize user targets into an `OperationSpec`, co
 
 Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcement guard violations emit `RuntimeWarning` where safe and continue. In `OFF`, those guard violations bypass safely without inventing resources. Python errors, import errors, serialization errors, and user code exceptions are not bypassed.
 
+## Lightweight Code Probes
+
+Sprint 5 adds `dryml.code.probe_target(...)`, `dryml.code.run_probe_request(...)`, `CodeProbeRequest`, and `CodeProbeResult`. A code probe runs the existing code analyzers under `RuntimeMode.PROBE` with `NoAllocation`, captures user-code stdout/stderr, and returns JSON-compatible code facts, diagnostics, and an optional `EnvironmentRecord` from the process that ran the probe.
+
+The default lightweight analyzer set is `callables`, `source`, `symbol_capture`, and `direct_annotations`. Probe mode may import a target module to resolve an import path, so module-level import side effects remain possible. Probe mode does not intentionally execute target function bodies, instantiate target classes, run dynamic tracing, synthesize worlds, allocate workload resources, or change dispatch selection.
+
+`python -m dryml.code.probe_worker --json` is the JSON worker protocol. It reads a serialized request from stdin and writes only serialized result JSON to stdout. Handled failures such as invalid JSON, unknown algorithms, import failures, unsupported environments, and subprocess timeouts are represented as `DiagnosticFact` entries with `code_probe.*` diagnostic codes.
+
 ## Non-Goals
 
 - This note does not specify exact implementation classes.
@@ -61,6 +69,7 @@ Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcemen
 - This note does not specify exact dispatch integration classes.
 - Sprint 3 implements annotation requirement resolution APIs, but does not implement Python-shaped dispatch normalization or dispatch candidate checking.
 - Sprint 4 implements runtime enforcement policy and current/default environment/world APIs, but still does not implement dispatch candidate checking.
+- Sprint 5 implements lightweight code probes, but still does not implement dispatch requirement resolution or candidate checking.
 
 ## Source Anchors
 
@@ -72,6 +81,8 @@ Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcemen
 - `src/dryml/runtime/context.py`
 - `src/dryml/runtime/enforcement.py`
 - `src/dryml/runtime/modes.py`
+- `src/dryml/code/probe.py`
+- `src/dryml/code/probe_worker.py`
 
 ## Risks
 
@@ -86,6 +97,7 @@ Baseline tests can become brittle if they assert private plan internals. Sprint 
 ## Follow-Up Sprints
 
 - Sprint 3: annotation collection and merge semantics.
+- Sprint 5: lightweight code probe service.
 - Sprint 6: Python-shaped operation normalization.
 - Sprint 7: dispatch requirement resolution and candidate checking.
 - Sprint 8: environment/world resolver behavior.
