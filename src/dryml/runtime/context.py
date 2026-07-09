@@ -41,7 +41,6 @@ class RuntimeBootstrapState:
 _DEFAULT_RUNTIME = RuntimeState(enforcement=default_enforcement_from_env())
 _ACTIVE_RUNTIME: ContextVar[RuntimeState] = ContextVar("dryml_active_runtime", default=_DEFAULT_RUNTIME)
 _ACTIVE_BOOTSTRAP: ContextVar[RuntimeBootstrapState | None] = ContextVar("dryml_active_bootstrap", default=None)
-_PLAIN_ALLOCATION = RuntimeAllocationView(role="local", metadata={"kind": "plain"})
 
 
 def active_runtime() -> RuntimeState:
@@ -178,8 +177,12 @@ def plain() -> Iterator[RuntimeState]:
     world allocation.
     """
 
-    with enter_runtime(RuntimeMode.INLINE, _PLAIN_ALLOCATION, enforcement=RuntimeEnforcement.OFF) as state:
+    with enter_runtime(RuntimeMode.INLINE, _make_plain_allocation(), enforcement=RuntimeEnforcement.OFF) as state:
         yield state
+
+
+def _make_plain_allocation() -> RuntimeAllocationView:
+    return RuntimeAllocationView(role="local", metadata={"kind": "plain"})
 
 
 def _make_state(

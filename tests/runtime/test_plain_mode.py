@@ -74,6 +74,15 @@ def test_plain_mode_does_not_mutate_current_environment_or_world():
     assert worlds.current() is world
 
 
+def test_plain_mode_allocation_metadata_does_not_leak_between_entries():
+    with runtime.plain() as first:
+        first.allocation.metadata["mutated"] = True
+
+    with runtime.plain() as second:
+        assert "mutated" not in second.allocation.metadata
+        assert second.allocation.metadata == {"kind": "plain"}
+
+
 def test_runtime_allocation_invariants_remain_valid():
     allocation = runtime.RuntimeAllocationView(cpus=(0,))
 
