@@ -4,12 +4,9 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 import dryml.operations as ops
 from dryml.core2.store.dir import DirStore
-from dryml.dispatch import Dispatcher
-from dryml.dispatch.errors import DispatchPlanningError
+from dryml.dispatch import Dispatcher, PickledCallable
 
 
 def _load_targets():
@@ -70,13 +67,16 @@ def test_plan_accepts_operation_spec_mapping_and_attaches_operation_id(tmp_path)
     assert plan.dispatch_spec["payload"]["operation_id"] == operation["id"]
 
 
-def test_callable_without_allow_pickle_raises_planning_error(tmp_path):
-    with pytest.raises(DispatchPlanningError, match="allow_pickle=True"):
-        Dispatcher(store=_store(tmp_path)).plan(targets.plain_importable_function)
+def test_importable_callable_without_allow_pickle_uses_import_path(tmp_path):
+    plan = Dispatcher(store=_store(tmp_path)).plan(targets.plain_importable_function)
+
+    assert plan.envelope.launch["call_transport"] == "import_ref"
+    assert plan.envelope.operation_spec["payload"]["function"] == "dryml_requirement_targets:plain_importable_function"
+    assert plan.execution_recipe["payload"]["constraints"]["portable"] is True
 
 
-def test_callable_with_allow_pickle_uses_existing_pickle_transport(tmp_path):
-    plan = Dispatcher(store=_store(tmp_path)).plan(targets.plain_importable_function, allow_pickle=True, args=(2,))
+def test_explicit_pickled_callable_uses_existing_pickle_transport(tmp_path):
+    plan = Dispatcher(store=_store(tmp_path)).plan(PickledCallable(targets.plain_importable_function), allow_pickle=True, args=(2,))
 
     assert plan.envelope.launch["call_transport"] == "pickle_small"
     assert plan.execution_recipe["payload"]["constraints"]["portable"] is False

@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 import os
-import hashlib
 import sys
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
-from dryml.operations import attach_operation_id, make_function_call_spec, validate_operation_spec
 from dryml.runtime import RuntimeAllocationView, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
 
 from .errors import DispatchPlanningError
-from .operations import PickledCallable, write_pickled_callable
+from .normalize import normalize_user_operation
+from .operations import PickledCallable
 from .protocol import DispatchResult, ExecutionEnvelope
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
@@ -45,6 +43,7 @@ class Dispatcher:
     def plan(
         self,
         operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable,
+        method_name: str | None = None,
         *,
         store: Any | None = None,
         environment: Any | Mapping[str, Any] | None = None,
@@ -55,14 +54,21 @@ class Dispatcher:
         args: tuple[Any, ...] = (),
         kwargs: Mapping[str, Any] | None = None,
     ) -> DispatchPlan:
-        """Build DispatchSpec, ExecutionRecipe, and launch-only envelope."""
+        """Build DispatchSpec, ExecutionRecipe, and launch-only envelope.
+
+        ``operation`` may be an explicit OperationSpec, an importable callable,
+        a non-importable callable with ``allow_pickle=True``, or a DRYML
+        Definition/CDef/Object paired with ``method_name``.
+        """
 
         _report("dryml.dispatch.plan.start", "Building dispatch plan")
         target_store = store or self.store
         if target_store is None:
             raise DispatchPlanningError("Dispatcher.plan requires a store for local subprocess marshalling")
         _report("dryml.dispatch.requirements.gather", "Gathering environment/world/runtime requirements")
-        op_spec, launch = self._normalize_operation(operation, allow_pickle=allow_pickle, args=args, kwargs=kwargs or {})
+        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
+        op_spec = dict(normalized.operation_spec)
+        launch = dict(normalized.launch)
         _report("dryml.dispatch.requirements.merge", "Merging requirements and defaults", operation_id=op_spec.get("id"))
         env_data = _environment_data(environment)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
@@ -110,14 +116,25 @@ class Dispatcher:
         )
         return DispatchPlan(dispatch, recipe, envelope, target_store)
 
-    def submit(self, plan: DispatchPlan):
-        """Submit a prebuilt plan to the configured backend."""
+    def submit(
+        self,
+        operation: DispatchPlan | Mapping[str, Any] | Callable[..., Any] | PickledCallable,
+        method_name: str | None = None,
+        **kwargs: Any,
+    ):
+        """Submit a prebuilt plan or plan and submit a user operation.
 
+        Passing a :class:`DispatchPlan` preserves the original advanced API.
+        Other targets are normalized through :meth:`plan` first.
+        """
+
+        plan = operation if isinstance(operation, DispatchPlan) else self.plan(operation, method_name, **kwargs)
         return self.backend.submit(plan)
 
     def plan_world(
         self,
         operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable,
+        method_name: str | None = None,
         *,
         world: Mapping[str, Any] | Any | None,
         store: Any | None = None,
@@ -144,7 +161,9 @@ class Dispatcher:
         target_store = store or self.store
         if target_store is None:
             raise DispatchPlanningError("Dispatcher.plan_world requires a store for shared DirStore marshalling")
-        op_spec, launch = self._normalize_operation(operation, allow_pickle=allow_pickle, args=args, kwargs=kwargs or {})
+        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
+        op_spec = dict(normalized.operation_spec)
+        launch = dict(normalized.launch)
         env_data = _environment_data(environment)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
@@ -213,63 +232,54 @@ class Dispatcher:
         backend = self.backend if isinstance(self.backend, LocalWorldBackend) else LocalWorldBackend()
         return backend.submit(plan)
 
-    def run_world(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, **kwargs: Any):
+    def run_world(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, **kwargs: Any):
         """Plan, launch, and wait for an explicit local-world dispatch."""
 
-        plan = self.plan_world(operation, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
+        plan = self.plan_world(operation, method_name, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
         future = self.submit_world(plan)
         return future.result(timeout=kwargs.get("timeout"))
 
-    def run(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, **kwargs: Any) -> DispatchResult:
+    def run(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, **kwargs: Any) -> DispatchResult:
         """Plan, submit, wait, and return a public ``DispatchResult``."""
 
-        plan = self.plan(operation, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
+        plan = self.plan(operation, method_name, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
         future = self.submit(plan)
         response = future.result(timeout=kwargs.get("timeout"))
         _report("dryml.dispatch.complete", "Dispatch complete", operation_id=response.operation_id, data={"status": response.status})
         return DispatchResult.from_worker_response(response)
 
-    def _normalize_operation(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, allow_pickle: bool, args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        if isinstance(operation, Mapping):
-            return attach_operation_id(validate_operation_spec(operation)), {}
-        if isinstance(operation, PickledCallable):
-            allow_pickle = True
-            func = operation.callable
-        else:
-            func = operation
-        if not allow_pickle:
-            raise DispatchPlanningError("callable dispatch requires allow_pickle=True or an OperationSpec import path")
-        work_dir = tempfile.mkdtemp(prefix="dryml-dispatch-pickle-")
-        pickle_path = os.path.join(work_dir, "callable.pkl")
-        write_pickled_callable(func, pickle_path)
-        with open(pickle_path, "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()
-        identity_marker = {"$literal": f"dryml.pickled_callable.sha256:{digest}"}
-        op = attach_operation_id(make_function_call_spec("dryml.dispatch.operations:import_function", args=[*args, identity_marker], kwargs=dict(kwargs)))
-        return op, {"call_transport": "pickle_small", "pickle_path": pickle_path, "identity_arg_count": len(args), "pickle_sha256": digest, "portable": False, "same_environment_only": True, "cleanup_paths": [work_dir]}
 
-
-def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchResult:
-    """Convenience wrapper for ``Dispatcher(...).run(...)``."""
+def plan(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchPlan:
+    """Build a dispatch plan for a Python-shaped or explicit OperationSpec target."""
 
     if backend in (None, "local_subprocess"):
         backend_obj = None
     else:
         backend_obj = backend
-    return Dispatcher(backend=backend_obj, store=store).run(operation, **kwargs)
+    return Dispatcher(backend=backend_obj, store=store).plan(operation, method_name, **kwargs)
 
 
-def run_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, store: Any | None = None, **kwargs: Any):
+def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchResult:
+    """Plan, submit, and wait for a Python-shaped or explicit operation."""
+
+    if backend in (None, "local_subprocess"):
+        backend_obj = None
+    else:
+        backend_obj = backend
+    return Dispatcher(backend=backend_obj, store=store).run(operation, method_name, **kwargs)
+
+
+def run_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, store: Any | None = None, **kwargs: Any):
     """Convenience wrapper for ``Dispatcher(...).run_world(...)``."""
 
-    return Dispatcher(store=store).run_world(operation, **kwargs)
+    return Dispatcher(store=store).run_world(operation, method_name, **kwargs)
 
 
-def submit(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any):
-    """Plan and submit an operation, returning a backend future."""
+def submit(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any):
+    """Plan and submit a Python-shaped or explicit operation."""
 
     dispatcher = Dispatcher(backend=None if backend in (None, "local_subprocess") else backend, store=store)
-    return dispatcher.submit(dispatcher.plan(operation, **kwargs))
+    return dispatcher.submit(operation, method_name, **kwargs)
 
 
 def _environment_data(environment: Any | Mapping[str, Any] | None) -> dict[str, Any]:

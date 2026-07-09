@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import pickle
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -12,7 +11,7 @@ from dryml.core2.canonical import to_canonical
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.object import Object
 from dryml.core2.repo import Repo
-from dryml.core2.utils.general import pickle_load
+from dryml.core2.utils.general import pickle_load, pickle_save
 from dryml.formats.refs import format_cdef_id, parse_cdef_id
 from dryml.operations import resolve_call_arguments
 from dryml.operations.errors import OperationResolutionError
@@ -37,8 +36,7 @@ def write_pickled_callable(func: Callable[..., Any], path: str) -> None:
     """Write a callable pickle as launch-time data, not operation identity."""
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump(func, f)
+    pickle_save(func, path)
 
 
 def execute_operation(operation_spec: dict[str, Any], *, repo: Repo, envelope_launch: dict[str, Any] | None = None) -> tuple[Any, tuple[str, ...]]:
@@ -49,8 +47,7 @@ def execute_operation(operation_spec: dict[str, Any], *, repo: Repo, envelope_la
         path = launch.get("pickle_path")
         if not isinstance(path, str):
             raise WorkerProtocolError("pickle_small transport requires pickle_path")
-        with open(path, "rb") as f:
-            func = pickle.load(f)
+        func = pickle_load(path)
         call = resolve_call_arguments(operation_spec, materialize_cdef=lambda cdef_id: _materialize_cdef(repo, cdef_id), make_cdef_ref=lambda cdef_id: cdef_id)
         identity_arg_count = launch.get("identity_arg_count")
         args = call.args[:identity_arg_count] if isinstance(identity_arg_count, int) else call.args
