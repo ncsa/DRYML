@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .decorators import FRAGMENT_ATTR
@@ -290,7 +290,7 @@ def _definition_cls_candidate(defn: Any) -> Any:
 
 
 def _iter_targets(targets: Iterable[Any] | Any) -> tuple[Any, ...]:
-    if isinstance(targets, (str, bytes)) or not isinstance(targets, Iterable):
+    if isinstance(targets, (str, bytes, Mapping)) or not isinstance(targets, Iterable):
         return (targets,)
     return tuple(targets)
 

@@ -68,7 +68,7 @@ Built-in analyzers are registered by name:
 - `ast_access`: static attribute-access and method-call-like hints.
 - `symbol_capture`: `ImportRef`/`SourceSpec`-style symbol facts using `dryml.core2.symbol`.
 - `direct_annotations`: raw annotation and requirement facts using the authoritative `dryml.annotations` collection/resolution APIs.
-- `method_contracts`: minimal DRYML `Method` contract metadata without moving `Method`.
+- `method_contracts`: minimal DRYML `Method` contract metadata from `dryml.core2.methods`.
 
 Analyzer failures become `DiagnosticFact(error)` by default. Setting `CodeAnalysisContext(diagnostics_policy="raise")` raises a `CodeAnalysisError` instead.
 

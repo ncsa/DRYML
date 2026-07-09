@@ -38,10 +38,41 @@ def test_fragments_for_method_includes_class_then_method_fragments():
     assert _requirements(fragments) == ("base-class>=1", "base-method>=1")
 
 
+def test_fragments_for_method_applies_namespace_and_kind_filters():
+    class Filtered:
+        @ann.default(namespace="runtime", fragment={"frameworks": {"plain": {}}})
+        @dryml.env.req(requirements=("filtered>=1",))
+        def train(self):
+            return None
+
+    env_requirements = ann.fragments_for_method(Filtered, "train", namespace="environment", kind="requirement")
+    runtime_defaults = ann.fragments_for_method(Filtered, "train", namespace="runtime", kind="default")
+
+    assert _requirements(env_requirements) == ("filtered>=1",)
+    assert len(runtime_defaults) == 1
+    assert runtime_defaults[0].fragment == {"frameworks": {"plain": {}}}
+
+
+def test_resolve_method_requirements_merges_class_and_method_fragments():
+    resolution = ann.resolve_method_requirements(BaseModel, "train")
+
+    assert tuple(resolution.environment_requirement.requirements) == ("base-class>=1", "base-method>=1")
+
+
 def test_inherited_method_includes_inherited_implementation_fragments():
     fragments = ann.fragments_for_method(InheritedModel, "train", namespace="environment")
 
     assert _requirements(fragments) == ("base-class>=1", "child-class>=1", "base-method>=1")
+
+
+def test_inherited_method_source_trace_points_to_inherited_implementation():
+    resolution = ann.resolve_method_requirements(InheritedModel, "train")
+    trace_by_requirement = {
+        tuple(fragment.fragment.get("requirements", ())): trace
+        for fragment, trace in zip(resolution.fragments, resolution.source_traces, strict=True)
+    }
+
+    assert trace_by_requirement[("base-method>=1",)].qualname == "BaseModel.train"
 
 
 def test_overridden_method_excludes_base_method_fragments_by_default():
@@ -49,6 +80,17 @@ def test_overridden_method_excludes_base_method_fragments_by_default():
 
     assert _requirements(fragments) == ("base-class>=1", "override-class>=1", "override-method>=1")
     assert "base-method>=1" not in _requirements(fragments)
+
+
+def test_overridden_method_source_trace_points_to_overriding_implementation():
+    resolution = ann.resolve_method_requirements(OverrideModel, "train")
+    trace_by_requirement = {
+        tuple(fragment.fragment.get("requirements", ())): trace
+        for fragment, trace in zip(resolution.fragments, resolution.source_traces, strict=True)
+    }
+
+    assert ("base-method>=1",) not in trace_by_requirement
+    assert trace_by_requirement[("override-method>=1",)].qualname == "OverrideModel.train"
 
 
 def test_bound_method_and_unbound_method_resolve_with_owner_class():

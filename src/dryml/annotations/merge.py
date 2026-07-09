@@ -367,7 +367,7 @@ def _merge_environment_requirements(fragments: tuple[AnnotationFragment, ...], i
         return None
     data: dict[str, Any] = {"requirements": [], "excludes": [], "capabilities": [], "tags": [], "schema_versions": {}, "details": {"sources": [f.source.to_data() for f in fragments]}}
     saw_payload = False
-    for fragment in fragments:
+    for fragment in _merge_order(fragments):
         try:
             payload = EnvironmentRequirement.from_data(fragment.fragment).to_data()
         except Exception as exc:
@@ -412,10 +412,16 @@ def _merge_environment_requirements(fragments: tuple[AnnotationFragment, ...], i
 
 def _merge_world_requirements(fragments: tuple[AnnotationFragment, ...], issues: list[AnnotationIssue]) -> WorldRequirement | None:
     req: WorldRequirement | None = None
-    for fragment in fragments:
+    for fragment in _merge_order(fragments):
         try:
             current = WorldRequirement.from_data(fragment.fragment)
-            req = current if req is None else req.merge(current)
+            policy = fragment.merge_policy or "merge"
+            if policy in {"merge", "add", "base"}:
+                req = current if req is None else req.merge(current)
+            elif policy in {"replace", "override"}:
+                req = current
+            else:
+                issues.append(AnnotationIssue("error", WORLD, "/merge_policy", "unsupported world requirement merge policy", expected="merge|add|base|replace|override", actual=policy, sources=(fragment.source,)))
         except Exception as exc:
             path = getattr(exc, "context", {}).get("path", "/")
             issues.append(AnnotationIssue("error", WORLD, f"/{str(path).replace('.', '/')}", str(exc), sources=(fragment.source,)))
@@ -424,7 +430,7 @@ def _merge_world_requirements(fragments: tuple[AnnotationFragment, ...], issues:
 
 def _merge_mapping_fragments(fragments: tuple[AnnotationFragment, ...], *, issues: list[AnnotationIssue] | None = None, namespace: str = "") -> dict[str, Any]:
     data: dict[str, Any] = {}
-    for fragment in sorted(fragments, key=lambda f: f.priority):
+    for fragment in _merge_order(fragments):
         policy = fragment.merge_policy or "merge"
         if policy in {"merge", "add", "base"}:
             data = _deep_merge(data, dict(fragment.fragment))
@@ -442,6 +448,12 @@ def _merge_mapping_fragments(fragments: tuple[AnnotationFragment, ...], *, issue
             if issues is not None:
                 issues.append(AnnotationIssue("error", namespace or fragment.namespace, "/merge_policy", "unknown annotation merge policy", expected="merge|replace|append|error_on_conflict", actual=policy, sources=(fragment.source,)))
     return data
+
+
+def _merge_order(fragments: tuple[AnnotationFragment, ...]) -> tuple[AnnotationFragment, ...]:
+    """Return fragments in stable priority order for merge decisions."""
+
+    return tuple(sorted(fragments, key=lambda fragment: fragment.priority))
 
 
 def _world_spec_or_issue(data: Mapping[str, Any], issues: list[AnnotationIssue], sources: tuple[SourceTrace, ...]) -> WorldSpec | None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import dryml
 import dryml.annotations as ann
 
@@ -48,3 +50,19 @@ def test_collect_fragments_accepts_single_target_and_appends_provider():
 
     assert _requirements(fragments) == ("target>=1", "provider>=1")
     assert fragments[-1] is provider
+
+
+def test_collect_fragments_treats_mapping_like_target_as_single_target():
+    class MappingTarget(Mapping):
+        def __getitem__(self, key):
+            return {"key": "value"}[key]
+
+        def __iter__(self):
+            return iter(("key",))
+
+        def __len__(self):
+            return 1
+
+    target = dryml.env.req(requirements=("mapping-target>=1",))(MappingTarget())
+
+    assert _requirements(ann.collect_fragments(target, namespace="environment")) == ("mapping-target>=1",)
