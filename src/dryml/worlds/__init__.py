@@ -21,6 +21,7 @@ from dryml.worlds.compatibility import (
     check_allocation_satisfies_requirement,
     check_world_spec_satisfies_requirement,
 )
+from dryml.worlds.current import current, discover_current, reset_current, set_current, use
 from dryml.worlds.resources import ByteSize, CountConstraint, ResourceRequirement, ResourceSpec, parse_byte_size
 from dryml.worlds.specs import (
     ProcessSpec,
@@ -61,10 +62,15 @@ __all__ = [
     "compute_world_allocation_id",
     "compute_world_id",
     "compute_world_requirement_id",
+    "current",
+    "discover_current",
     "make_world_allocation_spec",
     "make_world_requirement_spec",
     "make_world_spec",
     "parse_byte_size",
+    "reset_current",
+    "set_current",
+    "use",
     "validate_world_allocation_spec",
     "validate_world_requirement_spec",
     "validate_world_spec",

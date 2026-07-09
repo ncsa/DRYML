@@ -7,6 +7,7 @@ allocation, dispatch, providers, and heavyweight ML framework imports.
 """
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy
+from .current import current, reset_current, set_current, use
 from .errors import (
     DrymlEnvironmentError,
     EnvironmentCompatibilityError,
@@ -95,6 +96,7 @@ __all__ = [
     "build_probe_env",
     "coerce_policy",
     "compose_fragments",
+    "current",
     "fragments_for_class",
     "inspect_current",
     "normalize_distribution_name",
@@ -107,5 +109,8 @@ __all__ = [
     "probe_python",
     "req",
     "requirements_for_class",
+    "reset_current",
     "spec_from_data",
+    "set_current",
+    "use",
 ]

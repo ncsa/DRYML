@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed Sprint 0 baseline note anchored to `a6d3550`.
+Sprint 0 baseline note anchored to `a6d3550`, updated through Sprint 4 runtime enforcement and current/default APIs.
 
 ## Current State
 
-DRYML already has distinct modules for software environments, resource worlds, and process-local runtime state. Dispatch currently records current environment data, a requested single-worker world by default, and a worker runtime spec for local subprocess execution.
+DRYML has distinct modules for software environments, resource worlds, and process-local runtime state. Dispatch currently records current environment data, a requested single-worker world by default, and a worker runtime spec for local subprocess execution. Notebook/session defaults are context-local through `dryml.environments.current()` and `dryml.worlds.current()`.
 
 ## Definitions
 
@@ -14,7 +14,7 @@ DRYML already has distinct modules for software environments, resource worlds, a
 
 `world` means topology, resources, allocation request, or actual allocation.
 
-`runtime` means current process role, active allocation view, runtime spec, and eventual enforcement policy.
+`runtime` means current process role, active allocation view, runtime spec, and enforcement policy.
 
 `allocation` means actual resources assigned to a process from a world allocation.
 
@@ -30,9 +30,11 @@ Environment probing and world allocation are separate concerns. A probe can insp
 
 Probe processes do not need the final workload world and should normally run without GPU allocation. They should use `RuntimeMode.PROBE` and `NoAllocation`, producing facts and diagnostics rather than user workload results.
 
-## Notebook Current/Default State Direction
+## Notebook Current/Default State
 
-Future `dryml.environments.current()` and `dryml.worlds.current()` APIs should represent notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` should mean the actual allocation of this process.
+`dryml.environments.current()` and `dryml.worlds.current()` represent context-local notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` means the actual allocation of this process. Setting a current world does not allocate resources and does not imply that the current process owns that world.
+
+`dryml.worlds.discover_current()` first returns the explicit context-local current world. In Sprint 4, when no explicit current world is set, it returns the caller default rather than synthesizing worlds or converting runtime allocation into a requested world.
 
 ## Dispatch Candidate Selection Direction
 
@@ -44,24 +46,25 @@ In a notebook, a user may set a default requested world for later dispatch while
 
 ## Non-Goals
 
-- Sprint 0 does not add `dryml.environments.current()`.
-- Sprint 0 does not add `dryml.worlds.current()`.
-- Sprint 0 does not add runtime enforcement policy.
+- Sprint 4 current/default APIs do not allocate resources.
+- Sprint 4 `worlds.discover_current()` does not synthesize worlds.
+- Sprint 4 runtime enforcement does not implement dispatch candidate checking.
 - Sprint 0 does not implement environment or world registry/resolver behavior.
 
 ## Source Anchors
 
 - `src/dryml/environments/__init__.py`
+- `src/dryml/environments/current.py`
 - `src/dryml/environments/probe.py`
 - `src/dryml/environments/introspection.py`
 - `src/dryml/worlds/__init__.py`
+- `src/dryml/worlds/current.py`
 - `src/dryml/worlds/compatibility.py`
 - `src/dryml/runtime/context.py`
 - `src/dryml/runtime/modes.py`
 
 ## Open Questions
 
-- Should current environment/world defaults be context-local or process-global?
 - What minimum environment facts are required before dispatch can resolve requirements?
 - Should probe scheduling be owned by dispatch or by a provider/probe service?
 

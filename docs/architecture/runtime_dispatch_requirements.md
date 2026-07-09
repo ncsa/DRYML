@@ -48,16 +48,19 @@ Dispatch still does not consume those results during planning in Sprint 3. Candi
 
 A later implementation should normalize user targets into an `OperationSpec`, collect code and annotation facts, merge hard requirements and defaults, select candidate environment/world/runtime data, check candidates against hard requirements, then launch through the backend. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
 
-## Runtime Enforcement Policy Direction
+## Runtime Enforcement Policy
 
-`RuntimeMode` should continue to describe process role: `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy should be a separate concept with future values such as `STRICT`, `WARN`, and `OFF`. Plain Python execution should disable or relax checks through policy, not by adding another runtime role.
+`RuntimeMode` describes process role: `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy is separate and uses `RuntimeEnforcement.STRICT`, `RuntimeEnforcement.WARN`, and `RuntimeEnforcement.OFF`. Plain Python execution uses `RuntimeMode.INLINE` with a local runtime allocation view and `RuntimeEnforcement.OFF`; it does not add another runtime role.
+
+Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcement guard violations emit `RuntimeWarning` where safe and continue. In `OFF`, those guard violations bypass safely without inventing resources. Python errors, import errors, serialization errors, and user code exceptions are not bypassed.
 
 ## Non-Goals
 
 - This note does not specify exact implementation classes.
 - This note does not change dispatch behavior.
 - This note does not specify exact dispatch integration classes.
-- Sprint 3 implements annotation requirement resolution APIs, but does not implement Python-shaped dispatch normalization, dispatch candidate checking, or runtime enforcement policy.
+- Sprint 3 implements annotation requirement resolution APIs, but does not implement Python-shaped dispatch normalization or dispatch candidate checking.
+- Sprint 4 implements runtime enforcement policy and current/default environment/world APIs, but still does not implement dispatch candidate checking.
 
 ## Source Anchors
 
@@ -67,6 +70,7 @@ A later implementation should normalize user targets into an `OperationSpec`, co
 - `src/dryml/annotations/collect.py`
 - `src/dryml/annotations/merge.py`
 - `src/dryml/runtime/context.py`
+- `src/dryml/runtime/enforcement.py`
 - `src/dryml/runtime/modes.py`
 
 ## Risks
