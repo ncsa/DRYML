@@ -15,7 +15,7 @@ def test_notebook_context_defaults_are_selected_and_restored_without_allocation(
         explanation = Dispatcher().explain(lambda: None, allow_pickle=True, requirement_policy="ignore", inventory=LocalResourceInventory((0, 1)))
         assert explanation.resolution.environment_selection.source == "current"
         assert explanation.resolution.world_selection.source == "current"
-        assert explanation.resolution.world_allocation_summary["backend"] == "local_subprocess"
+        assert explanation.resolution.world_allocation_summary is None
         assert "environment_attempts=" in str(explanation)
         with dryml.environments.use(CurrentEnvironmentSpec()), dryml.worlds.use(WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {}}}})):
             assert dryml.worlds.current() != requested_world

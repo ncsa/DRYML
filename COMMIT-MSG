@@ -1,20 +1,7 @@
-sprint 08 hardening: enforce resolver and allocation safety
+test(notebook): preserve allocation-free explain contract
 
-Make resolver execution lazy and bounded, reject non-finite timeouts and probe
-spec mismatches, and redact environment overrides from resolver/planning metadata.
-
-Reject unknown-memory allocations, preserve distinct local_subprocess allocation
-provenance, persist requested-world/allocation specs, clean successful local-world
-pickle transport artifacts, and add the public plan_world helper.
-
-Validate advanced policies before discovery side effects, reuse resolver attempt
-records for no-match fallback checking, keep explain allocation-free, and repair
-the dispatch documentation's Sprint 8 contradictions.
-
-Tests:
-- lazy resolver consumption and environment override redaction
-- local_subprocess backend allocation and unknown-memory rejection
+Update the notebook defaults regression after Sprint 8 hardening so it asserts
+that dispatch.explain(...) does not create a world allocation summary.
 
 Verification:
-- pytest tests/dispatch -> 122 passed in 237.71s
-- pytest tests/environments tests/worlds -> 134 passed in 37.56s
+- pytest tests/notebook/test_local_defaults.py -> 1 passed
