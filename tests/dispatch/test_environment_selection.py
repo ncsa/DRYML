@@ -12,14 +12,14 @@ def target_with_environment_default():
 
 
 def test_environment_selection_precedence_and_consideration_trace():
-    explicit = PythonExecutableSpec("/usr/bin/python3")
+    explicit = CurrentEnvironmentSpec()
     normalized = normalize_user_operation(target_with_environment_default, allow_pickle=True)
     with use(PythonExecutableSpec("/bin/python3")):
         resolution = resolve_dispatch_plan(normalized, environment=explicit, requirement_policy="ignore")
 
     selection = resolution.environment_selection
     assert selection.source == "explicit"
-    assert selection.candidate["executable"] == "/usr/bin/python3"
+    assert selection.candidate["kind"] == "current"
     assert [item.status for item in selection.considered] == ["selected", "not_selected", "not_selected", "not_selected"]
 
 

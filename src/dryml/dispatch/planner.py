@@ -231,17 +231,30 @@ class Dispatcher:
             raise DispatchPlanningError("dispatch world plan is not launchable; call dispatch.explain(...) for requirement diagnostics", context={"planning": resolution.to_data()})
         env_data = dict(resolution.environment_selection.candidate)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
+            _cleanup_launch(launch)
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
         runtime_data = dict(resolution.runtime_selection.candidate)
-        allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=inventory, oversubscribe=oversubscribe)
+        try:
+            allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=inventory, oversubscribe=oversubscribe)
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         world_spec = allocation_plan.world_spec
         allocation_spec = allocation_plan.world_allocation_spec
         _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
         if record_policy != "none":
-            target_store.records.write_spec(world_spec, family="world")
-            target_store.records.write_spec(allocation_spec, family="world_allocation")
-        marshal = select_marshal_plan(target_store, query_index="none")
-        require_supported_plan(marshal)
+            try:
+                target_store.records.write_spec(world_spec, family="world")
+                target_store.records.write_spec(allocation_spec, family="world_allocation")
+            except Exception:
+                _cleanup_launch(launch)
+                raise
+        try:
+            marshal = select_marshal_plan(target_store, query_index="none")
+            require_supported_plan(marshal)
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         dispatch = attach_dispatch_id(
             make_dispatch_spec(
                 operation_id=op_spec["id"],
