@@ -1,6 +1,14 @@
 from __future__ import annotations
 
+import math
+import json
+import subprocess
+import sys
+
+import pytest
+
 from dryml.worlds import LocalResourceInventory, local_inventory
+from dryml.worlds.errors import ResourceValidationError
 
 
 def test_inventory_round_trip_is_deterministic():
@@ -18,3 +26,53 @@ def test_lightweight_inventory_uses_explicit_accelerator_override_without_mutati
 
     assert inventory.accelerators == {"fpga": ("a",), "gpu": (0, 2)}
     assert environment == {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
+
+
+@pytest.mark.parametrize("timeout", (math.inf, math.nan))
+def test_inventory_rejects_nonfinite_external_timeout(timeout):
+    with pytest.raises(ResourceValidationError, match="timeout must be positive"):
+        local_inventory(policy="external", timeout=timeout, command_runner=lambda *_args, **_kwargs: "")
+
+
+def test_inventory_rejects_unbounded_or_non_json_metadata():
+    with pytest.raises(ResourceValidationError, match="floats must be finite"):
+        LocalResourceInventory((0,), metadata={"value": math.nan})
+    with pytest.raises(ResourceValidationError, match="string exceeds"):
+        LocalResourceInventory((0,), metadata={"value": "x" * 4097})
+
+
+def test_external_inventory_bounds_runner_output():
+    output = "\n".join(str(index) for index in range(200))
+    inventory = local_inventory(
+        policy="external",
+        command_runner=lambda *_args, **_kwargs: type("Result", (), {"returncode": 0, "stdout": output})(),
+    )
+
+    assert len(inventory.accelerators["gpu"]) == 128
+    assert "external accelerator identifiers were truncated" in inventory.metadata["diagnostics"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    (
+        type("Result", (), {"returncode": 1, "stdout": ""})(),
+        type("Result", (), {"returncode": 0, "stdout": "not-a-device"})(),
+    ),
+)
+def test_external_inventory_failures_are_diagnostic_only(output):
+    inventory = local_inventory(policy="external", command_runner=lambda *_args, **_kwargs: output)
+
+    assert "gpu" not in inventory.accelerators
+    assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
+
+
+def test_inventory_import_path_does_not_load_framework_modules():
+    command = (
+        "import json, sys; "
+        "from dryml.worlds import local_inventory; "
+        "local_inventory(environ={}); "
+        "print(json.dumps(sorted(name for name in sys.modules if name.split('.')[0] in {'torch', 'tensorflow', 'jax', 'keras', 'cupy'})))"
+    )
+    output = subprocess.check_output([sys.executable, "-c", command], text=True)
+
+    assert json.loads(output) == []

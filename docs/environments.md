@@ -153,4 +153,7 @@ DRYML does not provide a global or persistent registry. Use
 caller candidates, name-sorted registry entries, then the current environment.
 Resolution is bounded, deduplicates canonical specs, records attempts, and
 selects the first strictly compatible candidate. Registry labels are only probe
-prefilters, never proof of compatibility.
+prefilters, never proof of compatibility. `max_candidates`, `probe_timeout`,
+and `total_timeout` bound search work; a finite total timeout also bounds a
+probe when no per-probe timeout is supplied. Resolver reports redact environment
+overrides and truncate diagnostic metadata before serialization.

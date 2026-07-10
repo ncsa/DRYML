@@ -258,7 +258,7 @@ class DispatchExplanation:
         inventory = self.resolution.inventory_summary
         inventory_text = ""
         if inventory is not None:
-            inventory_text = f" inventory_cpus={len(inventory.get('cpus') or ())} inventory_accelerators={sorted((inventory.get('accelerators') or {}).keys())}"
+            inventory_text = f" inventory_cpus={inventory.get('cpu_count', 0)} inventory_accelerators={sorted((inventory.get('accelerator_counts') or {}).keys())}"
         blocking_text = ""
         if self.blocking_diagnostics:
             first = self.blocking_diagnostics[0]
@@ -347,9 +347,9 @@ def resolve_dispatch_plan(
         diagnostics.append(_diagnostic("dryml.dispatch.environment_resolver_no_match", "No resolver candidate satisfied the environment requirement; pass, register, or set a compatible environment.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data=environment_resolution.to_data()))
         structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
     if world_synthesis is not None and not world_synthesis.ok:
-        severity = "error" if policy is RequirementPolicy.STRICT else "warning"
-        diagnostics.append(_diagnostic("dryml.dispatch.world_synthesis_failed", "Local world synthesis failed; inject inventory or pass/set a compatible world.", severity=severity, data=world_synthesis.to_data()))
-        structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
+        diagnostics.append(_diagnostic("dryml.dispatch.world_synthesis_failed", "Local world synthesis failed; inject inventory or pass/set a compatible world.", data=world_synthesis.to_data()))
+        # A fallback must not invent resources that synthesis could not prove.
+        structural_safe = False
     if normalized.launch.get("same_environment_only") and not _same_python_environment(env_spec):
         structural_safe = False
         diagnostics.append(_diagnostic(
@@ -415,6 +415,10 @@ def resolve_dispatch_plan(
         resolved_record=_resolution_record_for(environment_resolution, env_spec),
     )
     diagnostics.extend(env_probe_diagnostics)
+    if env_probe_diagnostics:
+        # Candidate validation is structural even when requirement compatibility
+        # itself is relaxed by warn/ignore.
+        structural_safe = False
     environment_check = _check_environment(
         resolution.environment_requirement,
         env_spec,
@@ -430,8 +434,40 @@ def resolve_dispatch_plan(
     selected_inventory = inventory
     if world_synthesis is not None:
         selected_inventory = world_synthesis.resource_inventory
-    if single_worker_only and not _is_multi_worker_world(world_spec) and (_world_needs_inventory(world_spec) or world_synthesis is not None):
-        selected_inventory = selected_inventory or worlds.local_inventory(policy=inventory_policy)
+    if (
+        single_worker_only
+        and not _is_multi_worker_world(world_spec)
+        and (world_synthesis is None or world_synthesis.resource_inventory is not None)
+        and (_world_needs_inventory(world_spec) or world_synthesis is not None or resolution.world_requirement is not None)
+    ):
+        try:
+            from .local_world import validate_local_world_feasibility
+
+            selected_inventory = selected_inventory or worlds.local_inventory(policy=inventory_policy)
+            allocation_world = _subprocess_allocation_world(world_spec)
+            validate_local_world_feasibility(
+                allocation_world,
+                inventory=selected_inventory,
+                allocation_backend_kind="local_subprocess",
+            )
+            allocation_requirement = _effective_local_allocation_requirement_check(
+                allocation_world,
+                resolution.world_requirement,
+            )
+            if allocation_requirement is not None and not allocation_requirement.ok:
+                structural_safe = False
+                diagnostics.append(_diagnostic(
+                    "dryml.dispatch.local_allocation_requirement_failed",
+                    "The executable local subprocess resource assignment does not satisfy the hard world requirement.",
+                    data={"issues": [_world_issue_data(issue) for issue in allocation_requirement.issues]},
+                ))
+        except Exception as exc:
+            structural_safe = False
+            diagnostics.append(_diagnostic(
+                "dryml.dispatch.local_allocation_failed",
+                "The selected one-worker world cannot be allocated from local inventory.",
+                data={"error": type(exc).__name__, "message": str(exc), "action": "inject inventory or pass/set a feasible world"},
+            ))
 
     if not complete:
         diagnostics.append(_diagnostic("dryml.dispatch.discovery_incomplete", "Requirement discovery is incomplete.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"policy": policy.value, "action": "use an importable target or call dispatch.explain(...)"}))
@@ -618,8 +654,7 @@ def _select_world(explicit: Any | None, annotation_default: Any | None, *, requi
         selection, data = _select("world", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("fallback", {"roles": {"main": {"replicas": 1, "process": {}}}, "backend": {"kind": "local", "parameters": {}}})), _world_data)
         return selection, data, None
     if requirement is not None:
-        selected_inventory = inventory or worlds.local_inventory(policy=inventory_policy)
-        result = worlds.synthesize(requirement, inventory=selected_inventory, policy="local")
+        result = worlds.synthesize(requirement, inventory=inventory, policy="local", inventory_policy=inventory_policy)
         considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current"))
         if result.world is not None:
             data = result.world.to_data()
@@ -767,6 +802,19 @@ def _local_subprocess_allocation_summary(allocation_plan) -> dict[str, Any]:
             "accelerators": {name: list(values) for name, values in sorted(view.accelerators.items())},
         })
     return {"backend": "local_subprocess", "workers": workers}
+
+
+def _effective_local_allocation_requirement_check(candidate: Mapping[str, Any], requirement):
+    """Check executor-normalized CPU counts without creating an allocation spec."""
+
+    if requirement is None:
+        return None
+    world = WorldSpec.from_data(candidate)
+    data = world.to_data()
+    for role in data["roles"].values():
+        resources = role["process"].setdefault("resources", {})
+        resources["cpus"] = resources.get("cpus") or 1
+    return worlds.check_world_spec_satisfies_requirement(WorldSpec.from_data(data), requirement)
 
 
 def _world_issue_data(issue) -> dict[str, Any]:

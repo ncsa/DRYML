@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import dryml
 
-from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
+from dryml.environments import ContainerEnvironmentSpec
+from dryml.operations import make_function_call_spec
 from dryml.worlds import LocalResourceInventory
 
 
@@ -25,3 +27,42 @@ def test_no_override_hard_world_requirement_is_synthesized_once():
     assert resolution.world_synthesis is not None and resolution.world_synthesis.ok
     assert resolution.inventory_summary == inventory.summary()
     assert resolution.launchable
+
+
+def test_dispatch_reports_inventory_discovery_failure_as_structured_synthesis_failure(monkeypatch):
+    import dryml.worlds.synthesis as synthesis
+
+    def fail_inventory(*_args, **_kwargs):
+        raise RuntimeError("malformed local inventory")
+
+    monkeypatch.setattr(synthesis, "local_inventory", fail_inventory)
+    explanation = Dispatcher().explain(cpu_target, allow_pickle=True)
+
+    assert explanation.launchable is False
+    assert explanation.resolution.world_synthesis is not None
+    assert explanation.resolution.world_synthesis.status == "error"
+    assert explanation.resolution.world_synthesis.diagnostics[0].code == "inventory_discovery_failed"
+
+
+def test_unsupported_resolver_environment_is_structurally_nonlaunchable_under_ignore():
+    explanation = Dispatcher().explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        environment_candidates=(ContainerEnvironmentSpec("example/image"),),
+        requirement_policy="ignore",
+    )
+
+    assert explanation.resolution.environment_selection.source == "resolver"
+    assert explanation.launchable is False
+    assert any(item.code == "dryml.dispatch.environment_probe_failed" for item in explanation.resolution.diagnostics)
+
+
+def test_explanation_formats_synthesized_inventory_summary():
+    explanation = Dispatcher().explain(
+        cpu_target,
+        allow_pickle=True,
+        inventory=LocalResourceInventory((2, 3), {"gpu": ("gpu-a",)}),
+        requirement_policy="strict",
+    )
+
+    assert "inventory_cpus=2" in str(explanation)
+    assert "inventory_accelerators=['gpu']" in str(explanation)

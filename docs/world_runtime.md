@@ -53,4 +53,9 @@ accelerators without importing ML frameworks or activating a runtime allocation.
 `worlds.synthesize(requirement, inventory=...)` returns a requested local
 `WorldSpec`, not an allocation. The allocator later assigns actual disjoint CPU
 and accelerator identifiers, keeping requested worlds separate from worker
-allocations.
+allocations. Default `lightweight` inventory avoids framework imports and uses
+CPU affinity, OS memory facts, and explicit `DRYML_LOCAL_ACCELERATORS` input;
+the opt-in `external` policy accepts a bounded command runner without importing
+framework bindings. Unknown capacity blocks positive memory requests, and
+unsupported topology, named resources, and devices fail synthesis rather than
+being silently dropped.

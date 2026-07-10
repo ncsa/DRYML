@@ -85,11 +85,19 @@ class WorldSynthesisResult:
         }
 
 
-def synthesize(requirement: WorldRequirement | Mapping[str, Any] | None, *, inventory: LocalResourceInventory | None = None, policy: str = "local") -> WorldSynthesisResult:
+def synthesize(
+    requirement: WorldRequirement | Mapping[str, Any] | None,
+    *,
+    inventory: LocalResourceInventory | None = None,
+    policy: str = "local",
+    inventory_policy: str = "lightweight",
+) -> WorldSynthesisResult:
     """Build the smallest disjoint local ``WorldSpec`` satisfying *requirement*.
 
     The result remains a requested world.  No allocation or runtime activation
-    occurs; callers pass it to a backend allocator separately.
+    occurs; callers pass it to a backend allocator separately. ``inventory``
+    avoids host discovery; otherwise ``inventory_policy`` selects the bounded
+    local discovery policy used to obtain inventory.
     """
 
     if policy != "local":
@@ -99,7 +107,7 @@ def synthesize(requirement: WorldRequirement | Mapping[str, Any] | None, *, inve
     except Exception as exc:
         return _failure("invalid_requirement", None, inventory, policy, "invalid_requirement", str(exc))
     try:
-        inv = inventory or local_inventory()
+        inv = inventory or local_inventory(policy=inventory_policy)
     except Exception as exc:
         return _failure("error", req, inventory, policy, "inventory_discovery_failed", str(exc))
     if req is None:

@@ -445,15 +445,23 @@ def is_multi_worker_world(world_spec: Mapping[str, Any]) -> bool:
     return len(counts) > 1 or sum(counts) > 1
 
 
-def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world") -> LocalWorldAllocationPlan:
+def validate_local_world_feasibility(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world") -> None:
+    """Validate local resource capacity without constructing an allocation spec."""
+
+    world_spec = normalize_world_spec(world)
+    world_obj = WorldSpec.from_data(world_spec["payload"])
+    inv = inventory or local_inventory()
+    _validate_local_resource_requests(world_obj, inv, oversubscribe, allocation_backend_kind)
+
+
+def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world", requested_world_id: str | None = None) -> LocalWorldAllocationPlan:
     """Expand and allocate a local ``WorldSpec`` deterministically."""
 
     _report("dryml.dispatch.world.allocate", "Allocating local world resources")
     world_spec = normalize_world_spec(world)
     world_obj = WorldSpec.from_data(world_spec["payload"])
     inv = inventory or local_inventory()
-    if allocation_backend_kind not in {"local_world", "local_subprocess"}:
-        raise DispatchPlanningError("unsupported local allocation backend kind", context={"kind": allocation_backend_kind})
+    _validate_local_resource_requests(world_obj, inv, oversubscribe, allocation_backend_kind)
     cpu_cursor = 0
     memory_cursor = 0
     accelerator_cursors = {key: 0 for key in inv.accelerators}
@@ -469,22 +477,9 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
             key = WorldWorkerKey(role_name, replica, rank, rank)
             keys.append(key)
             requested_cpus = role.process.resources.cpus or 1
-            if role.process.resources.devices or role.process.resources.named:
-                raise DispatchPlanningError(
-                    "local world allocation does not support named devices or resources",
-                    context={"role": role_name, "devices": dict(role.process.resources.devices), "named": dict(role.process.resources.named)},
-                )
             requested_memory = role.process.resources.memory
             if requested_memory is not None:
-                if inv.memory is None:
-                    raise DispatchPlanningError("local world memory request cannot be proven against unknown inventory", context={"role": role_name, "requested_memory": requested_memory})
-                if not oversubscribe and memory_cursor + requested_memory > inv.memory:
-                    raise DispatchPlanningError("local world memory requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_memory": requested_memory, "remaining_memory": inv.memory - memory_cursor})
                 memory_cursor += requested_memory
-            if not oversubscribe and requested_cpus > len(inv.cpus):
-                raise DispatchPlanningError("local world CPU request exceeds inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "inventory_cpus": len(inv.cpus)})
-            if not oversubscribe and cpu_cursor + requested_cpus > len(inv.cpus):
-                raise DispatchPlanningError("local world CPU requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "remaining_cpus": len(inv.cpus) - cpu_cursor})
             if oversubscribe:
                 cpus = tuple(inv.cpus[(cpu_cursor + idx) % len(inv.cpus)] for idx in range(requested_cpus))
                 cpu_cursor = (cpu_cursor + requested_cpus) % len(inv.cpus)
@@ -495,8 +490,6 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
             for acc_name, count in role.process.resources.accelerators.items():
                 available = inv.accelerators.get(acc_name, ())
                 cursor = accelerator_cursors.get(acc_name, 0)
-                if cursor + count > len(available):
-                    raise DispatchPlanningError("local world accelerator request exceeds explicit inventory", context={"role": role_name, "replica": replica, "accelerator": acc_name, "requested": count, "available": len(available)})
                 accelerators[acc_name] = tuple(available[cursor : cursor + count])
                 accelerator_cursors[acc_name] = cursor + count
             env = dict(role.process.env)
@@ -528,8 +521,45 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
     if allocation_backend_kind == "local_subprocess":
         backend.update({"name": "dryml.local_subprocess", "kind": "local_subprocess"})
     backend["host"] = os.uname().nodename if hasattr(os, "uname") else "localhost"
-    allocation_spec = attach_world_allocation_id(make_world_allocation_spec(roles, backend=backend, kind=f"{allocation_backend_kind}_allocation", metadata={"world_id": world_spec.get("id")}))
+    allocation_spec = attach_world_allocation_id(make_world_allocation_spec(roles, backend=backend, kind=f"{allocation_backend_kind}_allocation", metadata={"world_id": requested_world_id or world_spec.get("id")}))
     return LocalWorldAllocationPlan(world_spec=world_spec, world_allocation=WorldAllocation.from_data(allocation_spec["payload"]), world_allocation_spec=allocation_spec, worker_keys=tuple(keys))
+
+
+def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResourceInventory, oversubscribe: bool, allocation_backend_kind: str) -> None:
+    """Check the shared deterministic assignment inputs before allocation."""
+
+    if allocation_backend_kind not in {"local_world", "local_subprocess"}:
+        raise DispatchPlanningError("unsupported local allocation backend kind", context={"kind": allocation_backend_kind})
+    cpu_cursor = memory_cursor = 0
+    accelerator_cursors = {key: 0 for key in inventory.accelerators}
+    for role_name in sorted(world.roles):
+        role = world.roles[role_name]
+        for replica in range(role.replicas):
+            resources = role.process.resources
+            if resources.devices or resources.named:
+                raise DispatchPlanningError(
+                    "local world allocation does not support named devices or resources",
+                    context={"role": role_name, "devices": dict(resources.devices), "named": dict(resources.named)},
+                )
+            requested_cpus = resources.cpus or 1
+            requested_memory = resources.memory
+            if requested_memory is not None:
+                if requested_memory > 0 and inventory.memory is None:
+                    raise DispatchPlanningError("local world memory request cannot be proven against unknown inventory", context={"role": role_name, "requested_memory": requested_memory})
+                if not oversubscribe and inventory.memory is not None and memory_cursor + requested_memory > inventory.memory:
+                    raise DispatchPlanningError("local world memory requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_memory": requested_memory, "remaining_memory": inventory.memory - memory_cursor})
+                memory_cursor += requested_memory
+            if not oversubscribe and requested_cpus > len(inventory.cpus):
+                raise DispatchPlanningError("local world CPU request exceeds inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "inventory_cpus": len(inventory.cpus)})
+            if not oversubscribe and cpu_cursor + requested_cpus > len(inventory.cpus):
+                raise DispatchPlanningError("local world CPU requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "remaining_cpus": len(inventory.cpus) - cpu_cursor})
+            cpu_cursor = (cpu_cursor + requested_cpus) % len(inventory.cpus) if oversubscribe else cpu_cursor + requested_cpus
+            for acc_name, count in resources.accelerators.items():
+                available = inventory.accelerators.get(acc_name, ())
+                cursor = accelerator_cursors.get(acc_name, 0)
+                if cursor + count > len(available):
+                    raise DispatchPlanningError("local world accelerator request exceeds explicit inventory", context={"role": role_name, "replica": replica, "accelerator": acc_name, "requested": count, "available": len(available)})
+                accelerator_cursors[acc_name] = cursor + count
 
 
 def _with_coordination(envelope: ExecutionEnvelope, *, group_dir: str, start_path: str, cancel_path: str, worker_key: WorldWorkerKey, start_timeout: float) -> ExecutionEnvelope:

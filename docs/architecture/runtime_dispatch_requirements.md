@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed Sprint 0 baseline note. Current-state claims are anchored to baseline commit `a6d3550` and are intended to document behavior, not change it.
+Historical Sprint 0 baseline note, updated through Sprint 8 dispatch planning.
 
 ## Current State
 
@@ -19,7 +19,7 @@ Future sprints need to make normal Python-shaped dispatch calls work while prese
 
 ## Guiding Principle
 
-Decorators declare hard requirements and soft defaults. Dispatch kwargs select candidates. Candidate environment, world, and runtime selections should eventually be checked against hard requirements before launch.
+Decorators declare hard requirements and soft defaults. Dispatch kwargs select candidates. Candidate environment, world, and runtime selections are checked before launch; local allocation feasibility remains structural even when requirement policy relaxes compatibility reporting.
 
 ## Requirement Declaration vs Candidate Selection
 
@@ -44,9 +44,9 @@ Sprint 3 adds `dryml.annotations.RequirementResolution` plus collection helpers 
 
 Dispatch still does not consume those results during planning in Sprint 3. Candidate environment/world/runtime selection and compatibility checks remain deferred to later dispatch sprints.
 
-## Future Dispatch Planning Pipeline
+## Dispatch Planning Pipeline
 
-A later implementation should normalize user targets into an `OperationSpec`, collect code and annotation facts, merge hard requirements and defaults, select candidate environment/world/runtime data, check candidates against hard requirements, then launch through the backend. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
+Dispatch normalizes user targets into an `OperationSpec`, collects code and annotation facts, merges hard requirements and defaults, selects candidate environment/world/runtime data, checks candidates, and then launches through the backend. Environment precedence is explicit, annotation default, context current, resolver, then current fallback; world precedence is explicit, annotation default, context current, synthesized local world, then fallback. Resolver probes and local inventory are bounded, and an actual worker allocation is validated again before execution. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
 
 ## Runtime Enforcement Policy
 

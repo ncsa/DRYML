@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -10,6 +11,13 @@ from types import MappingProxyType
 from typing import Any
 
 from .errors import ResourceValidationError
+
+
+_MAX_METADATA_DEPTH = 8
+_MAX_METADATA_ITEMS = 64
+_MAX_METADATA_STRING = 4096
+_MAX_EXTERNAL_OUTPUT_CHARS = 64 * 1024
+_MAX_EXTERNAL_DEVICE_IDS = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +120,7 @@ def local_inventory(
 
     if policy not in {"lightweight", "external"}:
         raise ResourceValidationError("unsupported local inventory policy", context={"policy": policy})
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise ResourceValidationError("inventory timeout must be positive", context={"timeout": timeout})
     environment = os.environ if environ is None else environ
     diagnostics: list[str] = []
@@ -175,7 +183,13 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
         text = getattr(output, "stdout", output)
         if not isinstance(text, str):
             raise TypeError("runner output is not text")
+        if len(text) > _MAX_EXTERNAL_OUTPUT_CHARS:
+            diagnostics.append("external accelerator output was truncated")
+            text = text[:_MAX_EXTERNAL_OUTPUT_CHARS]
         values = tuple(int(line.strip()) for line in text.splitlines() if line.strip())
+        if len(values) > _MAX_EXTERNAL_DEVICE_IDS:
+            diagnostics.append("external accelerator identifiers were truncated")
+            values = values[:_MAX_EXTERNAL_DEVICE_IDS]
         if values:
             existing = accelerators.get("gpu", ())
             accelerators["gpu"] = tuple(sorted(set(existing) | set(values)))
@@ -189,13 +203,35 @@ def _nonneg_int(value: Any, name: str) -> int:
     return value
 
 
-def _freeze_json(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+def _freeze_json(value: Any, *, depth: int = 0) -> Any:
+    if depth > _MAX_METADATA_DEPTH:
+        raise ResourceValidationError("inventory metadata nesting exceeds the bounded limit")
+    if value is None or isinstance(value, (int, bool)):
+        return value
+    if isinstance(value, str):
+        if len(value) > _MAX_METADATA_STRING:
+            raise ResourceValidationError("inventory metadata string exceeds the bounded limit")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ResourceValidationError("inventory metadata floats must be finite")
         return value
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze_json(item) for key, item in value.items()})
+        if len(value) > _MAX_METADATA_ITEMS:
+            raise ResourceValidationError("inventory metadata mapping exceeds the bounded limit")
+        result = {}
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            normalized_key = str(key)
+            if normalized_key in result:
+                raise ResourceValidationError("inventory metadata keys collide after JSON normalization", context={"key": normalized_key})
+            if len(normalized_key) > _MAX_METADATA_STRING:
+                raise ResourceValidationError("inventory metadata key exceeds the bounded limit")
+            result[normalized_key] = _freeze_json(item, depth=depth + 1)
+        return MappingProxyType(result)
     if isinstance(value, (tuple, list)):
-        return tuple(_freeze_json(item) for item in value)
+        if len(value) > _MAX_METADATA_ITEMS:
+            raise ResourceValidationError("inventory metadata sequence exceeds the bounded limit")
+        return tuple(_freeze_json(item, depth=depth + 1) for item in value)
     raise ResourceValidationError("inventory metadata must be JSON-compatible", context={"type": type(value).__name__})
 
 

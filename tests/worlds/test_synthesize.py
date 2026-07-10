@@ -23,3 +23,27 @@ def test_synthesize_reports_insufficient_aggregate_capacity():
 
     assert result.status == "insufficient_inventory"
     assert result.diagnostics[0].code == "insufficient_cpus"
+
+
+def test_synthesize_default_and_unknown_memory_failure_are_structured():
+    default = synthesize(None, inventory=LocalResourceInventory((0,)))
+    memory_requirement = WorldRequirement.from_data(
+        {"roles": {"worker": {"resources": {"memory": {"min": "1GiB"}}}}}
+    )
+    insufficient_memory = synthesize(memory_requirement, inventory=LocalResourceInventory((0,)))
+
+    assert default.ok
+    assert default.world.roles["main"].process.resources.cpus == 1
+    assert insufficient_memory.status == "insufficient_inventory"
+    assert insufficient_memory.diagnostics[0].code == "memory_unknown"
+
+
+def test_synthesize_rejects_unsupported_named_resources():
+    requirement = WorldRequirement.from_data(
+        {"roles": {"worker": {"resources": {"named": {"fast_disk": {"min": 1}}}}}}
+    )
+
+    result = synthesize(requirement, inventory=LocalResourceInventory((0,)))
+
+    assert result.status == "unsupported_requirement"
+    assert result.diagnostics[0].code == "unsupported_named"

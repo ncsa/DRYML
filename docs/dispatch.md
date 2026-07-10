@@ -93,7 +93,11 @@ print(explanation.resolution.environment_check.to_data())
 Explanation may perform bounded static analysis, code/environment probes,
 explicit-registry resolution, and read-only local inventory/synthesis when
 needed. It does not launch workloads, activate an allocation, persist records,
-solve/install packages, or perform dynamic tracing.
+solve/install packages, or perform dynamic tracing. It does run the same
+non-allocating local capacity validation as planning, so an explanation is not
+launchable when the selected one-worker world cannot fit the supplied or
+discovered inventory. `plan(...)` and `plan_world(...)` then validate the actual
+backend allocation against hard world requirements before constructing workers.
 
 ## Local Worlds
 

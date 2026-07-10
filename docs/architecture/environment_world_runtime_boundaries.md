@@ -2,11 +2,12 @@
 
 ## Status
 
-Sprint 0 baseline note anchored to `a6d3550`, updated through Sprint 5 lightweight code probes.
+Historical baseline note anchored to `a6d3550`, updated through Sprint 8 local
+inventory, world synthesis, and environment resolution.
 
 ## Current State
 
-DRYML has distinct modules for software environments, resource worlds, and process-local runtime state. Dispatch currently records current environment data, a requested single-worker world by default, and a worker runtime spec for local subprocess execution. Notebook/session defaults are context-local through `dryml.environments.current()` and `dryml.worlds.current()`.
+DRYML has distinct modules for software environments, resource worlds, and process-local runtime state. Dispatch records a requested world separately from its actual allocation, resolves explicit environment registries only after higher-precedence selections are absent, and can synthesize a bounded local world from a hard requirement. Notebook/session defaults are context-local through `dryml.environments.current()` and `dryml.worlds.current()`.
 
 ## Definitions
 

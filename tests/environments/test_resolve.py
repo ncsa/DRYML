@@ -88,3 +88,24 @@ def test_resolver_metadata_redacts_environment_overrides():
     result = resolve(None, candidates=(PythonExecutableSpec("/python", env={"TOKEN": "secret"}),), include_current=False)
 
     assert "TOKEN" not in str(result.to_data())
+
+
+def test_total_timeout_bounds_a_probe_without_an_explicit_probe_timeout():
+    observed = []
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(PythonExecutableSpec("/first/python"),),
+        include_current=False,
+        probe_timeout=None,
+        total_timeout=0.25,
+        probe_runner=lambda spec, *, timeout: observed.append(timeout) or EnvironmentProbeResult(spec, False),
+    )
+
+    assert result.status == "no_match"
+    assert observed and 0 < observed[0] <= 0.25
+
+
+def test_resolver_metadata_bounds_large_candidate_values():
+    result = resolve(None, candidates=(PythonExecutableSpec("x" * 5000),), include_current=False)
+
+    assert len(result.to_data()["selected"]["executable"]) == 4096

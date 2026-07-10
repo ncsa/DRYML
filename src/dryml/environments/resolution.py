@@ -17,6 +17,8 @@ from .requirements import EnvironmentRequirement
 from .specs import CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
 
 _MAX_RECORDED_ATTEMPTS = 32
+_MAX_SERIALIZED_ITEMS = 64
+_MAX_SERIALIZED_STRING = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +36,7 @@ class EnvironmentResolutionAttempt:
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-compatible attempt data."""
 
-        return {
+        return _bounded_data({
             "source": self.source,
             "name": self.name,
             "spec": _spec_summary(self.spec),
@@ -42,7 +44,7 @@ class EnvironmentResolutionAttempt:
             "probe": None if self.probe is None else {"ok": self.probe.ok, "returncode": self.probe.returncode, "report": None if self.probe.report is None else self.probe.report.to_data()},
             "compatibility": None if self.compatibility is None else self.compatibility.to_data(),
             "diagnostics": [issue.to_data() for issue in self.diagnostics],
-        }
+        })
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +80,7 @@ class EnvironmentResolution:
     def to_data(self) -> dict[str, Any]:
         """Return deterministic JSON-compatible resolver output."""
 
-        return {
+        return _bounded_data({
             "status": self.status,
             "requirement": None if self.requirement is None else self.requirement.to_data(),
             "selected": None if self.selected is None else _spec_summary(self.selected),
@@ -88,7 +90,7 @@ class EnvironmentResolution:
             "attempts": [attempt.to_data() for attempt in self.attempts],
             "diagnostics": [issue.to_data() for issue in self.diagnostics],
             "policy": self.policy,
-        }
+        })
 
 
 def resolve(
@@ -104,7 +106,14 @@ def resolve(
     probe_runner: Callable[..., EnvironmentProbeResult] | None = None,
     clock: Callable[[], float] | None = None,
 ) -> EnvironmentResolution:
-    """Select the first compatible candidate in deterministic bounded order."""
+    """Select the first compatible candidate in deterministic bounded order.
+
+    Candidates precede name-sorted registry entries and the optional current
+    environment. ``max_candidates`` limits unique candidates; ``probe_timeout``
+    limits individual probes and ``total_timeout`` limits the entire search.
+    When only a total timeout is supplied, its remaining duration is passed to
+    each probe. Returned attempt metadata is redacted and size-bounded.
+    """
 
     if policy != "first_compatible":
         raise ValueError(f"unsupported environment resolver policy {policy!r}")
@@ -129,6 +138,7 @@ def resolve(
         if identity in seen:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "duplicate"))
             continue
+        seen.add(identity)
         if considered >= max_candidates:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_limit"))
             continue
@@ -139,13 +149,12 @@ def resolve(
         if entry is not None and not _labels_match(requirement, entry):
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
             continue
-        seen.add(identity)
         if requirement is None:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "selected"))
             return EnvironmentResolution("selected", None, spec, name, source, None, None, tuple(attempts), (), policy)
         try:
             remaining = None if total_timeout is None else max(0.0, total_timeout - (now() - started))
-            timeout = probe_timeout if remaining is None or probe_timeout is None else min(probe_timeout, remaining)
+            timeout = remaining if probe_timeout is None else probe_timeout if remaining is None else min(probe_timeout, remaining)
             if timeout is not None and timeout <= 0:
                 attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
                 continue
@@ -215,17 +224,35 @@ def _spec_summary(spec: EnvironmentSpec) -> dict[str, Any]:
     data.pop("env", None)
     if "extra_pythonpath" in data:
         data["extra_pythonpath"] = list(data["extra_pythonpath"][:16])
-    return data
+    return _bounded_data(data)
 
 
 def _record_summary(record: EnvironmentRecord | None) -> dict[str, Any] | None:
     if record is None:
         return None
-    return {
+    return _bounded_data({
         "id": record.id,
         "python": {"implementation": record.python.implementation, "version": record.python.version},
         "platform": {"system": record.platform.system, "machine": record.platform.machine},
-    }
+    })
+
+
+def _bounded_data(value: Any) -> Any:
+    """Bound public resolver serialization without retaining secret overrides."""
+
+    if isinstance(value, str):
+        return value[:_MAX_SERIALIZED_STRING]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:_MAX_SERIALIZED_STRING]: _bounded_data(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:_MAX_SERIALIZED_ITEMS]
+            if str(key) != "env"
+        }
+    if isinstance(value, (list, tuple)):
+        return [_bounded_data(item) for item in value[:_MAX_SERIALIZED_ITEMS]]
+    return value
 
 
 __all__ = ["EnvironmentResolution", "EnvironmentResolutionAttempt", "resolve"]
