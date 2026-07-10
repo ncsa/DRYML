@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from bisect import insort
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues
@@ -64,6 +66,7 @@ class EnvironmentRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, EnvironmentRegistryEntry] = {}
+        self._names: list[str] = []
 
     def register(
         self,
@@ -86,6 +89,7 @@ class EnvironmentRegistry:
             )
         entry = EnvironmentRegistryEntry(name, spec, provides=provides, tags=tags, requirement=requirement)
         self._entries[name] = entry
+        insort(self._names, name)
         return entry
 
     def get(self, name: str) -> EnvironmentRegistryEntry:
@@ -103,7 +107,9 @@ class EnvironmentRegistry:
         """Remove and return a registered environment without probing it."""
 
         try:
-            return self._entries.pop(name)
+            entry = self._entries.pop(name)
+            self._names.remove(name)
+            return entry
         except KeyError as exc:
             raise EnvironmentRegistryError(
                 f"environment registry entry {name!r} does not exist",
@@ -113,7 +119,13 @@ class EnvironmentRegistry:
     def list(self) -> tuple[EnvironmentRegistryEntry, ...]:
         """Return registered entries in deterministic name order."""
 
-        return tuple(self._entries[name] for name in sorted(self._entries))
+        return tuple(self._entries[name] for name in self._names)
+
+    def iter_entries(self, *, limit: int | None = None):
+        """Yield name-sorted entries without materializing the full registry."""
+
+        names = self._names if limit is None else islice(self._names, limit)
+        yield from (self._entries[name] for name in names)
 
     def find(
         self,

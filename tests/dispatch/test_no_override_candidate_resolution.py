@@ -4,7 +4,7 @@ import dryml
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import ContainerEnvironmentSpec, inspect_current
+from dryml.environments import ContainerEnvironmentSpec, EnvironmentRegistry, PythonExecutableSpec, inspect_current
 from dryml.operations import make_function_call_spec
 from dryml.worlds import LocalResourceInventory
 
@@ -107,3 +107,28 @@ def test_plan_world_synthesizes_an_omitted_multi_worker_world(tmp_path):
 
     assert len(plan.worker_plans) == 2
     assert len(plan.world_spec["payload"]["roles"]["trainer"]) == 2
+
+
+def test_warn_synthesis_failure_keeps_a_human_blocking_action():
+    explanation = Dispatcher().explain(
+        cpu_target,
+        allow_pickle=True,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="warn",
+    )
+
+    assert not explanation.launchable
+    assert explanation.blocking_diagnostics
+    assert "blocking_action=" in str(explanation)
+
+
+def test_per_call_none_clears_configured_registry_default():
+    registry = EnvironmentRegistry()
+    registry.register("configured", PythonExecutableSpec("/configured/python"))
+    dispatcher = Dispatcher(environment_registry=registry)
+
+    configured = dispatcher.explain(make_function_call_spec("operator:add", args=[1, 2]))
+    cleared = dispatcher.explain(make_function_call_spec("operator:add", args=[1, 2]), environment_registry=None)
+
+    assert configured.resolution.environment_selection.source == "resolver"
+    assert cleared.resolution.environment_selection.source == "fallback"

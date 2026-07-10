@@ -79,24 +79,27 @@ class EnvironmentProbeResult:
             raise EnvironmentProbeError("environment probe result ok must be a boolean")
         if data["ok"] and not isinstance(data.get("record"), Mapping):
             raise EnvironmentProbeError("successful environment probe result requires a record")
-        return cls(
-            spec=spec_from_data(data["spec"]),
-            ok=bool(data["ok"]),
-            record=(
-                None
-                if data.get("record") is None
-                else EnvironmentRecord.from_data(data["record"])
-            ),
-            report=(
-                None
-                if data.get("report") is None
-                else CompatibilityReport.from_data(data["report"])
-            ),
-            stdout=data.get("stdout"),
-            stderr=data.get("stderr"),
-            returncode=data.get("returncode"),
-            schema_version=data.get("schema_version", ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION),
-        )
+        try:
+            return cls(
+                spec=spec_from_data(data["spec"]),
+                ok=bool(data["ok"]),
+                record=(
+                    None
+                    if data.get("record") is None
+                    else EnvironmentRecord.from_data(data["record"])
+                ),
+                report=(
+                    None
+                    if data.get("report") is None
+                    else CompatibilityReport.from_data(data["report"])
+                ),
+                stdout=data.get("stdout"),
+                stderr=data.get("stderr"),
+                returncode=data.get("returncode"),
+                schema_version=data.get("schema_version", ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION),
+            )
+        except Exception as exc:
+            raise EnvironmentProbeError(f"environment probe result could not be decoded: {type(exc).__name__}") from exc
 
 
 def _failure_result(
@@ -200,7 +203,7 @@ def _probe_command(
         return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe worker reported failure", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     try:
         record = EnvironmentRecord.from_data(payload["record"])
-    except (KeyError, TypeError, ValueError) as exc:
+    except Exception as exc:
         return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe record could not be decoded: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     return _capture_diagnostic(EnvironmentProbeResult(spec=spec, ok=True, record=record, stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
 

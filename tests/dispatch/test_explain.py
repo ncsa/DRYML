@@ -74,6 +74,35 @@ def test_plan_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):
     assert all(not __import__("os").path.exists(path) for path in captured["paths"])
 
 
+def test_plan_cleans_pickle_artifacts_when_interrupted(monkeypatch, tmp_path):
+    import dryml.dispatch.planner as planner
+
+    captured = {}
+    original = planner.normalize_user_operation
+
+    def capture(*args, **kwargs):
+        normalized = original(*args, **kwargs)
+        captured["paths"] = tuple(normalized.launch.get("cleanup_paths") or ())
+        return normalized
+
+    monkeypatch.setattr(planner, "normalize_user_operation", capture)
+    monkeypatch.setattr(planner, "resolve_dispatch_plan", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with __import__("pytest").raises(KeyboardInterrupt):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(lambda: None, allow_pickle=True)
+
+    assert captured["paths"]
+    assert all(not __import__("os").path.exists(path) for path in captured["paths"])
+
+
+def test_explain_rejects_invalid_inventory_policy_before_normalization(monkeypatch):
+    import dryml.dispatch.planner as planner
+
+    monkeypatch.setattr(planner, "normalize_user_operation", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not normalize")))
+
+    with __import__("pytest").raises(DispatchPlanningError, match="invalid inventory_policy"):
+        Dispatcher().explain(lambda: None, allow_pickle=True, inventory_policy="invalid")
+
+
 def test_plan_world_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):
     import dryml.dispatch.planner as planner
 

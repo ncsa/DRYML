@@ -16,10 +16,16 @@ from .errors import ResourceValidationError
 _MAX_METADATA_DEPTH = 8
 _MAX_METADATA_ITEMS = 64
 _MAX_METADATA_STRING = 4096
+_MAX_METADATA_NODES = 1024
 _MAX_EXTERNAL_OUTPUT_CHARS = 64 * 1024
 _MAX_EXTERNAL_DEVICE_IDS = 128
 _MAX_EXPLICIT_ACCELERATOR_CHARS = 64 * 1024
 _MAX_EXPLICIT_ACCELERATOR_IDS = 128
+_MAX_DEVICE_ROOT_ENTRIES = 256
+_MAX_IDENTIFIER_STRING = 4096
+_MAX_INTEGER_BITS = 4096
+_MAX_CPU_IDENTIFIERS = 4096
+_MAX_ACCELERATOR_IDENTIFIERS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +42,10 @@ class LocalResourceInventory:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        cpus = tuple(sorted(_nonneg_int(cpu, "cpu") for cpu in self.cpus))
+        if isinstance(self.cpus, (str, bytes)) or not hasattr(self.cpus, "__iter__"):
+            raise ResourceValidationError("local resource inventory CPUs must be a sequence")
+        cpus = tuple(_nonneg_int(cpu, "cpu") for cpu in _bounded_items(self.cpus, _MAX_CPU_IDENTIFIERS, "CPUs"))
+        cpus = tuple(sorted(cpus))
         if not cpus:
             raise ResourceValidationError("local resource inventory requires at least one CPU")
         if len(set(cpus)) != len(cpus):
@@ -47,11 +56,19 @@ class LocalResourceInventory:
         for name, values in self.accelerators.items():
             if not isinstance(name, str) or not name:
                 raise ResourceValidationError("accelerator inventory name must be a non-empty string")
+            if len(name) > _MAX_IDENTIFIER_STRING:
+                raise ResourceValidationError("accelerator inventory name exceeds the bounded limit")
             if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
                 raise ResourceValidationError("accelerator inventory values must be sequences", context={"accelerator": name})
-            normalized = tuple(values)
+            normalized = tuple(_bounded_items(values, _MAX_ACCELERATOR_IDENTIFIERS, "accelerator identifiers"))
             if any(isinstance(value, bool) or not isinstance(value, (str, int)) for value in normalized):
                 raise ResourceValidationError("accelerator identifiers must be strings or integers", context={"accelerator": name})
+            if any(
+                (isinstance(value, str) and len(value) > _MAX_IDENTIFIER_STRING)
+                or (isinstance(value, int) and value.bit_length() > _MAX_INTEGER_BITS)
+                for value in normalized
+            ):
+                raise ResourceValidationError("accelerator inventory identifier exceeds the bounded limit", context={"accelerator": name})
             if len(set(normalized)) != len(normalized):
                 raise ResourceValidationError("accelerator inventory identifiers must be unique", context={"accelerator": name})
             accelerators[name] = tuple(sorted(normalized, key=lambda value: (str(type(value)), str(value))))
@@ -61,7 +78,7 @@ class LocalResourceInventory:
             raise ResourceValidationError("local resource inventory metadata must be a mapping")
         object.__setattr__(self, "cpus", cpus)
         object.__setattr__(self, "accelerators", MappingProxyType({name: accelerators[name] for name in sorted(accelerators)}))
-        object.__setattr__(self, "metadata", _freeze_json(self.metadata))
+        object.__setattr__(self, "metadata", _freeze_json(self.metadata, budget=[_MAX_METADATA_NODES]))
 
     @classmethod
     def local(cls) -> "LocalResourceInventory":
@@ -141,7 +158,8 @@ def local_inventory(
     accelerators = _accelerators_from_env(environment, diagnostics)
     if not accelerators and device_root is not None:
         accelerators = _accelerators_from_device_root(environment, device_root, diagnostics)
-    if policy == "external" and command_runner is not None:
+    # An explicit override is authoritative; never broaden it with host probes.
+    if policy == "external" and command_runner is not None and not accelerators:
         _merge_external_accelerators(accelerators, command_runner, timeout, diagnostics)
     metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": memory_source, "diagnostics": diagnostics[:8]}
     return LocalResourceInventory(cpus=cpus, accelerators=accelerators, memory=memory, metadata=metadata)
@@ -220,14 +238,17 @@ def _accelerators_from_device_root(environ: Mapping[str, str], device_root: str 
 
     root = Path(device_root)
     try:
-        device_ids = tuple(sorted(
-            int(path.name[6:])
-            for path in root.iterdir()
-            if path.name.startswith("nvidia") and path.name[6:].isdigit()
-        ))
+        device_ids = []
+        for index, path in enumerate(root.iterdir()):
+            if index >= _MAX_DEVICE_ROOT_ENTRIES:
+                diagnostics.append("device-file accelerator discovery exceeded the bounded entry limit")
+                return {}
+            if path.name.startswith("nvidia") and path.name[6:].isdigit():
+                device_ids.append(int(path.name[6:]))
     except (OSError, ValueError) as exc:
         diagnostics.append(f"device-file accelerator discovery unavailable: {type(exc).__name__}")
         return {}
+    device_ids = tuple(sorted(set(device_ids)))
     if not device_ids:
         return {}
     visible = environ.get("CUDA_VISIBLE_DEVICES", environ.get("NVIDIA_VISIBLE_DEVICES"))
@@ -267,15 +288,35 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
 
 
 def _nonneg_int(value: Any, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value.bit_length() > _MAX_INTEGER_BITS:
         raise ResourceValidationError(f"{name} must be an integer >= 0", context={"value": value})
     return value
 
 
-def _freeze_json(value: Any, *, depth: int = 0) -> Any:
+def _bounded_items(values: Any, limit: int, name: str) -> tuple[Any, ...]:
+    """Materialize at most *limit* injected inventory identifiers."""
+
+    iterator = iter(values)
+    result = []
+    for _ in range(limit + 1):
+        try:
+            result.append(next(iterator))
+        except StopIteration:
+            return tuple(result)
+    raise ResourceValidationError(f"local resource inventory {name} exceed the bounded limit")
+
+
+def _freeze_json(value: Any, *, depth: int = 0, budget: list[int]) -> Any:
+    if budget[0] <= 0:
+        raise ResourceValidationError("inventory metadata exceeds the aggregate bounded limit")
+    budget[0] -= 1
     if depth > _MAX_METADATA_DEPTH:
         raise ResourceValidationError("inventory metadata nesting exceeds the bounded limit")
-    if value is None or isinstance(value, (int, bool)):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value.bit_length() > _MAX_INTEGER_BITS:
+            raise ResourceValidationError("inventory metadata integer exceeds the bounded limit")
         return value
     if isinstance(value, str):
         if len(value) > _MAX_METADATA_STRING:
@@ -295,12 +336,12 @@ def _freeze_json(value: Any, *, depth: int = 0) -> Any:
                 raise ResourceValidationError("inventory metadata keys collide after JSON normalization", context={"key": normalized_key})
             if len(normalized_key) > _MAX_METADATA_STRING:
                 raise ResourceValidationError("inventory metadata key exceeds the bounded limit")
-            result[normalized_key] = _freeze_json(item, depth=depth + 1)
+            result[normalized_key] = _freeze_json(item, depth=depth + 1, budget=budget)
         return MappingProxyType(result)
     if isinstance(value, (tuple, list)):
         if len(value) > _MAX_METADATA_ITEMS:
             raise ResourceValidationError("inventory metadata sequence exceeds the bounded limit")
-        return tuple(_freeze_json(item, depth=depth + 1) for item in value)
+        return tuple(_freeze_json(item, depth=depth + 1, budget=budget) for item in value)
     raise ResourceValidationError("inventory metadata must be JSON-compatible", context={"type": type(value).__name__})
 
 

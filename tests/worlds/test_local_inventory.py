@@ -4,6 +4,7 @@ import math
 import json
 import subprocess
 import sys
+from itertools import count
 
 import pytest
 
@@ -41,6 +42,15 @@ def test_inventory_rejects_unbounded_or_non_json_metadata():
         LocalResourceInventory((0,), metadata={"value": "x" * 4097})
 
 
+def test_inventory_rejects_aggregate_metadata_expansion():
+    leaf = {f"leaf-{index}": "value" for index in range(11)}
+    branch = {f"branch-{index}": leaf for index in range(11)}
+    metadata = {f"outer-{index}": branch for index in range(11)}
+
+    with pytest.raises(ResourceValidationError, match="aggregate bounded limit"):
+        LocalResourceInventory((0,), metadata=metadata)
+
+
 def test_external_inventory_bounds_runner_output():
     output = "\n".join(str(index) for index in range(200))
     inventory = local_inventory(
@@ -50,6 +60,16 @@ def test_external_inventory_bounds_runner_output():
 
     assert len(inventory.accelerators["gpu"]) == 128
     assert "external accelerator identifiers were truncated" in inventory.metadata["diagnostics"]
+
+
+def test_explicit_accelerator_override_is_not_broadened_by_external_discovery():
+    inventory = local_inventory(
+        policy="external",
+        environ={"DRYML_LOCAL_ACCELERATORS": "gpu=0"},
+        command_runner=lambda *_args, **_kwargs: "0\n1\n",
+    )
+
+    assert inventory.accelerators == {"gpu": (0,)}
 
 
 @pytest.mark.parametrize(
@@ -63,6 +83,18 @@ def test_external_inventory_failures_are_diagnostic_only(output, tmp_path):
     inventory = local_inventory(policy="external", device_root=tmp_path, command_runner=lambda *_args, **_kwargs: output)
 
     assert "gpu" not in inventory.accelerators
+    assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
+
+
+@pytest.mark.parametrize("failure", (FileNotFoundError(), TimeoutError()))
+def test_external_inventory_missing_or_timed_out_runner_is_diagnostic_only(failure):
+    inventory = local_inventory(
+        policy="external",
+        environ={},
+        command_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    assert inventory.accelerators == {}
     assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
 
 
@@ -111,8 +143,25 @@ def test_device_root_accelerators_respect_numeric_visibility(tmp_path):
     assert inventory.accelerators == {"gpu": (1,)}
 
 
+def test_device_root_enumeration_is_bounded(tmp_path):
+    for index in range(257):
+        (tmp_path / f"nvidia{index}").touch()
+
+    inventory = local_inventory(environ={}, device_root=tmp_path)
+
+    assert inventory.accelerators == {}
+    assert "device-file accelerator discovery exceeded the bounded entry limit" in inventory.metadata["diagnostics"]
+
+
 def test_explicit_accelerator_override_is_bounded():
     values = ",".join(str(value) for value in range(129))
 
     with pytest.raises(ResourceValidationError, match="too many accelerator identifiers"):
         local_inventory(environ={"DRYML_LOCAL_ACCELERATORS": f"gpu={values}"})
+
+
+def test_injected_inventory_identifier_iterables_are_bounded():
+    with pytest.raises(ResourceValidationError, match="CPUs exceed"):
+        LocalResourceInventory(count())
+    with pytest.raises(ResourceValidationError, match="accelerator identifiers exceed"):
+        LocalResourceInventory((0,), {"gpu": count()})

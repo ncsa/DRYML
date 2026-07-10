@@ -103,7 +103,7 @@ compatibility semantics while never bypassing allocation feasibility.
 
 ## Local Worlds
 
-`Dispatcher.run_world(...)` is the explicit Sprint 10 entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
+`Dispatcher.run_world(...)` is the explicit Sprint 8 entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
 
 ```python
 from dryml.dispatch import Dispatcher
@@ -195,7 +195,8 @@ Environment candidates are ordered as caller candidates, name-sorted entries in
 an explicitly supplied `EnvironmentRegistry`, then the current environment.
 Registry hints only avoid definite mismatches; a probe record remains the
 compatibility authority. Resolver input, probes, trace metadata, and probe
-output are bounded. Candidate discovery never replaces an incompatible explicit,
+output are bounded, including resolver probe durations and aggregate inventory
+metadata. Candidate discovery never replaces an incompatible explicit,
 annotation-default, or context-current environment/world.
 
 `inventory=` injects one `LocalResourceInventory` for synthesis and allocation.

@@ -65,6 +65,15 @@ def test_single_subprocess_plan_rejects_resources_it_cannot_allocate(tmp_path):
         dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
 
 
+def test_single_subprocess_rejects_unenacted_process_metadata():
+    world = {"roles": {"main": {"replicas": 1, "process": {"metadata": {"label": "training"}}}}}
+
+    explanation = Dispatcher().explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+
+    assert not explanation.launchable
+    assert any(item.code == "dryml.dispatch.single_subprocess_process_settings_unsupported" for item in explanation.resolution.diagnostics)
+
+
 def test_single_subprocess_allows_zero_valued_unsupported_resources(tmp_path):
     world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"devices": {"gpu": 0}, "named": {"scratch": 0}}}}}}
 

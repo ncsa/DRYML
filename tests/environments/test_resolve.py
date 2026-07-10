@@ -210,3 +210,49 @@ def test_resolver_rejects_malformed_injected_probe_result():
 
     assert result.status == "no_match"
     assert result.attempts[0].status == "probe_failed"
+
+
+def test_total_timeout_includes_candidate_normalization():
+    ticks = iter((0.0, 0.0, 1.0))
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(PythonExecutableSpec("/candidate/python"),),
+        include_current=False,
+        total_timeout=0.5,
+        clock=lambda: next(ticks),
+        probe_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("probe must not run")),
+    )
+
+    assert result.status == "no_match"
+    assert any(issue.code == "resolver_candidate_input_timeout" for issue in result.diagnostics)
+
+
+def test_resolver_records_probe_duration():
+    spec = PythonExecutableSpec("/candidate/python")
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda candidate, *, timeout: EnvironmentProbeResult(candidate, False),
+    )
+
+    assert result.attempts[0].probe_duration_s is not None
+    assert result.attempts[0].to_data()["probe_duration_s"] >= 0
+
+
+def test_total_timeout_is_checked_after_candidate_conversion():
+    ticks = iter((0.0, 0.0, 0.0, 0.0, 1.0))
+    candidate = CurrentEnvironmentSpec().to_data()
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(candidate,),
+        include_current=False,
+        total_timeout=0.5,
+        clock=lambda: next(ticks),
+        probe_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("probe must not run")),
+    )
+
+    assert result.status == "no_match"
+    assert any(issue.code == "resolver_candidate_input_timeout" for issue in result.diagnostics)

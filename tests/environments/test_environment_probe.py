@@ -94,6 +94,23 @@ def test_probe_rejects_invalid_worker_protocol_payload(tmp_path, payload):
     assert result.report.issues[0].code == "probe_failed"
 
 
+def test_probe_rejects_malformed_nested_record_data(tmp_path):
+    payload = sample_payload()
+    payload["record"]["distributions"] = []
+    exe = make_fake_executable(tmp_path, payload)
+
+    result = envs.probe(envs.PythonExecutableSpec(exe))
+
+    assert not result.ok
+    assert result.report.issues[0].code == "probe_failed"
+    with pytest.raises(envs.EnvironmentProbeError, match="could not be decoded"):
+        envs.EnvironmentProbeResult.from_data({
+            "spec": envs.CurrentEnvironmentSpec().to_data(),
+            "ok": True,
+            "record": payload["record"],
+        })
+
+
 def test_probe_worker_json_schema(capsys):
     assert probe_worker_main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)

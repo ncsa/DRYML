@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from dryml.worlds import LocalResourceInventory, WorldRequirement, synthesize
 
 
@@ -72,3 +74,15 @@ def test_synthesis_omits_optional_zero_count_accelerators():
 
     assert result.ok
     assert result.world.roles["worker"].process.resources.accelerators == {}
+
+
+def test_synthesize_validates_inventory_policy_with_injected_inventory():
+    with pytest.raises(Exception, match="unsupported local inventory policy"):
+        synthesize(None, inventory=LocalResourceInventory((0,)), inventory_policy="invalid")
+
+
+def test_synthesize_invalid_injected_inventory_is_structured():
+    result = synthesize(None, inventory=object())  # type: ignore[arg-type]
+
+    assert result.status == "error"
+    assert result.diagnostics[0].code == "invalid_inventory"

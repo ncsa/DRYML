@@ -109,6 +109,10 @@ def synthesize(
 
     if policy != "local":
         raise WorldSpecValidationError("unsupported world synthesis policy", context={"policy": policy})
+    if inventory_policy not in {"lightweight", "external"}:
+        raise WorldSpecValidationError("unsupported local inventory policy", context={"inventory_policy": inventory_policy})
+    if inventory is not None and not isinstance(inventory, LocalResourceInventory):
+        return _failure("error", None, None, policy, "invalid_inventory", "inventory must be a LocalResourceInventory")
     try:
         req = _coerce_requirement(requirement)
     except Exception as exc:
@@ -151,7 +155,26 @@ def synthesize(
         world = WorldSpec.from_data({"roles": roles, "backend": {"kind": "local", "parameters": {}}})
         report = check_world_spec_satisfies_requirement(world, req)
         if not report.ok:
-            return WorldSynthesisResult("error", req, inv.summary(), None, report, tuple(WorldSynthesisDiagnostic("authoritative_check_failed", "error", issue.message, issue.path, issue.expected, issue.actual) for issue in report.issues), policy, inv)
+            return WorldSynthesisResult(
+                "error",
+                req,
+                inv.summary(),
+                None,
+                report,
+                tuple(
+                    WorldSynthesisDiagnostic(
+                        "authoritative_check_failed",
+                        issue.severity,
+                        issue.message,
+                        issue.path,
+                        issue.expected,
+                        issue.actual,
+                    )
+                    for issue in report.issues
+                ),
+                policy,
+                inv,
+            )
         return WorldSynthesisResult("synthesized", req, inv.summary(), world, report, (), policy, inv)
     except _SynthesisFailure as exc:
         return _failure(exc.status, req, inv, policy, exc.code, str(exc), exc.path, exc.expected, exc.observed)

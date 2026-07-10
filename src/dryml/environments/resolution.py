@@ -39,6 +39,7 @@ class EnvironmentResolutionAttempt:
     probe: EnvironmentProbeResult | None = None
     compatibility: CompatibilityReport | None = None
     diagnostics: tuple[CompatibilityIssue, ...] = ()
+    probe_duration_s: float | None = None
 
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-compatible attempt data."""
@@ -49,6 +50,7 @@ class EnvironmentResolutionAttempt:
             "spec": _spec_summary(self.spec),
             "status": self.status,
             "probe": None if self.probe is None else {"ok": self.probe.ok, "returncode": self.probe.returncode, "report": None if self.probe.report is None else self.probe.report.to_data()},
+            "probe_duration_s": self.probe_duration_s,
             "compatibility": None if self.compatibility is None else self.compatibility.to_data(),
             "diagnostics": [issue.to_data() for issue in self.diagnostics],
         })
@@ -132,16 +134,19 @@ def resolve(
         raise ValueError("total_timeout must be positive or None")
     runner = probe if probe_runner is None else probe_runner
     now = time.monotonic if clock is None else clock
+    started = now()
+    deadline = None if total_timeout is None else started + total_timeout
     # Bound raw entries as well as unique candidates. This leaves room to show
     # duplicates without letting a duplicate-only iterator defeat all limits.
-    raw_candidates, candidates_truncated = _normalize_candidates(
+    raw_candidates, candidates_truncated, candidates_timed_out = _normalize_candidates(
         candidates,
         max_items=max_candidates + _MAX_RECORDED_ATTEMPTS,
         select_first=requirement is None,
+        now=now,
+        deadline=deadline,
     )
     attempts: list[EnvironmentResolutionAttempt] = []
     seen: set[str] = set()
-    started = now()
     considered = 0
     truncated = False
 
@@ -158,9 +163,16 @@ def resolve(
             diagnostics.append(CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS))
         if candidates_truncated:
             diagnostics.append(CompatibilityIssue("resolver_candidates_truncated", "warning", "resolver candidate input was truncated", expected=max_candidates + _MAX_RECORDED_ATTEMPTS))
+        if candidates_timed_out:
+            diagnostics.append(CompatibilityIssue("resolver_candidate_input_timeout", "warning", "resolver candidate input exceeded the total timeout"))
         return tuple(diagnostics)
 
-    for source, name, spec, entry in _candidates(raw_candidates, registry, include_current):
+    for source, name, spec, entry in _candidates(
+        raw_candidates,
+        registry,
+        include_current,
+        max_registry_entries=max_candidates + _MAX_RECORDED_ATTEMPTS,
+    ):
         if total_timeout is not None and now() - started >= total_timeout:
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
             break
@@ -192,38 +204,48 @@ def resolve(
             if timeout is not None and timeout <= 0:
                 record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
                 break
+            probe_started = now()
             result = runner(spec, timeout=timeout)
+            probe_duration_s = max(0.0, now() - probe_started)
             _validate_probe_result(result, identity)
             if _identity(result.spec) != identity:
                 issue = CompatibilityIssue("probe_spec_mismatch", "error", "environment probe result did not match the requested candidate")
-                record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,)))
+                record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,), probe_duration_s=probe_duration_s))
                 continue
         except Exception as exc:
             issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}")
-            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,)))
+            duration = None if "probe_started" not in locals() else max(0.0, now() - probe_started)
+            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,), probe_duration_s=duration))
             continue
         if total_timeout is not None and now() - started >= total_timeout:
-            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout", result))
+            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout", result, probe_duration_s=probe_duration_s))
             break
         if not result.ok or result.record is None:
             diagnostics = () if result.report is None else result.report.issues
-            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics))
+            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics, probe_duration_s=probe_duration_s))
             continue
         report = requirement.check(result.record, policy="strict")
         if report.ok:
-            record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report))
+            record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report, probe_duration_s=probe_duration_s))
             return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), result_diagnostics(), policy)
-        record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues))
+        record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues, probe_duration_s))
     diagnostics = [CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())]
     diagnostics.extend(result_diagnostics())
     return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
 
 
-def _candidates(candidates: Iterable[tuple[str, str | None, EnvironmentSpec, Any]], registry: Any, include_current: bool) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
+def _candidates(
+    candidates: Iterable[tuple[str, str | None, EnvironmentSpec, Any]],
+    registry: Any,
+    include_current: bool,
+    *,
+    max_registry_entries: int,
+) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
     for candidate in candidates:
         yield candidate
     if registry is not None:
-        for entry in registry.list():
+        entries = registry.iter_entries(limit=max_registry_entries) if hasattr(registry, "iter_entries") else islice(registry.list(), max_registry_entries)
+        for entry in entries:
             yield "registry", entry.name, entry.spec, entry
     if include_current:
         yield "current", None, CurrentEnvironmentSpec(), None
@@ -239,21 +261,45 @@ def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, 
     raise TypeError(f"environment candidate must be an EnvironmentSpec, registry entry, or mapping, got {type(candidate).__name__}")
 
 
-def _normalize_candidates(candidates: Iterable[Any], *, max_items: int, select_first: bool) -> tuple[tuple[tuple[str, str | None, EnvironmentSpec, Any], ...], bool]:
+def _normalize_candidates(
+    candidates: Iterable[Any],
+    *,
+    max_items: int,
+    select_first: bool,
+    now: Callable[[], float],
+    deadline: float | None,
+) -> tuple[tuple[tuple[str, str | None, EnvironmentSpec, Any], ...], bool, bool]:
     """Normalize the bounded caller candidate prefix before any probe starts."""
 
     iterator = iter(candidates)
-    if select_first:
+    limit = 1 if select_first else max_items + 1
+    values = []
+    timed_out = False
+    for _ in range(limit):
+        if deadline is not None and now() >= deadline:
+            timed_out = True
+            break
         try:
-            values = (next(iterator),)
+            value = next(iterator)
         except StopIteration:
-            values = ()
-        return tuple(_normalize_candidate(candidate, "candidate") for candidate in values), False
-    values = tuple(islice(iterator, max_items + 1))
-    truncated = len(values) > max_items
-    values = values[:max_items]
+            break
+        if deadline is not None and now() >= deadline:
+            timed_out = True
+            break
+        values.append(value)
+    truncated = not select_first and len(values) > max_items
+    values = values[:1 if select_first else max_items]
     try:
-        return tuple(_normalize_candidate(candidate, "candidate") for candidate in values), truncated
+        normalized = []
+        for candidate in values:
+            if deadline is not None and now() >= deadline:
+                timed_out = True
+                break
+            normalized.append(_normalize_candidate(candidate, "candidate"))
+            if deadline is not None and now() >= deadline:
+                timed_out = True
+                break
+        return tuple(normalized), truncated, timed_out
     except Exception as exc:
         raise ValueError(f"invalid environment resolver candidate: {type(exc).__name__}") from exc
 

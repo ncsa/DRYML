@@ -45,7 +45,7 @@ The local coordinator launches all subprocesses, validates their handshakes, and
 
 The stored `WorldAllocation` captures actual backend assignment. The launch envelope adds the computed `world_allocation_id` to the runtime view and process environment, avoiding a self-referential ID inside the canonical allocation payload. Per-worker execution records reference that allocation ID and include role/replica/rank/local-rank metadata.
 
-Local-world CPU and accelerator assignment is enforced through the runtime allocation view and device-visibility environment, not by OS-level CPU affinity or hard memory limits. CPU affinity and memory limits remain runtime process-control features that require explicit opt-in and are not enabled by the Sprint 10 local-world coordinator.
+Local-world CPU and accelerator assignment is enforced through the runtime allocation view and device-visibility environment, not by OS-level CPU affinity or hard memory limits. CPU affinity and memory limits remain runtime process-control features that require explicit opt-in and are not enabled by the Sprint 8 local-world coordinator.
 # Local Inventory And Synthesis
 
 `worlds.local_inventory()` discovers CPU, memory, and explicitly declared local
@@ -59,7 +59,11 @@ the opt-in `external` policy accepts a bounded command runner without importing
 framework bindings. Memory capacity honors an explicit cgroup limit when one is
 available; unknown capacity blocks positive memory requests, and
 unsupported topology, named resources, and devices fail synthesis rather than
-being silently dropped.
+being silently dropped. An explicit `DRYML_LOCAL_ACCELERATORS` declaration is
+authoritative and is never broadened by optional external discovery. Injected
+device-root inspection is conservative and bounded; ambiguous visibility or an
+oversized device directory reports no accelerator inventory rather than a
+partial claim.
 
 The local-subprocess backend can enact only one role/replica. It allocates that
 requested world into an actual local-subprocess allocation and applies assigned

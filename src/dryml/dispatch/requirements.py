@@ -534,7 +534,10 @@ def explanation_for(normalized: NormalizedDispatchTarget, **kwargs: Any) -> Disp
     """Resolve a normalized target without launching or emitting warnings."""
 
     result = resolve_dispatch_plan(normalized, emit_warnings=False, **kwargs)
-    blocking = () if result.launchable else tuple(item for item in result.diagnostics if item.severity == "error")
+    errors = tuple(item for item in result.diagnostics if item.severity == "error")
+    # Structural failures stay blocking under warn/ignore even when their
+    # compatibility finding is intentionally presented as a warning.
+    blocking = () if result.launchable else errors or tuple(result.diagnostics)
     return DispatchExplanation(result, dict(normalized.operation_spec), blocking)
 
 

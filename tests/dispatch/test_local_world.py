@@ -186,6 +186,18 @@ def test_plan_world_persists_all_specs_before_launch(tmp_path, target_module):
     assert store.records.read_spec(plan.world_allocation_spec["id"], family="world_allocation")["id"] == plan.world_allocation_spec["id"]
 
 
+def test_plan_world_metadata_summarizes_assigned_memory_and_accelerators(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1, "memory": "1GiB", "accelerators": {"gpu": 1}}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+
+    worker = plan.dispatch_spec["payload"]["metadata"]["dryml.world_allocation"]["workers"][0]
+    assert worker["memory"] == 1024**3
+    assert dict(worker["accelerators"]) == {"gpu": (0,)}
+
+
 def test_run_world_two_roles_returns_runtime_and_env_facts(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"trainer": {"replicas": 1, "process": {"resources": {"cpus": 1}}}, "data": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}

@@ -24,6 +24,8 @@ from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
 from .stores import require_supported_plan, select_marshal_plan
 
+_UNSET = object()
+
 
 @dataclass(frozen=True, slots=True)
 class DispatchPlan:
@@ -68,9 +70,9 @@ class Dispatcher:
         world: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
         analysis_policy: Any | None = None,
-        environment_candidates: Any | None = None,
-        environment_registry: Any | None = None,
-        inventory: Any | None = None,
+        environment_candidates: Any = _UNSET,
+        environment_registry: Any = _UNSET,
+        inventory: Any = _UNSET,
         inventory_policy: str | None = None,
         resolver_policy: str | None = None,
         record_policy: str = "descriptive",
@@ -98,6 +100,9 @@ class Dispatcher:
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
         _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
+        effective_candidates = self.environment_candidates if environment_candidates is _UNSET else environment_candidates
+        effective_registry = self.environment_registry if environment_registry is _UNSET else environment_registry
+        effective_inventory = self.inventory if inventory is _UNSET else inventory
         _report("dryml.dispatch.requirements.gather", "Gathering environment/world/runtime requirements")
         normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
         op_spec = dict(normalized.operation_spec)
@@ -111,15 +116,15 @@ class Dispatcher:
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
                 analysis_policy=analysis_policy,
-                environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
-                environment_registry=self.environment_registry if environment_registry is None else environment_registry,
-                inventory=self.inventory if inventory is None else inventory,
+                environment_candidates=effective_candidates,
+                environment_registry=effective_registry,
+                inventory=effective_inventory,
                 inventory_policy=effective_inventory_policy,
                 resolver_policy=effective_resolver_policy,
                 emit_warnings=True,
                 single_worker_only=True,
             )
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         if not resolution.launchable:
@@ -148,7 +153,7 @@ class Dispatcher:
         try:
             from .local_world import allocate_local_world
 
-            selected_inventory = inventory or self.inventory or resolution.local_inventory
+            selected_inventory = effective_inventory or resolution.local_inventory
             allocation_world = _subprocess_allocation_world(world_data)
             requested_world_spec = worlds.attach_world_id(worlds.make_world_spec(worlds.WorldSpec.from_data(world_data)))
             allocation_plan = allocate_local_world(
@@ -169,13 +174,13 @@ class Dispatcher:
                     "workers": [{"role": key.role, "replica": key.replica, "cpus": list(allocation.cpus), "memory": allocation.memory, "accelerators": {name: list(values) for name, values in allocation.accelerators.items()}}],
                 },
             )
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         try:
             marshal = select_marshal_plan(target_store, query_index="none")
             require_supported_plan(marshal)
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         _report("dryml.dispatch.store.prepare", "Preparing shared DirStore marshalling", operation_id=op_spec.get("id"), data={"strategy": marshal.strategy})
@@ -219,7 +224,7 @@ class Dispatcher:
                 reporting={"planning": resolution.metadata()},
                 launch={**launch, "world_id": requested_world_spec["id"], "world_allocation_id": allocation_plan.world_allocation_spec["id"], "world_spec": requested_world_spec, "world_allocation_spec": allocation_plan.world_allocation_spec, "parent_persisted_specs": record_policy != "none"},
             )
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         if record_policy != "none":
@@ -229,7 +234,7 @@ class Dispatcher:
                 target_store.records.write_spec(recipe, family="execution_recipe")
                 target_store.records.write_spec(requested_world_spec, family="world")
                 target_store.records.write_spec(allocation_plan.world_allocation_spec, family="world_allocation")
-            except Exception:
+            except BaseException:
                 _cleanup_launch(launch)
                 raise
         return DispatchPlan(dispatch, recipe, envelope, target_store, resolution)
@@ -264,10 +269,10 @@ class Dispatcher:
         allow_pickle: bool = False,
         args: tuple[Any, ...] = (),
         kwargs: Mapping[str, Any] | None = None,
-        inventory: Any | None = None,
+        inventory: Any = _UNSET,
         inventory_policy: str | None = None,
-        environment_candidates: Any | None = None,
-        environment_registry: Any | None = None,
+        environment_candidates: Any = _UNSET,
+        environment_registry: Any = _UNSET,
         resolver_policy: str | None = None,
         oversubscribe: bool = False,
     ):
@@ -293,6 +298,9 @@ class Dispatcher:
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
         _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
+        effective_candidates = self.environment_candidates if environment_candidates is _UNSET else environment_candidates
+        effective_registry = self.environment_registry if environment_registry is _UNSET else environment_registry
+        effective_inventory = self.inventory if inventory is _UNSET else inventory
         normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
@@ -304,14 +312,14 @@ class Dispatcher:
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
                 analysis_policy=analysis_policy,
-                environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
-                environment_registry=self.environment_registry if environment_registry is None else environment_registry,
-                inventory=self.inventory if inventory is None else inventory,
+                environment_candidates=effective_candidates,
+                environment_registry=effective_registry,
+                inventory=effective_inventory,
                 inventory_policy=effective_inventory_policy,
                 resolver_policy=effective_resolver_policy,
                 emit_warnings=True,
             )
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         if not resolution.launchable:
@@ -325,7 +333,7 @@ class Dispatcher:
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
         runtime_data = dict(resolution.runtime_selection.candidate)
         try:
-            selected_inventory = inventory or self.inventory or resolution.local_inventory
+            selected_inventory = effective_inventory or resolution.local_inventory
             if selected_inventory is None:
                 selected_inventory = worlds.local_inventory(policy=effective_inventory_policy)
                 resolution = replace(
@@ -335,23 +343,30 @@ class Dispatcher:
                 )
             allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)
             _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         world_spec = allocation_plan.world_spec
         allocation_spec = allocation_plan.world_allocation_spec
+        allocation_workers = []
+        for key in allocation_plan.worker_keys:
+            allocation = allocation_plan.world_allocation.runtime_view(
+                key.role,
+                key.replica,
+                world_allocation_id=allocation_spec["id"],
+            )
+            allocation_workers.append({
+                "role": key.role,
+                "replica": key.replica,
+                "cpus": list(allocation.cpus),
+                "memory": allocation.memory,
+                "accelerators": {name: list(values) for name, values in allocation.accelerators.items()},
+            })
         resolution = replace(
             resolution,
             world_allocation_summary={
                 "backend": "local_world",
-                "workers": [
-                    {
-                        "role": key.role,
-                        "replica": key.replica,
-                        "cpus": list(allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"]).cpus),
-                    }
-                    for key in allocation_plan.worker_keys
-                ],
+                "workers": allocation_workers,
             },
         )
         _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
@@ -359,13 +374,13 @@ class Dispatcher:
             try:
                 target_store.records.write_spec(world_spec, family="world")
                 target_store.records.write_spec(allocation_spec, family="world_allocation")
-            except Exception:
+            except BaseException:
                 _cleanup_launch(launch)
                 raise
         try:
             marshal = select_marshal_plan(target_store, query_index="none")
             require_supported_plan(marshal)
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         try:
@@ -394,7 +409,7 @@ class Dispatcher:
                 annotation_report=resolution.metadata(),
                 )
             )
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         if record_policy != "none":
@@ -402,7 +417,7 @@ class Dispatcher:
                 target_store.records.write_spec(op_spec, family="operation")
                 target_store.records.write_spec(dispatch, family="dispatch")
                 target_store.records.write_spec(recipe, family="execution_recipe")
-            except Exception:
+            except BaseException:
                 _cleanup_launch(launch)
                 raise
         try:
@@ -425,7 +440,7 @@ class Dispatcher:
                     launch=launch_data,
                 )
                 worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))
-        except Exception:
+        except BaseException:
             _cleanup_launch(launch)
             raise
         return LocalWorldPlan(dispatch, recipe, op_spec, world_spec, allocation_spec, tuple(worker_plans), target_store)
@@ -465,9 +480,9 @@ class Dispatcher:
         world: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
         analysis_policy: Any | None = None,
-        environment_candidates: Any | None = None,
-        environment_registry: Any | None = None,
-        inventory: Any | None = None,
+        environment_candidates: Any = _UNSET,
+        environment_registry: Any = _UNSET,
+        inventory: Any = _UNSET,
         inventory_policy: str | None = None,
         resolver_policy: str | None = None,
         allow_pickle: bool = False,
@@ -485,6 +500,12 @@ class Dispatcher:
         """
 
         target_store = store or self.store
+        effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
+        effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
+        _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
+        effective_candidates = self.environment_candidates if environment_candidates is _UNSET else environment_candidates
+        effective_registry = self.environment_registry if environment_registry is _UNSET else environment_registry
+        effective_inventory = self.inventory if inventory is _UNSET else inventory
         normalized = normalize_user_operation(
             operation,
             method_name,
@@ -502,11 +523,11 @@ class Dispatcher:
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
                 analysis_policy=analysis_policy,
-                environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
-                environment_registry=self.environment_registry if environment_registry is None else environment_registry,
-                inventory=self.inventory if inventory is None else inventory,
-                inventory_policy=self.inventory_policy if inventory_policy is None else inventory_policy,
-                resolver_policy=self.resolver_policy if resolver_policy is None else resolver_policy,
+                environment_candidates=effective_candidates,
+                environment_registry=effective_registry,
+                inventory=effective_inventory,
+                inventory_policy=effective_inventory_policy,
+                resolver_policy=effective_resolver_policy,
                 single_worker_only=True,
             )
         finally:
