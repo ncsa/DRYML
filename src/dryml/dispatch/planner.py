@@ -19,7 +19,7 @@ from .errors import DispatchPlanningError
 from .normalize import normalize_user_operation
 from .operations import PickledCallable
 from .protocol import DispatchResult, ExecutionEnvelope
-from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, effective_requirement_policy, explanation_for, resolve_dispatch_plan
+from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
 from .stores import require_supported_plan, select_marshal_plan
@@ -37,7 +37,14 @@ class DispatchPlan:
 
 
 class Dispatcher:
-    """Plan and run one operation through a dispatch backend."""
+    """Plan and run one operation through a dispatch backend.
+
+    ``environment_candidates`` and ``environment_registry`` configure the
+    bounded no-override resolver stage. ``inventory`` injects deterministic
+    local capacity, while ``inventory_policy`` selects lightweight or opt-in
+    external discovery when inventory is omitted. Per-call values override these
+    defaults without mutating them.
+    """
 
     def __init__(self, *, backend: Any | None = None, store: Any | None = None, environment_candidates: Any | None = None, environment_registry: Any | None = None, inventory: Any | None = None, inventory_policy: str = "lightweight", resolver_policy: str | None = None):
         from .backends import LocalSubprocessBackend
@@ -78,13 +85,19 @@ class Dispatcher:
         Definition/CDef/Object paired with ``method_name``. Explicit candidates
         select a target but never override hard requirements. ``requirement_policy``
         is ``strict``, ``warn``, or ``ignore``; when omitted it follows active
-        runtime enforcement.
+        runtime enforcement. ``environment_candidates`` and
+        ``environment_registry`` are considered only after explicit/default/
+        current candidates are absent. ``inventory`` is reused for synthesis
+        and allocation; ``inventory_policy`` is ``lightweight`` or ``external``.
         """
 
         _report("dryml.dispatch.plan.start", "Building dispatch plan")
         target_store = store or self.store
         if target_store is None:
             raise DispatchPlanningError("Dispatcher.plan requires a store for local subprocess marshalling")
+        effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
+        effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
+        _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
         _report("dryml.dispatch.requirements.gather", "Gathering environment/world/runtime requirements")
         normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
         op_spec = dict(normalized.operation_spec)
@@ -101,8 +114,8 @@ class Dispatcher:
                 environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
                 environment_registry=self.environment_registry if environment_registry is None else environment_registry,
                 inventory=self.inventory if inventory is None else inventory,
-                inventory_policy=self.inventory_policy if inventory_policy is None else inventory_policy,
-                resolver_policy=self.resolver_policy if resolver_policy is None else resolver_policy,
+                inventory_policy=effective_inventory_policy,
+                resolver_policy=effective_resolver_policy,
                 emit_warnings=True,
                 single_worker_only=True,
             )
@@ -264,6 +277,11 @@ class Dispatcher:
         operation spec in every allocated role/replica worker. User code can
         branch on ``dryml.runtime.require_workload_allocation(...)`` or the
         ``DRYML_WORLD_*`` environment variables.
+
+        An omitted ``world`` is synthesized only when no higher-precedence world
+        exists and a hard world requirement is present. ``inventory`` and
+        ``inventory_policy`` use the same semantics as :meth:`plan` and are
+        retained for synthesis plus actual local allocation.
         """
 
         from .local_world import LOCAL_WORLD_BACKEND_IDENTITY, LocalWorldPlan, WorkerLaunchPlan, allocate_local_world
@@ -272,6 +290,9 @@ class Dispatcher:
         target_store = store or self.store
         if target_store is None:
             raise DispatchPlanningError("Dispatcher.plan_world requires a store for shared DirStore marshalling")
+        effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
+        effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
+        _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
         normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
@@ -286,8 +307,8 @@ class Dispatcher:
                 environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
                 environment_registry=self.environment_registry if environment_registry is None else environment_registry,
                 inventory=self.inventory if inventory is None else inventory,
-                inventory_policy=self.inventory_policy if inventory_policy is None else inventory_policy,
-                resolver_policy=self.resolver_policy if resolver_policy is None else resolver_policy,
+                inventory_policy=effective_inventory_policy,
+                resolver_policy=effective_resolver_policy,
                 emit_warnings=True,
             )
         except Exception:
@@ -305,6 +326,13 @@ class Dispatcher:
         runtime_data = dict(resolution.runtime_selection.candidate)
         try:
             selected_inventory = inventory or self.inventory or resolution.local_inventory
+            if selected_inventory is None:
+                selected_inventory = worlds.local_inventory(policy=effective_inventory_policy)
+                resolution = replace(
+                    resolution,
+                    inventory_summary=selected_inventory.summary(),
+                    local_inventory=selected_inventory,
+                )
             allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)
             _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
         except Exception:
@@ -450,7 +478,10 @@ class Dispatcher:
 
         Explanation follows the same one-time normalization, requirement policy,
         candidate precedence, and checks as :meth:`plan`. It may run a bounded
-        code/environment probe when static discovery is incomplete.
+        code/environment probe when static discovery is incomplete. Resolver,
+        registry, inventory, and policy arguments accept the same values as
+        :meth:`plan`, but explanation does not create allocation records or
+        activate a workload allocation.
         """
 
         target_store = store or self.store
@@ -562,12 +593,20 @@ def _subprocess_allocation_world(world: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _require_allocation_satisfies_requirement(allocation: worlds.WorldAllocation, requirement: worlds.WorldRequirement | None, policy: RequirementPolicy | str | None) -> None:
-    """Reject allocation incompatibility only when the effective policy is strict."""
+    """Validate actual allocation compatibility and enforce the active policy."""
 
-    if requirement is None or effective_requirement_policy(policy, runtime.enforcement()) is not RequirementPolicy.STRICT:
+    if requirement is None:
         return
     report = worlds.check_allocation_satisfies_requirement(allocation, requirement)
     if not report.ok:
+        effective_policy = effective_requirement_policy(policy, runtime.enforcement())
+        if effective_policy is RequirementPolicy.WARN:
+            import warnings
+
+            warnings.warn("actual local allocation does not satisfy the hard world requirement", RuntimeWarning, stacklevel=3)
+            return report
+        if effective_policy is RequirementPolicy.IGNORE:
+            return report
         raise DispatchPlanningError(
             "actual local allocation does not satisfy the hard world requirement",
             context={
@@ -582,6 +621,7 @@ def _require_allocation_satisfies_requirement(allocation: worlds.WorldAllocation
                 ]
             },
         )
+    return report
 
 
 def _cleanup_launch(launch: Mapping[str, Any]) -> None:

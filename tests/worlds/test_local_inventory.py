@@ -59,17 +59,17 @@ def test_external_inventory_bounds_runner_output():
         type("Result", (), {"returncode": 0, "stdout": "not-a-device"})(),
     ),
 )
-def test_external_inventory_failures_are_diagnostic_only(output):
-    inventory = local_inventory(policy="external", command_runner=lambda *_args, **_kwargs: output)
+def test_external_inventory_failures_are_diagnostic_only(output, tmp_path):
+    inventory = local_inventory(policy="external", device_root=tmp_path, command_runner=lambda *_args, **_kwargs: output)
 
     assert "gpu" not in inventory.accelerators
     assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
 
 
-def test_external_inventory_discards_partial_output_and_negative_identifiers():
+def test_external_inventory_discards_partial_output_and_negative_identifiers(tmp_path):
     partial = " " * ((64 * 1024) - 1) + "12\n"
-    inventory = local_inventory(policy="external", command_runner=lambda *_args, **_kwargs: partial)
-    negative = local_inventory(policy="external", command_runner=lambda *_args, **_kwargs: "-1\n")
+    inventory = local_inventory(policy="external", device_root=tmp_path, command_runner=lambda *_args, **_kwargs: partial)
+    negative = local_inventory(policy="external", device_root=tmp_path, command_runner=lambda *_args, **_kwargs: "-1\n")
 
     assert "gpu" not in inventory.accelerators
     assert "gpu" not in negative.accelerators
@@ -91,3 +91,28 @@ def test_inventory_import_path_does_not_load_framework_modules():
     output = subprocess.check_output([sys.executable, "-c", command], text=True)
 
     assert json.loads(output) == []
+
+
+def test_empty_cpu_affinity_is_not_reported_as_cpu_zero(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: set())
+
+    with pytest.raises(ResourceValidationError, match="no executable CPUs"):
+        local_inventory(environ={})
+
+
+def test_device_root_accelerators_respect_numeric_visibility(tmp_path):
+    (tmp_path / "nvidia0").touch()
+    (tmp_path / "nvidia1").touch()
+
+    inventory = local_inventory(environ={"CUDA_VISIBLE_DEVICES": "1"}, device_root=tmp_path)
+
+    assert inventory.accelerators == {"gpu": (1,)}
+
+
+def test_explicit_accelerator_override_is_bounded():
+    values = ",".join(str(value) for value in range(129))
+
+    with pytest.raises(ResourceValidationError, match="too many accelerator identifiers"):
+        local_inventory(environ={"DRYML_LOCAL_ACCELERATORS": f"gpu={values}"})

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import dryml
+import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
@@ -17,6 +20,11 @@ def gpu_target():
 
 @dryml.world.req(cpus={"max": 0})
 def zero_cpu_target():
+    return None
+
+
+@dryml.world.req(topology={"collectives": True})
+def collective_target():
     return None
 
 
@@ -149,8 +157,12 @@ def test_actual_allocation_requirement_respects_warn_and_ignore(tmp_path):
 
     for policy in ("warn", "ignore"):
         assert dispatcher.explain(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy).launchable
-        assert dispatcher.plan(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
-        assert dispatcher.plan_world(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+        expectation = pytest.warns(RuntimeWarning) if policy == "warn" else nullcontext()
+        with expectation:
+            assert dispatcher.plan(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+        expectation = pytest.warns(RuntimeWarning) if policy == "warn" else nullcontext()
+        with expectation:
+            assert dispatcher.plan_world(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
 
 
 def test_zero_memory_request_does_not_require_known_memory_inventory(tmp_path):
@@ -179,3 +191,30 @@ def test_local_subprocess_allocation_process_identity_uses_requested_world_id(tm
     allocation = plan.envelope.launch["world_allocation_spec"]
     assert allocation["metadata"]["world_id"] == plan.envelope.launch["world_id"]
     assert allocation["payload"]["roles"]["main"][0]["env"]["DRYML_WORLD_ID"] == plan.envelope.launch["world_id"]
+
+
+def test_single_subprocess_topology_remains_structural_under_relaxed_policies():
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
+
+    for policy in ("warn", "ignore"):
+        resolution = resolve_dispatch_plan(
+            normalize_user_operation(collective_target, allow_pickle=True),
+            world=world,
+            requirement_policy=policy,
+            single_worker_only=True,
+        )
+        assert resolution.launchable is False
+        assert any(item.code == "dryml.dispatch.single_subprocess_topology_unsupported" for item in resolution.diagnostics)
+
+
+def test_planning_metadata_bounds_deep_nested_data():
+    from dryml.dispatch.requirements import _bounded_data
+
+    value = "leaf"
+    for _ in range(1100):
+        value = {"nested": value}
+
+    bounded = _bounded_data(value)
+    for _ in range(9):
+        bounded = bounded["nested"]
+    assert bounded == {"__dryml_truncated__": "depth_or_size"}

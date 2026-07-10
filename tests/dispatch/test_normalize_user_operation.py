@@ -138,3 +138,21 @@ def test_argument_and_method_name_validation():
         normalize_user_operation(targets.plain_importable_function, "")
     with pytest.raises(DispatchPlanningError, match="only valid"):
         normalize_user_operation(targets.plain_importable_function, "train")
+
+
+def test_pickled_normalization_cleans_temporary_directory_on_serialization_failure(tmp_path, monkeypatch):
+    import dryml.dispatch.normalize as normalize_module
+
+    work_dir = tmp_path / "pickle-work"
+    monkeypatch.setattr(normalize_module.tempfile, "mkdtemp", lambda **_kwargs: str(work_dir))
+
+    def fail_after_creating_artifact(*_args, **_kwargs):
+        work_dir.mkdir()
+        raise RuntimeError("pickle failed")
+
+    monkeypatch.setattr(normalize_module, "write_pickled_callable", fail_after_creating_artifact)
+
+    with pytest.raises(RuntimeError, match="pickle failed"):
+        normalize_user_operation(CallableInstance(), allow_pickle=True)
+
+    assert not work_dir.exists()

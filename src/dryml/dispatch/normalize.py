@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import inspect
 import os
+import shutil
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -335,27 +336,27 @@ def _normalize_pickled_callable(
 ) -> NormalizedDispatchTarget:
     work_dir = tempfile.mkdtemp(prefix="dryml-dispatch-pickle-")
     pickle_path = os.path.join(work_dir, "callable.pkl")
-    write_pickled_callable(func, pickle_path)
-    with open(pickle_path, "rb") as f:
-        digest = hashlib.sha256(f.read()).hexdigest()
-    identity_marker = {"$literal": f"dryml.pickled_callable.sha256:{digest}"}
-    base_target = target_from_callable(func).spec
-    code_target = _code_target_with_metadata(
-        base_target,
-        {
-            "dispatch_target": "callable",
-            "pickle_transport": "pickle_small",
-            "transport_restrictions": ["same_environment_only"],
-            "importability": "not_importable" if importability.path is None else "explicit_pickle",
-            "importability_reason": importability.reason,
-        },
-    )
-    callable_metadata = {
-        "module": getattr(func, "__module__", None),
-        "qualname": getattr(func, "__qualname__", None),
-        "importability_reason": importability.reason,
-    }
     try:
+        write_pickled_callable(func, pickle_path)
+        with open(pickle_path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        identity_marker = {"$literal": f"dryml.pickled_callable.sha256:{digest}"}
+        base_target = target_from_callable(func).spec
+        code_target = _code_target_with_metadata(
+            base_target,
+            {
+                "dispatch_target": "callable",
+                "pickle_transport": "pickle_small",
+                "transport_restrictions": ["same_environment_only"],
+                "importability": "not_importable" if importability.path is None else "explicit_pickle",
+                "importability_reason": importability.reason,
+            },
+        )
+        callable_metadata = {
+            "module": getattr(func, "__module__", None),
+            "qualname": getattr(func, "__qualname__", None),
+            "importability_reason": importability.reason,
+        }
         op = attach_operation_id(
             make_function_call_spec(
                 "dryml.dispatch.operations:import_function",
@@ -364,20 +365,24 @@ def _normalize_pickled_callable(
                 metadata=_normalization_metadata("callable", "pickle_small", code_target),
             )
         )
+        launch = {
+            "call_transport": "pickle_small",
+            "pickle_path": pickle_path,
+            "identity_arg_count": len(args),
+            "pickle_sha256": digest,
+            "portable": False,
+            "same_environment_only": True,
+            "cleanup_paths": [work_dir],
+            "callable_metadata": callable_metadata,
+            "transport_restrictions": ["same_environment_only"],
+        }
+        return NormalizedDispatchTarget(op, launch, code_target, live_annotation_targets=(func,), transport="pickle_small")
     except OperationSpecError as exc:
+        shutil.rmtree(work_dir, ignore_errors=True)
         raise DispatchPlanningError(str(exc), context=exc.context) from exc
-    launch = {
-        "call_transport": "pickle_small",
-        "pickle_path": pickle_path,
-        "identity_arg_count": len(args),
-        "pickle_sha256": digest,
-        "portable": False,
-        "same_environment_only": True,
-        "cleanup_paths": [work_dir],
-        "callable_metadata": callable_metadata,
-        "transport_restrictions": ["same_environment_only"],
-    }
-    return NormalizedDispatchTarget(op, launch, code_target, live_annotation_targets=(func,), transport="pickle_small")
+    except BaseException:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
 
 
 def _normalize_args(args: tuple[Any, ...] | list[Any] | None) -> tuple[Any, ...]:

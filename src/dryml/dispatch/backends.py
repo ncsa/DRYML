@@ -61,7 +61,10 @@ class LocalSubprocessFuture:
             self._cleanup()
             raise DispatchTimeout("dispatch timed out") from exc
         except KeyboardInterrupt:
-            self.cancel(reason="KeyboardInterrupt")
+            try:
+                self.cancel(reason="KeyboardInterrupt")
+            finally:
+                self._cleanup()
             raise
         self._read_response()
         if self._exception is not None:
@@ -242,12 +245,12 @@ class LocalSubprocessBackend:
         response_path = os.path.join(work_dir, "response.json")
         stdout_path = os.path.join(work_dir, "stdout.txt")
         stderr_path = os.path.join(work_dir, "stderr.txt")
-        envelope = plan.envelope
-        save_envelope(request_path, envelope)
-        cmd, child_env = build_worker_command(envelope.environment_spec)
-        cmd.extend(["-m", "dryml.dispatch.worker", "--request", request_path, "--handshake", handshake_path, "--response", response_path])
-        _report("dryml.dispatch.worker.launch", "Launching local subprocess worker", operation_id=envelope.operation_id, data={"cmd": _command_summary(cmd), "work_dir": work_dir})
         try:
+            envelope = plan.envelope
+            save_envelope(request_path, envelope)
+            cmd, child_env = build_worker_command(envelope.environment_spec)
+            cmd.extend(["-m", "dryml.dispatch.worker", "--request", request_path, "--handshake", handshake_path, "--response", response_path])
+            _report("dryml.dispatch.worker.launch", "Launching local subprocess worker", operation_id=envelope.operation_id, data={"cmd": _command_summary(cmd), "work_dir": work_dir})
             stdout = open(stdout_path, "w", encoding="utf-8")
             stderr = open(stderr_path, "w", encoding="utf-8")
             try:
@@ -255,12 +258,23 @@ class LocalSubprocessBackend:
             finally:
                 stdout.close()
                 stderr.close()
-        except Exception as exc:
+        except BaseException as exc:
+            _cleanup_launch_paths(plan)
             shutil.rmtree(work_dir, ignore_errors=True)
+            if isinstance(exc, KeyboardInterrupt):
+                raise
             raise DispatchLaunchError("failed to launch local subprocess worker", context={"error": str(exc)}) from exc
         future = LocalSubprocessFuture(process, plan, work_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, self.preserve_work_dir, handshake_timeout=self.handshake_timeout)
         future.wait_for_handshake(timeout=self.handshake_timeout)
         return future
+
+
+def _cleanup_launch_paths(plan: Any) -> None:
+    """Remove normalization artifacts when worker launch never returns a future."""
+
+    for path in plan.envelope.launch.get("cleanup_paths", ()):
+        if isinstance(path, str):
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def build_worker_command(environment_spec: Mapping[str, Any] | None) -> tuple[list[str], dict[str, str]]:

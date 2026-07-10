@@ -88,3 +88,9 @@ In a notebook, a user may set a default requested world for later dispatch while
 synthesis. `dryml.environments` owns explicit registry candidate resolution and
 probing. `dryml.dispatch` applies precedence, validates the selected candidates,
 and asks a backend to create allocations; it does not make registry state global.
+
+An ordinary notebook keeps its registry in a local variable and uses
+`environments.use(...)`/`worlds.use(...)` for restorable defaults. Inventory and
+synthesis still leave the notebook at `NoAllocation`; only a worker receives the
+actual allocation. Resolver and inventory work are bounded per request, with
+cross-plan caching deferred to a later performance sprint.

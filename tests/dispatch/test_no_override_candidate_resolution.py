@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dryml
 
+from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
 from dryml.environments import ContainerEnvironmentSpec, inspect_current
 from dryml.operations import make_function_call_spec
@@ -10,6 +11,11 @@ from dryml.worlds import LocalResourceInventory
 
 @dryml.world.req(cpus={"min": 2})
 def cpu_target():
+    return None
+
+
+@dryml.world.req(roles={"trainer": {"replicas": {"exact": 2}, "resources": {"cpus": {"exact": 1}}}})
+def multi_worker_target():
     return None
 
 
@@ -77,3 +83,27 @@ def test_explanation_formats_synthesized_inventory_summary():
 
     assert "inventory_cpus=2" in str(explanation)
     assert "inventory_accelerators=['gpu']" in str(explanation)
+
+
+def test_plan_allocates_a_synthesized_one_worker_world(tmp_path):
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        cpu_target,
+        allow_pickle=True,
+        inventory=LocalResourceInventory((4, 5)),
+        requirement_policy="strict",
+    )
+
+    assert plan.resolution.world_selection.source == "synthesized"
+    assert plan.envelope.allocation_view["cpus"] == [4, 5]
+
+
+def test_plan_world_synthesizes_an_omitted_multi_worker_world(tmp_path):
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan_world(
+        multi_worker_target,
+        allow_pickle=True,
+        inventory=LocalResourceInventory((0, 1)),
+        requirement_policy="strict",
+    )
+
+    assert len(plan.worker_plans) == 2
+    assert len(plan.world_spec["payload"]["roles"]["trainer"]) == 2

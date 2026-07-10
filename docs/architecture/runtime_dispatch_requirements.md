@@ -48,6 +48,11 @@ Dispatch still does not consume those results during planning in Sprint 3. Candi
 
 Dispatch normalizes user targets into an `OperationSpec`, collects code and annotation facts, merges hard requirements and defaults, selects candidate environment/world/runtime data, checks candidates, and then launches through the backend. Environment precedence is explicit, annotation default, context current, resolver, then current fallback; world precedence is explicit, annotation default, context current, synthesized local world, then fallback. Resolver probes and local inventory are bounded, and an actual worker allocation is validated again before execution. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
 
+The resolver consumes a bounded candidate prefix before probing, deduplicates
+canonical identities, and validates worker probe protocol evidence before using
+it. Planning metadata has bounded depth, item, string, and aggregate-node limits.
+There is deliberately no cross-plan resolver, probe, or inventory cache.
+
 ## Runtime Enforcement Policy
 
 `RuntimeMode` describes process role: `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy is separate and uses `RuntimeEnforcement.STRICT`, `RuntimeEnforcement.WARN`, and `RuntimeEnforcement.OFF`. Plain Python execution uses `RuntimeMode.INLINE` with a local runtime allocation view and `RuntimeEnforcement.OFF`; it does not add another runtime role.

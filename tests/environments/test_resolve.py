@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from dryml.environments import CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
 
 
@@ -158,3 +160,53 @@ def test_resolver_does_not_serialize_probe_exception_secrets():
 
     assert "TOKEN" not in str(result.to_data())
     assert "secret" not in str(result.to_data())
+
+
+def test_resolver_bounds_duplicate_only_candidate_input():
+    rejected = PythonExecutableSpec("/rejected/python")
+
+    def candidates():
+        yield rejected
+        for _ in range(33):
+            yield rejected.to_data()
+        raise AssertionError("resolver consumed an unbounded duplicate input")
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=candidates(),
+        include_current=False,
+        max_candidates=1,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, False),
+    )
+
+    assert result.status == "no_match"
+    assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
+
+
+def test_resolver_rejects_invalid_candidate_before_running_any_probe():
+    calls = []
+
+    with pytest.raises(ValueError, match="invalid environment resolver candidate"):
+        resolve(
+            EnvironmentRequirement(tags=("wanted",)),
+            candidates=(PythonExecutableSpec("/valid/python"), object()),
+            include_current=False,
+            probe_runner=lambda *args, **kwargs: calls.append(args),
+        )
+
+    assert calls == []
+
+
+def test_resolver_rejects_malformed_injected_probe_result():
+    spec = PythonExecutableSpec("/candidate/python")
+    malformed = EnvironmentProbeResult(spec, "true")  # type: ignore[arg-type]
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda *_args, **_kwargs: malformed,
+    )
+
+    assert result.status == "no_match"
+    assert result.attempts[0].status == "probe_failed"

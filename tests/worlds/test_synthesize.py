@@ -62,3 +62,13 @@ def test_synthesis_result_serialization_is_bounded():
     ).to_data()
 
     assert len(bounded["inventory"]["deep"]["value"]) == 4096
+
+
+def test_synthesis_omits_optional_zero_count_accelerators():
+    result = synthesize(
+        {"roles": {"worker": {"resources": {"accelerators": {"gpu": {"max": 1}}}}}},
+        inventory=LocalResourceInventory((0,)),
+    )
+
+    assert result.ok
+    assert result.world.roles["worker"].process.resources.accelerators == {}

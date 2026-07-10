@@ -34,6 +34,10 @@ from .normalize import NormalizedDispatchTarget
 
 PLANNING_METADATA_VERSION = 2
 DEFAULT_PROBE_TIMEOUT_S = 30.0
+_MAX_METADATA_DEPTH = 8
+_MAX_METADATA_ITEMS = 64
+_MAX_METADATA_STRING = 4096
+_MAX_METADATA_NODES = 8192
 _RESERVED_PLANNING_KEYS = frozenset(
     {
         "dryml.dispatch.planning_version",
@@ -199,7 +203,7 @@ class DispatchPlanningResolution:
                 "final_probe": data["final_code_probe"],
             },
             "dryml.requirements": data["requirements"],
-            "dryml.requirement_sources": data["requirements"]["source_traces"],
+            "dryml.requirement_sources": data["requirements"].get("source_traces", []),
             "dryml.environment_selection": data["environment_selection"],
             "dryml.environment_probe": _environment_record_summary(self.environment_record),
             "dryml.environment_check": data["environment_check"],
@@ -347,7 +351,13 @@ def resolve_dispatch_plan(
         diagnostics.append(_diagnostic("dryml.dispatch.environment_resolver_no_match", "No resolver candidate satisfied the environment requirement; pass, register, or set a compatible environment.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data=environment_resolution.to_data()))
         structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
     if world_synthesis is not None and not world_synthesis.ok:
-        diagnostics.append(_diagnostic("dryml.dispatch.world_synthesis_failed", "Local world synthesis failed; inject inventory or pass/set a compatible world.", data=world_synthesis.to_data()))
+        synthesis_structural = world_synthesis.status not in {"insufficient_inventory", "unsupported_requirement"}
+        diagnostics.append(_diagnostic(
+            "dryml.dispatch.world_synthesis_failed",
+            "Local world synthesis failed; inject inventory or pass/set a compatible world.",
+            severity="error" if synthesis_structural or policy is RequirementPolicy.STRICT else "warning",
+            data=world_synthesis.to_data(),
+        ))
         # Ignore may run a feasible fallback without claiming it supplies the
         # skipped requirement. Discovery and malformed-input failures cannot.
         structural_safe = structural_safe and (
@@ -433,7 +443,11 @@ def resolve_dispatch_plan(
     )
     world_check = _check_world(resolution.world_requirement, world_spec, policy)
     runtime_check = _check_runtime(resolution.runtime_requirement, selected_runtime, policy)
-    diagnostics.extend(_check_diagnostics((environment_check, world_check, runtime_check), policy))
+    diagnostics.extend(_check_diagnostics(
+        (environment_check, world_check, runtime_check),
+        policy,
+        (env_selection, world_selection, runtime_selection),
+    ))
 
     selected_inventory = inventory
     if world_synthesis is not None:
@@ -520,7 +534,7 @@ def explanation_for(normalized: NormalizedDispatchTarget, **kwargs: Any) -> Disp
     """Resolve a normalized target without launching or emitting warnings."""
 
     result = resolve_dispatch_plan(normalized, emit_warnings=False, **kwargs)
-    blocking = tuple(item for item in result.diagnostics if item.severity == "error")
+    blocking = () if result.launchable else tuple(item for item in result.diagnostics if item.severity == "error")
     return DispatchExplanation(result, dict(normalized.operation_spec), blocking)
 
 
@@ -849,6 +863,14 @@ def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requiremen
         if process.environment is not None or process.runtime is not None or process.env or process.metadata:
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_process_settings_unsupported", "The local subprocess planner cannot enact selected role process settings.", data={"role": role_name, "process": process.to_data()}))
     if requirement is not None:
+        for role_name, role_requirement in requirement.roles.items():
+            for topology_name in ("collectives", "shared_filesystem"):
+                if role_requirement.topology.get(topology_name) not in (None, False):
+                    diagnostics.append(_diagnostic(
+                        "dryml.dispatch.single_subprocess_topology_unsupported",
+                        "The local subprocess planner cannot enforce the requested world topology.",
+                        data={"role": role_name, "topology": topology_name},
+                    ))
         report = worlds.check_world_spec_satisfies_requirement(world, requirement)
         if not report.ok:
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_requirement_unsupported", "The selected local subprocess world does not satisfy the hard world requirement.", data={"issues": [{"path": item.path, "message": item.message, "expected": item.expected, "actual": item.actual} for item in report.issues]}))
@@ -1004,18 +1026,23 @@ def _resolution_decisions(resolution) -> dict[str, Any]:
     }
 
 
-def _check_diagnostics(reports, policy):
+def _check_diagnostics(reports, policy, selections):
     diagnostics = []
-    for report in reports:
+    for report, selection in zip(reports, selections, strict=True):
         if report.status in {"not_required", "skipped", "satisfied"}:
             continue
         severity = "error" if policy is RequirementPolicy.STRICT else "warning"
         details = report.details or ({"reason": report.status},)
+        action = {
+            "explicit": f"replace the explicit {report.kind} override",
+            "annotation_default": f"replace or remove the annotation-default {report.kind}",
+            "current": f"set or clear the current {report.kind} override",
+        }.get(selection.source)
         diagnostics.append(_diagnostic(
             f"dryml.dispatch.{report.kind}_check_{report.status}",
-            f"Selected {report.kind} candidate does not satisfy dispatch requirements.",
+            f"Selected {selection.source} {report.kind} candidate does not satisfy dispatch requirements.",
             severity=severity,
-            data={"check": report.to_data(), "details": details, "policy": policy.value},
+            data={"check": report.to_data(), "details": details, "policy": policy.value, "action": action},
         ))
     return diagnostics
 
@@ -1057,21 +1084,29 @@ def _environment_record_summary(record):
     }
 
 
-def _bounded_data(value):
+def _bounded_data(value, *, depth=0, budget=None):
+    budget = [_MAX_METADATA_NODES] if budget is None else budget
+    if budget[0] <= 0 or depth > _MAX_METADATA_DEPTH:
+        return {"__dryml_truncated__": "depth_or_size"}
+    budget[0] -= 1
     if isinstance(value, str):
-        return value[:4096]
+        return value[:_MAX_METADATA_STRING]
+    if isinstance(value, float):
+        return value if value == value and value not in {float("inf"), float("-inf")} else None
     if isinstance(value, Mapping):
         items = []
-        for key, item in value.items():
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
             if str(key) == "env":
                 continue
-            items.append((str(key), _bounded_data(item)))
-            if len(items) >= 64:
+            items.append((str(key)[:_MAX_METADATA_STRING], _bounded_data(item, depth=depth + 1, budget=budget)))
+            if len(items) >= _MAX_METADATA_ITEMS:
                 break
         return dict(items)
     if isinstance(value, (list, tuple)):
-        return [_bounded_data(item) for item in value[:64]]
-    return value
+        return [_bounded_data(item, depth=depth + 1, budget=budget) for item in value[:_MAX_METADATA_ITEMS]]
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    return str(value)[:_MAX_METADATA_STRING]
 
 
 def _safe_candidate_data(candidate: Mapping[str, Any]) -> dict[str, Any]:

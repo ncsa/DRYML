@@ -60,3 +60,10 @@ framework bindings. Memory capacity honors an explicit cgroup limit when one is
 available; unknown capacity blocks positive memory requests, and
 unsupported topology, named resources, and devices fail synthesis rather than
 being silently dropped.
+
+The local-subprocess backend can enact only one role/replica. It allocates that
+requested world into an actual local-subprocess allocation and applies assigned
+accelerator visibility before importing the target. Multi-role or multi-replica
+worlds use `plan_world(...)`/`run_world(...)`; `world=None` there synthesizes an
+omitted hard requirement from the same inventory used for allocation. Inventory
+and probe results are intentionally not cached across plans.

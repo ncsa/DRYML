@@ -190,3 +190,31 @@ but does not launch work, activate an allocation, or write execution records.
 
 A synthesized single-worker local world can run through local subprocess
 dispatch. Multi-worker worlds require `plan_world(...)` or `run_world(...)`.
+
+Environment candidates are ordered as caller candidates, name-sorted entries in
+an explicitly supplied `EnvironmentRegistry`, then the current environment.
+Registry hints only avoid definite mismatches; a probe record remains the
+compatibility authority. Resolver input, probes, trace metadata, and probe
+output are bounded. Candidate discovery never replaces an incompatible explicit,
+annotation-default, or context-current environment/world.
+
+`inventory=` injects one `LocalResourceInventory` for synthesis and allocation.
+With no injection, `inventory_policy="lightweight"` is framework-free;
+`"external"` enables only an injected, timeout-bounded command runner. Actual
+allocation feasibility, backend support, target importability, and topology the
+backend cannot enforce remain blocking even under `requirement_policy="warn"`
+or `"ignore"`.
+
+For notebooks, ordinary context APIs are sufficient:
+
+```python
+registry = dryml.environments.EnvironmentRegistry()
+dryml.environments.set_current(dryml.environments.CurrentEnvironmentSpec())
+world = dryml.worlds.synthesize(None, inventory=dryml.worlds.local_inventory()).require_world()
+with dryml.worlds.use(world):
+    print(dryml.dispatch.explain(train, environment_registry=registry))
+```
+
+`explain(...)` may read local inventory and perform bounded probes, but never
+launches workloads, activates an allocation, writes Store records, or mutates
+the registry. Cross-plan probe and inventory caching is intentionally deferred.

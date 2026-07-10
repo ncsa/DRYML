@@ -132,7 +132,11 @@ def synthesize(
             replicas = _choose(role.replicas, minimum=1, path=f"roles.{name}.replicas")
             cpus = _choose(role.resources.cpus, minimum=1, path=f"roles.{name}.resources.cpus")
             memory = _choose(role.resources.memory, minimum=0, path=f"roles.{name}.resources.memory") if role.resources.memory.to_data() else None
-            accelerators = {kind: _choose(constraint, minimum=0, path=f"roles.{name}.resources.accelerators.{kind}") for kind, constraint in sorted(role.resources.accelerators.items())}
+            accelerators = {
+                kind: count
+                for kind, constraint in sorted(role.resources.accelerators.items())
+                if (count := _choose(constraint, minimum=0, path=f"roles.{name}.resources.accelerators.{kind}")) > 0
+            }
             required_cpus += replicas * cpus
             required_memory += replicas * (memory or 0)
             for kind, count in accelerators.items():

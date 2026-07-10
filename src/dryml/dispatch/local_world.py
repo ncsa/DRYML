@@ -179,12 +179,14 @@ class LocalWorldBackend:
                     stdout.close()
                     stderr.close()
                 futures[worker_plan.key] = LocalSubprocessFuture(process, launch_plan, worker_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, True, cancel_grace=self.cancel_grace, handshake_timeout=self.handshake_timeout)
-        except Exception as exc:
+        except BaseException as exc:
             for future in futures.values():
                 future.cancel(reason="launch_failure")
             _cleanup_worker_paths(plan)
             if not self.preserve_work_dir and not plan.preserve_work_dir:
                 shutil.rmtree(group_dir, ignore_errors=True)
+            if isinstance(exc, KeyboardInterrupt):
+                raise
             if isinstance(exc, DispatchLaunchError):
                 raise
             raise DispatchLaunchError("failed to launch local world worker group", context={"error": str(exc)}) from exc

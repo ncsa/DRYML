@@ -18,6 +18,8 @@ _MAX_METADATA_ITEMS = 64
 _MAX_METADATA_STRING = 4096
 _MAX_EXTERNAL_OUTPUT_CHARS = 64 * 1024
 _MAX_EXTERNAL_DEVICE_IDS = 128
+_MAX_EXPLICIT_ACCELERATOR_CHARS = 64 * 1024
+_MAX_EXPLICIT_ACCELERATOR_IDS = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,15 +136,13 @@ def local_inventory(
         cpus = tuple(range(count))
         cpu_source = "cpu_count"
     if not cpus:
-        cpus = (0,)
-        diagnostics.append("empty CPU affinity fell back to CPU 0")
+        raise ResourceValidationError("local CPU affinity contains no executable CPUs")
     memory, memory_source = _local_memory(diagnostics)
     accelerators = _accelerators_from_env(environment, diagnostics)
+    if not accelerators and device_root is not None:
+        accelerators = _accelerators_from_device_root(environment, device_root, diagnostics)
     if policy == "external" and command_runner is not None:
         _merge_external_accelerators(accelerators, command_runner, timeout, diagnostics)
-    # Device names only supplement an explicitly visible, unambiguous inventory.
-    if not accelerators and device_root is not None:
-        diagnostics.append(f"device root {Path(device_root)} was not used without explicit visibility")
     metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": memory_source, "diagnostics": diagnostics[:8]}
     return LocalResourceInventory(cpus=cpus, accelerators=accelerators, memory=memory, metadata=metadata)
 
@@ -196,6 +196,8 @@ def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -
     raw = str(environ.get("DRYML_LOCAL_ACCELERATORS", "")).strip()
     if not raw:
         return {}
+    if len(raw) > _MAX_EXPLICIT_ACCELERATOR_CHARS:
+        raise ResourceValidationError("DRYML_LOCAL_ACCELERATORS exceeds the bounded limit")
     result: dict[str, tuple[str | int, ...]] = {}
     for group in raw.split(";"):
         if not group:
@@ -207,8 +209,36 @@ def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -
         parsed = tuple(int(value) if value.isdigit() else value for value in (item.strip() for item in values.split(",")) if value)
         if not name or not parsed:
             raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
+        if len(parsed) > _MAX_EXPLICIT_ACCELERATOR_IDS:
+            raise ResourceValidationError("DRYML_LOCAL_ACCELERATORS has too many accelerator identifiers", context={"accelerator": name})
         result[name] = parsed
     return result
+
+
+def _accelerators_from_device_root(environ: Mapping[str, str], device_root: str | os.PathLike[str] | None, diagnostics: list[str]) -> dict[str, tuple[str | int, ...]]:
+    """Discover only numeric GPU device files, optionally intersected with visibility."""
+
+    root = Path(device_root)
+    try:
+        device_ids = tuple(sorted(
+            int(path.name[6:])
+            for path in root.iterdir()
+            if path.name.startswith("nvidia") and path.name[6:].isdigit()
+        ))
+    except (OSError, ValueError) as exc:
+        diagnostics.append(f"device-file accelerator discovery unavailable: {type(exc).__name__}")
+        return {}
+    if not device_ids:
+        return {}
+    visible = environ.get("CUDA_VISIBLE_DEVICES", environ.get("NVIDIA_VISIBLE_DEVICES"))
+    if visible is None:
+        return {"gpu": device_ids[:_MAX_EXPLICIT_ACCELERATOR_IDS]}
+    values = tuple(item.strip() for item in visible.split(",") if item.strip())
+    if any(value.lower() in {"none", "void", "all"} or not value.isdigit() for value in values):
+        diagnostics.append("accelerator visibility was ambiguous")
+        return {}
+    allowed = {int(value) for value in values}
+    return {"gpu": tuple(identifier for identifier in device_ids if identifier in allowed)}
 
 
 def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]], runner: Callable[..., Any], timeout: float, diagnostics: list[str]) -> None:

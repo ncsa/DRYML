@@ -436,3 +436,21 @@ def test_record_policy_none_suppresses_world_provenance(tmp_path, target_module)
     assert result.status == "ok"
     assert result.execution_record_ids == ()
     assert store.records.find_execution_records() == ()
+
+
+def test_explicit_local_world_uses_configured_inventory_policy(tmp_path, monkeypatch):
+    observed = []
+    inventory = LocalResourceInventory((0,))
+
+    def discover(*, policy):
+        observed.append(policy)
+        return inventory
+
+    monkeypatch.setattr("dryml.dispatch.planner.worlds.local_inventory", discover)
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"), inventory_policy="external").plan_world(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world={"roles": {"main": {"replicas": 1, "process": {}}}},
+    )
+
+    assert observed == ["external"]
+    assert plan.dispatch_spec["payload"]["metadata"]["dryml.local_inventory"]["cpu_count"] == 1

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, replace
+from collections.abc import Mapping
 from typing import Any
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues
@@ -70,6 +71,14 @@ class EnvironmentProbeResult:
     def from_data(cls, data: dict[str, Any]) -> "EnvironmentProbeResult":
         """Build a probe result from serialized data."""
 
+        if not isinstance(data, Mapping):
+            raise EnvironmentProbeError("environment probe result must be a mapping")
+        if data.get("schema_version", ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION) != ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION:
+            raise EnvironmentProbeError("unsupported environment probe result schema")
+        if not isinstance(data.get("ok"), bool):
+            raise EnvironmentProbeError("environment probe result ok must be a boolean")
+        if data["ok"] and not isinstance(data.get("record"), Mapping):
+            raise EnvironmentProbeError("successful environment probe result requires a record")
         return cls(
             spec=spec_from_data(data["spec"]),
             ok=bool(data["ok"]),
@@ -179,9 +188,16 @@ def _probe_command(
         payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
         return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe returned malformed JSON: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
-    if not payload.get("ok"):
-        issue = payload.get("error") or "environment probe worker reported failure"
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", str(issue), stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if not isinstance(payload, Mapping):
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned a non-mapping protocol payload", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if payload.get("kind") != "dryml.environment_probe_result":
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an unsupported protocol payload", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if payload.get("schema_version") != ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION:
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an unsupported protocol schema", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if not isinstance(payload.get("ok"), bool):
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an invalid protocol status", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if not payload["ok"]:
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe worker reported failure", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     try:
         record = EnvironmentRecord.from_data(payload["record"])
     except (KeyError, TypeError, ValueError) as exc:

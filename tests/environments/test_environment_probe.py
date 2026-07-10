@@ -76,6 +76,24 @@ def test_probe_python_timeout_and_malformed_output(tmp_path):
     assert result.report.issues[0].code == "probe_failed"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        [],
+        {"kind": "other", "schema_version": envs.ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION, "ok": True},
+        {"kind": "dryml.environment_probe_result", "schema_version": 999, "ok": True},
+        {"kind": "dryml.environment_probe_result", "schema_version": envs.ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION, "ok": "true"},
+    ),
+)
+def test_probe_rejects_invalid_worker_protocol_payload(tmp_path, payload):
+    exe = make_fake_executable(tmp_path, payload)
+
+    result = envs.probe(envs.PythonExecutableSpec(exe))
+
+    assert not result.ok
+    assert result.report.issues[0].code == "probe_failed"
+
+
 def test_probe_worker_json_schema(capsys):
     assert probe_worker_main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)

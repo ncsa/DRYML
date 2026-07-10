@@ -7,6 +7,7 @@ import math
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from itertools import islice
 from typing import Any
 
 from packaging.requirements import Requirement
@@ -16,6 +17,7 @@ from .current import current
 from .probe import EnvironmentProbeResult, probe
 from .records import EnvironmentRecord
 from .requirements import EnvironmentRequirement
+from .schema import ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION
 from .specs import CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
 from .utils import normalize_distribution_name
 
@@ -130,6 +132,13 @@ def resolve(
         raise ValueError("total_timeout must be positive or None")
     runner = probe if probe_runner is None else probe_runner
     now = time.monotonic if clock is None else clock
+    # Bound raw entries as well as unique candidates. This leaves room to show
+    # duplicates without letting a duplicate-only iterator defeat all limits.
+    raw_candidates, candidates_truncated = _normalize_candidates(
+        candidates,
+        max_items=max_candidates + _MAX_RECORDED_ATTEMPTS,
+        select_first=requirement is None,
+    )
     attempts: list[EnvironmentResolutionAttempt] = []
     seen: set[str] = set()
     started = now()
@@ -144,11 +153,17 @@ def resolve(
             truncated = True
 
     def result_diagnostics() -> tuple[CompatibilityIssue, ...]:
-        if not truncated:
-            return ()
-        return (CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS),)
+        diagnostics = []
+        if truncated:
+            diagnostics.append(CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS))
+        if candidates_truncated:
+            diagnostics.append(CompatibilityIssue("resolver_candidates_truncated", "warning", "resolver candidate input was truncated", expected=max_candidates + _MAX_RECORDED_ATTEMPTS))
+        return tuple(diagnostics)
 
-    for source, name, spec, entry in _candidates(candidates, registry, include_current):
+    for source, name, spec, entry in _candidates(raw_candidates, registry, include_current):
+        if total_timeout is not None and now() - started >= total_timeout:
+            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
+            break
         try:
             identity = _identity(spec)
         except Exception as exc:
@@ -178,8 +193,7 @@ def resolve(
                 record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
                 break
             result = runner(spec, timeout=timeout)
-            if not isinstance(result, EnvironmentProbeResult):
-                raise TypeError("probe runner returned an invalid result")
+            _validate_probe_result(result, identity)
             if _identity(result.spec) != identity:
                 issue = CompatibilityIssue("probe_spec_mismatch", "error", "environment probe result did not match the requested candidate")
                 record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,)))
@@ -205,9 +219,9 @@ def resolve(
     return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
 
 
-def _candidates(candidates: Iterable[Any], registry: Any, include_current: bool) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
+def _candidates(candidates: Iterable[tuple[str, str | None, EnvironmentSpec, Any]], registry: Any, include_current: bool) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
     for candidate in candidates:
-        yield _normalize_candidate(candidate, "candidate")
+        yield candidate
     if registry is not None:
         for entry in registry.list():
             yield "registry", entry.name, entry.spec, entry
@@ -223,6 +237,40 @@ def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, 
     if isinstance(candidate, Mapping):
         return source, None, spec_from_data(dict(candidate)), None
     raise TypeError(f"environment candidate must be an EnvironmentSpec, registry entry, or mapping, got {type(candidate).__name__}")
+
+
+def _normalize_candidates(candidates: Iterable[Any], *, max_items: int, select_first: bool) -> tuple[tuple[tuple[str, str | None, EnvironmentSpec, Any], ...], bool]:
+    """Normalize the bounded caller candidate prefix before any probe starts."""
+
+    iterator = iter(candidates)
+    if select_first:
+        try:
+            values = (next(iterator),)
+        except StopIteration:
+            values = ()
+        return tuple(_normalize_candidate(candidate, "candidate") for candidate in values), False
+    values = tuple(islice(iterator, max_items + 1))
+    truncated = len(values) > max_items
+    values = values[:max_items]
+    try:
+        return tuple(_normalize_candidate(candidate, "candidate") for candidate in values), truncated
+    except Exception as exc:
+        raise ValueError(f"invalid environment resolver candidate: {type(exc).__name__}") from exc
+
+
+def _validate_probe_result(result: Any, identity: str) -> None:
+    """Reject malformed injected probe evidence before it enters resolution."""
+
+    if not isinstance(result, EnvironmentProbeResult):
+        raise TypeError("probe runner returned an invalid result")
+    if not isinstance(result.ok, bool):
+        raise TypeError("probe runner result ok must be a boolean")
+    if result.schema_version != ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION:
+        raise TypeError("probe runner returned an unsupported result schema")
+    if _identity(result.spec) != identity:
+        raise TypeError("probe runner returned evidence for a different candidate")
+    if result.ok and not isinstance(result.record, EnvironmentRecord):
+        raise TypeError("successful probe result requires an environment record")
 
 
 def _labels_match(requirement: EnvironmentRequirement | None, entry: Any) -> bool:

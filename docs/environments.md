@@ -159,3 +159,9 @@ probe when no per-probe timeout is supplied. Resolver reports redact environment
 overrides and bound diagnostic metadata before serialization. Current-environment
 resolver probes use the bounded probe worker path rather than synchronous local
 introspection.
+
+Notebook users retain the registry object themselves; re-running a setup cell is
+deterministic as long as registration names are not duplicated. Use
+`environments.use(...)` for temporary context-local overrides and
+`set_current(...)` only for a deliberate session default. Resolution has no
+cross-plan cache: each dispatch/explain request performs only its bounded work.
