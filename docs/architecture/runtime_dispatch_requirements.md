@@ -105,3 +105,9 @@ Baseline tests can become brittle if they assert private plan internals. Sprint 
 - Sprint 6: Python-shaped operation normalization.
 - Sprint 7: dispatch requirement resolution and candidate checking.
 - Sprint 8: environment/world resolver behavior.
+# Synthesized Worlds
+
+Synthesis produces a `WorldSpec` only. Backend planning converts it into a
+`WorldAllocation`, and only workers activate the allocation. This preserves the
+orchestrator/notebook `NoAllocation` state while still allowing explain and
+planning to inspect inventory and perform bounded environment probes.

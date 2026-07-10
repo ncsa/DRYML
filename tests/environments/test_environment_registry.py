@@ -30,6 +30,18 @@ def test_registry_duplicate_and_missing_name_errors():
         raise AssertionError("expected missing registry error")
 
 
+def test_registry_unregister_is_deterministic_and_probe_free():
+    registry = envs.EnvironmentRegistry()
+    entry = registry.register("worker", envs.CurrentEnvironmentSpec())
+    assert registry.unregister("worker") == entry
+    try:
+        registry.unregister("worker")
+    except envs.EnvironmentRegistryError as exc:
+        assert exc.context["name"] == "worker"
+    else:
+        raise AssertionError("expected missing registry error")
+
+
 def test_registry_probe_and_find_compatible():
     registry = envs.EnvironmentRegistry()
     registry.register("current", envs.CurrentEnvironmentSpec(), tags=("current",))

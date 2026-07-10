@@ -99,6 +99,17 @@ class EnvironmentRegistry:
                 context={"name": name},
             ) from exc
 
+    def unregister(self, name: str) -> EnvironmentRegistryEntry:
+        """Remove and return a registered environment without probing it."""
+
+        try:
+            return self._entries.pop(name)
+        except KeyError as exc:
+            raise EnvironmentRegistryError(
+                f"environment registry entry {name!r} does not exist",
+                context={"name": name},
+            ) from exc
+
     def list(self) -> tuple[EnvironmentRegistryEntry, ...]:
         """Return registered entries in deterministic name order."""
 

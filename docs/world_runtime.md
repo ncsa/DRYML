@@ -46,3 +46,11 @@ The local coordinator launches all subprocesses, validates their handshakes, and
 The stored `WorldAllocation` captures actual backend assignment. The launch envelope adds the computed `world_allocation_id` to the runtime view and process environment, avoiding a self-referential ID inside the canonical allocation payload. Per-worker execution records reference that allocation ID and include role/replica/rank/local-rank metadata.
 
 Local-world CPU and accelerator assignment is enforced through the runtime allocation view and device-visibility environment, not by OS-level CPU affinity or hard memory limits. CPU affinity and memory limits remain runtime process-control features that require explicit opt-in and are not enabled by the Sprint 10 local-world coordinator.
+# Local Inventory And Synthesis
+
+`worlds.local_inventory()` discovers CPU, memory, and explicitly declared local
+accelerators without importing ML frameworks or activating a runtime allocation.
+`worlds.synthesize(requirement, inventory=...)` returns a requested local
+`WorldSpec`, not an allocation. The allocator later assigns actual disjoint CPU
+and accelerator identifiers, keeping requested worlds separate from worker
+allocations.

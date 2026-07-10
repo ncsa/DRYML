@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from dryml import worlds
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
 from dryml.runtime import RuntimeAllocationView, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
@@ -37,11 +38,16 @@ class DispatchPlan:
 class Dispatcher:
     """Plan and run one operation through a dispatch backend."""
 
-    def __init__(self, *, backend: Any | None = None, store: Any | None = None):
+    def __init__(self, *, backend: Any | None = None, store: Any | None = None, environment_candidates: Any | None = None, environment_registry: Any | None = None, inventory: Any | None = None, inventory_policy: str = "lightweight", resolver_policy: str | None = None):
         from .backends import LocalSubprocessBackend
 
         self.backend = backend if backend is not None else LocalSubprocessBackend()
         self.store = store
+        self.environment_candidates = environment_candidates
+        self.environment_registry = environment_registry
+        self.inventory = inventory
+        self.inventory_policy = inventory_policy
+        self.resolver_policy = resolver_policy
 
     def plan(
         self,
@@ -54,6 +60,11 @@ class Dispatcher:
         world: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
         analysis_policy: Any | None = None,
+        environment_candidates: Any | None = None,
+        environment_registry: Any | None = None,
+        inventory: Any | None = None,
+        inventory_policy: str | None = None,
+        resolver_policy: str | None = None,
         record_policy: str = "descriptive",
         allow_pickle: bool = False,
         args: tuple[Any, ...] = (),
@@ -86,6 +97,11 @@ class Dispatcher:
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
                 analysis_policy=analysis_policy,
+                environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
+                environment_registry=self.environment_registry if environment_registry is None else environment_registry,
+                inventory=self.inventory if inventory is None else inventory,
+                inventory_policy=self.inventory_policy if inventory_policy is None else inventory_policy,
+                resolver_policy=self.resolver_policy if resolver_policy is None else resolver_policy,
                 emit_warnings=True,
                 single_worker_only=True,
             )
@@ -108,7 +124,18 @@ class Dispatcher:
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
         runtime_data = dict(resolution.runtime_selection.candidate)
         world_data = dict(resolution.world_selection.candidate)
-        allocation_data = {"role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": _local_cpu_ids(), "accelerators": {}, "env": {}, "metadata": {"backend": "local_subprocess"}}
+        try:
+            from .local_world import allocate_local_world
+
+            selected_inventory = inventory or self.inventory or resolution.local_inventory
+            allocation_plan = allocate_local_world(world_data, inventory=selected_inventory)
+            key = allocation_plan.worker_keys[0]
+            allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_plan.world_allocation_spec["id"])
+            allocation_data = _allocation_to_json(allocation, world_id=allocation_plan.world_spec.get("id"))
+            allocation_data["metadata"] = {**allocation_data["metadata"], "backend": "local_subprocess", "requested_world": world_data}
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         try:
             marshal = select_marshal_plan(target_store, query_index="none")
             require_supported_plan(marshal)
@@ -181,7 +208,7 @@ class Dispatcher:
         operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable,
         method_name: str | None = None,
         *,
-        world: Mapping[str, Any] | Any | None,
+        world: Mapping[str, Any] | Any | None = None,
         store: Any | None = None,
         environment: Any | Mapping[str, Any] | None = None,
         runtime: Mapping[str, Any] | None = None,
@@ -192,6 +219,10 @@ class Dispatcher:
         args: tuple[Any, ...] = (),
         kwargs: Mapping[str, Any] | None = None,
         inventory: Any | None = None,
+        inventory_policy: str | None = None,
+        environment_candidates: Any | None = None,
+        environment_registry: Any | None = None,
+        resolver_policy: str | None = None,
         oversubscribe: bool = False,
     ):
         """Build a coordinated local-world dispatch plan.
@@ -219,6 +250,11 @@ class Dispatcher:
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
                 analysis_policy=analysis_policy,
+                environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
+                environment_registry=self.environment_registry if environment_registry is None else environment_registry,
+                inventory=self.inventory if inventory is None else inventory,
+                inventory_policy=self.inventory_policy if inventory_policy is None else inventory_policy,
+                resolver_policy=self.resolver_policy if resolver_policy is None else resolver_policy,
                 emit_warnings=True,
             )
         except Exception:
@@ -235,7 +271,8 @@ class Dispatcher:
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
         runtime_data = dict(resolution.runtime_selection.candidate)
         try:
-            allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=inventory, oversubscribe=oversubscribe)
+            selected_inventory = inventory or self.inventory or resolution.local_inventory
+            allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)
         except Exception:
             _cleanup_launch(launch)
             raise
@@ -352,6 +389,11 @@ class Dispatcher:
         world: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
         analysis_policy: Any | None = None,
+        environment_candidates: Any | None = None,
+        environment_registry: Any | None = None,
+        inventory: Any | None = None,
+        inventory_policy: str | None = None,
+        resolver_policy: str | None = None,
         allow_pickle: bool = False,
         args: tuple[Any, ...] = (),
         kwargs: Mapping[str, Any] | None = None,
@@ -381,6 +423,11 @@ class Dispatcher:
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
                 analysis_policy=analysis_policy,
+                environment_candidates=self.environment_candidates if environment_candidates is None else environment_candidates,
+                environment_registry=self.environment_registry if environment_registry is None else environment_registry,
+                inventory=self.inventory if inventory is None else inventory,
+                inventory_policy=self.inventory_policy if inventory_policy is None else inventory_policy,
+                resolver_policy=self.resolver_policy if resolver_policy is None else resolver_policy,
                 single_worker_only=True,
             )
         finally:

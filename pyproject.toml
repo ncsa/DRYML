@@ -25,6 +25,7 @@ markers = [
     "category_integration: auto-applied DRYML test category",
     "category_jax: auto-applied DRYML test category",
     "category_models: auto-applied DRYML test category",
+    "category_notebook: auto-applied DRYML test category",
     "category_multi_framework: auto-applied DRYML test category",
     "category_operations: auto-applied DRYML test category",
     "category_providers: auto-applied DRYML test category",

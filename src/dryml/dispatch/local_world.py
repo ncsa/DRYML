@@ -8,11 +8,11 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from dryml.worlds import WorldAllocation, WorldSpec, attach_world_allocation_id, attach_world_id, make_world_allocation_spec, make_world_spec, validate_world_spec
+from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldSpec, attach_world_allocation_id, attach_world_id, local_inventory, make_world_allocation_spec, make_world_spec, validate_world_spec
 
 from .backends import LocalSubprocessFuture, build_worker_command
 from .errors import DispatchLaunchError, DispatchPlanningError
@@ -60,48 +60,6 @@ class WorldWorkerKey:
 
         safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in self.role)
         return f"{safe}-{self.replica}-r{self.rank}"
-
-
-@dataclass(frozen=True, slots=True)
-class LocalResourceInventory:
-    """Small explicit local resource inventory used by the deterministic planner."""
-
-    cpus: tuple[int, ...]
-    accelerators: Mapping[str, tuple[str | int, ...]] = field(default_factory=dict)
-    memory: int | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        cpus = tuple(_nonneg_int(cpu, "cpu") for cpu in self.cpus)
-        if not cpus:
-            raise DispatchPlanningError("local resource inventory requires at least one CPU")
-        if len(set(cpus)) != len(cpus):
-            raise DispatchPlanningError("local resource inventory CPUs must be unique", context={"cpus": cpus})
-        if not isinstance(self.accelerators, Mapping):
-            raise DispatchPlanningError("local resource inventory accelerators must be a mapping")
-        normalized: dict[str, tuple[str | int, ...]] = {}
-        for name, values in self.accelerators.items():
-            if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
-                raise DispatchPlanningError("accelerator inventory values must be sequences", context={"accelerator": name})
-            normalized[str(name)] = tuple(values)
-        object.__setattr__(self, "cpus", cpus)
-        object.__setattr__(self, "accelerators", normalized)
-        object.__setattr__(self, "metadata", dict(self.metadata))
-
-    @classmethod
-    def local(cls) -> "LocalResourceInventory":
-        """Build inventory from CPU affinity and optional test accelerator env."""
-
-        try:
-            cpus = tuple(sorted(int(cpu) for cpu in os.sched_getaffinity(0)))
-        except Exception:
-            cpus = tuple(range(os.cpu_count() or 1))
-        return cls(cpus=cpus or (0,), accelerators=_accelerators_from_env(), metadata={"source": "local"})
-
-    def summary(self) -> dict[str, Any]:
-        """Return a reporting/debug summary without importing frameworks."""
-
-        return {"cpus": list(self.cpus), "accelerators": {key: list(value) for key, value in sorted(self.accelerators.items())}, "memory": self.memory, "metadata": dict(self.metadata)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -490,8 +448,9 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
     _report("dryml.dispatch.world.allocate", "Allocating local world resources")
     world_spec = normalize_world_spec(world)
     world_obj = WorldSpec.from_data(world_spec["payload"])
-    inv = inventory or LocalResourceInventory.local()
+    inv = inventory or local_inventory()
     cpu_cursor = 0
+    memory_cursor = 0
     accelerator_cursors = {key: 0 for key in inv.accelerators}
     world_size = sum(role.replicas for role in world_obj.roles.values())
     roles: dict[str, list[dict[str, Any]]] = {}
@@ -505,6 +464,16 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
             key = WorldWorkerKey(role_name, replica, rank, rank)
             keys.append(key)
             requested_cpus = role.process.resources.cpus or 1
+            if role.process.resources.devices or role.process.resources.named:
+                raise DispatchPlanningError(
+                    "local world allocation does not support named devices or resources",
+                    context={"role": role_name, "devices": dict(role.process.resources.devices), "named": dict(role.process.resources.named)},
+                )
+            requested_memory = role.process.resources.memory
+            if requested_memory is not None:
+                if inv.memory is not None and not oversubscribe and memory_cursor + requested_memory > inv.memory:
+                    raise DispatchPlanningError("local world memory requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_memory": requested_memory, "remaining_memory": inv.memory - memory_cursor})
+                memory_cursor += requested_memory
             if not oversubscribe and requested_cpus > len(inv.cpus):
                 raise DispatchPlanningError("local world CPU request exceeds inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "inventory_cpus": len(inv.cpus)})
             if not oversubscribe and cpu_cursor + requested_cpus > len(inv.cpus):
@@ -586,27 +555,6 @@ def _select_primary(results: Mapping[WorldWorkerKey, DispatchResult]) -> Dispatc
             if key.role == role and key.replica == 0:
                 return result
     return results[sorted(results)[0]]
-
-
-def _accelerators_from_env() -> dict[str, tuple[str | int, ...]]:
-    raw = os.environ.get("DRYML_LOCAL_ACCELERATORS", "").strip()
-    if not raw:
-        return {}
-    result: dict[str, tuple[str | int, ...]] = {}
-    for group in raw.split(";"):
-        if not group:
-            continue
-        if "=" not in group:
-            raise DispatchPlanningError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
-        name, values = group.split("=", 1)
-        parsed: list[str | int] = []
-        for value in values.split(","):
-            value = value.strip()
-            if not value:
-                continue
-            parsed.append(int(value) if value.isdigit() else value)
-        result[name.strip()] = tuple(parsed)
-    return result
 
 
 def _nonneg_int(value: Any, name: str) -> int:

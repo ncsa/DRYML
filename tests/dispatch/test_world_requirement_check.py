@@ -7,6 +7,7 @@ from dryml.dispatch import Dispatcher
 from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.operations import make_function_call_spec
+from dryml.worlds import LocalResourceInventory
 
 
 @dryml.world.req(accelerators={"gpu": {"min": 1}})
@@ -41,7 +42,7 @@ def test_single_subprocess_plan_rejects_multi_worker_world_under_every_policy(tm
 
 
 def test_single_subprocess_plan_rejects_resources_it_cannot_allocate(tmp_path):
-    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"accelerators": {"gpu": 1}}}}}}
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"devices": {"gpu": 1}}}}}}
     dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
 
     explanation = dispatcher.explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
@@ -49,3 +50,17 @@ def test_single_subprocess_plan_rejects_resources_it_cannot_allocate(tmp_path):
     assert any(item.code == "dryml.dispatch.single_subprocess_resources_unsupported" for item in explanation.resolution.diagnostics)
     with __import__("pytest").raises(DispatchPlanningError, match="not launchable"):
         dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+
+
+def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2, "accelerators": {"gpu": 1}}}}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((4, 5), {"gpu": ("gpu-a",)}),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["cpus"] == [4, 5]
+    assert plan.envelope.allocation_view["accelerators"] == {"gpu": ["gpu-a"]}
+    assert plan.envelope.allocation_view["metadata"]["backend"] == "local_subprocess"

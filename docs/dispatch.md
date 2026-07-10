@@ -175,3 +175,13 @@ In local-world mode, `plan_world(...)` writes the requested `WorldSpec`, operati
 ## Cancellation
 
 `LocalSubprocessFuture.cancel()` starts POSIX process-group cancellation with SIGINT, escalates to SIGTERM, then SIGKILL when needed. `result(timeout=...)` cancels and records timeout provenance. `KeyboardInterrupt` while waiting cancels the worker and re-raises.
+# Automatic Local Planning
+
+When no explicit, annotation-default, or context-current environment/world is
+selected, dispatch can resolve an injected environment registry and synthesize a
+local world for hard requirements. Higher-precedence candidates are never
+silently replaced. `dispatch.explain(...)` uses the same bounded discovery path
+but does not launch work, activate an allocation, or write execution records.
+
+A synthesized single-worker local world can run through local subprocess
+dispatch. Multi-worker worlds require `plan_world(...)` or `run_world(...)`.

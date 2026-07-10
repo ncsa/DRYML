@@ -81,3 +81,9 @@ In a notebook, a user may set a default requested world for later dispatch while
 - Sprint 5: lightweight code probe service.
 - Sprint 7: dispatch requirement checks.
 - Sprint 8: resolver and registry behavior.
+# Sprint 8 Local Discovery Boundary
+
+`dryml.worlds` owns import-safe local inventory and deterministic requested-world
+synthesis. `dryml.environments` owns explicit registry candidate resolution and
+probing. `dryml.dispatch` applies precedence, validates the selected candidates,
+and asks a backend to create allocations; it does not make registry state global.

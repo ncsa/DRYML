@@ -145,3 +145,12 @@ Use `override_req(...)` when a subclass intentionally replaces a field.
 This module does not attach environment metadata to `ConcreteDefinition`, `Definition`, or `Object`. It does not add Store `records/` persistence, SQLite record tables, object-load enforcement, dispatch, provider probes, worker handshakes, or class-update tooling.
 
 Existing object-only Stores remain valid and loadable without environment records.
+# Environment Resolution
+
+`EnvironmentRegistry` is an explicit in-memory notebook or application object;
+DRYML does not provide a global or persistent registry. Use
+`environments.resolve(requirement, candidates=..., registry=...)` to search
+caller candidates, name-sorted registry entries, then the current environment.
+Resolution is bounded, deduplicates canonical specs, records attempts, and
+selects the first strictly compatible candidate. Registry labels are only probe
+prefilters, never proof of compatibility.

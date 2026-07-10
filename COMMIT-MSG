@@ -1,0 +1,25 @@
+sprint 08: add local synthesis and environment resolution
+
+Promote LocalResourceInventory to dryml.worlds with deterministic serialization
+and import-safe lightweight discovery. Add local WorldRequirement synthesis with
+aggregate capacity checks and authoritative compatibility validation.
+
+Extend the explicit EnvironmentRegistry with unregister and add bounded,
+deterministic environment resolution. Integrate resolver and synthesis results
+into dispatch precedence, planning metadata, explain output, and reusable probe
+evidence.
+
+Allocate supported one-worker local CPU/GPU worlds through the local allocator
+for subprocess envelopes while retaining structural rejection for unsupported
+named resources and multi-worker single-subprocess plans.
+
+Tests:
+- inventory, synthesis, registry lifecycle, and resolver regressions
+- synthesized no-override dispatch selection
+- one-worker GPU envelope allocation
+
+Verification:
+- targeted Sprint 8 matrix -> 51 passed in 87.06s
+- subsystem closeout -> 1557 passed, 1 xfailed in 392.57s
+- ./tests.sh -> 1944 passed, 22 deselected, 1 xfailed in 502.29s
+- supplemental selected matrix -> 56 passed in 83.35s

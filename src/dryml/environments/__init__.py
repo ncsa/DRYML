@@ -38,6 +38,7 @@ from .records import (
     PythonRecord,
 )
 from .registry import EnvironmentRegistry, EnvironmentRegistryEntry
+from .resolution import EnvironmentResolution, EnvironmentResolutionAttempt, resolve
 from .requirements import EnvironmentRequirement, marker_environment_from_record
 from .schema import (
     COMPATIBILITY_REPORT_SCHEMA_VERSION,
@@ -82,6 +83,8 @@ __all__ = [
     "EnvironmentRecord",
     "EnvironmentRegistry",
     "EnvironmentRegistryEntry",
+    "EnvironmentResolution",
+    "EnvironmentResolutionAttempt",
     "EnvironmentRegistryError",
     "EnvironmentRequirement",
     "EnvironmentRequirementError",
@@ -110,6 +113,7 @@ __all__ = [
     "req",
     "requirements_for_class",
     "reset_current",
+    "resolve",
     "spec_from_data",
     "set_current",
     "use",
