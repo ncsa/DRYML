@@ -4,6 +4,7 @@ import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
+from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHandshakeResponse, write_json_file
 from dryml.dispatch.worker import _wait_for_start_barrier
 from dryml.environments import PythonExecutableSpec
@@ -125,6 +126,15 @@ def test_allocate_local_world_accepts_canonical_world_spec_data():
     plan = allocate_local_world(world, inventory=_inventory())
 
     assert plan.worker_keys == (WorldWorkerKey("worker", 0, 0, 0),)
+
+
+def test_allocate_local_world_rejects_unsupported_canonical_backend():
+    world = WorldSpec.from_data(
+        {"roles": {"worker": {"replicas": 1, "process": {}}}, "backend": {"kind": "slurm", "parameters": {}}}
+    ).to_data()
+
+    with pytest.raises(DispatchPlanningError, match="local-world dispatch supports only"):
+        allocate_local_world(world, inventory=_inventory())
 
 
 def test_allocate_local_world_rejects_insufficient_cpu():

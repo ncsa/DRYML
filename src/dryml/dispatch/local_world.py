@@ -450,15 +450,30 @@ def normalize_world_spec(world: Mapping[str, Any] | WorldSpec | None) -> Mapping
     if world is None:
         return attach_world_id(make_world_spec({"worker": {"replicas": 1, "process": {"resources": {"cpus": 0}}}}, backend={"kind": "local_world", "parameters": {}}))
     if isinstance(world, WorldSpec):
+        _validate_local_world_backend(world)
         return attach_world_id(make_world_spec(world))
     if not isinstance(world, Mapping):
         raise DispatchPlanningError("world must be a WorldSpec or mapping", context={"type": type(world).__name__})
     if world.get("schema") == "dryml.world.v1":
         validate_world_spec(world)
+        _validate_local_world_backend(WorldSpec.from_data(world["payload"]))
         return attach_world_id(world)
     if set(world).issubset({"roles", "backend"}) and "roles" in world:
-        return attach_world_id(make_world_spec(WorldSpec.from_data(world)))
+        world_spec = WorldSpec.from_data(world)
+        _validate_local_world_backend(world_spec)
+        return attach_world_id(make_world_spec(world_spec))
     return attach_world_id(make_world_spec(world, backend={"kind": "local_world", "parameters": {}}))
+
+
+def _validate_local_world_backend(world: WorldSpec) -> None:
+    """Reject world backends that the same-host local allocator cannot enact."""
+
+    kind = world.backend.get("kind")
+    if kind not in {"local", "local_world"}:
+        raise DispatchPlanningError(
+            "local-world dispatch supports only local or local_world backends",
+            context={"backend": dict(world.backend), "kind": kind},
+        )
 
 
 def is_multi_worker_world(world_spec: Mapping[str, Any]) -> bool:
