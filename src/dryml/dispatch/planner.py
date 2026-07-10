@@ -255,8 +255,9 @@ class Dispatcher:
         except Exception:
             _cleanup_launch(launch)
             raise
-        dispatch = attach_dispatch_id(
-            make_dispatch_spec(
+        try:
+            dispatch = attach_dispatch_id(
+                make_dispatch_spec(
                 operation_id=op_spec["id"],
                 operation=op_spec,
                 environment={"policy": "current", "spec": env_data},
@@ -265,10 +266,10 @@ class Dispatcher:
                 records={"record_policy": record_policy, "provenance": record_policy != "none"},
                 execution={"backend": "local_world"},
                 metadata=resolution.metadata(),
+                )
             )
-        )
-        recipe = attach_recipe_id(
-            make_execution_recipe(
+            recipe = attach_recipe_id(
+                make_execution_recipe(
                 dispatch_id=dispatch["id"],
                 operation_id=op_spec["id"],
                 backend=LOCAL_WORLD_BACKEND_IDENTITY,
@@ -278,31 +279,42 @@ class Dispatcher:
                 log_plan={"stdout": "capture_per_worker", "stderr": "capture_per_worker"},
                 constraints={"portable": launch.get("call_transport") != "pickle_small", "local_only": True},
                 annotation_report=resolution.metadata(),
+                )
             )
-        )
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         if record_policy != "none":
-            target_store.records.write_spec(op_spec, family="operation")
-            target_store.records.write_spec(dispatch, family="dispatch")
-            target_store.records.write_spec(recipe, family="execution_recipe")
-        worker_plans = []
-        for key in allocation_plan.worker_keys:
-            allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"])
-            launch_data = dict(launch)
-            launch_data.update({"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id"), "world_spec": world_spec, "world_allocation_spec": allocation_spec, "parent_persisted_specs": record_policy != "none"})
-            envelope = ExecutionEnvelope(
-                dispatch_spec=dispatch,
-                execution_recipe=recipe,
-                operation_spec=op_spec,
-                environment_spec=env_data,
-                runtime_spec=runtime_data,
-                allocation_view=_allocation_to_json(allocation, world_id=world_spec.get("id")),
-                store_refs=marshal.store_refs,
-                transfer={"strategy": marshal.strategy},
-                record_policy=record_policy,
-                reporting={"planning": resolution.metadata()},
-                launch=launch_data,
-            )
-            worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))
+            try:
+                target_store.records.write_spec(op_spec, family="operation")
+                target_store.records.write_spec(dispatch, family="dispatch")
+                target_store.records.write_spec(recipe, family="execution_recipe")
+            except Exception:
+                _cleanup_launch(launch)
+                raise
+        try:
+            worker_plans = []
+            for key in allocation_plan.worker_keys:
+                allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"])
+                launch_data = dict(launch)
+                launch_data.update({"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id"), "world_spec": world_spec, "world_allocation_spec": allocation_spec, "parent_persisted_specs": record_policy != "none"})
+                envelope = ExecutionEnvelope(
+                    dispatch_spec=dispatch,
+                    execution_recipe=recipe,
+                    operation_spec=op_spec,
+                    environment_spec=env_data,
+                    runtime_spec=runtime_data,
+                    allocation_view=_allocation_to_json(allocation, world_id=world_spec.get("id")),
+                    store_refs=marshal.store_refs,
+                    transfer={"strategy": marshal.strategy},
+                    record_policy=record_policy,
+                    reporting={"planning": resolution.metadata()},
+                    launch=launch_data,
+                )
+                worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         return LocalWorldPlan(dispatch, recipe, op_spec, world_spec, allocation_spec, tuple(worker_plans), target_store)
 
     def submit_world(self, plan: Any):

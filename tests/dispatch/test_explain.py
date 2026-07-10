@@ -91,3 +91,24 @@ def test_plan_world_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):
 
     assert captured["paths"]
     assert all(not __import__("os").path.exists(path) for path in captured["paths"])
+
+
+def test_plan_world_cleans_pickle_artifacts_when_recipe_build_fails(monkeypatch, tmp_path):
+    import dryml.dispatch.planner as planner
+
+    captured = {}
+    original = planner.normalize_user_operation
+
+    def capture(*args, **kwargs):
+        normalized = original(*args, **kwargs)
+        captured["paths"] = tuple(normalized.launch.get("cleanup_paths") or ())
+        return normalized
+
+    monkeypatch.setattr(planner, "normalize_user_operation", capture)
+    monkeypatch.setattr(planner, "make_execution_recipe", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("recipe failure")))
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
+    with __import__("pytest").raises(RuntimeError, match="recipe failure"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan_world(lambda: None, world=world, allow_pickle=True, requirement_policy="ignore")
+
+    assert captured["paths"]
+    assert all(not __import__("os").path.exists(path) for path in captured["paths"])

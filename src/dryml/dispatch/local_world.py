@@ -456,6 +456,8 @@ def normalize_world_spec(world: Mapping[str, Any] | WorldSpec | None) -> Mapping
     if world.get("schema") == "dryml.world.v1":
         validate_world_spec(world)
         return attach_world_id(world)
+    if set(world).issubset({"roles", "backend"}) and "roles" in world:
+        return attach_world_id(make_world_spec(WorldSpec.from_data(world)))
     return attach_world_id(make_world_spec(world, backend={"kind": "local_world", "parameters": {}}))
 
 

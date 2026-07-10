@@ -8,6 +8,7 @@ from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHands
 from dryml.dispatch.worker import _wait_for_start_barrier
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
+from dryml.worlds import WorldSpec
 
 
 def _env(target_module):
@@ -116,6 +117,14 @@ def test_allocate_local_world_two_roles_and_gpu():
     assert trainer["resources"]["cpus"] == [1, 2]
     assert trainer["resources"]["accelerators"] == {"gpu": [0]}
     assert trainer["resources"]["memory"] == "1GiB"
+
+
+def test_allocate_local_world_accepts_canonical_world_spec_data():
+    world = WorldSpec.from_data({"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}).to_data()
+
+    plan = allocate_local_world(world, inventory=_inventory())
+
+    assert plan.worker_keys == (WorldWorkerKey("worker", 0, 0, 0),)
 
 
 def test_allocate_local_world_rejects_insufficient_cpu():
