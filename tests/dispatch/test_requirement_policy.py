@@ -48,3 +48,15 @@ def test_runtime_requirement_uses_runtime_owned_compatibility_adapter():
     resolution = resolve_dispatch_plan(normalize_user_operation(target, allow_pickle=True), requirement_policy="strict")
     assert resolution.runtime_check.status == "incompatible"
     assert resolution.launchable is False
+
+
+@pytest.mark.parametrize("policy", ("strict", "warn", "ignore"))
+def test_annotation_merge_errors_are_blocking_under_every_policy(policy):
+    @dryml.world.req(cpus={"min": 4})
+    @dryml.world.req(cpus={"max": 2})
+    def target():
+        return None
+
+    resolution = resolve_dispatch_plan(normalize_user_operation(target, allow_pickle=True), requirement_policy=policy)
+    assert resolution.launchable is False
+    assert any(item.severity == "error" for item in resolution.diagnostics)

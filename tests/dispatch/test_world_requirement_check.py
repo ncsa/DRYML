@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import dryml
 
+from dryml.core2.store.dir import DirStore
+from dryml.dispatch import Dispatcher
 from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+from dryml.dispatch.errors import DispatchPlanningError
+from dryml.operations import make_function_call_spec
 
 
 @dryml.world.req(accelerators={"gpu": {"min": 1}})
@@ -24,3 +28,13 @@ def test_ignore_skips_world_requirement_but_preserves_selected_world():
     assert resolution.world_check.status == "skipped"
     assert resolution.world_check.details == ({"reason": "requirement_policy_ignore"},)
     assert resolution.launchable is True
+
+
+def test_single_subprocess_plan_rejects_multi_worker_world_under_every_policy(tmp_path):
+    world = {"roles": {"main": {"replicas": 2, "process": {}}}}
+    with __import__("pytest").raises(DispatchPlanningError, match=r"plan_world\(\) or run_world\(\)"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            requirement_policy="ignore",
+        )

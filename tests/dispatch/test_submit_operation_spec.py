@@ -54,15 +54,12 @@ def test_explicit_operation_spec_preserves_user_metadata_but_replaces_reserved_k
     assert metadata["dryml.code_target"]["import_path"] == "operator:add"
 
 
-def test_explicit_method_call_operation_spec_still_plans(tmp_path):
+def test_explicit_method_call_operation_spec_requires_resolvable_stored_subject(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     op = attach_operation_id(make_method_call_spec("cdef-v4-" + "0" * 64, "plus", args=[1]))
 
-    plan = Dispatcher(store=store).plan(op)
-
-    assert plan.envelope.operation_spec["kind"] == "method_call"
-    assert plan.envelope.operation_spec["payload"] == op["payload"]
-    assert plan.envelope.operation_spec["metadata"]["dryml.code_target"]["kind"] == "definition_method"
+    with pytest.raises(DispatchPlanningError, match="not launchable"):
+        Dispatcher(store=store).plan(op)
 
 
 def test_explicit_operation_spec_rejects_method_name_and_extra_args(tmp_path):

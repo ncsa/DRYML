@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -77,18 +78,26 @@ class Dispatcher:
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
         _report("dryml.dispatch.requirements.merge", "Merging requirements and defaults", operation_id=op_spec.get("id"))
-        resolution = resolve_dispatch_plan(
-            normalized,
-            environment=environment,
-            world=world,
-            runtime_spec=runtime,
-            requirement_policy=requirement_policy,
-            analysis_policy=analysis_policy,
-            emit_warnings=True,
-        )
+        try:
+            resolution = resolve_dispatch_plan(
+                normalized,
+                environment=environment,
+                world=world,
+                runtime_spec=runtime,
+                requirement_policy=requirement_policy,
+                analysis_policy=analysis_policy,
+                emit_warnings=True,
+                single_worker_only=True,
+            )
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         if not resolution.launchable:
+            _cleanup_launch(launch)
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
                 raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
+            if any(item.code == "dryml.dispatch.single_subprocess_world_unsupported" for item in resolution.diagnostics):
+                raise DispatchPlanningError("selected world requires multiple workers; use plan_world() or run_world()")
             raise DispatchPlanningError(
                 "dispatch plan is not launchable; call dispatch.explain(...) for requirement diagnostics",
                 context={"planning": resolution.to_data()},
@@ -193,16 +202,21 @@ class Dispatcher:
         normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
-        resolution = resolve_dispatch_plan(
-            normalized,
-            environment=environment,
-            world=world,
-            runtime_spec=runtime,
-            requirement_policy=requirement_policy,
-            analysis_policy=analysis_policy,
-            emit_warnings=True,
-        )
+        try:
+            resolution = resolve_dispatch_plan(
+                normalized,
+                environment=environment,
+                world=world,
+                runtime_spec=runtime,
+                requirement_policy=requirement_policy,
+                analysis_policy=analysis_policy,
+                emit_warnings=True,
+            )
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         if not resolution.launchable:
+            _cleanup_launch(launch)
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
                 raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
             raise DispatchPlanningError("dispatch world plan is not launchable; call dispatch.explain(...) for requirement diagnostics", context={"planning": resolution.to_data()})
@@ -316,17 +330,27 @@ class Dispatcher:
         """
 
         target_store = store or self.store
-        if target_store is None:
-            raise DispatchPlanningError("Dispatcher.explain requires a store for method target normalization")
-        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
-        return explanation_for(
-            normalized,
-            environment=environment,
-            world=world,
-            runtime_spec=runtime,
-            requirement_policy=requirement_policy,
-            analysis_policy=analysis_policy,
+        normalized = normalize_user_operation(
+            operation,
+            method_name,
+            store=target_store,
+            allow_pickle=allow_pickle,
+            args=args,
+            kwargs=kwargs,
+            persist_object=False,
         )
+        try:
+            return explanation_for(
+                normalized,
+                environment=environment,
+                world=world,
+                runtime_spec=runtime,
+                requirement_policy=requirement_policy,
+                analysis_policy=analysis_policy,
+                single_worker_only=True,
+            )
+        finally:
+            _cleanup_launch(normalized.launch)
 
 
 def plan(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchPlan:
@@ -389,6 +413,13 @@ def _same_python_environment(env_data: Mapping[str, Any]) -> bool:
     if kind == "python":
         return os.path.abspath(os.fspath(env_data.get("executable", ""))) == os.path.abspath(sys.executable)
     return False
+
+
+def _cleanup_launch(launch: Mapping[str, Any]) -> None:
+    """Remove launch-only temporary files when planning never returns a plan."""
+
+    for path in launch.get("cleanup_paths") or ():
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def allocation_from_json(data: Mapping[str, Any] | None) -> RuntimeAllocationView:

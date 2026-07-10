@@ -21,6 +21,8 @@ from dryml.code import CodeTargetSpec, target_from_callable, target_from_definit
 from dryml.core2.definition import ConcreteDefinition, Definition
 from dryml.core2.object import Object
 from dryml.core2.repo import Repo
+from dryml.core2.symbol import resolve_symbol
+from dryml.core2.utils.general import pickle_load
 from dryml.formats.refs import format_cdef_id
 from dryml.operations import (
     OPERATION_KINDS,
@@ -76,6 +78,7 @@ class NormalizedDispatchTarget:
     method_name: str | None = None
     transport: str = "operation_spec"
     diagnostics: tuple[Any, ...] = ()
+    definition_target: Definition | ConcreteDefinition | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operation_spec", dict(self.operation_spec))
@@ -100,6 +103,7 @@ def normalize_user_operation(
     args: tuple[Any, ...] | list[Any] | None = (),
     kwargs: Mapping[str, Any] | None = None,
     allow_pickle: bool = False,
+    persist_object: bool = True,
 ) -> NormalizedDispatchTarget:
     """Normalize a user dispatch target into the existing OperationSpec IR.
 
@@ -128,11 +132,11 @@ def normalize_user_operation(
     if is_definition_or_cdef(operation):
         return normalize_definition_method_operation(operation, norm_method, store=store, args=norm_args, kwargs=norm_kwargs)
     if is_dryml_object_instance(operation):
-        return normalize_object_method_operation(operation, norm_method, store=store, args=norm_args, kwargs=norm_kwargs)
+        return normalize_object_method_operation(operation, norm_method, store=store, args=norm_args, kwargs=norm_kwargs, persist=persist_object)
     if looks_like_operation_spec(operation):
         if norm_method is not None:
             raise DispatchPlanningError("method_name cannot be supplied with an explicit OperationSpec")
-        return normalize_existing_operation_spec(operation, args=norm_args, kwargs=norm_kwargs)
+        return normalize_existing_operation_spec(operation, store=store, args=norm_args, kwargs=norm_kwargs)
     if isinstance(operation, Mapping):
         _raise_invalid_operation_mapping(operation)
     if callable(operation) or isinstance(operation, PickledCallable):
@@ -176,7 +180,7 @@ def import_path_for_callable(func: Callable[..., Any]) -> str | None:
 
 
 def normalize_existing_operation_spec(
-    operation: Mapping[str, Any], *, args: tuple[Any, ...] = (), kwargs: Mapping[str, Any] | None = None
+    operation: Mapping[str, Any], *, store: Any | None = None, args: tuple[Any, ...] = (), kwargs: Mapping[str, Any] | None = None
 ) -> NormalizedDispatchTarget:
     """Preserve an explicit OperationSpec while adding safe metadata."""
 
@@ -186,9 +190,20 @@ def normalize_existing_operation_spec(
         op = attach_operation_id(validate_operation_spec(operation))
     except OperationSpecError as exc:
         raise DispatchPlanningError(str(exc), context=exc.context) from exc
-    code_target = _infer_code_target(op)
+    definition_target = _definition_target_for_operation(op, store)
+    code_target = _infer_code_target(op, subject_class=_definition_class(definition_target))
     op = _attach_normalization_metadata(op, user_target_kind="operation_spec", transport="operation_spec", code_target=code_target, preserve_existing=True)
-    return NormalizedDispatchTarget(op, {}, code_target, transport="operation_spec")
+    payload = op.get("payload") if isinstance(op.get("payload"), Mapping) else {}
+    method_name = payload.get("method") if op.get("kind") == "method_call" and isinstance(payload.get("method"), str) else None
+    return NormalizedDispatchTarget(
+        op,
+        {},
+        code_target,
+        subject_class=_definition_class(definition_target),
+        method_name=method_name,
+        transport="operation_spec",
+        definition_target=definition_target,
+    )
 
 
 def normalize_callable_operation(
@@ -266,14 +281,21 @@ def normalize_object_method_operation(
     store: Any | None = None,
     args: tuple[Any, ...] = (),
     kwargs: Mapping[str, Any] | None = None,
+    persist: bool = True,
 ) -> NormalizedDispatchTarget:
-    """Persist a live DRYML object and normalize it into a method_call spec."""
+    """Normalize a live DRYML object into a method_call spec.
+
+    ``persist=False`` is used by non-mutating explanation requests and requires
+    the object's existing definition to already be available in the store.
+    """
 
     method = _require_method_name(method_name)
     if store is None:
         raise DispatchPlanningError("store is required to dispatch this DRYML method target")
-    repo = Repo(stores=[store])
-    repo.save(subject, store=store, record_policy="none")
+    if persist:
+        Repo(stores=[store]).save(subject, store=store, record_policy="none")
+    elif not _store_has_cdef(store, subject.definition):
+        raise DispatchPlanningError("explain requires an already-stored DRYML object; use its CDef or save it before explaining")
     return _method_target_from_cdef(subject.definition, method, store=store, args=args, kwargs=kwargs or {}, user_target_kind="object_method", subject_class=type(subject))
 
 
@@ -288,7 +310,7 @@ def _method_target_from_cdef(
     subject_class: type | None = None,
 ) -> NormalizedDispatchTarget:
     cdef_id = format_cdef_id(cdef.stable_hash())
-    cls = subject_class if subject_class is not None else cdef.cls if isinstance(cdef.cls, type) else None
+    cls = subject_class if subject_class is not None else _definition_class(cdef)
     code_target = target_from_definition_method(cdef_id, cls, method_name).spec
     code_target = _code_target_with_metadata(code_target, {"dispatch_target": "definition_method", "transport": "method_call"}, subject_ref=cdef_id, method_name=method_name)
     try:
@@ -304,6 +326,7 @@ def _method_target_from_cdef(
         subject_class=cls,
         method_name=method_name,
         transport="method_call",
+        definition_target=cdef,
     )
 
 
@@ -426,13 +449,51 @@ def _store_has_cdef(store: Any, cdef: ConcreteDefinition) -> bool:
         return False
 
 
-def _infer_code_target(op: Mapping[str, Any]) -> CodeTargetSpec | None:
+def _infer_code_target(op: Mapping[str, Any], *, subject_class: type | None = None) -> CodeTargetSpec | None:
     payload = op.get("payload") if isinstance(op.get("payload"), Mapping) else {}
     if op.get("kind") == "function_call" and isinstance(payload.get("function"), str):
         return CodeTargetSpec("import_path", import_path=payload["function"], metadata={"dispatch_target": "function"})
     if op.get("kind") == "method_call" and isinstance(payload.get("subject"), str) and isinstance(payload.get("method"), str):
-        return CodeTargetSpec("definition_method", subject_ref=payload["subject"], method_name=payload["method"], metadata={"dispatch_target": "definition_method"})
+        return target_from_definition_method(payload["subject"], subject_class, payload["method"]).spec
     return None
+
+
+def _definition_target_for_operation(operation: Mapping[str, Any], store: Any | None) -> ConcreteDefinition | None:
+    """Load a stored method subject definition without materializing its object."""
+
+    if store is None or operation.get("kind") != "method_call":
+        return None
+    payload = operation.get("payload") if isinstance(operation.get("payload"), Mapping) else {}
+    subject = payload.get("subject")
+    if not isinstance(subject, str):
+        return None
+    try:
+        path = os.path.join(store.object_dir_for_cdef_id(subject), "def.pkl")
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        definition = pickle_load(path)
+    except Exception:
+        definition = None
+    if isinstance(definition, ConcreteDefinition):
+        return definition
+    try:
+        for candidate in store.hydrate_index():
+            if isinstance(candidate, ConcreteDefinition) and format_cdef_id(candidate.stable_hash()) == subject:
+                return candidate
+    except Exception:
+        pass
+    return None
+
+
+def _definition_class(definition: ConcreteDefinition | Definition | None) -> type | None:
+    cls = getattr(definition, "cls", None)
+    if isinstance(cls, type):
+        return cls
+    try:
+        resolved = resolve_symbol(cls)
+    except Exception:
+        return None
+    return resolved if isinstance(resolved, type) else None
 
 
 def _code_target_with_metadata(

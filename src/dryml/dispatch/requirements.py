@@ -18,7 +18,7 @@ from typing import Any
 
 from dryml import annotations, environments, runtime, worlds
 from dryml.code import analyze, probe_target
-from dryml.code.analysis import CodeAnalysisResult
+from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult
 from dryml.code.facts import AnnotationFact, DiagnosticFact
 from dryml.code.probe import CodeProbeResult
 from dryml.code.targets import CodeTargetSpec
@@ -33,6 +33,7 @@ from .normalize import NormalizedDispatchTarget
 
 
 PLANNING_METADATA_VERSION = 1
+DEFAULT_PROBE_TIMEOUT_S = 30.0
 _RESERVED_PLANNING_KEYS = frozenset(
     {
         "dryml.dispatch.planning_version",
@@ -132,6 +133,9 @@ class DispatchPlanningResolution:
     normalized_target: Mapping[str, Any]
     code_analysis: CodeAnalysisResult | None
     code_probe: CodeProbeResult | None
+    bootstrap_environment: Mapping[str, Any] | None
+    bootstrap_code_probe: CodeProbeResult | None
+    final_code_probe: CodeProbeResult | None
     requirements: annotations.RequirementResolution
     environment_selection: CandidateSelection
     environment_record: EnvironmentRecord | None
@@ -152,6 +156,9 @@ class DispatchPlanningResolution:
             "normalized_target": dict(self.normalized_target),
             "code_analysis": _analysis_summary(self.code_analysis),
             "code_probe": _probe_summary(self.code_probe),
+            "bootstrap_environment": None if self.bootstrap_environment is None else dict(self.bootstrap_environment),
+            "bootstrap_code_probe": _probe_summary(self.bootstrap_code_probe),
+            "final_code_probe": _probe_summary(self.final_code_probe),
             "requirements": self.requirements.to_data(),
             "environment_selection": self.environment_selection.to_data(),
             "environment_record": _environment_record_summary(self.environment_record),
@@ -173,7 +180,11 @@ class DispatchPlanningResolution:
         return {
             "dryml.dispatch.planning_version": PLANNING_METADATA_VERSION,
             "dryml.code_analysis": data["code_analysis"],
-            "dryml.code_probe": data["code_probe"],
+            "dryml.code_probe": {
+                "bootstrap_environment": data["bootstrap_environment"],
+                "bootstrap_probe": data["bootstrap_code_probe"],
+                "final_probe": data["final_code_probe"],
+            },
             "dryml.requirements": data["requirements"],
             "dryml.requirement_sources": data["requirements"]["source_traces"],
             "dryml.environment_selection": data["environment_selection"],
@@ -256,6 +267,7 @@ def resolve_dispatch_plan(
     requirement_policy: RequirementPolicy | str | None = None,
     analysis_policy: Any | None = None,
     emit_warnings: bool = False,
+    single_worker_only: bool = False,
 ) -> DispatchPlanningResolution:
     """Resolve requirements and candidate checks for one normalized target.
 
@@ -264,10 +276,15 @@ def resolve_dispatch_plan(
     the public normalization boundary.
     """
 
-    del analysis_policy
     enforcement = runtime.enforcement()
     policy = effective_requirement_policy(requirement_policy, enforcement)
-    fragments, analysis, probe, bootstrap_environment, discovery_diagnostics, complete = _discover(normalized, environment)
+    analysis_context, probe_timeout_s = _analysis_options(analysis_policy)
+    fragments, analysis, bootstrap_probe, bootstrap_environment, discovery_diagnostics, complete = _discover(
+        normalized,
+        environment,
+        analysis_context=analysis_context,
+        probe_timeout_s=probe_timeout_s,
+    )
     resolution = annotations.resolve_fragments(fragments, source="dryml.dispatch")
     diagnostics = list(discovery_diagnostics)
     diagnostics.extend(_annotation_diagnostics(resolution))
@@ -283,17 +300,49 @@ def resolve_dispatch_plan(
             "Pickled callable transport requires the current Python executable.",
             data={"candidate": env_spec, "restriction": "same_environment_only"},
         ))
+    if single_worker_only and _is_multi_worker_world(world_spec):
+        structural_safe = False
+        diagnostics.append(_diagnostic(
+            "dryml.dispatch.single_subprocess_world_unsupported",
+            "The local subprocess planner supports one worker only; use plan_world() or run_world() for this world.",
+            data={"world": world_spec},
+        ))
+
+    final_probe = None
+    if _needs_final_probe(normalized, env_spec, bootstrap_environment):
+        final_probe = probe_target(
+            normalized.code_target,
+            environment=spec_from_data(env_spec),
+            include_environment_record=True,
+            timeout=probe_timeout_s,
+        )
+        diagnostics.extend(final_probe.diagnostics)
+        if not final_probe.ok:
+            diagnostics.append(_diagnostic(
+                "dryml.dispatch.final_environment_probe_failed",
+                "Final selected environment could not validate the dispatch target.",
+                severity="error",
+                data={"environment": env_spec, "timeout_s": probe_timeout_s},
+            ))
 
     env_record, env_probe_diagnostics = _environment_record(
         env_spec,
         resolution.environment_requirement,
-        probe,
+        final_probe or bootstrap_probe,
         bootstrap_environment,
         environment,
         policy,
+        validate_candidate=_requires_environment_validation(env_spec, normalized),
     )
     diagnostics.extend(env_probe_diagnostics)
-    environment_check = _check_environment(resolution.environment_requirement, env_spec, env_record, policy, env_probe_diagnostics)
+    environment_check = _check_environment(
+        resolution.environment_requirement,
+        env_spec,
+        env_record,
+        policy,
+        env_probe_diagnostics,
+        validate_candidate=_requires_environment_validation(env_spec, normalized),
+    )
     world_check = _check_world(resolution.world_requirement, world_spec, policy)
     runtime_check = _check_runtime(resolution.runtime_requirement, selected_runtime, policy)
     diagnostics.extend(_check_diagnostics((environment_check, world_check, runtime_check), policy))
@@ -301,10 +350,11 @@ def resolve_dispatch_plan(
     if not complete:
         diagnostics.append(_diagnostic("dryml.dispatch.discovery_incomplete", "Requirement discovery is incomplete.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"policy": policy.value, "action": "use an importable target or call dispatch.explain(...)"}))
     checks = (environment_check, world_check, runtime_check)
+    merge_safe = not _has_annotation_errors(resolution)
     if policy is RequirementPolicy.STRICT:
-        launchable = structural_safe and complete and not _has_annotation_errors(resolution) and all(report.compatible is not False and report.status != "error" for report in checks)
+        launchable = structural_safe and merge_safe and complete and (final_probe is None or final_probe.ok) and all(report.compatible is not False and report.status != "error" for report in checks)
     else:
-        launchable = structural_safe
+        launchable = structural_safe and merge_safe and (final_probe is None or final_probe.ok)
     if emit_warnings and policy is RequirementPolicy.WARN:
         warning_items = [item for item in diagnostics if item.severity in {"warning", "error"}]
         if warning_items:
@@ -313,7 +363,10 @@ def resolve_dispatch_plan(
     return DispatchPlanningResolution(
         normalized_target=_normalized_target_data(normalized),
         code_analysis=analysis,
-        code_probe=probe,
+        code_probe=final_probe or bootstrap_probe,
+        bootstrap_environment=bootstrap_environment,
+        bootstrap_code_probe=bootstrap_probe,
+        final_code_probe=final_probe,
         requirements=resolution,
         environment_selection=env_selection,
         environment_record=env_record,
@@ -337,43 +390,86 @@ def explanation_for(normalized: NormalizedDispatchTarget, **kwargs: Any) -> Disp
     return DispatchExplanation(result, dict(normalized.operation_spec), blocking)
 
 
-def _discover(normalized: NormalizedDispatchTarget, explicit_environment: Any | None):
+def _discover(
+    normalized: NormalizedDispatchTarget,
+    explicit_environment: Any | None,
+    *,
+    analysis_context: CodeAnalysisContext,
+    probe_timeout_s: float,
+):
     diagnostics: list[DiagnosticFact] = []
     analysis: CodeAnalysisResult | None = None
     probe: CodeProbeResult | None = None
     bootstrap_environment: Mapping[str, Any] | None = None
     fragments = []
     complete = False
-    if normalized.method_name and normalized.subject_class is not None:
+    if normalized.definition_target is not None and normalized.method_name:
+        try:
+            fragments.extend(annotations.fragments_for_definition_method(normalized.definition_target, normalized.method_name))
+            complete = True
+        except Exception as exc:
+            diagnostics.append(_diagnostic("dryml.dispatch.definition_method_annotation_collection_failed", "Definition-method annotation collection failed.", data={"error": type(exc).__name__, "method": normalized.method_name}))
+    if not complete and normalized.method_name and normalized.subject_class is not None:
         try:
             fragments.extend(annotations.fragments_for_method(normalized.subject_class, normalized.method_name))
             complete = True
         except Exception as exc:
             diagnostics.append(_diagnostic("dryml.dispatch.method_annotation_collection_failed", "Method annotation collection failed.", data={"error": type(exc).__name__, "method": normalized.method_name}))
-    elif normalized.live_annotation_targets:
+    elif not complete and normalized.live_annotation_targets:
         for target in normalized.live_annotation_targets:
             try:
                 fragments.extend(annotations.fragments_for(target))
                 complete = True
             except Exception as exc:
                 diagnostics.append(_diagnostic("dryml.dispatch.annotation_collection_failed", "Live annotation collection failed.", data={"error": type(exc).__name__}))
-    if not complete and normalized.code_target is not None:
+    if normalized.code_target is not None:
         try:
-            analysis = analyze(normalized.code_target)
+            analysis = analyze(normalized.code_target, context=analysis_context)
             fragments.extend(_fragments_from_analysis(analysis))
-            complete = not any(item.severity == "error" for item in analysis.diagnostics)
+            if not complete:
+                complete = _analysis_is_complete(analysis)
             diagnostics.extend(analysis.diagnostics)
         except Exception as exc:
             diagnostics.append(_diagnostic("dryml.dispatch.code_analysis_failed", "Local code analysis failed.", data={"error": type(exc).__name__}))
     if not complete and normalized.code_target is not None:
         bootstrap = _bootstrap_environment(explicit_environment)
         bootstrap_environment = bootstrap.to_data()
-        probe = probe_target(normalized.code_target, environment=bootstrap, include_environment_record=True)
+        probe = probe_target(normalized.code_target, environment=bootstrap, include_environment_record=True, timeout=probe_timeout_s)
         diagnostics.extend(probe.diagnostics)
         if probe.analysis is not None:
             fragments.extend(_fragments_from_analysis(probe.analysis))
         complete = probe.ok and probe.analysis is not None
     return _dedupe_fragments(fragments), analysis, probe, bootstrap_environment, tuple(diagnostics), complete
+
+
+def _analysis_options(policy: Any | None) -> tuple[CodeAnalysisContext, float]:
+    """Validate bounded dispatch analysis/probe options before discovery starts."""
+
+    if policy is None:
+        return CodeAnalysisContext(), DEFAULT_PROBE_TIMEOUT_S
+    if isinstance(policy, CodeAnalysisContext):
+        return policy, DEFAULT_PROBE_TIMEOUT_S
+    if not isinstance(policy, Mapping):
+        raise DispatchPlanningError("analysis_policy must be a CodeAnalysisContext or mapping")
+    unknown = set(policy) - {"context", "probe_timeout_s"}
+    if unknown:
+        raise DispatchPlanningError("analysis_policy contains unsupported fields", context={"fields": sorted(unknown)})
+    context = policy.get("context")
+    if context is None:
+        context = CodeAnalysisContext()
+    if not isinstance(context, CodeAnalysisContext):
+        raise DispatchPlanningError("analysis_policy.context must be a CodeAnalysisContext")
+    timeout = policy.get("probe_timeout_s", DEFAULT_PROBE_TIMEOUT_S)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise DispatchPlanningError("analysis_policy.probe_timeout_s must be a positive number")
+    return context, float(timeout)
+
+
+def _analysis_is_complete(analysis: CodeAnalysisResult) -> bool:
+    if any(item.severity == "error" for item in analysis.diagnostics):
+        return False
+    incomplete_codes = {"dryml.code.algorithm_not_applicable", "dryml.code.annotations_unsupported_target"}
+    return not any(item.code in incomplete_codes for item in analysis.diagnostics)
 
 
 def _fragments_from_analysis(analysis: CodeAnalysisResult) -> list[annotations.AnnotationFragment]:
@@ -486,8 +582,29 @@ def _same_python_environment(env_data: Mapping[str, Any]) -> bool:
     return False
 
 
-def _environment_record(env_data, requirement, code_probe, bootstrap_environment, explicit_environment, policy):
-    if requirement is None:
+def _needs_final_probe(normalized: NormalizedDispatchTarget, final_environment: Mapping[str, Any], bootstrap_environment: Mapping[str, Any] | None) -> bool:
+    if normalized.code_target is None or normalized.code_target.kind != "import_path" or normalized.transport == "pickle_small":
+        return False
+    # Local discovery proves only the orchestrator environment. A non-current
+    # selected candidate must prove it can import/analyze the serialized target.
+    return bootstrap_environment != final_environment and final_environment.get("kind") != "current"
+
+
+def _requires_environment_validation(env_data: Mapping[str, Any], normalized: NormalizedDispatchTarget) -> bool:
+    del normalized
+    return env_data.get("kind") != "current"
+
+
+def _is_multi_worker_world(candidate: Mapping[str, Any]) -> bool:
+    try:
+        world = WorldSpec.from_data(candidate)
+    except Exception:
+        return False
+    return len(world.roles) > 1 or sum(role.replicas for role in world.roles.values()) > 1
+
+
+def _environment_record(env_data, requirement, code_probe, bootstrap_environment, explicit_environment, policy, *, validate_candidate: bool):
+    if requirement is None and not validate_candidate:
         return None, ()
     spec = spec_from_data(env_data)
     attached = _attached_environment_record(explicit_environment, env_data)
@@ -498,7 +615,7 @@ def _environment_record(env_data, requirement, code_probe, bootstrap_environment
     probe = environments.probe(spec)
     if probe.ok and probe.record is not None:
         return probe.record, ()
-    return None, (_diagnostic("dryml.dispatch.environment_probe_failed", "Environment probe failed for the selected candidate.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"candidate": env_data, "probe": _bounded_probe_data(probe.to_data())}),)
+    return None, (_diagnostic("dryml.dispatch.environment_probe_failed", "Environment probe failed for the selected candidate.", severity="error", data={"candidate": env_data, "probe": _bounded_probe_data(probe.to_data())}),)
 
 
 def _attached_environment_record(candidate, selected_data):
@@ -514,10 +631,14 @@ def _attached_environment_record(candidate, selected_data):
         return None
 
 
-def _check_environment(requirement, candidate, record, policy, probe_diagnostics):
+def _check_environment(requirement, candidate, record, policy, probe_diagnostics, *, validate_candidate: bool):
     requirement_data = None if requirement is None else requirement.to_data()
-    if requirement is None:
+    if requirement is None and record is None and not validate_candidate:
         return CandidateCheckReport("environment", "not_required", None, None, candidate)
+    if requirement is None and record is None:
+        return CandidateCheckReport("environment", "error", False, None, candidate, ({"reason": "environment_record_unavailable"},), probe_diagnostics)
+    if requirement is None:
+        return CandidateCheckReport("environment", "satisfied", True, None, candidate)
     if policy is RequirementPolicy.IGNORE:
         return CandidateCheckReport("environment", "skipped", None, requirement_data, candidate, ({"reason": "requirement_policy_ignore"},))
     if record is None:
