@@ -1,7 +1,0 @@
-test(notebook): preserve allocation-free explain contract
-
-Update the notebook defaults regression after Sprint 8 hardening so it asserts
-that dispatch.explain(...) does not create a world allocation summary.
-
-Verification:
-- pytest tests/notebook/test_local_defaults.py -> 1 passed
