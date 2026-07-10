@@ -38,3 +38,14 @@ def test_single_subprocess_plan_rejects_multi_worker_world_under_every_policy(tm
             world=world,
             requirement_policy="ignore",
         )
+
+
+def test_single_subprocess_plan_rejects_resources_it_cannot_allocate(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"accelerators": {"gpu": 1}}}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    explanation = dispatcher.explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+    assert explanation.launchable is False
+    assert any(item.code == "dryml.dispatch.single_subprocess_resources_unsupported" for item in explanation.resolution.diagnostics)
+    with __import__("pytest").raises(DispatchPlanningError, match="not launchable"):
+        dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")

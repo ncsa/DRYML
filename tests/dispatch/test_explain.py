@@ -31,7 +31,8 @@ def test_explain_does_not_write_operation_records_for_importable_target(tmp_path
     store = DirStore(tmp_path / "store", query_index="none")
 
     explanation = Dispatcher(store=store).explain(gpu_target, allow_pickle=True, requirement_policy="ignore")
-    assert explanation.launchable is True
+    assert explanation.launchable is False
+    assert any(item.code == "dryml.dispatch.single_subprocess_requirement_unsupported" for item in explanation.resolution.diagnostics)
     assert not store.records.specs_dir.exists()
 
 
@@ -50,5 +51,24 @@ def test_explain_does_not_require_store_for_ordinary_callable_or_leak_pickle(mon
     explanation = Dispatcher().explain(lambda: None, allow_pickle=True, requirement_policy="ignore")
 
     assert explanation.launchable is True
+    assert captured["paths"]
+    assert all(not __import__("os").path.exists(path) for path in captured["paths"])
+
+
+def test_plan_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):
+    import dryml.dispatch.planner as planner
+
+    captured = {}
+    original = planner.normalize_user_operation
+
+    def capture(*args, **kwargs):
+        normalized = original(*args, **kwargs)
+        captured["paths"] = tuple(normalized.launch.get("cleanup_paths") or ())
+        return normalized
+
+    monkeypatch.setattr(planner, "normalize_user_operation", capture)
+    with __import__("pytest").raises(DispatchPlanningError):
+        Dispatcher(store=object()).plan(lambda: None, allow_pickle=True, requirement_policy="ignore")
+
     assert captured["paths"]
     assert all(not __import__("os").path.exists(path) for path in captured["paths"])

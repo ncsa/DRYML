@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import sys
+
 import dryml
 
-from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+from dryml.code.analysis import CodeAnalysisResult
+from dryml.code.probe import CodeProbeResult
+from dryml.code.targets import CodeTargetSpec
+from dryml.dispatch import NormalizedDispatchTarget, normalize_user_operation, resolve_dispatch_plan
+from dryml.environments import inspect_current
 from dryml.operations import make_function_call_spec
 
 
@@ -39,3 +45,27 @@ def test_missing_explicit_final_environment_is_structurally_blocking_without_req
     assert resolution.environment_check.status == "error"
     assert resolution.launchable is False
     assert resolution.code_probe is not None
+
+
+def test_final_probe_uses_import_path_even_when_target_kind_is_function(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    target = CodeTargetSpec("function", import_path="operator:add")
+    normalized = NormalizedDispatchTarget(make_function_call_spec("operator:add"), code_target=target, transport="import_path")
+    calls = []
+
+    def fake_probe(code_target, **kwargs):
+        calls.append((code_target, kwargs["environment"].to_data()))
+        return CodeProbeResult(True, CodeAnalysisResult(target), inspect_current())
+
+    monkeypatch.setattr(requirements, "probe_target", fake_probe)
+    monkeypatch.setattr(requirements.environments, "probe", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("final probe record must be reused")))
+    resolution = resolve_dispatch_plan(
+        normalized,
+        environment={"kind": "python", "executable": sys.executable},
+        requirement_policy="strict",
+    )
+
+    assert len(calls) == 1
+    assert resolution.final_code_probe is not None
+    assert resolution.environment_record is not None

@@ -59,12 +59,13 @@ def test_dispatcher_submit_accepts_operation_and_forwards_environment_world(tmp_
     mod = importlib.import_module("dispatch_target")
     store = DirStore(tmp_path / "store", query_index="none")
     environment = _env(target_module)
-    world = {"policy": "single_worker", "metadata": {"source": "test"}}
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
 
     dispatcher = Dispatcher(store=store)
     planned = dispatcher.plan(mod.add, args=(1, 2), environment=environment, world=world)
     assert planned.envelope.environment_spec == environment
-    assert planned.envelope.dispatch_spec["payload"]["world"] == {"policy": "explicit", "spec": world}
+    assert planned.envelope.dispatch_spec["payload"]["world"]["policy"] == "explicit"
+    assert planned.envelope.dispatch_spec["payload"]["world"]["spec"]["roles"]["main"]["replicas"] == 1
 
     future = dispatcher.submit(mod.add, args=(1, 2), environment=environment, world=world)
     assert future.result(timeout=10).status == "ok"

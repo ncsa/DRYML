@@ -104,52 +104,61 @@ class Dispatcher:
             )
         env_data = dict(resolution.environment_selection.candidate)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
+            _cleanup_launch(launch)
             raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
         runtime_data = dict(resolution.runtime_selection.candidate)
         world_data = dict(resolution.world_selection.candidate)
         allocation_data = {"role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": _local_cpu_ids(), "accelerators": {}, "env": {}, "metadata": {"backend": "local_subprocess"}}
-        marshal = select_marshal_plan(target_store, query_index="none")
-        require_supported_plan(marshal)
+        try:
+            marshal = select_marshal_plan(target_store, query_index="none")
+            require_supported_plan(marshal)
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         _report("dryml.dispatch.store.prepare", "Preparing shared DirStore marshalling", operation_id=op_spec.get("id"), data={"strategy": marshal.strategy})
-        dispatch = attach_dispatch_id(
-            make_dispatch_spec(
-                operation_id=op_spec["id"],
-                operation=op_spec,
-                environment={"policy": "current", "spec": env_data},
-                world={"policy": resolution.world_selection.source, "spec": world_data},
-                runtime={"policy": "worker", "spec": runtime_data},
-                records={"record_policy": record_policy, "provenance": record_policy != "none"},
-                execution={"backend": "local_subprocess"},
-                metadata=resolution.metadata(),
+        try:
+            dispatch = attach_dispatch_id(
+                make_dispatch_spec(
+                    operation_id=op_spec["id"],
+                    operation=op_spec,
+                    environment={"policy": "current", "spec": env_data},
+                    world={"policy": resolution.world_selection.source, "spec": world_data},
+                    runtime={"policy": "worker", "spec": runtime_data},
+                    records={"record_policy": record_policy, "provenance": record_policy != "none"},
+                    execution={"backend": "local_subprocess"},
+                    metadata=resolution.metadata(),
+                )
             )
-        )
-        _report("dryml.dispatch.recipe.build", "Building execution recipe", operation_id=op_spec.get("id"), data={"dispatch_id": dispatch["id"]})
-        recipe = attach_recipe_id(
-            make_execution_recipe(
-                dispatch_id=dispatch["id"],
-                operation_id=op_spec["id"],
-                backend={"name": "dryml.local_subprocess", "kind": "local_subprocess", "version": "1"},
-                input_plan={"materialize_cdefs": [], "ref_cdefs": []},
-                output_plan={"record_policy": record_policy, "provenance": record_policy != "none"},
-                store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
-                log_plan={"stdout": "capture", "stderr": "capture"},
-                constraints={"portable": launch.get("call_transport") != "pickle_small"},
-                annotation_report=resolution.metadata(),
+            _report("dryml.dispatch.recipe.build", "Building execution recipe", operation_id=op_spec.get("id"), data={"dispatch_id": dispatch["id"]})
+            recipe = attach_recipe_id(
+                make_execution_recipe(
+                    dispatch_id=dispatch["id"],
+                    operation_id=op_spec["id"],
+                    backend={"name": "dryml.local_subprocess", "kind": "local_subprocess", "version": "1"},
+                    input_plan={"materialize_cdefs": [], "ref_cdefs": []},
+                    output_plan={"record_policy": record_policy, "provenance": record_policy != "none"},
+                    store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
+                    log_plan={"stdout": "capture", "stderr": "capture"},
+                    constraints={"portable": launch.get("call_transport") != "pickle_small"},
+                    annotation_report=resolution.metadata(),
+                )
             )
-        )
-        envelope = ExecutionEnvelope(
-            dispatch_spec=dispatch,
-            execution_recipe=recipe,
-            operation_spec=op_spec,
-            environment_spec=env_data,
-            runtime_spec=runtime_data,
-            allocation_view=allocation_data,
-            store_refs=marshal.store_refs,
-            transfer={"strategy": marshal.strategy},
-            record_policy=record_policy,
-            reporting={"planning": resolution.metadata()},
-            launch=launch,
-        )
+            envelope = ExecutionEnvelope(
+                dispatch_spec=dispatch,
+                execution_recipe=recipe,
+                operation_spec=op_spec,
+                environment_spec=env_data,
+                runtime_spec=runtime_data,
+                allocation_view=allocation_data,
+                store_refs=marshal.store_refs,
+                transfer={"strategy": marshal.strategy},
+                record_policy=record_policy,
+                reporting={"planning": resolution.metadata()},
+                launch=launch,
+            )
+        except Exception:
+            _cleanup_launch(launch)
+            raise
         return DispatchPlan(dispatch, recipe, envelope, target_store, resolution)
 
     def submit(

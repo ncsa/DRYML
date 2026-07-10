@@ -50,13 +50,14 @@ def test_plan_defaults_world_to_checked_single_worker_fallback(tmp_path):
 
 def test_plan_accepts_explicit_environment_and_world(tmp_path):
     environment = {"kind": "current", "metadata": {"name": "baseline"}}
-    world = {"policy": "explicit-test"}
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
 
     plan = Dispatcher(store=_store(tmp_path)).plan(_operation(), environment=environment, world=world)
 
     assert plan.dispatch_spec["payload"]["environment"]["spec"]["kind"] == "current"
     assert plan.envelope.environment_spec["kind"] == "current"
-    assert plan.dispatch_spec["payload"]["world"] == {"policy": "explicit", "spec": world}
+    assert plan.dispatch_spec["payload"]["world"]["policy"] == "explicit"
+    assert plan.dispatch_spec["payload"]["world"]["spec"]["roles"]["main"]["replicas"] == 1
 
 
 def test_plan_accepts_operation_spec_mapping_and_attaches_operation_id(tmp_path):

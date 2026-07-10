@@ -300,13 +300,21 @@ def resolve_dispatch_plan(
             "Pickled callable transport requires the current Python executable.",
             data={"candidate": env_spec, "restriction": "same_environment_only"},
         ))
+    if single_worker_only:
+        world_diagnostics = _local_subprocess_world_diagnostics(world_spec, resolution.world_requirement)
+        if world_diagnostics:
+            structural_safe = False
+            diagnostics.extend(world_diagnostics)
+    else:
+        world_diagnostics = ()
     if single_worker_only and _is_multi_worker_world(world_spec):
         structural_safe = False
-        diagnostics.append(_diagnostic(
-            "dryml.dispatch.single_subprocess_world_unsupported",
-            "The local subprocess planner supports one worker only; use plan_world() or run_world() for this world.",
-            data={"world": world_spec},
-        ))
+        if not world_diagnostics:
+            diagnostics.append(_diagnostic(
+                "dryml.dispatch.single_subprocess_world_unsupported",
+                "The local subprocess planner supports one worker only; use plan_world() or run_world() for this world.",
+                data={"world": world_spec},
+            ))
 
     final_probe = None
     if _needs_final_probe(normalized, env_spec, bootstrap_environment):
@@ -317,6 +325,19 @@ def resolve_dispatch_plan(
             timeout=probe_timeout_s,
         )
         diagnostics.extend(final_probe.diagnostics)
+        final_fragments = _fragments_from_analysis(final_probe.analysis) if final_probe.analysis is not None else []
+        if final_fragments:
+            reconciled_fragments = _dedupe_fragments((*fragments, *final_fragments))
+            reconciled = annotations.resolve_fragments(reconciled_fragments, source="dryml.dispatch.final_probe")
+            if _resolution_decisions(reconciled) != _resolution_decisions(resolution):
+                structural_safe = False
+                diagnostics.append(_diagnostic(
+                    "dryml.dispatch.final_probe_annotation_mismatch",
+                    "Final environment probe discovered annotation facts that change resolved requirements or defaults.",
+                    data={"bootstrap_fragments": len(fragments), "final_fragments": len(final_fragments)},
+                ))
+            resolution = reconciled
+            diagnostics.extend(_annotation_diagnostics(resolution))
         if not final_probe.ok:
             diagnostics.append(_diagnostic(
                 "dryml.dispatch.final_environment_probe_failed",
@@ -329,7 +350,7 @@ def resolve_dispatch_plan(
         env_spec,
         resolution.environment_requirement,
         final_probe or bootstrap_probe,
-        bootstrap_environment,
+        env_spec if final_probe is not None else bootstrap_environment,
         environment,
         policy,
         validate_candidate=_requires_environment_validation(env_spec, normalized),
@@ -583,7 +604,7 @@ def _same_python_environment(env_data: Mapping[str, Any]) -> bool:
 
 
 def _needs_final_probe(normalized: NormalizedDispatchTarget, final_environment: Mapping[str, Any], bootstrap_environment: Mapping[str, Any] | None) -> bool:
-    if normalized.code_target is None or normalized.code_target.kind != "import_path" or normalized.transport == "pickle_small":
+    if normalized.code_target is None or not normalized.code_target.import_path or normalized.transport == "pickle_small":
         return False
     # Local discovery proves only the orchestrator environment. A non-current
     # selected candidate must prove it can import/analyze the serialized target.
@@ -603,14 +624,41 @@ def _is_multi_worker_world(candidate: Mapping[str, Any]) -> bool:
     return len(world.roles) > 1 or sum(role.replicas for role in world.roles.values()) > 1
 
 
-def _environment_record(env_data, requirement, code_probe, bootstrap_environment, explicit_environment, policy, *, validate_candidate: bool):
+def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requirement) -> tuple[DiagnosticFact, ...]:
+    """Reject selected-world details the fixed local subprocess allocation ignores."""
+
+    try:
+        world = WorldSpec.from_data(candidate)
+    except Exception as exc:
+        return (_diagnostic("dryml.dispatch.single_subprocess_world_unsupported", "The local subprocess planner requires a concrete local one-worker WorldSpec.", data={"error": type(exc).__name__}),)
+    diagnostics = []
+    if len(world.roles) != 1 or sum(role.replicas for role in world.roles.values()) != 1:
+        diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_world_unsupported", "The local subprocess planner supports one worker only; use plan_world() or run_world() for this world.", data={"world": candidate}))
+    backend_kind = world.backend.get("kind")
+    if backend_kind not in {"local", "local_subprocess"}:
+        diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_backend_unsupported", "The local subprocess planner cannot enact the selected world backend.", data={"backend": dict(world.backend)}))
+    for role_name, role in world.roles.items():
+        process = role.process
+        resources = process.resources
+        if resources.cpus or resources.memory is not None or resources.accelerators or resources.devices or resources.named:
+            diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_resources_unsupported", "The local subprocess planner cannot guarantee selected world process resources.", data={"role": role_name, "resources": resources.to_data()}))
+        if process.environment is not None or process.runtime is not None or process.env or process.metadata:
+            diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_process_settings_unsupported", "The local subprocess planner cannot enact selected role process settings.", data={"role": role_name, "process": process.to_data()}))
+    if requirement is not None:
+        report = worlds.check_world_spec_satisfies_requirement(world, requirement)
+        if not report.ok:
+            diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_requirement_unsupported", "The fixed local subprocess allocation cannot satisfy the selected hard world requirement.", data={"issues": [{"path": item.path, "message": item.message, "expected": item.expected, "actual": item.actual} for item in report.issues]}))
+    return tuple(diagnostics)
+
+
+def _environment_record(env_data, requirement, code_probe, probe_environment, explicit_environment, policy, *, validate_candidate: bool):
     if requirement is None and not validate_candidate:
         return None, ()
     spec = spec_from_data(env_data)
     attached = _attached_environment_record(explicit_environment, env_data)
     if attached is not None:
         return attached, ()
-    if code_probe is not None and code_probe.environment_record is not None and bootstrap_environment == env_data:
+    if code_probe is not None and code_probe.environment_record is not None and probe_environment == env_data:
         return code_probe.environment_record, ()
     probe = environments.probe(spec)
     if probe.ok and probe.record is not None:
@@ -680,6 +728,23 @@ def _annotation_diagnostics(resolution):
 
 def _has_annotation_errors(resolution) -> bool:
     return any(item.level == "error" for item in resolution.diagnostics)
+
+
+def _resolution_decisions(resolution) -> dict[str, Any]:
+    """Return only requirement/default values whose change invalidates selection."""
+
+    data = resolution.to_data()
+    return {
+        key: data[key]
+        for key in (
+            "environment_requirement",
+            "environment_default",
+            "world_requirement",
+            "world_default",
+            "runtime_requirement",
+            "runtime_default",
+        )
+    }
 
 
 def _check_diagnostics(reports, policy):
