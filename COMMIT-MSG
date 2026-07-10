@@ -1,25 +1,20 @@
-sprint 08: add local synthesis and environment resolution
+sprint 08 hardening: enforce resolver and allocation safety
 
-Promote LocalResourceInventory to dryml.worlds with deterministic serialization
-and import-safe lightweight discovery. Add local WorldRequirement synthesis with
-aggregate capacity checks and authoritative compatibility validation.
+Make resolver execution lazy and bounded, reject non-finite timeouts and probe
+spec mismatches, and redact environment overrides from resolver/planning metadata.
 
-Extend the explicit EnvironmentRegistry with unregister and add bounded,
-deterministic environment resolution. Integrate resolver and synthesis results
-into dispatch precedence, planning metadata, explain output, and reusable probe
-evidence.
+Reject unknown-memory allocations, preserve distinct local_subprocess allocation
+provenance, persist requested-world/allocation specs, clean successful local-world
+pickle transport artifacts, and add the public plan_world helper.
 
-Allocate supported one-worker local CPU/GPU worlds through the local allocator
-for subprocess envelopes while retaining structural rejection for unsupported
-named resources and multi-worker single-subprocess plans.
+Validate advanced policies before discovery side effects, reuse resolver attempt
+records for no-match fallback checking, keep explain allocation-free, and repair
+the dispatch documentation's Sprint 8 contradictions.
 
 Tests:
-- inventory, synthesis, registry lifecycle, and resolver regressions
-- synthesized no-override dispatch selection
-- one-worker GPU envelope allocation
+- lazy resolver consumption and environment override redaction
+- local_subprocess backend allocation and unknown-memory rejection
 
 Verification:
-- targeted Sprint 8 matrix -> 51 passed in 87.06s
-- subsystem closeout -> 1557 passed, 1 xfailed in 392.57s
-- ./tests.sh -> 1944 passed, 22 deselected, 1 xfailed in 502.29s
-- supplemental selected matrix -> 56 passed in 83.35s
+- pytest tests/dispatch -> 122 passed in 237.71s
+- pytest tests/environments tests/worlds -> 134 passed in 37.56s

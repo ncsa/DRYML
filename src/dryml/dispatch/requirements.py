@@ -79,7 +79,7 @@ class CandidateConsideration:
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-ready consideration data."""
 
-        return {"slot": self.slot, "status": self.status, "candidate": None if self.candidate is None else dict(self.candidate)}
+        return {"slot": self.slot, "status": self.status, "candidate": None if self.candidate is None else _safe_candidate_data(self.candidate)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +97,7 @@ class CandidateSelection:
 
         return {
             "kind": self.kind,
-            "candidate": dict(self.candidate),
+            "candidate": _safe_candidate_data(self.candidate),
             "source": self.source,
             "considered": [item.to_data() for item in self.considered],
             "diagnostics": [item.to_data() for item in self.diagnostics],
@@ -124,7 +124,7 @@ class CandidateCheckReport:
             "status": self.status,
             "compatible": self.compatible,
             "requirement": None if self.requirement is None else dict(self.requirement),
-            "candidate": None if self.candidate is None else dict(self.candidate),
+            "candidate": None if self.candidate is None else _safe_candidate_data(self.candidate),
             "details": [dict(item) for item in self.details],
             "diagnostics": [item.to_data() for item in self.diagnostics],
         }
@@ -314,6 +314,7 @@ def resolve_dispatch_plan(
 
     enforcement = runtime.enforcement()
     policy = effective_requirement_policy(requirement_policy, enforcement)
+    _validate_sprint8_policies(inventory_policy, resolver_policy)
     analysis_context, probe_timeout_s = _analysis_options(analysis_policy)
     fragments, analysis, bootstrap_probe, bootstrap_environment, discovery_diagnostics, complete = _discover(
         normalized,
@@ -346,8 +347,9 @@ def resolve_dispatch_plan(
         diagnostics.append(_diagnostic("dryml.dispatch.environment_resolver_no_match", "No resolver candidate satisfied the environment requirement; pass, register, or set a compatible environment.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data=environment_resolution.to_data()))
         structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
     if world_synthesis is not None and not world_synthesis.ok:
-        diagnostics.append(_diagnostic("dryml.dispatch.world_synthesis_failed", "Local world synthesis failed; inject inventory or pass/set a compatible world.", severity="error", data=world_synthesis.to_data()))
-        structural_safe = False
+        severity = "error" if policy is RequirementPolicy.STRICT else "warning"
+        diagnostics.append(_diagnostic("dryml.dispatch.world_synthesis_failed", "Local world synthesis failed; inject inventory or pass/set a compatible world.", severity=severity, data=world_synthesis.to_data()))
+        structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
     if normalized.launch.get("same_environment_only") and not _same_python_environment(env_spec):
         structural_safe = False
         diagnostics.append(_diagnostic(
@@ -358,7 +360,8 @@ def resolve_dispatch_plan(
     if single_worker_only:
         world_diagnostics = _local_subprocess_world_diagnostics(world_spec, resolution.world_requirement)
         if world_diagnostics:
-            structural_safe = False
+            structural_failures = tuple(item for item in world_diagnostics if item.code != "dryml.dispatch.single_subprocess_requirement_unsupported")
+            structural_safe = structural_safe and (policy is not RequirementPolicy.STRICT and not structural_failures or policy is RequirementPolicy.STRICT and not world_diagnostics)
             diagnostics.extend(world_diagnostics)
     else:
         world_diagnostics = ()
@@ -409,7 +412,7 @@ def resolve_dispatch_plan(
         environment,
         policy,
         validate_candidate=_requires_environment_validation(env_spec, normalized),
-        resolved_record=None if environment_resolution is None else environment_resolution.selected_record,
+        resolved_record=_resolution_record_for(environment_resolution, env_spec),
     )
     diagnostics.extend(env_probe_diagnostics)
     environment_check = _check_environment(
@@ -427,22 +430,8 @@ def resolve_dispatch_plan(
     selected_inventory = inventory
     if world_synthesis is not None:
         selected_inventory = world_synthesis.resource_inventory
-    allocation_summary = None
-    if single_worker_only and not _is_multi_worker_world(world_spec) and not world_diagnostics and (_world_needs_inventory(world_spec) or world_synthesis is not None):
+    if single_worker_only and not _is_multi_worker_world(world_spec) and (_world_needs_inventory(world_spec) or world_synthesis is not None):
         selected_inventory = selected_inventory or worlds.local_inventory(policy=inventory_policy)
-        try:
-            from .local_world import allocate_local_world
-
-            allocation_plan = allocate_local_world(world_spec, inventory=selected_inventory)
-            allocation_summary = _local_subprocess_allocation_summary(allocation_plan)
-            if resolution.world_requirement is not None:
-                allocation_report = worlds.check_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.world_requirement)
-                if not allocation_report.ok:
-                    structural_safe = False
-                    diagnostics.append(_diagnostic("dryml.dispatch.local_allocation_requirement_failed", "The actual local subprocess allocation does not satisfy the hard world requirement.", data={"issues": [_world_issue_data(issue) for issue in allocation_report.issues]}))
-        except Exception as exc:
-            structural_safe = False
-            diagnostics.append(_diagnostic("dryml.dispatch.local_allocation_failed", "The selected one-worker world cannot be allocated from local inventory.", data={"error": type(exc).__name__, "message": str(exc), "action": "inject inventory or pass/set a feasible world"}))
 
     if not complete:
         diagnostics.append(_diagnostic("dryml.dispatch.discovery_incomplete", "Requirement discovery is incomplete.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"policy": policy.value, "action": "use an importable target or call dispatch.explain(...)"}))
@@ -479,7 +468,7 @@ def resolve_dispatch_plan(
         environment_resolution=environment_resolution,
         world_synthesis=world_synthesis,
         inventory_summary=None if selected_inventory is None else selected_inventory.summary(),
-        world_allocation_summary=allocation_summary,
+        world_allocation_summary=None,
         local_inventory=selected_inventory,
     )
 
@@ -565,6 +554,15 @@ def _analysis_options(policy: Any | None) -> tuple[CodeAnalysisContext, float]:
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise DispatchPlanningError("analysis_policy.probe_timeout_s must be a positive number")
     return context, float(timeout)
+
+
+def _validate_sprint8_policies(inventory_policy: str, resolver_policy: str | None) -> None:
+    """Reject advanced-policy typos before analysis, probes, or persistence."""
+
+    if inventory_policy not in {"lightweight", "external"}:
+        raise DispatchPlanningError("invalid inventory_policy", context={"inventory_policy": inventory_policy})
+    if resolver_policy is not None and resolver_policy != "first_compatible":
+        raise DispatchPlanningError("invalid resolver_policy", context={"resolver_policy": resolver_policy})
 
 
 def _analysis_is_complete(analysis: CodeAnalysisResult) -> bool:
@@ -746,6 +744,17 @@ def _world_needs_inventory(candidate: Mapping[str, Any]) -> bool:
     )
 
 
+def _subprocess_allocation_world(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt the supported local_subprocess request backend for local assignment."""
+
+    world = WorldSpec.from_data(candidate)
+    if world.backend.get("kind") != "local_subprocess":
+        return dict(candidate)
+    data = world.to_data()
+    data["backend"] = {"kind": "local", "parameters": {}}
+    return data
+
+
 def _local_subprocess_allocation_summary(allocation_plan) -> dict[str, Any]:
     workers = []
     for key in allocation_plan.worker_keys:
@@ -806,6 +815,17 @@ def _environment_record(env_data, requirement, code_probe, probe_environment, ex
     if probe.ok and probe.record is not None:
         return probe.record, ()
     return None, (_diagnostic("dryml.dispatch.environment_probe_failed", "Environment probe failed for the selected candidate.", severity="error", data={"candidate": env_data, "probe": _bounded_probe_data(probe.to_data())}),)
+
+
+def _resolution_record_for(result, candidate: Mapping[str, Any]) -> EnvironmentRecord | None:
+    if result is None:
+        return None
+    if result.selected_record is not None and result.selected is not None and result.selected.to_data() == candidate:
+        return result.selected_record
+    for attempt in result.attempts:
+        if attempt.probe is not None and attempt.probe.record is not None and attempt.spec.to_data() == candidate:
+            return attempt.probe.record
+    return None
 
 
 def _attached_environment_record(candidate, selected_data):
@@ -946,10 +966,26 @@ def _bounded_data(value):
     if isinstance(value, str):
         return value[:4096]
     if isinstance(value, Mapping):
-        return {str(key): _bounded_data(item) for key, item in value.items()}
+        items = []
+        for key, item in value.items():
+            if str(key) == "env":
+                continue
+            items.append((str(key), _bounded_data(item)))
+            if len(items) >= 64:
+                break
+        return dict(items)
     if isinstance(value, (list, tuple)):
-        return [_bounded_data(item) for item in value]
+        return [_bounded_data(item) for item in value[:64]]
     return value
+
+
+def _safe_candidate_data(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Redact runtime environment overrides from persisted planning metadata."""
+
+    data = _bounded_data(dict(candidate))
+    if data.get("kind") in {"python", "conda", "container"}:
+        data.pop("env", None)
+    return data
 
 
 __all__ = [

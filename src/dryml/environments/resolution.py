@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,7 +37,7 @@ class EnvironmentResolutionAttempt:
         return {
             "source": self.source,
             "name": self.name,
-            "spec": self.spec.to_data(),
+            "spec": _spec_summary(self.spec),
             "status": self.status,
             "probe": None if self.probe is None else {"ok": self.probe.ok, "returncode": self.probe.returncode, "report": None if self.probe.report is None else self.probe.report.to_data()},
             "compatibility": None if self.compatibility is None else self.compatibility.to_data(),
@@ -80,7 +81,7 @@ class EnvironmentResolution:
         return {
             "status": self.status,
             "requirement": None if self.requirement is None else self.requirement.to_data(),
-            "selected": None if self.selected is None else self.selected.to_data(),
+            "selected": None if self.selected is None else _spec_summary(self.selected),
             "selected_name": self.selected_name,
             "selected_source": self.selected_source,
             "selected_record": _record_summary(self.selected_record),
@@ -109,9 +110,9 @@ def resolve(
         raise ValueError(f"unsupported environment resolver policy {policy!r}")
     if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates <= 0:
         raise ValueError("max_candidates must be a positive integer")
-    if probe_timeout is not None and (isinstance(probe_timeout, bool) or probe_timeout <= 0):
+    if probe_timeout is not None and (isinstance(probe_timeout, bool) or not isinstance(probe_timeout, (int, float)) or not math.isfinite(probe_timeout) or probe_timeout <= 0):
         raise ValueError("probe_timeout must be positive or None")
-    if total_timeout is not None and (isinstance(total_timeout, bool) or total_timeout <= 0):
+    if total_timeout is not None and (isinstance(total_timeout, bool) or not isinstance(total_timeout, (int, float)) or not math.isfinite(total_timeout) or total_timeout <= 0):
         raise ValueError("total_timeout must be positive or None")
     runner = probe if probe_runner is None else probe_runner
     now = time.monotonic if clock is None else clock
@@ -119,12 +120,15 @@ def resolve(
     seen: set[str] = set()
     started = now()
     considered = 0
-    for source, name, spec, entry in _candidates(candidates, registry, include_current)[:_MAX_RECORDED_ATTEMPTS]:
+    truncated = False
+    for source, name, spec, entry in _candidates(candidates, registry, include_current):
+        if len(attempts) >= _MAX_RECORDED_ATTEMPTS:
+            truncated = True
+            break
         identity = json.dumps(spec.to_data(), sort_keys=True, separators=(",", ":"))
         if identity in seen:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "duplicate"))
             continue
-        seen.add(identity)
         if considered >= max_candidates:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_limit"))
             continue
@@ -135,6 +139,7 @@ def resolve(
         if entry is not None and not _labels_match(requirement, entry):
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
             continue
+        seen.add(identity)
         if requirement is None:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "selected"))
             return EnvironmentResolution("selected", None, spec, name, source, None, None, tuple(attempts), (), policy)
@@ -149,30 +154,36 @@ def resolve(
             issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}: {exc}")
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,)))
             continue
+        if _identity(result.spec) != identity:
+            issue = CompatibilityIssue("probe_spec_mismatch", "error", "environment probe result did not match the requested candidate")
+            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,)))
+            continue
+        if total_timeout is not None and now() - started >= total_timeout:
+            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout", result))
+            continue
         if not result.ok or result.record is None:
             diagnostics = () if result.report is None else result.report.issues
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, result.report, diagnostics))
+            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics))
             continue
         report = requirement.check(result.record, policy="strict")
         if report.ok:
             attempts.append(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report))
             return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), (), policy)
         attempts.append(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues))
-    issue = CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())
-    return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), (issue,), policy)
+    diagnostics = [CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())]
+    if truncated:
+        diagnostics.append(CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS))
+    return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
 
 
-def _candidates(candidates: Iterable[Any], registry: Any, include_current: bool) -> list[tuple[str, str | None, EnvironmentSpec, Any]]:
-    queued: list[tuple[str, str | None, EnvironmentSpec, Any]] = []
+def _candidates(candidates: Iterable[Any], registry: Any, include_current: bool) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
     for candidate in candidates:
-        queued.append(_normalize_candidate(candidate, "candidate"))
+        yield _normalize_candidate(candidate, "candidate")
     if registry is not None:
         for entry in registry.list():
-            queued.append(("registry", entry.name, entry.spec, entry))
+            yield "registry", entry.name, entry.spec, entry
     if include_current:
-        selected = current()
-        queued.append(("current", None, CurrentEnvironmentSpec() if selected is None else selected, None))
-    return queued
+        yield "current", None, CurrentEnvironmentSpec(), None
 
 
 def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, EnvironmentSpec, Any]:
@@ -188,7 +199,23 @@ def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, 
 def _labels_match(requirement: EnvironmentRequirement | None, entry: Any) -> bool:
     if requirement is None:
         return True
-    return set(requirement.tags) <= set(entry.tags) and set(requirement.capabilities) <= set(entry.provides)
+    tags = set(entry.tags)
+    provides = set(entry.provides)
+    return (not tags or set(requirement.tags) <= tags) and (not provides or set(requirement.capabilities) <= provides)
+
+
+def _identity(spec: EnvironmentSpec) -> str:
+    return json.dumps(spec.to_data(), sort_keys=True, separators=(",", ":"))
+
+
+def _spec_summary(spec: EnvironmentSpec) -> dict[str, Any]:
+    """Return candidate metadata without environment-variable values."""
+
+    data = spec.to_data()
+    data.pop("env", None)
+    if "extra_pythonpath" in data:
+        data["extra_pythonpath"] = list(data["extra_pythonpath"][:16])
+    return data
 
 
 def _record_summary(record: EnvironmentRecord | None) -> dict[str, Any] | None:

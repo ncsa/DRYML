@@ -17,7 +17,7 @@ def _env(target_module):
 
 
 def _inventory():
-    return LocalResourceInventory(cpus=(0, 1, 2, 3), accelerators={"gpu": (0, 1)}, metadata={"source": "test"})
+    return LocalResourceInventory(cpus=(0, 1, 2, 3), accelerators={"gpu": (0, 1)}, memory=2 * 1024**3, metadata={"source": "test"})
 
 
 class _FakeProcess:

@@ -98,7 +98,10 @@ def synthesize(requirement: WorldRequirement | Mapping[str, Any] | None, *, inve
         req = _coerce_requirement(requirement)
     except Exception as exc:
         return _failure("invalid_requirement", None, inventory, policy, "invalid_requirement", str(exc))
-    inv = inventory or local_inventory()
+    try:
+        inv = inventory or local_inventory()
+    except Exception as exc:
+        return _failure("error", req, inventory, policy, "inventory_discovery_failed", str(exc))
     if req is None:
         world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local", "parameters": {}}})
         return WorldSynthesisResult("synthesized", None, inv.summary(), world, None, (), policy, inv)

@@ -398,6 +398,9 @@ class LocalWorldFuture:
         return WorldDispatchResult(status=status, dispatch_id=self.plan.dispatch_spec.get("id"), recipe_id=self.plan.execution_recipe.get("id"), world_id=self.plan.world_spec.get("id"), world_allocation_id=self.plan.world_allocation_spec.get("id"), primary=primary, workers=worker_results, execution_record_ids=execution_record_ids, produced_record_ids=produced_record_ids, diagnostics=tuple(diagnostics), error=first_error, cancellation=first_cancel)
 
     def _cleanup(self) -> None:
+        for worker_plan in self.plan.worker_plans:
+            for path in worker_plan.envelope.launch.get("cleanup_paths") or ():
+                shutil.rmtree(path, ignore_errors=True)
         if not self.preserve_work_dir:
             shutil.rmtree(self.group_work_dir, ignore_errors=True)
 
@@ -442,13 +445,15 @@ def is_multi_worker_world(world_spec: Mapping[str, Any]) -> bool:
     return len(counts) > 1 or sum(counts) > 1
 
 
-def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False) -> LocalWorldAllocationPlan:
+def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world") -> LocalWorldAllocationPlan:
     """Expand and allocate a local ``WorldSpec`` deterministically."""
 
     _report("dryml.dispatch.world.allocate", "Allocating local world resources")
     world_spec = normalize_world_spec(world)
     world_obj = WorldSpec.from_data(world_spec["payload"])
     inv = inventory or local_inventory()
+    if allocation_backend_kind not in {"local_world", "local_subprocess"}:
+        raise DispatchPlanningError("unsupported local allocation backend kind", context={"kind": allocation_backend_kind})
     cpu_cursor = 0
     memory_cursor = 0
     accelerator_cursors = {key: 0 for key in inv.accelerators}
@@ -471,7 +476,9 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
                 )
             requested_memory = role.process.resources.memory
             if requested_memory is not None:
-                if inv.memory is not None and not oversubscribe and memory_cursor + requested_memory > inv.memory:
+                if inv.memory is None:
+                    raise DispatchPlanningError("local world memory request cannot be proven against unknown inventory", context={"role": role_name, "requested_memory": requested_memory})
+                if not oversubscribe and memory_cursor + requested_memory > inv.memory:
                     raise DispatchPlanningError("local world memory requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_memory": requested_memory, "remaining_memory": inv.memory - memory_cursor})
                 memory_cursor += requested_memory
             if not oversubscribe and requested_cpus > len(inv.cpus):
@@ -518,8 +525,10 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
             roles[role_name].append(allocation)
             rank += 1
     backend = dict(LOCAL_WORLD_BACKEND_IDENTITY)
+    if allocation_backend_kind == "local_subprocess":
+        backend.update({"name": "dryml.local_subprocess", "kind": "local_subprocess"})
     backend["host"] = os.uname().nodename if hasattr(os, "uname") else "localhost"
-    allocation_spec = attach_world_allocation_id(make_world_allocation_spec(roles, backend=backend, kind="local_world_allocation", metadata={"world_id": world_spec.get("id")}))
+    allocation_spec = attach_world_allocation_id(make_world_allocation_spec(roles, backend=backend, kind=f"{allocation_backend_kind}_allocation", metadata={"world_id": world_spec.get("id")}))
     return LocalWorldAllocationPlan(world_spec=world_spec, world_allocation=WorldAllocation.from_data(allocation_spec["payload"]), world_allocation_spec=allocation_spec, worker_keys=tuple(keys))
 
 

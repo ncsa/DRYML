@@ -72,3 +72,19 @@ def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
 
     assert [attempt.status for attempt in result.attempts] == ["probe_failed", "not_considered_limit", "not_considered_limit"]
     assert len(calls) == 1
+
+
+def test_resolve_stops_lazy_candidates_after_requirement_free_selection():
+    def candidates():
+        yield CurrentEnvironmentSpec()
+        raise AssertionError("resolver consumed a candidate after selection")
+
+    result = resolve(None, candidates=candidates(), include_current=False)
+
+    assert result.ok
+
+
+def test_resolver_metadata_redacts_environment_overrides():
+    result = resolve(None, candidates=(PythonExecutableSpec("/python", env={"TOKEN": "secret"}),), include_current=False)
+
+    assert "TOKEN" not in str(result.to_data())

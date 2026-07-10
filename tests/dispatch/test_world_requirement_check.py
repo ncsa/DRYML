@@ -64,3 +64,27 @@ def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
     assert plan.envelope.allocation_view["cpus"] == [4, 5]
     assert plan.envelope.allocation_view["accelerators"] == {"gpu": ["gpu-a"]}
     assert plan.envelope.allocation_view["metadata"]["backend"] == "local_subprocess"
+
+
+def test_single_subprocess_plan_accepts_local_subprocess_backend(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local_subprocess", "parameters": {}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((4,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["metadata"]["backend"] == "local_subprocess"
+    assert plan.envelope.launch["world_allocation_spec"]["payload"]["backend"]["kind"] == "local_subprocess"
+
+
+def test_single_subprocess_rejects_unknown_memory_inventory(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"memory": "1GiB"}}}}}
+    with __import__("pytest").raises(DispatchPlanningError, match="memory request cannot be proven"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy="ignore",
+        )

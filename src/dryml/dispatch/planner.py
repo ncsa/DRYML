@@ -6,7 +6,7 @@ import os
 import shutil
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from dryml import worlds
@@ -128,11 +128,20 @@ class Dispatcher:
             from .local_world import allocate_local_world
 
             selected_inventory = inventory or self.inventory or resolution.local_inventory
-            allocation_plan = allocate_local_world(world_data, inventory=selected_inventory)
+            allocation_world = _subprocess_allocation_world(world_data)
+            allocation_plan = allocate_local_world(allocation_world, inventory=selected_inventory, allocation_backend_kind="local_subprocess")
+            requested_world_spec = worlds.attach_world_id(worlds.make_world_spec(worlds.WorldSpec.from_data(world_data)))
             key = allocation_plan.worker_keys[0]
             allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_plan.world_allocation_spec["id"])
-            allocation_data = _allocation_to_json(allocation, world_id=allocation_plan.world_spec.get("id"))
+            allocation_data = _allocation_to_json(allocation, world_id=requested_world_spec.get("id"))
             allocation_data["metadata"] = {**allocation_data["metadata"], "backend": "local_subprocess", "requested_world": world_data}
+            resolution = replace(
+                resolution,
+                world_allocation_summary={
+                    "backend": "local_subprocess",
+                    "workers": [{"role": key.role, "replica": key.replica, "cpus": list(allocation.cpus), "memory": allocation.memory, "accelerators": {name: list(values) for name, values in allocation.accelerators.items()}}],
+                },
+            )
         except Exception:
             _cleanup_launch(launch)
             raise
@@ -181,11 +190,21 @@ class Dispatcher:
                 transfer={"strategy": marshal.strategy},
                 record_policy=record_policy,
                 reporting={"planning": resolution.metadata()},
-                launch=launch,
+                launch={**launch, "world_id": requested_world_spec["id"], "world_allocation_id": allocation_plan.world_allocation_spec["id"], "world_spec": requested_world_spec, "world_allocation_spec": allocation_plan.world_allocation_spec, "parent_persisted_specs": record_policy != "none"},
             )
         except Exception:
             _cleanup_launch(launch)
             raise
+        if record_policy != "none":
+            try:
+                target_store.records.write_spec(op_spec, family="operation")
+                target_store.records.write_spec(dispatch, family="dispatch")
+                target_store.records.write_spec(recipe, family="execution_recipe")
+                target_store.records.write_spec(requested_world_spec, family="world")
+                target_store.records.write_spec(allocation_plan.world_allocation_spec, family="world_allocation")
+            except Exception:
+                _cleanup_launch(launch)
+                raise
         return DispatchPlan(dispatch, recipe, envelope, target_store, resolution)
 
     def submit(
@@ -278,6 +297,20 @@ class Dispatcher:
             raise
         world_spec = allocation_plan.world_spec
         allocation_spec = allocation_plan.world_allocation_spec
+        resolution = replace(
+            resolution,
+            world_allocation_summary={
+                "backend": "local_world",
+                "workers": [
+                    {
+                        "role": key.role,
+                        "replica": key.replica,
+                        "cpus": list(allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"]).cpus),
+                    }
+                    for key in allocation_plan.worker_keys
+                ],
+            },
+        )
         _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
         if record_policy != "none":
             try:
@@ -468,6 +501,12 @@ def run_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallabl
     return Dispatcher(store=store).run_world(operation, method_name, **kwargs)
 
 
+def plan_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, store: Any | None = None, **kwargs: Any):
+    """Build an explicit local-world plan, synthesizing an omitted world when needed."""
+
+    return Dispatcher(store=store).plan_world(operation, method_name, **kwargs)
+
+
 def submit(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any):
     """Plan and submit a Python-shaped or explicit operation."""
 
@@ -494,6 +533,17 @@ def _same_python_environment(env_data: Mapping[str, Any]) -> bool:
     if kind == "python":
         return os.path.abspath(os.fspath(env_data.get("executable", ""))) == os.path.abspath(sys.executable)
     return False
+
+
+def _subprocess_allocation_world(world: Mapping[str, Any]) -> dict[str, Any]:
+    """Map a local_subprocess request to the local assignment representation."""
+
+    requested = worlds.WorldSpec.from_data(world)
+    if requested.backend.get("kind") != "local_subprocess":
+        return dict(world)
+    data = requested.to_data()
+    data["backend"] = {"kind": "local", "parameters": {}}
+    return data
 
 
 def _cleanup_launch(launch: Mapping[str, Any]) -> None:
@@ -559,4 +609,4 @@ def _report(name: str, message: str, *, operation_id: str | None = None, data: M
         pass
 
 
-__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "explain", "plan", "run", "run_world", "submit"]
+__all__ = ["DispatchPlan", "Dispatcher", "allocation_from_json", "explain", "plan", "plan_world", "run", "run_world", "submit"]

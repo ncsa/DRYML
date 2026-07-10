@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from .errors import ResourceValidationError
@@ -47,8 +48,8 @@ class LocalResourceInventory:
         if self.memory is not None:
             _nonneg_int(self.memory, "memory")
         object.__setattr__(self, "cpus", cpus)
-        object.__setattr__(self, "accelerators", {name: accelerators[name] for name in sorted(accelerators)})
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "accelerators", MappingProxyType({name: accelerators[name] for name in sorted(accelerators)}))
+        object.__setattr__(self, "metadata", _freeze_json(self.metadata))
 
     @classmethod
     def local(cls) -> "LocalResourceInventory":
@@ -63,7 +64,7 @@ class LocalResourceInventory:
             "cpus": list(self.cpus),
             "accelerators": {name: list(values) for name, values in self.accelerators.items()},
             "memory": self.memory,
-            "metadata": dict(self.metadata),
+            "metadata": _thaw_json(self.metadata),
         }
 
     @classmethod
@@ -85,7 +86,12 @@ class LocalResourceInventory:
     def summary(self) -> dict[str, Any]:
         """Return a bounded deterministic reporting summary."""
 
-        return self.to_data()
+        return {
+            "cpu_count": len(self.cpus),
+            "accelerator_counts": {name: len(values) for name, values in self.accelerators.items()},
+            "memory": self.memory,
+            "metadata": _thaw_json(self.metadata),
+        }
 
 
 def local_inventory(
@@ -164,6 +170,8 @@ def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -
 def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]], runner: Callable[..., Any], timeout: float, diagnostics: list[str]) -> None:
     try:
         output = runner(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"], timeout=timeout)
+        if getattr(output, "returncode", 0) != 0:
+            raise RuntimeError("external inventory command returned non-zero status")
         text = getattr(output, "stdout", output)
         if not isinstance(text, str):
             raise TypeError("runner output is not text")
@@ -178,6 +186,24 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
 def _nonneg_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ResourceValidationError(f"{name} must be an integer >= 0", context={"value": value})
+    return value
+
+
+def _freeze_json(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (tuple, list)):
+        return tuple(_freeze_json(item) for item in value)
+    raise ResourceValidationError("inventory metadata must be JSON-compatible", context={"type": type(value).__name__})
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
     return value
 
 

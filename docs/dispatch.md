@@ -63,12 +63,12 @@ annotation facts, resolve requirements/defaults, select candidates, and check
 the selected candidates before launch. Explicit `environment=`, `world=`, and
 `runtime=` values choose candidates but do not bypass hard requirements.
 
-Candidate precedence is deterministic: environment uses explicit, annotation
-default, current context, then `CurrentEnvironmentSpec`; world uses explicit,
-annotation default, current context, then a single-worker fallback; runtime uses
-explicit, annotation default, then the local worker default. Planning reports
-the selected source and every considered slot. Sprint 7 does not search a
-registry after incompatibility or synthesize a new world.
+Candidate precedence is deterministic: explicit, annotation-default, and
+context-current candidates remain authoritative. Only when those slots are
+absent, environment planning can perform a bounded explicit-registry search and
+world planning can synthesize a minimal local world for a hard requirement.
+Planning never searches or synthesizes after an incompatible higher-precedence
+candidate.
 
 `requirement_policy` accepts `"strict"`, `"warn"`, or `"ignore"`. When it is
 omitted, active `RuntimeEnforcement.STRICT`, `.WARN`, and `.OFF` select strict,
@@ -90,11 +90,10 @@ print(explanation.launchable)
 print(explanation.resolution.environment_check.to_data())
 ```
 
-Explanation may perform bounded static analysis or a lightweight code probe when
-static discovery is incomplete. It returns structured requirements, provenance,
-candidate selections, check reports, policy/enforcement, diagnostics, and
-launchability; it does not perform registry resolution, package solving, world
-synthesis, inventory discovery, or dynamic tracing.
+Explanation may perform bounded static analysis, code/environment probes,
+explicit-registry resolution, and read-only local inventory/synthesis when
+needed. It does not launch workloads, activate an allocation, persist records,
+solve/install packages, or perform dynamic tracing.
 
 ## Local Worlds
 

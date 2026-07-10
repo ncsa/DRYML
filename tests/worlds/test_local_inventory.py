@@ -8,7 +8,7 @@ def test_inventory_round_trip_is_deterministic():
 
     assert inventory.cpus == (1, 3)
     assert LocalResourceInventory.from_data(inventory.to_data()) == inventory
-    assert inventory.summary()["accelerators"] == {"gpu": [0, "1"]}
+    assert inventory.summary()["accelerator_counts"] == {"gpu": 2}
 
 
 def test_lightweight_inventory_uses_explicit_accelerator_override_without_mutation():
