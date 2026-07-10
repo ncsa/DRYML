@@ -163,9 +163,11 @@ class EnvironmentRegistry:
     ) -> tuple[EnvironmentRegistryEntry | None, CompatibilityReport]:
         """Return the first probed compatible entry and its report."""
 
+        from .resolution import _labels_match
+
         first_report: CompatibilityReport | None = None
         for entry in self.list():
-            if requirement.tags and not set(requirement.tags) <= set(entry.tags):
+            if not _labels_match(requirement, entry):
                 continue
             result = probe(entry.spec, timeout=timeout)
             if not result.ok or result.record is None:

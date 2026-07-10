@@ -55,6 +55,8 @@ class LocalResourceInventory:
             accelerators[name] = tuple(sorted(normalized, key=lambda value: (str(type(value)), str(value))))
         if self.memory is not None:
             _nonneg_int(self.memory, "memory")
+        if not isinstance(self.metadata, Mapping):
+            raise ResourceValidationError("local resource inventory metadata must be a mapping")
         object.__setattr__(self, "cpus", cpus)
         object.__setattr__(self, "accelerators", MappingProxyType({name: accelerators[name] for name in sorted(accelerators)}))
         object.__setattr__(self, "metadata", _freeze_json(self.metadata))
@@ -86,9 +88,9 @@ class LocalResourceInventory:
             raise ResourceValidationError("local resource inventory has unknown fields", context={"fields": sorted(unknown)})
         return cls(
             cpus=tuple(data.get("cpus", ())),
-            accelerators=data.get("accelerators") or {},
+            accelerators={} if "accelerators" not in data else data["accelerators"],
             memory=data.get("memory"),
-            metadata=data.get("metadata") or {},
+            metadata={} if "metadata" not in data else data["metadata"],
         )
 
     def summary(self) -> dict[str, Any]:
@@ -134,26 +136,60 @@ def local_inventory(
     if not cpus:
         cpus = (0,)
         diagnostics.append("empty CPU affinity fell back to CPU 0")
-    memory = _local_memory(diagnostics)
+    memory, memory_source = _local_memory(diagnostics)
     accelerators = _accelerators_from_env(environment, diagnostics)
     if policy == "external" and command_runner is not None:
         _merge_external_accelerators(accelerators, command_runner, timeout, diagnostics)
     # Device names only supplement an explicitly visible, unambiguous inventory.
     if not accelerators and device_root is not None:
         diagnostics.append(f"device root {Path(device_root)} was not used without explicit visibility")
-    metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": "proc_meminfo", "diagnostics": diagnostics[:8]}
+    metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": memory_source, "diagnostics": diagnostics[:8]}
     return LocalResourceInventory(cpus=cpus, accelerators=accelerators, memory=memory, metadata=metadata)
 
 
-def _local_memory(diagnostics: list[str]) -> int | None:
+def _local_memory(diagnostics: list[str]) -> tuple[int | None, str]:
+    available = None
     try:
         for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
             if line.startswith("MemAvailable:"):
-                value = int(line.split()[1]) * 1024
-                return value
+                available = int(line.split()[1]) * 1024
+                break
     except Exception as exc:
         diagnostics.append(f"memory discovery unavailable: {type(exc).__name__}")
-    return None
+    cgroup_available, cgroup_source, cgroup_readable = _cgroup_memory_available(diagnostics)
+    if not cgroup_readable:
+        return None, "unknown"
+    if available is None and cgroup_available is None:
+        return None, "unknown"
+    if available is None:
+        return cgroup_available, cgroup_source
+    if cgroup_available is None:
+        return available, "proc_meminfo"
+    return min(available, cgroup_available), f"proc_meminfo+{cgroup_source}"
+
+
+def _cgroup_memory_available(diagnostics: list[str]) -> tuple[int | None, str, bool]:
+    """Return an effective cgroup memory allowance when it is explicit."""
+
+    for limit_path, usage_path, source in (
+        (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory.current"), "cgroup_v2"),
+        (Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"), Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"), "cgroup_v1"),
+    ):
+        if not limit_path.exists():
+            continue
+        try:
+            raw_limit = limit_path.read_text(encoding="utf-8").strip()
+            if raw_limit == "max":
+                return None, source, True
+            limit = int(raw_limit)
+            if limit <= 0 or limit >= 1 << 60:
+                return None, source, True
+            usage = int(usage_path.read_text(encoding="utf-8").strip())
+            return max(0, limit - usage), source, True
+        except Exception as exc:
+            diagnostics.append(f"cgroup memory discovery unavailable: {type(exc).__name__}")
+            return None, source, False
+    return None, "none", True
 
 
 def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -> dict[str, tuple[str | int, ...]]:
@@ -186,7 +222,10 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
         if len(text) > _MAX_EXTERNAL_OUTPUT_CHARS:
             diagnostics.append("external accelerator output was truncated")
             text = text[:_MAX_EXTERNAL_OUTPUT_CHARS]
+            text = text.rsplit("\n", 1)[0] if "\n" in text else ""
         values = tuple(int(line.strip()) for line in text.splitlines() if line.strip())
+        if any(value < 0 for value in values):
+            raise ValueError("external accelerator identifiers must be non-negative")
         if len(values) > _MAX_EXTERNAL_DEVICE_IDS:
             diagnostics.append("external accelerator identifiers were truncated")
             values = values[:_MAX_EXTERNAL_DEVICE_IDS]

@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from dryml import worlds
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
+from dryml import runtime
 from dryml.runtime import RuntimeAllocationView, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
 
@@ -18,7 +19,7 @@ from .errors import DispatchPlanningError
 from .normalize import normalize_user_operation
 from .operations import PickledCallable
 from .protocol import DispatchResult, ExecutionEnvelope
-from .requirements import DispatchExplanation, DispatchPlanningResolution, explanation_for, resolve_dispatch_plan
+from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, effective_requirement_policy, explanation_for, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
 from .stores import require_supported_plan, select_marshal_plan
@@ -143,7 +144,7 @@ class Dispatcher:
                 allocation_backend_kind="local_subprocess",
                 requested_world_id=requested_world_spec["id"],
             )
-            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement)
+            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
             key = allocation_plan.worker_keys[0]
             allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_plan.world_allocation_spec["id"])
             allocation_data = _allocation_to_json(allocation, world_id=requested_world_spec.get("id"))
@@ -305,7 +306,7 @@ class Dispatcher:
         try:
             selected_inventory = inventory or self.inventory or resolution.local_inventory
             allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)
-            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement)
+            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
         except Exception:
             _cleanup_launch(launch)
             raise
@@ -560,10 +561,10 @@ def _subprocess_allocation_world(world: Mapping[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _require_allocation_satisfies_requirement(allocation: worlds.WorldAllocation, requirement: worlds.WorldRequirement | None) -> None:
-    """Reject an executable allocation that diverges from a hard requirement."""
+def _require_allocation_satisfies_requirement(allocation: worlds.WorldAllocation, requirement: worlds.WorldRequirement | None, policy: RequirementPolicy | str | None) -> None:
+    """Reject allocation incompatibility only when the effective policy is strict."""
 
-    if requirement is None:
+    if requirement is None or effective_requirement_policy(policy, runtime.enforcement()) is not RequirementPolicy.STRICT:
         return
     report = worlds.check_allocation_satisfies_requirement(allocation, requirement)
     if not report.ok:

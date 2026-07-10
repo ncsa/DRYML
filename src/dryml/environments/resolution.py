@@ -9,16 +9,21 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from packaging.requirements import Requirement
+
 from .compatibility import CompatibilityIssue, CompatibilityReport
 from .current import current
 from .probe import EnvironmentProbeResult, probe
 from .records import EnvironmentRecord
 from .requirements import EnvironmentRequirement
 from .specs import CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
+from .utils import normalize_distribution_name
 
 _MAX_RECORDED_ATTEMPTS = 32
 _MAX_SERIALIZED_ITEMS = 64
 _MAX_SERIALIZED_STRING = 4096
+_MAX_SERIALIZED_DEPTH = 8
+_MAX_SERIALIZED_NODES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,58 +135,73 @@ def resolve(
     started = now()
     considered = 0
     truncated = False
-    for source, name, spec, entry in _candidates(candidates, registry, include_current):
-        if len(attempts) >= _MAX_RECORDED_ATTEMPTS:
+
+    def record(attempt: EnvironmentResolutionAttempt) -> None:
+        nonlocal truncated
+        if len(attempts) < _MAX_RECORDED_ATTEMPTS:
+            attempts.append(attempt)
+        else:
             truncated = True
-            break
-        identity = json.dumps(spec.to_data(), sort_keys=True, separators=(",", ":"))
+
+    def result_diagnostics() -> tuple[CompatibilityIssue, ...]:
+        if not truncated:
+            return ()
+        return (CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS),)
+
+    for source, name, spec, entry in _candidates(candidates, registry, include_current):
+        try:
+            identity = _identity(spec)
+        except Exception as exc:
+            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(CompatibilityIssue("candidate_invalid", "error", f"environment candidate could not be serialized: {type(exc).__name__}"),)))
+            continue
         if identity in seen:
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "duplicate"))
+            record(EnvironmentResolutionAttempt(source, name, spec, "duplicate"))
             continue
         seen.add(identity)
         if considered >= max_candidates:
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_limit"))
-            continue
+            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_limit"))
+            break
         if total_timeout is not None and now() - started >= total_timeout:
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
-            continue
+            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
+            break
         considered += 1
         if entry is not None and not _labels_match(requirement, entry):
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
+            record(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
             continue
         if requirement is None:
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "selected"))
-            return EnvironmentResolution("selected", None, spec, name, source, None, None, tuple(attempts), (), policy)
+            record(EnvironmentResolutionAttempt(source, name, spec, "selected"))
+            return EnvironmentResolution("selected", None, spec, name, source, None, None, tuple(attempts), result_diagnostics(), policy)
         try:
             remaining = None if total_timeout is None else max(0.0, total_timeout - (now() - started))
             timeout = remaining if probe_timeout is None else probe_timeout if remaining is None else min(probe_timeout, remaining)
             if timeout is not None and timeout <= 0:
-                attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
-                continue
+                record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
+                break
             result = runner(spec, timeout=timeout)
+            if not isinstance(result, EnvironmentProbeResult):
+                raise TypeError("probe runner returned an invalid result")
+            if _identity(result.spec) != identity:
+                issue = CompatibilityIssue("probe_spec_mismatch", "error", "environment probe result did not match the requested candidate")
+                record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,)))
+                continue
         except Exception as exc:
-            issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}: {exc}")
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,)))
-            continue
-        if _identity(result.spec) != identity:
-            issue = CompatibilityIssue("probe_spec_mismatch", "error", "environment probe result did not match the requested candidate")
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,)))
+            issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}")
+            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,)))
             continue
         if total_timeout is not None and now() - started >= total_timeout:
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout", result))
-            continue
+            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout", result))
+            break
         if not result.ok or result.record is None:
             diagnostics = () if result.report is None else result.report.issues
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics))
+            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics))
             continue
         report = requirement.check(result.record, policy="strict")
         if report.ok:
-            attempts.append(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report))
-            return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), (), policy)
-        attempts.append(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues))
+            record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report))
+            return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), result_diagnostics(), policy)
+        record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues))
     diagnostics = [CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())]
-    if truncated:
-        diagnostics.append(CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS))
+    diagnostics.extend(result_diagnostics())
     return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
 
 
@@ -210,7 +230,25 @@ def _labels_match(requirement: EnvironmentRequirement | None, entry: Any) -> boo
         return True
     tags = set(entry.tags)
     provides = set(entry.provides)
-    return (not tags or set(requirement.tags) <= tags) and (not provides or set(requirement.capabilities) <= provides)
+    return (
+        (not tags or set(requirement.tags) <= tags)
+        and (not provides or set(requirement.capabilities) <= provides)
+        and not _requirement_hints_conflict(requirement, entry.requirement)
+    )
+
+
+def _requirement_hints_conflict(requested: EnvironmentRequirement, hint: EnvironmentRequirement | None) -> bool:
+    """Return only contradictions that registry requirement hints can prove."""
+
+    if hint is None:
+        return False
+    requested_packages = {normalize_distribution_name(Requirement(item).name): item for item in requested.requirements}
+    hinted_packages = {normalize_distribution_name(Requirement(item).name): item for item in hint.requirements}
+    if set(requested.excludes) & set(hinted_packages):
+        return True
+    if set(hint.excludes) & set(requested_packages):
+        return True
+    return False
 
 
 def _identity(spec: EnvironmentSpec) -> str:
@@ -237,21 +275,25 @@ def _record_summary(record: EnvironmentRecord | None) -> dict[str, Any] | None:
     })
 
 
-def _bounded_data(value: Any) -> Any:
+def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:
     """Bound public resolver serialization without retaining secret overrides."""
 
+    budget = [_MAX_SERIALIZED_NODES] if budget is None else budget
+    if budget[0] <= 0 or depth > _MAX_SERIALIZED_DEPTH:
+        return {"__dryml_truncated__": "depth_or_size"}
+    budget[0] -= 1
     if isinstance(value, str):
         return value[:_MAX_SERIALIZED_STRING]
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, Mapping):
         return {
-            str(key)[:_MAX_SERIALIZED_STRING]: _bounded_data(item)
+            str(key)[:_MAX_SERIALIZED_STRING]: _bounded_data(item, depth=depth + 1, budget=budget)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:_MAX_SERIALIZED_ITEMS]
             if str(key) != "env"
         }
     if isinstance(value, (list, tuple)):
-        return [_bounded_data(item) for item in value[:_MAX_SERIALIZED_ITEMS]]
+        return [_bounded_data(item, depth=depth + 1, budget=budget) for item in value[:_MAX_SERIALIZED_ITEMS]]
     return value
 
 

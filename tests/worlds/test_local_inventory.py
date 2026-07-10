@@ -66,6 +66,21 @@ def test_external_inventory_failures_are_diagnostic_only(output):
     assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
 
 
+def test_external_inventory_discards_partial_output_and_negative_identifiers():
+    partial = " " * ((64 * 1024) - 1) + "12\n"
+    inventory = local_inventory(policy="external", command_runner=lambda *_args, **_kwargs: partial)
+    negative = local_inventory(policy="external", command_runner=lambda *_args, **_kwargs: "-1\n")
+
+    assert "gpu" not in inventory.accelerators
+    assert "gpu" not in negative.accelerators
+
+
+@pytest.mark.parametrize("field,value", (("accelerators", []), ("accelerators", ""), ("metadata", []), ("metadata", "")))
+def test_inventory_rejects_falsey_non_mapping_serialized_fields(field, value):
+    with pytest.raises(ResourceValidationError):
+        LocalResourceInventory.from_data({"cpus": [0], field: value})
+
+
 def test_inventory_import_path_does_not_load_framework_modules():
     command = (
         "import json, sys; "

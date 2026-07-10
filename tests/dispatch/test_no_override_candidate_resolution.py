@@ -3,7 +3,7 @@ from __future__ import annotations
 import dryml
 
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import ContainerEnvironmentSpec
+from dryml.environments import ContainerEnvironmentSpec, inspect_current
 from dryml.operations import make_function_call_spec
 from dryml.worlds import LocalResourceInventory
 
@@ -53,7 +53,18 @@ def test_unsupported_resolver_environment_is_structurally_nonlaunchable_under_ig
 
     assert explanation.resolution.environment_selection.source == "resolver"
     assert explanation.launchable is False
-    assert any(item.code == "dryml.dispatch.environment_probe_failed" for item in explanation.resolution.diagnostics)
+    assert any(item.code == "dryml.dispatch.environment_launch_unsupported" for item in explanation.resolution.diagnostics)
+
+
+def test_attached_record_does_not_bypass_unsupported_environment_launch():
+    explanation = Dispatcher().explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        environment={"spec": ContainerEnvironmentSpec("example/image").to_data(), "record": inspect_current().to_data()},
+        requirement_policy="ignore",
+    )
+
+    assert explanation.launchable is False
+    assert any(item.code == "dryml.dispatch.environment_launch_unsupported" for item in explanation.resolution.diagnostics)
 
 
 def test_explanation_formats_synthesized_inventory_summary():

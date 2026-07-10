@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+import sys
+import tempfile
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues
@@ -17,10 +19,13 @@ from .specs import (
     ContainerEnvironmentSpec,
     CurrentEnvironmentSpec,
     EnvironmentSpec,
+    ProbeWorkerCommand,
     PythonExecutableSpec,
     spec_from_data,
 )
 from .utils import build_probe_env
+
+_MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +115,9 @@ def probe(spec: EnvironmentSpec | None = None, *, timeout: float | None = 30.0) 
 
     spec = spec or CurrentEnvironmentSpec()
     if isinstance(spec, CurrentEnvironmentSpec):
-        return EnvironmentProbeResult(spec=spec, ok=True, record=inspect_current())
+        if timeout is None:
+            return EnvironmentProbeResult(spec=spec, ok=True, record=inspect_current())
+        return _probe_command(spec, [sys.executable, *ProbeWorkerCommand], timeout=timeout)
     if isinstance(spec, PythonExecutableSpec):
         return _probe_command(
             spec,
@@ -151,74 +158,53 @@ def _probe_command(
     timeout: float | None,
     env: dict[str, str] | None = None,
 ) -> EnvironmentProbeResult:
-    try:
-        completed = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return _failure_result(
-            spec,
-            "probe_timeout",
-            f"environment probe timed out after {timeout} seconds",
-            stdout=exc.stdout if isinstance(exc.stdout, str) else None,
-            stderr=exc.stderr if isinstance(exc.stderr, str) else None,
-        )
-    except OSError as exc:
-        return _failure_result(spec, "probe_failed", f"environment probe could not start: {exc}")
-
+    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        try:
+            completed = subprocess.run(command, stdout=stdout_file, stderr=stderr_file, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            stdout, stdout_truncated = _read_captured_output(stdout_file)
+            stderr, stderr_truncated = _read_captured_output(stderr_file)
+            return _capture_diagnostic(
+                _failure_result(spec, "probe_timeout", f"environment probe timed out after {timeout} seconds", stdout=stdout, stderr=stderr),
+                stdout_truncated or stderr_truncated,
+            )
+        except OSError as exc:
+            return _failure_result(spec, "probe_failed", f"environment probe could not start: {exc}")
+        stdout, stdout_truncated = _read_captured_output(stdout_file)
+        stderr, stderr_truncated = _read_captured_output(stderr_file)
+    truncated = stdout_truncated or stderr_truncated
     if completed.returncode != 0:
-        return _failure_result(
-            spec,
-            "probe_failed",
-            f"environment probe exited with status {completed.returncode}",
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            returncode=completed.returncode,
-        )
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe exited with status {completed.returncode}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     try:
-        payload = json.loads(completed.stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        return _failure_result(
-            spec,
-            "probe_failed",
-            f"environment probe returned malformed JSON: {exc}",
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            returncode=completed.returncode,
-        )
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe returned malformed JSON: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     if not payload.get("ok"):
         issue = payload.get("error") or "environment probe worker reported failure"
-        return _failure_result(
-            spec,
-            "probe_failed",
-            str(issue),
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            returncode=completed.returncode,
-        )
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", str(issue), stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     try:
         record = EnvironmentRecord.from_data(payload["record"])
     except (KeyError, TypeError, ValueError) as exc:
-        return _failure_result(
-            spec,
-            "probe_failed",
-            f"environment probe record could not be decoded: {exc}",
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            returncode=completed.returncode,
-        )
-    return EnvironmentProbeResult(
-        spec=spec,
-        ok=True,
-        record=record,
-        stdout=completed.stdout,
-        stderr=completed.stderr,
-        returncode=completed.returncode,
-    )
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe record could not be decoded: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    return _capture_diagnostic(EnvironmentProbeResult(spec=spec, ok=True, record=record, stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+
+
+def _read_captured_output(handle) -> tuple[str, bool]:
+    """Decode at most the bounded diagnostic prefix from a probe stream."""
+
+    handle.seek(0)
+    value = handle.read(_MAX_CAPTURED_OUTPUT_BYTES + 1)
+    return value[:_MAX_CAPTURED_OUTPUT_BYTES].decode("utf-8", errors="replace"), len(value) > _MAX_CAPTURED_OUTPUT_BYTES
+
+
+def _capture_diagnostic(result: EnvironmentProbeResult, truncated: bool) -> EnvironmentProbeResult:
+    """Mark captured probe output truncation without retaining excess bytes."""
+
+    if not truncated:
+        return result
+    issue = CompatibilityIssue("probe_output_truncated", "warning", "environment probe output was truncated")
+    issues = () if result.report is None else result.report.issues
+    return replace(result, report=report_from_issues((*issues, issue)))
 
 
 def probe_current() -> EnvironmentProbeResult:

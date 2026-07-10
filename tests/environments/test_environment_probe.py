@@ -113,7 +113,8 @@ def test_probe_pythonpath_policy_none_removes_parent_pythonpath(monkeypatch):
 
     def fake_run(command, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(returncode=0, stdout=json.dumps(sample_payload()), stderr="")
+        kwargs["stdout"].write(json.dumps(sample_payload()).encode())
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.setenv("PYTHONPATH", "/parent")
     monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
@@ -132,7 +133,8 @@ def test_probe_pythonpath_policy_explicit_uses_only_extra_paths(monkeypatch):
 
     def fake_run(command, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(returncode=0, stdout=json.dumps(sample_payload()), stderr="")
+        kwargs["stdout"].write(json.dumps(sample_payload()).encode())
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.setenv("PYTHONPATH", "/parent")
     monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
@@ -169,7 +171,8 @@ def test_conda_probe_uses_pythonpath_policy(monkeypatch):
 
     def fake_run(command, **kwargs):
         captured.update({"command": command, **kwargs})
-        return SimpleNamespace(returncode=0, stdout=json.dumps(sample_payload()), stderr="")
+        kwargs["stdout"].write(json.dumps(sample_payload()).encode())
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.setenv("PYTHONPATH", "/parent")
     monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
@@ -185,3 +188,18 @@ def test_conda_probe_uses_pythonpath_policy(monkeypatch):
     assert result.ok
     assert captured["command"][0] == "/conda/env/bin/python"
     assert captured["env"]["PYTHONPATH"] == "/only"
+
+
+def test_current_environment_probe_uses_bounded_worker_path(monkeypatch):
+    import importlib
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+    observed = []
+    expected = envs.EnvironmentProbeResult(envs.CurrentEnvironmentSpec(), True, record=envs.inspect_current())
+    monkeypatch.setattr(probe_module, "_probe_command", lambda spec, command, *, timeout, env=None: observed.append((spec, command, timeout)) or expected)
+
+    result = envs.probe(envs.CurrentEnvironmentSpec(), timeout=0.25)
+
+    assert result is expected
+    assert observed[0][1][0] == sys.executable
+    assert observed[0][2] == 0.25

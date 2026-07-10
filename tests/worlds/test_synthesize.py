@@ -47,3 +47,18 @@ def test_synthesize_rejects_unsupported_named_resources():
 
     assert result.status == "unsupported_requirement"
     assert result.diagnostics[0].code == "unsupported_named"
+
+
+def test_synthesis_result_serialization_is_bounded():
+    result = synthesize({"roles": {"worker": {"resources": {"named": {"x": {"min": 1}}}}}}, inventory=LocalResourceInventory((0,)))
+    bounded = result.__class__(
+        result.status,
+        result.requirement,
+        {"deep": {"value": "x" * 5000}},
+        result.world,
+        result.compatibility,
+        result.diagnostics,
+        result.policy,
+    ).to_data()
+
+    assert len(bounded["inventory"]["deep"]["value"]) == 4096

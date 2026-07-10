@@ -31,7 +31,7 @@ def test_explain_does_not_write_operation_records_for_importable_target(tmp_path
     store = DirStore(tmp_path / "store", query_index="none")
 
     explanation = Dispatcher(store=store).explain(gpu_target, allow_pickle=True, requirement_policy="ignore")
-    assert explanation.launchable is False
+    assert explanation.launchable is True
     assert any(item.code == "dryml.dispatch.world_synthesis_failed" for item in explanation.resolution.diagnostics)
     assert not store.records.specs_dir.exists()
 

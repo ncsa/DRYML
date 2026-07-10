@@ -182,6 +182,7 @@ class LocalWorldBackend:
         except Exception as exc:
             for future in futures.values():
                 future.cancel(reason="launch_failure")
+            _cleanup_worker_paths(plan)
             if not self.preserve_work_dir and not plan.preserve_work_dir:
                 shutil.rmtree(group_dir, ignore_errors=True)
             if isinstance(exc, DispatchLaunchError):
@@ -296,6 +297,7 @@ class LocalWorldFuture:
                 time.sleep(0.01)
         except KeyboardInterrupt:
             self.cancel(reason="KeyboardInterrupt")
+            self._cleanup()
             raise
         self._result = self._aggregate()
         self._cleanup()
@@ -398,11 +400,17 @@ class LocalWorldFuture:
         return WorldDispatchResult(status=status, dispatch_id=self.plan.dispatch_spec.get("id"), recipe_id=self.plan.execution_recipe.get("id"), world_id=self.plan.world_spec.get("id"), world_allocation_id=self.plan.world_allocation_spec.get("id"), primary=primary, workers=worker_results, execution_record_ids=execution_record_ids, produced_record_ids=produced_record_ids, diagnostics=tuple(diagnostics), error=first_error, cancellation=first_cancel)
 
     def _cleanup(self) -> None:
-        for worker_plan in self.plan.worker_plans:
-            for path in worker_plan.envelope.launch.get("cleanup_paths") or ():
-                shutil.rmtree(path, ignore_errors=True)
+        _cleanup_worker_paths(self.plan)
         if not self.preserve_work_dir:
             shutil.rmtree(self.group_work_dir, ignore_errors=True)
+
+
+def _cleanup_worker_paths(plan: LocalWorldPlan) -> None:
+    """Remove per-worker normalization artifacts after an abnormal path."""
+
+    for worker_plan in plan.worker_plans:
+        for path in worker_plan.envelope.launch.get("cleanup_paths") or ():
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def normalize_world_spec(world: Mapping[str, Any] | WorldSpec | None) -> Mapping[str, Any]:
@@ -495,7 +503,7 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
             env = dict(role.process.env)
             env.update(
                 {
-                    "DRYML_WORLD_ID": str(world_spec.get("id")),
+                    "DRYML_WORLD_ID": str(requested_world_id or world_spec.get("id")),
                     "DRYML_WORLD_ROLE": role_name,
                     "DRYML_WORLD_REPLICA": str(replica),
                     "DRYML_WORLD_RANK": str(rank),
@@ -536,7 +544,7 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
         role = world.roles[role_name]
         for replica in range(role.replicas):
             resources = role.process.resources
-            if resources.devices or resources.named:
+            if _has_positive_unsupported_resource(resources.devices) or _has_positive_unsupported_resource(resources.named):
                 raise DispatchPlanningError(
                     "local world allocation does not support named devices or resources",
                     context={"role": role_name, "devices": dict(resources.devices), "named": dict(resources.named)},
@@ -560,6 +568,21 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
                 if cursor + count > len(available):
                     raise DispatchPlanningError("local world accelerator request exceeds explicit inventory", context={"role": role_name, "replica": replica, "accelerator": acc_name, "requested": count, "available": len(available)})
                 accelerator_cursors[acc_name] = cursor + count
+
+
+def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:
+    """Return whether a concrete unsupported resource requests backend work."""
+
+    for value in values.values():
+        if isinstance(value, Mapping):
+            if _has_positive_unsupported_resource(value):
+                return True
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if value > 0:
+                return True
+        elif value:
+            return True
+    return False
 
 
 def _with_coordination(envelope: ExecutionEnvelope, *, group_dir: str, start_path: str, cancel_path: str, worker_key: WorldWorkerKey, start_timeout: float) -> ExecutionEnvelope:

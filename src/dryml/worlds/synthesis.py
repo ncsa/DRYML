@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,11 @@ from .errors import WorldCompatibilityError, WorldSpecValidationError
 from .inventory import LocalResourceInventory, local_inventory
 from .resources import CountConstraint
 from .specs import WorldRequirement, WorldSpec
+
+_MAX_SERIALIZATION_DEPTH = 8
+_MAX_SERIALIZATION_ITEMS = 64
+_MAX_SERIALIZATION_STRING = 4096
+_MAX_SERIALIZATION_NODES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +33,7 @@ class WorldSynthesisDiagnostic:
     def to_data(self) -> dict[str, Any]:
         """Return JSON-compatible diagnostic data."""
 
-        return {"code": self.code, "severity": self.severity, "message": self.message, "path": self.path, "expected": self.expected, "observed": self.observed}
+        return _bounded_data({"code": self.code, "severity": self.severity, "message": self.message, "path": self.path, "expected": self.expected, "observed": self.observed})
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +65,7 @@ class WorldSynthesisResult:
     def to_data(self) -> dict[str, Any]:
         """Return deterministic JSON-compatible result data."""
 
-        return {
+        data = {
             "status": self.status,
             "requirement": None if self.requirement is None else self.requirement.to_data(),
             "inventory": dict(self.inventory),
@@ -83,6 +89,7 @@ class WorldSynthesisResult:
             "diagnostics": [item.to_data() for item in self.diagnostics],
             "policy": self.policy,
         }
+        return _bounded_data(data)
 
 
 def synthesize(
@@ -202,6 +209,35 @@ def _validate_topology(topology: Mapping[str, Any], role: str) -> None:
 
 def _failure(status: str, requirement: WorldRequirement | None, inventory: LocalResourceInventory | None, policy: str, code: str, message: str, path: str | None = None, expected: Any | None = None, observed: Any | None = None) -> WorldSynthesisResult:
     return WorldSynthesisResult(status, requirement, {} if inventory is None else inventory.summary(), None, None, (WorldSynthesisDiagnostic(code, "error", message, path, expected, observed),), policy, inventory)
+
+
+def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:
+    """Return deterministic JSON-compatible data within public size limits."""
+
+    budget = [_MAX_SERIALIZATION_NODES] if budget is None else budget
+    if budget[0] <= 0 or depth > _MAX_SERIALIZATION_DEPTH:
+        return {"__dryml_truncated__": "depth_or_size"}
+    budget[0] -= 1
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, str):
+        return value[:_MAX_SERIALIZATION_STRING]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        result = {
+            str(key)[:_MAX_SERIALIZATION_STRING]: _bounded_data(item, depth=depth + 1, budget=budget)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:_MAX_SERIALIZATION_ITEMS]
+        }
+        if len(value) > _MAX_SERIALIZATION_ITEMS:
+            result["__dryml_truncated__"] = "items"
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [_bounded_data(item, depth=depth + 1, budget=budget) for item in value[:_MAX_SERIALIZATION_ITEMS]]
+        if len(value) > _MAX_SERIALIZATION_ITEMS:
+            result.append({"__dryml_truncated__": "items"})
+        return result
+    return str(value)[:_MAX_SERIALIZATION_STRING]
 
 
 __all__ = ["WorldSynthesisDiagnostic", "WorldSynthesisResult", "synthesize"]

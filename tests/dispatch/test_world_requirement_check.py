@@ -57,6 +57,19 @@ def test_single_subprocess_plan_rejects_resources_it_cannot_allocate(tmp_path):
         dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
 
 
+def test_single_subprocess_allows_zero_valued_unsupported_resources(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"devices": {"gpu": 0}, "named": {"scratch": 0}}}}}}
+
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["cpus"] == [0]
+
+
 def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
     world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2, "accelerators": {"gpu": 1}}}}}}
     plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
@@ -130,6 +143,16 @@ def test_plan_world_validates_actual_allocation_against_requirement(tmp_path):
         )
 
 
+def test_actual_allocation_requirement_respects_warn_and_ignore(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 0}}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    for policy in ("warn", "ignore"):
+        assert dispatcher.explain(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy).launchable
+        assert dispatcher.plan(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+        assert dispatcher.plan_world(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+
+
 def test_zero_memory_request_does_not_require_known_memory_inventory(tmp_path):
     world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"memory": "0B"}}}}}
 
@@ -141,3 +164,18 @@ def test_zero_memory_request_does_not_require_known_memory_inventory(tmp_path):
     )
 
     assert plan.envelope.allocation_view["memory"] == 0
+
+
+def test_local_subprocess_allocation_process_identity_uses_requested_world_id(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local_subprocess", "parameters": {}}}
+
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    allocation = plan.envelope.launch["world_allocation_spec"]
+    assert allocation["metadata"]["world_id"] == plan.envelope.launch["world_id"]
+    assert allocation["payload"]["roles"]["main"][0]["env"]["DRYML_WORLD_ID"] == plan.envelope.launch["world_id"]

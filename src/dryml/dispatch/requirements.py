@@ -348,8 +348,12 @@ def resolve_dispatch_plan(
         structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
     if world_synthesis is not None and not world_synthesis.ok:
         diagnostics.append(_diagnostic("dryml.dispatch.world_synthesis_failed", "Local world synthesis failed; inject inventory or pass/set a compatible world.", data=world_synthesis.to_data()))
-        # A fallback must not invent resources that synthesis could not prove.
-        structural_safe = False
+        # Ignore may run a feasible fallback without claiming it supplies the
+        # skipped requirement. Discovery and malformed-input failures cannot.
+        structural_safe = structural_safe and (
+            policy is RequirementPolicy.IGNORE
+            and world_synthesis.status in {"insufficient_inventory", "unsupported_requirement"}
+        )
     if normalized.launch.get("same_environment_only") and not _same_python_environment(env_spec):
         structural_safe = False
         diagnostics.append(_diagnostic(
@@ -455,12 +459,15 @@ def resolve_dispatch_plan(
                 resolution.world_requirement,
             )
             if allocation_requirement is not None and not allocation_requirement.ok:
-                structural_safe = False
-                diagnostics.append(_diagnostic(
-                    "dryml.dispatch.local_allocation_requirement_failed",
-                    "The executable local subprocess resource assignment does not satisfy the hard world requirement.",
-                    data={"issues": [_world_issue_data(issue) for issue in allocation_requirement.issues]},
-                ))
+                if policy is not RequirementPolicy.IGNORE:
+                    diagnostics.append(_diagnostic(
+                        "dryml.dispatch.local_allocation_requirement_failed",
+                        "The executable local subprocess resource assignment does not satisfy the hard world requirement.",
+                        severity="error" if policy is RequirementPolicy.STRICT else "warning",
+                        data={"issues": [_world_issue_data(issue) for issue in allocation_requirement.issues]},
+                    ))
+                if policy is RequirementPolicy.STRICT:
+                    structural_safe = False
         except Exception as exc:
             structural_safe = False
             diagnostics.append(_diagnostic(
@@ -837,7 +844,7 @@ def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requiremen
     for role_name, role in world.roles.items():
         process = role.process
         resources = process.resources
-        if resources.devices or resources.named:
+        if _has_positive_unsupported_resource(resources.devices) or _has_positive_unsupported_resource(resources.named):
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_resources_unsupported", "The local subprocess planner cannot allocate selected named devices or resources.", data={"role": role_name, "resources": resources.to_data()}))
         if process.environment is not None or process.runtime is not None or process.env or process.metadata:
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_process_settings_unsupported", "The local subprocess planner cannot enact selected role process settings.", data={"role": role_name, "process": process.to_data()}))
@@ -848,10 +855,28 @@ def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requiremen
     return tuple(diagnostics)
 
 
+def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:
+    """Return whether a concrete unsupported resource requests backend work."""
+
+    for value in values.values():
+        if isinstance(value, Mapping):
+            if _has_positive_unsupported_resource(value):
+                return True
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if value > 0:
+                return True
+        elif value:
+            return True
+    return False
+
+
 def _environment_record(env_data, requirement, code_probe, probe_environment, explicit_environment, policy, *, validate_candidate: bool, resolved_record=None):
     if requirement is None and not validate_candidate:
         return None, ()
     spec = spec_from_data(env_data)
+    launch_error = _environment_launch_error(env_data)
+    if launch_error is not None:
+        return None, (launch_error,)
     attached = _attached_environment_record(explicit_environment, env_data)
     if attached is not None:
         return attached, ()
@@ -871,8 +896,30 @@ def _resolution_record_for(result, candidate: Mapping[str, Any]) -> EnvironmentR
     if result.selected_record is not None and result.selected is not None and result.selected.to_data() == candidate:
         return result.selected_record
     for attempt in result.attempts:
-        if attempt.probe is not None and attempt.probe.record is not None and attempt.spec.to_data() == candidate:
+        if (
+            attempt.status in {"selected", "incompatible"}
+            and attempt.probe is not None
+            and attempt.probe.ok
+            and attempt.probe.record is not None
+            and attempt.spec.to_data() == candidate
+        ):
             return attempt.probe.record
+    return None
+
+
+def _environment_launch_error(env_data: Mapping[str, Any]) -> DiagnosticFact | None:
+    """Validate local worker command construction without launching a worker."""
+
+    try:
+        from .backends import build_worker_command
+
+        build_worker_command(env_data)
+    except Exception as exc:
+        return _diagnostic(
+            "dryml.dispatch.environment_launch_unsupported",
+            "The selected environment cannot be launched by the local subprocess backend.",
+            data={"candidate": env_data, "error": type(exc).__name__},
+        )
     return None
 
 

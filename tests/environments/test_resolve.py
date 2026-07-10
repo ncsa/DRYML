@@ -70,7 +70,7 @@ def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
         probe_runner=lambda spec, *, timeout: calls.append(spec) or EnvironmentProbeResult(spec, False),
     )
 
-    assert [attempt.status for attempt in result.attempts] == ["probe_failed", "not_considered_limit", "not_considered_limit"]
+    assert [attempt.status for attempt in result.attempts] == ["probe_failed", "not_considered_limit"]
     assert len(calls) == 1
 
 
@@ -109,3 +109,52 @@ def test_resolver_metadata_bounds_large_candidate_values():
     result = resolve(None, candidates=(PythonExecutableSpec("x" * 5000),), include_current=False)
 
     assert len(result.to_data()["selected"]["executable"]) == 4096
+
+
+def test_resolver_continues_after_the_bounded_duplicate_trace():
+    requirement = EnvironmentRequirement(tags=("selected",))
+    rejected = PythonExecutableSpec("/rejected/python")
+    selected = PythonExecutableSpec("/selected/python")
+
+    def runner(spec, *, timeout):
+        return EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=("selected",) if spec == selected else ()))
+
+    result = resolve(
+        requirement,
+        candidates=(rejected, *((rejected.to_data(),) * 32), selected),
+        include_current=False,
+        probe_runner=runner,
+    )
+
+    assert result.selected == selected
+    assert len(result.attempts) == 32
+    assert any(issue.code == "resolver_trace_truncated" for issue in result.diagnostics)
+
+
+def test_resolver_continues_after_a_invalid_probe_runner_result():
+    requirement = EnvironmentRequirement(tags=("selected",))
+    rejected = PythonExecutableSpec("/invalid/python")
+    selected = PythonExecutableSpec("/selected/python")
+
+    result = resolve(
+        requirement,
+        candidates=(rejected, selected),
+        include_current=False,
+        probe_runner=lambda spec, *, timeout: None if spec == rejected else EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=("selected",))),
+    )
+
+    assert result.selected == selected
+    assert result.attempts[0].status == "probe_failed"
+    assert result.attempts[0].diagnostics[0].message == "environment probe raised TypeError"
+
+
+def test_resolver_does_not_serialize_probe_exception_secrets():
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(PythonExecutableSpec("/first/python", env={"TOKEN": "secret"}),),
+        include_current=False,
+        probe_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("TOKEN=secret")),
+    )
+
+    assert "TOKEN" not in str(result.to_data())
+    assert "secret" not in str(result.to_data())

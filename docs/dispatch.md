@@ -97,7 +97,9 @@ solve/install packages, or perform dynamic tracing. It does run the same
 non-allocating local capacity validation as planning, so an explanation is not
 launchable when the selected one-worker world cannot fit the supplied or
 discovered inventory. `plan(...)` and `plan_world(...)` then validate the actual
-backend allocation against hard world requirements before constructing workers.
+backend allocation against hard world requirements before constructing workers
+when requirement policy is `strict`; `warn` and `ignore` retain their established
+compatibility semantics while never bypassing allocation feasibility.
 
 ## Local Worlds
 

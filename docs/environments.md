@@ -156,4 +156,6 @@ selects the first strictly compatible candidate. Registry labels are only probe
 prefilters, never proof of compatibility. `max_candidates`, `probe_timeout`,
 and `total_timeout` bound search work; a finite total timeout also bounds a
 probe when no per-probe timeout is supplied. Resolver reports redact environment
-overrides and truncate diagnostic metadata before serialization.
+overrides and bound diagnostic metadata before serialization. Current-environment
+resolver probes use the bounded probe worker path rather than synchronous local
+introspection.
