@@ -37,6 +37,14 @@ def test_environment_record_roundtrip_and_id_stability():
     assert clone.id == record.id
 
 
+def test_direct_nullable_mapping_construction_roundtrips():
+    record = sample_record(details=None, dryml=envs.DrymlRuntimeRecord(schema_versions=None))  # type: ignore[arg-type]
+
+    assert record.to_data()["details"] == {}
+    assert record.to_data()["dryml"]["schema_versions"] == {}
+    assert envs.EnvironmentRecord.from_data(record.to_data()).to_data() == record.to_data()
+
+
 def test_environment_record_distribution_keys_are_normalized_and_order_stable():
     first = sample_record(distributions={"Foo_Bar": envs.PackageRecord("Foo_Bar", "1")})
     second = sample_record(distributions={"foo-bar": envs.PackageRecord("Foo_Bar", "1")})

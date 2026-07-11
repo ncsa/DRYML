@@ -1,6 +1,8 @@
 import os
+import signal
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +33,28 @@ class _FakeProcess:
 
     def wait(self, timeout=None):
         return 0
+
+
+class _LeaderExitsOnSignalProcess:
+    pid = 123
+
+    def __init__(self):
+        self.returncode = None
+        self.signals = []
+        self.kill_calls = 0
+
+    def poll(self):
+        return self.returncode
+
+    def send_signal(self, signal):
+        self.signals.append(signal)
+        self.returncode = 0
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.kill_calls += 1
 
 
 class _FakeWorldWorkerFuture:
@@ -455,6 +479,62 @@ def test_successful_worker_cleanup_kills_only_backend_owned_process_group(tmp_pa
     assert len(signals) == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process-group signaling is POSIX-specific")
+def test_cancel_reaps_backend_group_after_signal_exits_leader(tmp_path, monkeypatch):
+    process = _LeaderExitsOnSignalProcess()
+    future = LocalSubprocessFuture(
+        process,
+        SimpleNamespace(envelope=SimpleNamespace(operation_id="op")),
+        str(tmp_path / "worker"),
+        str(tmp_path / "request.json"),
+        str(tmp_path / "handshake.json"),
+        str(tmp_path / "response.json"),
+        str(tmp_path / "stdout.txt"),
+        str(tmp_path / "stderr.txt"),
+        process_group=True,
+    )
+    signals = []
+
+    def killpg(pid, sig):
+        signals.append((pid, sig))
+        if sig == signal.SIGINT:
+            process.returncode = 0
+
+    monkeypatch.setattr("dryml.dispatch.backends.os.killpg", killpg)
+
+    assert future.cancel(record=False) is True
+
+    assert process.signals == []
+    assert signals == [(process.pid, signal.SIGINT), (process.pid, signal.SIGKILL)]
+
+
+def test_cancel_uses_taskkill_for_owned_windows_worker_tree(tmp_path, monkeypatch):
+    import dryml.dispatch.backends as backends
+
+    process = _LeaderExitsOnSignalProcess()
+    future = LocalSubprocessFuture(
+        process,
+        SimpleNamespace(envelope=SimpleNamespace(operation_id="op")),
+        str(tmp_path / "worker"),
+        str(tmp_path / "request.json"),
+        str(tmp_path / "handshake.json"),
+        str(tmp_path / "response.json"),
+        str(tmp_path / "stdout.txt"),
+        str(tmp_path / "stderr.txt"),
+        process_tree=True,
+    )
+    commands = []
+    monkeypatch.setattr(backends.os, "name", "nt")
+    monkeypatch.setattr(backends.subprocess, "run", lambda command, **kwargs: commands.append((command, kwargs)))
+
+    assert future.cancel(record=False) is True
+
+    assert commands == [
+        (["taskkill", "/PID", str(process.pid), "/T", "/F"], {"check": False, "stdout": backends.subprocess.DEVNULL, "stderr": backends.subprocess.DEVNULL, "timeout": 5})
+    ]
+    assert process.kill_calls == 1
+
+
 def test_world_result_cleans_artifacts_after_aggregate_failure(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
@@ -599,4 +679,22 @@ def test_explicit_local_world_uses_configured_inventory_policy(tmp_path, monkeyp
     )
 
     assert observed == ["external"]
-    assert plan.dispatch_spec["payload"]["metadata"]["dryml.local_inventory"]["cpu_count"] == 1
+    assert plan.dispatch_spec["payload"]["metadata"]["dryml.local_inventory"] is None
+
+
+def test_requirement_free_plan_world_inventory_summary_stays_out_of_dispatch_identity(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
+    operation = make_function_call_spec("operator:add", args=[1, 2])
+    left = Dispatcher(store=DirStore(tmp_path / "left", query_index="none")).plan_world(
+        operation,
+        world=world,
+        inventory=LocalResourceInventory((0,), metadata={"observed_at": "first"}),
+    )
+    right = Dispatcher(store=DirStore(tmp_path / "right", query_index="none")).plan_world(
+        operation,
+        world=world,
+        inventory=LocalResourceInventory((0,), metadata={"observed_at": "second"}),
+    )
+
+    assert left.dispatch_spec["payload"]["metadata"]["dryml.local_inventory"] is None
+    assert left.dispatch_spec["id"] == right.dispatch_spec["id"]

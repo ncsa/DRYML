@@ -51,7 +51,7 @@ class EnvironmentResolutionAttempt:
             "status": self.status,
             "probe": _probe_summary(self.probe),
             "probe_duration_s": self.probe_duration_s,
-            "compatibility": None if self.compatibility is None else self.compatibility.to_data(),
+            "compatibility": None if self.compatibility is None else _report_summary(self.compatibility),
             "diagnostics": [issue.to_data() for issue in self.diagnostics],
         })
 
@@ -124,9 +124,10 @@ def resolve(
     callback boundaries. When only a total timeout is supplied, its remaining
     duration is passed to each probe. Injected runners and arbitrary candidate
     iterators are cooperative and must enforce their own hard deadlines.
-    Raw candidate input is limited to ``max_candidates`` plus fixed alias
-    headroom; truncation is reported rather than implying arbitrary iterators
-    can be searched without bound.
+    Raw caller and registry input is limited to ``max_candidates + 256`` items,
+    including aliases; truncation returns ``incomplete`` rather than claiming
+    that no candidate matched. Injected iterators and runners are cooperative
+    and must yield control for total-timeout checks to take effect.
     Returned attempt metadata is redacted and size-bounded.
     """
 
@@ -142,16 +143,10 @@ def resolve(
     now = time.monotonic if clock is None else clock
     started = now()
     deadline = None if total_timeout is None else started + total_timeout
-    # ``max_candidates`` constrains unique identities. Raw inputs get bounded
-    # headroom so aliases do not consume that limit or hide later unique specs.
-    # Caller-owned finite sequences can be deduplicated completely without
-    # risking an iterator that never yields a second identity. Arbitrary
-    # iterators remain bounded by explicit alias headroom.
-    raw_candidate_limit = (
-        None
-        if isinstance(candidates, (list, tuple))
-        else max_candidates + _MAX_RAW_CANDIDATE_HEADROOM
-    )
+    # ``max_candidates`` constrains unique identities. Every raw source gets
+    # fixed alias headroom, including finite sequences and registry entries.
+    # This prevents a large alias prefix from making intake unbounded.
+    raw_candidate_limit = max_candidates + _MAX_RAW_CANDIDATE_HEADROOM
     raw_candidates, candidates_truncated, candidates_timed_out = _normalize_candidates(
         candidates,
         max_items=raw_candidate_limit,
@@ -163,9 +158,12 @@ def resolve(
     seen: set[str] = set()
     considered = 0
     truncated = False
-    registry_entries, registry_truncated = _registry_entries(
+    registry_entries, registry_state = _registry_entries(
         registry,
-        limit=None,
+        max_items=raw_candidate_limit,
+        select_first=requirement is None,
+        now=now,
+        deadline=deadline,
     )
 
     def record(attempt: EnvironmentResolutionAttempt) -> None:
@@ -183,14 +181,18 @@ def resolve(
             diagnostics.append(CompatibilityIssue("resolver_candidates_truncated", "warning", "resolver candidate input was truncated", expected=raw_candidate_limit))
         if candidates_timed_out:
             diagnostics.append(CompatibilityIssue("resolver_candidate_input_timeout", "warning", "resolver candidate input exceeded the total timeout"))
-        if registry_truncated:
+        if registry_state["truncated"]:
             diagnostics.append(CompatibilityIssue("resolver_registry_truncated", "warning", "registry candidate input was truncated before a compatible candidate was found"))
+        if registry_state["timed_out"]:
+            diagnostics.append(CompatibilityIssue("resolver_candidate_input_timeout", "warning", "registry candidate input exceeded the total timeout"))
         return tuple(diagnostics)
 
     for source, name, spec, entry in _candidates(
         raw_candidates,
         registry_entries,
         include_current,
+        candidates_truncated=candidates_truncated,
+        registry_state=registry_state,
     ):
         if total_timeout is not None and now() - started >= total_timeout:
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
@@ -275,6 +277,10 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report, probe_duration_s=probe_duration_s))
             return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), result_diagnostics(), policy)
         record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues, probe_duration_s))
+    if candidates_truncated or registry_state["truncated"]:
+        diagnostics = [CompatibilityIssue("resolver_input_truncated", "error", "environment candidate input was truncated before compatibility could be determined")]
+        diagnostics.extend(result_diagnostics())
+        return EnvironmentResolution("incomplete", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
     diagnostics = [CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())]
     diagnostics.extend(result_diagnostics())
     return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
@@ -282,25 +288,57 @@ def resolve(
 
 def _candidates(
     candidates: Iterable[tuple[str, str | None, EnvironmentSpec, Any]],
-    registry_entries: Iterable[Any],
+    registry_entries: Iterable[tuple[str, str | None, EnvironmentSpec, Any]],
     include_current: bool,
+    *,
+    candidates_truncated: bool,
+    registry_state: Mapping[str, bool],
 ) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
     for candidate in candidates:
         yield candidate
+    # An omitted caller candidate could take precedence over every registry or
+    # current candidate. Do not silently select a lower-precedence source.
+    if candidates_truncated:
+        return
     for entry in registry_entries:
-        yield "registry", entry.name, entry.spec, entry
+        yield entry
+    # Registry entries likewise precede the implicit current environment.
+    if registry_state["truncated"] or registry_state["timed_out"]:
+        return
     if include_current:
         yield "current", None, CurrentEnvironmentSpec(), None
 
 
-def _registry_entries(registry: Any, *, limit: int | None) -> tuple[Iterable[Any], bool]:
-    """Return deterministic registry entries without alias-prefix truncation."""
+def _registry_entries(
+    registry: Any,
+    *,
+    max_items: int,
+    select_first: bool,
+    now: Callable[[], float],
+    deadline: float | None,
+) -> tuple[Iterable[tuple[str, str | None, EnvironmentSpec, Any]], dict[str, bool]]:
+    """Lazily normalize a finite, deterministic registry entry prefix."""
 
+    state = {"truncated": False, "timed_out": False}
     if registry is None:
-        return (), False
-    if hasattr(registry, "iter_entries"):
-        return registry.iter_entries(limit=limit), False
-    return iter(registry.list()), False
+        return (), state
+
+    def entries() -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
+        if deadline is not None and now() >= deadline:
+            state["timed_out"] = True
+            return
+        raw_entries = registry.iter_entries() if hasattr(registry, "iter_entries") else iter(registry.list())
+        normalized, state["truncated"], state["timed_out"] = _normalize_candidates(
+            raw_entries,
+            max_items=max_items,
+            select_first=select_first,
+            now=now,
+            deadline=deadline,
+            source="registry",
+        )
+        yield from normalized
+
+    return entries(), state
 
 
 def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, EnvironmentSpec, Any]:
@@ -333,6 +371,7 @@ def _normalize_candidates(
     select_first: bool,
     now: Callable[[], float],
     deadline: float | None,
+    source: str = "candidate",
 ) -> tuple[tuple[tuple[str, str | None, EnvironmentSpec, Any], ...], bool, bool]:
     """Normalize the bounded caller candidate prefix before any probe starts."""
 
@@ -353,7 +392,7 @@ def _normalize_candidates(
         values.append(value)
         if select_first:
             try:
-                _source, _name, spec, _entry = _normalize_candidate(value, "candidate")
+                _source, _name, spec, _entry = _normalize_candidate(value, source)
             except Exception as exc:
                 raise ValueError(f"invalid environment resolver candidate: {type(exc).__name__}") from exc
             if _structural_candidate_issue(spec) is None:
@@ -367,7 +406,7 @@ def _normalize_candidates(
             if deadline is not None and now() >= deadline:
                 timed_out = True
                 break
-            normalized.append(_normalize_candidate(candidate, "candidate"))
+            normalized.append(_normalize_candidate(candidate, source))
             if deadline is not None and now() >= deadline:
                 timed_out = True
                 break
@@ -460,8 +499,19 @@ def _probe_summary(result: EnvironmentProbeResult | None) -> dict[str, Any] | No
     return _bounded_data({
         "ok": result.ok,
         "returncode": result.returncode,
-        "report": None if result.report is None else result.report.to_data(),
+        "report": None if result.report is None else _report_summary(result.report),
     })
+
+
+def _report_summary(report: CompatibilityReport) -> dict[str, Any]:
+    """Return public compatibility metadata without injected detail values."""
+
+    return {
+        "schema_version": report.schema_version,
+        "status": report.status,
+        "issues": [issue.to_data() for issue in report.issues],
+        "details": {"redacted": True},
+    }
 
 
 def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:

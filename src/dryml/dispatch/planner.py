@@ -345,7 +345,14 @@ class Dispatcher:
                 selected_inventory = worlds.local_inventory(policy=effective_inventory_policy)
                 resolution = replace(
                     resolution,
-                    inventory_summary=selected_inventory.summary(),
+                    # Allocation still needs the discovered inventory, but a
+                    # requirement-free fallback must not make host observations
+                    # part of dispatch intent identity.
+                    inventory_summary=(
+                        selected_inventory.summary()
+                        if resolution.world_synthesis is not None or resolution.requirements.world_requirement is not None
+                        else None
+                    ),
                     local_inventory=selected_inventory,
                 )
             allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)

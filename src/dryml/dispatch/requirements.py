@@ -353,7 +353,15 @@ def resolve_dispatch_plan(
     runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
     structural_safe = True
     if environment_resolution is not None and not environment_resolution.ok:
-        diagnostics.append(_diagnostic("dryml.dispatch.environment_resolver_no_match", "No resolver candidate satisfied the environment requirement; pass, register, or set a compatible environment.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data=environment_resolution.to_data()))
+        incomplete = environment_resolution.status == "incomplete"
+        diagnostics.append(_diagnostic(
+            "dryml.dispatch.environment_resolver_incomplete" if incomplete else "dryml.dispatch.environment_resolver_no_match",
+            "Environment candidate input was truncated before compatibility could be determined; pass, register, or set a compatible environment."
+            if incomplete
+            else "No resolver candidate satisfied the environment requirement; pass, register, or set a compatible environment.",
+            severity="error" if policy is RequirementPolicy.STRICT else "warning",
+            data=environment_resolution.to_data(),
+        ))
         structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
     if world_synthesis is not None and not world_synthesis.ok:
         synthesis_structural = world_synthesis.status not in {"insufficient_inventory", "unsupported_requirement"}
@@ -803,7 +811,7 @@ def _select_environment(
             data = result.selected.to_data()
             return CandidateSelection("environment", data, "resolver", considered + (CandidateConsideration("resolver", "selected", data),)), data, result
         fallback = environments.CurrentEnvironmentSpec().to_data()
-        return CandidateSelection("environment", fallback, "fallback", considered + (CandidateConsideration("resolver", "no_match"), CandidateConsideration("fallback", "selected", fallback))), fallback, result
+        return CandidateSelection("environment", fallback, "fallback", considered + (CandidateConsideration("resolver", result.status), CandidateConsideration("fallback", "selected", fallback))), fallback, result
     selection, data = _select("environment", (("fallback", environments.CurrentEnvironmentSpec()),), _environment_data)
     return selection, data, None
 

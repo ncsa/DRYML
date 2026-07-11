@@ -16,6 +16,11 @@ from .errors import ResourceValidationError, WorldSpecValidationError
 from .resources import CountConstraint, ResourceRequirement, ResourceSpec
 
 _ROLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_MAX_TOPOLOGY_DEPTH = 8
+_MAX_TOPOLOGY_ITEMS = 64
+_MAX_TOPOLOGY_STRING = 4096
+_MAX_TOPOLOGY_NODES = 1024
+_MAX_TOPOLOGY_INTEGER_BITS = 4096
 
 
 def _validated_process_env(value: Any) -> dict[str, str]:
@@ -65,17 +70,17 @@ class RoleRequirement:
         topology = data["topology"] if "topology" in data else {}
         if not isinstance(topology, Mapping):
             raise WorldSpecValidationError("role topology must be a mapping", context={"type": type(topology).__name__})
-        topology = _normalize_topology(topology)
-        if topology.get("single_process") is not None and not isinstance(topology["single_process"], bool):
-            raise WorldSpecValidationError("topology single_process must be a boolean or null")
         try:
-            return cls(
+            requirement = cls(
                 replicas=CountConstraint.from_data(data.get("replicas", {"exact": 1}), path="replicas"),
                 resources=ResourceRequirement.from_data(data.get("resources") or {}),
                 topology=topology,
             )
         except ResourceValidationError as exc:
             raise WorldSpecValidationError(str(exc), context=exc.context) from exc
+        if requirement.topology.get("single_process") is not None and not isinstance(requirement.topology["single_process"], bool):
+            raise WorldSpecValidationError("topology single_process must be a boolean or null")
+        return requirement
 
     def to_data(self) -> dict[str, Any]:
         """Return canonical JSON-ready role requirement data."""
@@ -83,7 +88,7 @@ class RoleRequirement:
         return {
             "replicas": self.replicas.to_data(),
             "resources": self.resources.to_data(),
-            "topology": _topology_to_data(_normalize_topology(self.topology)),
+            "topology": _topology_to_data(self.topology),
         }
 
     def merge(self, other: "RoleRequirement", *, path: str) -> "RoleRequirement":
@@ -317,10 +322,33 @@ def _iter_valid_roles(roles: Mapping[str, Any]):
         yield name, value
 
 
-def _normalize_topology(value: Any, *, path: str = "topology", ancestors: set[int] | None = None) -> Any:
-    """Return a frozen JSON-safe topology value without coercing arbitrary objects."""
+def _normalize_topology(
+    value: Any,
+    *,
+    path: str = "topology",
+    ancestors: set[int] | None = None,
+    depth: int = 0,
+    budget: list[int] | None = None,
+) -> Any:
+    """Return a bounded frozen JSON-safe topology without arbitrary coercion."""
 
+    if depth > _MAX_TOPOLOGY_DEPTH:
+        raise WorldSpecValidationError(
+            "role topology nesting exceeds the bounded limit",
+            context={"path": path, "limit": _MAX_TOPOLOGY_DEPTH},
+        )
+    budget = [_MAX_TOPOLOGY_NODES] if budget is None else budget
+    if budget[0] <= 0:
+        raise WorldSpecValidationError(
+            "role topology exceeds the aggregate bounded limit",
+            context={"path": path, "limit": _MAX_TOPOLOGY_NODES},
+        )
+    budget[0] -= 1
     if value is None or isinstance(value, (bool, int, str)):
+        if isinstance(value, int) and not isinstance(value, bool) and value.bit_length() > _MAX_TOPOLOGY_INTEGER_BITS:
+            raise WorldSpecValidationError("role topology integer exceeds the bounded limit", context={"path": path})
+        if isinstance(value, str) and len(value) > _MAX_TOPOLOGY_STRING:
+            raise WorldSpecValidationError("role topology string exceeds the bounded limit", context={"path": path})
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -328,10 +356,17 @@ def _normalize_topology(value: Any, *, path: str = "topology", ancestors: set[in
         return value
     ancestors = set() if ancestors is None else ancestors
     if isinstance(value, Mapping):
+        if len(value) > _MAX_TOPOLOGY_ITEMS:
+            raise WorldSpecValidationError(
+                "role topology mapping exceeds the bounded limit",
+                context={"path": path, "limit": _MAX_TOPOLOGY_ITEMS},
+            )
         if path == "topology" and any(not isinstance(key, str) or not key for key in value):
             raise WorldSpecValidationError("role topology names must be non-empty strings")
         if any(not isinstance(key, str) for key in value):
             raise WorldSpecValidationError("role topology object keys must be strings", context={"path": path})
+        if any(len(key) > _MAX_TOPOLOGY_STRING for key in value):
+            raise WorldSpecValidationError("role topology key exceeds the bounded limit", context={"path": path})
         identity = id(value)
         if identity in ancestors:
             raise WorldSpecValidationError("role topology must not contain cycles", context={"path": path})
@@ -339,20 +374,37 @@ def _normalize_topology(value: Any, *, path: str = "topology", ancestors: set[in
         try:
             return MappingProxyType(
                 {
-                    key: _normalize_topology(item, path=f"{path}.{key}", ancestors=ancestors)
+                    key: _normalize_topology(
+                        item,
+                        path=f"{path}.{key}",
+                        ancestors=ancestors,
+                        depth=depth + 1,
+                        budget=budget,
+                    )
                     for key, item in sorted(value.items())
                 }
             )
         finally:
             ancestors.remove(identity)
     if isinstance(value, (list, tuple)):
+        if len(value) > _MAX_TOPOLOGY_ITEMS:
+            raise WorldSpecValidationError(
+                "role topology sequence exceeds the bounded limit",
+                context={"path": path, "limit": _MAX_TOPOLOGY_ITEMS},
+            )
         identity = id(value)
         if identity in ancestors:
             raise WorldSpecValidationError("role topology must not contain cycles", context={"path": path})
         ancestors.add(identity)
         try:
             return tuple(
-                _normalize_topology(item, path=f"{path}[{index}]", ancestors=ancestors)
+                _normalize_topology(
+                    item,
+                    path=f"{path}[{index}]",
+                    ancestors=ancestors,
+                    depth=depth + 1,
+                    budget=budget,
+                )
                 for index, item in enumerate(value)
             )
         finally:

@@ -204,7 +204,7 @@ class DrymlRuntimeRecord:
     schema_version: int = ENVIRONMENT_RECORD_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_versions", deep_freeze_json(self.schema_versions))
+        object.__setattr__(self, "schema_versions", deep_freeze_json({} if self.schema_versions is None else self.schema_versions))
         object.__setattr__(self, "features", tuple(sorted(str(item) for item in coerce_tuple(self.features))))
 
     def to_data(self) -> dict[str, Any]:
@@ -263,7 +263,7 @@ class EnvironmentRecord:
             packages[normalize_distribution_name(key)] = pkg
         object.__setattr__(self, "distributions", freeze_mapping(packages))
         object.__setattr__(self, "tags", tuple(sorted(str(item) for item in coerce_tuple(self.tags))))
-        object.__setattr__(self, "details", deep_freeze_json(self.details))
+        object.__setattr__(self, "details", deep_freeze_json({} if self.details is None else self.details))
 
     @property
     def id(self) -> str:

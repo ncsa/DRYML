@@ -110,6 +110,21 @@ def test_resolve_stops_lazy_candidates_after_requirement_free_selection():
     assert result.ok
 
 
+def test_resolve_defers_registry_iterator_until_needed():
+    class UnusedRegistry:
+        def iter_entries(self):
+            raise AssertionError("resolver invoked an unused registry callback")
+
+    result = resolve(
+        None,
+        candidates=(CurrentEnvironmentSpec(),),
+        registry=UnusedRegistry(),
+        include_current=False,
+    )
+
+    assert result.ok
+
+
 def test_resolver_metadata_redacts_environment_overrides():
     result = resolve(None, candidates=(PythonExecutableSpec("/python", env={"TOKEN": "secret"}),), include_current=False)
 
@@ -137,7 +152,7 @@ def test_resolver_metadata_bounds_large_candidate_values():
     assert len(result.to_data()["selected"]["executable"]) == 4096
 
 
-def test_resolver_continues_after_the_bounded_duplicate_trace():
+def test_resolver_reports_incomplete_after_bounded_duplicate_sequence():
     requirement = EnvironmentRequirement(tags=("selected",))
     rejected = PythonExecutableSpec("/rejected/python")
     selected = PythonExecutableSpec("/selected/python")
@@ -152,10 +167,12 @@ def test_resolver_continues_after_the_bounded_duplicate_trace():
         probe_runner=runner,
     )
 
-    assert result.selected == selected
+    assert result.status == "incomplete"
+    assert result.selected is None
     assert len(result.attempts) == 32
     assert any(issue.code == "resolver_trace_truncated" for issue in result.diagnostics)
-    assert result.to_data()["selected_probe"]["ok"] is True
+    assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
+    assert any(issue.code == "resolver_input_truncated" for issue in result.diagnostics)
 
 
 def test_resolver_continues_after_a_invalid_probe_runner_result():
@@ -204,13 +221,13 @@ def test_resolver_bounds_duplicate_only_candidate_input():
         probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, False),
     )
 
-    assert result.status == "no_match"
+    assert result.status == "incomplete"
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
 
 
-def test_resolver_reaches_unique_registry_candidates_after_aliases():
+def test_resolver_reports_incomplete_after_bounded_registry_aliases():
     registry = EnvironmentRegistry()
-    for index in range(40):
+    for index in range(300):
         registry.register(f"alias-{index:02}", CurrentEnvironmentSpec())
     registry.register("selected", PythonExecutableSpec("/selected/python"))
 
@@ -230,8 +247,10 @@ def test_resolver_reaches_unique_registry_candidates_after_aliases():
         else EnvironmentProbeResult(spec, False),
     )
 
-    assert result.selected_name == "selected"
-    assert not any(issue.code == "resolver_registry_truncated" for issue in result.diagnostics)
+    assert result.status == "incomplete"
+    assert result.selected_name is None
+    assert any(issue.code == "resolver_registry_truncated" for issue in result.diagnostics)
+    assert any(issue.code == "resolver_input_truncated" for issue in result.diagnostics)
 
 
 def test_resolver_rejects_invalid_candidate_before_running_any_probe():
@@ -406,4 +425,91 @@ def test_resolver_serialization_redacts_non_json_injected_probe_evidence():
 
     data = result.to_data()
     assert json.loads(json.dumps(data))
-    assert data["attempts"][0]["probe"]["report"]["details"]["opaque"] == {"__dryml_unsupported_type__": "bytes"}
+    assert data["attempts"][0]["probe"]["report"]["details"] == {"redacted": True}
+
+
+@pytest.mark.parametrize("aliases", [list, tuple])
+def test_resolver_bounds_finite_list_and_tuple_aliases(aliases):
+    rejected = PythonExecutableSpec("/rejected/python")
+    selected = PythonExecutableSpec("/selected/python")
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=aliases([rejected, *((rejected.to_data(),) * 300), selected]),
+        include_current=False,
+        max_candidates=1,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, False),
+    )
+
+    assert result.status == "incomplete"
+    assert result.selected is None
+    assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
+
+
+def test_resolver_does_not_select_lower_precedence_registry_after_candidate_truncation():
+    rejected = PythonExecutableSpec("/rejected/python")
+    registry = EnvironmentRegistry()
+    registry.register("selected", PythonExecutableSpec("/selected/python"))
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(rejected, *((rejected.to_data(),) * 300)),
+        registry=registry,
+        include_current=False,
+        max_candidates=1,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
+            spec,
+            True,
+            record=replace(
+                inspect_current(),
+                tags=("wanted",) if spec.executable == "/selected/python" else (),
+            ),
+        ),
+    )
+
+    assert result.status == "incomplete"
+    assert result.selected is None
+    assert all(attempt.source != "registry" for attempt in result.attempts)
+
+
+def test_resolver_does_not_select_current_after_registry_truncation():
+    rejected = CurrentEnvironmentSpec()
+    registry = EnvironmentRegistry()
+    for index in range(300):
+        registry.register(f"alias-{index:03}", rejected)
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        registry=registry,
+        include_current=True,
+        max_candidates=1,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
+            spec,
+            True,
+            record=replace(inspect_current(), tags=()),
+        ),
+    )
+
+    assert result.status == "incomplete"
+    assert result.selected is None
+    assert all(attempt.source != "current" for attempt in result.attempts)
+
+
+def test_resolver_serialization_redacts_injected_report_detail_secrets():
+    from dryml.environments.compatibility import CompatibilityReport
+
+    secret = "TOKEN=secret"
+    spec = PythonExecutableSpec("/candidate/python")
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda candidate, *, timeout: EnvironmentProbeResult(
+            candidate,
+            False,
+            report=CompatibilityReport("incompatible", details={"TOKEN": secret}),
+        ),
+    )
+
+    assert "TOKEN" not in str(result.to_data())
+    assert secret not in str(result.to_data())

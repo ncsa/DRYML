@@ -28,6 +28,7 @@ _MAX_INTEGER_BITS = 4096
 _MAX_CPU_IDENTIFIERS = 4096
 _MAX_ACCELERATOR_IDENTIFIERS = 4096
 _MAX_ACCELERATOR_KINDS = 128
+_RESERVED_VISIBILITY_IDENTIFIERS = frozenset({"all", "none", "void"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +347,10 @@ def _accelerator_identifier(value: Any, accelerator: str) -> str | int:
         or "," in value
         or "\x00" in value
         or any(character.isspace() or ord(character) < 32 for character in value)
+        # CUDA treats negative ordinals as disabled; NVIDIA reserves all/none/void.
+        # Keep opaque identifiers such as GPU-<UUID> valid.
+        or (value.startswith("-") and value[1:].isdigit())
+        or value.lower() in _RESERVED_VISIBILITY_IDENTIFIERS
     ):
         raise ResourceValidationError(
             "accelerator identifiers must be safe visibility tokens",

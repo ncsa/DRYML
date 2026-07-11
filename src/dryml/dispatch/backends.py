@@ -39,6 +39,7 @@ class LocalSubprocessFuture:
     cancel_grace: float = 0.5
     handshake_timeout: float = 10.0
     process_group: bool = False
+    process_tree: bool = False
 
     _response: WorkerResponse | None = None
     _exception: BaseException | None = None
@@ -104,7 +105,7 @@ class LocalSubprocessFuture:
             time.sleep(0.01)
 
     def cancel(self, *, grace: float | None = None, reason: str = "user", record: bool = True) -> bool:
-        """Cancel the process using SIGINT, SIGTERM, then SIGKILL where needed."""
+        """Cancel a backend-owned worker and its descendants where supported."""
 
         if self.done():
             # The leader may have exited while descendants still retain its
@@ -119,6 +120,9 @@ class LocalSubprocessFuture:
             methods.append(sig_name)
             self._signal(sig_value)
             if self._wait(wait):
+                # SIGINT/SIGTERM may let the leader exit before its descendants.
+                # Backend-owned sessions and Windows trees still need a final reap.
+                self.kill()
                 if record:
                     self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": sig_name, "escalated": len(methods) > 1, "reason": reason})
                 return True
@@ -137,18 +141,20 @@ class LocalSubprocessFuture:
             self.kill()
 
     def kill(self) -> None:
-        """Kill the worker process group."""
+        """Kill the worker and any backend-owned descendants."""
 
         if os.name == "posix" and self.process_group:
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
-                return
-        else:
-            try:
-                self.process.kill()
-            except ProcessLookupError:
                 pass
+            return
+        if os.name == "nt" and self.process_tree:
+            self._kill_windows_process_tree()
+        try:
+            self.process.kill()
+        except ProcessLookupError:
+            pass
 
     def _signal(self, sig: signal.Signals) -> None:
         try:
@@ -165,6 +171,20 @@ class LocalSubprocessFuture:
             return True
         except subprocess.TimeoutExpired:
             return False
+
+    def _kill_windows_process_tree(self) -> None:
+        """Best-effort reap of a backend-created Windows worker tree."""
+
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
     def _read_response(self) -> None:
         if self._response is not None or self._exception is not None:
@@ -228,9 +248,13 @@ class LocalSubprocessFuture:
             pass
 
     def _cleanup(self) -> None:
-        if os.name == "posix" and self.process_group and self._response is not None and self._response.status == "ok":
-            # Backend launches create this dedicated POSIX session. Reap any
-            # descendants retained after the worker leader has returned.
+        if (
+            os.name == "posix"
+            and self.process_group
+            and self._response is not None
+            and self._response.status == "ok"
+        ) or (os.name == "nt" and self.process_tree and self._response is not None):
+            # Reap descendants retained after the backend worker leader returns.
             self.kill()
         for path in self.plan.envelope.launch.get("cleanup_paths", ()):  # type: ignore[union-attr]
             if isinstance(path, str):
@@ -289,6 +313,7 @@ class LocalSubprocessBackend:
             self.preserve_work_dir,
             handshake_timeout=self.handshake_timeout,
             process_group=(os.name == "posix"),
+            process_tree=True,
         )
         try:
             future.wait_for_handshake(timeout=self.handshake_timeout)

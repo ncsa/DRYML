@@ -4,7 +4,7 @@ import dryml
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import ContainerEnvironmentSpec, EnvironmentRegistry, PythonExecutableSpec, inspect_current
+from dryml.environments import ContainerEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current
 from dryml.operations import make_function_call_spec
 from dryml.worlds import LocalResourceInventory
 
@@ -64,6 +64,31 @@ def test_unsupported_requirement_free_resolver_candidate_falls_back_to_current()
     assert explanation.launchable is True
 
 
+def test_dispatch_reports_truncated_environment_resolution_without_claiming_no_match(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    rejected = PythonExecutableSpec("/rejected/python")
+    monkeypatch.setattr(
+        requirements.environments,
+        "probe",
+        lambda spec, **_kwargs: requirements.environments.EnvironmentProbeResult(
+            spec,
+            True,
+            record=inspect_current(),
+        ),
+    )
+
+    selection, _data, resolution = requirements._select_environment(
+        None,
+        None,
+        requirement=EnvironmentRequirement(tags=("wanted",)),
+        candidates=(rejected, *((rejected.to_data(),) * 300)),
+    )
+
+    assert resolution is not None and resolution.status == "incomplete"
+    assert selection.considered[-2].status == "incomplete"
+
+
 def test_attached_record_does_not_bypass_unsupported_environment_launch():
     explanation = Dispatcher().explain(
         make_function_call_spec("operator:add", args=[1, 2]),
@@ -100,15 +125,17 @@ def test_plan_allocates_a_synthesized_one_worker_world(tmp_path):
 
 
 def test_plan_world_synthesizes_an_omitted_multi_worker_world(tmp_path):
+    inventory = LocalResourceInventory((0, 1))
     plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan_world(
         multi_worker_target,
         allow_pickle=True,
-        inventory=LocalResourceInventory((0, 1)),
+        inventory=inventory,
         requirement_policy="strict",
     )
 
     assert len(plan.worker_plans) == 2
     assert len(plan.world_spec["payload"]["roles"]["trainer"]) == 2
+    assert plan.dispatch_spec["payload"]["metadata"]["dryml.local_inventory"] == inventory.summary()
 
 
 def test_warn_synthesis_failure_keeps_a_human_blocking_action():

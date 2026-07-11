@@ -193,6 +193,7 @@ class LocalWorldBackend:
                     cancel_grace=self.cancel_grace,
                     handshake_timeout=self.handshake_timeout,
                     process_group=(os.name == "posix"),
+                    process_tree=True,
                 )
         except BaseException as exc:
             for future in futures.values():
