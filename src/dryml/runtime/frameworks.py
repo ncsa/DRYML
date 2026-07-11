@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import os
-import resource
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+try:
+    import resource
+except ModuleNotFoundError:  # Windows does not provide POSIX resource limits.
+    resource = None
+
 from .allocation import RuntimeAllocationView
 from .devices import DeviceVisibilityPlan
-from .errors import FrameworkImportSafetyError
+from .errors import FrameworkImportSafetyError, RuntimeSpecError
 from .specs import RuntimeContextSpec
 
 
@@ -69,6 +73,11 @@ class PlainBootstrapAdapter:
         if result.cpu_affinity is not None and environ is None and hasattr(os, "sched_setaffinity"):
             os.sched_setaffinity(0, set(result.cpu_affinity))
         if result.memory_limit is not None and environ is None:
+            if resource is None:
+                raise RuntimeSpecError(
+                    "process memory limits are unsupported on this platform",
+                    context={"memory_limit": result.memory_limit, "platform": os.name},
+                )
             resource.setrlimit(resource.RLIMIT_AS, (result.memory_limit, result.memory_limit))
 
     def apply_post_import(self, result: FrameworkBootstrapResult) -> None:

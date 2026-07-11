@@ -9,6 +9,7 @@ import pytest
 import dryml.runtime as runtime
 import dryml.runtime.frameworks as runtime_frameworks
 from dryml.runtime.errors import FrameworkImportSafetyError
+from dryml.runtime.errors import RuntimeSpecError
 from dryml.runtime.errors import RuntimeTransitionError
 
 
@@ -195,6 +196,34 @@ def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):
 
     assert calls["affinity"] == (0, {2, 3})
     assert calls["rlimit"] == (runtime_frameworks.resource.RLIMIT_AS, (128 * 1024**2, 128 * 1024**2))
+
+
+def test_plain_bootstrap_without_posix_resource_module_remains_import_safe(monkeypatch):
+    monkeypatch.setattr(runtime_frameworks, "resource", None)
+    plan = runtime.build_runtime_bootstrap_plan(
+        runtime.RuntimeContextSpec.from_data({"mode": "worker", "device_visibility": {"policy": "none"}}),
+        runtime.NoAllocation,
+        policy=runtime.FrameworkBootstrapPolicy(("plain",)),
+    )
+
+    runtime.apply_runtime_bootstrap_plan(plan)
+
+
+def test_plain_bootstrap_reports_unsupported_windows_memory_limit(monkeypatch):
+    monkeypatch.setattr(runtime_frameworks, "resource", None)
+    spec = runtime.RuntimeContextSpec.from_data(
+        {
+            "mode": "worker",
+            "device_visibility": {"policy": "none"},
+            "limits": {"memory": "128MiB"},
+        }
+    )
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation, policy=runtime.FrameworkBootstrapPolicy(("plain",)))
+
+    with pytest.raises(RuntimeSpecError, match="memory limits are unsupported") as excinfo:
+        runtime.apply_runtime_bootstrap_plan(plan)
+
+    assert excinfo.value.context["memory_limit"] == 128 * 1024**2
 
 
 def test_worker_bootstrap_imports_fake_framework_in_fresh_subprocess(tmp_path):

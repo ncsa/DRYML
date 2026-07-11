@@ -166,7 +166,7 @@ def test_external_inventory_intersects_cuda_and_nvidia_visibility(environ, expec
     ),
 )
 def test_external_inventory_failures_are_diagnostic_only(output, tmp_path):
-    inventory = local_inventory(policy="external", device_root=tmp_path, command_runner=lambda *_args, **_kwargs: output)
+    inventory = local_inventory(policy="external", environ={}, device_root=tmp_path, command_runner=lambda *_args, **_kwargs: output)
 
     assert "gpu" not in inventory.accelerators
     assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
