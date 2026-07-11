@@ -252,7 +252,7 @@ def test_lightweight_inventory_discovers_affinity_and_memory(monkeypatch):
     monkeypatch.setattr(
         inventory_module.Path,
         "read_text",
-        lambda path, **_kwargs: "MemAvailable:       2048 kB\n" if str(path) == "/proc/meminfo" else "",
+        lambda path, **_kwargs: "MemAvailable:       2048 kB\n" if path.as_posix() == "/proc/meminfo" else "",
     )
 
     inventory = local_inventory(environ={}, device_root=None)
