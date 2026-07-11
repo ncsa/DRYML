@@ -18,7 +18,8 @@ def make_fake_executable(tmp_path, payload, *, sleep=False):
         script = tmp_path / "fake-python.cmd"
         text = "@echo off\r\n"
         if sleep:
-            text += "timeout /t 2 /nobreak >nul\r\n"
+            # timeout exits immediately when stdin is redirected in CI.
+            text += "ping 127.0.0.1 -n 3 >nul\r\n"
         text += 'type "%~dp0probe-payload.json"\r\n'
     else:
         script = tmp_path / "fake-python"
