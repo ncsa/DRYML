@@ -244,6 +244,36 @@ def test_large_cpu_count_fallback_is_conservatively_bounded(monkeypatch):
     assert "CPU discovery exceeded the bounded identifier limit" in inventory.metadata["diagnostics"]
 
 
+def test_lightweight_inventory_discovers_affinity_and_memory(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: {5, 2}, raising=False)
+    monkeypatch.setattr(inventory_module.Path, "exists", lambda path: False)
+    monkeypatch.setattr(
+        inventory_module.Path,
+        "read_text",
+        lambda path, **_kwargs: "MemAvailable:       2048 kB\n" if str(path) == "/proc/meminfo" else "",
+    )
+
+    inventory = local_inventory(environ={}, device_root=None)
+
+    assert inventory.cpus == (2, 5)
+    assert inventory.memory == 2048 * 1024
+    assert inventory.metadata["memory_source"] == "proc_meminfo"
+
+
+def test_lightweight_inventory_uses_cpu_count_when_affinity_is_unavailable(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: (_ for _ in ()).throw(OSError()), raising=False)
+    monkeypatch.setattr(inventory_module.os, "cpu_count", lambda: 3)
+
+    inventory = local_inventory(environ={}, device_root=None)
+
+    assert inventory.cpus == (0, 1, 2)
+    assert inventory.metadata["cpu_source"] == "cpu_count"
+
+
 def test_device_root_accelerators_respect_numeric_visibility(tmp_path, monkeypatch):
     import dryml.worlds.inventory as inventory_module
 

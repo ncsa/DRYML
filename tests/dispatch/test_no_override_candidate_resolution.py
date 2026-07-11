@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import dryml
+import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import ContainerEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current
+from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, use
 from dryml.operations import make_function_call_spec
-from dryml.worlds import LocalResourceInventory
+from dryml.worlds import LocalResourceInventory, WorldSpec, use as use_world
 
 
 @dryml.world.req(cpus={"min": 2})
@@ -16,6 +19,33 @@ def cpu_target():
 
 @dryml.world.req(roles={"trainer": {"replicas": {"exact": 2}, "resources": {"cpus": {"exact": 1}}}})
 def multi_worker_target():
+    return None
+
+
+@dryml.env.req(tags=("resolved",))
+def resolver_target():
+    return None
+
+
+@dryml.world.default(cpus=1)
+@dryml.world.req(cpus={"min": 2})
+def incompatible_default_world_target():
+    return None
+
+
+@dryml.env.default(CurrentEnvironmentSpec())
+@dryml.env.req(tags=("unavailable",))
+def incompatible_default_environment_target():
+    return None
+
+
+@dryml.env.req(tags=("unavailable",))
+def incompatible_current_environment_target():
+    return None
+
+
+@dryml.world.req(cpus={"min": 2})
+def incompatible_current_world_target():
     return None
 
 
@@ -161,3 +191,88 @@ def test_per_call_none_clears_configured_registry_default():
 
     assert configured.resolution.environment_selection.source == "resolver"
     assert cleared.resolution.environment_selection.source == "fallback"
+
+
+def test_dispatcher_rejects_retained_one_shot_candidate_iterators():
+    with pytest.raises(TypeError, match="re-iterable"):
+        Dispatcher(environment_candidates=iter((PythonExecutableSpec("/candidate/python"),)))
+
+
+def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    candidate = PythonExecutableSpec("/resolved/python")
+    calls = []
+    record = replace(inspect_current(), tags=("resolved",))
+
+    def probe(spec, **_kwargs):
+        calls.append(spec)
+        return requirements.environments.EnvironmentProbeResult(spec, True, record=record)
+
+    monkeypatch.setattr(requirements.environments, "probe", probe)
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(resolver_target, allow_pickle=True),
+        environment_candidates=(candidate,),
+        requirement_policy="strict",
+    )
+
+    assert resolution.environment_selection.source == "resolver"
+    assert resolution.environment_record == record
+    assert calls == [candidate]
+    metadata = resolution.metadata()
+    assert metadata["dryml.environment_resolution"]["selected"]["executable"] == "/resolved/python"
+    assert metadata["dryml.environment_probe"] is not None
+
+
+def test_annotation_default_world_is_not_replaced_by_synthesis(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    monkeypatch.setattr(requirements.worlds, "synthesize", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synthesis must not run")))
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(incompatible_default_world_target, allow_pickle=True),
+        inventory=LocalResourceInventory((0, 1)),
+        requirement_policy="strict",
+    )
+
+    assert resolution.world_selection.source == "annotation_default"
+    assert resolution.world_check.status == "incompatible"
+
+
+def test_incompatible_environment_default_and_current_do_not_start_resolver_search():
+    def candidates():
+        raise AssertionError("resolver must not inspect candidates")
+        yield PythonExecutableSpec("/unreachable/python")
+
+    default = resolve_dispatch_plan(
+        normalize_user_operation(incompatible_default_environment_target, allow_pickle=True),
+        environment_candidates=candidates(),
+        requirement_policy="strict",
+    )
+    with use(CurrentEnvironmentSpec()):
+        current = resolve_dispatch_plan(
+            normalize_user_operation(incompatible_current_environment_target, allow_pickle=True),
+            environment_candidates=candidates(),
+            requirement_policy="strict",
+        )
+
+    assert default.environment_selection.source == "annotation_default"
+    assert default.environment_resolution is None
+    assert current.environment_selection.source == "current"
+    assert current.environment_resolution is None
+
+
+def test_incompatible_current_world_is_not_replaced_by_synthesis(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    monkeypatch.setattr(requirements.worlds, "synthesize", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synthesis must not run")))
+    current_world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}})
+
+    with use_world(current_world):
+        resolution = resolve_dispatch_plan(
+            normalize_user_operation(incompatible_current_world_target, allow_pickle=True),
+            inventory=LocalResourceInventory((0, 1)),
+            requirement_policy="strict",
+        )
+
+    assert resolution.world_selection.source == "current"
+    assert resolution.world_check.status == "incompatible"

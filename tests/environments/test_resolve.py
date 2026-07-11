@@ -100,6 +100,52 @@ def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
     assert len(calls) == 1
 
 
+def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels():
+    registry = EnvironmentRegistry()
+    ignored = PythonExecutableSpec("/ignored/python")
+    selected = PythonExecutableSpec("/selected/python")
+    registry.register("ignored", ignored, tags=("other",))
+    registry.register("selected", selected, tags=("wanted",))
+    rejected = PythonExecutableSpec("/candidate/python")
+    calls = []
+
+    def runner(spec, *, timeout):
+        calls.append(spec)
+        return EnvironmentProbeResult(
+            spec,
+            True,
+            record=replace(inspect_current(), tags=("wanted",) if spec == selected else ()),
+        )
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(rejected,),
+        registry=registry,
+        include_current=True,
+        probe_runner=runner,
+    )
+
+    assert result.selected == selected
+    assert [(attempt.source, attempt.status) for attempt in result.attempts] == [
+        ("candidate", "incompatible"),
+        ("registry", "label_mismatch"),
+        ("registry", "selected"),
+    ]
+    assert calls == [rejected, selected]
+
+
+def test_resolve_records_an_all_incompatible_no_match_trace():
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(PythonExecutableSpec("/candidate/python"),),
+        include_current=False,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=())),
+    )
+
+    assert result.status == "no_match"
+    assert [attempt.status for attempt in result.attempts] == ["incompatible"]
+
+
 def test_resolve_stops_lazy_candidates_after_requirement_free_selection():
     def candidates():
         yield CurrentEnvironmentSpec()
@@ -326,8 +372,9 @@ def test_total_timeout_includes_candidate_normalization():
         probe_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("probe must not run")),
     )
 
-    assert result.status == "no_match"
+    assert result.status == "incomplete"
     assert any(issue.code == "resolver_candidate_input_timeout" for issue in result.diagnostics)
+    assert any(issue.code == "resolver_input_truncated" for issue in result.diagnostics)
 
 
 def test_resolver_records_probe_duration():
@@ -404,8 +451,27 @@ def test_total_timeout_is_checked_after_candidate_conversion():
         probe_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("probe must not run")),
     )
 
-    assert result.status == "no_match"
+    assert result.status == "incomplete"
     assert any(issue.code == "resolver_candidate_input_timeout" for issue in result.diagnostics)
+
+
+def test_resolver_does_not_fall_through_after_candidate_input_timeout():
+    ticks = iter((0.0, 0.0, 1.0))
+    registry = EnvironmentRegistry()
+    registry.register("lower-precedence", PythonExecutableSpec("/registry/python"))
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(PythonExecutableSpec("/candidate/python"),),
+        registry=registry,
+        include_current=True,
+        total_timeout=0.5,
+        clock=lambda: next(ticks),
+        probe_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("probe must not run")),
+    )
+
+    assert result.status == "incomplete"
+    assert all(attempt.source == "candidate" for attempt in result.attempts)
 
 
 def test_resolver_serialization_redacts_non_json_injected_probe_evidence():

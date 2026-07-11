@@ -192,6 +192,7 @@ def resolve(
         registry_entries,
         include_current,
         candidates_truncated=candidates_truncated,
+        candidates_timed_out=candidates_timed_out,
         registry_state=registry_state,
     ):
         if total_timeout is not None and now() - started >= total_timeout:
@@ -277,8 +278,8 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report, probe_duration_s=probe_duration_s))
             return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), result_diagnostics(), policy)
         record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues, probe_duration_s))
-    if candidates_truncated or registry_state["truncated"]:
-        diagnostics = [CompatibilityIssue("resolver_input_truncated", "error", "environment candidate input was truncated before compatibility could be determined")]
+    if candidates_truncated or candidates_timed_out or registry_state["truncated"] or registry_state["timed_out"]:
+        diagnostics = [CompatibilityIssue("resolver_input_truncated", "error", "environment candidate input was incomplete before compatibility could be determined")]
         diagnostics.extend(result_diagnostics())
         return EnvironmentResolution("incomplete", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
     diagnostics = [CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())]
@@ -292,13 +293,14 @@ def _candidates(
     include_current: bool,
     *,
     candidates_truncated: bool,
+    candidates_timed_out: bool,
     registry_state: Mapping[str, bool],
 ) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
     for candidate in candidates:
         yield candidate
     # An omitted caller candidate could take precedence over every registry or
     # current candidate. Do not silently select a lower-precedence source.
-    if candidates_truncated:
+    if candidates_truncated or candidates_timed_out:
         return
     for entry in registry_entries:
         yield entry

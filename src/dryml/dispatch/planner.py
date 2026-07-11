@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -42,10 +42,11 @@ class Dispatcher:
     """Plan and run one operation through a dispatch backend.
 
     ``environment_candidates`` and ``environment_registry`` configure the
-    bounded no-override resolver stage. ``inventory`` injects deterministic
-    local capacity, while ``inventory_policy`` selects lightweight or opt-in
-    external discovery when inventory is omitted. Per-call values override these
-    defaults without mutating them.
+    bounded no-override resolver stage. Retained candidates must be re-iterable
+    so repeated notebook calls cannot consume a one-shot iterator. ``inventory``
+    injects deterministic local capacity, while ``inventory_policy`` selects
+    lightweight or opt-in external discovery when inventory is omitted. Per-call
+    values override these defaults without mutating them.
     """
 
     def __init__(self, *, backend: Any | None = None, store: Any | None = None, environment_candidates: Any | None = None, environment_registry: Any | None = None, inventory: Any | None = None, inventory_policy: str = "lightweight", resolver_policy: str | None = None):
@@ -53,6 +54,11 @@ class Dispatcher:
 
         self.backend = backend if backend is not None else LocalSubprocessBackend()
         self.store = store
+        if isinstance(environment_candidates, Iterator):
+            raise TypeError(
+                "Dispatcher environment_candidates must be a re-iterable; "
+                "materialize one-shot iterators before configuring a dispatcher"
+            )
         self.environment_candidates = environment_candidates
         self.environment_registry = environment_registry
         self.inventory = inventory

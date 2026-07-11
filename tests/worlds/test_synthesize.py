@@ -128,6 +128,64 @@ def test_synthesis_cpu_memory_accelerator_and_topology_matrix(monkeypatch):
     assert synthesize({"roles": {"main": {"resources": {"devices": {"gpu": {"min": 1}}}}}}, inventory=inventory).status == "unsupported_requirement"
 
 
+def test_synthesis_selects_minimums_and_reports_distinct_aggregate_shortfalls():
+    inventory = LocalResourceInventory((0, 1), {"gpu": ("a",)}, memory=1024)
+
+    minimums = synthesize(
+        {"roles": {"main": {"resources": {"cpus": {"max": 2}, "accelerators": {"gpu": {"min": 1}}}}}},
+        inventory=inventory,
+    )
+    missing_gpu = synthesize(
+        {"roles": {"main": {"resources": {"accelerators": {"gpu": {"min": 1}}}}}},
+        inventory=LocalResourceInventory((0,)),
+    )
+    insufficient_memory = synthesize(
+        {"roles": {"main": {"resources": {"memory": {"min": 2048}}}}},
+        inventory=inventory,
+    )
+    competing_roles = synthesize(
+        {"roles": {"alpha": {"resources": {"cpus": {"exact": 2}}}, "beta": {"resources": {"cpus": {"exact": 1}}}}},
+        inventory=inventory,
+    )
+
+    assert minimums.ok
+    assert minimums.world.roles["main"].process.resources.cpus == 1
+    assert minimums.world.roles["main"].process.resources.accelerators == {"gpu": 1}
+    assert missing_gpu.diagnostics[0].code == "insufficient_accelerators"
+    assert insufficient_memory.diagnostics[0].code == "insufficient_memory"
+    assert competing_roles.diagnostics[0].to_data()["data"] == {"required": 3, "available": 2, "shortfall": 1}
+
+
+def test_synthesis_honors_single_process_and_rejects_shared_filesystem():
+    inventory = LocalResourceInventory((0,))
+
+    supported = synthesize(
+        {"roles": {"main": {"topology": {"single_process": True}}}},
+        inventory=inventory,
+    )
+    unsupported = synthesize(
+        {"roles": {"main": {"topology": {"shared_filesystem": True}}}},
+        inventory=inventory,
+    )
+
+    assert supported.ok
+    assert unsupported.status == "unsupported_requirement"
+
+
+def test_synthesis_serialization_is_deterministic_across_mapping_order():
+    inventory = LocalResourceInventory((0, 1), {"gpu": ("a",)}, memory=1024)
+    first = synthesize(
+        {"roles": {"beta": {"resources": {"accelerators": {"gpu": {"exact": 1}}}}, "alpha": {"resources": {"cpus": {"exact": 1}}}}},
+        inventory=inventory,
+    )
+    second = synthesize(
+        {"roles": {"alpha": {"resources": {"cpus": {"exact": 1}}}, "beta": {"resources": {"accelerators": {"gpu": {"exact": 1}}}}}},
+        inventory=inventory,
+    )
+
+    assert first.to_data() == second.to_data()
+
+
 def test_synthesis_rejects_zero_only_and_authoritative_post_check(monkeypatch):
     import dryml.worlds.synthesis as synthesis
 

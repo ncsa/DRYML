@@ -199,6 +199,13 @@ output are bounded, including resolver probe durations and aggregate inventory
 metadata. Candidate discovery never replaces an incompatible explicit,
 annotation-default, or context-current environment/world.
 
+When candidates are retained on a `Dispatcher` for repeated notebook calls,
+pass a re-iterable collection such as a tuple or list. One-shot iterators are
+rejected at construction so an earlier `explain(...)` cannot consume candidates
+that a later `plan(...)` would need. If bounded candidate enumeration reaches its
+deadline, resolution is reported as incomplete and does not fall through to a
+lower-precedence registry or current-environment candidate.
+
 `inventory=` injects one `LocalResourceInventory` for synthesis and allocation.
 With no injection, `inventory_policy="lightweight"` is framework-free. To use
 `"external"`, call `worlds.local_inventory(policy="external",

@@ -32,3 +32,16 @@ def test_world_current_precedes_fallback_without_using_runtime_allocation():
         resolution = resolve_dispatch_plan(normalize_user_operation(lambda: None, allow_pickle=True), requirement_policy="ignore")
     assert resolution.world_selection.source == "current"
     assert resolution.world_selection.candidate["roles"]["main"]["process"]["resources"]["cpus"] == 3
+
+
+def test_enveloped_explicit_world_is_preserved():
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2}}}}}
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(lambda: None, allow_pickle=True),
+        world={"spec": world},
+        requirement_policy="ignore",
+    )
+
+    assert resolution.world_selection.source == "explicit"
+    assert resolution.world_selection.candidate["roles"]["main"]["process"]["resources"]["cpus"] == 2
