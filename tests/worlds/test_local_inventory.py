@@ -239,3 +239,8 @@ def test_injected_inventory_identifier_iterables_are_bounded():
 def test_inventory_serialization_rejects_malformed_cpu_values(cpus):
     with pytest.raises(ResourceValidationError, match="CPUs must be a sequence"):
         LocalResourceInventory.from_data({"cpus": cpus})
+
+
+def test_inventory_serialization_rejects_mixed_unknown_keys_structurally():
+    with pytest.raises(ResourceValidationError, match="unknown fields"):
+        LocalResourceInventory.from_data({"cpus": (0,), "unexpected": True, 1: True})

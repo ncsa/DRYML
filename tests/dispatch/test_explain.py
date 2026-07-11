@@ -113,6 +113,26 @@ def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
     assert resolution.final_code_probe is not None and resolution.final_code_probe.ok
 
 
+def test_resolver_reuses_matching_bootstrap_environment_record(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+    from dryml.code.probe import CodeProbeResult
+    from dryml.environments import CurrentEnvironmentSpec, EnvironmentRequirement, inspect_current
+
+    bootstrap = CodeProbeResult(True, None, inspect_current())
+    monkeypatch.setattr(requirements.environments, "probe", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected reprobe")))
+
+    _selection, _data, resolution = requirements._select_environment(
+        None,
+        None,
+        requirement=EnvironmentRequirement(),
+        bootstrap_probe=bootstrap,
+        bootstrap_environment=CurrentEnvironmentSpec().to_data(),
+    )
+
+    assert resolution is not None and resolution.ok
+    assert resolution.selected_source == "current"
+
+
 def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(monkeypatch):
     import sys
 

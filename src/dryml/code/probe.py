@@ -31,12 +31,14 @@ from dryml.environments.specs import (
     EnvironmentSpec,
     PythonExecutableSpec,
 )
+from dryml.environments.probe import _diagnostic_output, _run_bounded_command
 from dryml.environments.utils import build_probe_env
 
 
 PROBE_SCHEMA_VERSION = 1
 DEFAULT_PROBE_ALGORITHMS = ("callables", "source", "symbol_capture", "direct_annotations")
 PROBE_WORKER_ARGS = ("-m", "dryml.code.probe_worker", "--json")
+PROBE_RESULT_KIND = "dryml.code_probe_result"
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +157,7 @@ class CodeProbeResult:
         """Return JSON-compatible result data using schema version 1."""
 
         return {
+            "kind": PROBE_RESULT_KIND,
             "schema_version": PROBE_SCHEMA_VERSION,
             "ok": self.ok,
             "analysis": None if self.analysis is None else self.analysis.to_data(),
@@ -170,16 +173,26 @@ class CodeProbeResult:
 
         if not isinstance(data, Mapping):
             raise TypeError("CodeProbeResult data must be a mapping")
+        if data.get("kind") != PROBE_RESULT_KIND:
+            raise ValueError("unsupported code probe result kind")
         _validate_schema_version(data)
+        if not isinstance(data.get("ok"), bool):
+            raise TypeError("CodeProbeResult ok must be a boolean")
+        diagnostics = tuple(DiagnosticFact.from_data(item) for item in data.get("diagnostics") or ())
+        analysis = None if data.get("analysis") is None else CodeAnalysisResult.from_data(data["analysis"])
+        if data["ok"] != probe_ok(diagnostics):
+            raise ValueError("CodeProbeResult ok does not match diagnostics")
+        if data["ok"] and analysis is None:
+            raise ValueError("successful CodeProbeResult requires analysis")
         return cls(
-            ok=bool(data.get("ok", False)),
-            analysis=None if data.get("analysis") is None else CodeAnalysisResult.from_data(data["analysis"]),
+            ok=data["ok"],
+            analysis=analysis,
             environment_record=(
                 None
                 if data.get("environment_record") is None
                 else EnvironmentRecord.from_data(data["environment_record"])
             ),
-            diagnostics=tuple(DiagnosticFact.from_data(item) for item in data.get("diagnostics") or ()),
+            diagnostics=diagnostics,
             stdout=data.get("stdout"),
             stderr=data.get("stderr"),
         )
@@ -398,24 +411,13 @@ def probe_target_in_subprocess(
 ) -> CodeProbeResult:
     """Launch a probe worker command and decode its JSON result."""
 
-    payload = json.dumps(request.to_data(), sort_keys=True)
+    payload = json.dumps(request.to_data(), sort_keys=True).encode("utf-8")
     try:
-        completed = subprocess.run(
+        returncode, protocol, protocol_truncated, stderr_bytes, stderr_truncated, timed_out = _run_bounded_command(
             command,
-            input=payload,
-            text=True,
-            capture_output=True,
             timeout=timeout,
             env=dict(env) if env is not None else None,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return CodeProbeResult(
-            ok=False,
-            analysis=None,
-            environment_record=None,
-            diagnostics=(diagnostic("code_probe.timeout", f"Code probe timed out after {timeout} seconds."),),
-            stdout=exc.stdout if isinstance(exc.stdout, str) else None,
-            stderr=exc.stderr if isinstance(exc.stderr, str) else None,
+            input_data=payload,
         )
     except OSError as exc:
         return CodeProbeResult(
@@ -424,9 +426,29 @@ def probe_target_in_subprocess(
             environment_record=None,
             diagnostics=(diagnostic("code_probe.unsupported_environment", "Code probe worker could not be started.", data={"error": repr(exc)}),),
         )
+    stdout, stdout_truncated = _diagnostic_output(protocol)
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    if timed_out:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic("code_probe.timeout", f"Code probe timed out after {timeout} seconds."),),
+            stdout=stdout,
+            stderr=stderr,
+        )
+    if protocol_truncated:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic("code_probe.worker_protocol_error", "Code probe worker output exceeded the bounded protocol limit."),),
+            stdout=stdout,
+            stderr=stderr,
+        )
 
     try:
-        result = CodeProbeResult.from_data(json.loads(completed.stdout))
+        result = CodeProbeResult.from_data(json.loads(protocol.decode("utf-8")))
     except Exception as exc:
         return CodeProbeResult(
             ok=False,
@@ -435,16 +457,16 @@ def probe_target_in_subprocess(
             diagnostics=(diagnostic(
                 "code_probe.worker_protocol_error",
                 "Code probe worker did not emit valid result JSON.",
-                data={"error": repr(exc), "returncode": completed.returncode},
+                data={"error": repr(exc), "returncode": returncode},
             ),),
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=stdout,
+            stderr=stderr,
         )
-    if completed.returncode != 0:
+    if returncode != 0:
         extra = diagnostic(
             "code_probe.worker_protocol_error",
-            f"Code probe worker exited with status {completed.returncode}.",
-            data={"returncode": completed.returncode},
+            f"Code probe worker exited with status {returncode}.",
+            data={"returncode": returncode},
         )
         return CodeProbeResult(
             ok=False,
@@ -452,7 +474,7 @@ def probe_target_in_subprocess(
             environment_record=result.environment_record,
             diagnostics=result.diagnostics + (extra,),
             stdout=result.stdout,
-            stderr=result.stderr or completed.stderr or None,
+            stderr=result.stderr or stderr or None,
         )
     return result
 

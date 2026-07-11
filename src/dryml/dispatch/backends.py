@@ -66,6 +66,12 @@ class LocalSubprocessFuture:
             finally:
                 self._cleanup()
             raise
+        except BaseException:
+            try:
+                self.cancel(reason="worker_protocol_error")
+            finally:
+                self._cleanup()
+            raise
         self._read_response()
         if self._exception is not None:
             raise self._exception
@@ -266,7 +272,14 @@ class LocalSubprocessBackend:
                 raise
             raise DispatchLaunchError("failed to launch local subprocess worker", context={"error": str(exc)}) from exc
         future = LocalSubprocessFuture(process, plan, work_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, self.preserve_work_dir, handshake_timeout=self.handshake_timeout)
-        future.wait_for_handshake(timeout=self.handshake_timeout)
+        try:
+            future.wait_for_handshake(timeout=self.handshake_timeout)
+        except BaseException:
+            try:
+                future.cancel(reason="worker_protocol_error", record=False)
+            finally:
+                future._cleanup()
+            raise
         return future
 
 

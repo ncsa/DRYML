@@ -27,6 +27,7 @@ _MAX_IDENTIFIER_STRING = 4096
 _MAX_INTEGER_BITS = 4096
 _MAX_CPU_IDENTIFIERS = 4096
 _MAX_ACCELERATOR_IDENTIFIERS = 4096
+_MAX_ACCELERATOR_KINDS = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,8 @@ class LocalResourceInventory:
             raise ResourceValidationError("local resource inventory accelerators must be a mapping")
         accelerators: dict[str, tuple[str | int, ...]] = {}
         for name, values in self.accelerators.items():
+            if len(accelerators) >= _MAX_ACCELERATOR_KINDS:
+                raise ResourceValidationError("local resource inventory accelerator kinds exceed the bounded limit")
             if not isinstance(name, str) or not name:
                 raise ResourceValidationError("accelerator inventory name must be a non-empty string")
             if len(name) > _MAX_IDENTIFIER_STRING:
@@ -105,7 +108,10 @@ class LocalResourceInventory:
             raise ResourceValidationError("local resource inventory must be a mapping")
         unknown = set(data) - {"cpus", "accelerators", "memory", "metadata"}
         if unknown:
-            raise ResourceValidationError("local resource inventory has unknown fields", context={"fields": sorted(unknown)})
+            raise ResourceValidationError(
+                "local resource inventory has unknown fields",
+                context={"fields": sorted(repr(key) for key in unknown)},
+            )
         return cls(
             cpus=data.get("cpus", ()),
             accelerators={} if "accelerators" not in data else data["accelerators"],
@@ -165,12 +171,15 @@ def local_inventory(
         raise ResourceValidationError("local CPU affinity contains no executable CPUs")
     memory, memory_source = _local_memory(diagnostics)
     accelerators = _accelerators_from_env(environment, diagnostics)
+    accelerator_source = "explicit_override" if accelerators else "none"
     if not accelerators and device_root is not None:
         accelerators = _accelerators_from_device_root(environment, device_root, diagnostics)
+        accelerator_source = "device_root" if accelerators else "none"
     # An explicit override is authoritative; never broaden it with host probes.
     if policy == "external" and command_runner is not None and not accelerators:
         _merge_external_accelerators(accelerators, command_runner, timeout, diagnostics)
-    metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": memory_source, "diagnostics": diagnostics[:8]}
+        accelerator_source = "external" if accelerators else "none"
+    metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": memory_source, "accelerator_source": accelerator_source, "diagnostics": diagnostics[:8]}
     return LocalResourceInventory(cpus=cpus, accelerators=accelerators, memory=memory, metadata=metadata)
 
 

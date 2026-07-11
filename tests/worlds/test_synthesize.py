@@ -87,3 +87,19 @@ def test_synthesize_invalid_injected_inventory_is_structured():
 
     assert result.status == "error"
     assert result.diagnostics[0].code == "invalid_inventory"
+
+
+def test_synthesis_rejects_colliding_resource_names_and_invalid_topology():
+    with pytest.raises(Exception, match="name"):
+        WorldRequirement.from_data({"roles": {"main": {"resources": {"accelerators": {1: {"min": 1}, "1": {"exact": 0}}}}}})
+    with pytest.raises(Exception, match="single_process"):
+        WorldRequirement.from_data({"roles": {"main": {"topology": {"single_process": "yes"}}}})
+
+
+def test_synthesis_rejects_oversized_count_before_serialization():
+    result = synthesize(
+        {"roles": {"main": {"resources": {"cpus": {"exact": 1 << 5000}}}}},
+        inventory=LocalResourceInventory((0,)),
+    )
+
+    assert result.status == "invalid_requirement"

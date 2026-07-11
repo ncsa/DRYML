@@ -33,11 +33,18 @@ class RoleRequirement:
         unknown = set(data) - {"replicas", "resources", "topology"}
         if unknown:
             raise WorldSpecValidationError("role requirement has unknown fields", context={"fields": sorted(unknown)})
+        topology = data.get("topology") or {}
+        if not isinstance(topology, Mapping):
+            raise WorldSpecValidationError("role topology must be a mapping", context={"type": type(topology).__name__})
+        if any(not isinstance(key, str) or not key for key in topology):
+            raise WorldSpecValidationError("role topology names must be non-empty strings")
+        if topology.get("single_process") is not None and not isinstance(topology["single_process"], bool):
+            raise WorldSpecValidationError("topology single_process must be a boolean or null")
         try:
             return cls(
                 replicas=CountConstraint.from_data(data.get("replicas", {"exact": 1}), path="replicas"),
                 resources=ResourceRequirement.from_data(data.get("resources") or {}),
-                topology=dict(data.get("topology") or {}),
+                topology=dict(topology),
             )
         except ResourceValidationError as exc:
             raise WorldSpecValidationError(str(exc), context=exc.context) from exc

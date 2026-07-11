@@ -36,6 +36,25 @@ def _validate_pythonpath_policy(value: Any) -> None:
         )
 
 
+def _validated_env(value: Any) -> Mapping[str, str]:
+    """Validate launch environment overrides without coercing arbitrary values."""
+
+    if not isinstance(value, Mapping):
+        raise EnvironmentSpecError("environment overrides must be a mapping")
+    if any(not isinstance(key, str) or not key or not isinstance(item, str) for key, item in value.items()):
+        raise EnvironmentSpecError("environment override keys must be non-empty strings and values must be strings")
+    return value
+
+
+def _validated_paths(value: Any) -> tuple[str, ...]:
+    """Return explicitly validated extra Python paths."""
+
+    paths = coerce_tuple(value)
+    if any(not isinstance(path, str) or not path for path in paths):
+        raise EnvironmentSpecError("extra_pythonpath entries must be non-empty strings")
+    return tuple(paths)
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentEnvironmentSpec:
     """Spec selecting the current Python process environment."""
@@ -73,10 +92,13 @@ class PythonExecutableSpec:
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if not isinstance(self.executable, str) or not self.executable:
+            raise EnvironmentSpecError("Python executable must be a non-empty string")
         _validate_pythonpath_policy(self.pythonpath_policy)
-        object.__setattr__(self, "env", deep_freeze_json(self.env))
+        frozen_env = deep_freeze_json(self.env)
+        object.__setattr__(self, "env", _validated_env(frozen_env))
         object.__setattr__(self, "pythonpath_policy", _normalize_pythonpath_policy(self.pythonpath_policy))
-        object.__setattr__(self, "extra_pythonpath", tuple(str(path) for path in coerce_tuple(self.extra_pythonpath)))
+        object.__setattr__(self, "extra_pythonpath", _validated_paths(self.extra_pythonpath))
 
     @property
     def id(self) -> str:
@@ -129,6 +151,12 @@ class CondaEnvironmentSpec:
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if self.prefix is not None and (not isinstance(self.prefix, str) or not self.prefix):
+            raise EnvironmentSpecError("Conda prefix must be a non-empty string")
+        if self.name is not None and (not isinstance(self.name, str) or not self.name):
+            raise EnvironmentSpecError("Conda name must be a non-empty string")
+        if not isinstance(self.conda_executable, str) or not self.conda_executable:
+            raise EnvironmentSpecError("Conda executable must be a non-empty string")
         if self.prefix and self.name:
             raise EnvironmentSpecError("CondaEnvironmentSpec accepts prefix or name, not both")
         if self.launch_mode not in {"direct", "conda-run"}:
@@ -137,9 +165,10 @@ class CondaEnvironmentSpec:
                 context={"launch_mode": self.launch_mode},
             )
         _validate_pythonpath_policy(self.pythonpath_policy)
-        object.__setattr__(self, "env", deep_freeze_json(self.env))
+        frozen_env = deep_freeze_json(self.env)
+        object.__setattr__(self, "env", _validated_env(frozen_env))
         object.__setattr__(self, "pythonpath_policy", _normalize_pythonpath_policy(self.pythonpath_policy))
-        object.__setattr__(self, "extra_pythonpath", tuple(str(path) for path in coerce_tuple(self.extra_pythonpath)))
+        object.__setattr__(self, "extra_pythonpath", _validated_paths(self.extra_pythonpath))
 
     @property
     def id(self) -> str:

@@ -166,7 +166,14 @@ class Dispatcher:
             key = allocation_plan.worker_keys[0]
             allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_plan.world_allocation_spec["id"])
             allocation_data = _allocation_to_json(allocation, world_id=requested_world_spec.get("id"))
-            allocation_data["metadata"] = {**allocation_data["metadata"], "backend": "local_subprocess", "requested_world": world_data}
+            allocation_data["metadata"] = {
+                **allocation_data["metadata"],
+                "backend": "local_subprocess",
+                # The canonical world spec is persisted separately. Do not copy
+                # process.env values into execution metadata.
+                "requested_world_id": requested_world_spec["id"],
+                "requested_world_backend": world_data.get("backend", {}).get("kind"),
+            }
             resolution = replace(
                 resolution,
                 world_allocation_summary={

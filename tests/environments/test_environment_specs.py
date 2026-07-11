@@ -52,6 +52,20 @@ def test_environment_spec_rejects_non_string_env_keys():
         envs.PythonExecutableSpec("/usr/bin/python", env={"1": "string-key", 1: "integer-key"})
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"executable": ""},
+        {"executable": 1},
+        {"executable": "/python", "env": {"TOKEN": 1}},
+        {"executable": "/python", "extra_pythonpath": (1,)},
+    ),
+)
+def test_python_executable_spec_rejects_non_launchable_values(kwargs):
+    with pytest.raises(envs.EnvironmentSpecError):
+        envs.PythonExecutableSpec(**kwargs)
+
+
 def test_environment_lock_ref_roundtrip_and_id():
     lock = envs.EnvironmentLockRef("conda-lock", "file:///tmp/conda-lock.yml", digest="sha256:abc")
     clone = envs.EnvironmentLockRef.from_data(lock.to_data())

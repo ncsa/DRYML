@@ -4,6 +4,7 @@ import importlib
 
 import dryml
 import dryml.code as code
+import pytest
 
 
 TARGET_MODULE = "probe_targets"
@@ -36,6 +37,27 @@ def test_probe_import_path_target_round_trips_request_result():
 
     assert result.ok
     assert code.CodeProbeResult.from_data(result.to_data()).ok
+
+
+def test_probe_result_rejects_inconsistent_or_unproven_success_protocol_data():
+    with pytest.raises(ValueError, match="ok does not match diagnostics"):
+        code.CodeProbeResult.from_data({
+            "kind": "dryml.code_probe_result",
+            "schema_version": 1,
+            "ok": False,
+            "analysis": None,
+            "environment_record": None,
+            "diagnostics": [],
+        })
+    with pytest.raises(ValueError, match="requires analysis"):
+        code.CodeProbeResult.from_data({
+            "kind": "dryml.code_probe_result",
+            "schema_version": 1,
+            "ok": True,
+            "analysis": None,
+            "environment_record": None,
+            "diagnostics": [],
+        })
 
 
 def test_probe_direct_annotation_facts_for_function():

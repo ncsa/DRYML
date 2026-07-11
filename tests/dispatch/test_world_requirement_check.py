@@ -274,6 +274,35 @@ def test_local_world_rejects_zero_worker_world_and_subprocess_enacts_process_env
     assert plan.envelope.allocation_view["env"]["AUDIT_PROCESS_ENV"] == "enabled"
 
 
+def test_requested_world_environment_is_not_copied_to_execution_metadata(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"env": {"AUDIT_TOKEN": "secret"}}}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    metadata = plan.envelope.allocation_view["metadata"]
+    assert metadata["requested_world_id"] == plan.envelope.launch["world_id"]
+    assert "AUDIT_TOKEN" not in str(metadata)
+
+
+def test_synthesis_inventory_is_discovered_once_per_plan_and_explain(tmp_path, monkeypatch):
+    import dryml.worlds.synthesis as synthesis
+
+    calls = []
+    inventory = LocalResourceInventory((0,), {"gpu": ("gpu-a",)})
+    monkeypatch.setattr(synthesis, "local_inventory", lambda **_kwargs: calls.append(True) or inventory)
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    dispatcher.explain(gpu_target, allow_pickle=True, requirement_policy="ignore")
+    assert len(calls) == 1
+    calls.clear()
+    dispatcher.plan(gpu_target, allow_pickle=True, requirement_policy="ignore")
+    assert len(calls) == 1
+
+
 def test_planning_metadata_bounds_deep_nested_data():
     from dryml.dispatch.requirements import _bounded_data
 

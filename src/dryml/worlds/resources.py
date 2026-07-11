@@ -13,6 +13,7 @@ ByteSize = int
 
 _BYTE_RE = re.compile(r"^(0|[1-9][0-9]*)(B|MiB|GiB)$")
 _UNIT_FACTORS = {"B": 1, "MiB": 1024**2, "GiB": 1024**3}
+_MAX_COUNT_BITS = 4096
 
 
 def parse_byte_size(value: str | int | None) -> int | None:
@@ -58,6 +59,8 @@ def _as_nonneg_int(name: str, value: Any) -> int:
         raise ResourceValidationError(f"{name} must be an integer >= 0", context={"path": name, "value": value})
     if value < 0:
         raise ResourceValidationError(f"{name} must be >= 0", context={"path": name, "value": value})
+    if value.bit_length() > _MAX_COUNT_BITS:
+        raise ResourceValidationError(f"{name} exceeds the bounded integer limit", context={"path": name})
     return value
 
 
@@ -267,7 +270,13 @@ def _constraint_map(data: Any, *, path: str) -> dict[str, CountConstraint]:
         return {}
     if not isinstance(data, Mapping):
         raise ResourceValidationError("constraint map must be a mapping", context={"path": path})
-    return {str(key): CountConstraint.from_data(value, path=f"{path}.{key}") for key, value in data.items()}
+    result: dict[str, CountConstraint] = {}
+    for key, value in data.items():
+        _validate_name(key, path)
+        if key in result:
+            raise ResourceValidationError("constraint map repeats a resource name", context={"path": path, "name": key})
+        result[key] = CountConstraint.from_data(value, path=f"{path}.{key}")
+    return result
 
 
 def _merge_constraint_maps(left: Mapping[str, CountConstraint], right: Mapping[str, CountConstraint], *, path: str) -> dict[str, CountConstraint]:

@@ -56,12 +56,15 @@ Record, requirement, and spec metadata fields are deeply frozen at construction.
 
 ## Probing
 
-Probe the current interpreter in process:
+Probe the current interpreter through the bounded worker protocol (the default
+finite timeout):
 
 ```python
 result = envs.probe(envs.CurrentEnvironmentSpec())
 info = result.require_ok()
 ```
+
+Pass `timeout=None` only when explicitly requesting in-process inspection.
 
 Probe another Python executable through the worker protocol:
 
@@ -119,6 +122,8 @@ match = registry.find(req)
 ```
 
 Duplicate names are rejected so selection is deterministic.
+`get()`, `list()`, and `unregister(name)` are probe-free lifecycle operations;
+`list()` is name-sorted and `unregister()` returns the removed entry.
 
 The registry is an explicit catalog, while `envs.resolve(...)` performs bounded
 candidate selection for dispatch: caller candidates precede name-sorted registry

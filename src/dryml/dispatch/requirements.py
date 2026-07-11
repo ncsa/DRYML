@@ -338,6 +338,8 @@ def resolve_dispatch_plan(
         candidates=environment_candidates,
         registry=environment_registry,
         resolver_policy=resolver_policy,
+        bootstrap_probe=bootstrap_probe,
+        bootstrap_environment=bootstrap_environment,
     )
     world_selection, world_spec, world_synthesis = _select_world(
         world,
@@ -445,7 +447,18 @@ def resolve_dispatch_plan(
                 else:
                     world_diagnostics = _local_world_topology_diagnostics(resolution.world_requirement)
                 if world_diagnostics:
-                    structural_safe = False
+                    if single_worker_only:
+                        structural_failures = tuple(
+                            item
+                            for item in world_diagnostics
+                            if item.code != "dryml.dispatch.single_subprocess_requirement_unsupported"
+                        )
+                        structural_safe = structural_safe and (
+                            policy is not RequirementPolicy.STRICT and not structural_failures
+                            or policy is RequirementPolicy.STRICT and not world_diagnostics
+                        )
+                    else:
+                        structural_safe = False
                     diagnostics.extend(world_diagnostics)
                 if single_worker_only and _is_multi_worker_world(world_spec):
                     structural_safe = False
@@ -709,14 +722,42 @@ def _dedupe_fragments(fragments):
     return tuple(result)
 
 
-def _select_environment(explicit: Any | None, annotation_default: Any | None, *, requirement=None, candidates=None, registry=None, resolver_policy=None):
+def _select_environment(
+    explicit: Any | None,
+    annotation_default: Any | None,
+    *,
+    requirement=None,
+    candidates=None,
+    registry=None,
+    resolver_policy=None,
+    bootstrap_probe: CodeProbeResult | None = None,
+    bootstrap_environment: Mapping[str, Any] | None = None,
+):
     current = environments.current(default=None)
     if explicit is not None or annotation_default is not None or current is not None:
         selection, data = _select("environment", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("fallback", environments.CurrentEnvironmentSpec())), _environment_data)
         return selection, data, None
     needs_resolver = candidates is not None or registry is not None or requirement is not None
     if needs_resolver:
-        result = environments.resolve(requirement, candidates=() if candidates is None else candidates, registry=registry, include_current=True, policy="first_compatible" if resolver_policy is None else resolver_policy)
+        def probe_runner(spec, *, timeout):
+            if (
+                bootstrap_probe is not None
+                and bootstrap_probe.ok
+                and bootstrap_probe.environment_record is not None
+                and bootstrap_environment is not None
+                and spec.to_data() == bootstrap_environment
+            ):
+                return environments.EnvironmentProbeResult(spec=spec, ok=True, record=bootstrap_probe.environment_record)
+            return environments.probe(spec, timeout=timeout)
+
+        result = environments.resolve(
+            requirement,
+            candidates=() if candidates is None else candidates,
+            registry=registry,
+            include_current=True,
+            policy="first_compatible" if resolver_policy is None else resolver_policy,
+            probe_runner=probe_runner,
+        )
         considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current"))
         if result.selected is not None:
             data = result.selected.to_data()

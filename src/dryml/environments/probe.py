@@ -34,7 +34,7 @@ _MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024
 # explicit bound for decoding records with substantial package inventories while
 # retaining only a small prefix in public result diagnostics.
 _MAX_PROTOCOL_OUTPUT_BYTES = 4 * 1024 * 1024
-_PIPE_DRAIN_JOIN_TIMEOUT_S = 0.25
+_PIPE_DRAIN_JOIN_TIMEOUT_S = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,11 +239,13 @@ def _run_bounded_command(
     *,
     timeout: float | None,
     env: dict[str, str] | None,
+    input_data: bytes | None = None,
 ) -> tuple[int, bytes, bool, bytes, bool, bool]:
     """Run a probe while continuously draining bounded stdout and stderr pipes."""
 
     process = subprocess.Popen(
         command,
+        stdin=subprocess.PIPE if input_data is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -274,6 +276,24 @@ def _run_bounded_command(
     stderr_thread = threading.Thread(target=drain, args=("stderr", process.stderr, _MAX_CAPTURED_OUTPUT_BYTES), daemon=True)
     stdout_thread.start()
     stderr_thread.start()
+    input_thread = None
+    if input_data is not None:
+        assert process.stdin is not None
+
+        def write_input() -> None:
+            try:
+                process.stdin.write(input_data)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+
+        input_thread = threading.Thread(target=write_input, daemon=True)
+        input_thread.start()
     timed_out = False
     try:
         process.wait(timeout=timeout)
@@ -293,6 +313,29 @@ def _run_bounded_command(
         stdout_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
         stderr_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
         pipes_lingered = stdout_thread.is_alive() or stderr_thread.is_alive()
+        if pipes_lingered:
+            # The leader may have exited while a descendant still owns a pipe.
+            # Close our descriptors and kill any remaining same-session process.
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            for stream in (process.stdout, process.stderr):
+                try:
+                    # ``TextIOWrapper.close()`` can wait on a concurrent read.
+                    # Closing the descriptor directly wakes the daemon drainer.
+                    os.close(stream.fileno())
+                except (OSError, ValueError):
+                    pass
+            stdout_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
+            stderr_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
+        if input_thread is not None:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+            input_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
         timed_out = timed_out or pipes_lingered
     stdout, stdout_truncated = captured["stdout"]
     stderr, stderr_truncated = captured["stderr"]
