@@ -55,30 +55,24 @@ class LocalSubprocessFuture:
         try:
             self.wait_for_handshake(timeout=self.handshake_timeout)
             self.process.wait(timeout=timeout)
+            self._read_response()
+            if self._exception is not None:
+                raise self._exception
+            assert self._response is not None
+            self._persist_logs(self._response.execution_record_id)
+            return self._response
         except subprocess.TimeoutExpired as exc:
             self.cancel(reason="timeout", record=False)
             self._response = self._parent_failure_response("timeout", error={"type": "TimeoutError", "message": "dispatch timed out"})
-            self._cleanup()
             raise DispatchTimeout("dispatch timed out") from exc
         except KeyboardInterrupt:
-            try:
-                self.cancel(reason="KeyboardInterrupt")
-            finally:
-                self._cleanup()
+            self.cancel(reason="KeyboardInterrupt")
             raise
         except BaseException:
-            try:
-                self.cancel(reason="worker_protocol_error")
-            finally:
-                self._cleanup()
+            self.cancel(reason="worker_protocol_error")
             raise
-        self._read_response()
-        if self._exception is not None:
-            raise self._exception
-        assert self._response is not None
-        self._persist_logs(self._response.execution_record_id)
-        self._cleanup()
-        return self._response
+        finally:
+            self._cleanup()
 
     def exception(self, timeout: float | None = None) -> BaseException | None:
         """Return the exception raised by ``result()``, if any."""

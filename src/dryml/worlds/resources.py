@@ -31,6 +31,8 @@ def parse_byte_size(value: str | int | None) -> int | None:
     if isinstance(value, int):
         if value < 0:
             raise ResourceValidationError("byte size must be >= 0", context={"value": value})
+        if value.bit_length() > _MAX_COUNT_BITS:
+            raise ResourceValidationError("byte size exceeds the bounded integer limit")
         return value
     if not isinstance(value, str):
         raise ResourceValidationError("byte size must be int or string", context={"type": type(value).__name__})
@@ -38,7 +40,10 @@ def parse_byte_size(value: str | int | None) -> int | None:
     if not match:
         raise ResourceValidationError("invalid or ambiguous byte-size unit", context={"value": value, "accepted_units": sorted(_UNIT_FACTORS)})
     number, unit = match.groups()
-    return int(number) * _UNIT_FACTORS[unit]
+    parsed = int(number) * _UNIT_FACTORS[unit]
+    if parsed.bit_length() > _MAX_COUNT_BITS:
+        raise ResourceValidationError("byte size exceeds the bounded integer limit")
+    return parsed
 
 
 def canonical_byte_size(value: str | int | None) -> str | None:
@@ -230,7 +235,7 @@ class ResourceSpec:
         return cls(
             cpus=_as_nonneg_int("cpus", data.get("cpus", 0)),
             memory=parse_byte_size(data.get("memory")),
-            accelerators={str(key): _as_nonneg_int(f"accelerators.{key}", value) for key, value in accelerators.items()},
+            accelerators=_concrete_accelerator_map(accelerators),
             devices=dict(data.get("devices") or {}),
             named=dict(data.get("named") or {}),
         )
@@ -276,6 +281,16 @@ def _constraint_map(data: Any, *, path: str) -> dict[str, CountConstraint]:
         if key in result:
             raise ResourceValidationError("constraint map repeats a resource name", context={"path": path, "name": key})
         result[key] = CountConstraint.from_data(value, path=f"{path}.{key}")
+    return result
+
+
+def _concrete_accelerator_map(values: Mapping[Any, Any]) -> dict[str, int]:
+    """Validate concrete accelerator keys before canonicalizing the mapping."""
+
+    result: dict[str, int] = {}
+    for key, value in values.items():
+        _validate_name(key, "accelerator")
+        result[key] = _as_nonneg_int(f"accelerators.{key}", value)
     return result
 
 

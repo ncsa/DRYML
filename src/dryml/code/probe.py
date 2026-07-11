@@ -150,6 +150,8 @@ class CodeProbeResult:
 
     def __post_init__(self) -> None:
         diagnostics = tuple(self.diagnostics or ())
+        if probe_ok(diagnostics) and self.analysis is None:
+            raise ValueError("successful CodeProbeResult requires analysis")
         object.__setattr__(self, "diagnostics", diagnostics)
         object.__setattr__(self, "ok", probe_ok(diagnostics))
 

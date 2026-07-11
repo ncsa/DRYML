@@ -66,6 +66,21 @@ def test_python_executable_spec_rejects_non_launchable_values(kwargs):
         envs.PythonExecutableSpec(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "factory",
+    (
+        lambda: envs.PythonExecutableSpec("bad\x00python"),
+        lambda: envs.PythonExecutableSpec("/python", env={"BAD=KEY": "value"}),
+        lambda: envs.PythonExecutableSpec("/python", env={"KEY": "bad\x00value"}),
+        lambda: envs.CondaEnvironmentSpec(prefix="bad\x00prefix"),
+        lambda: envs.CondaEnvironmentSpec(name="named", launch_mode="conda-run", conda_executable="bad\x00conda"),
+    ),
+)
+def test_environment_specs_reject_os_invalid_launch_strings(factory):
+    with pytest.raises(envs.EnvironmentSpecError):
+        factory()
+
+
 def test_environment_lock_ref_roundtrip_and_id():
     lock = envs.EnvironmentLockRef("conda-lock", "file:///tmp/conda-lock.yml", digest="sha256:abc")
     clone = envs.EnvironmentLockRef.from_data(lock.to_data())

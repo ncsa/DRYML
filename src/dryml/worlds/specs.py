@@ -165,6 +165,8 @@ class RoleSpec:
         if unknown:
             raise WorldSpecValidationError("role spec has unknown fields", context={"fields": sorted(unknown)})
         replicas = data.get("replicas", 1)
+        if isinstance(replicas, int) and not isinstance(replicas, bool) and replicas.bit_length() > 4096:
+            raise WorldSpecValidationError("role replicas exceed the bounded integer limit")
         if isinstance(replicas, bool) or not isinstance(replicas, int) or replicas < 0:
             raise WorldSpecValidationError("role replicas must be an integer >= 0", context={"replicas": replicas})
         return cls(replicas=replicas, process=ProcessSpec.from_data(data.get("process") or {}))

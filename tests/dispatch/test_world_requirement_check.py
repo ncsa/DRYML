@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import replace
 
 import dryml
 import pytest
@@ -301,6 +302,27 @@ def test_synthesis_inventory_is_discovered_once_per_plan_and_explain(tmp_path, m
     calls.clear()
     dispatcher.plan(gpu_target, allow_pickle=True, requirement_policy="ignore")
     assert len(calls) == 1
+
+
+def test_planning_metadata_excludes_probe_output(tmp_path):
+    from dryml.code.facts import DiagnosticFact
+    from dryml.code.probe import CodeProbeResult
+
+    resolution = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+    ).resolution
+    assert resolution.code_analysis is not None
+    probe = CodeProbeResult(
+        True,
+        resolution.code_analysis,
+        None,
+        (DiagnosticFact(severity="warning", code="audit", message="safe"),),
+        stdout="AUDIT_SECRET",
+        stderr="AUDIT_SECRET",
+    )
+    metadata = replace(resolution, code_probe=probe, bootstrap_code_probe=probe, final_code_probe=probe).metadata()
+
+    assert "AUDIT_SECRET" not in str(metadata)
 
 
 def test_planning_metadata_bounds_deep_nested_data():

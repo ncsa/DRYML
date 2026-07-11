@@ -103,3 +103,36 @@ def test_synthesis_rejects_oversized_count_before_serialization():
     )
 
     assert result.status == "invalid_requirement"
+
+
+def test_concrete_world_resources_reject_collisions_and_oversized_values():
+    from dryml.worlds import WorldSpec
+
+    with pytest.raises(Exception, match="accelerator name"):
+        WorldSpec.from_data({"roles": {"main": {"process": {"resources": {"accelerators": {1: 1, "1": 2}}}}}})
+    with pytest.raises(Exception, match="bounded"):
+        WorldSpec.from_data({"roles": {"main": {"replicas": 1 << 5000, "process": {}}}})
+    with pytest.raises(Exception, match="bounded"):
+        WorldSpec.from_data({"roles": {"main": {"process": {"resources": {"memory": 1 << 5000}}}}})
+
+
+def test_synthesis_cpu_memory_accelerator_and_topology_matrix(monkeypatch):
+    inventory = LocalResourceInventory((0, 1, 2), {"gpu": ("a",)}, memory=1024)
+    exact = synthesize({"roles": {"main": {"resources": {"cpus": {"exact": 2}, "memory": {"exact": 512}, "accelerators": {"gpu": {"exact": 1}}}}}}, inventory=inventory)
+    assert exact.ok
+    assert exact.world.roles["main"].process.resources.cpus == 2
+    assert exact.world.roles["main"].process.resources.memory == 512
+    assert exact.world.roles["main"].process.resources.accelerators == {"gpu": 1}
+    assert synthesize({"roles": {"main": {"resources": {"accelerators": {"gpu": {"exact": 2}}}}}}, inventory=inventory).diagnostics[0].code == "insufficient_accelerators"
+    assert synthesize({"roles": {"main": {"topology": {"collectives": True}}}}, inventory=inventory).status == "unsupported_requirement"
+    assert synthesize({"roles": {"main": {"resources": {"devices": {"gpu": {"min": 1}}}}}}, inventory=inventory).status == "unsupported_requirement"
+
+
+def test_synthesis_rejects_zero_only_and_authoritative_post_check(monkeypatch):
+    import dryml.worlds.synthesis as synthesis
+
+    zero = synthesize({"roles": {"main": {"resources": {"cpus": {"max": 0}}}}}, inventory=LocalResourceInventory((0,)))
+    assert zero.status == "invalid_requirement"
+    monkeypatch.setattr(synthesis, "check_world_spec_satisfies_requirement", lambda *_args: type("Report", (), {"ok": False, "issues": ()})())
+    result = synthesis.synthesize({"roles": {"main": {}}}, inventory=LocalResourceInventory((0,)))
+    assert result.status == "error"

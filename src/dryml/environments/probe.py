@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import math
 import os
+import select
 import signal
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
 from typing import Any
@@ -276,26 +278,28 @@ def _run_bounded_command(
     stderr_thread = threading.Thread(target=drain, args=("stderr", process.stderr, _MAX_CAPTURED_OUTPUT_BYTES), daemon=True)
     stdout_thread.start()
     stderr_thread.start()
-    input_thread = None
-    if input_data is not None:
-        assert process.stdin is not None
-
-        def write_input() -> None:
-            try:
-                process.stdin.write(input_data)
-                process.stdin.flush()
-            except (BrokenPipeError, OSError, ValueError):
-                pass
-            finally:
-                try:
-                    process.stdin.close()
-                except (OSError, ValueError):
-                    pass
-
-        input_thread = threading.Thread(target=write_input, daemon=True)
-        input_thread.start()
     timed_out = False
     try:
+        if input_data is not None:
+            assert process.stdin is not None
+            deadline = None if timeout is None else time.monotonic() + timeout
+            descriptor = process.stdin.fileno()
+            os.set_blocking(descriptor, False)
+            offset = 0
+            while offset < len(input_data):
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                _, writable, _ = select.select((), (descriptor,), (), remaining)
+                if not writable:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    offset += os.write(descriptor, input_data[offset:])
+                except BlockingIOError:
+                    continue
+                except BrokenPipeError:
+                    break
+            process.stdin.close()
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
@@ -330,12 +334,6 @@ def _run_bounded_command(
                     pass
             stdout_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
             stderr_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
-        if input_thread is not None:
-            try:
-                process.stdin.close()
-            except (OSError, ValueError):
-                pass
-            input_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
         timed_out = timed_out or pipes_lingered
     stdout, stdout_truncated = captured["stdout"]
     stderr, stderr_truncated = captured["stderr"]

@@ -41,7 +41,15 @@ def _validated_env(value: Any) -> Mapping[str, str]:
 
     if not isinstance(value, Mapping):
         raise EnvironmentSpecError("environment overrides must be a mapping")
-    if any(not isinstance(key, str) or not key or not isinstance(item, str) for key, item in value.items()):
+    if any(
+        not isinstance(key, str)
+        or not key
+        or "=" in key
+        or "\x00" in key
+        or not isinstance(item, str)
+        or "\x00" in item
+        for key, item in value.items()
+    ):
         raise EnvironmentSpecError("environment override keys must be non-empty strings and values must be strings")
     return value
 
@@ -50,7 +58,7 @@ def _validated_paths(value: Any) -> tuple[str, ...]:
     """Return explicitly validated extra Python paths."""
 
     paths = coerce_tuple(value)
-    if any(not isinstance(path, str) or not path for path in paths):
+    if any(not isinstance(path, str) or not path or "\x00" in path for path in paths):
         raise EnvironmentSpecError("extra_pythonpath entries must be non-empty strings")
     return tuple(paths)
 
@@ -92,7 +100,7 @@ class PythonExecutableSpec:
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if not isinstance(self.executable, str) or not self.executable:
+        if not isinstance(self.executable, str) or not self.executable or "\x00" in self.executable:
             raise EnvironmentSpecError("Python executable must be a non-empty string")
         _validate_pythonpath_policy(self.pythonpath_policy)
         frozen_env = deep_freeze_json(self.env)
@@ -151,11 +159,11 @@ class CondaEnvironmentSpec:
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.prefix is not None and (not isinstance(self.prefix, str) or not self.prefix):
+        if self.prefix is not None and (not isinstance(self.prefix, str) or not self.prefix or "\x00" in self.prefix):
             raise EnvironmentSpecError("Conda prefix must be a non-empty string")
-        if self.name is not None and (not isinstance(self.name, str) or not self.name):
+        if self.name is not None and (not isinstance(self.name, str) or not self.name or "\x00" in self.name):
             raise EnvironmentSpecError("Conda name must be a non-empty string")
-        if not isinstance(self.conda_executable, str) or not self.conda_executable:
+        if not isinstance(self.conda_executable, str) or not self.conda_executable or "\x00" in self.conda_executable:
             raise EnvironmentSpecError("Conda executable must be a non-empty string")
         if self.prefix and self.name:
             raise EnvironmentSpecError("CondaEnvironmentSpec accepts prefix or name, not both")

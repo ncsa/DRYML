@@ -37,8 +37,12 @@ def test_notebook_registry_explain_is_explicit_repeatable_and_allocation_free(tm
     explanation = Dispatcher(store=store, environment_registry=registry).explain(
         make_function_call_spec("operator:add", args=[1, 2]),
     )
+    repeated = Dispatcher(store=store, environment_registry=registry).explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+    )
 
     assert explanation.resolution.environment_selection.source == "resolver"
     assert registry.list() == (entry,)
+    assert repeated.to_data() == explanation.to_data()
     assert is_no_allocation(active_runtime().allocation)
     assert not store.records.specs_dir.exists()

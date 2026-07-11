@@ -491,6 +491,7 @@ def resolve_dispatch_plan(
         policy,
         validate_candidate=_requires_environment_validation(env_spec, normalized),
         resolved_record=_resolution_record_for(environment_resolution, env_spec),
+        resolved_probe=_resolution_probe_for(environment_resolution, env_spec),
     )
     diagnostics.extend(env_probe_diagnostics)
     if env_probe_diagnostics:
@@ -1008,7 +1009,7 @@ def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:
     return False
 
 
-def _environment_record(env_data, requirement, code_probe, probe_environment, explicit_environment, policy, *, validate_candidate: bool, resolved_record=None):
+def _environment_record(env_data, requirement, code_probe, probe_environment, explicit_environment, policy, *, validate_candidate: bool, resolved_record=None, resolved_probe=None):
     if requirement is None and not validate_candidate:
         return None, ()
     spec = spec_from_data(env_data)
@@ -1020,6 +1021,13 @@ def _environment_record(env_data, requirement, code_probe, probe_environment, ex
         return attached, ()
     if resolved_record is not None:
         return resolved_record, ()
+    if resolved_probe is not None:
+        return None, (_diagnostic(
+            "dryml.dispatch.environment_probe_failed",
+            "Environment probe already failed for the selected candidate during resolution.",
+            severity="error",
+            data={"candidate": env_data, "probe": _bounded_probe_data(resolved_probe.to_data())},
+        ),)
     if code_probe is not None and code_probe.environment_record is not None and probe_environment == env_data:
         return code_probe.environment_record, ()
     probe = environments.probe(spec)
@@ -1042,6 +1050,17 @@ def _resolution_record_for(result, candidate: Mapping[str, Any]) -> EnvironmentR
             and attempt.spec.to_data() == candidate
         ):
             return attempt.probe.record
+    return None
+
+
+def _resolution_probe_for(result, candidate: Mapping[str, Any]):
+    """Return matching failed resolver evidence to avoid a fallback reprobe."""
+
+    if result is None:
+        return None
+    for attempt in result.attempts:
+        if attempt.probe is not None and attempt.spec.to_data() == candidate:
+            return attempt.probe
     return None
 
 
@@ -1183,7 +1202,18 @@ def _bounded_probe_data(data):
 
 
 def _probe_summary(probe):
-    return None if probe is None else _bounded_probe_data(probe.to_data())
+    if probe is None:
+        return None
+    # Imported modules can print credentials. Captured output stays transient and
+    # is never copied into persisted planning metadata.
+    return _bounded_probe_data({
+        "kind": "dryml.code_probe_result",
+        "schema_version": 1,
+        "ok": probe.ok,
+        "analysis": _analysis_summary(probe.analysis),
+        "environment_record": _environment_record_summary(probe.environment_record),
+        "diagnostics": [item.to_data() for item in probe.diagnostics],
+    })
 
 
 def _analysis_summary(analysis):

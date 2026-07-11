@@ -115,10 +115,12 @@ def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
 
 def test_resolver_reuses_matching_bootstrap_environment_record(monkeypatch):
     import dryml.dispatch.requirements as requirements
+    from dryml.code.analysis import CodeAnalysisResult
     from dryml.code.probe import CodeProbeResult
+    from dryml.code.targets import CodeTargetSpec
     from dryml.environments import CurrentEnvironmentSpec, EnvironmentRequirement, inspect_current
 
-    bootstrap = CodeProbeResult(True, None, inspect_current())
+    bootstrap = CodeProbeResult(True, CodeAnalysisResult(CodeTargetSpec.from_import_path("operator:add")), inspect_current())
     monkeypatch.setattr(requirements.environments, "probe", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected reprobe")))
 
     _selection, _data, resolution = requirements._select_environment(
