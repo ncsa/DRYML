@@ -198,8 +198,12 @@ class _SynthesisFailure(Exception):
 
 
 def _coerce_requirement(requirement: WorldRequirement | Mapping[str, Any] | None) -> WorldRequirement | None:
-    if requirement is None or isinstance(requirement, WorldRequirement):
-        return requirement
+    if requirement is None:
+        return None
+    if isinstance(requirement, WorldRequirement):
+        # Direct dataclass construction can bypass ``from_data`` validation.
+        # Round-trip through canonical data before synthesis uses its fields.
+        return WorldRequirement.from_data(requirement.to_data())
     if not isinstance(requirement, Mapping):
         raise WorldSpecValidationError("world requirement must be a mapping")
     return WorldRequirement.from_data(requirement if "roles" in requirement else {"roles": requirement})

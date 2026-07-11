@@ -16,6 +16,26 @@ from .resources import CountConstraint, ResourceRequirement, ResourceSpec
 _ROLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
 
+def _validated_process_env(value: Any) -> dict[str, str]:
+    """Return OS-launchable process environment overrides without coercion."""
+
+    if not isinstance(value, Mapping):
+        raise WorldSpecValidationError("process env must be a mapping")
+    if any(
+        not isinstance(key, str)
+        or not key
+        or "=" in key
+        or "\x00" in key
+        or not isinstance(item, str)
+        or "\x00" in item
+        for key, item in value.items()
+    ):
+        raise WorldSpecValidationError(
+            "process env keys must be non-empty strings and values must be strings"
+        )
+    return dict(value)
+
+
 @dataclass(frozen=True, slots=True)
 class RoleRequirement:
     """Hard replica, resource, and topology constraints for a world role."""
@@ -115,6 +135,11 @@ class ProcessSpec:
     env: Mapping[str, str] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Apply launch-safe environment validation to direct construction."""
+
+        object.__setattr__(self, "env", _validated_process_env(self.env))
+
     @classmethod
     def from_data(cls, data: Mapping[str, Any] | None) -> "ProcessSpec":
         """Build a requested process spec from JSON-ready data."""
@@ -126,13 +151,11 @@ class ProcessSpec:
         if unknown:
             raise WorldSpecValidationError("process spec has unknown fields", context={"fields": sorted(unknown)})
         env = data.get("env") or {}
-        if not isinstance(env, Mapping):
-            raise WorldSpecValidationError("process env must be a mapping")
         return cls(
             resources=ResourceSpec.from_data(data.get("resources") or {}),
             environment=data.get("environment"),
             runtime=data.get("runtime"),
-            env={str(key): str(value) for key, value in env.items()},
+            env=_validated_process_env(env),
             metadata=dict(data.get("metadata") or {}),
         )
 

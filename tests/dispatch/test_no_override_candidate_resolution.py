@@ -50,7 +50,7 @@ def test_dispatch_reports_inventory_discovery_failure_as_structured_synthesis_fa
     assert explanation.resolution.world_synthesis.diagnostics[0].code == "inventory_discovery_failed"
 
 
-def test_unsupported_resolver_environment_is_structurally_nonlaunchable_under_ignore():
+def test_unsupported_requirement_free_resolver_candidate_falls_back_to_current():
     explanation = Dispatcher().explain(
         make_function_call_spec("operator:add", args=[1, 2]),
         environment_candidates=(ContainerEnvironmentSpec("example/image"),),
@@ -58,8 +58,10 @@ def test_unsupported_resolver_environment_is_structurally_nonlaunchable_under_ig
     )
 
     assert explanation.resolution.environment_selection.source == "resolver"
-    assert explanation.launchable is False
-    assert any(item.code == "dryml.dispatch.environment_launch_unsupported" for item in explanation.resolution.diagnostics)
+    assert explanation.resolution.environment_resolution is not None
+    assert explanation.resolution.environment_resolution.selected_source == "current"
+    assert explanation.resolution.environment_resolution.attempts[0].status == "unsupported"
+    assert explanation.launchable is True
 
 
 def test_attached_record_does_not_bypass_unsupported_environment_launch():

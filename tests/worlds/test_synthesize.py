@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.worlds import LocalResourceInventory, WorldRequirement, synthesize
+from dryml.worlds import LocalResourceInventory, RoleRequirement, WorldRequirement, synthesize
 
 
 def test_synthesize_uses_smallest_aggregate_compatible_local_world():
@@ -136,3 +136,12 @@ def test_synthesis_rejects_zero_only_and_authoritative_post_check(monkeypatch):
     monkeypatch.setattr(synthesis, "check_world_spec_satisfies_requirement", lambda *_args: type("Report", (), {"ok": False, "issues": ()})())
     result = synthesis.synthesize({"roles": {"main": {}}}, inventory=LocalResourceInventory((0,)))
     assert result.status == "error"
+
+
+def test_synthesis_revalidates_direct_requirement_instances():
+    malformed = WorldRequirement({"main": RoleRequirement(resources=object())})  # type: ignore[arg-type]
+
+    result = synthesize(malformed, inventory=LocalResourceInventory((0,)))
+
+    assert result.status == "invalid_requirement"
+    assert result.diagnostics[0].code == "invalid_requirement"

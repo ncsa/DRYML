@@ -141,9 +141,10 @@ def local_inventory(
     """Discover local capacity without importing or initializing ML frameworks.
 
     ``lightweight`` reads standard OS facts and an explicit accelerator override.
-    ``external`` additionally accepts an injected bounded command runner for
-    optional device discovery.  The injectable arguments make host-independent
-    tests possible and are never mutated.
+    ``external`` additionally accepts an injected command runner for optional
+    device discovery. ``timeout`` is forwarded to that runner; a custom
+    in-process runner must enforce its own hard deadline. The injectable
+    arguments make host-independent tests possible and are never mutated.
     """
 
     if policy not in {"lightweight", "external"}:

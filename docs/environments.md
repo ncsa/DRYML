@@ -166,11 +166,16 @@ caller candidates, name-sorted registry entries, then the current environment.
 Resolution is bounded, deduplicates canonical specs, records attempts, and
 selects the first strictly compatible candidate. Registry labels are only probe
 prefilters, never proof of compatibility. `max_candidates`, `probe_timeout`,
-and `total_timeout` bound search work; a finite total timeout also bounds a
-probe when no per-probe timeout is supplied. Resolver reports redact environment
-overrides and bound diagnostic metadata before serialization. Current-environment
-resolver probes use the bounded probe worker path rather than synchronous local
-introspection.
+and `total_timeout` bound DRYML's own search work; a finite total timeout also
+bounds a built-in probe when no per-probe timeout is supplied. Injected probe
+runners and arbitrary candidate iterators are cooperative callbacks, so callers
+requiring a hard deadline must provide a timeout-enforcing subprocess runner and
+bounded candidates. Resolver reports redact environment overrides and bound
+diagnostic metadata before serialization. Current-environment resolver probes use
+the bounded probe worker path rather than synchronous local introspection.
+Probe cleanup terminates the probe process group, but cannot reliably terminate
+an untrusted descendant that deliberately escapes that group; use an external
+sandbox or cgroup when probing untrusted executables.
 
 Notebook users retain the registry object themselves; re-running a setup cell is
 deterministic as long as registration names are not duplicated. Use

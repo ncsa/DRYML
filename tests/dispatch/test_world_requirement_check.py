@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+import sys
 
 import dryml
 import pytest
@@ -10,7 +11,7 @@ from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
 from dryml.dispatch.errors import DispatchPlanningError
-from dryml.operations import make_function_call_spec
+from dryml.operations import attach_operation_id, make_function_call_spec
 from dryml.worlds import LocalResourceInventory
 
 
@@ -75,6 +76,17 @@ def test_single_subprocess_rejects_unenacted_process_metadata():
     assert any(item.code == "dryml.dispatch.single_subprocess_process_settings_unsupported" for item in explanation.resolution.diagnostics)
 
 
+@pytest.mark.parametrize("env", ({"BAD=KEY": "value"}, {"TOKEN": "bad\x00value"}, {1: "value"}))
+def test_single_subprocess_rejects_os_invalid_process_environment(env, tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"env": env}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    with pytest.raises(DispatchPlanningError, match="invalid world candidate"):
+        dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world)
+
+    assert not dispatcher.store.records.specs_dir.exists()
+
+
 def test_single_subprocess_allows_zero_valued_unsupported_resources(tmp_path):
     world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"devices": {"gpu": 0}, "named": {"scratch": 0}}}}}}
 
@@ -100,6 +112,43 @@ def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
     assert plan.envelope.allocation_view["cpus"] == [4, 5]
     assert plan.envelope.allocation_view["accelerators"] == {"gpu": ["gpu-a"]}
     assert plan.envelope.allocation_view["metadata"]["backend"] == "local_subprocess"
+
+
+def test_run_allocates_synthesized_gpu_world_into_worker(tmp_path, target_module):
+    target_module.write_text(
+        target_module.read_text(encoding="utf-8")
+        + "\nimport dryml\n@dryml.world.req(accelerators={'gpu': {'min': 1}})\ndef synthesized_gpu_facts():\n    return allocation_facts()\n",
+        encoding="utf-8",
+    )
+    result = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).run(
+        attach_operation_id(make_function_call_spec("dispatch_target:synthesized_gpu_facts")),
+        environment={"kind": "python", "executable": sys.executable, "pythonpath_policy": "explicit", "extra_pythonpath": [str(target_module.parent)]},
+        inventory=LocalResourceInventory((4,), {"gpu": ("gpu-a",)}),
+        requirement_policy="strict",
+        timeout=10,
+    )
+
+    assert result.status == "ok"
+    assert result.result_canonical["accelerators"] == {"gpu": ["gpu-a"]}
+    assert result.result_canonical["role"] == "main"
+
+
+def test_run_world_synthesizes_omitted_multi_worker_world(tmp_path, target_module):
+    target_module.write_text(
+        target_module.read_text(encoding="utf-8")
+        + "\nimport dryml\n@dryml.world.req(roles={'worker': {'replicas': {'exact': 2}, 'resources': {'cpus': {'exact': 1}}}})\ndef synthesized_multi_facts():\n    return allocation_facts()\n",
+        encoding="utf-8",
+    )
+    result = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).run_world(
+        attach_operation_id(make_function_call_spec("dispatch_target:synthesized_multi_facts")),
+        environment={"kind": "python", "executable": sys.executable, "pythonpath_policy": "explicit", "extra_pythonpath": [str(target_module.parent)]},
+        inventory=LocalResourceInventory((0, 1)),
+        requirement_policy="strict",
+        timeout=10,
+    )
+
+    assert result.status == "ok"
+    assert {(worker.result_canonical["role"], worker.result_canonical["replica"]) for worker in result.workers.values()} == {("worker", 0), ("worker", 1)}
 
 
 def test_single_subprocess_plan_accepts_local_subprocess_backend(tmp_path):

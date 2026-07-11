@@ -18,7 +18,7 @@ from .probe import EnvironmentProbeResult, probe
 from .records import EnvironmentRecord
 from .requirements import EnvironmentRequirement
 from .schema import ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION
-from .specs import CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
+from .specs import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
 from .utils import normalize_distribution_name
 
 _MAX_RECORDED_ATTEMPTS = 32
@@ -119,9 +119,11 @@ def resolve(
 
     Candidates precede name-sorted registry entries and the optional current
     environment. ``max_candidates`` limits unique candidates; ``probe_timeout``
-    limits individual probes and ``total_timeout`` limits the entire search.
-    When only a total timeout is supplied, its remaining duration is passed to
-    each probe. Returned attempt metadata is redacted and size-bounded.
+    limits DRYML's built-in probes and ``total_timeout`` limits work between
+    callback boundaries. When only a total timeout is supplied, its remaining
+    duration is passed to each probe. Injected runners and arbitrary candidate
+    iterators are cooperative and must enforce their own hard deadlines.
+    Returned attempt metadata is redacted and size-bounded.
     """
 
     if policy != "first_compatible":
@@ -196,6 +198,19 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
             continue
         if requirement is None:
+            if isinstance(spec, ContainerEnvironmentSpec):
+                record(EnvironmentResolutionAttempt(
+                    source,
+                    name,
+                    spec,
+                    "unsupported",
+                    diagnostics=(CompatibilityIssue(
+                        "unsupported_environment_spec",
+                        "error",
+                        "container execution is not implemented",
+                    ),),
+                ))
+                continue
             record(EnvironmentResolutionAttempt(source, name, spec, "selected"))
             return EnvironmentResolution("selected", None, spec, name, source, None, None, tuple(attempts), result_diagnostics(), policy)
         try:
@@ -272,7 +287,7 @@ def _normalize_candidates(
     """Normalize the bounded caller candidate prefix before any probe starts."""
 
     iterator = iter(candidates)
-    limit = 1 if select_first else max_items + 1
+    limit = max_items + 1
     values = []
     timed_out = False
     for _ in range(limit):
@@ -287,8 +302,15 @@ def _normalize_candidates(
             timed_out = True
             break
         values.append(value)
-    truncated = not select_first and len(values) > max_items
-    values = values[:1 if select_first else max_items]
+        if select_first:
+            try:
+                _source, _name, spec, _entry = _normalize_candidate(value, "candidate")
+            except Exception as exc:
+                raise ValueError(f"invalid environment resolver candidate: {type(exc).__name__}") from exc
+            if not isinstance(spec, ContainerEnvironmentSpec):
+                break
+    truncated = len(values) > max_items
+    values = values[:max_items]
     try:
         normalized = []
         for candidate in values:

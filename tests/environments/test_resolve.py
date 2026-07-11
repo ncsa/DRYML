@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dryml.environments import CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
+from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
 
 
 def test_resolve_without_requirement_selects_first_candidate_without_probe():
@@ -31,6 +31,17 @@ def test_resolve_uses_registry_name_order_for_no_requirement_candidates():
     result = resolve(None, registry=registry, include_current=False)
 
     assert result.selected_name == "alpha"
+
+
+def test_resolve_without_requirement_skips_unsupported_container_candidate():
+    result = resolve(
+        None,
+        candidates=(ContainerEnvironmentSpec("example/image"), CurrentEnvironmentSpec()),
+        include_current=False,
+    )
+
+    assert isinstance(result.selected, CurrentEnvironmentSpec)
+    assert result.attempts[0].status == "unsupported"
 
 
 def test_resolve_deduplicates_after_selected_candidate():
