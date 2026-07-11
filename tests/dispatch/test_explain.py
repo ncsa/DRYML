@@ -113,6 +113,96 @@ def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
     assert resolution.final_code_probe is not None and resolution.final_code_probe.ok
 
 
+def test_final_probe_environment_default_does_not_retain_resolver_candidate(monkeypatch):
+    import sys
+
+    import dryml.dispatch.requirements as requirements
+    from dryml import annotations
+    from dryml.code.analysis import CodeAnalysisResult
+    from dryml.code.facts import AnnotationFact, DiagnosticFact
+    from dryml.code.probe import CodeProbeResult
+    from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+    from dryml.environments import EnvironmentProbeResult, PythonExecutableSpec, inspect_current
+    from dryml.operations import make_function_call_spec
+
+    @dryml.env.default(PythonExecutableSpec("/final/default/python").to_data())
+    def final_default_target():
+        return None
+
+    final_analysis = CodeAnalysisResult(
+        normalize_user_operation(make_function_call_spec("operator:add", args=[1, 2])).code_target,
+        facts=(AnnotationFact(data=annotations.fragments_for(final_default_target)[0].to_data()),),
+    )
+    incomplete = CodeAnalysisResult(
+        final_analysis.target,
+        diagnostics=(DiagnosticFact(severity="error", code="dryml.code.algorithm_not_applicable", message="force bootstrap probe"),),
+    )
+    probes = []
+
+    def fake_probe(target, **_kwargs):
+        probes.append(target)
+        if len(probes) == 1:
+            return CodeProbeResult(False, None, None, (DiagnosticFact(severity="error", code="code_probe.import_failed", message="bootstrap failed"),))
+        return CodeProbeResult(True, final_analysis, inspect_current())
+
+    monkeypatch.setattr(requirements, "analyze", lambda *_args, **_kwargs: incomplete)
+    monkeypatch.setattr(requirements, "probe_target", fake_probe)
+    monkeypatch.setattr(
+        requirements.environments,
+        "probe",
+        lambda spec, **_kwargs: EnvironmentProbeResult(spec=spec, ok=True, record=inspect_current()),
+    )
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(make_function_call_spec("operator:add", args=[1, 2])),
+        environment_candidates=(PythonExecutableSpec(sys.executable),),
+        requirement_policy="strict",
+    )
+
+    assert resolution.environment_selection.source == "resolver"
+    assert not resolution.launchable
+    assert any(item.code == "dryml.dispatch.final_probe_annotation_mismatch" for item in resolution.diagnostics)
+
+
+def test_implicit_fallback_inventory_failure_has_explain_plan_parity(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+    from dryml.operations import make_function_call_spec
+
+    calls = []
+
+    def fail_inventory(*_args, **_kwargs):
+        calls.append(True)
+        raise RuntimeError("local inventory unavailable")
+
+    monkeypatch.setattr(requirements.worlds, "local_inventory", fail_inventory)
+    operation = make_function_call_spec("operator:add", args=[1, 2])
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    explanation = dispatcher.explain(operation, requirement_policy="ignore")
+
+    assert not explanation.launchable
+    assert any(item.code == "dryml.dispatch.local_allocation_failed" for item in explanation.resolution.diagnostics)
+    with __import__("pytest").raises(DispatchPlanningError, match="local inventory"):
+        dispatcher.plan(operation, requirement_policy="ignore")
+    assert len(calls) == 2
+
+
+def test_implicit_fallback_plan_discovers_inventory_once(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+    from dryml.operations import make_function_call_spec
+
+    calls = []
+    inventory = LocalResourceInventory((0,))
+    monkeypatch.setattr(requirements.worlds, "local_inventory", lambda **_kwargs: calls.append(True) or inventory)
+
+    Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        requirement_policy="ignore",
+    )
+
+    assert len(calls) == 1
+
+
 def test_resolver_reuses_matching_bootstrap_environment_record(monkeypatch):
     import dryml.dispatch.requirements as requirements
     from dryml.code.analysis import CodeAnalysisResult

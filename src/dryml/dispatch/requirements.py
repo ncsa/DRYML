@@ -421,6 +421,29 @@ def resolve_dispatch_plan(
             resolution = reconciled
             diagnostics.extend(_annotation_diagnostics(resolution))
             if bootstrap_probe is not None and not bootstrap_probe.ok:
+                # A final probe can reveal an annotation default unavailable to
+                # bootstrap discovery. Do not continue with a lower-precedence
+                # resolver/current candidate unless it is the same environment.
+                if resolution.environment_default is not None:
+                    default_environment = _environment_data(resolution.environment_default)
+                    if default_environment != env_spec and env_selection.source != "explicit":
+                        structural_safe = False
+                        diagnostics.append(_diagnostic(
+                            "dryml.dispatch.final_probe_annotation_mismatch",
+                            "Final environment probe discovered a higher-precedence annotation-default environment.",
+                            data={
+                                "selected_source": env_selection.source,
+                                "selected_environment": env_spec,
+                                "annotation_default": default_environment,
+                                "action": "pass the annotation-default environment explicitly and plan again",
+                            },
+                        ))
+                    elif default_environment == env_spec:
+                        env_selection, env_spec, _ = _select_environment(
+                            environment,
+                            resolution.environment_default,
+                            requirement=resolution.environment_requirement,
+                        )
                 # Bootstrap did not provide usable requirements. Final-probe
                 # facts are therefore authoritative for world/runtime selection
                 # without restarting environment search after target validation.
@@ -523,7 +546,12 @@ def resolve_dispatch_plan(
         single_worker_only
         and not _is_multi_worker_world(world_spec)
         and (world_synthesis is None or world_synthesis.resource_inventory is not None)
-        and (_world_needs_inventory(world_spec) or world_synthesis is not None or resolution.world_requirement is not None)
+        and (
+            world_selection.source == "fallback"
+            or _world_needs_inventory(world_spec)
+            or world_synthesis is not None
+            or resolution.world_requirement is not None
+        )
     ):
         try:
             from .local_world import validate_local_world_feasibility
@@ -595,7 +623,16 @@ def resolve_dispatch_plan(
         launchable=launchable,
         environment_resolution=environment_resolution,
         world_synthesis=world_synthesis,
-        inventory_summary=None if selected_inventory is None else selected_inventory.summary(),
+        # The implicit no-requirement fallback still retains inventory for the
+        # planner, but its volatile host-capacity observations are not dispatch
+        # intent metadata. Synthesis and resource requirements retain the
+        # required inventory evidence.
+        inventory_summary=(
+            None
+            if selected_inventory is None
+            or (world_synthesis is None and resolution.world_requirement is None)
+            else selected_inventory.summary()
+        ),
         world_allocation_summary=None,
         local_inventory=selected_inventory,
     )
@@ -1149,17 +1186,13 @@ def _has_annotation_errors(resolution) -> bool:
 def _resolution_decisions(resolution) -> dict[str, Any]:
     """Return only requirement/default values whose change invalidates selection."""
 
-    data = resolution.to_data()
     return {
-        key: data[key]
-        for key in (
-            "environment_requirement",
-            "environment_default",
-            "world_requirement",
-            "world_default",
-            "runtime_requirement",
-            "runtime_default",
-        )
+        "environment_requirement": None if resolution.environment_requirement is None else resolution.environment_requirement.to_data(),
+        "environment_default": None if resolution.environment_default is None else _environment_data(resolution.environment_default),
+        "world_requirement": None if resolution.world_requirement is None else resolution.world_requirement.to_data(),
+        "world_default": None if resolution.world_default is None else _world_data(resolution.world_default),
+        "runtime_requirement": None if resolution.runtime_requirement is None else dict(resolution.runtime_requirement),
+        "runtime_default": None if resolution.runtime_default is None else _runtime_data(resolution.runtime_default),
     }
 
 

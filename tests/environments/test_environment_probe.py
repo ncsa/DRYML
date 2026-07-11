@@ -205,6 +205,17 @@ def test_probe_rejects_malformed_nested_record_data(tmp_path):
         })
 
 
+def test_probe_rejects_non_string_record_primitives(tmp_path):
+    payload = sample_payload()
+    payload["record"]["python"]["version"] = 3.11
+    exe = make_fake_executable(tmp_path, payload)
+
+    result = envs.probe(envs.PythonExecutableSpec(exe))
+
+    assert not result.ok
+    assert result.report.issues[0].code == "probe_failed"
+
+
 def test_probe_worker_json_schema(capsys):
     assert probe_worker_main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)

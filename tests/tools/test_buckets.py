@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -145,4 +146,8 @@ def update_from_timings(baseline: dict[str, Any], timing_paths: list[Path]) -> d
 
 
 if __name__ == "__main__":
+    # ``tests.sh`` reads selected paths with Bash ``mapfile``.  On Windows,
+    # Python otherwise emits CRLF and leaves a trailing carriage return in each
+    # selected pathname.
+    sys.stdout.reconfigure(newline="\n")
     raise SystemExit(main())

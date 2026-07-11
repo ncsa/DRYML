@@ -145,3 +145,20 @@ def test_synthesis_revalidates_direct_requirement_instances():
 
     assert result.status == "invalid_requirement"
     assert result.diagnostics[0].code == "invalid_requirement"
+
+
+def test_synthesis_rejects_local_role_and_worker_counts_before_materializing_worlds():
+    inventory = LocalResourceInventory((0,))
+    too_many_workers = synthesize(
+        {"roles": {"main": {"replicas": {"exact": 4097}}}},
+        inventory=inventory,
+    )
+    too_many_roles = synthesize(
+        {"roles": {f"role_{index}": {} for index in range(4097)}},
+        inventory=inventory,
+    )
+
+    assert too_many_workers.status == "invalid_requirement"
+    assert too_many_workers.diagnostics[0].code == "worker_count_exceeds_local_limit"
+    assert too_many_roles.status == "invalid_requirement"
+    assert too_many_roles.diagnostics[0].code == "role_count_exceeds_local_limit"

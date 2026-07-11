@@ -17,6 +17,7 @@ _MAX_SERIALIZATION_DEPTH = 8
 _MAX_SERIALIZATION_ITEMS = 64
 _MAX_SERIALIZATION_STRING = 4096
 _MAX_SERIALIZATION_NODES = 1024
+_MAX_LOCAL_WORLD_WORKERS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,15 +127,37 @@ def synthesize(
         world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local", "parameters": {}}})
         return WorldSynthesisResult("synthesized", None, inv.summary(), world, None, (), policy, inv)
     try:
+        if len(req.roles) > _MAX_LOCAL_WORLD_WORKERS:
+            raise _SynthesisFailure(
+                "invalid_requirement",
+                "role_count_exceeds_local_limit",
+                "local synthesis role count exceeds the worker limit",
+                "roles",
+                _MAX_LOCAL_WORLD_WORKERS,
+                len(req.roles),
+                {"limit": _MAX_LOCAL_WORLD_WORKERS, "roles": len(req.roles)},
+            )
         roles: dict[str, Any] = {}
         required_cpus = required_memory = 0
         required_accelerators: dict[str, int] = {}
+        worker_count = 0
         for name in sorted(req.roles):
             role = req.roles[name]
             _validate_topology(role.topology, name)
             _reject_unsupported(role.resources.devices, "devices", name)
             _reject_unsupported(role.resources.named, "named", name)
             replicas = _choose(role.replicas, minimum=1, path=f"roles.{name}.replicas")
+            worker_count += replicas
+            if worker_count > _MAX_LOCAL_WORLD_WORKERS:
+                raise _SynthesisFailure(
+                    "invalid_requirement",
+                    "worker_count_exceeds_local_limit",
+                    "local synthesis worker count exceeds the worker limit",
+                    "roles",
+                    _MAX_LOCAL_WORLD_WORKERS,
+                    worker_count,
+                    {"limit": _MAX_LOCAL_WORLD_WORKERS, "workers": worker_count},
+                )
             cpus = _choose(role.resources.cpus, minimum=1, path=f"roles.{name}.resources.cpus")
             memory = _choose(role.resources.memory, minimum=0, path=f"roles.{name}.resources.memory") if role.resources.memory.to_data() else None
             accelerators = {

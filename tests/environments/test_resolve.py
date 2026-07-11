@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from dryml.environments import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
+from dryml.environments import CompatibilityIssue, CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
+from dryml.environments.compatibility import report_from_issues
 
 
 def test_resolve_without_requirement_selects_first_candidate_without_probe():
@@ -146,7 +147,7 @@ def test_resolver_continues_after_the_bounded_duplicate_trace():
 
     result = resolve(
         requirement,
-        candidates=(rejected, *((rejected.to_data(),) * 32), selected),
+        candidates=(rejected, *((rejected.to_data(),) * 300), selected),
         include_current=False,
         probe_runner=runner,
     )
@@ -154,6 +155,7 @@ def test_resolver_continues_after_the_bounded_duplicate_trace():
     assert result.selected == selected
     assert len(result.attempts) == 32
     assert any(issue.code == "resolver_trace_truncated" for issue in result.diagnostics)
+    assert result.to_data()["selected_probe"]["ok"] is True
 
 
 def test_resolver_continues_after_a_invalid_probe_runner_result():
@@ -190,7 +192,7 @@ def test_resolver_bounds_duplicate_only_candidate_input():
 
     def candidates():
         yield rejected
-        for _ in range(33):
+        for _ in range(300):
             yield rejected.to_data()
         raise AssertionError("resolver consumed an unbounded duplicate input")
 
@@ -206,7 +208,7 @@ def test_resolver_bounds_duplicate_only_candidate_input():
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
 
 
-def test_resolver_reports_bounded_registry_prefix_before_no_match():
+def test_resolver_reaches_unique_registry_candidates_after_aliases():
     registry = EnvironmentRegistry()
     for index in range(40):
         registry.register(f"alias-{index:02}", CurrentEnvironmentSpec())
@@ -217,11 +219,19 @@ def test_resolver_reports_bounded_registry_prefix_before_no_match():
         registry=registry,
         include_current=False,
         max_candidates=8,
-        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, False),
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
+            spec,
+            True,
+            record=replace(inspect_current(), tags=("wanted",))
+            if isinstance(spec, PythonExecutableSpec) and spec.executable == "/selected/python"
+            else None,
+        )
+        if isinstance(spec, PythonExecutableSpec) and spec.executable == "/selected/python"
+        else EnvironmentProbeResult(spec, False),
     )
 
-    assert result.status == "no_match"
-    assert any(issue.code == "resolver_registry_truncated" for issue in result.diagnostics)
+    assert result.selected_name == "selected"
+    assert not any(issue.code == "resolver_registry_truncated" for issue in result.diagnostics)
 
 
 def test_resolver_rejects_invalid_candidate_before_running_any_probe():
@@ -312,6 +322,54 @@ def test_resolver_records_probe_duration():
 
     assert result.attempts[0].probe_duration_s is not None
     assert result.attempts[0].to_data()["probe_duration_s"] >= 0
+
+
+def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_failed():
+    spec = PythonExecutableSpec("/candidate/python")
+    state = {"now": 0.0}
+
+    def runner(candidate, *, timeout):
+        state["now"] = 1.0
+        return EnvironmentProbeResult(candidate, True, record=replace(inspect_current(), tags=("wanted",)))
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        total_timeout=0.5,
+        clock=lambda: state["now"],
+        probe_runner=runner,
+    )
+
+    attempt = result.attempts[0]
+    assert attempt.status == "probe_failed"
+    assert attempt.probe_duration_s == 1.0
+    assert attempt.probe is not None and not attempt.probe.ok
+    assert attempt.probe.report is not None
+    assert attempt.probe.report.issues[-1].code == "resolver_total_timeout"
+
+
+def test_resolver_continues_after_malformed_protocol_record():
+    malformed = PythonExecutableSpec("/malformed-protocol/python")
+    selected = PythonExecutableSpec("/selected/python")
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(malformed, selected),
+        include_current=False,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
+            spec,
+            False,
+            report=report_from_issues((CompatibilityIssue("probe_failed", "error", "environment probe record could not be decoded"),)),
+        )
+        if spec == malformed
+        else EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=("wanted",))),
+    )
+
+    assert result.selected == selected
+    assert result.attempts[0].status == "probe_failed"
+    assert result.attempts[0].probe is not None
+    assert result.attempts[0].probe.report.issues[0].code == "probe_failed"
 
 
 def test_total_timeout_is_checked_after_candidate_conversion():

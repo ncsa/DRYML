@@ -1,3 +1,6 @@
+import json
+import math
+
 import pytest
 
 import dryml.worlds as worlds
@@ -46,3 +49,42 @@ def test_world_requirement_merge_conflict_has_context():
     with pytest.raises(WorldSpecValidationError) as excinfo:
         left.merge(right)
     assert "roles.trainer" in excinfo.value.context["path"]
+
+
+@pytest.mark.parametrize(
+    "topology",
+    (
+        {"hint": object()},
+        {"hint": math.nan},
+        {"hint": math.inf},
+    ),
+)
+def test_role_requirement_rejects_non_json_safe_topology_values(topology):
+    with pytest.raises(WorldSpecValidationError, match="topology"):
+        worlds.RoleRequirement.from_data({"topology": topology})
+    with pytest.raises(WorldSpecValidationError, match="topology"):
+        worlds.RoleRequirement(topology=topology)
+
+
+def test_role_requirement_rejects_cyclic_topology_and_preserves_json_safe_direct_data():
+    cycle = []
+    cycle.append(cycle)
+
+    with pytest.raises(WorldSpecValidationError, match="cycles"):
+        worlds.RoleRequirement.from_data({"topology": {"hint": cycle}})
+    with pytest.raises(WorldSpecValidationError, match="cycles"):
+        worlds.RoleRequirement(topology={"hint": cycle})
+
+    requirement = worlds.WorldRequirement(
+        {"main": worlds.RoleRequirement(topology={"hint": {"devices": ["gpu"]}})}
+    )
+
+    assert json.loads(json.dumps(requirement.to_data())) == {
+        "roles": {
+            "main": {
+                "replicas": {"exact": 1},
+                "resources": {},
+                "topology": {"hint": {"devices": ["gpu"]}},
+            }
+        }
+    }

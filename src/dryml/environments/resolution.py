@@ -6,13 +6,12 @@ import json
 import math
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
-from itertools import islice
+from dataclasses import dataclass, replace
 from typing import Any
 
 from packaging.requirements import Requirement
 
-from .compatibility import CompatibilityIssue, CompatibilityReport
+from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues
 from .current import current
 from .probe import EnvironmentProbeResult, probe
 from .records import EnvironmentRecord
@@ -22,6 +21,7 @@ from .specs import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnviro
 from .utils import normalize_distribution_name
 
 _MAX_RECORDED_ATTEMPTS = 32
+_MAX_RAW_CANDIDATE_HEADROOM = 256
 _MAX_SERIALIZED_ITEMS = 64
 _MAX_SERIALIZED_STRING = 4096
 _MAX_SERIALIZED_DEPTH = 8
@@ -49,7 +49,7 @@ class EnvironmentResolutionAttempt:
             "name": self.name,
             "spec": _spec_summary(self.spec),
             "status": self.status,
-            "probe": None if self.probe is None else {"ok": self.probe.ok, "returncode": self.probe.returncode, "report": None if self.probe.report is None else self.probe.report.to_data()},
+            "probe": _probe_summary(self.probe),
             "probe_duration_s": self.probe_duration_s,
             "compatibility": None if self.compatibility is None else self.compatibility.to_data(),
             "diagnostics": [issue.to_data() for issue in self.diagnostics],
@@ -96,6 +96,7 @@ class EnvironmentResolution:
             "selected_name": self.selected_name,
             "selected_source": self.selected_source,
             "selected_record": _record_summary(self.selected_record),
+            "selected_probe": _probe_summary(self.selected_probe),
             "attempts": [attempt.to_data() for attempt in self.attempts],
             "diagnostics": [issue.to_data() for issue in self.diagnostics],
             "policy": self.policy,
@@ -123,6 +124,9 @@ def resolve(
     callback boundaries. When only a total timeout is supplied, its remaining
     duration is passed to each probe. Injected runners and arbitrary candidate
     iterators are cooperative and must enforce their own hard deadlines.
+    Raw candidate input is limited to ``max_candidates`` plus fixed alias
+    headroom; truncation is reported rather than implying arbitrary iterators
+    can be searched without bound.
     Returned attempt metadata is redacted and size-bounded.
     """
 
@@ -138,11 +142,19 @@ def resolve(
     now = time.monotonic if clock is None else clock
     started = now()
     deadline = None if total_timeout is None else started + total_timeout
-    # Bound raw entries as well as unique candidates. This leaves room to show
-    # duplicates without letting a duplicate-only iterator defeat all limits.
+    # ``max_candidates`` constrains unique identities. Raw inputs get bounded
+    # headroom so aliases do not consume that limit or hide later unique specs.
+    # Caller-owned finite sequences can be deduplicated completely without
+    # risking an iterator that never yields a second identity. Arbitrary
+    # iterators remain bounded by explicit alias headroom.
+    raw_candidate_limit = (
+        None
+        if isinstance(candidates, (list, tuple))
+        else max_candidates + _MAX_RAW_CANDIDATE_HEADROOM
+    )
     raw_candidates, candidates_truncated, candidates_timed_out = _normalize_candidates(
         candidates,
-        max_items=max_candidates + _MAX_RECORDED_ATTEMPTS,
+        max_items=raw_candidate_limit,
         select_first=requirement is None,
         now=now,
         deadline=deadline,
@@ -153,7 +165,7 @@ def resolve(
     truncated = False
     registry_entries, registry_truncated = _registry_entries(
         registry,
-        limit=max_candidates + _MAX_RECORDED_ATTEMPTS,
+        limit=None,
     )
 
     def record(attempt: EnvironmentResolutionAttempt) -> None:
@@ -168,7 +180,7 @@ def resolve(
         if truncated:
             diagnostics.append(CompatibilityIssue("resolver_trace_truncated", "warning", "resolver attempt metadata was truncated", expected=_MAX_RECORDED_ATTEMPTS))
         if candidates_truncated:
-            diagnostics.append(CompatibilityIssue("resolver_candidates_truncated", "warning", "resolver candidate input was truncated", expected=max_candidates + _MAX_RECORDED_ATTEMPTS))
+            diagnostics.append(CompatibilityIssue("resolver_candidates_truncated", "warning", "resolver candidate input was truncated", expected=raw_candidate_limit))
         if candidates_timed_out:
             diagnostics.append(CompatibilityIssue("resolver_candidate_input_timeout", "warning", "resolver candidate input exceeded the total timeout"))
         if registry_truncated:
@@ -235,7 +247,24 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,), probe_duration_s=duration))
             continue
         if total_timeout is not None and now() - started >= total_timeout:
-            record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout", result, probe_duration_s=probe_duration_s))
+            timeout_issue = CompatibilityIssue(
+                "resolver_total_timeout",
+                "error",
+                "environment probe exhausted the total resolver timeout",
+            )
+            timeout_report = report_from_issues(
+                (*(() if result.report is None else result.report.issues), timeout_issue)
+            )
+            timed_out_result = replace(result, ok=False, report=timeout_report)
+            record(EnvironmentResolutionAttempt(
+                source,
+                name,
+                spec,
+                "probe_failed",
+                timed_out_result,
+                diagnostics=timeout_report.issues,
+                probe_duration_s=probe_duration_s,
+            ))
             break
         if not result.ok or result.record is None:
             diagnostics = () if result.report is None else result.report.issues
@@ -264,14 +293,14 @@ def _candidates(
         yield "current", None, CurrentEnvironmentSpec(), None
 
 
-def _registry_entries(registry: Any, *, limit: int) -> tuple[tuple[Any, ...], bool]:
-    """Materialize a bounded registry prefix and report omitted entries."""
+def _registry_entries(registry: Any, *, limit: int | None) -> tuple[Iterable[Any], bool]:
+    """Return deterministic registry entries without alias-prefix truncation."""
 
     if registry is None:
         return (), False
-    entries = registry.iter_entries(limit=limit + 1) if hasattr(registry, "iter_entries") else islice(registry.list(), limit + 1)
-    values = tuple(entries)
-    return values[:limit], len(values) > limit
+    if hasattr(registry, "iter_entries"):
+        return registry.iter_entries(limit=limit), False
+    return iter(registry.list()), False
 
 
 def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, EnvironmentSpec, Any]:
@@ -300,7 +329,7 @@ def _structural_candidate_issue(spec: EnvironmentSpec) -> CompatibilityIssue | N
 def _normalize_candidates(
     candidates: Iterable[Any],
     *,
-    max_items: int,
+    max_items: int | None,
     select_first: bool,
     now: Callable[[], float],
     deadline: float | None,
@@ -308,10 +337,9 @@ def _normalize_candidates(
     """Normalize the bounded caller candidate prefix before any probe starts."""
 
     iterator = iter(candidates)
-    limit = max_items + 1
     values = []
     timed_out = False
-    for _ in range(limit):
+    while max_items is None or len(values) <= max_items:
         if deadline is not None and now() >= deadline:
             timed_out = True
             break
@@ -330,8 +358,9 @@ def _normalize_candidates(
                 raise ValueError(f"invalid environment resolver candidate: {type(exc).__name__}") from exc
             if _structural_candidate_issue(spec) is None:
                 break
-    truncated = len(values) > max_items
-    values = values[:max_items]
+    truncated = max_items is not None and len(values) > max_items
+    if max_items is not None:
+        values = values[:max_items]
     try:
         normalized = []
         for candidate in values:
@@ -420,6 +449,18 @@ def _record_summary(record: EnvironmentRecord | None) -> dict[str, Any] | None:
         "id": record.id,
         "python": {"implementation": record.python.implementation, "version": record.python.version},
         "platform": {"system": record.platform.system, "machine": record.platform.machine},
+    })
+
+
+def _probe_summary(result: EnvironmentProbeResult | None) -> dict[str, Any] | None:
+    """Return bounded probe evidence without duplicating selected record data."""
+
+    if result is None:
+        return None
+    return _bounded_data({
+        "ok": result.ok,
+        "returncode": result.returncode,
+        "report": None if result.report is None else result.report.to_data(),
     })
 
 

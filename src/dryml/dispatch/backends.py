@@ -38,6 +38,7 @@ class LocalSubprocessFuture:
     preserve_work_dir: bool = False
     cancel_grace: float = 0.5
     handshake_timeout: float = 10.0
+    process_group: bool = False
 
     _response: WorkerResponse | None = None
     _exception: BaseException | None = None
@@ -138,17 +139,20 @@ class LocalSubprocessFuture:
     def kill(self) -> None:
         """Kill the worker process group."""
 
-        if os.name == "posix":
+        if os.name == "posix" and self.process_group:
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 return
         else:
-            self.process.kill()
+            try:
+                self.process.kill()
+            except ProcessLookupError:
+                pass
 
     def _signal(self, sig: signal.Signals) -> None:
         try:
-            if os.name == "posix":
+            if os.name == "posix" and self.process_group:
                 os.killpg(self.process.pid, sig)
             else:
                 self.process.send_signal(sig)
@@ -224,6 +228,10 @@ class LocalSubprocessFuture:
             pass
 
     def _cleanup(self) -> None:
+        if os.name == "posix" and self.process_group and self._response is not None and self._response.status == "ok":
+            # Backend launches create this dedicated POSIX session. Reap any
+            # descendants retained after the worker leader has returned.
+            self.kill()
         for path in self.plan.envelope.launch.get("cleanup_paths", ()):  # type: ignore[union-attr]
             if isinstance(path, str):
                 shutil.rmtree(path, ignore_errors=True)
@@ -269,7 +277,19 @@ class LocalSubprocessBackend:
             if isinstance(exc, KeyboardInterrupt):
                 raise
             raise DispatchLaunchError("failed to launch local subprocess worker", context={"error": str(exc)}) from exc
-        future = LocalSubprocessFuture(process, plan, work_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, self.preserve_work_dir, handshake_timeout=self.handshake_timeout)
+        future = LocalSubprocessFuture(
+            process,
+            plan,
+            work_dir,
+            request_path,
+            handshake_path,
+            response_path,
+            stdout_path,
+            stderr_path,
+            self.preserve_work_dir,
+            handshake_timeout=self.handshake_timeout,
+            process_group=(os.name == "posix"),
+        )
         try:
             future.wait_for_handshake(timeout=self.handshake_timeout)
         except BaseException:

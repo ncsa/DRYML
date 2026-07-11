@@ -180,7 +180,20 @@ class LocalWorldBackend:
                 finally:
                     stdout.close()
                     stderr.close()
-                futures[worker_plan.key] = LocalSubprocessFuture(process, launch_plan, worker_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, True, cancel_grace=self.cancel_grace, handshake_timeout=self.handshake_timeout)
+                futures[worker_plan.key] = LocalSubprocessFuture(
+                    process,
+                    launch_plan,
+                    worker_dir,
+                    request_path,
+                    handshake_path,
+                    response_path,
+                    stdout_path,
+                    stderr_path,
+                    True,
+                    cancel_grace=self.cancel_grace,
+                    handshake_timeout=self.handshake_timeout,
+                    process_group=(os.name == "posix"),
+                )
         except BaseException as exc:
             for future in futures.values():
                 _cancel_worker_safely(future, grace=self.cancel_grace, reason="launch_failure")
@@ -220,10 +233,14 @@ class LocalWorldFuture:
 
         if self._started:
             return {key: future._handshake for key, future in self.workers.items()}
+        if self._cancelled:
+            return {key: future._handshake for key, future in self.workers.items()}
         _report("dryml.dispatch.world.handshake.wait", "Waiting for worker handshakes", operation_id=self.plan.operation_spec.get("id"), data={"worker_count": len(self.workers)})
         deadline = time.monotonic() + (self.handshake_timeout if timeout is None else timeout)
         handshakes: dict[WorldWorkerKey, WorkerHandshakeResponse | None] = {key: None for key in self.workers}
         while True:
+            if self._cancelled:
+                return handshakes
             for key, future in self.workers.items():
                 if handshakes[key] is not None:
                     continue
@@ -333,7 +350,7 @@ class LocalWorldFuture:
         """Cancel the group and remove its work directory without awaiting results."""
 
         cancelled = self.cancel(reason=reason)
-        self._cleanup()
+        self._cleanup(force=True)
         return cancelled
 
     def done(self) -> bool:
@@ -415,9 +432,12 @@ class LocalWorldFuture:
         _report("dryml.dispatch.world.complete", "Local world dispatch complete", operation_id=self.plan.operation_spec.get("id"), data={"status": status, "worker_statuses": {key.label(): result.status for key, result in worker_results.items()}, "world_allocation_id": self.plan.world_allocation_spec.get("id"), "execution_record_ids": list(execution_record_ids)})
         return WorldDispatchResult(status=status, dispatch_id=self.plan.dispatch_spec.get("id"), recipe_id=self.plan.execution_recipe.get("id"), world_id=self.plan.world_spec.get("id"), world_allocation_id=self.plan.world_allocation_spec.get("id"), primary=primary, workers=worker_results, execution_record_ids=execution_record_ids, produced_record_ids=produced_record_ids, diagnostics=tuple(diagnostics), error=first_error, cancellation=first_cancel)
 
-    def _cleanup(self) -> None:
+    def _cleanup(self, *, force: bool = False) -> None:
         _cleanup_worker_paths(self.plan)
-        if not self.preserve_work_dir:
+        for future in self.workers.values():
+            if isinstance(future, LocalSubprocessFuture):
+                future._cleanup()
+        if force or not self.preserve_work_dir:
             shutil.rmtree(self.group_work_dir, ignore_errors=True)
 
 

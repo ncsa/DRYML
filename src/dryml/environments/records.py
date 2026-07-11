@@ -12,6 +12,40 @@ from .serialization import deep_freeze_json, freeze_mapping, json_ready
 from .utils import coerce_tuple, normalize_distribution_name
 
 
+def _mapping(data: Any, name: str) -> Mapping[str, Any]:
+    if not isinstance(data, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    return data
+
+
+def _required_string(data: Mapping[str, Any], name: str) -> str:
+    value = data[name]
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    return value
+
+
+def _optional_string(data: Mapping[str, Any], name: str) -> str | None:
+    value = data.get(name)
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None")
+    return value
+
+
+def _schema_version(data: Mapping[str, Any]) -> int:
+    value = data.get("schema_version", ENVIRONMENT_RECORD_SCHEMA_VERSION)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("schema_version must be an integer")
+    return value
+
+
+def _string_list(data: Mapping[str, Any], name: str) -> tuple[str, ...]:
+    value = data.get(name, ())
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        raise TypeError(f"{name} must be a sequence of strings")
+    return tuple(value)
+
+
 @dataclass(frozen=True, slots=True)
 class PackageRecord:
     """Observed installed Python distribution metadata.
@@ -51,15 +85,19 @@ class PackageRecord:
     def from_data(cls, data: Mapping[str, Any]) -> "PackageRecord":
         """Build a package record from serialized data."""
 
+        data = _mapping(data, "package record")
+        editable = data.get("editable")
+        if editable is not None and not isinstance(editable, bool):
+            raise TypeError("editable must be a boolean or None")
         return cls(
-            name=data["name"],
-            normalized_name=data.get("normalized_name"),
-            version=data.get("version"),
-            metadata_name=data.get("metadata_name"),
-            location=data.get("location"),
-            installer=data.get("installer"),
-            editable=data.get("editable"),
-            schema_version=data.get("schema_version", ENVIRONMENT_RECORD_SCHEMA_VERSION),
+            name=_required_string(data, "name"),
+            normalized_name=_optional_string(data, "normalized_name"),
+            version=_optional_string(data, "version"),
+            metadata_name=_optional_string(data, "metadata_name"),
+            location=_optional_string(data, "location"),
+            installer=_optional_string(data, "installer"),
+            editable=editable,
+            schema_version=_schema_version(data),
         )
 
 
@@ -90,13 +128,14 @@ class PythonRecord:
     def from_data(cls, data: Mapping[str, Any]) -> "PythonRecord":
         """Build a Python record from serialized data."""
 
+        data = _mapping(data, "Python record")
         return cls(
-            version=data["version"],
-            implementation=data["implementation"],
-            executable=data.get("executable"),
-            prefix=data.get("prefix"),
-            base_prefix=data.get("base_prefix"),
-            schema_version=data.get("schema_version", ENVIRONMENT_RECORD_SCHEMA_VERSION),
+            version=_required_string(data, "version"),
+            implementation=_required_string(data, "implementation"),
+            executable=_optional_string(data, "executable"),
+            prefix=_optional_string(data, "prefix"),
+            base_prefix=_optional_string(data, "base_prefix"),
+            schema_version=_schema_version(data),
         )
 
 
@@ -137,18 +176,19 @@ class PlatformRecord:
     def from_data(cls, data: Mapping[str, Any]) -> "PlatformRecord":
         """Build a platform record from serialized data."""
 
+        data = _mapping(data, "platform record")
         return cls(
-            system=data["system"],
-            release=data["release"],
-            version=data["version"],
-            machine=data["machine"],
-            platform=data["platform"],
-            os_name=data.get("os_name"),
-            sys_platform=data.get("sys_platform"),
-            implementation_name=data.get("implementation_name"),
-            implementation_version=data.get("implementation_version"),
-            platform_python_implementation=data.get("platform_python_implementation"),
-            schema_version=data.get("schema_version", ENVIRONMENT_RECORD_SCHEMA_VERSION),
+            system=_required_string(data, "system"),
+            release=_required_string(data, "release"),
+            version=_required_string(data, "version"),
+            machine=_required_string(data, "machine"),
+            platform=_required_string(data, "platform"),
+            os_name=_optional_string(data, "os_name"),
+            sys_platform=_optional_string(data, "sys_platform"),
+            implementation_name=_optional_string(data, "implementation_name"),
+            implementation_version=_optional_string(data, "implementation_version"),
+            platform_python_implementation=_optional_string(data, "platform_python_implementation"),
+            schema_version=_schema_version(data),
         )
 
 
@@ -183,13 +223,17 @@ class DrymlRuntimeRecord:
     def from_data(cls, data: Mapping[str, Any]) -> "DrymlRuntimeRecord":
         """Build a DRYML runtime record from serialized data."""
 
+        data = _mapping(data, "DRYML runtime record")
+        schema_versions = _mapping(data.get("schema_versions", {}), "schema_versions")
+        if not all(isinstance(name, str) and not isinstance(version, bool) and isinstance(version, int) for name, version in schema_versions.items()):
+            raise TypeError("schema_versions must map strings to integers")
         return cls(
-            version=data.get("version"),
-            git_revision=data.get("git_revision"),
-            execution_protocol=data.get("execution_protocol"),
-            schema_versions=data.get("schema_versions", {}),
-            features=tuple(data.get("features", ())),
-            schema_version=data.get("schema_version", ENVIRONMENT_RECORD_SCHEMA_VERSION),
+            version=_optional_string(data, "version"),
+            git_revision=_optional_string(data, "git_revision"),
+            execution_protocol=_optional_string(data, "execution_protocol"),
+            schema_versions=schema_versions,
+            features=_string_list(data, "features"),
+            schema_version=_schema_version(data),
         )
 
 
@@ -247,22 +291,33 @@ class EnvironmentRecord:
     def from_data(cls, data: Mapping[str, Any]) -> "EnvironmentRecord":
         """Build an environment record from serialized data."""
 
+        data = _mapping(data, "environment record")
+        distributions = _mapping(data.get("distributions", {}), "distributions")
+        if not all(isinstance(name, str) and isinstance(value, Mapping) for name, value in distributions.items()):
+            raise TypeError("distributions must map strings to package-record mappings")
+        dryml = data.get("dryml")
+        if dryml is not None and not isinstance(dryml, Mapping):
+            raise TypeError("dryml must be a mapping or None")
+        kind = data.get("kind", "unknown")
+        if not isinstance(kind, str):
+            raise TypeError("kind must be a string")
+        details = _mapping(data.get("details", {}), "details")
         return cls(
             python=PythonRecord.from_data(data["python"]),
             platform=PlatformRecord.from_data(data["platform"]),
             distributions={
                 key: PackageRecord.from_data(value)
-                for key, value in data.get("distributions", {}).items()
+                for key, value in distributions.items()
             },
             dryml=(
                 None
-                if data.get("dryml") is None
-                else DrymlRuntimeRecord.from_data(data["dryml"])
+                if dryml is None
+                else DrymlRuntimeRecord.from_data(dryml)
             ),
-            kind=data.get("kind", "unknown"),
-            tags=tuple(data.get("tags", ())),
-            details=data.get("details", {}),
-            schema_version=data.get("schema_version", ENVIRONMENT_RECORD_SCHEMA_VERSION),
+            kind=kind,
+            tags=_string_list(data, "tags"),
+            details=details,
+            schema_version=_schema_version(data),
         )
 
 

@@ -20,6 +20,31 @@ def test_inventory_round_trip_is_deterministic():
     assert inventory.summary()["accelerator_counts"] == {"gpu": 2}
 
 
+@pytest.mark.parametrize("identifier", ("", "0,1", "GPU\x00unsafe", -1))
+def test_inventory_rejects_unsafe_accelerator_visibility_identifiers(identifier):
+    with pytest.raises(ResourceValidationError, match="accelerator identifier"):
+        LocalResourceInventory((0,), {"gpu": (identifier,)})
+    with pytest.raises(ResourceValidationError, match="accelerator identifier"):
+        LocalResourceInventory.from_data({"cpus": [0], "accelerators": {"gpu": [identifier]}})
+
+
+def test_inventory_accelerator_string_identifier_reaches_visibility_allocation():
+    from dryml.dispatch.local_world import allocate_local_world
+    from dryml.runtime import RuntimeAllocationView, RuntimeMode, build_device_visibility_plan
+
+    plan = allocate_local_world(
+        {"roles": {"main": {"process": {"resources": {"accelerators": {"gpu": 1}}}}}},
+        inventory=LocalResourceInventory((0,), {"gpu": ("GPU-safe-token",)}),
+    )
+    allocation = plan.world_allocation.roles["main"][0]
+    visibility = build_device_visibility_plan(
+        mode=RuntimeMode.WORKER,
+        allocation_view=RuntimeAllocationView(accelerators=allocation.accelerators),
+    )
+
+    assert visibility.env_updates["CUDA_VISIBLE_DEVICES"] == "GPU-safe-token"
+
+
 def test_lightweight_inventory_uses_explicit_accelerator_override_without_mutation():
     environment = {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
 

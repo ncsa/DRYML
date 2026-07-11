@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from dryml.records import attach_spec_id, compute_spec_id, make_spec, validate_spec
@@ -44,6 +46,13 @@ class RoleRequirement:
     resources: ResourceRequirement = field(default_factory=ResourceRequirement)
     topology: Mapping[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Freeze topology as deterministic JSON-safe data for direct construction."""
+
+        if not isinstance(self.topology, Mapping):
+            raise WorldSpecValidationError("role topology must be a mapping", context={"type": type(self.topology).__name__})
+        object.__setattr__(self, "topology", _normalize_topology(self.topology))
+
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "RoleRequirement":
         """Build a role requirement from JSON-ready data."""
@@ -53,18 +62,17 @@ class RoleRequirement:
         unknown = set(data) - {"replicas", "resources", "topology"}
         if unknown:
             raise WorldSpecValidationError("role requirement has unknown fields", context={"fields": sorted(unknown)})
-        topology = data.get("topology") or {}
+        topology = data["topology"] if "topology" in data else {}
         if not isinstance(topology, Mapping):
             raise WorldSpecValidationError("role topology must be a mapping", context={"type": type(topology).__name__})
-        if any(not isinstance(key, str) or not key for key in topology):
-            raise WorldSpecValidationError("role topology names must be non-empty strings")
+        topology = _normalize_topology(topology)
         if topology.get("single_process") is not None and not isinstance(topology["single_process"], bool):
             raise WorldSpecValidationError("topology single_process must be a boolean or null")
         try:
             return cls(
                 replicas=CountConstraint.from_data(data.get("replicas", {"exact": 1}), path="replicas"),
                 resources=ResourceRequirement.from_data(data.get("resources") or {}),
-                topology=dict(topology),
+                topology=topology,
             )
         except ResourceValidationError as exc:
             raise WorldSpecValidationError(str(exc), context=exc.context) from exc
@@ -72,7 +80,11 @@ class RoleRequirement:
     def to_data(self) -> dict[str, Any]:
         """Return canonical JSON-ready role requirement data."""
 
-        return {"replicas": self.replicas.to_data(), "resources": self.resources.to_data(), "topology": dict(sorted(self.topology.items()))}
+        return {
+            "replicas": self.replicas.to_data(),
+            "resources": self.resources.to_data(),
+            "topology": _topology_to_data(_normalize_topology(self.topology)),
+        }
 
     def merge(self, other: "RoleRequirement", *, path: str) -> "RoleRequirement":
         """Merge this role requirement with another requirement."""
@@ -303,6 +315,62 @@ def _iter_valid_roles(roles: Mapping[str, Any]):
         if not isinstance(name, str) or not _ROLE_RE.match(name):
             raise WorldSpecValidationError("invalid role name", context={"role": name})
         yield name, value
+
+
+def _normalize_topology(value: Any, *, path: str = "topology", ancestors: set[int] | None = None) -> Any:
+    """Return a frozen JSON-safe topology value without coercing arbitrary objects."""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise WorldSpecValidationError("role topology floats must be finite", context={"path": path})
+        return value
+    ancestors = set() if ancestors is None else ancestors
+    if isinstance(value, Mapping):
+        if path == "topology" and any(not isinstance(key, str) or not key for key in value):
+            raise WorldSpecValidationError("role topology names must be non-empty strings")
+        if any(not isinstance(key, str) for key in value):
+            raise WorldSpecValidationError("role topology object keys must be strings", context={"path": path})
+        identity = id(value)
+        if identity in ancestors:
+            raise WorldSpecValidationError("role topology must not contain cycles", context={"path": path})
+        ancestors.add(identity)
+        try:
+            return MappingProxyType(
+                {
+                    key: _normalize_topology(item, path=f"{path}.{key}", ancestors=ancestors)
+                    for key, item in sorted(value.items())
+                }
+            )
+        finally:
+            ancestors.remove(identity)
+    if isinstance(value, (list, tuple)):
+        identity = id(value)
+        if identity in ancestors:
+            raise WorldSpecValidationError("role topology must not contain cycles", context={"path": path})
+        ancestors.add(identity)
+        try:
+            return tuple(
+                _normalize_topology(item, path=f"{path}[{index}]", ancestors=ancestors)
+                for index, item in enumerate(value)
+            )
+        finally:
+            ancestors.remove(identity)
+    raise WorldSpecValidationError(
+        "role topology must be JSON-compatible",
+        context={"path": path, "type": type(value).__name__},
+    )
+
+
+def _topology_to_data(value: Any) -> Any:
+    """Thaw a normalized topology into standard JSON-ready containers."""
+
+    if isinstance(value, Mapping):
+        return {key: _topology_to_data(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_topology_to_data(item) for item in value]
+    return value
 
 
 __all__ = [

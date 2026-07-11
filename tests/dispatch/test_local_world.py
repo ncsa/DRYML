@@ -299,6 +299,22 @@ def test_missing_handshake_reports_failed_not_cancelled(tmp_path, target_module)
     assert any(item.get("reason") == "missing_handshake" for item in result.diagnostics)
 
 
+def test_cancel_before_handshakes_aggregates_cancelled(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    key = plan.worker_plans[0].key
+    future = _fake_future(tmp_path, plan, {key: _FakeWorldWorkerFuture(tmp_path, plan, key, done=False)})
+
+    assert future.cancel(reason="test") is True
+    result = future.result(timeout=1)
+
+    assert result.status == "cancelled"
+    assert result.cancellation == {"requested": True, "reason": "test"}
+    assert not any(item.get("reason") == "missing_handshake" for item in result.diagnostics)
+
+
 def test_handshake_timeout_reports_timeout_not_cancelled(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
@@ -380,8 +396,23 @@ def test_world_close_removes_group_directory_without_result(tmp_path, target_mod
     assert not Path(future.group_work_dir).exists()
 
 
+def test_world_close_removes_preserved_group_directory(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:sleep_forever"))
+    dispatcher = Dispatcher(backend=LocalWorldBackend(preserve_work_dir=True), store=store)
+    future = dispatcher.submit_world(
+        dispatcher.plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    )
+    future.wait_for_handshakes(timeout=5)
+
+    future.close(reason="test")
+
+    assert not Path(future.group_work_dir).exists()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process-group signaling is POSIX-specific")
-def test_completed_worker_leader_still_kills_its_process_group(tmp_path, target_module, monkeypatch):
+def test_successful_worker_cleanup_kills_only_backend_owned_process_group(tmp_path, target_module, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
     op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
@@ -398,13 +429,30 @@ def test_completed_worker_leader_still_kills_its_process_group(tmp_path, target_
         str(tmp_path / "stdout.txt"),
         str(tmp_path / "stderr.txt"),
         True,
+        process_group=True,
     )
     signals = []
     monkeypatch.setattr("dryml.dispatch.backends.os.killpg", lambda pid, signal: signals.append((pid, signal)))
 
-    future.kill()
+    future._response = WorkerResponse(status="ok")
+    future._cleanup()
 
-    assert signals
+    unmanaged = LocalSubprocessFuture(
+        process,
+        worker_plan,
+        str(tmp_path / "unmanaged-worker"),
+        str(tmp_path / "unmanaged-request.json"),
+        str(tmp_path / "unmanaged-handshake.json"),
+        str(tmp_path / "unmanaged-response.json"),
+        str(tmp_path / "unmanaged-stdout.txt"),
+        str(tmp_path / "unmanaged-stderr.txt"),
+        True,
+        process_group=False,
+    )
+    unmanaged._response = WorkerResponse(status="ok")
+    unmanaged._cleanup()
+
+    assert len(signals) == 1
 
 
 def test_world_result_cleans_artifacts_after_aggregate_failure(tmp_path, monkeypatch):

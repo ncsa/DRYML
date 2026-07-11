@@ -65,14 +65,7 @@ class LocalResourceInventory:
             if isinstance(values, (str, bytes)) or not hasattr(values, "__iter__"):
                 raise ResourceValidationError("accelerator inventory values must be sequences", context={"accelerator": name})
             normalized = tuple(_bounded_items(values, _MAX_ACCELERATOR_IDENTIFIERS, "accelerator identifiers"))
-            if any(isinstance(value, bool) or not isinstance(value, (str, int)) for value in normalized):
-                raise ResourceValidationError("accelerator identifiers must be strings or integers", context={"accelerator": name})
-            if any(
-                (isinstance(value, str) and len(value) > _MAX_IDENTIFIER_STRING)
-                or (isinstance(value, int) and value.bit_length() > _MAX_INTEGER_BITS)
-                for value in normalized
-            ):
-                raise ResourceValidationError("accelerator inventory identifier exceeds the bounded limit", context={"accelerator": name})
+            normalized = tuple(_accelerator_identifier(value, name) for value in normalized)
             if len(set(normalized)) != len(normalized):
                 raise ResourceValidationError("accelerator inventory identifiers must be unique", context={"accelerator": name})
             accelerators[name] = tuple(sorted(normalized, key=lambda value: (str(type(value)), str(value))))
@@ -243,7 +236,10 @@ def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -
             raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
         name, values = group.split("=", 1)
         name = name.strip()
-        parsed = tuple(int(value) if value.isdigit() else value for value in (item.strip() for item in values.split(",")) if value)
+        raw_values = tuple(item.strip() for item in values.split(","))
+        if any(not value for value in raw_values):
+            raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
+        parsed = tuple(int(value) if value.isdigit() else value for value in raw_values)
         if not name or not parsed:
             raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
         if name in result:
@@ -334,6 +330,27 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
 def _nonneg_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value.bit_length() > _MAX_INTEGER_BITS:
         raise ResourceValidationError(f"{name} must be an integer >= 0", context={"value": value})
+    return value
+
+
+def _accelerator_identifier(value: Any, accelerator: str) -> str | int:
+    """Validate one identifier before it can become a visibility token."""
+
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ResourceValidationError("accelerator identifiers must be strings or integers", context={"accelerator": accelerator})
+    if isinstance(value, int):
+        return _nonneg_int(value, "accelerator identifier")
+    if (
+        not value
+        or len(value) > _MAX_IDENTIFIER_STRING
+        or "," in value
+        or "\x00" in value
+        or any(character.isspace() or ord(character) < 32 for character in value)
+    ):
+        raise ResourceValidationError(
+            "accelerator identifiers must be safe visibility tokens",
+            context={"accelerator": accelerator},
+        )
     return value
 
 
