@@ -5,6 +5,9 @@ from __future__ import annotations
 from bisect import insort
 from dataclasses import dataclass
 from itertools import islice
+import json
+import math
+import time
 from typing import Any
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues
@@ -26,6 +29,12 @@ class EnvironmentRegistryEntry:
     requirement: EnvironmentRequirement | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name:
+            raise EnvironmentRegistryError("environment registry entry name must be a non-empty string")
+        if not isinstance(self.spec, EnvironmentSpec):
+            raise EnvironmentRegistryError("environment registry entry spec must be an EnvironmentSpec")
+        if self.requirement is not None and not isinstance(self.requirement, EnvironmentRequirement):
+            raise EnvironmentRegistryError("environment registry entry requirement must be an EnvironmentRequirement")
         object.__setattr__(self, "provides", tuple(sorted(str(item) for item in coerce_tuple(self.provides))))
         object.__setattr__(self, "tags", tuple(sorted(str(item) for item in coerce_tuple(self.tags))))
 
@@ -60,8 +69,8 @@ class EnvironmentRegistryEntry:
 class EnvironmentRegistry:
     """Deterministic in-memory registry of environment specs.
 
-    The registry is a future dispatch selection aid. It does not persist records
-    and does not probe registered environments unless explicitly requested.
+    The registry is an explicit dispatch selection aid. It does not persist
+    records and does not probe registered environments unless explicitly requested.
     """
 
     def __init__(self) -> None:
@@ -82,14 +91,16 @@ class EnvironmentRegistry:
         Duplicate names are rejected so selection remains deterministic.
         """
 
-        if name in self._entries:
-            raise EnvironmentRegistryError(
-                f"environment registry entry {name!r} already exists",
-                context={"name": name},
-            )
         entry = EnvironmentRegistryEntry(name, spec, provides=provides, tags=tags, requirement=requirement)
-        self._entries[name] = entry
-        insort(self._names, name)
+        if entry.name in self._entries:
+            raise EnvironmentRegistryError(
+                f"environment registry entry {entry.name!r} already exists",
+                context={"name": entry.name},
+            )
+        # Validate the complete entry before changing either index, preserving
+        # deterministic lifecycle behavior after malformed registration input.
+        self._entries[entry.name] = entry
+        insort(self._names, entry.name)
         return entry
 
     def get(self, name: str) -> EnvironmentRegistryEntry:
@@ -172,16 +183,51 @@ class EnvironmentRegistry:
         *,
         timeout: float | None = 30.0,
         policy: str = "compatible",
+        max_candidates: int = 8,
+        total_timeout: float | None = 30.0,
     ) -> tuple[EnvironmentRegistryEntry | None, CompatibilityReport]:
-        """Return the first probed compatible entry and its report."""
+        """Return the first bounded, deduplicated compatible registry entry.
+
+        ``max_candidates`` and ``total_timeout`` apply the same guardrails as
+        resolver search while retaining this helper's historical return shape
+        and compatibility-policy behavior.
+        """
 
         from .resolution import _labels_match
 
+        if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates <= 0:
+            raise EnvironmentRegistryError("max_candidates must be a positive integer")
+        for name, value in (("timeout", timeout), ("total_timeout", total_timeout)):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise EnvironmentRegistryError(f"{name} must be a positive finite number or None")
         first_report: CompatibilityReport | None = None
-        for entry in self.list():
+        seen: set[str] = set()
+        considered = 0
+        started = time.monotonic()
+        # Bound raw aliases as well as unique candidates so duplicate names
+        # cannot turn this compatibility helper into an unbounded probe loop.
+        for entry in self.iter_entries(limit=max_candidates + 32):
+            if total_timeout is not None and time.monotonic() - started >= total_timeout:
+                break
             if not _labels_match(requirement, entry):
                 continue
-            result = probe(entry.spec, timeout=timeout)
+            identity = json.dumps(entry.spec.to_data(), sort_keys=True, separators=(",", ":"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if considered >= max_candidates:
+                break
+            considered += 1
+            remaining = None if total_timeout is None else total_timeout - (time.monotonic() - started)
+            if remaining is not None and remaining <= 0:
+                break
+            probe_timeout = timeout if remaining is None else remaining if timeout is None else min(timeout, remaining)
+            result = probe(entry.spec, timeout=probe_timeout)
             if not result.ok or result.record is None:
                 first_report = first_report or result.report
                 continue

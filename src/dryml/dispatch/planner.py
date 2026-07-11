@@ -369,14 +369,6 @@ class Dispatcher:
                 "workers": allocation_workers,
             },
         )
-        _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
-        if record_policy != "none":
-            try:
-                target_store.records.write_spec(world_spec, family="world")
-                target_store.records.write_spec(allocation_spec, family="world_allocation")
-            except BaseException:
-                _cleanup_launch(launch)
-                raise
         try:
             marshal = select_marshal_plan(target_store, query_index="none")
             require_supported_plan(marshal)
@@ -417,6 +409,9 @@ class Dispatcher:
                 target_store.records.write_spec(op_spec, family="operation")
                 target_store.records.write_spec(dispatch, family="dispatch")
                 target_store.records.write_spec(recipe, family="execution_recipe")
+                _report("dryml.dispatch.world.allocation.write", "Writing world allocation spec", operation_id=op_spec.get("id"), data={"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id")})
+                target_store.records.write_spec(world_spec, family="world")
+                target_store.records.write_spec(allocation_spec, family="world_allocation")
             except BaseException:
                 _cleanup_launch(launch)
                 raise

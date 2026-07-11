@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shlex
 import stat
@@ -54,6 +55,31 @@ def test_probe_python_fake_executable_success(tmp_path):
     assert result.stdout
     assert result.require_ok().python.version == "3.11.8"
     assert envs.EnvironmentProbeResult.from_data(result.to_data()).to_data() == result.to_data()
+
+
+def test_probe_decodes_a_bounded_large_protocol_payload(tmp_path):
+    payload = sample_payload()
+    payload["record"]["details"] = {"padding": "x" * (70 * 1024)}
+
+    result = envs.probe(envs.PythonExecutableSpec(make_fake_executable(tmp_path, payload)))
+
+    assert result.ok
+    assert result.record is not None
+    assert len(result.record.details["padding"]) == 70 * 1024
+    assert len(result.stdout) == 64 * 1024
+
+
+@pytest.mark.parametrize("timeout", (0, -1, math.nan, math.inf))
+def test_probe_rejects_invalid_timeout_as_a_structured_failure(timeout):
+    result = envs.probe(envs.CurrentEnvironmentSpec(), timeout=timeout)
+
+    assert not result.ok
+    assert result.report.issues[0].code == "invalid_probe_timeout"
+
+
+def test_probe_spec_rejects_invalid_pythonpath_policy():
+    with pytest.raises(envs.EnvironmentSpecError, match="unknown Python path probe policy"):
+        envs.PythonExecutableSpec("python", pythonpath_policy="unsupported")
 
 
 def test_probe_python_missing_executable():

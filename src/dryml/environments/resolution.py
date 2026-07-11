@@ -376,6 +376,8 @@ def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None
     if budget[0] <= 0 or depth > _MAX_SERIALIZED_DEPTH:
         return {"__dryml_truncated__": "depth_or_size"}
     budget[0] -= 1
+    if value is None or isinstance(value, (bool, int)):
+        return value
     if isinstance(value, str):
         return value[:_MAX_SERIALIZED_STRING]
     if isinstance(value, float):
@@ -388,7 +390,10 @@ def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None
         }
     if isinstance(value, (list, tuple)):
         return [_bounded_data(item, depth=depth + 1, budget=budget) for item in value[:_MAX_SERIALIZED_ITEMS]]
-    return value
+    # Probe runners are injectable. Never allow arbitrary objects supplied by a
+    # runner to make public resolver metadata non-JSON-serializable or expose
+    # their representation.
+    return {"__dryml_unsupported_type__": type(value).__name__}
 
 
 __all__ = ["EnvironmentResolution", "EnvironmentResolutionAttempt", "resolve"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,10 @@ from .specs import (
 from .utils import build_probe_env
 
 _MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024
+# stdout is the worker protocol, not merely a diagnostic stream. Keep a larger,
+# explicit bound for decoding records with substantial package inventories while
+# retaining only a small prefix in public result diagnostics.
+_MAX_PROTOCOL_OUTPUT_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,37 +131,52 @@ def probe(spec: EnvironmentSpec | None = None, *, timeout: float | None = 30.0) 
     """Probe an environment spec and return a structured result."""
 
     spec = spec or CurrentEnvironmentSpec()
+    if timeout is not None and (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        return _failure_result(spec, "invalid_probe_timeout", "environment probe timeout must be a positive finite number")
     if isinstance(spec, CurrentEnvironmentSpec):
         if timeout is None:
             return EnvironmentProbeResult(spec=spec, ok=True, record=inspect_current())
         return _probe_command(spec, [sys.executable, *ProbeWorkerCommand], timeout=timeout)
     if isinstance(spec, PythonExecutableSpec):
-        return _probe_command(
-            spec,
-            spec.probe_command(),
-            timeout=timeout,
-            env=build_probe_env(
+        try:
+            env = build_probe_env(
                 base=None,
                 overrides=spec.env,
                 pythonpath_policy=spec.pythonpath_policy,
                 extra_pythonpath=spec.extra_pythonpath,
-            ),
+            )
+        except EnvironmentSpecError as exc:
+            return _failure_result(spec, "invalid_environment_spec", str(exc))
+        return _probe_command(
+            spec,
+            spec.probe_command(),
+            timeout=timeout,
+            env=env,
         )
     if isinstance(spec, CondaEnvironmentSpec):
         try:
             cmd = spec.probe_command()
         except EnvironmentSpecError as exc:
             return _failure_result(spec, "unsupported_environment_spec", str(exc))
-        return _probe_command(
-            spec,
-            cmd,
-            timeout=timeout,
-            env=build_probe_env(
+        try:
+            env = build_probe_env(
                 base=None,
                 overrides=spec.env,
                 pythonpath_policy=spec.pythonpath_policy,
                 extra_pythonpath=spec.extra_pythonpath,
-            ),
+            )
+        except EnvironmentSpecError as exc:
+            return _failure_result(spec, "invalid_environment_spec", str(exc))
+        return _probe_command(
+            spec,
+            cmd,
+            timeout=timeout,
+            env=env,
         )
     if isinstance(spec, ContainerEnvironmentSpec):
         return _failure_result(spec, "unsupported_environment_spec", "container probing is not implemented")
@@ -182,13 +202,16 @@ def _probe_command(
             )
         except OSError as exc:
             return _failure_result(spec, "probe_failed", f"environment probe could not start: {exc}")
-        stdout, stdout_truncated = _read_captured_output(stdout_file)
+        protocol, protocol_truncated = _read_protocol_output(stdout_file)
+        stdout, stdout_truncated = _diagnostic_output(protocol)
         stderr, stderr_truncated = _read_captured_output(stderr_file)
     truncated = stdout_truncated or stderr_truncated
     if completed.returncode != 0:
         return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe exited with status {completed.returncode}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if protocol_truncated:
+        return _capture_diagnostic(_failure_result(spec, "probe_output_too_large", "environment probe protocol payload exceeded the bounded limit", stdout=stdout, stderr=stderr, returncode=completed.returncode), True)
     try:
-        payload = json.loads(stdout)
+        payload = json.loads(protocol.decode("utf-8"))
     except json.JSONDecodeError as exc:
         return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe returned malformed JSON: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
     if not isinstance(payload, Mapping):
@@ -214,6 +237,23 @@ def _read_captured_output(handle) -> tuple[str, bool]:
     handle.seek(0)
     value = handle.read(_MAX_CAPTURED_OUTPUT_BYTES + 1)
     return value[:_MAX_CAPTURED_OUTPUT_BYTES].decode("utf-8", errors="replace"), len(value) > _MAX_CAPTURED_OUTPUT_BYTES
+
+
+def _read_protocol_output(handle) -> tuple[bytes, bool]:
+    """Read a complete bounded protocol payload before parsing JSON."""
+
+    handle.seek(0)
+    value = handle.read(_MAX_PROTOCOL_OUTPUT_BYTES + 1)
+    return value[:_MAX_PROTOCOL_OUTPUT_BYTES], len(value) > _MAX_PROTOCOL_OUTPUT_BYTES
+
+
+def _diagnostic_output(value: bytes) -> tuple[str, bool]:
+    """Return the bounded public diagnostic prefix of a protocol payload."""
+
+    return (
+        value[:_MAX_CAPTURED_OUTPUT_BYTES].decode("utf-8", errors="replace"),
+        len(value) > _MAX_CAPTURED_OUTPUT_BYTES,
+    )
 
 
 def _capture_diagnostic(result: EnvironmentProbeResult, truncated: bool) -> EnvironmentProbeResult:

@@ -7,6 +7,7 @@ import dryml
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
+from dryml.worlds import LocalResourceInventory
 
 
 @dryml.world.req(accelerators={"gpu": {"min": 1}})
@@ -30,7 +31,12 @@ def test_explain_returns_nonlaunching_structured_failure_with_plan_parity(tmp_pa
 def test_explain_does_not_write_operation_records_for_importable_target(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
 
-    explanation = Dispatcher(store=store).explain(gpu_target, allow_pickle=True, requirement_policy="ignore")
+    explanation = Dispatcher(store=store).explain(
+        gpu_target,
+        allow_pickle=True,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
     assert explanation.launchable is True
     assert any(item.code == "dryml.dispatch.world_synthesis_failed" for item in explanation.resolution.diagnostics)
     assert not store.records.specs_dir.exists()
@@ -53,6 +59,20 @@ def test_explain_does_not_require_store_for_ordinary_callable_or_leak_pickle(mon
     assert explanation.launchable is True
     assert captured["paths"]
     assert all(not __import__("os").path.exists(path) for path in captured["paths"])
+
+
+def test_failed_bootstrap_target_probe_remains_blocking_under_relaxed_policies():
+    from dryml.operations import make_function_call_spec
+
+    for policy in ("warn", "ignore"):
+        explanation = Dispatcher().explain(
+            make_function_call_spec("missing_audit_module:fn"),
+            requirement_policy=policy,
+        )
+
+        assert not explanation.launchable
+        assert explanation.resolution.bootstrap_code_probe is not None
+        assert not explanation.resolution.bootstrap_code_probe.ok
 
 
 def test_plan_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):
@@ -141,3 +161,5 @@ def test_plan_world_cleans_pickle_artifacts_when_recipe_build_fails(monkeypatch,
 
     assert captured["paths"]
     assert all(not __import__("os").path.exists(path) for path in captured["paths"])
+    assert not (tmp_path / "store" / "records" / "specs" / "world").exists()
+    assert not (tmp_path / "store" / "records" / "specs" / "world_allocation").exists()

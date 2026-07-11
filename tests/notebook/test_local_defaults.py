@@ -3,7 +3,11 @@ from __future__ import annotations
 import dryml
 
 from dryml.dispatch import Dispatcher
-from dryml.environments import CurrentEnvironmentSpec
+from dryml.core2.store.dir import DirStore
+from dryml.environments import CurrentEnvironmentSpec, EnvironmentRegistry
+from dryml.operations import make_function_call_spec
+from dryml.runtime import active_runtime
+from dryml.runtime.allocation import is_no_allocation
 from dryml.worlds import LocalResourceInventory, WorldSpec
 
 
@@ -23,3 +27,18 @@ def test_notebook_context_defaults_are_selected_and_restored_without_allocation(
     finally:
         dryml.environments.set_current(previous_environment) if previous_environment is not None else dryml.environments.reset_current()
         dryml.worlds.set_current(previous_world) if previous_world is not None else dryml.worlds.reset_current()
+
+
+def test_notebook_registry_explain_is_explicit_repeatable_and_allocation_free(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="none")
+    registry = EnvironmentRegistry()
+    entry = registry.register("current", CurrentEnvironmentSpec())
+
+    explanation = Dispatcher(store=store, environment_registry=registry).explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+    )
+
+    assert explanation.resolution.environment_selection.source == "resolver"
+    assert registry.list() == (entry,)
+    assert is_no_allocation(active_runtime().allocation)
+    assert not store.records.specs_dir.exists()

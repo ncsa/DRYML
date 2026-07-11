@@ -29,6 +29,26 @@ def test_lightweight_inventory_uses_explicit_accelerator_override_without_mutati
     assert environment == {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
 
 
+def test_lightweight_inventory_uses_default_device_root(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    roots = []
+    monkeypatch.setattr(
+        inventory_module,
+        "_accelerators_from_device_root",
+        lambda _environ, root, _diagnostics: roots.append(root) or {},
+    )
+
+    local_inventory(environ={})
+
+    assert roots == ["/dev"]
+
+
+def test_explicit_accelerator_groups_may_not_repeat():
+    with pytest.raises(ResourceValidationError, match="repeats an accelerator group"):
+        local_inventory(environ={"DRYML_LOCAL_ACCELERATORS": "gpu=0;gpu=1"})
+
+
 @pytest.mark.parametrize("timeout", (math.inf, math.nan))
 def test_inventory_rejects_nonfinite_external_timeout(timeout):
     with pytest.raises(ResourceValidationError, match="timeout must be positive"):
@@ -51,10 +71,11 @@ def test_inventory_rejects_aggregate_metadata_expansion():
         LocalResourceInventory((0,), metadata=metadata)
 
 
-def test_external_inventory_bounds_runner_output():
+def test_external_inventory_bounds_runner_output(tmp_path):
     output = "\n".join(str(index) for index in range(200))
     inventory = local_inventory(
         policy="external",
+        device_root=tmp_path,
         command_runner=lambda *_args, **_kwargs: type("Result", (), {"returncode": 0, "stdout": output})(),
     )
 
@@ -87,10 +108,11 @@ def test_external_inventory_failures_are_diagnostic_only(output, tmp_path):
 
 
 @pytest.mark.parametrize("failure", (FileNotFoundError(), TimeoutError()))
-def test_external_inventory_missing_or_timed_out_runner_is_diagnostic_only(failure):
+def test_external_inventory_missing_or_timed_out_runner_is_diagnostic_only(failure, tmp_path):
     inventory = local_inventory(
         policy="external",
         environ={},
+        device_root=tmp_path,
         command_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
     )
 

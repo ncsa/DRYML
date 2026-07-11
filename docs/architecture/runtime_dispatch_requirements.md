@@ -74,7 +74,8 @@ Timeout enforcement is parent-side for subprocess probes. When a current-process
 ## Non-Goals
 
 - This note does not specify exact implementation classes.
-- This note does not change dispatch behavior.
+- Historical baseline sections do not supersede the current dispatch behavior
+  described above.
 - This note does not specify exact dispatch integration classes.
 - Sprint 3 implements annotation requirement resolution APIs, but does not implement Python-shaped dispatch normalization or dispatch candidate checking.
 - Sprint 4 implements runtime enforcement policy and current/default environment/world APIs, but still does not implement dispatch candidate checking.

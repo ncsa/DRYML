@@ -29,11 +29,12 @@ class WorldSynthesisDiagnostic:
     path: str | None = None
     expected: Any | None = None
     observed: Any | None = None
+    data: Mapping[str, Any] | None = None
 
     def to_data(self) -> dict[str, Any]:
         """Return JSON-compatible diagnostic data."""
 
-        return _bounded_data({"code": self.code, "severity": self.severity, "message": self.message, "path": self.path, "expected": self.expected, "observed": self.observed})
+        return _bounded_data({"code": self.code, "severity": self.severity, "message": self.message, "path": self.path, "expected": self.expected, "observed": self.observed, "data": self.data})
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,7 +178,7 @@ def synthesize(
             )
         return WorldSynthesisResult("synthesized", req, inv.summary(), world, report, (), policy, inv)
     except _SynthesisFailure as exc:
-        return _failure(exc.status, req, inv, policy, exc.code, str(exc), exc.path, exc.expected, exc.observed)
+        return _failure(exc.status, req, inv, policy, exc.code, str(exc), exc.path, exc.expected, exc.observed, exc.data)
     except Exception as exc:
         return _failure("error", req, inv, policy, "synthesis_error", str(exc))
 
@@ -190,6 +191,7 @@ class _SynthesisFailure(Exception):
     path: str | None = None
     expected: Any | None = None
     observed: Any | None = None
+    data: Mapping[str, Any] | None = None
 
     def __str__(self) -> str:
         return self.message
@@ -212,15 +214,21 @@ def _choose(constraint: CountConstraint, *, minimum: int, path: str) -> int:
 
 def _check_capacity(inventory: LocalResourceInventory, cpus: int, memory: int, accelerators: Mapping[str, int]) -> None:
     if cpus > len(inventory.cpus):
-        raise _SynthesisFailure("insufficient_inventory", "insufficient_cpus", "local CPU inventory is insufficient", "resources.cpus", cpus, len(inventory.cpus))
+        raise _SynthesisFailure("insufficient_inventory", "insufficient_cpus", "local CPU inventory is insufficient", "resources.cpus", cpus, len(inventory.cpus), _capacity_data(cpus, len(inventory.cpus)))
     if memory and inventory.memory is None:
-        raise _SynthesisFailure("insufficient_inventory", "memory_unknown", "local memory inventory is unknown", "resources.memory", memory, None)
+        raise _SynthesisFailure("insufficient_inventory", "memory_unknown", "local memory inventory is unknown", "resources.memory", memory, None, {"required": memory, "available": None, "shortfall": None})
     if inventory.memory is not None and memory > inventory.memory:
-        raise _SynthesisFailure("insufficient_inventory", "insufficient_memory", "local memory inventory is insufficient", "resources.memory", memory, inventory.memory)
+        raise _SynthesisFailure("insufficient_inventory", "insufficient_memory", "local memory inventory is insufficient", "resources.memory", memory, inventory.memory, _capacity_data(memory, inventory.memory))
     for kind, count in accelerators.items():
         available = len(inventory.accelerators.get(kind, ()))
         if count > available:
-            raise _SynthesisFailure("insufficient_inventory", "insufficient_accelerators", "local accelerator inventory is insufficient", f"resources.accelerators.{kind}", count, available)
+            raise _SynthesisFailure("insufficient_inventory", "insufficient_accelerators", "local accelerator inventory is insufficient", f"resources.accelerators.{kind}", count, available, _capacity_data(count, available))
+
+
+def _capacity_data(required: int, available: int) -> dict[str, int]:
+    """Return explicit aggregate capacity evidence for synthesis diagnostics."""
+
+    return {"required": required, "available": available, "shortfall": required - available}
 
 
 def _reject_unsupported(resources: Mapping[str, CountConstraint], kind: str, role: str) -> None:
@@ -234,8 +242,8 @@ def _validate_topology(topology: Mapping[str, Any], role: str) -> None:
             raise _SynthesisFailure("unsupported_requirement", "unsupported_topology", "local synthesis cannot enforce requested topology", f"roles.{role}.topology.{key}")
 
 
-def _failure(status: str, requirement: WorldRequirement | None, inventory: LocalResourceInventory | None, policy: str, code: str, message: str, path: str | None = None, expected: Any | None = None, observed: Any | None = None) -> WorldSynthesisResult:
-    return WorldSynthesisResult(status, requirement, {} if inventory is None else inventory.summary(), None, None, (WorldSynthesisDiagnostic(code, "error", message, path, expected, observed),), policy, inventory)
+def _failure(status: str, requirement: WorldRequirement | None, inventory: LocalResourceInventory | None, policy: str, code: str, message: str, path: str | None = None, expected: Any | None = None, observed: Any | None = None, data: Mapping[str, Any] | None = None) -> WorldSynthesisResult:
+    return WorldSynthesisResult(status, requirement, {} if inventory is None else inventory.summary(), None, None, (WorldSynthesisDiagnostic(code, "error", message, path, expected, observed, data),), policy, inventory)
 
 
 def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:

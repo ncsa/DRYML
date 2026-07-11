@@ -490,6 +490,7 @@ def resolve_dispatch_plan(
                 data={"error": type(exc).__name__, "message": str(exc), "action": "inject inventory or pass/set a feasible world"},
             ))
 
+    bootstrap_probe_failed = bootstrap_probe is not None and not bootstrap_probe.ok
     if not complete:
         diagnostics.append(_diagnostic("dryml.dispatch.discovery_incomplete", "Requirement discovery is incomplete.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"policy": policy.value, "action": "use an importable target or call dispatch.explain(...)"}))
     checks = (environment_check, world_check, runtime_check)
@@ -497,7 +498,10 @@ def resolve_dispatch_plan(
     if policy is RequirementPolicy.STRICT:
         launchable = structural_safe and merge_safe and complete and (final_probe is None or final_probe.ok) and all(report.compatible is not False and report.status != "error" for report in checks)
     else:
-        launchable = structural_safe and merge_safe and (final_probe is None or final_probe.ok)
+        # A failed bootstrap probe proves the target cannot be imported in the
+        # selected current environment. Policy relaxes compatibility, never
+        # target importability.
+        launchable = structural_safe and merge_safe and not bootstrap_probe_failed and (final_probe is None or final_probe.ok)
     if emit_warnings and policy is RequirementPolicy.WARN:
         warning_items = [item for item in diagnostics if item.severity in {"warning", "error"}]
         if warning_items:

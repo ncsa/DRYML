@@ -42,6 +42,19 @@ def test_registry_unregister_is_deterministic_and_probe_free():
         raise AssertionError("expected missing registry error")
 
 
+def test_registry_rejects_invalid_entries_without_mutating_indexes():
+    registry = envs.EnvironmentRegistry()
+
+    try:
+        registry.register(1, envs.CurrentEnvironmentSpec())  # type: ignore[arg-type]
+    except envs.EnvironmentRegistryError:
+        pass
+    else:
+        raise AssertionError("expected invalid registry entry error")
+
+    assert registry.list() == ()
+
+
 def test_registry_probe_and_find_compatible():
     registry = envs.EnvironmentRegistry()
     registry.register("current", envs.CurrentEnvironmentSpec(), tags=("current",))
@@ -62,3 +75,23 @@ def test_registry_check_requirement_and_no_match_report():
     assert report.ok
     no_match = registry.no_match_report(envs.EnvironmentRequirement(requirements=("torch",)))
     assert no_match.issues[0].code == "registry_no_match"
+
+
+def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    registry.register("first", envs.CurrentEnvironmentSpec())
+    registry.register("second", envs.CurrentEnvironmentSpec())
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append((spec, timeout)) or envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current()),
+    )
+
+    entry, report = registry.find_compatible(envs.EnvironmentRequirement(), max_candidates=1)
+
+    assert entry.name == "first"
+    assert report.ok
+    assert len(calls) == 1

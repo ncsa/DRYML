@@ -43,7 +43,7 @@ Current-process probes can inspect live local/notebook targets because they pres
 
 ## Dispatch Candidate Selection Direction
 
-Dispatch should combine current/default state, explicit kwargs, annotation defaults, and hard requirements into candidate selections. Explicit candidates override defaults but must still be checked against hard requirements unless a future policy says otherwise.
+Dispatch combines current/default state, explicit kwargs, annotation defaults, and hard requirements into candidate selections. Explicit candidates override defaults but remain checked against hard requirements; `warn` and `ignore` may relax compatibility reporting but never structural launchability, allocation feasibility, or target importability.
 
 ## Notebook and Orchestration Examples
 

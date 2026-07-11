@@ -24,7 +24,7 @@ def test_missing_store_path_fails_handshake(tmp_path):
 
 
 def test_store_paths_stay_out_of_dispatch_identity(tmp_path):
-    op = attach_operation_id(make_function_call_spec("pkg.mod:fn", args=[format_cdef_id("a" * 64)]))
+    op = attach_operation_id(make_function_call_spec("operator:add", args=[format_cdef_id("a" * 64)]))
     left = Dispatcher(store=DirStore(tmp_path / "left", query_index="none")).plan(op, requirement_policy="ignore")
     right = Dispatcher(store=DirStore(tmp_path / "right", query_index="none")).plan(op, requirement_policy="ignore")
 

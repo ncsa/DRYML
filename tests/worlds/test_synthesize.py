@@ -25,6 +25,7 @@ def test_synthesize_reports_insufficient_aggregate_capacity():
 
     assert result.status == "insufficient_inventory"
     assert result.diagnostics[0].code == "insufficient_cpus"
+    assert result.diagnostics[0].to_data()["data"] == {"required": 4, "available": 2, "shortfall": 2}
 
 
 def test_synthesize_default_and_unknown_memory_failure_are_structured():

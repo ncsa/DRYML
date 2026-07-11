@@ -216,6 +216,34 @@ def test_single_subprocess_topology_remains_structural_under_relaxed_policies():
         assert any(item.code == "dryml.dispatch.single_subprocess_topology_unsupported" for item in resolution.diagnostics)
 
 
+def test_local_world_rejects_unenacted_role_process_settings(tmp_path):
+    world = {
+        "roles": {
+            "trainer": {
+                "replicas": 1,
+                "process": {"environment": "other-python", "runtime": "other-runtime"},
+            }
+        }
+    }
+
+    with pytest.raises(DispatchPlanningError, match="cannot enact role-specific process"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan_world(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy="ignore",
+        )
+
+
+def test_oversubscribed_local_world_has_bounded_expansion():
+    from dryml.dispatch.local_world import allocate_local_world
+
+    world = {"roles": {"main": {"replicas": 4097, "process": {}}}}
+
+    with pytest.raises(DispatchPlanningError, match="worker count exceeds"):
+        allocate_local_world(world, inventory=LocalResourceInventory((0,)), oversubscribe=True)
+
+
 def test_planning_metadata_bounds_deep_nested_data():
     from dryml.dispatch.requirements import _bounded_data
 

@@ -21,6 +21,8 @@ from .protocol import DispatchResult, ExecutionEnvelope, WorkerHandshakeResponse
 
 LOCAL_WORLD_BACKEND_IDENTITY = {"name": "dryml.local_world", "kind": "local_world", "version": "1"}
 _FATAL_STATUSES = frozenset({"failed", "timeout", "unsupported", "cancelled"})
+_MAX_LOCAL_WORLD_WORKERS = 4096
+_MAX_LOCAL_WORLD_CPU_ASSIGNMENTS = 4096
 
 
 @dataclass(frozen=True, order=True, slots=True)
@@ -540,6 +542,27 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
 
     if allocation_backend_kind not in {"local_world", "local_subprocess"}:
         raise DispatchPlanningError("unsupported local allocation backend kind", context={"kind": allocation_backend_kind})
+    worker_count = sum(role.replicas for role in world.roles.values())
+    if worker_count > _MAX_LOCAL_WORLD_WORKERS:
+        raise DispatchPlanningError(
+            "local world worker count exceeds the bounded limit",
+            context={"workers": worker_count, "limit": _MAX_LOCAL_WORLD_WORKERS},
+        )
+    cpu_assignments = 0
+    for role_name, role in world.roles.items():
+        process = role.process
+        if process.environment is not None or process.runtime is not None or process.metadata:
+            raise DispatchPlanningError(
+                "local world allocation cannot enact role-specific process environment, runtime, or metadata settings",
+                context={"role": role_name, "process": process.to_data()},
+            )
+        requested_cpus = process.resources.cpus or 1
+        cpu_assignments += role.replicas * requested_cpus
+    if cpu_assignments > _MAX_LOCAL_WORLD_CPU_ASSIGNMENTS:
+        raise DispatchPlanningError(
+            "local world CPU assignments exceed the bounded limit",
+            context={"cpu_assignments": cpu_assignments, "limit": _MAX_LOCAL_WORLD_CPU_ASSIGNMENTS, "oversubscribe": oversubscribe},
+        )
     cpu_cursor = memory_cursor = 0
     accelerator_cursors = {key: 0 for key in inventory.accelerators}
     for role_name in sorted(world.roles):

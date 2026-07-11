@@ -15,6 +15,23 @@ from .utils import coerce_tuple
 
 
 ProbeWorkerCommand = ("-m", "dryml.environments.probe_worker", "--json")
+_PYTHONPATH_POLICIES = frozenset({"none", "explicit", "inherit", "dryml-source"})
+
+
+def _normalize_pythonpath_policy(value: Any) -> str:
+    """Return the canonical spelling for a Python-path probe policy."""
+
+    return str(value).strip().lower().replace("_", "-")
+
+
+def _validate_pythonpath_policy(value: Any) -> None:
+    """Reject invalid probe policy values before a worker can be launched."""
+
+    if _normalize_pythonpath_policy(value) not in _PYTHONPATH_POLICIES:
+        raise EnvironmentSpecError(
+            f"unknown Python path probe policy {value!r}",
+            context={"pythonpath_policy": value},
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +71,9 @@ class PythonExecutableSpec:
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _validate_pythonpath_policy(self.pythonpath_policy)
         object.__setattr__(self, "env", deep_freeze_json(self.env))
+        object.__setattr__(self, "pythonpath_policy", _normalize_pythonpath_policy(self.pythonpath_policy))
         object.__setattr__(self, "extra_pythonpath", tuple(str(path) for path in coerce_tuple(self.extra_pythonpath)))
 
     @property
@@ -115,7 +134,9 @@ class CondaEnvironmentSpec:
                 f"unsupported Conda launch mode {self.launch_mode!r}",
                 context={"launch_mode": self.launch_mode},
             )
+        _validate_pythonpath_policy(self.pythonpath_policy)
         object.__setattr__(self, "env", deep_freeze_json(self.env))
+        object.__setattr__(self, "pythonpath_policy", _normalize_pythonpath_policy(self.pythonpath_policy))
         object.__setattr__(self, "extra_pythonpath", tuple(str(path) for path in coerce_tuple(self.extra_pythonpath)))
 
     @property

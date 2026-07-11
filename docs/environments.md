@@ -120,6 +120,13 @@ match = registry.find(req)
 
 Duplicate names are rejected so selection is deterministic.
 
+The registry is an explicit catalog, while `envs.resolve(...)` performs bounded
+candidate selection for dispatch: caller candidates precede name-sorted registry
+entries, then the current environment. Registry labels are only probe prefilters;
+the observed environment record remains the compatibility authority. Resolver
+search never replaces an explicit, annotation-default, or context-current
+candidate.
+
 ## Requirement Fragments
 
 Decorators are sugar over requirement fragments. They are not the future provider system.

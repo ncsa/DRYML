@@ -127,7 +127,7 @@ def local_inventory(
     policy: str = "lightweight",
     *,
     environ: Mapping[str, str] | None = None,
-    device_root: str | os.PathLike[str] | None = None,
+    device_root: str | os.PathLike[str] | None = "/dev",
     command_runner: Callable[..., Any] | None = None,
     timeout: float = 2.0,
 ) -> LocalResourceInventory:
@@ -227,6 +227,8 @@ def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -
         parsed = tuple(int(value) if value.isdigit() else value for value in (item.strip() for item in values.split(",")) if value)
         if not name or not parsed:
             raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
+        if name in result:
+            raise ResourceValidationError("DRYML_LOCAL_ACCELERATORS repeats an accelerator group", context={"accelerator": name})
         if len(parsed) > _MAX_EXPLICIT_ACCELERATOR_IDS:
             raise ResourceValidationError("DRYML_LOCAL_ACCELERATORS has too many accelerator identifiers", context={"accelerator": name})
         result[name] = parsed

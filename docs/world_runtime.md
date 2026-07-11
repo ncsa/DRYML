@@ -54,16 +54,23 @@ accelerators without importing ML frameworks or activating a runtime allocation.
 `WorldSpec`, not an allocation. The allocator later assigns actual disjoint CPU
 and accelerator identifiers, keeping requested worlds separate from worker
 allocations. Default `lightweight` inventory avoids framework imports and uses
-CPU affinity, OS memory facts, and explicit `DRYML_LOCAL_ACCELERATORS` input;
+CPU affinity, OS memory facts, explicit `DRYML_LOCAL_ACCELERATORS` input, and
+conservative numeric GPU device files under `/dev`;
 the opt-in `external` policy accepts a bounded command runner without importing
 framework bindings. Memory capacity honors an explicit cgroup limit when one is
 available; unknown capacity blocks positive memory requests, and
 unsupported topology, named resources, and devices fail synthesis rather than
 being silently dropped. An explicit `DRYML_LOCAL_ACCELERATORS` declaration is
-authoritative and is never broadened by optional external discovery. Injected
-device-root inspection is conservative and bounded; ambiguous visibility or an
+authoritative and is never broadened by optional external discovery. Device-root
+inspection is conservative and bounded; ambiguous visibility or an
 oversized device directory reports no accelerator inventory rather than a
 partial claim.
+
+Synthesis visits role names in sorted order and chooses the smallest positive
+replica and executable CPU counts permitted by each constraint, plus the minimum
+requested memory and accelerator counts. It proves aggregate disjoint CPU,
+memory, and accelerator capacity across every replica before returning a local
+world; failures report required, available, and shortfall capacity facts.
 
 The local-subprocess backend can enact only one role/replica. It allocates that
 requested world into an actual local-subprocess allocation and applies assigned

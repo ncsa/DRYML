@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -256,3 +257,23 @@ def test_total_timeout_is_checked_after_candidate_conversion():
 
     assert result.status == "no_match"
     assert any(issue.code == "resolver_candidate_input_timeout" for issue in result.diagnostics)
+
+
+def test_resolver_serialization_redacts_non_json_injected_probe_evidence():
+    from dryml.environments.compatibility import CompatibilityReport
+
+    spec = PythonExecutableSpec("/candidate/python")
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda candidate, *, timeout: EnvironmentProbeResult(
+            candidate,
+            False,
+            report=CompatibilityReport("incompatible", details={"opaque": b"not-json"}),
+        ),
+    )
+
+    data = result.to_data()
+    assert json.loads(json.dumps(data))
+    assert data["attempts"][0]["probe"]["report"]["details"]["opaque"] == {"__dryml_unsupported_type__": "bytes"}
