@@ -511,6 +511,7 @@ def test_cancel_reaps_backend_group_after_signal_exits_leader(tmp_path, monkeypa
 def test_cancel_uses_taskkill_for_owned_windows_worker_tree(tmp_path, monkeypatch):
     import dryml.dispatch.backends as backends
 
+    host_os_name = os.name
     process = _LeaderExitsOnSignalProcess()
     future = LocalSubprocessFuture(
         process,
@@ -524,7 +525,9 @@ def test_cancel_uses_taskkill_for_owned_windows_worker_tree(tmp_path, monkeypatc
         process_tree=True,
     )
     commands = []
-    monkeypatch.setattr(backends.os, "name", "nt")
+    # Do not mutate process-global os.name: pytest/pathlib then attempts to
+    # instantiate WindowsPath inside this Linux test process.
+    monkeypatch.setattr(backends, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(backends.subprocess, "run", lambda command, **kwargs: commands.append((command, kwargs)))
 
     assert future.cancel(record=False) is True
@@ -533,6 +536,7 @@ def test_cancel_uses_taskkill_for_owned_windows_worker_tree(tmp_path, monkeypatc
         (["taskkill", "/PID", str(process.pid), "/T", "/F"], {"check": False, "stdout": backends.subprocess.DEVNULL, "stderr": backends.subprocess.DEVNULL, "timeout": 5})
     ]
     assert process.kill_calls == 1
+    assert os.name == host_os_name
 
 
 def test_world_result_cleans_artifacts_after_aggregate_failure(tmp_path, monkeypatch):

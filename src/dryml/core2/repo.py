@@ -1090,7 +1090,7 @@ def make_store(store):
     if isinstance(store, Store):
         return store
 
-    elif isinstance(store, IOBase):
+    elif isinstance(store, IOBase) or _is_binary_file_like(store):
         from .store.zip import ZipStore
         # file-like => zip-backed store in a temp dir
         return ZipStore(store)
@@ -1107,6 +1107,12 @@ def make_store(store):
         return store
     else:
         raise ValueError(f"Cannot open a store pointing to location {store!r}")
+
+
+def _is_binary_file_like(value) -> bool:
+    """Return whether *value* supports the binary seekable zip protocol."""
+
+    return all(callable(getattr(value, name, None)) for name in ("read", "write", "seek", "truncate"))
 
 
 # Context management for default repo
