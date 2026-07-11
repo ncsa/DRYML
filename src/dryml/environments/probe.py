@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import math
 import os
-import select
+import selectors
 import signal
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
@@ -36,7 +35,7 @@ _MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024
 # explicit bound for decoding records with substantial package inventories while
 # retaining only a small prefix in public result diagnostics.
 _MAX_PROTOCOL_OUTPUT_BYTES = 4 * 1024 * 1024
-_PIPE_DRAIN_JOIN_TIMEOUT_S = 0.1
+_POST_EXIT_DRAIN_TIMEOUT_S = 0.1
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +242,7 @@ def _run_bounded_command(
     env: dict[str, str] | None,
     input_data: bytes | None = None,
 ) -> tuple[int, bytes, bool, bytes, bool, bool]:
-    """Run a probe while continuously draining bounded stdout and stderr pipes."""
+    """Run a probe with one deadline for stdin, execution, and pipe cleanup."""
 
     process = subprocess.Popen(
         command,
@@ -254,90 +253,105 @@ def _run_bounded_command(
         start_new_session=(os.name == "posix"),
     )
     assert process.stdout is not None and process.stderr is not None
-    captured: dict[str, tuple[bytes, bool]] = {"stdout": (b"", False), "stderr": (b"", False)}
-
-    def drain(name: str, stream, limit: int) -> None:
-        value = bytearray()
-        truncated = False
-        try:
-            while chunk := stream.read(64 * 1024):
-                remaining = limit + 1 - len(value)
-                if remaining > 0:
-                    value.extend(chunk[:remaining])
-                truncated = truncated or len(chunk) > remaining
-        except (OSError, ValueError):
-            pass
-        finally:
-            try:
-                stream.close()
-            except (OSError, ValueError):
-                pass
-            captured[name] = (bytes(value[:limit]), truncated or len(value) > limit)
-
-    stdout_thread = threading.Thread(target=drain, args=("stdout", process.stdout, _MAX_PROTOCOL_OUTPUT_BYTES), daemon=True)
-    stderr_thread = threading.Thread(target=drain, args=("stderr", process.stderr, _MAX_CAPTURED_OUTPUT_BYTES), daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
+    streams = {"stdout": (process.stdout, _MAX_PROTOCOL_OUTPUT_BYTES), "stderr": (process.stderr, _MAX_CAPTURED_OUTPUT_BYTES)}
+    captured = {name: bytearray() for name in streams}
+    truncated = {name: False for name in streams}
+    selector = selectors.DefaultSelector()
+    for name, (stream, _limit) in streams.items():
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, name)
+    input_offset = 0
+    if input_data is not None:
+        assert process.stdin is not None
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
     timed_out = False
+    deadline = None if timeout is None else time.monotonic() + timeout
+    post_exit_deadline = None
     try:
-        if input_data is not None:
-            assert process.stdin is not None
-            deadline = None if timeout is None else time.monotonic() + timeout
-            descriptor = process.stdin.fileno()
-            os.set_blocking(descriptor, False)
-            offset = 0
-            while offset < len(input_data):
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    raise subprocess.TimeoutExpired(command, timeout)
-                _, writable, _ = select.select((), (descriptor,), (), remaining)
-                if not writable:
-                    raise subprocess.TimeoutExpired(command, timeout)
+        while selector.get_map():
+            now = time.monotonic()
+            if process.poll() is not None and post_exit_deadline is None:
+                post_exit_deadline = now + _POST_EXIT_DRAIN_TIMEOUT_S
+            limits = [value for value in (deadline, post_exit_deadline) if value is not None]
+            remaining = None if not limits else min(limits) - now
+            if remaining is not None and remaining <= 0:
+                timed_out = True
+                break
+            events = selector.select(None if remaining is None else min(remaining, 0.05))
+            for key, _mask in events:
+                stream = key.fileobj
+                if key.data == "stdin":
+                    try:
+                        input_offset += os.write(stream.fileno(), input_data[input_offset:])  # type: ignore[index]
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        input_offset = len(input_data)  # type: ignore[arg-type]
+                    if input_offset >= len(input_data):  # type: ignore[arg-type]
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
                 try:
-                    offset += os.write(descriptor, input_data[offset:])
+                    chunk = os.read(stream.fileno(), 64 * 1024)
                 except BlockingIOError:
                     continue
-                except BrokenPipeError:
-                    break
-            process.stdin.close()
-        process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:  # pragma: no cover - Windows does not provide POSIX groups.
-            process.kill()
-        process.wait()
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                value = captured[key.data]
+                limit = streams[key.data][1]
+                remaining_capacity = limit + 1 - len(value)
+                if remaining_capacity > 0:
+                    value.extend(chunk[:remaining_capacity])
+                truncated[key.data] = truncated[key.data] or len(chunk) > remaining_capacity
+        if process.poll() is None:
+            timed_out = True
+        if timed_out:
+            _kill_probe_process_group(process)
+            process.wait()
+        elif process.poll() is None:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            process.wait(timeout=remaining)
+    except BaseException:
+        _kill_probe_process_group(process)
+        try:
+            process.wait(timeout=_POST_EXIT_DRAIN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
     finally:
-        # A descendant can deliberately escape the child process group while
-        # retaining a capture pipe. Do not let that defeat the caller timeout.
-        stdout_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
-        stderr_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
-        pipes_lingered = stdout_thread.is_alive() or stderr_thread.is_alive()
-        if pipes_lingered:
-            # The leader may have exited while a descendant still owns a pipe.
-            # Close our descriptors and kill any remaining same-session process.
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            for stream in (process.stdout, process.stderr):
-                try:
-                    # ``TextIOWrapper.close()`` can wait on a concurrent read.
-                    # Closing the descriptor directly wakes the daemon drainer.
-                    os.close(stream.fileno())
-                except (OSError, ValueError):
-                    pass
-            stdout_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
-            stderr_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
-        timed_out = timed_out or pipes_lingered
-    stdout, stdout_truncated = captured["stdout"]
-    stderr, stderr_truncated = captured["stderr"]
-    return process.returncode, stdout, stdout_truncated, stderr, stderr_truncated, timed_out
+        for key in list(selector.get_map().values()):
+            try:
+                selector.unregister(key.fileobj)
+            except Exception:
+                pass
+            try:
+                key.fileobj.close()
+            except (OSError, ValueError):
+                pass
+        selector.close()
+    return (
+        process.returncode,
+        bytes(captured["stdout"][:_MAX_PROTOCOL_OUTPUT_BYTES]),
+        truncated["stdout"] or len(captured["stdout"]) > _MAX_PROTOCOL_OUTPUT_BYTES,
+        bytes(captured["stderr"][:_MAX_CAPTURED_OUTPUT_BYTES]),
+        truncated["stderr"] or len(captured["stderr"]) > _MAX_CAPTURED_OUTPUT_BYTES,
+        timed_out,
+    )
+
+
+def _kill_probe_process_group(process: subprocess.Popen[bytes]) -> None:
+    """Kill the probe leader and its process group when the parent aborts."""
+
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:  # pragma: no cover - Windows lacks POSIX groups.
+        process.kill()
 
 
 def _diagnostic_output(value: bytes) -> tuple[str, bool]:

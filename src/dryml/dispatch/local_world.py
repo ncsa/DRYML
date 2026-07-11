@@ -151,13 +151,13 @@ class LocalWorldBackend:
         """Launch all workers and return a group future."""
 
         group_dir = plan.group_work_dir or tempfile.mkdtemp(prefix="dryml-local-world-")
-        workers_dir = os.path.join(group_dir, "workers")
-        os.makedirs(workers_dir, exist_ok=True)
-        start_path = os.path.join(group_dir, "start.json")
-        cancel_path = os.path.join(group_dir, "cancel.json")
-        write_json_file(os.path.join(group_dir, "group.json"), {"dispatch_id": plan.dispatch_spec.get("id"), "recipe_id": plan.execution_recipe.get("id"), "world_id": plan.world_spec.get("id"), "world_allocation_id": plan.world_allocation_spec.get("id"), "worker_count": len(plan.worker_plans)})
         futures: dict[WorldWorkerKey, LocalSubprocessFuture] = {}
         try:
+            workers_dir = os.path.join(group_dir, "workers")
+            os.makedirs(workers_dir, exist_ok=True)
+            start_path = os.path.join(group_dir, "start.json")
+            cancel_path = os.path.join(group_dir, "cancel.json")
+            write_json_file(os.path.join(group_dir, "group.json"), {"dispatch_id": plan.dispatch_spec.get("id"), "recipe_id": plan.execution_recipe.get("id"), "world_id": plan.world_spec.get("id"), "world_allocation_id": plan.world_allocation_spec.get("id"), "worker_count": len(plan.worker_plans)})
             for worker_plan in plan.worker_plans:
                 worker_dir = os.path.join(workers_dir, worker_plan.key.label())
                 os.makedirs(worker_dir, exist_ok=True)
@@ -183,7 +183,7 @@ class LocalWorldBackend:
                 futures[worker_plan.key] = LocalSubprocessFuture(process, launch_plan, worker_dir, request_path, handshake_path, response_path, stdout_path, stderr_path, True, cancel_grace=self.cancel_grace, handshake_timeout=self.handshake_timeout)
         except BaseException as exc:
             for future in futures.values():
-                future.cancel(reason="launch_failure")
+                _cancel_worker_safely(future, grace=self.cancel_grace, reason="launch_failure")
             _cleanup_worker_paths(plan)
             if not self.preserve_work_dir and not plan.preserve_work_dir:
                 shutil.rmtree(group_dir, ignore_errors=True)
@@ -274,7 +274,6 @@ class LocalWorldFuture:
                 status_override = self._control_failure_status
                 cancellation = None if status_override is not None else {"requested": True, "reason": self._cancel_reason or "cancelled"}
                 self._result = self._aggregate(handshakes=handshakes, status_override=status_override, cancellation=cancellation)
-                self._cleanup()
                 return self._result
             deadline = None if timeout is None else time.monotonic() + timeout
             fatal_seen = False
@@ -291,21 +290,27 @@ class LocalWorldFuture:
                 if fatal_seen:
                     for future in self.workers.values():
                         if not future.done():
-                            future.process.wait(timeout=self.cancel_grace)
+                            try:
+                                future.kill()
+                                future._wait(self.cancel_grace)
+                            except Exception:
+                                pass
                     break
                 if deadline is not None and time.monotonic() >= deadline:
                     self._timeout_live()
                     self._result = self._aggregate(handshakes=handshakes, status_override="timeout", cancellation={"requested": True, "reason": "timeout"})
-                    self._cleanup()
                     return self._result
                 time.sleep(0.01)
+            self._result = self._aggregate()
+            return self._result
         except KeyboardInterrupt:
             self.cancel(reason="KeyboardInterrupt")
-            self._cleanup()
             raise
-        self._result = self._aggregate()
-        self._cleanup()
-        return self._result
+        except BaseException:
+            self.cancel(reason="parent_error")
+            raise
+        finally:
+            self._cleanup()
 
     def cancel(self, reason: str = "user") -> bool:
         """Cancel all live workers and write a cooperative cancel marker."""
@@ -319,7 +324,7 @@ class LocalWorldFuture:
             pass
         cancelled = False
         for future in self.workers.values():
-            cancelled = future.cancel(grace=self.cancel_grace, reason=reason) or cancelled
+            cancelled = _cancel_worker_safely(future, grace=self.cancel_grace, reason=reason) or cancelled
         return cancelled
 
     def done(self) -> bool:
@@ -336,7 +341,7 @@ class LocalWorldFuture:
             pass
         for future in self.workers.values():
             if not future.done() and future._response is None:
-                future.cancel(grace=self.cancel_grace, reason=reason)
+                _cancel_worker_safely(future, grace=self.cancel_grace, reason=reason)
 
     def _timeout_live(self, *, message: str = "local world dispatch timed out") -> None:
         self._cancelled = True
@@ -348,7 +353,7 @@ class LocalWorldFuture:
         for future in self.workers.values():
             was_live = not future.done()
             if was_live:
-                future.cancel(grace=self.cancel_grace, reason="timeout", record=False)
+                _cancel_worker_safely(future, grace=self.cancel_grace, reason="timeout", record=False)
             if future._response is None:
                 future._read_response()
             if was_live or future._response is None or future._response.status == "cancelled":
@@ -415,6 +420,19 @@ def _cleanup_worker_paths(plan: LocalWorldPlan) -> None:
     for worker_plan in plan.worker_plans:
         for path in worker_plan.envelope.launch.get("cleanup_paths") or ():
             shutil.rmtree(path, ignore_errors=True)
+
+
+def _cancel_worker_safely(future: LocalSubprocessFuture, *, grace: float, reason: str, record: bool = True) -> bool:
+    """Cancel one worker without allowing persistence failures to strand peers."""
+
+    try:
+        return future.cancel(grace=grace, reason=reason, record=record)
+    except BaseException:
+        try:
+            future.kill()
+        except BaseException:
+            pass
+        return False
 
 
 def normalize_world_spec(world: Mapping[str, Any] | WorldSpec | None) -> Mapping[str, Any]:

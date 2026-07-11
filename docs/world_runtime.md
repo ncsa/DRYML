@@ -55,9 +55,10 @@ accelerators without importing ML frameworks or activating a runtime allocation.
 and accelerator identifiers, keeping requested worlds separate from worker
 allocations. Default `lightweight` inventory avoids framework imports and uses
 CPU affinity, OS memory facts, explicit `DRYML_LOCAL_ACCELERATORS` input, and
-conservative numeric GPU device files under `/dev`;
-the opt-in `external` policy accepts a bounded command runner without importing
-framework bindings. Memory capacity honors an explicit cgroup limit when one is
+conservative numeric GPU device files under `/dev`; the opt-in `external` policy
+forwards a timeout to an injected command runner without importing framework
+bindings. Custom in-process runners are cooperative and must enforce a hard
+deadline themselves. Memory capacity honors an explicit cgroup limit when one is
 available; unknown capacity blocks positive memory requests, and
 unsupported topology, named resources, and devices fail synthesis rather than
 being silently dropped. An explicit `DRYML_LOCAL_ACCELERATORS` declaration is
@@ -65,6 +66,10 @@ authoritative and is never broadened by optional external discovery. Device-root
 inspection is conservative and bounded; ambiguous visibility or an
 oversized device directory reports no accelerator inventory rather than a
 partial claim.
+
+Inherited numeric CUDA/NVIDIA visibility restricts device-root and external GPU
+evidence alike. Disabled or ambiguous visibility produces no usable GPU capacity,
+so optional host discovery cannot broaden a scheduler or container allocation.
 
 Device-file evidence is accepted only for readable/writable character devices;
 regular files or stale names such as `nvidia0` never create usable GPU capacity.

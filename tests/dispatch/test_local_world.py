@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -337,6 +338,49 @@ def test_one_worker_failure_cancels_sibling(tmp_path, target_module):
     assert statuses["a"] == "failed"
     assert statuses["b"] == "cancelled"
     assert result.error and result.error["type"] == "ValueError"
+
+
+def test_world_cancel_continues_after_a_worker_cancellation_error(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    first, second = plan.worker_plans[0].key, plan.worker_plans[1].key
+    failed = _FakeWorldWorkerFuture(tmp_path, plan, first)
+    completed = _FakeWorldWorkerFuture(tmp_path, plan, second)
+    completed_calls = []
+
+    def fail_cancel(**_kwargs):
+        raise RuntimeError("record persistence failed")
+
+    def record_cancel(**kwargs):
+        completed_calls.append(kwargs)
+        return True
+
+    failed.cancel = fail_cancel
+    completed.cancel = record_cancel
+    future = _fake_future(tmp_path, plan, {first: failed, second: completed})
+
+    assert future.cancel(reason="test") is True
+    assert completed_calls == [{"grace": future.cancel_grace, "reason": "test", "record": True}]
+
+
+def test_world_result_cleans_artifacts_after_aggregate_failure(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = make_function_call_spec("operator:add", args=[1, 2])
+    plan = Dispatcher(store=store).plan_world(op, world=world, inventory=_inventory())
+    key = plan.worker_plans[0].key
+    worker = _FakeWorldWorkerFuture(tmp_path, plan, key, handshake=_handshake(plan, key), done=True)
+    future = _fake_future(tmp_path, plan, {key: worker})
+    future.preserve_work_dir = False
+    Path(future.group_work_dir).mkdir()
+    monkeypatch.setattr(LocalWorldFuture, "_aggregate", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("aggregate failed")))
+
+    with pytest.raises(RuntimeError, match="aggregate failed"):
+        future.result(timeout=1)
+
+    assert not Path(future.group_work_dir).exists()
 
 
 def test_explicit_world_cancel_reaches_all_workers(tmp_path, target_module):

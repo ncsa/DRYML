@@ -102,6 +102,24 @@ def test_probe_python_timeout_and_malformed_output(tmp_path):
     assert result.report.issues[0].code == "probe_failed"
 
 
+def test_bounded_command_uses_one_deadline_for_stdin_and_execution():
+    import importlib
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+
+    command = [sys.executable, "-c", "import sys, time; time.sleep(0.15); sys.stdin.buffer.read(); time.sleep(0.15)"]
+    started = time.monotonic()
+    _returncode, _stdout, _stdout_truncated, _stderr, _stderr_truncated, timed_out = probe_module._run_bounded_command(
+        command,
+        timeout=0.2,
+        env=None,
+        input_data=b"x" * (1024 * 1024),
+    )
+
+    assert timed_out
+    assert time.monotonic() - started < 0.35
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process-group timeout behavior is POSIX-specific")
 def test_probe_timeout_kills_descendants_holding_capture_pipes(tmp_path):
     script = tmp_path / "forking-python"

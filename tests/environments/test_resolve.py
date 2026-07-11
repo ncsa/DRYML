@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
+from dryml.environments import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
 
 
 def test_resolve_without_requirement_selects_first_candidate_without_probe():
@@ -37,6 +37,17 @@ def test_resolve_without_requirement_skips_unsupported_container_candidate():
     result = resolve(
         None,
         candidates=(ContainerEnvironmentSpec("example/image"), CurrentEnvironmentSpec()),
+        include_current=False,
+    )
+
+    assert isinstance(result.selected, CurrentEnvironmentSpec)
+    assert result.attempts[0].status == "unsupported"
+
+
+def test_resolve_without_requirement_skips_unlaunchable_conda_candidate():
+    result = resolve(
+        None,
+        candidates=(CondaEnvironmentSpec(name="only-name"), CurrentEnvironmentSpec()),
         include_current=False,
     )
 

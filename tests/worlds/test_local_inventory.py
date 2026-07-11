@@ -75,6 +75,7 @@ def test_external_inventory_bounds_runner_output(tmp_path):
     output = "\n".join(str(index) for index in range(200))
     inventory = local_inventory(
         policy="external",
+        environ={},
         device_root=tmp_path,
         command_runner=lambda *_args, **_kwargs: type("Result", (), {"returncode": 0, "stdout": output})(),
     )
@@ -91,6 +92,21 @@ def test_explicit_accelerator_override_is_not_broadened_by_external_discovery():
     )
 
     assert inventory.accelerators == {"gpu": (0,)}
+
+
+@pytest.mark.parametrize(
+    "visibility,expected",
+    (("1", {"gpu": (1,)}), ("none", {}), ("GPU-opaque", {})),
+)
+def test_external_inventory_never_broadens_inherited_gpu_visibility(visibility, expected, tmp_path):
+    inventory = local_inventory(
+        policy="external",
+        environ={"CUDA_VISIBLE_DEVICES": visibility},
+        device_root=tmp_path,
+        command_runner=lambda *_args, **_kwargs: "0\n1\n",
+    )
+
+    assert inventory.accelerators == expected
 
 
 @pytest.mark.parametrize(

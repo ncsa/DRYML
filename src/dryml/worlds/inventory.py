@@ -178,7 +178,7 @@ def local_inventory(
         accelerator_source = "device_root" if accelerators else "none"
     # An explicit override is authoritative; never broaden it with host probes.
     if policy == "external" and command_runner is not None and not accelerators:
-        _merge_external_accelerators(accelerators, command_runner, timeout, diagnostics)
+        _merge_external_accelerators(accelerators, command_runner, timeout, environment, diagnostics)
         accelerator_source = "external" if accelerators else "none"
     metadata: dict[str, Any] = {"policy": policy, "cpu_source": cpu_source, "memory_source": memory_source, "accelerator_source": accelerator_source, "diagnostics": diagnostics[:8]}
     return LocalResourceInventory(cpus=cpus, accelerators=accelerators, memory=memory, metadata=metadata)
@@ -272,18 +272,33 @@ def _accelerators_from_device_root(environ: Mapping[str, str], device_root: str 
     device_ids = tuple(sorted(set(device_ids)))
     if not device_ids:
         return {}
-    visible = environ.get("CUDA_VISIBLE_DEVICES", environ.get("NVIDIA_VISIBLE_DEVICES"))
-    if visible is None or visible.strip().lower() == "all":
-        return {"gpu": device_ids[:_MAX_EXPLICIT_ACCELERATOR_IDS]}
-    values = tuple(item.strip() for item in visible.split(",") if item.strip())
-    if any(value.lower() in {"none", "void", "all"} or not value.isdigit() for value in values):
-        diagnostics.append("accelerator visibility was ambiguous")
+    visible, known = _visible_gpu_ids(environ, diagnostics)
+    if not known:
         return {}
-    allowed = {int(value) for value in values}
-    return {"gpu": tuple(identifier for identifier in device_ids if identifier in allowed)}
+    if visible is not None:
+        device_ids = tuple(identifier for identifier in device_ids if identifier in visible)
+    return {"gpu": device_ids[:_MAX_EXPLICIT_ACCELERATOR_IDS]} if device_ids else {}
 
 
-def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]], runner: Callable[..., Any], timeout: float, diagnostics: list[str]) -> None:
+def _visible_gpu_ids(environ: Mapping[str, str], diagnostics: list[str]) -> tuple[set[int] | None, bool]:
+    """Return the inherited numeric GPU allowlist and whether it is usable."""
+
+    raw = environ.get("CUDA_VISIBLE_DEVICES", environ.get("NVIDIA_VISIBLE_DEVICES"))
+    if raw is None or raw.strip().lower() == "all":
+        return None, True
+    values = tuple(item.strip() for item in raw.split(",") if item.strip())
+    if not values or all(value.lower() in {"none", "void"} for value in values):
+        return set(), True
+    if any(not value.isdigit() for value in values):
+        diagnostics.append("accelerator visibility was ambiguous")
+        return set(), False
+    return {int(value) for value in values}, True
+
+
+def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]], runner: Callable[..., Any], timeout: float, environ: Mapping[str, str], diagnostics: list[str]) -> None:
+    visible, known = _visible_gpu_ids(environ, diagnostics)
+    if not known or visible == set():
+        return
     try:
         output = runner(["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"], timeout=timeout)
         if getattr(output, "returncode", 0) != 0:
@@ -301,6 +316,8 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
         if len(values) > _MAX_EXTERNAL_DEVICE_IDS:
             diagnostics.append("external accelerator identifiers were truncated")
             values = values[:_MAX_EXTERNAL_DEVICE_IDS]
+        if visible is not None:
+            values = tuple(value for value in values if value in visible)
         if values:
             existing = accelerators.get("gpu", ())
             accelerators["gpu"] = tuple(sorted(set(existing) | set(values)))

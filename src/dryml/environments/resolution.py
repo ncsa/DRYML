@@ -18,7 +18,7 @@ from .probe import EnvironmentProbeResult, probe
 from .records import EnvironmentRecord
 from .requirements import EnvironmentRequirement
 from .schema import ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION
-from .specs import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
+from .specs import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentSpec, spec_from_data
 from .utils import normalize_distribution_name
 
 _MAX_RECORDED_ATTEMPTS = 32
@@ -198,17 +198,14 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
             continue
         if requirement is None:
-            if isinstance(spec, ContainerEnvironmentSpec):
+            structural_issue = _structural_candidate_issue(spec)
+            if structural_issue is not None:
                 record(EnvironmentResolutionAttempt(
                     source,
                     name,
                     spec,
                     "unsupported",
-                    diagnostics=(CompatibilityIssue(
-                        "unsupported_environment_spec",
-                        "error",
-                        "container execution is not implemented",
-                    ),),
+                    diagnostics=(structural_issue,),
                 ))
                 continue
             record(EnvironmentResolutionAttempt(source, name, spec, "selected"))
@@ -276,6 +273,19 @@ def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, 
     raise TypeError(f"environment candidate must be an EnvironmentSpec, registry entry, or mapping, got {type(candidate).__name__}")
 
 
+def _structural_candidate_issue(spec: EnvironmentSpec) -> CompatibilityIssue | None:
+    """Return an environment-owned local-launch issue without probing it."""
+
+    if isinstance(spec, ContainerEnvironmentSpec):
+        return CompatibilityIssue("unsupported_environment_spec", "error", "container execution is not implemented")
+    if isinstance(spec, CondaEnvironmentSpec):
+        if spec.launch_mode == "direct" and not spec.prefix:
+            return CompatibilityIssue("unsupported_environment_spec", "error", "direct Conda launch requires a prefix")
+        if spec.launch_mode == "conda-run" and not (spec.prefix or spec.name):
+            return CompatibilityIssue("unsupported_environment_spec", "error", "conda-run launch requires a prefix or name")
+    return None
+
+
 def _normalize_candidates(
     candidates: Iterable[Any],
     *,
@@ -307,7 +317,7 @@ def _normalize_candidates(
                 _source, _name, spec, _entry = _normalize_candidate(value, "candidate")
             except Exception as exc:
                 raise ValueError(f"invalid environment resolver candidate: {type(exc).__name__}") from exc
-            if not isinstance(spec, ContainerEnvironmentSpec):
+            if _structural_candidate_issue(spec) is None:
                 break
     truncated = len(values) > max_items
     values = values[:max_items]
