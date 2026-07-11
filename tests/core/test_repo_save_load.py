@@ -216,6 +216,7 @@ def test_save_4(prep_and_clean_test_dir2):
 
     # Save objects in repository
     repo.save()
+    repo.close(flush=False)
 
     # Delete the repo
     del repo
@@ -230,6 +231,7 @@ def test_save_4(prep_and_clean_test_dir2):
     with pytest.raises(ValueError, match="load_or_build"):
         repo.get(build_missing=True)
 
+    repo.close(flush=False)
     del repo
 
     repo = dryml.core2.Repo(dir2)
@@ -238,12 +240,16 @@ def test_save_4(prep_and_clean_test_dir2):
     with pytest.raises(ValueError, match="load_or_build"):
         repo.get(build_missing=True)
 
+    repo.close(flush=False)
+    del repo
+
     repo = dryml.core2.Repo([dir1, dir2])
     assert len(repo.find_defs(None)) == 2
     assert len(repo.get()) == 2
 
     assert len(dryml.core2.Repo.dir_store_inspect(dir1)) == 1
     assert len(dryml.core2.Repo.dir_store_inspect(dir2)) == 1
+    repo.close(flush=False)
 
 
 def test_object_save_restore_1(primary_store_set):

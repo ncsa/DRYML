@@ -307,6 +307,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(occurrences) == 1
     assert occurrences[0].owner == root
     assert occurrences[0].definition == child
+    repo.close(flush=False)
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -358,6 +359,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(occurrences) == 1
     assert occurrences[0].owner == root
     assert occurrences[0].definition == child
+    repo.close(flush=False)
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules

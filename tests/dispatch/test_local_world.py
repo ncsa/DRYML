@@ -50,6 +50,9 @@ class _LeaderExitsOnSignalProcess:
         self.signals.append(signal)
         self.returncode = 0
 
+    def terminate(self):
+        self.returncode = 0
+
     def wait(self, timeout=None):
         return self.returncode
 

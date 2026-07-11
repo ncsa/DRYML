@@ -1,7 +1,6 @@
 import json
 import math
 import os
-import shlex
 import stat
 import sys
 import time
@@ -13,11 +12,20 @@ from dryml.environments.probe_worker import main as probe_worker_main
 
 
 def make_fake_executable(tmp_path, payload, *, sleep=False):
-    script = tmp_path / "fake-python"
-    text = "#!/bin/sh\n"
-    if sleep:
-        text += "sleep 2\n"
-    text += f"printf '%s\\n' {shlex.quote(json.dumps(payload))}\n"
+    payload_path = tmp_path / "probe-payload.json"
+    payload_path.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
+    if os.name == "nt":
+        script = tmp_path / "fake-python.cmd"
+        text = "@echo off\r\n"
+        if sleep:
+            text += "timeout /t 2 /nobreak >nul\r\n"
+        text += 'type "%~dp0probe-payload.json"\r\n'
+    else:
+        script = tmp_path / "fake-python"
+        text = "#!/bin/sh\n"
+        if sleep:
+            text += "sleep 2\n"
+        text += 'cat "$(dirname "$0")/probe-payload.json"\n'
     script.write_text(text)
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script)
@@ -95,10 +103,7 @@ def test_probe_python_timeout_and_malformed_output(tmp_path):
     timeout = envs.probe(envs.PythonExecutableSpec(timeout_exe), timeout=0.05)
     assert timeout.report.issues[0].code == "probe_timeout"
 
-    malformed = tmp_path / "malformed-python"
-    malformed.write_text("#!/bin/sh\nprintf '%s\\n' 'not json'\n")
-    malformed.chmod(malformed.stat().st_mode | stat.S_IXUSR)
-    result = envs.probe(envs.PythonExecutableSpec(str(malformed)))
+    result = envs.probe(envs.PythonExecutableSpec(make_fake_executable(tmp_path, "not json")))
     assert result.report.issues[0].code == "probe_failed"
 
 
@@ -323,7 +328,7 @@ def test_conda_probe_uses_pythonpath_policy(monkeypatch):
     )
 
     assert result.ok
-    assert captured["command"][0] == "/conda/env/bin/python"
+    assert captured["command"][0] == envs.CondaEnvironmentSpec(prefix="/conda/env").direct_python_executable()
     assert captured["env"]["PYTHONPATH"] == "/only"
 
 

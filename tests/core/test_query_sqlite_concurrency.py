@@ -631,6 +631,7 @@ while True:
     report = idx.validate(thorough=True)
     assert not report.ok
     assert any("not ready" in issue.message for issue in report.issues)
+    idx.close()
 
     result = _run_worker(f'''
 idx = store_index({str(tmp_path)!r})

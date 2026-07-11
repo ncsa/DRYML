@@ -215,7 +215,7 @@ def test_inventory_import_path_does_not_load_framework_modules():
 def test_empty_cpu_affinity_is_not_reported_as_cpu_zero(monkeypatch):
     import dryml.worlds.inventory as inventory_module
 
-    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: set())
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: set(), raising=False)
 
     with pytest.raises(ResourceValidationError, match="no executable CPUs"):
         local_inventory(environ={})
@@ -224,7 +224,7 @@ def test_empty_cpu_affinity_is_not_reported_as_cpu_zero(monkeypatch):
 def test_large_discovered_cpu_affinity_is_conservatively_bounded(monkeypatch):
     import dryml.worlds.inventory as inventory_module
 
-    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: set(range(4097)))
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: set(range(4097)), raising=False)
 
     inventory = local_inventory(environ={}, device_root=None)
 
@@ -235,7 +235,7 @@ def test_large_discovered_cpu_affinity_is_conservatively_bounded(monkeypatch):
 def test_large_cpu_count_fallback_is_conservatively_bounded(monkeypatch):
     import dryml.worlds.inventory as inventory_module
 
-    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: (_ for _ in ()).throw(OSError()), raising=False)
     monkeypatch.setattr(inventory_module.os, "cpu_count", lambda: 4097)
 
     inventory = local_inventory(environ={}, device_root=None)

@@ -160,9 +160,14 @@ class LocalSubprocessFuture:
         try:
             if os.name == "posix" and self.process_group:
                 os.killpg(self.process.pid, sig)
+            elif os.name == "nt":
+                # Windows Popen only accepts SIGTERM or CTRL_BREAK_EVENT.
+                # This backend does not create a console process group, so a
+                # normal termination is the portable first cancellation step.
+                self.process.terminate()
             else:
                 self.process.send_signal(sig)
-        except ProcessLookupError:
+        except (OSError, ProcessLookupError, ValueError):
             pass
 
     def _wait(self, timeout: float) -> bool:

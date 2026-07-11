@@ -170,6 +170,7 @@ def test_activate_runtime_bootstrap_rejects_process_controls_by_default(monkeypa
     assert "plain" in excinfo.value.context["controls"]
 
 
+@pytest.mark.skipif(runtime_frameworks.resource is None, reason="POSIX resource limits are unavailable")
 def test_plain_bootstrap_can_apply_cpu_affinity_and_memory_limit(monkeypatch):
     calls = {}
 
