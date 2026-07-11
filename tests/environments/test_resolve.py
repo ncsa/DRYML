@@ -98,6 +98,7 @@ def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
 
     assert [attempt.status for attempt in result.attempts] == ["probe_failed", "not_considered_limit"]
     assert len(calls) == 1
+    assert result.status == "incomplete"
 
 
 def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels():

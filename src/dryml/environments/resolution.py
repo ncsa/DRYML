@@ -118,17 +118,22 @@ def resolve(
 ) -> EnvironmentResolution:
     """Select the first compatible candidate in deterministic bounded order.
 
-    Candidates precede name-sorted registry entries and the optional current
-    environment. ``max_candidates`` limits unique candidates; ``probe_timeout``
-    limits DRYML's built-in probes and ``total_timeout`` limits work between
-    callback boundaries. When only a total timeout is supplied, its remaining
-    duration is passed to each probe. Injected runners and arbitrary candidate
-    iterators are cooperative and must enforce their own hard deadlines.
-    Raw caller and registry input is limited to ``max_candidates + 256`` items,
-    including aliases; truncation returns ``incomplete`` rather than claiming
-    that no candidate matched. Injected iterators and runners are cooperative
-    and must yield control for total-timeout checks to take effect.
-    Returned attempt metadata is redacted and size-bounded.
+    Args:
+        requirement: Optional hard environment requirement.
+        candidates: Caller candidates, considered before registry entries.
+        registry: Optional explicit registry, considered in name order.
+        include_current: Include the current environment after other sources.
+        policy: Supported resolver policy, currently ``"first_compatible"``.
+        max_candidates: Positive bound on unique candidates considered.
+        probe_timeout: Per-probe deadline for DRYML-managed probes.
+        total_timeout: Total deadline observed between cooperative callbacks.
+        probe_runner: Optional probe hook. In-process runners and candidate
+            iterators are cooperative and must enforce their own hard deadline.
+        clock: Optional monotonic clock injection for deterministic tests.
+
+    Returns:
+        A deterministic, bounded resolution report. Input or search truncation
+        returns ``incomplete`` rather than allowing a lower-precedence fallback.
     """
 
     if policy != "first_compatible":
@@ -158,6 +163,7 @@ def resolve(
     seen: set[str] = set()
     considered = 0
     truncated = False
+    search_incomplete = False
     registry_entries, registry_state = _registry_entries(
         registry,
         max_items=raw_candidate_limit,
@@ -197,6 +203,7 @@ def resolve(
     ):
         if total_timeout is not None and now() - started >= total_timeout:
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
+            search_incomplete = True
             break
         try:
             identity = _identity(spec)
@@ -209,9 +216,11 @@ def resolve(
         seen.add(identity)
         if considered >= max_candidates:
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_limit"))
+            search_incomplete = True
             break
         if total_timeout is not None and now() - started >= total_timeout:
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
+            search_incomplete = True
             break
         considered += 1
         if entry is not None and not _labels_match(requirement, entry):
@@ -235,6 +244,7 @@ def resolve(
             timeout = remaining if probe_timeout is None else probe_timeout if remaining is None else min(probe_timeout, remaining)
             if timeout is not None and timeout <= 0:
                 record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
+                search_incomplete = True
                 break
             probe_started = now()
             result = runner(spec, timeout=timeout)
@@ -278,7 +288,7 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report, probe_duration_s=probe_duration_s))
             return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), result_diagnostics(), policy)
         record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues, probe_duration_s))
-    if candidates_truncated or candidates_timed_out or registry_state["truncated"] or registry_state["timed_out"]:
+    if search_incomplete or candidates_truncated or candidates_timed_out or registry_state["truncated"] or registry_state["timed_out"]:
         diagnostics = [CompatibilityIssue("resolver_input_truncated", "error", "environment candidate input was incomplete before compatibility could be determined")]
         diagnostics.extend(result_diagnostics())
         return EnvironmentResolution("incomplete", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)

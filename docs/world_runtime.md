@@ -54,12 +54,16 @@ accelerators without importing ML frameworks or activating a runtime allocation.
 `WorldSpec`, not an allocation. The allocator later assigns actual disjoint CPU
 and accelerator identifiers, keeping requested worlds separate from worker
 allocations. Default `lightweight` inventory avoids framework imports and uses
-CPU affinity, OS memory facts, explicit `DRYML_LOCAL_ACCELERATORS` input, and
+CPU affinity, platform-native memory facts, explicit `DRYML_LOCAL_ACCELERATORS` input, and
 conservative numeric GPU device files under `/dev`; the opt-in `external` policy
 forwards a timeout to an injected command runner without importing framework
 bindings. Custom in-process runners are cooperative and must enforce a hard
 deadline themselves. Memory capacity honors an explicit cgroup limit when one is
-available; unknown capacity blocks positive memory requests, and
+available. Linux uses `/proc/meminfo` constrained by cgroup v1/v2 limits;
+Windows uses `GlobalMemoryStatusEx` available physical memory; macOS uses
+available pages when exposed and otherwise its native physical-memory fact;
+other POSIX hosts use `sysconf` page facts. Unknown capacity blocks positive
+memory requests, and
 unsupported topology, named resources, and devices fail synthesis rather than
 being silently dropped. An explicit `DRYML_LOCAL_ACCELERATORS` declaration is
 authoritative and is never broadened by optional external discovery. Device-root

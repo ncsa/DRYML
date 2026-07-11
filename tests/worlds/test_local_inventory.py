@@ -185,6 +185,21 @@ def test_external_inventory_missing_or_timed_out_runner_is_diagnostic_only(failu
     assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
 
 
+def test_external_inventory_forwards_timeout_to_runner(tmp_path):
+    observed = []
+
+    inventory = local_inventory(
+        policy="external",
+        environ={},
+        device_root=tmp_path,
+        timeout=1.25,
+        command_runner=lambda _command, *, timeout: observed.append(timeout) or "0\n",
+    )
+
+    assert inventory.accelerators == {"gpu": (0,)}
+    assert observed == [1.25]
+
+
 def test_external_inventory_discards_partial_output_and_negative_identifiers(tmp_path):
     partial = " " * ((64 * 1024) - 1) + "12\n"
     inventory = local_inventory(policy="external", device_root=tmp_path, command_runner=lambda *_args, **_kwargs: partial)
@@ -260,6 +275,59 @@ def test_lightweight_inventory_discovers_affinity_and_memory(monkeypatch):
     assert inventory.cpus == (2, 5)
     assert inventory.memory == 2048 * 1024
     assert inventory.metadata["memory_source"] == "proc_meminfo"
+
+
+def test_windows_memory_discovery_uses_native_available_memory(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.sys, "platform", "win32")
+    monkeypatch.setattr(inventory_module, "_windows_available_memory", lambda: 2048 * 1024)
+
+    memory, source = inventory_module._local_memory([])
+
+    assert memory == 2048 * 1024
+    assert source == "windows_available_memory"
+
+
+def test_darwin_memory_discovery_uses_available_pages_before_total_memory(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.sys, "platform", "darwin")
+    monkeypatch.setattr(inventory_module, "_sysconf_memory", lambda name: 4096 if name == "SC_AVPHYS_PAGES" else None)
+    monkeypatch.setattr(inventory_module, "_darwin_physical_memory", lambda: (_ for _ in ()).throw(AssertionError("physical fallback must not run")))
+
+    memory, source = inventory_module._local_memory([])
+
+    assert memory == 4096
+    assert source == "darwin_available_pages"
+
+
+def test_darwin_memory_discovery_falls_back_to_native_physical_memory(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.sys, "platform", "darwin")
+    monkeypatch.setattr(inventory_module, "_sysconf_memory", lambda _name: None)
+    monkeypatch.setattr(inventory_module, "_darwin_physical_memory", lambda: 8 * 1024 * 1024)
+
+    memory, source = inventory_module._local_memory([])
+
+    assert memory == 8 * 1024 * 1024
+    assert source == "darwin_physical_memory"
+
+
+def test_linux_cgroup_memory_limit_reduces_available_capacity(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    values = {
+        "/sys/fs/cgroup/memory.max": "8192",
+        "/sys/fs/cgroup/memory.current": "2048",
+    }
+    monkeypatch.setattr(inventory_module.Path, "exists", lambda path: path.as_posix() in values)
+    monkeypatch.setattr(inventory_module.Path, "read_text", lambda path, **_kwargs: values[path.as_posix()])
+
+    memory, source, readable = inventory_module._cgroup_memory_available([])
+
+    assert (memory, source, readable) == (6144, "cgroup_v2", True)
 
 
 def test_lightweight_inventory_uses_cpu_count_when_affinity_is_unavailable(monkeypatch):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import heapq
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -134,11 +135,18 @@ def local_inventory(
 ) -> LocalResourceInventory:
     """Discover local capacity without importing or initializing ML frameworks.
 
-    ``lightweight`` reads standard OS facts and an explicit accelerator override.
-    ``external`` additionally accepts an injected command runner for optional
-    device discovery. ``timeout`` is forwarded to that runner; a custom
-    in-process runner must enforce its own hard deadline. The injectable
-    arguments make host-independent tests possible and are never mutated.
+    Args:
+        policy: ``"lightweight"`` for OS facts only, or ``"external"`` to use
+            the optional injected accelerator command runner.
+        environ: Optional environment mapping used for explicit inventory and
+            visibility inputs without mutating the process environment.
+        device_root: Optional device directory for conservative GPU discovery.
+        command_runner: Optional external-policy command runner.
+        timeout: Positive seconds forwarded to ``command_runner``. In-process
+            runners are cooperative and must enforce their own hard deadline.
+
+    Returns:
+        Immutable, deterministic local CPU, memory, and accelerator facts.
     """
 
     if policy not in {"lightweight", "external"}:
@@ -179,6 +187,18 @@ def local_inventory(
 
 
 def _local_memory(diagnostics: list[str]) -> tuple[int | None, str]:
+    if sys.platform.startswith("win"):
+        return _platform_memory(_windows_available_memory, "windows_available_memory", diagnostics)
+    if sys.platform == "darwin":
+        available = _sysconf_memory("SC_AVPHYS_PAGES")
+        if available is not None:
+            return available, "darwin_available_pages"
+        return _platform_memory(_darwin_physical_memory, "darwin_physical_memory", diagnostics)
+    if not sys.platform.startswith("linux"):
+        available = _sysconf_memory("SC_AVPHYS_PAGES")
+        if available is not None:
+            return available, "posix_available_pages"
+        return _platform_memory(lambda: _sysconf_memory("SC_PHYS_PAGES"), "posix_physical_memory", diagnostics)
     available = None
     try:
         for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
@@ -197,6 +217,71 @@ def _local_memory(diagnostics: list[str]) -> tuple[int | None, str]:
     if cgroup_available is None:
         return available, "proc_meminfo"
     return min(available, cgroup_available), f"proc_meminfo+{cgroup_source}"
+
+
+def _platform_memory(reader: Callable[[], int | None], source: str, diagnostics: list[str]) -> tuple[int | None, str]:
+    """Read one platform-native memory fact without making discovery fatal."""
+
+    try:
+        memory = reader()
+    except Exception as exc:
+        diagnostics.append(f"memory discovery unavailable: {type(exc).__name__}")
+        return None, "unknown"
+    if memory is None or memory <= 0:
+        diagnostics.append("memory discovery returned no usable capacity")
+        return None, "unknown"
+    return memory, source
+
+
+def _sysconf_memory(page_count_name: str) -> int | None:
+    """Return a POSIX page-count fact in bytes when the host exposes it."""
+
+    try:
+        pages = os.sysconf(page_count_name)
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if not isinstance(pages, int) or not isinstance(page_size, int) or pages <= 0 or page_size <= 0:
+        return None
+    return pages * page_size
+
+
+def _windows_available_memory() -> int:
+    """Return Windows immediately available physical memory via Kernel32."""
+
+    import ctypes
+
+    class MemoryStatusEx(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    status = MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(status)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        raise ctypes.WinError()
+    return int(status.ullAvailPhys)
+
+
+def _darwin_physical_memory() -> int:
+    """Return macOS physical memory through libSystem's ``sysctlbyname`` API."""
+
+    import ctypes
+
+    value = ctypes.c_uint64()
+    size = ctypes.c_size_t(ctypes.sizeof(value))
+    libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    if libsystem.sysctlbyname(b"hw.memsize", ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+        raise OSError("sysctlbyname(hw.memsize) failed")
+    return int(value.value)
 
 
 def _cgroup_memory_available(diagnostics: list[str]) -> tuple[int | None, str, bool]:

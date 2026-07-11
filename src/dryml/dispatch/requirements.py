@@ -359,10 +359,12 @@ def resolve_dispatch_plan(
             "Environment candidate input was truncated before compatibility could be determined; pass, register, or set a compatible environment."
             if incomplete
             else "No resolver candidate satisfied the environment requirement; pass, register, or set a compatible environment.",
-            severity="error" if policy is RequirementPolicy.STRICT else "warning",
+            severity="error" if incomplete or policy is RequirementPolicy.STRICT else "warning",
             data=environment_resolution.to_data(),
         ))
-        structural_safe = structural_safe and policy is not RequirementPolicy.STRICT
+        # An incomplete resolver input may contain a compatible higher-precedence
+        # candidate. Never probe or launch the fallback in that case.
+        structural_safe = structural_safe and not incomplete and policy is not RequirementPolicy.STRICT
     if world_synthesis is not None and not world_synthesis.ok:
         synthesis_structural = world_synthesis.status not in {"insufficient_inventory", "unsupported_requirement"}
         diagnostics.append(_diagnostic(
@@ -407,7 +409,8 @@ def resolve_dispatch_plan(
             ))
 
     final_probe = None
-    if _needs_final_probe(normalized, env_spec, bootstrap_environment):
+    resolver_incomplete = environment_resolution is not None and environment_resolution.status == "incomplete"
+    if not resolver_incomplete and _needs_final_probe(normalized, env_spec, bootstrap_environment):
         final_probe = probe_target(
             normalized.code_target,
             environment=spec_from_data(env_spec),
@@ -525,6 +528,7 @@ def resolve_dispatch_plan(
         validate_candidate=_requires_environment_validation(env_spec, normalized),
         resolved_record=_resolution_record_for(environment_resolution, env_spec),
         resolved_probe=_resolution_probe_for(environment_resolution, env_spec),
+        resolver_incomplete=resolver_incomplete,
     )
     diagnostics.extend(env_probe_diagnostics)
     if env_probe_diagnostics:
@@ -1056,7 +1060,9 @@ def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:
     return False
 
 
-def _environment_record(env_data, requirement, code_probe, probe_environment, explicit_environment, policy, *, validate_candidate: bool, resolved_record=None, resolved_probe=None):
+def _environment_record(env_data, requirement, code_probe, probe_environment, explicit_environment, policy, *, validate_candidate: bool, resolved_record=None, resolved_probe=None, resolver_incomplete: bool = False):
+    if resolver_incomplete:
+        return None, ()
     if requirement is None and not validate_candidate:
         return None, ()
     spec = spec_from_data(env_data)

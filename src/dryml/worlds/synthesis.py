@@ -103,10 +103,17 @@ def synthesize(
 ) -> WorldSynthesisResult:
     """Build the smallest disjoint local ``WorldSpec`` satisfying *requirement*.
 
-    The result remains a requested world.  No allocation or runtime activation
-    occurs; callers pass it to a backend allocator separately. ``inventory``
-    avoids host discovery; otherwise ``inventory_policy`` selects the bounded
-    local discovery policy used to obtain inventory.
+    Args:
+        requirement: A world requirement, its canonical data, or ``None`` for
+            the direct one-worker local default.
+        inventory: Optional immutable capacity facts; supplied inventory avoids
+            host discovery.
+        policy: Supported synthesis policy, currently ``"local"`` only.
+        inventory_policy: Discovery policy used only when inventory is omitted.
+
+    Returns:
+        A report containing a requested world or structured diagnostics. This
+        function never allocates resources or activates a runtime.
     """
 
     if policy != "local":

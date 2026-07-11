@@ -94,29 +94,35 @@ def test_unsupported_requirement_free_resolver_candidate_falls_back_to_current()
     assert explanation.launchable is True
 
 
-def test_dispatch_reports_truncated_environment_resolution_without_claiming_no_match(monkeypatch):
+@pytest.mark.parametrize("policy", ("strict", "warn", "ignore"))
+def test_dispatch_blocks_incomplete_environment_resolution_without_fallback_probe(monkeypatch, policy):
     import dryml.dispatch.requirements as requirements
 
     rejected = PythonExecutableSpec("/rejected/python")
+    calls = []
+
+    def probe(spec, **_kwargs):
+        calls.append(spec)
+        if spec == rejected:
+            return requirements.environments.EnvironmentProbeResult(spec, False)
+        raise AssertionError("incomplete resolver input must not probe the fallback")
+
     monkeypatch.setattr(
         requirements.environments,
         "probe",
-        lambda spec, **_kwargs: requirements.environments.EnvironmentProbeResult(
-            spec,
-            True,
-            record=inspect_current(),
-        ),
+        probe,
     )
 
-    selection, _data, resolution = requirements._select_environment(
-        None,
-        None,
-        requirement=EnvironmentRequirement(tags=("wanted",)),
-        candidates=(rejected, *((rejected.to_data(),) * 300)),
+    dispatch_resolution = resolve_dispatch_plan(
+        normalize_user_operation(resolver_target, allow_pickle=True),
+        environment_candidates=(rejected, *((rejected.to_data(),) * 300)),
+        requirement_policy=policy,
     )
 
-    assert resolution is not None and resolution.status == "incomplete"
-    assert selection.considered[-2].status == "incomplete"
+    assert dispatch_resolution.environment_resolution is not None
+    assert dispatch_resolution.environment_resolution.status == "incomplete"
+    assert not dispatch_resolution.launchable
+    assert calls == [rejected]
 
 
 def test_attached_record_does_not_bypass_unsupported_environment_launch():

@@ -41,12 +41,20 @@ class DispatchPlan:
 class Dispatcher:
     """Plan and run one operation through a dispatch backend.
 
-    ``environment_candidates`` and ``environment_registry`` configure the
-    bounded no-override resolver stage. Retained candidates must be re-iterable
-    so repeated notebook calls cannot consume a one-shot iterator. ``inventory``
-    injects deterministic local capacity, while ``inventory_policy`` selects
-    lightweight or opt-in external discovery when inventory is omitted. Per-call
-    values override these defaults without mutating them.
+    Args:
+        backend: Optional dispatch backend; local subprocess is the default.
+        store: Optional default store used by plan and execution methods.
+        environment_candidates: Re-iterable resolver candidates retained across
+            calls. Per-call candidates override this value.
+        environment_registry: Optional explicit resolver registry.
+        inventory: Optional injected local capacity facts.
+        inventory_policy: ``"lightweight"`` or opt-in ``"external"`` discovery.
+        resolver_policy: Optional resolver policy, currently
+            ``"first_compatible"`` only.
+
+    Retained candidates must be re-iterable so repeated notebook calls cannot
+    consume a one-shot iterator. Per-call values override defaults without
+    mutating them.
     """
 
     def __init__(self, *, backend: Any | None = None, store: Any | None = None, environment_candidates: Any | None = None, environment_registry: Any | None = None, inventory: Any | None = None, inventory_policy: str = "lightweight", resolver_policy: str | None = None):
@@ -550,7 +558,18 @@ class Dispatcher:
 
 
 def plan(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchPlan:
-    """Build a dispatch plan for a Python-shaped or explicit OperationSpec target."""
+    """Build a local-subprocess plan.
+
+    Args:
+        operation: Python-shaped callable or explicit operation specification.
+        method_name: Optional DRYML object method name.
+        backend: Optional backend object or ``"local_subprocess"``.
+        store: Store used for operation marshalling.
+        **kwargs: Arguments accepted by :meth:`Dispatcher.plan`.
+
+    Returns:
+        A validated dispatch plan.
+    """
 
     if backend in (None, "local_subprocess"):
         backend_obj = None
@@ -570,7 +589,12 @@ def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, met
 
 
 def explain(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchExplanation:
-    """Explain a Python-shaped or explicit operation without launching it."""
+    """Explain a Python-shaped or explicit operation without launching it.
+
+    ``operation``, ``method_name``, ``store``, and ``**kwargs`` follow
+    :meth:`Dispatcher.explain`; ``backend`` must be local subprocess. Returns a
+    non-persisting explanation, though bounded discovery and probes may run.
+    """
 
     if backend not in (None, "local_subprocess"):
         raise DispatchPlanningError("dispatch.explain currently supports the local_subprocess planner")
