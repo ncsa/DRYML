@@ -120,6 +120,21 @@ def test_bounded_command_uses_one_deadline_for_stdin_and_execution():
     assert time.monotonic() - started < 0.35
 
 
+def test_bounded_command_waits_after_output_eof_until_deadline():
+    import importlib
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+    command = [sys.executable, "-c", "import os, time; os.close(1); os.close(2); time.sleep(0.05)"]
+
+    _returncode, _stdout, _stdout_truncated, _stderr, _stderr_truncated, timed_out = probe_module._run_bounded_command(
+        command,
+        timeout=0.2,
+        env=None,
+    )
+
+    assert not timed_out
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process-group timeout behavior is POSIX-specific")
 def test_probe_timeout_kills_descendants_holding_capture_pipes(tmp_path):
     script = tmp_path / "forking-python"

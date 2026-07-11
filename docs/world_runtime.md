@@ -74,6 +74,11 @@ so optional host discovery cannot broaden a scheduler or container allocation.
 Device-file evidence is accepted only for readable/writable character devices;
 regular files or stale names such as `nvidia0` never create usable GPU capacity.
 
+`LocalWorldFuture.cancel()` requests cancellation while preserving worker
+responses for a later `result()` call. Use `LocalWorldFuture.close()` when no
+aggregate result is needed and the local-world work directory should be removed
+immediately.
+
 Synthesis visits role names in sorted order and chooses the smallest positive
 replica and executable CPU counts permitted by each constraint, plus the minimum
 requested memory and accelerator counts. It proves aggregate disjoint CPU,

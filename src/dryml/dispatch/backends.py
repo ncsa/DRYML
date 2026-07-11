@@ -106,6 +106,9 @@ class LocalSubprocessFuture:
         """Cancel the process using SIGINT, SIGTERM, then SIGKILL where needed."""
 
         if self.done():
+            # The leader may have exited while descendants still retain its
+            # dedicated process group. Kill the group before reporting done.
+            self.kill()
             return False
         self._cancelled = True
         _report("dryml.dispatch.worker.cancel", "Cancelling local subprocess worker", operation_id=self.plan.envelope.operation_id, data={"pid": self.process.pid, "reason": reason})
@@ -128,8 +131,6 @@ class LocalSubprocessFuture:
     def terminate(self, *, grace: float | None = None) -> None:
         """Terminate the worker process group."""
 
-        if self.done():
-            return
         self._signal(signal.SIGTERM)
         if not self._wait(self.cancel_grace if grace is None else grace):
             self.kill()
@@ -137,8 +138,6 @@ class LocalSubprocessFuture:
     def kill(self) -> None:
         """Kill the worker process group."""
 
-        if self.done():
-            return
         if os.name == "posix":
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
@@ -180,16 +179,21 @@ class LocalSubprocessFuture:
             self._response = self._parent_failure_response("failed", error={"type": type(exc).__name__, "message": str(exc), "exit_code": self.process.returncode})
 
     def _parent_failure_response(self, status: str, *, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None) -> WorkerResponse:
-        record_id = _write_execution_record(
-            self.plan.store,
-            self.plan.envelope,
-            status=status,
-            error=error,
-            cancellation=cancellation,
-            diagnostics=({"message": "parent-side dispatch failure", "returncode": self.process.returncode},),
-            stdout_path=self.stdout_path,
-            stderr_path=self.stderr_path,
-        )
+        diagnostics = [{"message": "parent-side dispatch failure", "returncode": self.process.returncode}]
+        try:
+            record_id = _write_execution_record(
+                self.plan.store,
+                self.plan.envelope,
+                status=status,
+                error=error,
+                cancellation=cancellation,
+                diagnostics=tuple(diagnostics),
+                stdout_path=self.stdout_path,
+                stderr_path=self.stderr_path,
+            )
+        except Exception as exc:
+            record_id = None
+            diagnostics.append({"message": "parent-side failure provenance could not be written", "error_type": type(exc).__name__})
         response = WorkerResponse(
             status=status,
             operation_id=self.plan.envelope.operation_id,
@@ -198,7 +202,7 @@ class LocalSubprocessFuture:
             execution_record_id=record_id,
             error=error,
             cancellation=cancellation,
-            diagnostics=({"message": "parent-side dispatch failure"},),
+            diagnostics=tuple(diagnostics),
         )
         try:
             write_json_file(self.response_path, response.to_json())

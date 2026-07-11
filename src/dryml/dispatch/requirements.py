@@ -320,6 +320,8 @@ def resolve_dispatch_plan(
     enforcement = runtime.enforcement()
     policy = effective_requirement_policy(requirement_policy, enforcement)
     _validate_sprint8_policies(inventory_policy, resolver_policy)
+    if inventory is not None and not isinstance(inventory, worlds.LocalResourceInventory):
+        raise DispatchPlanningError("inventory must be a LocalResourceInventory")
     analysis_context, probe_timeout_s = _analysis_options(analysis_policy)
     fragments, analysis, bootstrap_probe, bootstrap_environment, discovery_diagnostics, complete = _discover(
         normalized,
@@ -426,7 +428,7 @@ def resolve_dispatch_plan(
                     world,
                     resolution.world_default,
                     requirement=resolution.world_requirement,
-                    inventory=inventory,
+                    inventory=inventory or (world_synthesis.resource_inventory if world_synthesis is not None else None),
                     inventory_policy=inventory_policy,
                 )
                 runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)

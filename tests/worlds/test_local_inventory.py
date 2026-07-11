@@ -110,6 +110,24 @@ def test_external_inventory_never_broadens_inherited_gpu_visibility(visibility, 
 
 
 @pytest.mark.parametrize(
+    "environ,expected",
+    (
+        ({"CUDA_VISIBLE_DEVICES": "all", "NVIDIA_VISIBLE_DEVICES": "none"}, {}),
+        ({"CUDA_VISIBLE_DEVICES": "0,1", "NVIDIA_VISIBLE_DEVICES": "1,2"}, {"gpu": (1,)}),
+    ),
+)
+def test_external_inventory_intersects_cuda_and_nvidia_visibility(environ, expected, tmp_path):
+    inventory = local_inventory(
+        policy="external",
+        environ=environ,
+        device_root=tmp_path,
+        command_runner=lambda *_args, **_kwargs: "0\n1\n2\n",
+    )
+
+    assert inventory.accelerators == expected
+
+
+@pytest.mark.parametrize(
     "output",
     (
         type("Result", (), {"returncode": 1, "stdout": ""})(),

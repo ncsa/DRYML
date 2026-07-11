@@ -289,12 +289,11 @@ class LocalWorldFuture:
                     break
                 if fatal_seen:
                     for future in self.workers.values():
-                        if not future.done():
-                            try:
-                                future.kill()
-                                future._wait(self.cancel_grace)
-                            except Exception:
-                                pass
+                        try:
+                            future.kill()
+                            future._wait(self.cancel_grace)
+                        except Exception:
+                            pass
                     break
                 if deadline is not None and time.monotonic() >= deadline:
                     self._timeout_live()
@@ -325,6 +324,16 @@ class LocalWorldFuture:
         cancelled = False
         for future in self.workers.values():
             cancelled = _cancel_worker_safely(future, grace=self.cancel_grace, reason=reason) or cancelled
+        # Cancellation is terminal for normalized pickle/source payloads even
+        # when the caller later asks for the aggregate worker responses.
+        _cleanup_worker_paths(self.plan)
+        return cancelled
+
+    def close(self, reason: str = "user") -> bool:
+        """Cancel the group and remove its work directory without awaiting results."""
+
+        cancelled = self.cancel(reason=reason)
+        self._cleanup()
         return cancelled
 
     def done(self) -> bool:
@@ -340,8 +349,7 @@ class LocalWorldFuture:
         except Exception:
             pass
         for future in self.workers.values():
-            if not future.done() and future._response is None:
-                _cancel_worker_safely(future, grace=self.cancel_grace, reason=reason)
+            _cancel_worker_safely(future, grace=self.cancel_grace, reason=reason)
 
     def _timeout_live(self, *, message: str = "local world dispatch timed out") -> None:
         self._cancelled = True
@@ -352,8 +360,7 @@ class LocalWorldFuture:
             pass
         for future in self.workers.values():
             was_live = not future.done()
-            if was_live:
-                _cancel_worker_safely(future, grace=self.cancel_grace, reason="timeout", record=False)
+            _cancel_worker_safely(future, grace=self.cancel_grace, reason="timeout", record=False)
             if future._response is None:
                 future._read_response()
             if was_live or future._response is None or future._response.status == "cancelled":

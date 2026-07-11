@@ -206,6 +206,24 @@ def test_resolver_bounds_duplicate_only_candidate_input():
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
 
 
+def test_resolver_reports_bounded_registry_prefix_before_no_match():
+    registry = EnvironmentRegistry()
+    for index in range(40):
+        registry.register(f"alias-{index:02}", CurrentEnvironmentSpec())
+    registry.register("selected", PythonExecutableSpec("/selected/python"))
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        registry=registry,
+        include_current=False,
+        max_candidates=8,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, False),
+    )
+
+    assert result.status == "no_match"
+    assert any(issue.code == "resolver_registry_truncated" for issue in result.diagnostics)
+
+
 def test_resolver_rejects_invalid_candidate_before_running_any_probe():
     calls = []
 

@@ -151,6 +151,10 @@ def resolve(
     seen: set[str] = set()
     considered = 0
     truncated = False
+    registry_entries, registry_truncated = _registry_entries(
+        registry,
+        limit=max_candidates + _MAX_RECORDED_ATTEMPTS,
+    )
 
     def record(attempt: EnvironmentResolutionAttempt) -> None:
         nonlocal truncated
@@ -167,13 +171,14 @@ def resolve(
             diagnostics.append(CompatibilityIssue("resolver_candidates_truncated", "warning", "resolver candidate input was truncated", expected=max_candidates + _MAX_RECORDED_ATTEMPTS))
         if candidates_timed_out:
             diagnostics.append(CompatibilityIssue("resolver_candidate_input_timeout", "warning", "resolver candidate input exceeded the total timeout"))
+        if registry_truncated:
+            diagnostics.append(CompatibilityIssue("resolver_registry_truncated", "warning", "registry candidate input was truncated before a compatible candidate was found"))
         return tuple(diagnostics)
 
     for source, name, spec, entry in _candidates(
         raw_candidates,
-        registry,
+        registry_entries,
         include_current,
-        max_registry_entries=max_candidates + _MAX_RECORDED_ATTEMPTS,
     ):
         if total_timeout is not None and now() - started >= total_timeout:
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
@@ -248,19 +253,25 @@ def resolve(
 
 def _candidates(
     candidates: Iterable[tuple[str, str | None, EnvironmentSpec, Any]],
-    registry: Any,
+    registry_entries: Iterable[Any],
     include_current: bool,
-    *,
-    max_registry_entries: int,
 ) -> Iterator[tuple[str, str | None, EnvironmentSpec, Any]]:
     for candidate in candidates:
         yield candidate
-    if registry is not None:
-        entries = registry.iter_entries(limit=max_registry_entries) if hasattr(registry, "iter_entries") else islice(registry.list(), max_registry_entries)
-        for entry in entries:
-            yield "registry", entry.name, entry.spec, entry
+    for entry in registry_entries:
+        yield "registry", entry.name, entry.spec, entry
     if include_current:
         yield "current", None, CurrentEnvironmentSpec(), None
+
+
+def _registry_entries(registry: Any, *, limit: int) -> tuple[tuple[Any, ...], bool]:
+    """Materialize a bounded registry prefix and report omitted entries."""
+
+    if registry is None:
+        return (), False
+    entries = registry.iter_entries(limit=limit + 1) if hasattr(registry, "iter_entries") else islice(registry.list(), limit + 1)
+    values = tuple(entries)
+    return values[:limit], len(values) > limit
 
 
 def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, EnvironmentSpec, Any]:

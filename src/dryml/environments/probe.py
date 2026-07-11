@@ -9,6 +9,7 @@ import selectors
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
@@ -252,23 +253,26 @@ def _run_bounded_command(
         env=env,
         start_new_session=(os.name == "posix"),
     )
-    assert process.stdout is not None and process.stderr is not None
-    streams = {"stdout": (process.stdout, _MAX_PROTOCOL_OUTPUT_BYTES), "stderr": (process.stderr, _MAX_CAPTURED_OUTPUT_BYTES)}
-    captured = {name: bytearray() for name in streams}
-    truncated = {name: False for name in streams}
-    selector = selectors.DefaultSelector()
-    for name, (stream, _limit) in streams.items():
-        os.set_blocking(stream.fileno(), False)
-        selector.register(stream, selectors.EVENT_READ, name)
-    input_offset = 0
-    if input_data is not None:
-        assert process.stdin is not None
-        os.set_blocking(process.stdin.fileno(), False)
-        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
-    timed_out = False
-    deadline = None if timeout is None else time.monotonic() + timeout
-    post_exit_deadline = None
+    selector = None
     try:
+        if os.name == "nt":  # Windows selectors cannot monitor anonymous pipes.
+            return _run_bounded_command_threaded(process, input_data=input_data, timeout=timeout)
+        assert process.stdout is not None and process.stderr is not None
+        streams = {"stdout": (process.stdout, _MAX_PROTOCOL_OUTPUT_BYTES), "stderr": (process.stderr, _MAX_CAPTURED_OUTPUT_BYTES)}
+        captured = {name: bytearray() for name in streams}
+        truncated = {name: False for name in streams}
+        selector = selectors.DefaultSelector()
+        for name, (stream, _limit) in streams.items():
+            os.set_blocking(stream.fileno(), False)
+            selector.register(stream, selectors.EVENT_READ, name)
+        input_offset = 0
+        if input_data is not None:
+            assert process.stdin is not None
+            os.set_blocking(process.stdin.fileno(), False)
+            selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+        timed_out = False
+        deadline = None if timeout is None else time.monotonic() + timeout
+        post_exit_deadline = None
         while selector.get_map():
             now = time.monotonic()
             if process.poll() is not None and post_exit_deadline is None:
@@ -278,7 +282,7 @@ def _run_bounded_command(
             if remaining is not None and remaining <= 0:
                 timed_out = True
                 break
-            events = selector.select(None if remaining is None else min(remaining, 0.05))
+            events = selector.select(0.05 if remaining is None else min(remaining, 0.05))
             for key, _mask in events:
                 stream = key.fileobj
                 if key.data == "stdin":
@@ -306,14 +310,15 @@ def _run_bounded_command(
                 if remaining_capacity > 0:
                     value.extend(chunk[:remaining_capacity])
                 truncated[key.data] = truncated[key.data] or len(chunk) > remaining_capacity
-        if process.poll() is None:
-            timed_out = True
+        if process.poll() is None and not timed_out:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                timed_out = True
         if timed_out:
             _kill_probe_process_group(process)
             process.wait()
-        elif process.poll() is None:
-            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-            process.wait(timeout=remaining)
     except BaseException:
         _kill_probe_process_group(process)
         try:
@@ -322,16 +327,25 @@ def _run_bounded_command(
             pass
         raise
     finally:
-        for key in list(selector.get_map().values()):
+        if selector is not None:
+            for key in list(selector.get_map().values()):
+                try:
+                    selector.unregister(key.fileobj)
+                except Exception:
+                    pass
+                try:
+                    key.fileobj.close()
+                except (OSError, ValueError):
+                    pass
             try:
-                selector.unregister(key.fileobj)
-            except Exception:
-                pass
-            try:
-                key.fileobj.close()
+                selector.close()
             except (OSError, ValueError):
                 pass
-        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close() if stream is not None else None
+            except (OSError, ValueError):
+                pass
     return (
         process.returncode,
         bytes(captured["stdout"][:_MAX_PROTOCOL_OUTPUT_BYTES]),
@@ -352,6 +366,77 @@ def _kill_probe_process_group(process: subprocess.Popen[bytes]) -> None:
             pass
     elif process.poll() is None:  # pragma: no cover - Windows lacks POSIX groups.
         process.kill()
+
+
+def _run_bounded_command_threaded(
+    process: subprocess.Popen[bytes], *, input_data: bytes | None, timeout: float | None
+) -> tuple[int, bytes, bool, bytes, bool, bool]:
+    """Windows-compatible bounded pipe capture fallback.
+
+    Windows ``selectors`` cannot watch anonymous subprocess pipes. Reader and
+    writer threads are joined after the process is reaped, so they cannot escape
+    the parent deadline.
+    """
+
+    assert process.stdout is not None and process.stderr is not None
+    captured: dict[str, tuple[bytes, bool]] = {"stdout": (b"", False), "stderr": (b"", False)}
+
+    def drain(name: str, stream, limit: int) -> None:
+        value = bytearray()
+        truncated = False
+        try:
+            while chunk := stream.read(64 * 1024):
+                remaining = limit + 1 - len(value)
+                if remaining > 0:
+                    value.extend(chunk[:remaining])
+                truncated = truncated or len(chunk) > remaining
+        except (OSError, ValueError):
+            pass
+        captured[name] = (bytes(value[:limit]), truncated or len(value) > limit)
+
+    readers = (
+        threading.Thread(target=drain, args=("stdout", process.stdout, _MAX_PROTOCOL_OUTPUT_BYTES), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr, _MAX_CAPTURED_OUTPUT_BYTES), daemon=True),
+    )
+    for reader in readers:
+        reader.start()
+    writer = None
+    if input_data is not None:
+        assert process.stdin is not None
+
+        def write() -> None:
+            try:
+                process.stdin.write(input_data)
+                process.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            finally:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_probe_process_group(process)
+        process.wait()
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close() if stream is not None else None
+            except (OSError, ValueError):
+                pass
+        for thread in (*readers, *((writer,) if writer is not None else ())):
+            thread.join(_POST_EXIT_DRAIN_TIMEOUT_S)
+        timed_out = timed_out or any(thread.is_alive() for thread in (*readers, *((writer,) if writer is not None else ())))
+    stdout, stdout_truncated = captured["stdout"]
+    stderr, stderr_truncated = captured["stderr"]
+    return process.returncode, stdout, stdout_truncated, stderr, stderr_truncated, timed_out
 
 
 def _diagnostic_output(value: bytes) -> tuple[str, bool]:

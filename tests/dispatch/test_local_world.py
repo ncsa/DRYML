@@ -1,10 +1,11 @@
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from dryml.core2.store.dir import DirStore
-from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
+from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalSubprocessFuture, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHandshakeResponse, write_json_file
 from dryml.dispatch.worker import _wait_for_start_barrier
@@ -363,6 +364,47 @@ def test_world_cancel_continues_after_a_worker_cancellation_error(tmp_path, targ
 
     assert future.cancel(reason="test") is True
     assert completed_calls == [{"grace": future.cancel_grace, "reason": "test", "record": True}]
+
+
+def test_world_close_removes_group_directory_without_result(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:sleep_forever"))
+    future = Dispatcher(store=store).submit_world(
+        Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    )
+    future.wait_for_handshakes(timeout=5)
+
+    future.close(reason="test")
+
+    assert not Path(future.group_work_dir).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process-group signaling is POSIX-specific")
+def test_completed_worker_leader_still_kills_its_process_group(tmp_path, target_module, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    worker_plan = plan.worker_plans[0]
+    process = _FakeProcess()
+    future = LocalSubprocessFuture(
+        process,
+        worker_plan,
+        str(tmp_path / "worker"),
+        str(tmp_path / "request.json"),
+        str(tmp_path / "handshake.json"),
+        str(tmp_path / "response.json"),
+        str(tmp_path / "stdout.txt"),
+        str(tmp_path / "stderr.txt"),
+        True,
+    )
+    signals = []
+    monkeypatch.setattr("dryml.dispatch.backends.os.killpg", lambda pid, signal: signals.append((pid, signal)))
+
+    future.kill()
+
+    assert signals
 
 
 def test_world_result_cleans_artifacts_after_aggregate_failure(tmp_path, monkeypatch):

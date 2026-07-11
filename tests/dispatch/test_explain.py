@@ -229,6 +229,13 @@ def test_explain_rejects_invalid_inventory_policy_before_normalization(monkeypat
         Dispatcher().explain(lambda: None, allow_pickle=True, inventory_policy="invalid")
 
 
+def test_explain_rejects_invalid_injected_inventory_before_planning():
+    from dryml.operations import make_function_call_spec
+
+    with __import__("pytest").raises(DispatchPlanningError, match="LocalResourceInventory"):
+        Dispatcher().explain(make_function_call_spec("operator:add", args=[1, 2]), inventory=object())
+
+
 def test_explain_rejects_nonfinite_probe_timeout_before_discovery():
     with __import__("pytest").raises(DispatchPlanningError, match="probe_timeout_s must be a positive number"):
         Dispatcher().explain(

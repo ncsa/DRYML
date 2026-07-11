@@ -281,18 +281,24 @@ def _accelerators_from_device_root(environ: Mapping[str, str], device_root: str 
 
 
 def _visible_gpu_ids(environ: Mapping[str, str], diagnostics: list[str]) -> tuple[set[int] | None, bool]:
-    """Return the inherited numeric GPU allowlist and whether it is usable."""
+    """Return the intersection of inherited numeric GPU visibility limits."""
 
-    raw = environ.get("CUDA_VISIBLE_DEVICES", environ.get("NVIDIA_VISIBLE_DEVICES"))
-    if raw is None or raw.strip().lower() == "all":
+    limits: list[set[int]] = []
+    for name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+        raw = environ.get(name)
+        if raw is None or raw.strip().lower() == "all":
+            continue
+        values = tuple(item.strip() for item in raw.split(",") if item.strip())
+        if not values or all(value.lower() in {"none", "void"} for value in values):
+            limits.append(set())
+            continue
+        if any(not value.isdigit() for value in values):
+            diagnostics.append(f"{name} visibility was ambiguous")
+            return set(), False
+        limits.append({int(value) for value in values})
+    if not limits:
         return None, True
-    values = tuple(item.strip() for item in raw.split(",") if item.strip())
-    if not values or all(value.lower() in {"none", "void"} for value in values):
-        return set(), True
-    if any(not value.isdigit() for value in values):
-        diagnostics.append("accelerator visibility was ambiguous")
-        return set(), False
-    return {int(value) for value in values}, True
+    return set.intersection(*limits), True
 
 
 def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]], runner: Callable[..., Any], timeout: float, environ: Mapping[str, str], diagnostics: list[str]) -> None:

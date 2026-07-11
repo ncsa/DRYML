@@ -200,11 +200,13 @@ metadata. Candidate discovery never replaces an incompatible explicit,
 annotation-default, or context-current environment/world.
 
 `inventory=` injects one `LocalResourceInventory` for synthesis and allocation.
-With no injection, `inventory_policy="lightweight"` is framework-free;
-`"external"` enables only an injected command runner and forwards its timeout.
-Custom in-process runners are cooperative and must enforce any hard deadline
-themselves. Actual allocation feasibility, backend support, target importability,
-and topology the backend cannot enforce remain blocking even under
+With no injection, `inventory_policy="lightweight"` is framework-free. To use
+`"external"`, call `worlds.local_inventory(policy="external",
+command_runner=...)` yourself and pass that inventory to dispatch; dispatcher
+methods do not accept a command runner. The runner timeout is cooperative for
+custom in-process callbacks, which must enforce any hard deadline themselves.
+Actual allocation feasibility, backend support, target importability, and topology
+the backend cannot enforce remain blocking even under
 `requirement_policy="warn"` or `"ignore"`.
 
 For notebooks, ordinary context APIs are sufficient:
