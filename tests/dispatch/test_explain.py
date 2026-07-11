@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import dryml
 
@@ -75,6 +76,89 @@ def test_failed_bootstrap_target_probe_remains_blocking_under_relaxed_policies()
         assert not explanation.resolution.bootstrap_code_probe.ok
 
 
+def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
+    import sys
+
+    import dryml.dispatch.requirements as requirements
+    from dryml.code.analysis import CodeAnalysisResult
+    from dryml.code.facts import DiagnosticFact
+    from dryml.code.probe import CodeProbeResult
+    from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+    from dryml.environments import PythonExecutableSpec, inspect_current
+    from dryml.operations import make_function_call_spec
+
+    normalized = normalize_user_operation(make_function_call_spec("operator:add", args=[1, 2]))
+    incomplete = CodeAnalysisResult(
+        normalized.code_target,
+        diagnostics=(DiagnosticFact(severity="error", code="dryml.code.algorithm_not_applicable", message="force bootstrap probe"),),
+    )
+    probes = []
+
+    def fake_probe(target, **_kwargs):
+        probes.append(target)
+        if len(probes) == 1:
+            return CodeProbeResult(False, None, None, (DiagnosticFact(severity="error", code="code_probe.import_failed", message="bootstrap failed"),))
+        return CodeProbeResult(True, CodeAnalysisResult(target), inspect_current())
+
+    monkeypatch.setattr(requirements, "analyze", lambda *_args, **_kwargs: incomplete)
+    monkeypatch.setattr(requirements, "probe_target", fake_probe)
+
+    resolution = resolve_dispatch_plan(
+        normalized,
+        environment_candidates=(PythonExecutableSpec(sys.executable),),
+        requirement_policy="strict",
+    )
+
+    assert resolution.launchable
+    assert resolution.final_code_probe is not None and resolution.final_code_probe.ok
+
+
+def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(monkeypatch):
+    import sys
+
+    import dryml.dispatch.requirements as requirements
+    from dryml.code.analysis import CodeAnalysisResult
+    from dryml.code.facts import AnnotationFact, DiagnosticFact
+    from dryml.code.probe import CodeProbeResult
+    from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+    from dryml.environments import PythonExecutableSpec, inspect_current
+    from dryml.operations import make_function_call_spec
+
+    normalized = normalize_user_operation(make_function_call_spec("operator:add", args=[1, 2]))
+    incomplete = CodeAnalysisResult(
+        normalized.code_target,
+        diagnostics=(DiagnosticFact(severity="error", code="dryml.code.algorithm_not_applicable", message="force bootstrap probe"),),
+    )
+    final_analysis = CodeAnalysisResult(
+        normalized.code_target,
+        facts=(AnnotationFact(data={
+            "namespace": "world",
+            "kind": "requirement",
+            "fragment": {"roles": {"main": {"topology": {"collectives": True}}}},
+            "source": {"kind": "synthetic"},
+        }),),
+    )
+    probes = []
+
+    def fake_probe(target, **_kwargs):
+        probes.append(target)
+        if len(probes) == 1:
+            return CodeProbeResult(False, None, None, (DiagnosticFact(severity="error", code="code_probe.import_failed", message="bootstrap failed"),))
+        return CodeProbeResult(True, final_analysis, inspect_current())
+
+    monkeypatch.setattr(requirements, "analyze", lambda *_args, **_kwargs: incomplete)
+    monkeypatch.setattr(requirements, "probe_target", fake_probe)
+
+    resolution = resolve_dispatch_plan(
+        normalized,
+        environment_candidates=(PythonExecutableSpec(sys.executable),),
+        requirement_policy="ignore",
+    )
+
+    assert not resolution.launchable
+    assert any(item.code == "dryml.dispatch.local_world_topology_unsupported" for item in resolution.diagnostics)
+
+
 def test_plan_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):
     import dryml.dispatch.planner as planner
 
@@ -121,6 +205,15 @@ def test_explain_rejects_invalid_inventory_policy_before_normalization(monkeypat
 
     with __import__("pytest").raises(DispatchPlanningError, match="invalid inventory_policy"):
         Dispatcher().explain(lambda: None, allow_pickle=True, inventory_policy="invalid")
+
+
+def test_explain_rejects_nonfinite_probe_timeout_before_discovery():
+    with __import__("pytest").raises(DispatchPlanningError, match="probe_timeout_s must be a positive number"):
+        Dispatcher().explain(
+            lambda: None,
+            allow_pickle=True,
+            analysis_policy={"probe_timeout_s": math.nan},
+        )
 
 
 def test_plan_world_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):

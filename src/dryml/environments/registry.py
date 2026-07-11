@@ -183,20 +183,21 @@ class EnvironmentRegistry:
         *,
         timeout: float | None = 30.0,
         policy: str = "compatible",
-        max_candidates: int = 8,
-        total_timeout: float | None = 30.0,
+        max_candidates: int | None = None,
+        total_timeout: float | None = None,
     ) -> tuple[EnvironmentRegistryEntry | None, CompatibilityReport]:
         """Return the first bounded, deduplicated compatible registry entry.
 
-        ``max_candidates`` and ``total_timeout`` apply the same guardrails as
-        resolver search while retaining this helper's historical return shape
-        and compatibility-policy behavior.
+        Supplying ``max_candidates`` or ``total_timeout`` opts into bounded
+        search. Omitting both preserves this legacy helper's full-registry,
+        tag-prefilter behavior; dispatch uses :func:`resolve` for bounded
+        deterministic search.
         """
 
-        from .resolution import _labels_match
-
-        if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates <= 0:
-            raise EnvironmentRegistryError("max_candidates must be a positive integer")
+        if max_candidates is not None and (
+            isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates <= 0
+        ):
+            raise EnvironmentRegistryError("max_candidates must be a positive integer or None")
         for name, value in (("timeout", timeout), ("total_timeout", total_timeout)):
             if value is not None and (
                 isinstance(value, bool)
@@ -206,22 +207,29 @@ class EnvironmentRegistry:
             ):
                 raise EnvironmentRegistryError(f"{name} must be a positive finite number or None")
         first_report: CompatibilityReport | None = None
+        bounded_mode = max_candidates is not None or total_timeout is not None
         seen: set[str] = set()
         considered = 0
         started = time.monotonic()
-        # Bound raw aliases as well as unique candidates so duplicate names
-        # cannot turn this compatibility helper into an unbounded probe loop.
-        for entry in self.iter_entries(limit=max_candidates + 32):
+        # Bounded mode also limits raw aliases. The default remains compatible
+        # with the historical full-registry helper.
+        entry_limit = None if max_candidates is None else max_candidates + 32
+        for entry in self.iter_entries(limit=entry_limit):
             if total_timeout is not None and time.monotonic() - started >= total_timeout:
                 break
-            if not _labels_match(requirement, entry):
+            if not bounded_mode and requirement.tags and not set(requirement.tags) <= set(entry.tags):
                 continue
-            identity = json.dumps(entry.spec.to_data(), sort_keys=True, separators=(",", ":"))
-            if identity in seen:
-                continue
-            seen.add(identity)
-            if considered >= max_candidates:
-                break
+            if bounded_mode:
+                from .resolution import _labels_match
+
+                if not _labels_match(requirement, entry):
+                    continue
+                identity = json.dumps(entry.spec.to_data(), sort_keys=True, separators=(",", ":"))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if max_candidates is not None and considered >= max_candidates:
+                    break
             considered += 1
             remaining = None if total_timeout is None else total_timeout - (time.monotonic() - started)
             if remaining is not None and remaining <= 0:

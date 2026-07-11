@@ -95,3 +95,59 @@ def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch):
     assert entry.name == "first"
     assert report.ok
     assert len(calls) == 1
+
+
+def test_registry_find_compatible_preserves_default_full_search_and_tag_prefilter(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    for index in range(9):
+        registry.register(f"entry-{index:02}", envs.PythonExecutableSpec(f"/python-{index}"))
+    calls = []
+
+    def fake_probe(spec, *, timeout):
+        calls.append(spec.executable)
+        if spec.executable.endswith("-8"):
+            return envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current())
+        return envs.EnvironmentProbeResult(spec, False)
+
+    monkeypatch.setattr(registry_module, "probe", fake_probe)
+    entry, report = registry.find_compatible(envs.EnvironmentRequirement())
+
+    assert entry.name == "entry-08"
+    assert report.ok
+    assert len(calls) == 9
+
+    tagged = envs.EnvironmentRegistry()
+    tagged.register("untagged", envs.PythonExecutableSpec("/untagged"))
+    tagged.register("wanted", envs.PythonExecutableSpec("/wanted"), tags=("wanted",))
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current()),
+    )
+    entry, _ = tagged.find_compatible(envs.EnvironmentRequirement(tags=("wanted",)))
+
+    assert entry.name == "wanted"
+
+
+def test_bounded_registry_search_prefilters_known_requirement_hints(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    registry.register("ignored", envs.PythonExecutableSpec("/ignored"), provides=("other",))
+    registry.register("candidate", envs.PythonExecutableSpec("/candidate"), provides=("wanted",))
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append(spec.executable) or envs.EnvironmentProbeResult(spec, False),
+    )
+
+    entry, _ = registry.find_compatible(
+        envs.EnvironmentRequirement(capabilities=("wanted",)),
+        max_candidates=1,
+    )
+
+    assert entry is None
+    assert calls == ["/candidate"]

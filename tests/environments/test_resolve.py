@@ -213,6 +213,38 @@ def test_resolver_rejects_malformed_injected_probe_result():
     assert result.attempts[0].status == "probe_failed"
 
 
+def test_resolver_rejects_malformed_injected_probe_report():
+    spec = PythonExecutableSpec("/candidate/python")
+    malformed = EnvironmentProbeResult(spec, False, report=object())  # type: ignore[arg-type]
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda *_args, **_kwargs: malformed,
+    )
+
+    assert result.status == "no_match"
+    assert result.attempts[0].status == "probe_failed"
+
+
+def test_resolver_rejects_non_mapping_injected_probe_report_details():
+    from dryml.environments.compatibility import CompatibilityReport
+
+    spec = PythonExecutableSpec("/candidate/python")
+    malformed = EnvironmentProbeResult(spec, False, report=CompatibilityReport("compatible", details=object()))  # type: ignore[arg-type]
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda *_args, **_kwargs: malformed,
+    )
+
+    assert result.status == "no_match"
+    assert result.attempts[0].status == "probe_failed"
+
+
 def test_total_timeout_includes_candidate_normalization():
     ticks = iter((0.0, 0.0, 1.0))
 

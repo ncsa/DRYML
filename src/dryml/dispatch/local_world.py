@@ -543,6 +543,8 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
     if allocation_backend_kind not in {"local_world", "local_subprocess"}:
         raise DispatchPlanningError("unsupported local allocation backend kind", context={"kind": allocation_backend_kind})
     worker_count = sum(role.replicas for role in world.roles.values())
+    if worker_count == 0:
+        raise DispatchPlanningError("local world requires at least one worker")
     if worker_count > _MAX_LOCAL_WORLD_WORKERS:
         raise DispatchPlanningError(
             "local world worker count exceeds the bounded limit",

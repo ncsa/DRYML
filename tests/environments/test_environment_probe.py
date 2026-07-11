@@ -4,7 +4,7 @@ import os
 import shlex
 import stat
 import sys
-from types import SimpleNamespace
+import time
 
 import pytest
 
@@ -102,6 +102,41 @@ def test_probe_python_timeout_and_malformed_output(tmp_path):
     assert result.report.issues[0].code == "probe_failed"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="process-group timeout behavior is POSIX-specific")
+def test_probe_timeout_kills_descendants_holding_capture_pipes(tmp_path):
+    script = tmp_path / "forking-python"
+    script.write_text("#!/bin/sh\nsleep 2 &\nwait\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    started = time.monotonic()
+    result = envs.probe(envs.PythonExecutableSpec(str(script)), timeout=0.05)
+
+    assert not result.ok
+    assert result.report.issues[0].code == "probe_timeout"
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="inherited pipe behavior is POSIX-specific")
+def test_probe_does_not_wait_for_descendant_that_escapes_capture_group(tmp_path):
+    script = tmp_path / "detached-python"
+    script.write_text("#!/bin/sh\nsetsid sleep 2 &\nexit 0\n")
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+    started = time.monotonic()
+    result = envs.probe(envs.PythonExecutableSpec(str(script)), timeout=0.05)
+
+    assert not result.ok
+    assert result.report.issues[0].code == "probe_timeout"
+    assert time.monotonic() - started < 1.0
+
+    invalid_utf8 = tmp_path / "invalid-utf8-python"
+    invalid_utf8.write_bytes(b"#!/bin/sh\nprintf '\\377'\n")
+    invalid_utf8.chmod(invalid_utf8.stat().st_mode | stat.S_IXUSR)
+    result = envs.probe(envs.PythonExecutableSpec(str(invalid_utf8)))
+    assert not result.ok
+    assert result.report.issues[0].code == "probe_failed"
+
+
 @pytest.mark.parametrize(
     "payload",
     (
@@ -172,13 +207,12 @@ def test_probe_pythonpath_policy_none_removes_parent_pythonpath(monkeypatch):
     probe_module = importlib.import_module("dryml.environments.probe")
     captured = {}
 
-    def fake_run(command, **kwargs):
-        captured.update(kwargs)
-        kwargs["stdout"].write(json.dumps(sample_payload()).encode())
-        return SimpleNamespace(returncode=0)
+    def fake_run(command, *, timeout, env):
+        captured.update({"command": command, "timeout": timeout, "env": env})
+        return 0, json.dumps(sample_payload()).encode(), False, b"", False, False
 
     monkeypatch.setenv("PYTHONPATH", "/parent")
-    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(probe_module, "_run_bounded_command", fake_run)
 
     result = envs.probe(envs.PythonExecutableSpec("python", env={"PYTHONPATH": "/override"}))
 
@@ -192,13 +226,12 @@ def test_probe_pythonpath_policy_explicit_uses_only_extra_paths(monkeypatch):
     probe_module = importlib.import_module("dryml.environments.probe")
     captured = {}
 
-    def fake_run(command, **kwargs):
-        captured.update(kwargs)
-        kwargs["stdout"].write(json.dumps(sample_payload()).encode())
-        return SimpleNamespace(returncode=0)
+    def fake_run(command, *, timeout, env):
+        captured.update({"command": command, "timeout": timeout, "env": env})
+        return 0, json.dumps(sample_payload()).encode(), False, b"", False, False
 
     monkeypatch.setenv("PYTHONPATH", "/parent")
-    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(probe_module, "_run_bounded_command", fake_run)
 
     result = envs.probe(
         envs.PythonExecutableSpec(
@@ -230,13 +263,12 @@ def test_conda_probe_uses_pythonpath_policy(monkeypatch):
     probe_module = importlib.import_module("dryml.environments.probe")
     captured = {}
 
-    def fake_run(command, **kwargs):
-        captured.update({"command": command, **kwargs})
-        kwargs["stdout"].write(json.dumps(sample_payload()).encode())
-        return SimpleNamespace(returncode=0)
+    def fake_run(command, *, timeout, env):
+        captured.update({"command": command, "timeout": timeout, "env": env})
+        return 0, json.dumps(sample_payload()).encode(), False, b"", False, False
 
     monkeypatch.setenv("PYTHONPATH", "/parent")
-    monkeypatch.setattr(probe_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(probe_module, "_run_bounded_command", fake_run)
 
     result = envs.probe(
         envs.CondaEnvironmentSpec(

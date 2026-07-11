@@ -66,6 +66,9 @@ inspection is conservative and bounded; ambiguous visibility or an
 oversized device directory reports no accelerator inventory rather than a
 partial claim.
 
+Device-file evidence is accepted only for readable/writable character devices;
+regular files or stale names such as `nvidia0` never create usable GPU capacity.
+
 Synthesis visits role names in sorted order and chooses the smallest positive
 replica and executable CPU counts permitted by each constraint, plus the minimum
 requested memory and accelerator counts. It proves aggregate disjoint CPU,

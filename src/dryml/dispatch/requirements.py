@@ -1,13 +1,14 @@
 """Requirement-aware dispatch planning over normalized operation targets.
 
 This module orchestrates existing code analysis, annotation, environment, world,
-and runtime APIs.  It does not normalize user targets, merge annotations, solve
-environments, or synthesize worlds.
+and runtime APIs. It does not normalize user targets, merge annotations, or
+solve environments; it delegates local world synthesis to :mod:`dryml.worlds`.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import warnings
@@ -378,7 +379,12 @@ def resolve_dispatch_plan(
             structural_safe = structural_safe and (policy is not RequirementPolicy.STRICT and not structural_failures or policy is RequirementPolicy.STRICT and not world_diagnostics)
             diagnostics.extend(world_diagnostics)
     else:
-        world_diagnostics = ()
+        world_diagnostics = _local_world_topology_diagnostics(resolution.world_requirement)
+        if world_diagnostics:
+            # The same-host coordinator cannot enact collectives or shared
+            # filesystem guarantees, regardless of compatibility policy.
+            structural_safe = False
+            diagnostics.extend(world_diagnostics)
     if single_worker_only and _is_multi_worker_world(world_spec):
         structural_safe = False
         if not world_diagnostics:
@@ -401,7 +407,7 @@ def resolve_dispatch_plan(
         if final_fragments:
             reconciled_fragments = _dedupe_fragments((*fragments, *final_fragments))
             reconciled = annotations.resolve_fragments(reconciled_fragments, source="dryml.dispatch.final_probe")
-            if _resolution_decisions(reconciled) != _resolution_decisions(resolution):
+            if _resolution_decisions(reconciled) != _resolution_decisions(resolution) and (bootstrap_probe is None or bootstrap_probe.ok):
                 structural_safe = False
                 diagnostics.append(_diagnostic(
                     "dryml.dispatch.final_probe_annotation_mismatch",
@@ -410,6 +416,51 @@ def resolve_dispatch_plan(
                 ))
             resolution = reconciled
             diagnostics.extend(_annotation_diagnostics(resolution))
+            if bootstrap_probe is not None and not bootstrap_probe.ok:
+                # Bootstrap did not provide usable requirements. Final-probe
+                # facts are therefore authoritative for world/runtime selection
+                # without restarting environment search after target validation.
+                world_selection, world_spec, world_synthesis = _select_world(
+                    world,
+                    resolution.world_default,
+                    requirement=resolution.world_requirement,
+                    inventory=inventory,
+                    inventory_policy=inventory_policy,
+                )
+                runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
+                if world_synthesis is not None and not world_synthesis.ok:
+                    synthesis_structural = world_synthesis.status not in {"insufficient_inventory", "unsupported_requirement"}
+                    diagnostics.append(_diagnostic(
+                        "dryml.dispatch.world_synthesis_failed",
+                        "Local world synthesis failed; inject inventory or pass/set a compatible world.",
+                        severity="error" if synthesis_structural or policy is RequirementPolicy.STRICT else "warning",
+                        data=world_synthesis.to_data(),
+                    ))
+                    structural_safe = structural_safe and (
+                        policy is RequirementPolicy.IGNORE
+                        and world_synthesis.status in {"insufficient_inventory", "unsupported_requirement"}
+                    )
+                if single_worker_only:
+                    world_diagnostics = _local_subprocess_world_diagnostics(world_spec, resolution.world_requirement)
+                else:
+                    world_diagnostics = _local_world_topology_diagnostics(resolution.world_requirement)
+                if world_diagnostics:
+                    structural_safe = False
+                    diagnostics.extend(world_diagnostics)
+                if single_worker_only and _is_multi_worker_world(world_spec):
+                    structural_safe = False
+                    if not world_diagnostics:
+                        diagnostics.append(_diagnostic(
+                            "dryml.dispatch.single_subprocess_world_unsupported",
+                            "The local subprocess planner supports one worker only; use plan_world() or run_world() for this world.",
+                            data={"world": world_spec},
+                        ))
+        # A successful final probe validates the environment that will execute
+        # the target and supersedes failed/incomplete bootstrap discovery.
+        if final_probe.ok and final_probe.analysis is not None:
+            complete = True
+            if bootstrap_probe is not None and not bootstrap_probe.ok:
+                diagnostics = [item for item in diagnostics if item not in bootstrap_probe.diagnostics]
         if not final_probe.ok:
             diagnostics.append(_diagnostic(
                 "dryml.dispatch.final_environment_probe_failed",
@@ -490,7 +541,7 @@ def resolve_dispatch_plan(
                 data={"error": type(exc).__name__, "message": str(exc), "action": "inject inventory or pass/set a feasible world"},
             ))
 
-    bootstrap_probe_failed = bootstrap_probe is not None and not bootstrap_probe.ok
+    bootstrap_probe_failed = bootstrap_probe is not None and not bootstrap_probe.ok and (final_probe is None or not final_probe.ok)
     if not complete:
         diagnostics.append(_diagnostic("dryml.dispatch.discovery_incomplete", "Requirement discovery is incomplete.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"policy": policy.value, "action": "use an importable target or call dispatch.explain(...)"}))
     checks = (environment_check, world_check, runtime_check)
@@ -615,7 +666,7 @@ def _analysis_options(policy: Any | None) -> tuple[CodeAnalysisContext, float]:
     if not isinstance(context, CodeAnalysisContext):
         raise DispatchPlanningError("analysis_policy.context must be a CodeAnalysisContext")
     timeout = policy.get("probe_timeout_s", DEFAULT_PROBE_TIMEOUT_S)
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
         raise DispatchPlanningError("analysis_policy.probe_timeout_s must be a positive number")
     return context, float(timeout)
 
@@ -867,7 +918,7 @@ def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requiremen
         resources = process.resources
         if _has_positive_unsupported_resource(resources.devices) or _has_positive_unsupported_resource(resources.named):
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_resources_unsupported", "The local subprocess planner cannot allocate selected named devices or resources.", data={"role": role_name, "resources": resources.to_data()}))
-        if process.environment is not None or process.runtime is not None or process.env or process.metadata:
+        if process.environment is not None or process.runtime is not None or process.metadata:
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_process_settings_unsupported", "The local subprocess planner cannot enact selected role process settings.", data={"role": role_name, "process": process.to_data()}))
     if requirement is not None:
         for role_name, role_requirement in requirement.roles.items():
@@ -881,6 +932,23 @@ def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requiremen
         report = worlds.check_world_spec_satisfies_requirement(world, requirement)
         if not report.ok:
             diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_requirement_unsupported", "The selected local subprocess world does not satisfy the hard world requirement.", data={"issues": [{"path": item.path, "message": item.message, "expected": item.expected, "actual": item.actual} for item in report.issues]}))
+    return tuple(diagnostics)
+
+
+def _local_world_topology_diagnostics(requirement) -> tuple[DiagnosticFact, ...]:
+    """Reject topology guarantees the same-host local-world backend cannot enact."""
+
+    if requirement is None:
+        return ()
+    diagnostics = []
+    for role_name, role_requirement in requirement.roles.items():
+        for topology_name in ("collectives", "shared_filesystem"):
+            if role_requirement.topology.get(topology_name) not in (None, False):
+                diagnostics.append(_diagnostic(
+                    "dryml.dispatch.local_world_topology_unsupported",
+                    "The local-world planner cannot enforce the requested world topology.",
+                    data={"role": role_name, "topology": topology_name},
+                ))
     return tuple(diagnostics)
 
 

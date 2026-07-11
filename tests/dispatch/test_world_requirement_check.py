@@ -216,6 +216,19 @@ def test_single_subprocess_topology_remains_structural_under_relaxed_policies():
         assert any(item.code == "dryml.dispatch.single_subprocess_topology_unsupported" for item in resolution.diagnostics)
 
 
+def test_local_world_topology_remains_structural_under_relaxed_policies():
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
+
+    for policy in ("warn", "ignore"):
+        resolution = resolve_dispatch_plan(
+            normalize_user_operation(collective_target, allow_pickle=True),
+            world=world,
+            requirement_policy=policy,
+        )
+        assert resolution.launchable is False
+        assert any(item.code == "dryml.dispatch.local_world_topology_unsupported" for item in resolution.diagnostics)
+
+
 def test_local_world_rejects_unenacted_role_process_settings(tmp_path):
     world = {
         "roles": {
@@ -242,6 +255,23 @@ def test_oversubscribed_local_world_has_bounded_expansion():
 
     with pytest.raises(DispatchPlanningError, match="worker count exceeds"):
         allocate_local_world(world, inventory=LocalResourceInventory((0,)), oversubscribe=True)
+
+
+def test_local_world_rejects_zero_worker_world_and_subprocess_enacts_process_env(tmp_path):
+    from dryml.dispatch.local_world import allocate_local_world
+
+    with pytest.raises(DispatchPlanningError, match="requires at least one worker"):
+        allocate_local_world({"roles": {"main": {"replicas": 0, "process": {}}}}, inventory=LocalResourceInventory((0,)))
+
+    world = {"roles": {"main": {"replicas": 1, "process": {"env": {"AUDIT_PROCESS_ENV": "enabled"}}}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["env"]["AUDIT_PROCESS_ENV"] == "enabled"
 
 
 def test_planning_metadata_bounds_deep_nested_data():

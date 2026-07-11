@@ -21,7 +21,9 @@ _PYTHONPATH_POLICIES = frozenset({"none", "explicit", "inherit", "dryml-source"}
 def _normalize_pythonpath_policy(value: Any) -> str:
     """Return the canonical spelling for a Python-path probe policy."""
 
-    return str(value).strip().lower().replace("_", "-")
+    if not isinstance(value, str):
+        raise EnvironmentSpecError("Python path probe policy must be a string", context={"pythonpath_policy": value})
+    return value.strip().lower().replace("_", "-")
 
 
 def _validate_pythonpath_policy(value: Any) -> None:

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import signal
 import subprocess
 import sys
-import tempfile
+import threading
 from dataclasses import dataclass, replace
 from collections.abc import Mapping
 from typing import Any
@@ -32,6 +34,7 @@ _MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024
 # explicit bound for decoding records with substantial package inventories while
 # retaining only a small prefix in public result diagnostics.
 _MAX_PROTOCOL_OUTPUT_BYTES = 4 * 1024 * 1024
+_PIPE_DRAIN_JOIN_TIMEOUT_S = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,61 +193,110 @@ def _probe_command(
     timeout: float | None,
     env: dict[str, str] | None = None,
 ) -> EnvironmentProbeResult:
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        try:
-            completed = subprocess.run(command, stdout=stdout_file, stderr=stderr_file, timeout=timeout, env=env)
-        except subprocess.TimeoutExpired:
-            stdout, stdout_truncated = _read_captured_output(stdout_file)
-            stderr, stderr_truncated = _read_captured_output(stderr_file)
-            return _capture_diagnostic(
-                _failure_result(spec, "probe_timeout", f"environment probe timed out after {timeout} seconds", stdout=stdout, stderr=stderr),
-                stdout_truncated or stderr_truncated,
-            )
-        except OSError as exc:
-            return _failure_result(spec, "probe_failed", f"environment probe could not start: {exc}")
-        protocol, protocol_truncated = _read_protocol_output(stdout_file)
-        stdout, stdout_truncated = _diagnostic_output(protocol)
-        stderr, stderr_truncated = _read_captured_output(stderr_file)
+    try:
+        returncode, protocol, protocol_truncated, stderr_bytes, stderr_truncated, timed_out = _run_bounded_command(
+            command,
+            timeout=timeout,
+            env=env,
+        )
+    except OSError as exc:
+        return _failure_result(spec, "probe_failed", f"environment probe could not start: {exc}")
+    stdout, stdout_truncated = _diagnostic_output(protocol)
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    if timed_out:
+        return _capture_diagnostic(
+            _failure_result(spec, "probe_timeout", f"environment probe timed out after {timeout} seconds", stdout=stdout, stderr=stderr),
+            stdout_truncated or stderr_truncated,
+        )
     truncated = stdout_truncated or stderr_truncated
-    if completed.returncode != 0:
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe exited with status {completed.returncode}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    if returncode != 0:
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe exited with status {returncode}", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     if protocol_truncated:
-        return _capture_diagnostic(_failure_result(spec, "probe_output_too_large", "environment probe protocol payload exceeded the bounded limit", stdout=stdout, stderr=stderr, returncode=completed.returncode), True)
+        return _capture_diagnostic(_failure_result(spec, "probe_output_too_large", "environment probe protocol payload exceeded the bounded limit", stdout=stdout, stderr=stderr, returncode=returncode), True)
     try:
         payload = json.loads(protocol.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe returned malformed JSON: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe returned malformed JSON: {type(exc).__name__}", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     if not isinstance(payload, Mapping):
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned a non-mapping protocol payload", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned a non-mapping protocol payload", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     if payload.get("kind") != "dryml.environment_probe_result":
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an unsupported protocol payload", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an unsupported protocol payload", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     if payload.get("schema_version") != ENVIRONMENT_PROBE_RESULT_SCHEMA_VERSION:
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an unsupported protocol schema", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an unsupported protocol schema", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     if not isinstance(payload.get("ok"), bool):
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an invalid protocol status", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe returned an invalid protocol status", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     if not payload["ok"]:
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe worker reported failure", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", "environment probe worker reported failure", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
     try:
         record = EnvironmentRecord.from_data(payload["record"])
     except Exception as exc:
-        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe record could not be decoded: {exc}", stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
-    return _capture_diagnostic(EnvironmentProbeResult(spec=spec, ok=True, record=record, stdout=stdout, stderr=stderr, returncode=completed.returncode), truncated)
+        return _capture_diagnostic(_failure_result(spec, "probe_failed", f"environment probe record could not be decoded: {exc}", stdout=stdout, stderr=stderr, returncode=returncode), truncated)
+    return _capture_diagnostic(EnvironmentProbeResult(spec=spec, ok=True, record=record, stdout=stdout, stderr=stderr, returncode=returncode), truncated)
 
 
-def _read_captured_output(handle) -> tuple[str, bool]:
-    """Decode at most the bounded diagnostic prefix from a probe stream."""
+def _run_bounded_command(
+    command: list[str],
+    *,
+    timeout: float | None,
+    env: dict[str, str] | None,
+) -> tuple[int, bytes, bool, bytes, bool, bool]:
+    """Run a probe while continuously draining bounded stdout and stderr pipes."""
 
-    handle.seek(0)
-    value = handle.read(_MAX_CAPTURED_OUTPUT_BYTES + 1)
-    return value[:_MAX_CAPTURED_OUTPUT_BYTES].decode("utf-8", errors="replace"), len(value) > _MAX_CAPTURED_OUTPUT_BYTES
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        start_new_session=(os.name == "posix"),
+    )
+    assert process.stdout is not None and process.stderr is not None
+    captured: dict[str, tuple[bytes, bool]] = {"stdout": (b"", False), "stderr": (b"", False)}
 
+    def drain(name: str, stream, limit: int) -> None:
+        value = bytearray()
+        truncated = False
+        try:
+            while chunk := stream.read(64 * 1024):
+                remaining = limit + 1 - len(value)
+                if remaining > 0:
+                    value.extend(chunk[:remaining])
+                truncated = truncated or len(chunk) > remaining
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+            captured[name] = (bytes(value[:limit]), truncated or len(value) > limit)
 
-def _read_protocol_output(handle) -> tuple[bytes, bool]:
-    """Read a complete bounded protocol payload before parsing JSON."""
-
-    handle.seek(0)
-    value = handle.read(_MAX_PROTOCOL_OUTPUT_BYTES + 1)
-    return value[:_MAX_PROTOCOL_OUTPUT_BYTES], len(value) > _MAX_PROTOCOL_OUTPUT_BYTES
+    stdout_thread = threading.Thread(target=drain, args=("stdout", process.stdout, _MAX_PROTOCOL_OUTPUT_BYTES), daemon=True)
+    stderr_thread = threading.Thread(target=drain, args=("stderr", process.stderr, _MAX_CAPTURED_OUTPUT_BYTES), daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    timed_out = False
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - Windows does not provide POSIX groups.
+            process.kill()
+        process.wait()
+    finally:
+        # A descendant can deliberately escape the child process group while
+        # retaining a capture pipe. Do not let that defeat the caller timeout.
+        stdout_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
+        stderr_thread.join(_PIPE_DRAIN_JOIN_TIMEOUT_S)
+        pipes_lingered = stdout_thread.is_alive() or stderr_thread.is_alive()
+        timed_out = timed_out or pipes_lingered
+    stdout, stdout_truncated = captured["stdout"]
+    stderr, stderr_truncated = captured["stderr"]
+    return process.returncode, stdout, stdout_truncated, stderr, stderr_truncated, timed_out
 
 
 def _diagnostic_output(value: bytes) -> tuple[str, bool]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import heapq
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -106,7 +107,7 @@ class LocalResourceInventory:
         if unknown:
             raise ResourceValidationError("local resource inventory has unknown fields", context={"fields": sorted(unknown)})
         return cls(
-            cpus=tuple(data.get("cpus", ())),
+            cpus=data.get("cpus", ()),
             accelerators={} if "accelerators" not in data else data["accelerators"],
             memory=data.get("memory"),
             metadata={} if "metadata" not in data else data["metadata"],
@@ -146,10 +147,18 @@ def local_inventory(
     environment = os.environ if environ is None else environ
     diagnostics: list[str] = []
     try:
-        cpus = tuple(sorted(int(cpu) for cpu in os.sched_getaffinity(0)))
+        affinity = os.sched_getaffinity(0)
+        if len(affinity) > _MAX_CPU_IDENTIFIERS:
+            diagnostics.append("CPU discovery exceeded the bounded identifier limit")
+            cpus = tuple(sorted(int(cpu) for cpu in heapq.nsmallest(_MAX_CPU_IDENTIFIERS, affinity)))
+        else:
+            cpus = tuple(sorted(int(cpu) for cpu in affinity))
         cpu_source = "affinity"
     except Exception:
         count = os.cpu_count() or 1
+        if count > _MAX_CPU_IDENTIFIERS:
+            diagnostics.append("CPU discovery exceeded the bounded identifier limit")
+            count = _MAX_CPU_IDENTIFIERS
         cpus = tuple(range(count))
         cpu_source = "cpu_count"
     if not cpus:
@@ -245,7 +254,7 @@ def _accelerators_from_device_root(environ: Mapping[str, str], device_root: str 
             if index >= _MAX_DEVICE_ROOT_ENTRIES:
                 diagnostics.append("device-file accelerator discovery exceeded the bounded entry limit")
                 return {}
-            if path.name.startswith("nvidia") and path.name[6:].isdigit():
+            if path.name.startswith("nvidia") and path.name[6:].isdigit() and path.is_char_device() and os.access(path, os.R_OK | os.W_OK):
                 device_ids.append(int(path.name[6:]))
     except (OSError, ValueError) as exc:
         diagnostics.append(f"device-file accelerator discovery unavailable: {type(exc).__name__}")
@@ -254,7 +263,7 @@ def _accelerators_from_device_root(environ: Mapping[str, str], device_root: str 
     if not device_ids:
         return {}
     visible = environ.get("CUDA_VISIBLE_DEVICES", environ.get("NVIDIA_VISIBLE_DEVICES"))
-    if visible is None:
+    if visible is None or visible.strip().lower() == "all":
         return {"gpu": device_ids[:_MAX_EXPLICIT_ACCELERATOR_IDS]}
     values = tuple(item.strip() for item in visible.split(",") if item.strip())
     if any(value.lower() in {"none", "void", "all"} or not value.isdigit() for value in values):

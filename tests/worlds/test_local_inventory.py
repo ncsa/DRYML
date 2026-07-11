@@ -156,13 +156,59 @@ def test_empty_cpu_affinity_is_not_reported_as_cpu_zero(monkeypatch):
         local_inventory(environ={})
 
 
-def test_device_root_accelerators_respect_numeric_visibility(tmp_path):
+def test_large_discovered_cpu_affinity_is_conservatively_bounded(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: set(range(4097)))
+
+    inventory = local_inventory(environ={}, device_root=None)
+
+    assert len(inventory.cpus) == 4096
+    assert "CPU discovery exceeded the bounded identifier limit" in inventory.metadata["diagnostics"]
+
+
+def test_large_cpu_count_fallback_is_conservatively_bounded(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(inventory_module.os, "cpu_count", lambda: 4097)
+
+    inventory = local_inventory(environ={}, device_root=None)
+
+    assert len(inventory.cpus) == 4096
+    assert "CPU discovery exceeded the bounded identifier limit" in inventory.metadata["diagnostics"]
+
+
+def test_device_root_accelerators_respect_numeric_visibility(tmp_path, monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
     (tmp_path / "nvidia0").touch()
     (tmp_path / "nvidia1").touch()
+    monkeypatch.setattr(inventory_module.Path, "is_char_device", lambda path: path.name.startswith("nvidia"))
 
     inventory = local_inventory(environ={"CUDA_VISIBLE_DEVICES": "1"}, device_root=tmp_path)
 
     assert inventory.accelerators == {"gpu": (1,)}
+
+
+def test_device_root_accelerators_honor_all_visibility(tmp_path, monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    (tmp_path / "nvidia0").touch()
+    (tmp_path / "nvidia1").touch()
+    monkeypatch.setattr(inventory_module.Path, "is_char_device", lambda path: path.name.startswith("nvidia"))
+
+    inventory = local_inventory(environ={"NVIDIA_VISIBLE_DEVICES": "all"}, device_root=tmp_path)
+
+    assert inventory.accelerators == {"gpu": (0, 1)}
+
+
+def test_device_root_ignores_regular_nvidia_named_files(tmp_path):
+    (tmp_path / "nvidia0").touch()
+
+    inventory = local_inventory(environ={}, device_root=tmp_path)
+
+    assert inventory.accelerators == {}
 
 
 def test_device_root_enumeration_is_bounded(tmp_path):
@@ -187,3 +233,9 @@ def test_injected_inventory_identifier_iterables_are_bounded():
         LocalResourceInventory(count())
     with pytest.raises(ResourceValidationError, match="accelerator identifiers exceed"):
         LocalResourceInventory((0,), {"gpu": count()})
+
+
+@pytest.mark.parametrize("cpus", (None, 1))
+def test_inventory_serialization_rejects_malformed_cpu_values(cpus):
+    with pytest.raises(ResourceValidationError, match="CPUs must be a sequence"):
+        LocalResourceInventory.from_data({"cpus": cpus})

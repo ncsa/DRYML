@@ -317,6 +317,17 @@ def _validate_probe_result(result: Any, identity: str) -> None:
         raise TypeError("probe runner returned evidence for a different candidate")
     if result.ok and not isinstance(result.record, EnvironmentRecord):
         raise TypeError("successful probe result requires an environment record")
+    if result.report is not None:
+        if not isinstance(result.report, CompatibilityReport):
+            raise TypeError("probe runner result report must be a CompatibilityReport")
+        if result.report.status not in {"compatible", "warning", "incompatible", "unknown"}:
+            raise TypeError("probe runner report has an invalid status")
+        if not isinstance(result.report.issues, tuple) or not all(
+            isinstance(issue, CompatibilityIssue) for issue in result.report.issues
+        ):
+            raise TypeError("probe runner report issues must be CompatibilityIssue values")
+        if not isinstance(result.report.details, Mapping):
+            raise TypeError("probe runner report details must be a mapping")
 
 
 def _labels_match(requirement: EnvironmentRequirement | None, entry: Any) -> bool:

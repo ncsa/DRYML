@@ -249,6 +249,7 @@ class LocalSubprocessBackend:
             envelope = plan.envelope
             save_envelope(request_path, envelope)
             cmd, child_env = build_worker_command(envelope.environment_spec)
+            child_env.update({str(key): str(value) for key, value in (envelope.allocation_view.get("env") or {}).items()})
             cmd.extend(["-m", "dryml.dispatch.worker", "--request", request_path, "--handshake", handshake_path, "--response", response_path])
             _report("dryml.dispatch.worker.launch", "Launching local subprocess worker", operation_id=envelope.operation_id, data={"cmd": _command_summary(cmd), "work_dir": work_dir})
             stdout = open(stdout_path, "w", encoding="utf-8")
