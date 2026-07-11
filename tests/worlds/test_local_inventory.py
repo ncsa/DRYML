@@ -262,6 +262,7 @@ def test_large_cpu_count_fallback_is_conservatively_bounded(monkeypatch):
 def test_lightweight_inventory_discovers_affinity_and_memory(monkeypatch):
     import dryml.worlds.inventory as inventory_module
 
+    monkeypatch.setattr(inventory_module.sys, "platform", "linux")
     monkeypatch.setattr(inventory_module.os, "sched_getaffinity", lambda _: {5, 2}, raising=False)
     monkeypatch.setattr(inventory_module.Path, "exists", lambda path: False)
     monkeypatch.setattr(
