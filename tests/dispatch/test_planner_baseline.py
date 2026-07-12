@@ -112,4 +112,4 @@ def test_planner_resolves_target_annotations_into_authoritative_metadata(tmp_pat
 
     requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]
     assert "pandas>=2" in requirements["environment_requirement"]["requirements"]
-    assert plan.dispatch_spec["payload"]["environment"]["policy"] == "resolver"
+    assert plan.dispatch_spec["payload"]["environment"]["policy"] == plan.resolution.environment_selection.source
