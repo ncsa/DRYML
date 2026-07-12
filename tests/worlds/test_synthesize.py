@@ -208,6 +208,17 @@ def test_synthesis_honors_single_process_and_rejects_shared_filesystem():
     assert unsupported.status == "unsupported_requirement"
 
 
+def test_synthesis_preserves_advisory_topology_warning_from_authoritative_check():
+    result = synthesize(
+        {"roles": {"main": {"topology": {"advisory_placement": "near-storage"}}}},
+        inventory=LocalResourceInventory((0,)),
+    )
+
+    assert result.ok
+    assert result.compatibility is not None
+    assert any(issue.severity == "warning" and issue.path.endswith("advisory_placement") for issue in result.compatibility.issues)
+
+
 def test_synthesis_serialization_is_deterministic_across_mapping_order():
     inventory = LocalResourceInventory((0, 1), {"gpu": ("a",)}, memory=1024)
     first = synthesize(

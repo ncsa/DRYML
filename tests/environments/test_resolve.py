@@ -45,6 +45,23 @@ def test_resolve_without_requirement_skips_unsupported_container_candidate():
     assert result.attempts[0].status == "unsupported"
 
 
+def test_resolve_with_requirement_skips_unsupported_container_without_probe():
+    calls = []
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(ContainerEnvironmentSpec("example/image"),),
+        include_current=False,
+        probe_runner=lambda *args, **kwargs: calls.append(args) or EnvironmentProbeResult(
+            CurrentEnvironmentSpec(), True, record=replace(inspect_current(), tags=("wanted",))
+        ),
+    )
+
+    assert result.status == "no_match"
+    assert result.attempts[0].status == "unsupported"
+    assert calls == []
+
+
 def test_resolve_without_requirement_skips_unlaunchable_conda_candidate():
     result = resolve(
         None,
@@ -173,9 +190,31 @@ def test_resolve_defers_registry_iterator_until_needed():
 
 
 def test_resolver_metadata_redacts_environment_overrides():
-    result = resolve(None, candidates=(PythonExecutableSpec("/python", env={"TOKEN": "secret"}),), include_current=False)
+    first = PythonExecutableSpec("/python", env={"TOKEN": "secret"})
+    second = PythonExecutableSpec("/python", env={"TOKEN": "other"})
+    result = resolve(None, candidates=(first, second), include_current=False)
 
     assert "TOKEN" not in str(result.to_data())
+    assert result.to_data()["selected"]["id"] == first.id
+    assert first.id != second.id
+
+
+def test_resolver_trace_distinguishes_redacted_environment_override_candidates():
+    first = PythonExecutableSpec("/first", env={"TOKEN": "one"})
+    second = PythonExecutableSpec("/second", env={"TOKEN": "two"})
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(first, second),
+        include_current=False,
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
+            spec, True, record=replace(inspect_current(), tags=())
+        ),
+    )
+
+    attempts = result.to_data()["attempts"]
+    assert [attempt["spec"]["id"] for attempt in attempts] == [first.id, second.id]
+    assert "TOKEN" not in str(attempts)
 
 
 def test_total_timeout_bounds_a_probe_without_an_explicit_probe_timeout():

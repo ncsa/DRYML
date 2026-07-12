@@ -17,6 +17,11 @@ def cpu_target():
     return None
 
 
+@dryml.world.default(cpus=2)
+def default_world_target():
+    return None
+
+
 @dryml.world.req(roles={"trainer": {"replicas": {"exact": 2}, "resources": {"cpus": {"exact": 1}}}})
 def multi_worker_target():
     return None
@@ -189,6 +194,30 @@ def test_dispatch_blocks_probe_deadline_exhaustion_without_relaxed_fallback(monk
     assert not dispatch_resolution.launchable
 
 
+@pytest.mark.parametrize(("policy", "launchable"), (("strict", False), ("warn", True), ("ignore", True)))
+def test_dispatch_completed_resolver_no_match_obeys_requirement_policy(monkeypatch, policy, launchable):
+    import dryml.dispatch.requirements as requirements
+
+    candidate = PythonExecutableSpec("/incompatible/python")
+    monkeypatch.setattr(
+        requirements.environments,
+        "probe",
+        lambda spec, **_kwargs: requirements.environments.EnvironmentProbeResult(
+            spec, True, record=replace(inspect_current(), tags=())
+        ),
+    )
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(resolver_target, allow_pickle=True),
+        environment_candidates=(candidate,),
+        requirement_policy=policy,
+    )
+
+    assert resolution.environment_resolution is not None
+    assert resolution.environment_resolution.status == "no_match"
+    assert resolution.launchable is launchable
+
+
 def test_attached_record_does_not_bypass_unsupported_environment_launch():
     explanation = Dispatcher().explain(
         make_function_call_spec("operator:add", args=[1, 2]),
@@ -272,6 +301,54 @@ def test_plan_allocates_a_synthesized_one_worker_world(tmp_path):
 
     assert plan.resolution.world_selection.source == "synthesized"
     assert plan.envelope.allocation_view["cpus"] == [4, 5]
+
+
+def test_plan_allocates_annotation_default_and_context_current_worlds(tmp_path):
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+    inventory = LocalResourceInventory((4, 5))
+
+    default_plan = dispatcher.plan(
+        default_world_target,
+        allow_pickle=True,
+        inventory=inventory,
+        requirement_policy="strict",
+    )
+    current_world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2}}}}})
+    with use_world(current_world):
+        current_plan = dispatcher.plan(
+            lambda: None,
+            allow_pickle=True,
+            inventory=inventory,
+            requirement_policy="strict",
+        )
+
+    assert default_plan.resolution.world_selection.source == "annotation_default"
+    assert current_plan.resolution.world_selection.source == "current"
+    assert default_plan.envelope.allocation_view["cpus"] == [4, 5]
+    assert current_plan.envelope.allocation_view["cpus"] == [4, 5]
+    assert default_plan.resolution.world_allocation_summary["backend"] == "local_subprocess"
+    assert current_plan.resolution.world_allocation_summary["backend"] == "local_subprocess"
+
+
+def test_successful_resolver_synthesis_plan_and_explain_have_matching_resolution(tmp_path):
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+    inventory = LocalResourceInventory((4, 5))
+    kwargs = {
+        "allow_pickle": True,
+        "environment_candidates": (CurrentEnvironmentSpec(),),
+        "inventory": inventory,
+        "requirement_policy": "strict",
+    }
+
+    plan = dispatcher.plan(cpu_target, **kwargs)
+    explanation = dispatcher.explain(cpu_target, **kwargs)
+
+    assert plan.resolution.environment_selection.source == explanation.resolution.environment_selection.source == "resolver"
+    assert plan.resolution.world_selection.source == explanation.resolution.world_selection.source == "synthesized"
+    assert plan.resolution.environment_resolution.to_data() == explanation.resolution.environment_resolution.to_data()
+    assert plan.resolution.world_synthesis.to_data() == explanation.resolution.world_synthesis.to_data()
+    assert plan.resolution.metadata()["dryml.environment_resolution"] == explanation.resolution.metadata()["dryml.environment_resolution"]
+    assert plan.resolution.metadata()["dryml.world_synthesis"] == explanation.resolution.metadata()["dryml.world_synthesis"]
 
 
 def test_plan_world_synthesizes_an_omitted_multi_worker_world(tmp_path):

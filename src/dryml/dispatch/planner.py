@@ -592,6 +592,27 @@ class Dispatcher:
         registry, inventory, and policy arguments accept the same values as
         :meth:`plan`, but explanation does not create allocation records or
         activate a workload allocation.
+
+        Args:
+            operation: Python-shaped callable or explicit operation specification.
+            method_name: Optional DRYML object method name.
+            store: Optional store used only for operation normalization.
+            environment: Explicit environment candidate.
+            runtime: Explicit runtime specification.
+            world: Explicit requested world.
+            requirement_policy: Optional strict, warn, or ignore policy.
+            analysis_policy: Optional code-analysis policy.
+            environment_candidates: Per-call ordered resolver candidates.
+            environment_registry: Per-call explicit environment registry.
+            inventory: Per-call local inventory used by synthesis/allocation checks.
+            inventory_policy: Local inventory discovery policy.
+            resolver_policy: Environment resolver selection policy.
+            allow_pickle: Permit pickled callable normalization where supported.
+            args: Positional arguments for Python-shaped operation normalization.
+            kwargs: Keyword arguments for Python-shaped operation normalization.
+
+        Returns:
+            A non-launching explanation with the equivalent plan's resolution.
         """
 
         target_store = store or self.store

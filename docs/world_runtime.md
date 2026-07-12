@@ -72,6 +72,11 @@ inspection is conservative and bounded; ambiguous visibility or an
 oversized device directory reports no accelerator inventory rather than a
 partial claim.
 
+Set `DRYML_LOCAL_ACCELERATORS` to semicolon-separated resource groups in the
+form `kind=id[,id...]`, for example `gpu=0,1;fpga=card-a`. Each kind and
+identifier must be unique; malformed or duplicate groups are rejected instead
+of inventing capacity.
+
 Inherited numeric CUDA/NVIDIA visibility restricts device-root and external GPU
 evidence alike. Disabled or ambiguous visibility produces no usable GPU capacity,
 so optional host discovery cannot broaden a scheduler or container allocation.

@@ -314,17 +314,17 @@ def resolve(
         if entry is not None and not _labels_match(requirement, entry):
             record(EnvironmentResolutionAttempt(source, name, spec, "label_mismatch"))
             continue
+        structural_issue = _structural_candidate_issue(spec)
+        if structural_issue is not None:
+            record(EnvironmentResolutionAttempt(
+                source,
+                name,
+                spec,
+                "unsupported",
+                diagnostics=(structural_issue,),
+            ))
+            continue
         if requirement is None:
-            structural_issue = _structural_candidate_issue(spec)
-            if structural_issue is not None:
-                record(EnvironmentResolutionAttempt(
-                    source,
-                    name,
-                    spec,
-                    "unsupported",
-                    diagnostics=(structural_issue,),
-                ))
-                continue
             record(EnvironmentResolutionAttempt(source, name, spec, "selected"))
             return resolution("selected", None, spec, name, source, None, None, result_diagnostics())
         try:
@@ -588,10 +588,13 @@ def _identity(spec: EnvironmentSpec) -> str:
 
 
 def _spec_summary(spec: EnvironmentSpec) -> dict[str, Any]:
-    """Return candidate metadata without environment-variable values."""
+    """Return redacted candidate metadata with a safe canonical identifier."""
 
     data = spec.to_data()
     data.pop("env", None)
+    # The content ID preserves distinct candidate identities without exposing
+    # environment override names or values in a public resolver trace.
+    data["id"] = spec.id
     if "extra_pythonpath" in data:
         data["extra_pythonpath"] = list(data["extra_pythonpath"][:16])
     return _bounded_data(data)

@@ -504,7 +504,17 @@ def is_multi_worker_world(world_spec: Mapping[str, Any]) -> bool:
 
 
 def validate_local_world_feasibility(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world") -> None:
-    """Validate local resource capacity without constructing an allocation spec."""
+    """Validate whether a local allocator can enact a requested world.
+
+    Args:
+        world: Raw, canonical, or enveloped requested world.
+        inventory: Optional injected process-visible resource inventory.
+        oversubscribe: Permit CPU reuse for explicit advanced local-world plans.
+        allocation_backend_kind: ``"local_world"`` or ``"local_subprocess"``.
+
+    Raises:
+        DispatchPlanningError: If structure, backend, or capacity is unsupported.
+    """
 
     world_spec = normalize_world_spec(world)
     world_obj = WorldSpec.from_data(world_spec["payload"])
@@ -513,7 +523,21 @@ def validate_local_world_feasibility(world: Mapping[str, Any] | WorldSpec | None
 
 
 def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world", requested_world_id: str | None = None) -> LocalWorldAllocationPlan:
-    """Expand and allocate a local ``WorldSpec`` deterministically."""
+    """Expand a feasible world into deterministic local worker assignments.
+
+    Args:
+        world: Raw, canonical, or enveloped requested world.
+        inventory: Optional injected process-visible resource inventory.
+        oversubscribe: Permit CPU reuse for explicit advanced local-world plans.
+        allocation_backend_kind: Provenance backend for the allocation.
+        requested_world_id: Optional requested-world identity retained in workers.
+
+    Returns:
+        Worker keys, canonical requested world, and actual allocation records.
+
+    Raises:
+        DispatchPlanningError: If the local allocator cannot enact the world.
+    """
 
     _report("dryml.dispatch.world.allocate", "Allocating local world resources")
     world_spec = normalize_world_spec(world)

@@ -251,7 +251,14 @@ class DispatchPlanningResolution:
 
 @dataclass(frozen=True, slots=True)
 class DispatchExplanation:
-    """Non-launching view of dispatch planning decisions."""
+    """Non-launching view of normalized dispatch planning decisions.
+
+    Attributes:
+        resolution: Candidate selections, compatibility checks, metadata, and
+            launchability produced by the same pipeline as planning.
+        operation_preview: Bounded normalized operation summary.
+        blocking_diagnostics: Ordered diagnostics that prevent launch.
+    """
 
     resolution: DispatchPlanningResolution
     operation_preview: Mapping[str, Any]

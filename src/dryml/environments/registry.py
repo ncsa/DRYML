@@ -223,6 +223,20 @@ class EnvironmentRegistry:
         search. Omitting both preserves this legacy helper's full-registry,
         tag-prefilter behavior; dispatch uses :func:`resolve` for bounded
         deterministic search.
+
+        Args:
+            requirement: Hard environment requirement to check.
+            timeout: Per-entry probe timeout in seconds, or ``None``.
+            policy: Requirement-check policy passed to the requirement.
+            max_candidates: Optional positive bound on unique entries checked.
+            total_timeout: Optional positive deadline for bounded search.
+
+        Returns:
+            The first compatible entry and its report, or ``None`` and the
+            no-match report.
+
+        Raises:
+            EnvironmentRegistryError: If an optional search bound is invalid.
         """
 
         if max_candidates is not None and (

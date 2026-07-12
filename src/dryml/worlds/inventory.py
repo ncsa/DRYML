@@ -38,6 +38,12 @@ class LocalResourceInventory:
 
     The model describes discoverable host capacity only.  It does not allocate
     resources, initialize frameworks, or alter process visibility.
+
+    Attributes:
+        cpus: Unique, sorted executable CPU identifiers.
+        accelerators: Sorted accelerator identifiers by resource kind.
+        memory: Known local memory capacity in bytes, or ``None`` when unknown.
+        metadata: Bounded discovery source, policy, and diagnostic metadata.
     """
 
     cpus: tuple[int, ...]
@@ -81,12 +87,21 @@ class LocalResourceInventory:
 
     @classmethod
     def local(cls) -> "LocalResourceInventory":
-        """Discover a lightweight inventory using the current process environment."""
+        """Discover lightweight process-visible capacity.
+
+        Returns:
+            A framework-free inventory using the current process environment.
+        """
 
         return local_inventory()
 
     def to_data(self) -> dict[str, Any]:
-        """Return deterministic JSON-compatible inventory data."""
+        """Return deterministic JSON-compatible inventory data.
+
+        Returns:
+            CPU identifiers, accelerator identifiers, optional memory bytes, and
+            bounded metadata suitable for :meth:`from_data`.
+        """
 
         return {
             "cpus": list(self.cpus),
@@ -97,7 +112,17 @@ class LocalResourceInventory:
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "LocalResourceInventory":
-        """Build an inventory from serialized data."""
+        """Build a validated inventory from serialized data.
+
+        Args:
+            data: Mapping emitted by :meth:`to_data`.
+
+        Returns:
+            The immutable local inventory.
+
+        Raises:
+            ResourceValidationError: If fields are unknown or values are invalid.
+        """
 
         if not isinstance(data, Mapping):
             raise ResourceValidationError("local resource inventory must be a mapping")
@@ -115,7 +140,11 @@ class LocalResourceInventory:
         )
 
     def summary(self) -> dict[str, Any]:
-        """Return a bounded deterministic reporting summary."""
+        """Return a bounded deterministic reporting summary.
+
+        Returns:
+            Aggregate CPU/accelerator counts, memory, and bounded metadata.
+        """
 
         return {
             "cpu_count": len(self.cpus),
