@@ -216,6 +216,11 @@ Actual allocation feasibility, backend support, target importability, and topolo
 the backend cannot enforce remain blocking even under
 `requirement_policy="warn"` or `"ignore"`.
 
+`plan_world(..., oversubscribe=True)` is an explicit advanced local-world
+allocator policy. Automatic synthesis remains disjoint; the resulting planning
+metadata records either `disjoint_local` or `oversubscribed_local` under
+`dryml.world_allocation`.
+
 For notebooks, ordinary context APIs are sufficient:
 
 ```python

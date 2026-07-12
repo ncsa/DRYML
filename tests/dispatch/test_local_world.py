@@ -227,6 +227,23 @@ def test_plan_world_metadata_summarizes_assigned_memory_and_accelerators(tmp_pat
     assert dict(worker["accelerators"]) == {"gpu": (0,)}
 
 
+def test_plan_world_metadata_records_explicit_oversubscription(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
+    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+
+    plan = Dispatcher(store=store).plan_world(
+        op,
+        world=world,
+        environment=_env(target_module),
+        inventory=LocalResourceInventory((0,)),
+        oversubscribe=True,
+    )
+
+    metadata = plan.dispatch_spec["payload"]["metadata"]["dryml.world_allocation"]
+    assert metadata["allocation_policy"] == "oversubscribed_local"
+
+
 def test_run_world_two_roles_returns_runtime_and_env_facts(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"trainer": {"replicas": 1, "process": {"resources": {"cpus": 1}}}, "data": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}

@@ -188,7 +188,35 @@ def synthesize(
     inventory_source = "injected" if inventory is not None else "discovered"
     if req is None:
         world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local", "parameters": {}}})
-        return WorldSynthesisResult("synthesized", None, inv.summary(), world, None, (), policy, inv, None, inventory_policy, inventory_source)
+        default_requirement = WorldRequirement.from_data(
+            {"roles": {"main": {"replicas": {"exact": 1}, "resources": {"cpus": {"exact": 1}}}}}
+        )
+        report = check_world_spec_satisfies_requirement(world, default_requirement)
+        if not report.ok:
+            return WorldSynthesisResult(
+                "error",
+                None,
+                inv.summary(),
+                None,
+                report,
+                tuple(
+                    WorldSynthesisDiagnostic(
+                        "authoritative_check_failed",
+                        issue.severity,
+                        issue.message,
+                        issue.path,
+                        issue.expected,
+                        issue.actual,
+                    )
+                    for issue in report.issues
+                ),
+                policy,
+                inv,
+                None,
+                inventory_policy,
+                inventory_source,
+            )
+        return WorldSynthesisResult("synthesized", None, inv.summary(), world, report, (), policy, inv, None, inventory_policy, inventory_source)
     try:
         if len(req.roles) > _MAX_LOCAL_WORLD_WORKERS:
             raise _SynthesisFailure(

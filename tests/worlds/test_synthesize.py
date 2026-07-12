@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from dryml.worlds import LocalResourceInventory, RoleRequirement, WorldRequirement, synthesize
@@ -37,6 +39,7 @@ def test_synthesize_default_and_unknown_memory_failure_are_structured():
 
     assert default.ok
     assert default.world.roles["main"].process.resources.cpus == 1
+    assert default.compatibility is not None and default.compatibility.ok
     assert insufficient_memory.status == "insufficient_inventory"
     assert insufficient_memory.diagnostics[0].code == "memory_unknown"
 
@@ -87,6 +90,17 @@ def test_synthesis_result_serialization_is_bounded():
     ).to_data()
 
     assert len(bounded["inventory"]["deep"]["value"]) == 4096
+
+
+def test_synthesis_result_json_and_failed_require_world_are_structured():
+    result = synthesize(
+        {"roles": {"worker": {"resources": {"named": {"fast_disk": {"min": 1}}}}}},
+        inventory=LocalResourceInventory((0,)),
+    )
+
+    assert json.loads(json.dumps(result.to_data())) == result.to_data()
+    with pytest.raises(Exception, match="world synthesis did not produce"):
+        result.require_world()
 
 
 def test_synthesis_omits_optional_zero_count_accelerators():

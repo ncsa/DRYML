@@ -219,6 +219,7 @@ class Dispatcher:
                 resolution,
                 world_allocation_summary={
                     "backend": "local_subprocess",
+                    "allocation_policy": "disjoint_local",
                     "workers": [{"role": key.role, "replica": key.replica, "cpus": list(allocation.cpus), "memory": allocation.memory, "accelerators": {name: list(values) for name, values in allocation.accelerators.items()}}],
                 },
             )
@@ -442,10 +443,11 @@ class Dispatcher:
             })
         resolution = replace(
             resolution,
-            world_allocation_summary={
-                "backend": "local_world",
-                "workers": allocation_workers,
-            },
+                world_allocation_summary={
+                    "backend": "local_world",
+                    "allocation_policy": "oversubscribed_local" if oversubscribe else "disjoint_local",
+                    "workers": allocation_workers,
+                },
         )
         try:
             marshal = select_marshal_plan(target_store, query_index="none")

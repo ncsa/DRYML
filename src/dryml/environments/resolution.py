@@ -21,7 +21,6 @@ from .specs import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnviro
 from .utils import normalize_distribution_name
 
 _MAX_RECORDED_ATTEMPTS = 32
-_MAX_RAW_CANDIDATE_HEADROOM = 256
 _MAX_SERIALIZED_ITEMS = 64
 _MAX_SERIALIZED_STRING = 4096
 _MAX_SERIALIZED_DEPTH = 8
@@ -84,6 +83,9 @@ class EnvironmentResolution:
             the bounded public trace.
         probe_count: Total probes started during resolution.
         probe_duration_s: Aggregate measured duration of started probes.
+        fallback_spec: Implicit-current candidate retained for dispatch fallback.
+        fallback_record: Reusable record for ``fallback_spec``.
+        fallback_probe: Probe evidence that produced ``fallback_record``.
         diagnostics: Bounded public resolver diagnostics.
         policy: Resolver selection policy.
     """
@@ -162,7 +164,8 @@ def resolve(
         registry: Optional explicit registry, considered in name order.
         include_current: Include the current environment after other sources.
         policy: Supported resolver policy, currently ``"first_compatible"``.
-        max_candidates: Positive bound on unique candidates considered.
+        max_candidates: Positive bound on unique candidates considered, up to
+            the bounded public attempt-trace limit.
         probe_timeout: Per-probe deadline for DRYML-managed probes.
         total_timeout: Total deadline observed between cooperative callbacks.
         probe_runner: Optional probe hook. In-process runners and candidate
@@ -178,6 +181,8 @@ def resolve(
         raise ValueError(f"unsupported environment resolver policy {policy!r}")
     if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates <= 0:
         raise ValueError("max_candidates must be a positive integer")
+    if max_candidates > _MAX_RECORDED_ATTEMPTS:
+        raise ValueError(f"max_candidates must not exceed {_MAX_RECORDED_ATTEMPTS}")
     if probe_timeout is not None and (isinstance(probe_timeout, bool) or not isinstance(probe_timeout, (int, float)) or not math.isfinite(probe_timeout) or probe_timeout <= 0):
         raise ValueError("probe_timeout must be positive or None")
     if total_timeout is not None and (isinstance(total_timeout, bool) or not isinstance(total_timeout, (int, float)) or not math.isfinite(total_timeout) or total_timeout <= 0):
@@ -188,10 +193,10 @@ def resolve(
     now = time.monotonic if clock is None else clock
     started = now()
     deadline = None if total_timeout is None else started + total_timeout
-    # ``max_candidates`` constrains unique identities. Every raw source gets
-    # fixed alias headroom, including finite sequences and registry entries.
-    # This prevents a large alias prefix from making intake unbounded.
-    raw_candidate_limit = max_candidates + _MAX_RAW_CANDIDATE_HEADROOM
+    # The normalized raw prefix and public attempt trace share one bound. This
+    # keeps every considered candidate visible while duplicate-heavy input still
+    # cannot make intake unbounded.
+    raw_candidate_limit = _MAX_RECORDED_ATTEMPTS
     raw_candidates, candidates_truncated, candidates_timed_out = _normalize_candidates(
         candidates,
         max_items=raw_candidate_limit,

@@ -228,13 +228,34 @@ def test_resolver_reports_incomplete_after_bounded_duplicate_sequence():
     assert result.status == "incomplete"
     assert result.selected is None
     assert len(result.attempts) == 32
-    assert result.attempt_count == 264
+    assert result.attempt_count == 32
     assert result.probe_count == 1
     assert result.probe_duration_s >= 0
-    assert result.to_data()["attempt_count"] == 264
-    assert any(issue.code == "resolver_trace_truncated" for issue in result.diagnostics)
+    assert result.to_data()["attempt_count"] == 32
+    assert not any(issue.code == "resolver_trace_truncated" for issue in result.diagnostics)
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
     assert any(issue.code == "resolver_input_truncated" for issue in result.diagnostics)
+
+
+def test_resolver_records_timeout_before_an_unconsidered_candidate():
+    spec = PythonExecutableSpec("/candidate/python")
+    clock_calls = 0
+
+    def clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        return 1.0 if clock_calls >= 7 else 0.0
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        total_timeout=0.5,
+        clock=clock,
+    )
+
+    assert result.status == "incomplete"
+    assert [attempt.status for attempt in result.attempts] == ["not_considered_timeout"]
 
 
 def test_resolver_continues_after_a_invalid_probe_runner_result():

@@ -50,7 +50,8 @@ Local-world CPU and accelerator assignment is enforced through the runtime alloc
 
 `worlds.local_inventory()` discovers CPU, memory, and explicitly declared local
 accelerators without importing ML frameworks or activating a runtime allocation.
-`worlds.synthesize(requirement, inventory=...)` returns a requested local
+`worlds.synthesize(requirement, inventory=...)` returns a
+`WorldSynthesisResult`; use `.require_world()` to obtain its requested local
 `WorldSpec`, not an allocation. The allocator later assigns actual disjoint CPU
 and accelerator identifiers, keeping requested worlds separate from worker
 allocations. Default `lightweight` inventory avoids framework imports and uses

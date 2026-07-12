@@ -338,9 +338,27 @@ def resolve_dispatch_plan(
 ) -> DispatchPlanningResolution:
     """Resolve requirements and candidate checks for one normalized target.
 
-    ``normalized`` is intentionally the only target input.  The resolver never
-    calls normalization and therefore retains live annotation targets supplied by
-    the public normalization boundary.
+    Args:
+        normalized: Already-normalized operation target to evaluate.
+        environment: Optional explicit environment candidate.
+        world: Optional explicit requested world candidate.
+        runtime_spec: Optional explicit runtime candidate.
+        requirement_policy: Strict, warning, or ignore requirement policy.
+        analysis_policy: Optional code-analysis/probe policy.
+        emit_warnings: Emit warning diagnostics through the reporting path.
+        single_worker_only: Require a locally enactable single worker world.
+        environment_candidates: Ordered resolver candidates after higher slots.
+        environment_registry: Explicit registry used by resolver search.
+        inventory: Injected local inventory reused for synthesis and allocation.
+        inventory_policy: Local inventory discovery policy when not injected.
+        resolver_policy: Optional environment resolver policy override.
+
+    Returns:
+        A bounded planning resolution without workload allocation.
+
+    ``normalized`` is intentionally the only target input. The resolver never
+    calls normalization and therefore retains live annotation targets supplied
+    by the public normalization boundary.
     """
 
     enforcement = runtime.enforcement()

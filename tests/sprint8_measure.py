@@ -18,6 +18,7 @@ COUNTERS = {
     "inventory": {"calls": 0, "seconds": 0.0},
     "code_probe": {"calls": 0, "seconds": 0.0},
     "environment_probe": {"calls": 0, "seconds": 0.0},
+    "managed_subprocess_probe": {"calls": 0, "seconds": 0.0},
 }
 
 
@@ -59,6 +60,10 @@ def main() -> int:
     _instrument(environments, "probe", "environment_probe")
     _instrument(registry, "probe", "environment_probe")
     _instrument(resolution, "probe", "environment_probe")
+    # These aliases are the actual bounded worker-launch seam. Counting them
+    # excludes injected fake probe runners used by unit tests.
+    _instrument(environment_probe, "_run_bounded_command", "managed_subprocess_probe")
+    _instrument(code_probe, "_run_bounded_command", "managed_subprocess_probe")
     status = pytest.main([
         "tests/worlds/test_local_inventory.py",
         "tests/worlds/test_synthesize.py",

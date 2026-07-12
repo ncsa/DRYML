@@ -136,7 +136,17 @@ class EnvironmentRegistry:
             ) from exc
 
     def unregister(self, name: str) -> EnvironmentRegistryEntry:
-        """Remove and return a registered environment without probing it."""
+        """Remove and return the entry named *name* without probing it.
+
+        Args:
+            name: Registered entry name to remove.
+
+        Returns:
+            The removed immutable registry entry.
+
+        Raises:
+            EnvironmentRegistryError: If *name* is not registered.
+        """
 
         try:
             entry = self._entries.pop(name)

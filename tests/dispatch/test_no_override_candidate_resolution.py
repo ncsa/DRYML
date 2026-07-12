@@ -237,12 +237,12 @@ def test_explanation_formats_total_resolver_counts_not_bounded_trace_length():
 def test_dispatch_reuses_truncated_current_resolver_evidence(monkeypatch):
     import dryml.dispatch.requirements as requirements
 
-    candidates = tuple(PythonExecutableSpec(f"/candidate-{index}") for index in range(33))
+    candidates = tuple(PythonExecutableSpec(f"/candidate-{index}") for index in range(31))
     record = replace(inspect_current(), tags=())
     resolver_result = resolve(
         EnvironmentRequirement(tags=("resolved",)),
         candidates=candidates,
-        max_candidates=34,
+        max_candidates=32,
         probe_runner=lambda spec, *, timeout: requirements.environments.EnvironmentProbeResult(
             spec,
             True,

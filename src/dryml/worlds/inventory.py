@@ -285,24 +285,31 @@ def _darwin_physical_memory() -> int:
 
 
 def _cgroup_memory_available(diagnostics: list[str]) -> tuple[int | None, str, bool]:
-    """Return an effective cgroup memory allowance when it is explicit."""
+    """Return the most restrictive readable cgroup memory allowance."""
 
+    allowances: list[tuple[int, str]] = []
+    readable = True
     for limit_path, usage_path, source in _cgroup_memory_paths(diagnostics):
         if not limit_path.exists():
             continue
         try:
             raw_limit = limit_path.read_text(encoding="utf-8").strip()
             if raw_limit == "max":
-                return None, source, True
+                continue
             limit = int(raw_limit)
             if limit <= 0 or limit >= 1 << 60:
-                return None, source, True
+                continue
             usage = int(usage_path.read_text(encoding="utf-8").strip())
-            return max(0, limit - usage), source, True
+            allowances.append((max(0, limit - usage), source))
         except Exception as exc:
             diagnostics.append(f"cgroup memory discovery unavailable: {type(exc).__name__}")
-            return None, source, False
-    return None, "none", True
+            readable = False
+    if not readable:
+        return None, "unknown", False
+    if not allowances:
+        return None, "none", True
+    allowance, source = min(allowances, key=lambda item: item[0])
+    return allowance, source, True
 
 
 def _cgroup_memory_paths(diagnostics: list[str]) -> tuple[tuple[Path, Path, str], ...]:
