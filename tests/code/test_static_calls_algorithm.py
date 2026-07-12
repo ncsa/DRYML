@@ -171,6 +171,46 @@ def reassigned_receiver_target(model):
 reassigned_receiver_target.__annotations__["model"] = Model
 
 
+def attribute_reassigned_receiver_target(model):
+    model.train = helper
+    model.train()
+
+
+attribute_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def dynamic_attribute_reassigned_receiver_target(model):
+    setattr(model, "train", helper)
+    model.train()
+
+
+dynamic_attribute_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def local_annotation_target():
+    model = object()
+    model.train()
+
+
+local_annotation_target.__annotations__["model"] = Model
+
+
+def unknown_global_target():
+    unknown_static_global()
+
+
+def spoofed_helper():
+    return None
+
+
+def spoofed_reference_target():
+    spoofed_helper()
+
+
+class ClassSourceTarget:
+    pass
+
+
 def parameter_shadows_global(helper):
     helper()
 
@@ -318,6 +358,9 @@ def test_static_calls_reports_conservative_non_resolution_cases():
         (protocol_annotation_target, "non_standard_annotation_class"),
         (alias_target, "local_name_unsupported"),
         (reassigned_receiver_target, "receiver_reassigned"),
+        (attribute_reassigned_receiver_target, "receiver_reassigned"),
+        (dynamic_attribute_reassigned_receiver_target, "receiver_reassigned"),
+        (local_annotation_target, "attribute_chain_unsupported"),
         (nested_receiver_target, "call_result_receiver"),
         (parameter_shadows_global, "parameter_name_unsupported"),
         (local_shadows_global, "local_name_unsupported"),
@@ -344,6 +387,36 @@ def test_static_calls_does_not_invoke_callable_instances_or_dynamic_getattr():
     assert callable_facts[0].data["status"] == "unsupported"
     assert hostile_facts[0].data["status"] == "unsupported"
     assert all(fact.data["status"] != "resolved" for fact in dynamic_facts)
+
+
+def test_static_calls_reports_unknown_globals_and_class_source_availability():
+    unknown_result, unknown_facts = _facts(unknown_global_target)
+    class_result = code.analyze(ClassSourceTarget, algorithms=("static_calls",))
+
+    assert unknown_result.ok
+    assert unknown_facts[0].data["status"] == "unresolved"
+    assert unknown_facts[0].data["reason"] == "global_name_unavailable"
+    assert class_result.facts_of_kind("static_call_summary")
+    assert not class_result.diagnostics_of_code("dryml.code.source_unavailable")
+
+
+def test_static_calls_does_not_publish_unverified_or_oversized_import_references():
+    original_module = spoofed_helper.__module__
+    original_qualname = spoofed_helper.__qualname__
+    try:
+        spoofed_helper.__module__ = "builtins"
+        spoofed_helper.__qualname__ = "len"
+        _, facts = _facts(spoofed_reference_target)
+        assert facts[0].data["status"] == "resolved"
+        assert facts[0].data["target"]["import_path"] is None
+
+        spoofed_helper.__module__ = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
+        result, oversized_facts = _facts(spoofed_reference_target)
+        assert oversized_facts[0].data["reason"] == "target_reference_limit_exceeded"
+        assert result.diagnostics_of_code("dryml.code.static_target_reference_limit_exceeded")
+    finally:
+        spoofed_helper.__module__ = original_module
+        spoofed_helper.__qualname__ = original_qualname
 
 
 def test_static_calls_does_not_inspect_hostile_targets_or_wrapped_metadata():

@@ -293,42 +293,42 @@ def target_from_class_attribute(
         diagnostics.append(DiagnosticFact(
             severity="error",
             code="dryml.code.class_attribute_missing",
-            message=f"Class attribute {name!r} is not present on {cls.__qualname__!r}.",
+            message=f"Class attribute {name!r} is not present on {object.__getattribute__(cls, '__qualname__')!r}.",
             source={"target_kind": "class_attribute", "attribute_name": name},
             data={"error": repr(exc)},
         ))
         raw_descriptor = None
 
-    obj = getattr(cls, name, None)
-    if isinstance(raw_descriptor, classmethod):
+    unwrapped = _unwrap_descriptor(raw_descriptor)
+    if type(raw_descriptor) is classmethod:
         kind = "class_method"
-    elif isinstance(raw_descriptor, staticmethod):
+    elif type(raw_descriptor) is staticmethod:
         kind = "static_method"
-    elif inspect.isfunction(_unwrap_descriptor(raw_descriptor)):
+    elif type(unwrapped) is types.FunctionType:
         kind = "unbound_method"
     else:
         kind = "unknown"
 
     local_metadata = {
-        "module": getattr(_unwrap_descriptor(raw_descriptor), "__module__", getattr(cls, "__module__", None)),
-        "qualname": getattr(_unwrap_descriptor(raw_descriptor), "__qualname__", None),
-        "owner_module": getattr(cls, "__module__", None),
-        "owner_qualname": getattr(cls, "__qualname__", None),
+        "module": _object_module(unwrapped) or _object_module(cls),
+        "qualname": _object_qualname(unwrapped),
+        "owner_module": _object_module(cls),
+        "owner_qualname": _object_qualname(cls),
         **dict(metadata or {}),
     }
     spec = CodeTargetSpec(
         kind,
-        import_path=_object_import_path(raw_descriptor),
+        import_path=_object_import_path(unwrapped),
         method_name=name,
         metadata=local_metadata,
     )
     return CodeTarget(
         spec=spec,
-        obj=obj,
+        obj=unwrapped,
         owner=cls,
         attribute_name=name,
         raw_descriptor=raw_descriptor,
-        unwrapped=_unwrap_descriptor(raw_descriptor),
+        unwrapped=unwrapped,
         metadata=metadata or {},
         diagnostics=tuple(diagnostics),
     )
@@ -341,21 +341,25 @@ def target_from_definition_method(
 ) -> CodeTarget:
     """Create a representational target for a method on a definition/class."""
 
-    raw_descriptor = getattr(cls, "__dict__", {}).get(method_name) if cls is not None else None
+    try:
+        raw_descriptor = inspect.getattr_static(cls, method_name) if cls is not None else None
+    except AttributeError:
+        raw_descriptor = None
+    unwrapped = _unwrap_descriptor(raw_descriptor)
     spec = CodeTargetSpec(
         "definition_method",
-        import_path=_object_import_path(raw_descriptor) if raw_descriptor is not None else None,
+        import_path=_object_import_path(unwrapped) if raw_descriptor is not None else None,
         method_name=method_name,
         subject_ref=subject_ref,
         metadata={"owner": _object_import_path(cls) if cls is not None else None},
     )
     return CodeTarget(
         spec=spec,
-        obj=getattr(cls, method_name, None) if cls is not None else None,
+        obj=unwrapped,
         owner=cls,
         attribute_name=method_name,
         raw_descriptor=raw_descriptor,
-        unwrapped=_unwrap_descriptor(raw_descriptor),
+        unwrapped=unwrapped,
     )
 
 
@@ -421,13 +425,15 @@ def _resolve_qualname(root: Any, qualname: str) -> Any:
 
 def _object_import_path(obj: Any) -> str | None:
     target = _unwrap_descriptor(obj)
-    module_name = getattr(target, "__module__", None)
-    qualname = getattr(target, "__qualname__", None)
+    if type(target) not in {types.FunctionType, type}:
+        return None
+    module_name = _object_module(target)
+    qualname = _object_qualname(target)
     if not module_name or not qualname or module_name == "__main__" or "<locals>" in qualname:
         return None
     try:
         module = importlib.import_module(module_name)
-        resolved = _resolve_qualname(module, qualname)
+        resolved = _resolve_static_qualname(module, qualname)
     except Exception:
         return None
     if resolved is target:
@@ -436,9 +442,40 @@ def _object_import_path(obj: Any) -> str | None:
 
 
 def _unwrap_descriptor(obj: Any) -> Any:
-    if isinstance(obj, (staticmethod, classmethod)):
-        return obj.__func__
-    return getattr(obj, "__func__", obj)
+    if type(obj) in {staticmethod, classmethod}:
+        return object.__getattribute__(obj, "__func__")
+    if type(obj) is types.MethodType:
+        return object.__getattribute__(obj, "__func__")
+    return obj
+
+
+def _object_module(obj: Any) -> str | None:
+    """Return safe module metadata for a plain function or ordinary class."""
+
+    if type(obj) not in {types.FunctionType, type}:
+        return None
+    value = object.__getattribute__(obj, "__module__")
+    return value if isinstance(value, str) else None
+
+
+def _object_qualname(obj: Any) -> str | None:
+    """Return safe qualname metadata for a plain function or ordinary class."""
+
+    if type(obj) not in {types.FunctionType, type}:
+        return None
+    value = object.__getattribute__(obj, "__qualname__")
+    return value if isinstance(value, str) else None
+
+
+def _resolve_static_qualname(root: Any, qualname: str) -> Any:
+    """Resolve a qualname without binding descriptors or dynamic attributes."""
+
+    obj = root
+    for part in qualname.split("."):
+        if part == "<locals>":
+            raise ValueError("Cannot resolve local qualname components.")
+        obj = inspect.getattr_static(obj, part)
+    return _unwrap_descriptor(obj)
 
 
 __all__ = [

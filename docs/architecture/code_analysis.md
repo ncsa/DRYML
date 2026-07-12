@@ -143,6 +143,17 @@ cross-environment tracing is not implied by this contract.
 
 ### Target and Location Support
 
+| Input | Direct `analyze` | Inline `probe_target` | Subprocess probe | `static_calls` |
+|---|---|---|---|---|
+| Live module-level importable function | Supported | Supported | Stable import path only | Supported when source exists |
+| Import path string/spec | Supported when imports are allowed | Supported | Supported | Supported after import/source retrieval |
+| Live notebook or `__main__` function | Supported | Supported without timeout | Unsupported | Supported when source is available |
+| Live local function/closure | Supported | Supported without timeout | Unsupported | Supported without inferring captured values |
+| Live bound method | Supported inline | Supported without timeout | Unsupported because receiver state is not transported | Supported from the live method source |
+| Importable class or unbound method | Supported | Supported | Stable import path only | Supported when source exists |
+| Source-spec-only target | Descriptive only | Descriptive only | Unsupported | Unavailable until reconstruction exists |
+| Unknown/non-callable target | Structured normalization diagnostic | Structured normalization diagnostic | Unsupported | Not applicable |
+
 | Requested location | Import-path target | Live non-importable target | Source-spec-only target | Timeout guarantee |
 |---|---|---|---|---|
 | Direct `analyze(...)` | Inline import and analysis | Inline analysis | Descriptive only; live-object analyzers report unavailable | None |
@@ -202,7 +213,6 @@ distinct outcomes.
 
 ## Non-Goals
 
-- This note does not add code probes.
 - This note does not add dynamic tracing or export `trace(...)`.
 - This note does not implement source-spec subprocess reconstruction.
 - This note does not add static-call dispatch policy or alter dispatch planning.

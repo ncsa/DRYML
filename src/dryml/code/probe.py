@@ -334,9 +334,10 @@ def probe_target(
 
     Import-path targets may execute module-level code while being imported by
     Python. Probe mode does not execute target function bodies or instantiate
-    classes. Subprocess execution requires a stable import path; source-spec
-    reconstruction is not implemented. Unsupported environment specs return structured diagnostics rather
-    than attempting package solving, container execution, or world synthesis.
+    classes. Subprocess execution requires a stable import path and cannot carry
+    live bound-method receiver state; source-spec reconstruction is not
+    implemented. Unsupported environment specs return structured diagnostics
+    rather than attempting package solving, container execution, or world synthesis.
     """
 
     code_target: CodeTarget | None = None
@@ -381,6 +382,8 @@ def probe_target(
     )
     if environment is None or isinstance(environment, CurrentEnvironmentSpec):
         if timeout is not None:
+            if target_spec.kind == "bound_method":
+                return _bound_method_worker_result(target_spec)
             if _target_can_run_in_subprocess(target_spec):
                 env = build_probe_env(base=None, overrides=None, pythonpath_policy="inherit")
                 return probe_target_in_subprocess(request, [sys.executable, *PROBE_WORKER_ARGS], timeout=timeout, env=env)
@@ -400,10 +403,14 @@ def probe_target(
             return _run_probe_request_normalized(request, analysis_target=code_target)
         return run_probe_request(request, environment=environment)
     if isinstance(environment, PythonExecutableSpec):
+        if target_spec.kind == "bound_method":
+            return _bound_method_worker_result(target_spec)
         if not _target_can_run_in_subprocess(target_spec):
             return _non_serializable_target_result(target_spec)
         return probe_target_in_subprocess(request, _python_command(environment), timeout=timeout, env=_python_env(environment))
     if isinstance(environment, CondaEnvironmentSpec):
+        if target_spec.kind == "bound_method":
+            return _bound_method_worker_result(target_spec)
         if not _target_can_run_in_subprocess(target_spec):
             return _non_serializable_target_result(target_spec)
         try:
@@ -523,7 +530,7 @@ def _validate_schema_version(data: Mapping[str, Any]) -> None:
 def _target_can_run_in_subprocess(target: CodeTargetSpec) -> bool:
     """Return whether *target* has the stable import path required by workers."""
 
-    if not isinstance(target.import_path, str):
+    if target.kind == "bound_method" or not isinstance(target.import_path, str):
         return False
     module_name, separator, qualname = target.import_path.partition(":")
     return bool(separator and module_name.strip() and qualname.strip())
@@ -548,6 +555,21 @@ def _non_serializable_target_result(target: CodeTargetSpec) -> CodeProbeResult:
         diagnostics=(diagnostic(
             "code_probe.non_serializable_target",
             "Target cannot be probed in a subprocess without a stable import path.",
+            data={"target": target.to_data()},
+        ),),
+    )
+
+
+def _bound_method_worker_result(target: CodeTargetSpec) -> CodeProbeResult:
+    """Reject worker routing that would silently drop a live receiver instance."""
+
+    return CodeProbeResult(
+        ok=False,
+        analysis=None,
+        environment_record=None,
+        diagnostics=(diagnostic(
+            "code_probe.bound_method_receiver_unavailable",
+            "A live bound-method receiver cannot be reconstructed in a subprocess code probe.",
             data={"target": target.to_data()},
         ),),
     )

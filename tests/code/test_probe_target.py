@@ -103,6 +103,17 @@ def test_current_process_timeout_rejects_live_non_serializable_function():
     assert result.diagnostics[0].code == "code_probe.timeout"
 
 
+def test_worker_probe_rejects_live_bound_method_receiver_state():
+    result = code.probe_target(
+        LiveBoundTarget().inspectable_method,
+        include_environment_record=False,
+        timeout=1,
+    )
+
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.bound_method_receiver_unavailable"
+
+
 def test_current_process_timeout_rejects_source_spec_without_reconstruction():
     spec = code.CodeTargetSpec("source_spec", source_spec={"kind": "function", "source": "lambda x: x"})
 
@@ -110,6 +121,19 @@ def test_current_process_timeout_rejects_source_spec_without_reconstruction():
 
     assert not result.ok
     assert result.diagnostics[0].code == "code_probe.source_spec_reconstruction_unavailable"
+    assert "reconstruction is not implemented" in result.diagnostics[0].message.lower()
+
+
+def test_probe_inline_main_module_function_remains_available(monkeypatch):
+    def notebook_target():
+        return "not executed"
+
+    monkeypatch.setattr(notebook_target, "__module__", "__main__")
+    result = code.probe_target(notebook_target, include_environment_record=False)
+
+    assert result.ok
+    assert result.analysis is not None
+    assert result.analysis.facts_of_kind("callable")
 
 
 def test_probe_method_classmethod_and_staticmethod_annotations():

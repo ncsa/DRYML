@@ -10,6 +10,15 @@ class CallableInstance:
         return value
 
 
+class HostileDescriptor:
+    def __get__(self, instance, owner):
+        raise AssertionError("target construction must not bind descriptors")
+
+
+class HostileDescriptorOwner:
+    method = HostileDescriptor()
+
+
 def test_import_path_target_resolves(requirement_targets):
     target = code.target_from_import_path("dryml_requirement_targets:plain_importable_function")
 
@@ -91,3 +100,13 @@ def test_missing_class_attribute_target_diagnostic(requirement_targets):
 
     assert target.spec.kind == "unknown"
     assert target.diagnostics[0].code == "dryml.code.class_attribute_missing"
+
+
+def test_class_attribute_and_definition_targets_do_not_bind_descriptors():
+    class_attribute = code.target_from_class_attribute(HostileDescriptorOwner, "method")
+    definition_method = code.target_from_definition_method("subject", HostileDescriptorOwner, "method")
+
+    assert class_attribute.raw_descriptor is HostileDescriptorOwner.__dict__["method"]
+    assert class_attribute.obj is class_attribute.raw_descriptor
+    assert definition_method.raw_descriptor is HostileDescriptorOwner.__dict__["method"]
+    assert definition_method.obj is definition_method.raw_descriptor

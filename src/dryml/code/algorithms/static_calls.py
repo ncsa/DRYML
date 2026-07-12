@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sys
 import types
 from collections.abc import Mapping
 from typing import Any
@@ -138,7 +139,8 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             source={"analyzer": "static_calls", "target_kind": target.spec.kind},
         ),))
     function = _function_for_target(target)
-    info = get_source_info(function) if function is not None else None
+    source_target = function or target.unwrapped or target.obj
+    info = get_source_info(source_target) if source_target is not None else None
     if info is None:
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
             severity="warning",
@@ -160,7 +162,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     root = _analysis_root(parsed.tree)
     collector = _CallCollector()
     collector.collect_root(root)
-    globals_mapping = object.__getattribute__(function, "__globals__") if function is not None else {}
+    globals_mapping = _globals_for_target(function, source_target)
     annotations = _parameter_annotations(function)
     parameter_names = _parameter_names(root)
     free_names = _free_names(function)
@@ -191,16 +193,24 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             "limits": STATIC_ANALYSIS_LIMITS,
         },
     )
-    diagnostics: tuple[DiagnosticFact, ...] = ()
+    diagnostics: list[DiagnosticFact] = []
     if collector.exhausted:
-        diagnostics = (limit_diagnostic(
+        diagnostics.append(limit_diagnostic(
             target,
             "static_calls",
             limit_name="call_sites",
             limit=MAX_CALL_SITES,
             observed_lower_bound=collector.call_sites_seen,
-        ),)
-    return CodeAnalysisResult(target=target.spec, facts=(*facts, summary), diagnostics=diagnostics)
+        ))
+    if any(fact.data["reason"] == "target_reference_limit_exceeded" for fact in facts):
+        diagnostics.append(DiagnosticFact(
+            severity="error",
+            code="dryml.code.static_target_reference_limit_exceeded",
+            message="A static call target reference exceeded the serialized scalar limit.",
+            source={"analyzer": "static_calls", "target_kind": target.spec.kind},
+            data={"limit_name": "scalar_chars", "limit": MAX_STATIC_SCALAR_CHARS},
+        ))
+    return CodeAnalysisResult(target=target.spec, facts=(*facts, summary), diagnostics=tuple(diagnostics))
 
 
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
@@ -229,6 +239,19 @@ def _function_for_target(target: CodeTarget) -> Any | None:
     if type(candidate) is types.MethodType:
         return object.__getattribute__(candidate, "__func__")
     return candidate if type(candidate) is types.FunctionType else None
+
+
+def _globals_for_target(function: Any | None, source_target: Any | None) -> Mapping[str, Any]:
+    """Return a safe globals mapping for a function or ordinary class source."""
+
+    if function is not None:
+        return object.__getattribute__(function, "__globals__")
+    if type(source_target) is type:
+        module_name = object.__getattribute__(source_target, "__module__")
+        module = sys.modules.get(module_name)
+        if module is not None:
+            return vars(module)
+    return {}
 
 
 def _parameter_annotations(function: Any | None) -> Mapping[str, Any]:
@@ -306,10 +329,10 @@ def _fact_for_call(
             reason = "global_name_unavailable"
         else:
             value = globals_mapping[func.id]
-            target_data = _safe_function_target_data(value)
+            target_data, target_reason = _safe_function_target_data(value)
             if target_data is None:
                 status = "unsupported"
-                reason = "global_value_not_safe_function"
+                reason = target_reason or "global_value_not_safe_function"
             else:
                 status = "resolved"
     elif isinstance(func, ast.Attribute):
@@ -332,18 +355,17 @@ def _fact_for_call(
                 syntax = "attribute_chain"
                 status = "unsupported"
                 reason = "attribute_chain_unsupported"
-            elif receiver in annotations:
+            elif receiver in parameter_names:
                 syntax = "annotated_receiver_method"
                 if receiver in bound_names:
                     status = "unresolved"
                     reason = "receiver_reassigned"
+                elif receiver not in annotations:
+                    status = "unresolved"
+                    reason = "missing_annotation"
                 else:
                     annotation = annotations[receiver]
                     target_data, status, reason = _resolve_annotated_method(annotation, method_name)
-            elif receiver in parameter_names:
-                syntax = "annotated_receiver_method"
-                status = "unresolved"
-                reason = "missing_annotation"
             else:
                 syntax = "attribute_chain"
                 status = "unsupported"
@@ -411,6 +433,7 @@ class _BindingCollector(ast.NodeVisitor):
     def _add_targets(self, targets: tuple[ast.AST, ...]) -> None:
         for target in targets:
             self.names.update(_target_names(target))
+            self.names.update(_attribute_receiver_names(target))
 
     def visit_Assign(self, node: ast.Assign) -> None:
         self._add_targets(tuple(node.targets))
@@ -426,6 +449,18 @@ class _BindingCollector(ast.NodeVisitor):
 
     def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
         self._add_targets((node.target,))
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        """Treat dynamic attribute mutation as a conservative receiver rebind."""
+
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in {"setattr", "delattr"}
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            self.names.add(node.args[0].id)
         self.generic_visit(node)
 
     def visit_Delete(self, node: ast.Delete) -> None:
@@ -513,6 +548,17 @@ def _target_names(node: ast.AST) -> set[str]:
     return set()
 
 
+def _attribute_receiver_names(node: ast.AST) -> set[str]:
+    """Return receiver names mutated through attribute assignment or deletion."""
+
+    if not isinstance(node, ast.Attribute):
+        return set()
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        current = current.value
+    return {current.id} if isinstance(current, ast.Name) else set()
+
+
 def _resolve_annotated_method(annotation: Any, method_name: str | None) -> tuple[dict[str, str | None] | None, str, str | None]:
     if method_name is None:
         return None, "unsupported", "method_name_unavailable"
@@ -534,9 +580,9 @@ def _resolve_annotated_method(annotation: Any, method_name: str | None) -> tuple
         candidate = descriptor
     else:
         return None, "unsupported", "annotated_member_not_safe_function"
-    target_data = _safe_function_target_data(candidate, method_name=method_name)
+    target_data, target_reason = _safe_function_target_data(candidate, method_name=method_name)
     if target_data is None:
-        return None, "unsupported", "target_reference_limit_exceeded"
+        return None, "unsupported", target_reason or "target_reference_limit_exceeded"
     return target_data, "resolved", None
 
 
@@ -545,7 +591,7 @@ def _safe_function_target_data(
     *,
     method_name: str | None = None,
     subject_ref: str | None = None,
-) -> dict[str, str | None] | None:
+) -> tuple[dict[str, str | None] | None, str | None]:
     """Describe a plain Python function without dynamic attribute access.
 
     Arbitrary callable instances and descriptors are intentionally unsupported:
@@ -553,7 +599,7 @@ def _safe_function_target_data(
     """
 
     if type(value) is not types.FunctionType:
-        return None
+        return None, "global_value_not_safe_function"
     module_name = object.__getattribute__(value, "__module__")
     qualname = object.__getattribute__(value, "__qualname__")
     import_path = None
@@ -563,13 +609,36 @@ def _safe_function_target_data(
         and module_name != "__main__"
         and "<locals>" not in qualname
     ):
-        import_path = f"{module_name}:{qualname}"
-    return bounded_target_mapping({
+        candidate_path = f"{module_name}:{qualname}"
+        if len(candidate_path) > MAX_STATIC_SCALAR_CHARS:
+            return None, "target_reference_limit_exceeded"
+        if _path_resolves_to_function(candidate_path, value):
+            import_path = candidate_path
+    target = bounded_target_mapping({
         "kind": "function",
         "import_path": import_path,
         "method_name": method_name,
         "subject_ref": subject_ref,
     })
+    return target, None if target is not None else "target_reference_limit_exceeded"
+
+
+def _path_resolves_to_function(path: str, value: types.FunctionType) -> bool:
+    """Verify a prospective import path without dynamic module/class lookups."""
+
+    module_name, qualname = path.split(":", 1)
+    module = sys.modules.get(module_name)
+    if module is None:
+        return False
+    current: Any = module
+    try:
+        for part in qualname.split("."):
+            current = inspect.getattr_static(current, part)
+    except AttributeError:
+        return False
+    if type(current) in {staticmethod, classmethod}:
+        current = current.__func__
+    return current is value
 
 
 ANALYZER = FunctionAnalyzer("static_calls", analyze_target, can_analyze)

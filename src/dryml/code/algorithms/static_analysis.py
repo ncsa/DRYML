@@ -85,11 +85,11 @@ def parse_static_source(
         tree = ast.parse(source)
     except SyntaxError as exc:
         return None, DiagnosticFact(
-            severity="warning",
+            severity="error",
             code="dryml.code.ast_parse_failed",
             message="Source could not be parsed for static analysis.",
             source={"analyzer": analyzer, "target_kind": target.spec.kind},
-            data={"error": repr(exc)},
+            data={"error_type": type(exc).__name__},
         )
 
     node_count = 0

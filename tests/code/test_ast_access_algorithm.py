@@ -40,6 +40,8 @@ def test_ast_access_parse_failure_and_no_source(monkeypatch, requirement_targets
     no_source = code.analyze(len, algorithms=("ast_access",))
 
     assert parse_failed.diagnostics_of_code("dryml.code.ast_parse_failed")
+    assert not parse_failed.ok
+    assert parse_failed.diagnostics_of_code("dryml.code.ast_parse_failed")[0].data == {"error_type": "SyntaxError"}
     assert no_source.diagnostics_of_code("dryml.code.source_unavailable")
 
 
