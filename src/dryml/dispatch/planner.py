@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -62,11 +62,13 @@ class Dispatcher:
 
         self.backend = backend if backend is not None else LocalSubprocessBackend()
         self.store = store
-        if isinstance(environment_candidates, Iterator):
-            raise TypeError(
-                "Dispatcher environment_candidates must be a re-iterable; "
-                "materialize one-shot iterators before configuring a dispatcher"
-            )
+        if environment_candidates is not None:
+            first_iteration = iter(environment_candidates)
+            if first_iteration is iter(environment_candidates):
+                raise TypeError(
+                    "Dispatcher environment_candidates must be a re-iterable; "
+                    "materialize one-shot iterators before configuring a dispatcher"
+                )
         self.environment_candidates = environment_candidates
         self.environment_registry = environment_registry
         self.inventory = inventory

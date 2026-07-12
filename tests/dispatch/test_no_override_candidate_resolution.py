@@ -125,6 +125,44 @@ def test_dispatch_blocks_incomplete_environment_resolution_without_fallback_prob
     assert calls == [rejected]
 
 
+@pytest.mark.parametrize("policy", ("strict", "warn", "ignore"))
+def test_dispatch_blocks_probe_deadline_exhaustion_without_relaxed_fallback(monkeypatch, policy):
+    import dryml.dispatch.requirements as requirements
+    from dryml.environments.resolution import resolve as resolve_environments
+
+    candidate = PythonExecutableSpec("/slow-candidate/python")
+    clock_state = {"now": 0.0}
+
+    def delayed_probe(spec, *, timeout):
+        clock_state["now"] = 1.0
+        return requirements.environments.EnvironmentProbeResult(
+            spec,
+            True,
+            record=replace(inspect_current(), tags=("resolved",)),
+        )
+
+    def resolve_with_short_deadline(requirement, **kwargs):
+        kwargs.pop("probe_runner")
+        return resolve_environments(
+            requirement,
+            **kwargs,
+            total_timeout=0.5,
+            clock=lambda: clock_state["now"],
+            probe_runner=delayed_probe,
+        )
+
+    monkeypatch.setattr(requirements.environments, "resolve", resolve_with_short_deadline)
+    dispatch_resolution = resolve_dispatch_plan(
+        normalize_user_operation(resolver_target, allow_pickle=True),
+        environment_candidates=(candidate,),
+        requirement_policy=policy,
+    )
+
+    assert dispatch_resolution.environment_resolution is not None
+    assert dispatch_resolution.environment_resolution.status == "incomplete"
+    assert not dispatch_resolution.launchable
+
+
 def test_attached_record_does_not_bypass_unsupported_environment_launch():
     explanation = Dispatcher().explain(
         make_function_call_spec("operator:add", args=[1, 2]),
@@ -202,6 +240,18 @@ def test_per_call_none_clears_configured_registry_default():
 def test_dispatcher_rejects_retained_one_shot_candidate_iterators():
     with pytest.raises(TypeError, match="re-iterable"):
         Dispatcher(environment_candidates=iter((PythonExecutableSpec("/candidate/python"),)))
+
+
+def test_dispatcher_rejects_retained_one_shot_candidate_iterable_wrappers():
+    class OneShotCandidates:
+        def __init__(self):
+            self._iterator = iter((PythonExecutableSpec("/candidate/python"),))
+
+        def __iter__(self):
+            return self._iterator
+
+    with pytest.raises(TypeError, match="re-iterable"):
+        Dispatcher(environment_candidates=OneShotCandidates())
 
 
 def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeypatch):

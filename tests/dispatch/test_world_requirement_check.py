@@ -117,7 +117,7 @@ def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
 def test_run_allocates_synthesized_gpu_world_into_worker(tmp_path, target_module):
     target_module.write_text(
         target_module.read_text(encoding="utf-8")
-        + "\nimport dryml\n@dryml.world.req(accelerators={'gpu': {'min': 1}})\ndef synthesized_gpu_facts():\n    return allocation_facts()\n",
+        + "\nimport dryml\nIMPORT_CUDA_VISIBLE_DEVICES = os.environ.get('CUDA_VISIBLE_DEVICES')\n@dryml.world.req(accelerators={'gpu': {'min': 1}})\ndef synthesized_gpu_facts():\n    return {**allocation_facts(), 'import_cuda_visible_devices': IMPORT_CUDA_VISIBLE_DEVICES, 'execution_cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES')}\n",
         encoding="utf-8",
     )
     result = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).run(
@@ -131,6 +131,8 @@ def test_run_allocates_synthesized_gpu_world_into_worker(tmp_path, target_module
     assert result.status == "ok"
     assert result.result_canonical["accelerators"] == {"gpu": ["gpu-a"]}
     assert result.result_canonical["role"] == "main"
+    assert result.result_canonical["import_cuda_visible_devices"] == "gpu-a"
+    assert result.result_canonical["execution_cuda_visible_devices"] == "gpu-a"
 
 
 def test_run_world_synthesizes_omitted_multi_worker_world(tmp_path, target_module):

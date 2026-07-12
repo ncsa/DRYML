@@ -20,6 +20,12 @@ def test_inventory_round_trip_is_deterministic():
     assert inventory.summary()["accelerator_counts"] == {"gpu": 2}
 
 
+def test_dispatch_inventory_re_export_is_the_worlds_owned_type():
+    from dryml import dispatch
+
+    assert dispatch.LocalResourceInventory is LocalResourceInventory
+
+
 @pytest.mark.parametrize("identifier", ("", "0,1", "GPU\x00unsafe", -1, "-1", "-7", "all", "none", "VOID"))
 def test_inventory_rejects_unsafe_accelerator_visibility_identifiers(identifier):
     with pytest.raises(ResourceValidationError, match="accelerator identifier"):
@@ -207,6 +213,18 @@ def test_external_inventory_discards_partial_output_and_negative_identifiers(tmp
 
     assert "gpu" not in inventory.accelerators
     assert "gpu" not in negative.accelerators
+
+
+def test_external_inventory_discards_oversized_identifiers(tmp_path):
+    inventory = local_inventory(
+        policy="external",
+        environ={},
+        device_root=tmp_path,
+        command_runner=lambda *_args, **_kwargs: f"{1 << 4096}\n",
+    )
+
+    assert "gpu" not in inventory.accelerators
+    assert any(item.startswith("external accelerator discovery unavailable") for item in inventory.metadata["diagnostics"])
 
 
 @pytest.mark.parametrize("field,value", (("accelerators", []), ("accelerators", ""), ("metadata", []), ("metadata", "")))

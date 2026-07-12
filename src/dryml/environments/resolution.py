@@ -278,6 +278,9 @@ def resolve(
                 diagnostics=timeout_report.issues,
                 probe_duration_s=probe_duration_s,
             ))
+            # The completed probe consumed the resolver deadline, so later
+            # ordered candidates remain unsearched and cannot be bypassed.
+            search_incomplete = True
             break
         if not result.ok or result.record is None:
             diagnostics = () if result.report is None else result.report.issues

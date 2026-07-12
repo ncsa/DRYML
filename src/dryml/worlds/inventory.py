@@ -398,9 +398,7 @@ def _merge_external_accelerators(accelerators: dict[str, tuple[str | int, ...]],
             diagnostics.append("external accelerator output was truncated")
             text = text[:_MAX_EXTERNAL_OUTPUT_CHARS]
             text = text.rsplit("\n", 1)[0] if "\n" in text else ""
-        values = tuple(int(line.strip()) for line in text.splitlines() if line.strip())
-        if any(value < 0 for value in values):
-            raise ValueError("external accelerator identifiers must be non-negative")
+        values = tuple(_nonneg_int(int(line.strip()), "external accelerator identifier") for line in text.splitlines() if line.strip())
         if len(values) > _MAX_EXTERNAL_DEVICE_IDS:
             diagnostics.append("external accelerator identifiers were truncated")
             values = values[:_MAX_EXTERNAL_DEVICE_IDS]

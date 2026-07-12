@@ -391,7 +391,7 @@ def test_resolver_records_probe_duration():
     assert result.attempts[0].to_data()["probe_duration_s"] >= 0
 
 
-def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_failed():
+def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_incomplete():
     spec = PythonExecutableSpec("/candidate/python")
     state = {"now": 0.0}
 
@@ -409,6 +409,7 @@ def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_failed():
     )
 
     attempt = result.attempts[0]
+    assert result.status == "incomplete"
     assert attempt.status == "probe_failed"
     assert attempt.probe_duration_s == 1.0
     assert attempt.probe is not None and not attempt.probe.ok
