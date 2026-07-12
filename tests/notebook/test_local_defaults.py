@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+
 import dryml
+import pytest
 
 from dryml.dispatch import Dispatcher
 from dryml.core2.store.dir import DirStore
@@ -21,6 +26,9 @@ def test_notebook_context_defaults_are_selected_and_restored_without_allocation(
         assert explanation.resolution.world_selection.source == "current"
         assert explanation.resolution.world_allocation_summary is None
         assert "environment_attempts=" in str(explanation)
+        assert "environment=current" in str(explanation)
+        assert "world=current" in str(explanation)
+        assert "launchable=" in str(explanation)
         with dryml.environments.use(CurrentEnvironmentSpec()), dryml.worlds.use(WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {}}}})):
             assert dryml.worlds.current() != requested_world
         assert dryml.worlds.current() == requested_world
@@ -44,5 +52,20 @@ def test_notebook_registry_explain_is_explicit_repeatable_and_allocation_free(tm
     assert explanation.resolution.environment_selection.source == "resolver"
     assert registry.list() == (entry,)
     assert repeated.to_data() == explanation.to_data()
+    with pytest.raises(Exception):
+        registry.register("current", CurrentEnvironmentSpec())
     assert is_no_allocation(active_runtime().allocation)
     assert not store.records.specs_dir.exists()
+
+
+def test_notebook_explain_does_not_import_framework_modules():
+    command = (
+        "import json, sys; "
+        "from dryml.dispatch import Dispatcher; "
+        "from dryml.operations import make_function_call_spec; "
+        "Dispatcher().explain(make_function_call_spec('operator:add', args=[1, 2])); "
+        "print(json.dumps(sorted(name for name in sys.modules if name.split('.')[0] in {'torch', 'tensorflow', 'jax', 'jaxlib', 'keras', 'cupy', 'pynvml', 'py3nvml', 'nvidia'})))"
+    )
+    output = subprocess.check_output([sys.executable, "-c", command], text=True)
+
+    assert json.loads(output) == []

@@ -62,6 +62,10 @@ class WorldSynthesisResult:
         diagnostics: Ordered structured synthesis findings.
         policy: Applied synthesis policy.
         resource_inventory: Internal inventory reused by dispatch allocation.
+        inventory_discovery_error: Internal cached discovery failure reused by
+            dispatch reconciliation to avoid a second host inventory read.
+        inventory_policy: Discovery policy used or requested for inventory.
+        inventory_source: Whether inventory was injected, discovered, or failed.
     """
 
     status: str
@@ -72,6 +76,9 @@ class WorldSynthesisResult:
     diagnostics: tuple[WorldSynthesisDiagnostic, ...]
     policy: str
     resource_inventory: LocalResourceInventory | None = None
+    inventory_discovery_error: str | None = None
+    inventory_policy: str | None = None
+    inventory_source: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -112,6 +119,8 @@ class WorldSynthesisResult:
             },
             "diagnostics": [item.to_data() for item in self.diagnostics],
             "policy": self.policy,
+            "inventory_policy": self.inventory_policy,
+            "inventory_source": self.inventory_source,
         }
         return _bounded_data(data)
 
@@ -122,6 +131,7 @@ def synthesize(
     inventory: LocalResourceInventory | None = None,
     policy: str = "local",
     inventory_policy: str = "lightweight",
+    _inventory_discovery_error: str | None = None,
 ) -> WorldSynthesisResult:
     """Build the smallest disjoint local ``WorldSpec`` satisfying *requirement*.
 
@@ -143,18 +153,42 @@ def synthesize(
     if inventory_policy not in {"lightweight", "external"}:
         raise WorldSpecValidationError("unsupported local inventory policy", context={"inventory_policy": inventory_policy})
     if inventory is not None and not isinstance(inventory, LocalResourceInventory):
-        return _failure("error", None, None, policy, "invalid_inventory", "inventory must be a LocalResourceInventory")
+        return _failure("error", None, None, policy, "invalid_inventory", "inventory must be a LocalResourceInventory", inventory_policy=inventory_policy, inventory_source="invalid")
     try:
         req = _coerce_requirement(requirement)
     except Exception as exc:
-        return _failure("invalid_requirement", None, inventory, policy, "invalid_requirement", str(exc))
+        return _failure("invalid_requirement", None, inventory, policy, "invalid_requirement", str(exc), inventory_policy=inventory_policy, inventory_source="injected" if inventory is not None else "not_discovered")
+    if _inventory_discovery_error is not None:
+        return _failure(
+            "error",
+            req,
+            None,
+            policy,
+            "inventory_discovery_failed",
+            _inventory_discovery_error,
+            inventory_discovery_error=_inventory_discovery_error,
+            inventory_policy=inventory_policy,
+            inventory_source="discovery_failed",
+        )
     try:
         inv = inventory or local_inventory(policy=inventory_policy)
     except Exception as exc:
-        return _failure("error", req, inventory, policy, "inventory_discovery_failed", str(exc))
+        message = f"{type(exc).__name__}: {exc}"
+        return _failure(
+            "error",
+            req,
+            inventory,
+            policy,
+            "inventory_discovery_failed",
+            message,
+            inventory_discovery_error=message,
+            inventory_policy=inventory_policy,
+            inventory_source="discovery_failed",
+        )
+    inventory_source = "injected" if inventory is not None else "discovered"
     if req is None:
         world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local", "parameters": {}}})
-        return WorldSynthesisResult("synthesized", None, inv.summary(), world, None, (), policy, inv)
+        return WorldSynthesisResult("synthesized", None, inv.summary(), world, None, (), policy, inv, None, inventory_policy, inventory_source)
     try:
         if len(req.roles) > _MAX_LOCAL_WORLD_WORKERS:
             raise _SynthesisFailure(
@@ -227,12 +261,15 @@ def synthesize(
                 ),
                 policy,
                 inv,
+                None,
+                inventory_policy,
+                inventory_source,
             )
-        return WorldSynthesisResult("synthesized", req, inv.summary(), world, report, (), policy, inv)
+        return WorldSynthesisResult("synthesized", req, inv.summary(), world, report, (), policy, inv, None, inventory_policy, inventory_source)
     except _SynthesisFailure as exc:
-        return _failure(exc.status, req, inv, policy, exc.code, str(exc), exc.path, exc.expected, exc.observed, exc.data)
+        return _failure(exc.status, req, inv, policy, exc.code, str(exc), exc.path, exc.expected, exc.observed, exc.data, inventory_policy=inventory_policy, inventory_source=inventory_source)
     except Exception as exc:
-        return _failure("error", req, inv, policy, "synthesis_error", str(exc))
+        return _failure("error", req, inv, policy, "synthesis_error", str(exc), inventory_policy=inventory_policy, inventory_source=inventory_source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,8 +335,8 @@ def _validate_topology(topology: Mapping[str, Any], role: str) -> None:
             raise _SynthesisFailure("unsupported_requirement", "unsupported_topology", "local synthesis cannot enforce requested topology", f"roles.{role}.topology.{key}")
 
 
-def _failure(status: str, requirement: WorldRequirement | None, inventory: LocalResourceInventory | None, policy: str, code: str, message: str, path: str | None = None, expected: Any | None = None, observed: Any | None = None, data: Mapping[str, Any] | None = None) -> WorldSynthesisResult:
-    return WorldSynthesisResult(status, requirement, {} if inventory is None else inventory.summary(), None, None, (WorldSynthesisDiagnostic(code, "error", message, path, expected, observed, data),), policy, inventory)
+def _failure(status: str, requirement: WorldRequirement | None, inventory: LocalResourceInventory | None, policy: str, code: str, message: str, path: str | None = None, expected: Any | None = None, observed: Any | None = None, data: Mapping[str, Any] | None = None, inventory_discovery_error: str | None = None, inventory_policy: str | None = None, inventory_source: str | None = None) -> WorldSynthesisResult:
+    return WorldSynthesisResult(status, requirement, {} if inventory is None else inventory.summary(), None, None, (WorldSynthesisDiagnostic(code, "error", message, path, expected, observed, data),), policy, inventory, inventory_discovery_error, inventory_policy, inventory_source)
 
 
 def _bounded_data(value: Any, *, depth: int = 0, budget: list[int] | None = None) -> Any:

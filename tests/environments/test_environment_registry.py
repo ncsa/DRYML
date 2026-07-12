@@ -160,3 +160,25 @@ def test_bounded_registry_search_prefilters_known_requirement_hints(monkeypatch)
 
     assert entry is None
     assert calls == ["/candidate"]
+
+
+def test_bounded_registry_search_does_not_let_prefilters_hide_a_candidate(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    for index in range(40):
+        registry.register(f"ignored-{index:02}", envs.PythonExecutableSpec(f"/ignored-{index}"), provides=("other",))
+    registry.register("wanted", envs.PythonExecutableSpec("/wanted"), provides=("dryml.environments.v1",))
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current()),
+    )
+
+    entry, report = registry.find_compatible(
+        envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",)),
+        max_candidates=1,
+    )
+
+    assert entry is not None and entry.name == "wanted"
+    assert report.ok

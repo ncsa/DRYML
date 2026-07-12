@@ -232,10 +232,9 @@ class EnvironmentRegistry:
         seen: set[str] = set()
         considered = 0
         started = time.monotonic()
-        # Bounded mode also limits raw aliases. The default remains compatible
-        # with the historical full-registry helper.
-        entry_limit = None if max_candidates is None else max_candidates + 32
-        for entry in self.iter_entries(limit=entry_limit):
+        # Label mismatches and canonical aliases do not consume the candidate
+        # budget, so they must not hide a later viable name-sorted entry.
+        for entry in self.iter_entries():
             if total_timeout is not None and time.monotonic() - started >= total_timeout:
                 break
             if not bounded_mode and requirement.tags and not set(requirement.tags) <= set(entry.tags):

@@ -80,6 +80,32 @@ def test_dispatch_reports_inventory_discovery_failure_as_structured_synthesis_fa
     assert explanation.resolution.world_synthesis.diagnostics[0].code == "inventory_discovery_failed"
 
 
+def test_failed_inventory_discovery_is_reused_during_reconciliation(monkeypatch):
+    import dryml.worlds.synthesis as synthesis
+    from dryml.dispatch.requirements import _select_world
+    from dryml.worlds import WorldRequirement
+
+    calls = []
+    monkeypatch.setattr(
+        synthesis,
+        "local_inventory",
+        lambda **_kwargs: calls.append(True) or (_ for _ in ()).throw(RuntimeError("inventory unavailable")),
+    )
+    requirement = WorldRequirement.from_data({"roles": {"main": {"resources": {"cpus": {"min": 1}}}}})
+
+    _selection, _world, first = _select_world(None, None, requirement=requirement)
+    _selection, _world, second = _select_world(
+        None,
+        None,
+        requirement=requirement,
+        inventory_discovery_error=first.inventory_discovery_error,
+    )
+
+    assert len(calls) == 1
+    assert second.inventory_source == "discovery_failed"
+    assert second.inventory_policy == "lightweight"
+
+
 def test_unsupported_requirement_free_resolver_candidate_falls_back_to_current():
     explanation = Dispatcher().explain(
         make_function_call_spec("operator:add", args=[1, 2]),
@@ -206,6 +232,34 @@ def test_explanation_formats_total_resolver_counts_not_bounded_trace_length():
 
     assert "environment_attempts=37" in str(reported)
     assert "environment_probes=11" in str(reported)
+
+
+def test_dispatch_reuses_truncated_current_resolver_evidence(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    candidates = tuple(PythonExecutableSpec(f"/candidate-{index}") for index in range(33))
+    record = replace(inspect_current(), tags=())
+    resolver_result = resolve(
+        EnvironmentRequirement(tags=("resolved",)),
+        candidates=candidates,
+        max_candidates=34,
+        probe_runner=lambda spec, *, timeout: requirements.environments.EnvironmentProbeResult(
+            spec,
+            True,
+            record=record,
+        ),
+    )
+    assert resolver_result.fallback_record is not None
+    assert len(resolver_result.attempts) == 32
+    monkeypatch.setattr(requirements.environments, "resolve", lambda *_args, **_kwargs: resolver_result)
+    monkeypatch.setattr(requirements.environments, "probe", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fallback must reuse resolver evidence")))
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(resolver_target, allow_pickle=True),
+        requirement_policy="warn",
+    )
+
+    assert not any(item.code == "dryml.dispatch.environment_probe_failed" for item in resolution.diagnostics)
 
 
 def test_plan_allocates_a_synthesized_one_worker_world(tmp_path):

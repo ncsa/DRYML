@@ -413,7 +413,11 @@ def resolve_dispatch_plan(
             data={"candidate": env_spec, "restriction": "same_environment_only"},
         ))
     if single_worker_only:
-        world_diagnostics = _local_subprocess_world_diagnostics(world_spec, resolution.world_requirement)
+        world_diagnostics = _local_subprocess_world_diagnostics(
+            world_spec,
+            resolution.world_requirement,
+            policy,
+        )
         if world_diagnostics:
             structural_failures = tuple(item for item in world_diagnostics if item.code != "dryml.dispatch.single_subprocess_requirement_unsupported")
             structural_safe = structural_safe and (policy is not RequirementPolicy.STRICT and not structural_failures or policy is RequirementPolicy.STRICT and not world_diagnostics)
@@ -490,6 +494,11 @@ def resolve_dispatch_plan(
                     requirement=resolution.world_requirement,
                     inventory=inventory or (world_synthesis.resource_inventory if world_synthesis is not None else None),
                     inventory_policy=inventory_policy,
+                    inventory_discovery_error=(
+                        None
+                        if world_synthesis is None
+                        else world_synthesis.inventory_discovery_error
+                    ),
                 )
                 runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
                 if world_synthesis is not None and not world_synthesis.ok:
@@ -505,7 +514,11 @@ def resolve_dispatch_plan(
                         and world_synthesis.status in {"insufficient_inventory", "unsupported_requirement"}
                     )
                 if single_worker_only:
-                    world_diagnostics = _local_subprocess_world_diagnostics(world_spec, resolution.world_requirement)
+                    world_diagnostics = _local_subprocess_world_diagnostics(
+                        world_spec,
+                        resolution.world_requirement,
+                        policy,
+                    )
                 else:
                     world_diagnostics = _local_world_topology_diagnostics(resolution.world_requirement)
                 if world_diagnostics:
@@ -846,13 +859,27 @@ def _select_environment(
     return selection, data, None
 
 
-def _select_world(explicit: Any | None, annotation_default: Any | None, *, requirement=None, inventory=None, inventory_policy="lightweight"):
+def _select_world(
+    explicit: Any | None,
+    annotation_default: Any | None,
+    *,
+    requirement=None,
+    inventory=None,
+    inventory_policy="lightweight",
+    inventory_discovery_error: str | None = None,
+):
     current = worlds.current(default=None)
     if explicit is not None or annotation_default is not None or current is not None:
         selection, data = _select("world", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("fallback", {"roles": {"main": {"replicas": 1, "process": {}}}, "backend": {"kind": "local", "parameters": {}}})), _world_data)
         return selection, data, None
     if requirement is not None:
-        result = worlds.synthesize(requirement, inventory=inventory, policy="local", inventory_policy=inventory_policy)
+        result = worlds.synthesize(
+            requirement,
+            inventory=inventory,
+            policy="local",
+            inventory_policy=inventory_policy,
+            _inventory_discovery_error=inventory_discovery_error,
+        )
         considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current"))
         if result.world is not None:
             data = result.world.to_data()
@@ -1022,7 +1049,11 @@ def _world_issue_data(issue) -> dict[str, Any]:
     return {"severity": issue.severity, "path": issue.path, "message": issue.message, "expected": issue.expected, "actual": issue.actual}
 
 
-def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requirement) -> tuple[DiagnosticFact, ...]:
+def _local_subprocess_world_diagnostics(
+    candidate: Mapping[str, Any],
+    requirement,
+    policy: RequirementPolicy,
+) -> tuple[DiagnosticFact, ...]:
     """Reject selected-world details the one-worker local allocator cannot enact."""
 
     try:
@@ -1053,7 +1084,12 @@ def _local_subprocess_world_diagnostics(candidate: Mapping[str, Any], requiremen
                     ))
         report = worlds.check_world_spec_satisfies_requirement(world, requirement)
         if not report.ok:
-            diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_requirement_unsupported", "The selected local subprocess world does not satisfy the hard world requirement.", data={"issues": [{"path": item.path, "message": item.message, "expected": item.expected, "actual": item.actual} for item in report.issues]}))
+            diagnostics.append(_diagnostic(
+                "dryml.dispatch.single_subprocess_requirement_unsupported",
+                "The selected local subprocess world does not satisfy the hard world requirement.",
+                severity="error" if policy is RequirementPolicy.STRICT else "warning",
+                data={"issues": [{"path": item.path, "message": item.message, "expected": item.expected, "actual": item.actual} for item in report.issues]},
+            ))
     return tuple(diagnostics)
 
 
@@ -1123,6 +1159,8 @@ def _resolution_record_for(result, candidate: Mapping[str, Any]) -> EnvironmentR
         return None
     if result.selected_record is not None and result.selected is not None and result.selected.to_data() == candidate:
         return result.selected_record
+    if result.fallback_record is not None and result.fallback_spec is not None and result.fallback_spec.to_data() == candidate:
+        return result.fallback_record
     for attempt in result.attempts:
         if (
             attempt.status in {"selected", "incompatible"}
@@ -1140,6 +1178,8 @@ def _resolution_probe_for(result, candidate: Mapping[str, Any]):
 
     if result is None:
         return None
+    if result.fallback_probe is not None and result.fallback_spec is not None and result.fallback_spec.to_data() == candidate:
+        return result.fallback_probe
     for attempt in result.attempts:
         if attempt.probe is not None and attempt.spec.to_data() == candidate:
             return attempt.probe

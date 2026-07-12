@@ -217,7 +217,13 @@ def test_actual_allocation_requirement_respects_warn_and_ignore(tmp_path):
     dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
 
     for policy in ("warn", "ignore"):
-        assert dispatcher.explain(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy).launchable
+        explanation = dispatcher.explain(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+        assert explanation.launchable
+        assert all(
+            item.severity == "warning"
+            for item in explanation.resolution.diagnostics
+            if item.code == "dryml.dispatch.single_subprocess_requirement_unsupported"
+        )
         expectation = pytest.warns(RuntimeWarning) if policy == "warn" else nullcontext()
         with expectation:
             assert dispatcher.plan(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)

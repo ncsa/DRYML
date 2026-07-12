@@ -287,10 +287,7 @@ def _darwin_physical_memory() -> int:
 def _cgroup_memory_available(diagnostics: list[str]) -> tuple[int | None, str, bool]:
     """Return an effective cgroup memory allowance when it is explicit."""
 
-    for limit_path, usage_path, source in (
-        (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory.current"), "cgroup_v2"),
-        (Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"), Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"), "cgroup_v1"),
-    ):
+    for limit_path, usage_path, source in _cgroup_memory_paths(diagnostics):
         if not limit_path.exists():
             continue
         try:
@@ -306,6 +303,36 @@ def _cgroup_memory_available(diagnostics: list[str]) -> tuple[int | None, str, b
             diagnostics.append(f"cgroup memory discovery unavailable: {type(exc).__name__}")
             return None, source, False
     return None, "none", True
+
+
+def _cgroup_memory_paths(diagnostics: list[str]) -> tuple[tuple[Path, Path, str], ...]:
+    """Return process-relative cgroup memory files before legacy root paths."""
+
+    paths: list[tuple[Path, Path, str]] = []
+    try:
+        entries = Path("/proc/self/cgroup").read_text(encoding="utf-8").splitlines()
+    except Exception:
+        entries = ()
+    for entry in entries:
+        try:
+            _hierarchy, controllers, relative_path = entry.split(":", 2)
+            relative = Path(relative_path.lstrip("/"))
+            if ".." in relative.parts:
+                raise ValueError("unsafe cgroup path")
+            if controllers == "":
+                root = Path("/sys/fs/cgroup") / relative
+                paths.append((root / "memory.max", root / "memory.current", "cgroup_v2"))
+            elif "memory" in controllers.split(","):
+                root = Path("/sys/fs/cgroup/memory") / relative
+                paths.append((root / "memory.limit_in_bytes", root / "memory.usage_in_bytes", "cgroup_v1"))
+        except Exception:
+            diagnostics.append("cgroup memory membership was malformed")
+    # Some hosts do not expose /proc/self/cgroup or use non-standard mounts.
+    paths.extend((
+        (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory.current"), "cgroup_v2"),
+        (Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"), Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"), "cgroup_v1"),
+    ))
+    return tuple(paths)
 
 
 def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -> dict[str, tuple[str | int, ...]]:

@@ -329,6 +329,23 @@ def test_resolver_rejects_invalid_candidate_before_running_any_probe():
     assert calls == []
 
 
+def test_resolver_rejects_duck_typed_registry_candidates_before_running_any_probe():
+    class InvalidEntry:
+        name = "invalid"
+        spec = object()
+
+    calls = []
+    with pytest.raises(ValueError, match="invalid environment resolver candidate"):
+        resolve(
+            EnvironmentRequirement(tags=("wanted",)),
+            candidates=(InvalidEntry(),),
+            include_current=False,
+            probe_runner=lambda *args, **kwargs: calls.append(args),
+        )
+
+    assert calls == []
+
+
 def test_resolver_rejects_malformed_injected_probe_result():
     spec = PythonExecutableSpec("/candidate/python")
     malformed = EnvironmentProbeResult(spec, "true")  # type: ignore[arg-type]
@@ -404,6 +421,26 @@ def test_resolver_records_probe_duration():
 
     assert result.attempts[0].probe_duration_s is not None
     assert result.attempts[0].to_data()["probe_duration_s"] >= 0
+
+
+def test_resolver_does_not_double_count_malformed_probe_duration():
+    spec = PythonExecutableSpec("/candidate/python")
+    state = {"now": 0.0}
+
+    def runner(candidate, *, timeout):
+        state["now"] = 2.0
+        return EnvironmentProbeResult(candidate, "true")  # type: ignore[arg-type]
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=runner,
+        clock=lambda: state["now"],
+    )
+
+    assert result.probe_count == 1
+    assert result.probe_duration_s == 2.0
 
 
 def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_incomplete():

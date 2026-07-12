@@ -101,6 +101,9 @@ class EnvironmentResolution:
     attempt_count: int = 0
     probe_count: int = 0
     probe_duration_s: float = 0.0
+    fallback_spec: EnvironmentSpec | None = None
+    fallback_record: EnvironmentRecord | None = None
+    fallback_probe: EnvironmentProbeResult | None = None
 
     @property
     def ok(self) -> bool:
@@ -132,6 +135,7 @@ class EnvironmentResolution:
             "attempt_count": self.attempt_count,
             "probe_count": self.probe_count,
             "probe_duration_s": self.probe_duration_s,
+            "fallback_probe": _probe_summary(self.fallback_probe),
             "diagnostics": [_issue_summary(issue) for issue in self.diagnostics],
             "policy": self.policy,
         })
@@ -203,6 +207,9 @@ def resolve(
     attempt_count = 0
     probe_count = 0
     total_probe_duration_s = 0.0
+    fallback_spec: EnvironmentSpec | None = None
+    fallback_record: EnvironmentRecord | None = None
+    fallback_probe: EnvironmentProbeResult | None = None
     registry_entries, registry_state = _registry_entries(
         registry,
         max_items=raw_candidate_limit,
@@ -212,8 +219,14 @@ def resolve(
     )
 
     def record(attempt: EnvironmentResolutionAttempt) -> None:
-        nonlocal truncated, attempt_count
+        nonlocal attempt_count, fallback_probe, fallback_record, fallback_spec, truncated
         attempt_count += 1
+        # Dispatch may use the implicit current environment as a relaxed-policy
+        # fallback. Preserve its evidence even when the public trace is full.
+        if attempt.source == "current" and attempt.probe is not None:
+            fallback_spec = attempt.spec
+            fallback_probe = attempt.probe
+            fallback_record = attempt.probe.record
         if len(attempts) < _MAX_RECORDED_ATTEMPTS:
             attempts.append(attempt)
         else:
@@ -230,19 +243,22 @@ def resolve(
         diagnostics: tuple[CompatibilityIssue, ...],
     ) -> EnvironmentResolution:
         return EnvironmentResolution(
-            status,
-            requirement,
-            selected,
-            selected_name,
-            selected_source,
-            selected_record,
-            selected_probe,
-            tuple(attempts),
-            diagnostics,
-            policy,
-            attempt_count,
-            probe_count,
-            total_probe_duration_s,
+            status=status,
+            requirement=requirement,
+            selected=selected,
+            selected_name=selected_name,
+            selected_source=selected_source,
+            selected_record=selected_record,
+            selected_probe=selected_probe,
+            attempts=tuple(attempts),
+            diagnostics=diagnostics,
+            policy=policy,
+            attempt_count=attempt_count,
+            probe_count=probe_count,
+            probe_duration_s=total_probe_duration_s,
+            fallback_spec=fallback_spec,
+            fallback_record=fallback_record,
+            fallback_probe=fallback_probe,
         )
 
     def result_diagnostics() -> tuple[CompatibilityIssue, ...]:
@@ -271,6 +287,7 @@ def resolve(
             record(EnvironmentResolutionAttempt(source, name, spec, "not_considered_timeout"))
             search_incomplete = True
             break
+        attempt_probe_duration_s: float | None = None
         try:
             identity = _identity(spec)
         except Exception as exc:
@@ -324,8 +341,10 @@ def resolve(
                 continue
         except Exception as exc:
             issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}")
-            duration = max(0.0, now() - probe_started)
-            total_probe_duration_s += duration
+            duration = attempt_probe_duration_s
+            if duration is None:
+                duration = max(0.0, now() - probe_started)
+                total_probe_duration_s += duration
             record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,), probe_duration_s=duration))
             if total_timeout is not None and now() - started >= total_timeout:
                 # A malformed result or runner exception can consume the final
@@ -432,7 +451,9 @@ def _registry_entries(
 
 
 def _normalize_candidate(candidate: Any, source: str) -> tuple[str, str | None, EnvironmentSpec, Any]:
-    if hasattr(candidate, "spec") and hasattr(candidate, "name"):
+    from .registry import EnvironmentRegistryEntry
+
+    if isinstance(candidate, EnvironmentRegistryEntry):
         return source, candidate.name, candidate.spec, candidate
     if isinstance(candidate, EnvironmentSpec):
         return source, None, candidate, None

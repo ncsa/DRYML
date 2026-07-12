@@ -386,6 +386,24 @@ def test_linux_cgroup_memory_limit_reduces_available_capacity(monkeypatch):
     assert (memory, source, readable) == (6144, "cgroup_v2", True)
 
 
+def test_linux_cgroup_memory_limit_uses_the_process_nested_cgroup(monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
+    values = {
+        "/proc/self/cgroup": "0::/workload/slice\n",
+        "/sys/fs/cgroup/workload/slice/memory.max": "8192",
+        "/sys/fs/cgroup/workload/slice/memory.current": "2048",
+        "/sys/fs/cgroup/memory.max": "max",
+        "/sys/fs/cgroup/memory.current": "0",
+    }
+    monkeypatch.setattr(inventory_module.Path, "exists", lambda path: path.as_posix() in values)
+    monkeypatch.setattr(inventory_module.Path, "read_text", lambda path, **_kwargs: values[path.as_posix()])
+
+    memory, source, readable = inventory_module._cgroup_memory_available([])
+
+    assert (memory, source, readable) == (6144, "cgroup_v2", True)
+
+
 def test_lightweight_inventory_uses_cpu_count_when_affinity_is_unavailable(monkeypatch):
     import dryml.worlds.inventory as inventory_module
 
