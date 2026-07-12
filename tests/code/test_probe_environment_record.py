@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import dryml.code as code
-from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRecord, PythonExecutableSpec
+from dryml.environments import CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRecord, PythonExecutableSpec
 
 
 TARGET = "probe_targets:plain_function"
@@ -58,6 +58,40 @@ def test_python_executable_spec_probe_path():
     assert result.ok
     assert result.analysis is not None
     assert result.analysis.facts_of_kind("callable")
+
+
+def test_conda_spec_routes_import_path_to_worker(monkeypatch):
+    import dryml.code.probe as probe
+
+    captured = {}
+
+    def fake_worker(request, command, *, timeout, env):
+        captured.update(request=request, command=command, timeout=timeout, env=env)
+        return code.CodeProbeResult(
+            ok=True,
+            analysis=code.CodeAnalysisResult(target=request.target),
+            environment_record=None,
+        )
+
+    monkeypatch.setattr(probe, "probe_target_in_subprocess", fake_worker)
+    environment = CondaEnvironmentSpec(prefix="/opt/test-conda", pythonpath_policy="none")
+    result = code.probe_target(TARGET, environment=environment, include_environment_record=False, timeout=10)
+
+    assert result.ok
+    assert captured["command"] == ["/opt/test-conda/bin/python", "-m", "dryml.code.probe_worker", "--json"]
+    assert captured["timeout"] == 10
+
+
+def test_empty_source_spec_and_malformed_import_path_are_not_worker_eligible():
+    empty_source = code.CodeTargetSpec("source_spec", source_spec={})
+    malformed_path = code.CodeTargetSpec.from_import_path("malformed-path")
+    executable = PythonExecutableSpec(executable=sys.executable, pythonpath_policy="dryml-source")
+
+    source_result = code.probe_target(empty_source, environment=executable, include_environment_record=False)
+    malformed_result = code.probe_target(malformed_path, environment=executable, include_environment_record=False)
+
+    assert source_result.diagnostics[0].code == "code_probe.source_spec_reconstruction_unavailable"
+    assert malformed_result.diagnostics[0].code == "code_probe.non_serializable_target"
 
 
 def test_subprocess_probe_rejects_non_serializable_local_function():

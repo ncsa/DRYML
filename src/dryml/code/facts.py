@@ -173,6 +173,8 @@ class StaticCallFact(CodeFact):
         missing = required.difference(self.data)
         if missing:
             raise ValueError(f"StaticCallFact data is missing required fields: {sorted(missing)!r}")
+        if set(self.data) != required:
+            raise ValueError("StaticCallFact data must use the fixed static-call schema")
         status = self.data["status"]
         confidence = self.data["confidence"]
         if status not in {"resolved", "unresolved", "ambiguous", "unsupported"}:
@@ -183,12 +185,22 @@ class StaticCallFact(CodeFact):
             raise ValueError("StaticCallFact syntax must be a bounded string")
         if self.data["syntax"] not in {"direct_name", "annotated_receiver_method", "attribute_chain", "other"}:
             raise ValueError(f"unsupported StaticCallFact syntax {self.data['syntax']!r}")
+        if set(self.source).difference({"analyzer", "target_kind", "filename"}):
+            raise ValueError("StaticCallFact source must use the fixed static-call schema")
         if self.source.get("analyzer") != "static_calls" or "target_kind" not in self.source:
             raise ValueError("StaticCallFact source must identify the static_calls analyzer and target kind")
+        for field_name in ("target_kind", "filename"):
+            value = self.source.get(field_name)
+            if field_name == "target_kind" and (not isinstance(value, str) or not value):
+                raise ValueError("StaticCallFact source target_kind must be a non-empty string")
+            if value is not None and (not isinstance(value, str) or len(value) > 4_096):
+                raise ValueError(f"StaticCallFact source {field_name} must be a bounded string or null")
         for field_name in ("display", "receiver", "method_name", "reason"):
             value = self.data[field_name]
             if value is not None and (not isinstance(value, str) or len(value) > 4_096):
                 raise ValueError(f"StaticCallFact {field_name} must be a bounded string or null")
+        if not isinstance(self.data["display"], str) or not self.data["display"]:
+            raise ValueError("StaticCallFact display must be a non-empty bounded string")
         target = self.data["target"]
         if status == "resolved":
             if confidence != "exact_static" or self.data["reason"] is not None:

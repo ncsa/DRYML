@@ -127,9 +127,18 @@ class AccessCollector(ast.NodeVisitor):
 
 
 def collect_accesses_from_source(source: str):
-    """Parse *source* and return an :class:`AccessCollector` with findings."""
+    """Parse bounded *source* and return an :class:`AccessCollector` with findings.
 
+    Raises:
+        ValueError: If the shared source or AST-node bound is exceeded.
+    """
+
+    if len(source.encode("utf-8")) > MAX_SOURCE_BYTES:
+        raise ValueError("source exceeds the static analysis source_bytes limit")
     tree = ast.parse(source)
+    for node_count, _ in enumerate(ast.walk(tree), start=1):
+        if node_count > MAX_AST_NODES:
+            raise ValueError("source exceeds the static analysis ast_nodes limit")
     return collect_accesses_from_tree(tree)
 
 

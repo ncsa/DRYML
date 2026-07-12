@@ -194,6 +194,9 @@ Both static analyzers enforce these limits before unbounded fact expansion:
 
 Bound exhaustion returns an error diagnostic with `limit_name`, `limit`, and
 `observed_lower_bound`; static-call summaries then set `complete` to false.
+`static_calls` represents per-site resolution outcomes as bounded facts rather
+than one diagnostic per site, so it does not emit an unbounded stream of
+semantic-resolution diagnostics.
 Source unavailable, source disabled, parse failure, and no matching call remain
 distinct outcomes.
 

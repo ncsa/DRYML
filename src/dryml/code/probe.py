@@ -112,7 +112,7 @@ class CodeProbeRequest:
             raise ValueError("CodeProbeRequest data is missing required 'target'")
         return cls(
             target=CodeTargetSpec.from_data(data["target"]),
-            algorithms=tuple(data.get("algorithms") or DEFAULT_PROBE_ALGORITHMS),
+            algorithms=_coerce_algorithms(data.get("algorithms")),
             include_environment_record=bool(data.get("include_environment_record", True)),
             args=tuple(data.get("args") or ()),
             kwargs=data.get("kwargs") or {},
@@ -384,7 +384,7 @@ def probe_target(
             if _target_can_run_in_subprocess(target_spec):
                 env = build_probe_env(base=None, overrides=None, pythonpath_policy="inherit")
                 return probe_target_in_subprocess(request, [sys.executable, *PROBE_WORKER_ARGS], timeout=timeout, env=env)
-            if target_spec.source_spec:
+            if target_spec.source_spec is not None:
                 return _non_serializable_target_result(target_spec)
             return CodeProbeResult(
                 ok=False,
@@ -510,7 +510,8 @@ def _coerce_algorithms(value: Iterable[str] | str | None) -> tuple[str, ...]:
         return DEFAULT_PROBE_ALGORITHMS
     if isinstance(value, str):
         return (value,)
-    return tuple(str(item) for item in value)
+    algorithms = tuple(str(item) for item in value)
+    return algorithms or DEFAULT_PROBE_ALGORITHMS
 
 
 def _validate_schema_version(data: Mapping[str, Any]) -> None:
@@ -522,11 +523,14 @@ def _validate_schema_version(data: Mapping[str, Any]) -> None:
 def _target_can_run_in_subprocess(target: CodeTargetSpec) -> bool:
     """Return whether *target* has the stable import path required by workers."""
 
-    return bool(target.import_path)
+    if not isinstance(target.import_path, str):
+        return False
+    module_name, separator, qualname = target.import_path.partition(":")
+    return bool(separator and module_name.strip() and qualname.strip())
 
 
 def _non_serializable_target_result(target: CodeTargetSpec) -> CodeProbeResult:
-    if target.source_spec and not target.import_path:
+    if target.source_spec is not None and not target.import_path:
         return CodeProbeResult(
             ok=False,
             analysis=None,

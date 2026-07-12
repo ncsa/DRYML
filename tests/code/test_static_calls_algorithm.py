@@ -46,6 +46,11 @@ class HostileCallable:
 HOSTILE_CALLABLE = HostileCallable()
 
 
+class HostileWrapped:
+    def __getattribute__(self, name):
+        raise AssertionError("static analysis must not inspect __wrapped__ metadata")
+
+
 class Model:
     def train(self):
         global METHOD_EXECUTED
@@ -192,6 +197,51 @@ def nested_scope_target(model):
 nested_scope_target.__annotations__["model"] = Model
 
 
+def closure_factory():
+    def helper():
+        return None
+
+    def closure_target():
+        helper()
+
+    return closure_target
+
+
+CLOSURE_TARGET = closure_factory()
+
+
+def comprehension_shadow_target(values):
+    return [helper() for helper in values]
+
+
+def match_shadow_target(value):
+    match value:
+        case helper:
+            return helper()
+
+
+def deleted_shadow_target():
+    del helper
+    helper()
+
+
+def nested_class_shadow_target():
+    class Inner:
+        def run(self):
+            helper()
+
+    return Inner
+
+
+def decorator_factory():
+    return lambda function: function
+
+
+@decorator_factory()
+def decorated_default_target(value=helper()):
+    helper()
+
+
 def attribute_chain_target(model):
     model.first.second()
 
@@ -273,6 +323,11 @@ def test_static_calls_reports_conservative_non_resolution_cases():
         (local_shadows_global, "local_name_unsupported"),
         (loop_rebinds_receiver, "receiver_reassigned"),
         (nested_scope_target, "nested_scope_unsupported"),
+        (CLOSURE_TARGET, "closure_name_unsupported"),
+        (comprehension_shadow_target, "nested_scope_unsupported"),
+        (match_shadow_target, "local_name_unsupported"),
+        (deleted_shadow_target, "local_name_unsupported"),
+        (nested_class_shadow_target, "nested_scope_unsupported"),
     )
 
     for target, reason in cases:
@@ -289,6 +344,22 @@ def test_static_calls_does_not_invoke_callable_instances_or_dynamic_getattr():
     assert callable_facts[0].data["status"] == "unsupported"
     assert hostile_facts[0].data["status"] == "unsupported"
     assert all(fact.data["status"] != "resolved" for fact in dynamic_facts)
+
+
+def test_static_calls_does_not_inspect_hostile_targets_or_wrapped_metadata():
+    def wrapped_target():
+        helper()
+
+    wrapped_target.__wrapped__ = HostileWrapped()
+
+    hostile_target_result = code.analyze(HostileCallable(), algorithms=("static_calls",))
+    hostile_class_result = code.analyze(HostileModel, algorithms=("static_calls",))
+    wrapped_result, wrapped_facts = _facts(wrapped_target)
+
+    assert hostile_target_result.diagnostics_of_code("dryml.code.source_unavailable")
+    assert hostile_class_result.diagnostics_of_code("dryml.code.source_unavailable")
+    assert wrapped_result.ok
+    assert wrapped_facts[0].data["status"] == "resolved"
 
 
 def test_static_calls_inspects_hostile_metaclasses_without_dynamic_lookup():
@@ -321,6 +392,14 @@ def test_static_calls_emits_complete_zero_count_summary():
     assert summary.data["complete"] is True
     assert summary.data["call_sites_seen"] == 0
     assert summary.data["facts_emitted"] == 0
+
+
+def test_static_calls_emits_all_definition_calls_in_textual_source_order():
+    _, facts = _facts(decorated_default_target)
+
+    positions = [(fact.data["relative_line"], fact.data["col_offset"]) for fact in facts]
+    assert positions == sorted(positions)
+    assert len(facts) == 3
 
 
 def test_static_calls_enforces_call_site_limit(monkeypatch):
@@ -397,4 +476,19 @@ def test_static_call_fact_rejects_unbounded_or_invalid_serialized_data():
     data = _facts(direct_global_target)[1][0].to_data()
     data["source"]["analyzer"] = "wrong"
     with pytest.raises(ValueError, match="static_calls analyzer"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["data"]["unexpected"] = "x" * 10_000
+    with pytest.raises(ValueError, match="fixed static-call schema"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["source"]["filename"] = "x" * 4_097
+    with pytest.raises(ValueError, match="source filename"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["data"]["display"] = None
+    with pytest.raises(ValueError, match="display must"):
         code.CodeFact.from_data(data)

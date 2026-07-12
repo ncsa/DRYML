@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -113,20 +114,28 @@ def normalize_target(
         A local target wrapper. Import failures are captured as diagnostics.
     """
 
-    if isinstance(target, CodeTarget):
+    # Exact-type checks avoid invoking a hostile target's ``__class__`` hook
+    # before it can be classified as an unsupported callable instance.
+    if type(target) is CodeTarget:
         return target
-    if isinstance(target, CodeTargetSpec):
+    if type(target) is CodeTargetSpec:
         if target.import_path:
             return target_from_import_path(target.import_path, allow_import=allow_import, spec=target)
         return CodeTarget(spec=target, metadata=metadata or {})
-    if isinstance(target, str):
+    if type(target) is str:
         return target_from_import_path(target, allow_import=allow_import, metadata=metadata)
     if method_name is not None:
-        cls = target if inspect.isclass(target) else type(target) if target is not None else None
+        cls = target if _is_class(target) else type(target) if target is not None else None
         return target_from_definition_method(subject_ref, cls, method_name)
-    if inspect.ismethod(target):
+    if type(target) is types.MethodType:
         return target_from_method(target, metadata=metadata)
-    if inspect.isclass(target):
+    if _is_class(target):
+        if type(target) is not type:
+            return CodeTarget(
+                spec=CodeTargetSpec("class", metadata={"type": object.__getattribute__(target, "__name__"), **dict(metadata or {})}),
+                obj=target,
+                metadata=metadata or {},
+            )
         return _target_from_object(target, "class", metadata=metadata)
     if callable(target):
         return target_from_callable(target, metadata=metadata)
@@ -208,11 +217,17 @@ def target_from_import_path(
 def target_from_callable(func: Callable[..., Any], *, metadata: Mapping[str, Any] | None = None) -> CodeTarget:
     """Create a target from a live callable without invoking it."""
 
-    if inspect.ismethod(func):
+    if type(func) is types.MethodType:
         return target_from_method(func, metadata=metadata)
-    if inspect.isclass(func):
+    if _is_class(func):
+        if type(func) is not type:
+            return CodeTarget(
+                spec=CodeTargetSpec("class", metadata={"type": object.__getattribute__(func, "__name__"), **dict(metadata or {})}),
+                obj=func,
+                metadata=metadata or {},
+            )
         return _target_from_object(func, "class", metadata=metadata)
-    if inspect.isfunction(func):
+    if type(func) is types.FunctionType:
         qualname = getattr(func, "__qualname__", "") or ""
         if getattr(func, "__name__", None) == "<lambda>":
             kind = "lambda"
@@ -223,7 +238,16 @@ def target_from_callable(func: Callable[..., Any], *, metadata: Mapping[str, Any
         else:
             kind = "function"
         return _target_from_object(func, kind, metadata=metadata)
-    return _target_from_object(func, "callable_instance", unwrapped=getattr(type(func), "__call__", None), metadata=metadata)
+    # Do not inspect callable-instance or metaclass attributes. Those lookups can
+    # execute user-defined hooks before an analyzer has a chance to reject them.
+    return CodeTarget(
+        spec=CodeTargetSpec(
+            "callable_instance",
+            metadata={"type": object.__getattribute__(type(func), "__name__"), **dict(metadata or {})},
+        ),
+        obj=func,
+        metadata=metadata or {},
+    )
 
 
 def target_from_method(method: Callable[..., Any], *, metadata: Mapping[str, Any] | None = None) -> CodeTarget:
@@ -348,6 +372,12 @@ def _target_from_object(
         unwrapped=unwrapped or _unwrap_descriptor(obj),
         metadata=metadata or {},
     )
+
+
+def _is_class(value: Any) -> bool:
+    """Return whether *value* is a class without reading target attributes."""
+
+    return issubclass(type(value), type)
 
 
 def _spec_for_object(

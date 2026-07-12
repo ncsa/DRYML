@@ -45,6 +45,34 @@ class _CallCollector(ast.NodeVisitor):
         self.exhausted = False
         self._nested_scope_depth = 0
 
+    def collect_root(self, root: ast.AST) -> None:
+        """Collect every call in the selected definition in source order."""
+
+        if not isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            self.visit(root)
+            self.calls.sort(key=lambda item: (item[0].lineno, item[0].col_offset))
+            return
+        # Decorators, signature expressions, and the body are all source-level
+        # call sites of the selected definition. Nested scopes stay unsupported.
+        for decorator in root.decorator_list:
+            self.visit(decorator)
+        for default in (*root.args.defaults, *(item for item in root.args.kw_defaults if item is not None)):
+            self.visit(default)
+        for argument in (*root.args.posonlyargs, *root.args.args, *root.args.kwonlyargs):
+            if argument.annotation is not None:
+                self.visit(argument.annotation)
+        if root.args.vararg is not None and root.args.vararg.annotation is not None:
+            self.visit(root.args.vararg.annotation)
+        if root.args.kwarg is not None and root.args.kwarg.annotation is not None:
+            self.visit(root.args.kwarg.annotation)
+        if root.returns is not None:
+            self.visit(root.returns)
+        for type_parameter in getattr(root, "type_params", ()):
+            self.visit(type_parameter)
+        for statement in root.body:
+            self.visit(statement)
+        self.calls.sort(key=lambda item: (item[0].lineno, item[0].col_offset))
+
     def visit(self, node: ast.AST):
         if not self.exhausted:
             return super().visit(node)
@@ -67,12 +95,31 @@ class _CallCollector(ast.NodeVisitor):
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        """Nested class bodies have their own namespace and remain unsupported."""
+
+        self._nested_scope_depth += 1
+        self.generic_visit(node)
+        self._nested_scope_depth -= 1
+
     def visit_Lambda(self, node: ast.Lambda) -> None:
         """Record nested calls without applying outer-scope resolution."""
 
         self._nested_scope_depth += 1
         self.generic_visit(node)
         self._nested_scope_depth -= 1
+
+    def _visit_comprehension_scope(self, node: ast.AST) -> None:
+        """Keep comprehension-local calls out of the enclosing function scope."""
+
+        self._nested_scope_depth += 1
+        self.generic_visit(node)
+        self._nested_scope_depth -= 1
+
+    visit_ListComp = _visit_comprehension_scope
+    visit_SetComp = _visit_comprehension_scope
+    visit_DictComp = _visit_comprehension_scope
+    visit_GeneratorExp = _visit_comprehension_scope
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
@@ -90,8 +137,8 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             message="Static call analysis requires source extraction.",
             source={"analyzer": "static_calls", "target_kind": target.spec.kind},
         ),))
-    obj = target.unwrapped or target.obj
-    info = get_source_info(obj) if obj is not None else None
+    function = _function_for_target(target)
+    info = get_source_info(function) if function is not None else None
     if info is None:
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
             severity="warning",
@@ -112,15 +159,11 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 
     root = _analysis_root(parsed.tree)
     collector = _CallCollector()
-    if isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        for statement in root.body:
-            collector.visit(statement)
-    else:
-        collector.visit(root)
-    function = _function_for_target(target)
-    globals_mapping = function.__globals__ if function is not None else {}
+    collector.collect_root(root)
+    globals_mapping = object.__getattribute__(function, "__globals__") if function is not None else {}
     annotations = _parameter_annotations(function)
-    parameter_names = _parameter_names(function)
+    parameter_names = _parameter_names(root)
+    free_names = _free_names(function)
     bound_names = _bound_names(root)
     facts = tuple(
         _fact_for_call(
@@ -130,6 +173,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             globals_mapping=globals_mapping,
             annotations=annotations,
             parameter_names=parameter_names,
+            free_names=free_names,
             bound_names=bound_names,
             filename=parsed.filename,
             start_line=parsed.start_line,
@@ -182,31 +226,37 @@ def _analysis_root(tree: ast.AST) -> ast.AST:
 
 def _function_for_target(target: CodeTarget) -> Any | None:
     candidate = target.unwrapped or target.obj
-    if inspect.ismethod(candidate):
-        return candidate.__func__
-    return candidate if inspect.isfunction(candidate) else None
+    if type(candidate) is types.MethodType:
+        return object.__getattribute__(candidate, "__func__")
+    return candidate if type(candidate) is types.FunctionType else None
 
 
 def _parameter_annotations(function: Any | None) -> Mapping[str, Any]:
     if function is None:
         return {}
-    try:
-        return {
-            name: parameter.annotation
-            for name, parameter in inspect.signature(function).parameters.items()
-            if parameter.annotation is not inspect.Parameter.empty
-        }
-    except (TypeError, ValueError):
-        return {}
+    annotations = object.__getattribute__(function, "__annotations__")
+    return annotations if isinstance(annotations, Mapping) else {}
 
 
-def _parameter_names(function: Any | None) -> set[str]:
+def _parameter_names(root: ast.AST) -> set[str]:
+    if not isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return set()
+    arguments = root.args
+    names = {argument.arg for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+    if arguments.vararg is not None:
+        names.add(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.add(arguments.kwarg.arg)
+    return names
+
+
+def _free_names(function: Any | None) -> set[str]:
+    """Return closure names that must not be treated as globals."""
+
     if function is None:
         return set()
-    try:
-        return set(inspect.signature(function).parameters)
-    except (TypeError, ValueError):
-        return set()
+    code = object.__getattribute__(function, "__code__")
+    return set(code.co_freevars)
 
 
 def _fact_for_call(
@@ -217,6 +267,7 @@ def _fact_for_call(
     globals_mapping: Mapping[str, Any],
     annotations: Mapping[str, Any],
     parameter_names: set[str],
+    free_names: set[str],
     bound_names: set[str],
     filename: str | None,
     start_line: int | None,
@@ -247,6 +298,8 @@ def _fact_for_call(
         method_name = func.id
         if func.id in parameter_names:
             reason = "parameter_name_unsupported"
+        elif func.id in free_names:
+            reason = "closure_name_unsupported"
         elif func.id in bound_names:
             reason = "local_name_unsupported"
         elif func.id not in globals_mapping:
@@ -375,6 +428,10 @@ class _BindingCollector(ast.NodeVisitor):
         self._add_targets((node.target,))
         self.generic_visit(node)
 
+    def visit_Delete(self, node: ast.Delete) -> None:
+        self._add_targets(tuple(node.targets))
+        self.generic_visit(node)
+
     def visit_For(self, node: ast.For) -> None:
         self._add_targets((node.target,))
         self.generic_visit(node)
@@ -408,6 +465,32 @@ class _BindingCollector(ast.NodeVisitor):
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         return None
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest is not None:
+            self.names.add(node.rest)
+        self.generic_visit(node)
+
+    def _visit_comprehension(self, node: ast.AST) -> None:
+        """Treat comprehension bindings conservatively as local names."""
+
+        for generator in node.generators:
+            self._add_targets((generator.target,))
+        self.generic_visit(node)
+
+    visit_ListComp = _visit_comprehension
+    visit_SetComp = _visit_comprehension
+    visit_DictComp = _visit_comprehension
+    visit_GeneratorExp = _visit_comprehension
 
 
 def _bound_names(root: ast.AST) -> set[str]:

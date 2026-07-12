@@ -43,10 +43,31 @@ def test_ast_access_parse_failure_and_no_source(monkeypatch, requirement_targets
     assert no_source.diagnostics_of_code("dryml.code.source_unavailable")
 
 
+def test_ast_access_reports_source_disabled(requirement_targets):
+    result = code.analyze(
+        requirement_targets.run_training,
+        algorithms=("ast_access",),
+        context=code.CodeAnalysisContext(allow_source=False),
+    )
+
+    assert result.diagnostics_of_code("dryml.code.source_disabled")
+
+
 def test_old_ast_helper_compatibility():
     collector = collect_accesses_from_source("def f(obj):\n    return obj.value\n")
 
     assert any(access.root == "obj" and access.chain == ("value",) for access in collector.attr_accesses)
+
+
+def test_public_ast_helper_enforces_source_and_node_bounds(monkeypatch):
+    monkeypatch.setattr(ast_access, "MAX_SOURCE_BYTES", 1)
+    with pytest.raises(ValueError, match="source_bytes"):
+        collect_accesses_from_source("def f():\n    return None\n")
+
+    monkeypatch.setattr(ast_access, "MAX_SOURCE_BYTES", 1_048_576)
+    monkeypatch.setattr(ast_access, "MAX_AST_NODES", 1)
+    with pytest.raises(ValueError, match="ast_nodes"):
+        collect_accesses_from_source("def f():\n    return None\n")
 
 
 def test_shared_static_parser_enforces_source_and_ast_bounds(requirement_targets, monkeypatch):

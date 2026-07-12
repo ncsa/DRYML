@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import textwrap
+import types
 from dataclasses import dataclass
 
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, FunctionAnalyzer
@@ -21,6 +22,14 @@ class SourceInfo:
 def get_source_info(obj) -> SourceInfo | None:
     """Return source text/location for *obj*, or ``None`` if unavailable."""
 
+    # inspect.getsourcelines(function) follows __wrapped__ by default. Reading
+    # the code object directly avoids user-controlled wrapper metadata.
+    if type(obj) is types.FunctionType:
+        obj = object.__getattribute__(obj, "__code__")
+    elif issubclass(type(obj), type) and type(obj) is not type:
+        return None
+    elif type(obj) is not types.CodeType and not issubclass(type(obj), type):
+        return None
     try:
         lines, start_line = inspect.getsourcelines(obj)
         filename = inspect.getsourcefile(obj)

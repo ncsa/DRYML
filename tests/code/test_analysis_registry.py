@@ -32,6 +32,16 @@ def test_default_analyzers_are_registered():
     assert DEFAULT_PROBE_ALGORITHMS == EXPECTED_DEFAULT_PROBE_ALGORITHMS
 
 
+def test_empty_probe_algorithm_selection_round_trips_to_probe_defaults(requirement_targets):
+    request = code.CodeProbeRequest(
+        target=code.normalize_target(requirement_targets.plain_importable_function).spec,
+        algorithms=(),
+    )
+
+    assert request.algorithms == DEFAULT_PROBE_ALGORITHMS
+    assert code.CodeProbeRequest.from_data(request.to_data()).algorithms == DEFAULT_PROBE_ALGORITHMS
+
+
 def test_register_duplicate_and_replace(requirement_targets):
     analyzer = code.FunctionAnalyzer("test_duplicate_analyzer", lambda target, context: code.CodeAnalysisResult(target.spec))
     replacement = code.FunctionAnalyzer("test_duplicate_analyzer", lambda target, context: code.CodeAnalysisResult(target.spec))
