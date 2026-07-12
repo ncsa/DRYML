@@ -65,6 +65,15 @@ def test_source_spec_and_unknown_targets_are_serializable():
     json.dumps(unknown.spec.to_data())
 
 
+def test_source_spec_only_targets_report_source_unavailable_without_reconstruction():
+    spec = code.CodeTargetSpec("source_spec", source_spec={"kind": "function", "source": "lambda x: x"})
+
+    result = code.analyze(spec, algorithms=("source", "ast_access", "static_calls"))
+
+    assert not result.facts
+    assert result.diagnostics_of_code("dryml.code.source_unavailable")
+
+
 def test_class_attribute_target_preserves_raw_descriptors(requirement_targets):
     classmethod_target = code.target_from_class_attribute(requirement_targets.ClassMethodTargets, "outer_decorated")
     staticmethod_target = code.target_from_class_attribute(requirement_targets.StaticMethodTargets, "outer_decorated")

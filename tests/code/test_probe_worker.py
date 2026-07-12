@@ -86,6 +86,16 @@ def test_worker_handles_unknown_algorithm():
     assert {item.code for item in result.diagnostics} == {"code_probe.unknown_algorithm"}
 
 
+def test_worker_runs_explicit_builtin_static_calls():
+    completed = _run_worker(json.dumps(_request(algorithms=("static_calls",)).to_data()))
+    result = _result(completed)
+
+    assert completed.returncode == 0
+    assert result.ok
+    assert result.analysis is not None
+    assert result.analysis.facts_of_kind("static_call_summary")
+
+
 def test_worker_reports_import_failure_diagnostic():
     completed = _run_worker(json.dumps(_request("probe_import_failure:target").to_data()))
     result = _result(completed)

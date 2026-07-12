@@ -246,9 +246,9 @@ def _ensure_builtin_analyzers() -> None:
     global _BUILTINS_REGISTERED
     if _BUILTINS_REGISTERED:
         return
-    from .algorithms import ast_access, callables, direct_annotations, method_contracts, source, symbol_capture
+    from .algorithms import ast_access, callables, direct_annotations, method_contracts, source, static_calls, symbol_capture
 
-    for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts):
+    for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts, static_calls):
         register_analyzer(module.ANALYZER, replace=True)
     _BUILTINS_REGISTERED = True
 

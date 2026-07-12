@@ -71,6 +71,16 @@ def test_subprocess_probe_rejects_non_serializable_local_function():
     assert "code_probe.non_serializable_target" in {item.code for item in result.diagnostics}
 
 
+def test_subprocess_probe_rejects_source_spec_without_reconstruction():
+    spec = PythonExecutableSpec(executable=sys.executable, pythonpath_policy="dryml-source")
+    target = code.CodeTargetSpec("source_spec", source_spec={"kind": "function", "source": "lambda x: x"})
+
+    result = code.probe_target(target, environment=spec, include_environment_record=False)
+
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.source_spec_reconstruction_unavailable"
+
+
 def test_current_import_path_timeout_routes_through_subprocess(monkeypatch):
     monkeypatch.setenv("PYTHONPATH", FIXTURE_DIR)
     result = code.probe_target(

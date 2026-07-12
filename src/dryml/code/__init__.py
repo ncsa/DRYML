@@ -21,6 +21,7 @@ from .facts import (
     RequirementFact,
     ShapeFact,
     SourceFact,
+    StaticCallFact,
     SymbolFact,
 )
 from .probe import (
@@ -66,6 +67,7 @@ __all__ = [
     "ShapeFact",
     "SourceFact",
     "SourceInfo",
+    "StaticCallFact",
     "SymbolFact",
     "Traits",
     "analyze",

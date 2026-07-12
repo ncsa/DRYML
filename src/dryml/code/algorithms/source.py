@@ -85,7 +85,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
     """Return true for targets that can potentially expose source."""
 
-    return target.obj is not None or target.unwrapped is not None
+    return target.obj is not None or target.unwrapped is not None or target.spec.source_spec is not None
 
 
 ANALYZER = FunctionAnalyzer("source", analyze_target, can_analyze)

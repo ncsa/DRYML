@@ -2,7 +2,7 @@
 
 ## Status
 
-Sprint 1 implementation note for the reusable `dryml.code` analysis API.
+Sprint 9A implementation note for the reusable `dryml.code` analysis API.
 
 ## Current State
 
@@ -69,6 +69,9 @@ Built-in analyzers are registered by name:
 - `symbol_capture`: `ImportRef`/`SourceSpec`-style symbol facts using `dryml.core2.symbol`.
 - `direct_annotations`: raw annotation and requirement facts using the authoritative `dryml.annotations` collection/resolution APIs.
 - `method_contracts`: minimal DRYML `Method` contract metadata from `dryml.core2.methods`.
+- `static_calls`: opt-in conservative resolution for direct globals and direct
+  methods on concretely annotated parameters. It is not in either default
+  analyzer tuple.
 
 Analyzer failures become `DiagnosticFact(error)` by default. Setting `CodeAnalysisContext(diagnostics_policy="raise")` raises a `CodeAnalysisError` instead.
 
@@ -106,12 +109,96 @@ from dryml.code import Method, Traits, CompilerInfo, traits
 
 Dispatch should ask `dryml.code` for code facts and then apply requirement/candidate logic. Code probes should reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.
 
-Dispatch integration is intentionally deferred. Sprint 3 lets `dryml.code.algorithms.direct_annotations` delegate merge semantics to `dryml.annotations`, but the analyzer still emits facts and diagnostics only. It does not select environments, allocate worlds, enforce runtime policy, launch workers, or decide candidate compatibility. Code probe workers remain deferred to Sprint 5. Dynamic tracing remains deferred to Sprint 9.
+Dispatch integration is intentionally deferred. Sprint 3 lets `dryml.code.algorithms.direct_annotations` delegate merge semantics to `dryml.annotations`, but the analyzer still emits facts and diagnostics only. It does not select environments, allocate worlds, enforce runtime policy, launch workers, or decide candidate compatibility.
+
+## Sprint 9A Analysis Contract
+
+Static analysis and future dynamic tracing share the existing `CodeAnalyzer`
+protocol and `CodeAnalysisResult` model. `analyze(...)` directly runs selected
+analyzers and never intentionally invokes the submitted target body. Importing an
+import-path target can still execute module-level code.
+
+`probe_target(...)` only selects execution location for the same analyzers. An
+inline probe enters `RuntimeMode.PROBE` but does not imply a new OS process. A
+worker process may use only analyzers installed and registered in that worker.
+
+The Sprint 9B contract, not a currently exported API, is:
+
+```python
+dryml.code.trace(
+    target,
+    *,
+    args=(),
+    kwargs=None,
+    context=None,
+    policy=None,
+) -> CodeAnalysisResult
+```
+
+`trace(...)` will be the invocation-bearing API and will require
+`CodeAnalysisContext.allow_dynamic_execution=True`. Its invocation data is
+explicit rather than hidden in metadata. Trace facts will use a distinct fact
+kind, inline live notebook targets are intended use cases, and subprocess or
+cross-environment tracing is not implied by this contract.
+
+### Target and Location Support
+
+| Target | Direct `analyze` / inline probe | Worker probe | `static_calls` |
+|---|---|---|---|
+| Importable module function or class method | Supported | Supported by stable import path | Supported when source is available |
+| Import-path string/spec | Supported when imports are allowed | Supported | Supported after import/source retrieval |
+| Live notebook/local function or closure | Supported inline | Unsupported | Supported only when `inspect` supplies source |
+| Live bound method | Supported inline with owner metadata | Unsupported unless a stable importable method target is supplied | Supported under the same source and receiver bounds |
+| Source-spec-only target | Descriptive only; live-object analyzers report unavailable | Unsupported: reconstruction is not implemented | Unsupported until reconstruction exists |
+
+A finite timeout, explicit Python executable, or supported Conda environment
+selects a worker and therefore requires a stable import path. A source spec is
+still serializable provenance data; it does not reconstruct closures, notebook
+frames, bound instances, or arbitrary dependencies.
+
+### Static Facts and Bounds
+
+`ast_access` emits syntactic `ASTAccessFact` and `CallSiteFact` records. Every
+call-site fact says `semantic_resolution="not_attempted"`; nested receivers such
+as `obj.child().train()` remain partial rather than flattened through the call
+result. Locations include source-relative line, file-absolute line when known,
+and column offset.
+
+`static_calls` emits one `StaticCallFact` per inspected `ast.Call` and one
+`static_call_summary` fact after traversal. A resolved fact has
+`status="resolved"`, `confidence="exact_static"`, and a fixed target mapping
+containing only `kind`, `import_path`, `method_name`, and `subject_ref`.
+Unresolved, ambiguous, and unsupported facts use `confidence="conservative_hint"`.
+They are static possibilities, not runtime observations or dispatch requirements.
+
+Supported resolution forms are a callable from the analyzed function's real
+globals mapping and a direct method on a direct parameter with a concrete class
+annotation, inspected with `inspect.getattr_static`. String annotations, unions,
+generics, aliases, reassignment, attribute chains, call-result receivers,
+properties, dynamic `getattr`, and control-flow inference do not resolve.
+
+Both static analyzers enforce these limits before unbounded fact expansion:
+
+| Dimension | Limit |
+|---|---:|
+| UTF-8 source bytes | 1,048,576 |
+| AST nodes | 100,000 |
+| Call sites | 10,000 |
+| Attribute/call chain components | 64 |
+| Semantic-resolution diagnostics | 1,000 |
+| Serialized display/reference scalars | 4,096 characters |
+
+Bound exhaustion returns an error diagnostic with `limit_name`, `limit`, and
+`observed_lower_bound`; static-call summaries then set `complete` to false.
+Source unavailable, source disabled, parse failure, and no matching call remain
+distinct outcomes.
 
 ## Non-Goals
 
 - This note does not add code probes.
-- This note does not add dynamic tracing.
+- This note does not add dynamic tracing or export `trace(...)`.
+- This note does not implement source-spec subprocess reconstruction.
+- This note does not add static-call dispatch policy or alter dispatch planning.
 
 ## Source Anchors
 

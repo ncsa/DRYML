@@ -325,7 +325,8 @@ def probe_target(
 
     Import-path targets may execute module-level code while being imported by
     Python. Probe mode does not execute target function bodies or instantiate
-    classes. Unsupported environment specs return structured diagnostics rather
+    classes. Subprocess execution requires a stable import path; source-spec
+    reconstruction is not implemented. Unsupported environment specs return structured diagnostics rather
     than attempting package solving, container execution, or world synthesis.
     """
 
@@ -374,6 +375,8 @@ def probe_target(
             if _target_can_run_in_subprocess(target_spec):
                 env = build_probe_env(base=None, overrides=None, pythonpath_policy="inherit")
                 return probe_target_in_subprocess(request, [sys.executable, *PROBE_WORKER_ARGS], timeout=timeout, env=env)
+            if target_spec.source_spec:
+                return _non_serializable_target_result(target_spec)
             return CodeProbeResult(
                 ok=False,
                 analysis=None,
@@ -508,17 +511,30 @@ def _validate_schema_version(data: Mapping[str, Any]) -> None:
 
 
 def _target_can_run_in_subprocess(target: CodeTargetSpec) -> bool:
-    return bool(target.import_path or target.source_spec)
+    """Return whether *target* has the stable import path required by workers."""
+
+    return bool(target.import_path)
 
 
 def _non_serializable_target_result(target: CodeTargetSpec) -> CodeProbeResult:
+    if target.source_spec and not target.import_path:
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic(
+                "code_probe.source_spec_reconstruction_unavailable",
+                "Source-spec reconstruction is not implemented for subprocess code probes.",
+                data={"target": target.to_data()},
+            ),),
+        )
     return CodeProbeResult(
         ok=False,
         analysis=None,
         environment_record=None,
         diagnostics=(diagnostic(
             "code_probe.non_serializable_target",
-            "Target cannot be probed in a subprocess without an import path or source spec.",
+            "Target cannot be probed in a subprocess without a stable import path.",
             data={"target": target.to_data()},
         ),),
     )

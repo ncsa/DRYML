@@ -6,5 +6,7 @@ __all__ = [
     "direct_annotations",
     "method_contracts",
     "source",
+    "static_calls",
+    "static_analysis",
     "symbol_capture",
 ]

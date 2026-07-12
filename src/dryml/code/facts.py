@@ -85,6 +85,7 @@ class CodeFact:
             "shape": ShapeFact,
             "ast_access": ASTAccessFact,
             "call_site": CallSiteFact,
+            "static_call": StaticCallFact,
         }
         fact_type = type_map.get(kind, CodeFact)
         return fact_type(
@@ -148,6 +149,49 @@ class CallSiteFact(CodeFact):
     """Fact describing one static method-call-like site."""
 
     kind: str = "call_site"
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCallFact(CodeFact):
+    """Conservative static possibility for one source-level call expression.
+
+    ``status`` and ``confidence`` live in ``data``. A resolved fact identifies a
+    defensible static target; it never claims the call executes at runtime.
+    """
+
+    kind: str = "static_call"
+
+    def __post_init__(self) -> None:
+        """Validate the bounded, serializable static-call fact contract."""
+
+        CodeFact.__post_init__(self)
+        required = {
+            "status", "confidence", "syntax", "display", "receiver",
+            "method_name", "target", "reason", "relative_line",
+            "absolute_line", "col_offset",
+        }
+        missing = required.difference(self.data)
+        if missing:
+            raise ValueError(f"StaticCallFact data is missing required fields: {sorted(missing)!r}")
+        status = self.data["status"]
+        confidence = self.data["confidence"]
+        if status not in {"resolved", "unresolved", "ambiguous", "unsupported"}:
+            raise ValueError(f"unsupported StaticCallFact status {status!r}")
+        if confidence not in {"exact_static", "conservative_hint"}:
+            raise ValueError(f"unsupported StaticCallFact confidence {confidence!r}")
+        for field_name in ("display", "receiver", "method_name", "reason"):
+            value = self.data[field_name]
+            if value is not None and (not isinstance(value, str) or len(value) > 4_096):
+                raise ValueError(f"StaticCallFact {field_name} must be a bounded string or null")
+        target = self.data["target"]
+        if status == "resolved":
+            if not isinstance(target, Mapping) or set(target) != {"kind", "import_path", "method_name", "subject_ref"}:
+                raise ValueError("resolved StaticCallFact target must use the fixed target-reference schema")
+            for value in target.values():
+                if value is not None and (not isinstance(value, str) or len(value) > 4_096):
+                    raise ValueError("StaticCallFact target values must be bounded strings or null")
+        elif target is not None:
+            raise ValueError("non-resolved StaticCallFact target must be null")
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +280,7 @@ __all__ = [
     "RequirementFact",
     "ShapeFact",
     "SourceFact",
+    "StaticCallFact",
     "SymbolFact",
     "json_compatible",
 ]

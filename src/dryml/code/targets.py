@@ -16,7 +16,9 @@ class CodeTargetSpec:
     Args:
         kind: Descriptive target kind such as ``"function"`` or ``"class"``.
         import_path: Optional ``module:qualname`` reference.
-        source_spec: Optional serialized source-backed reference.
+        source_spec: Optional serialized source-backed reference. It is
+            descriptive data only in Sprint 9A; it does not reconstruct a live
+            target for subprocess analysis.
         method_name: Optional method name for method-like targets.
         subject_ref: Optional serializable subject reference for definition methods.
         metadata: JSON-compatible auxiliary metadata.

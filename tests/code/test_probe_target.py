@@ -19,6 +19,11 @@ def _requirements(result: code.CodeProbeResult):
     return result.analysis.facts_of_kind("requirement")
 
 
+class LiveBoundTarget:
+    def inspectable_method(self):
+        return None
+
+
 def test_probe_current_environment_importable_function():
     result = code.probe_target(f"{TARGET_MODULE}:plain_function", include_environment_record=False)
 
@@ -79,6 +84,15 @@ def test_probe_current_process_live_local_function_keeps_annotations():
     assert result.analysis.facts_of_kind("callable")
 
 
+def test_probe_current_process_live_bound_method_keeps_callable_metadata():
+    result = code.probe_target(LiveBoundTarget().inspectable_method, include_environment_record=False)
+
+    assert result.ok
+    assert result.analysis is not None
+    assert result.analysis.target.kind == "bound_method"
+    assert result.analysis.facts_of_kind("callable")
+
+
 def test_current_process_timeout_rejects_live_non_serializable_function():
     def local_target():
         return "not executed"
@@ -87,6 +101,15 @@ def test_current_process_timeout_rejects_live_non_serializable_function():
 
     assert not result.ok
     assert result.diagnostics[0].code == "code_probe.timeout"
+
+
+def test_current_process_timeout_rejects_source_spec_without_reconstruction():
+    spec = code.CodeTargetSpec("source_spec", source_spec={"kind": "function", "source": "lambda x: x"})
+
+    result = code.probe_target(spec, include_environment_record=False, timeout=0.1)
+
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.source_spec_reconstruction_unavailable"
 
 
 def test_probe_method_classmethod_and_staticmethod_annotations():
@@ -115,6 +138,37 @@ def test_probe_algorithm_list_override():
     assert result.analysis is not None
     assert result.analysis.facts_of_kind("symbol")
     assert not result.analysis.facts_of_kind("callable")
+
+
+def test_probe_can_explicitly_request_opt_in_static_calls():
+    result = code.probe_target(
+        f"{TARGET_MODULE}:plain_function",
+        algorithms=("static_calls",),
+        include_environment_record=False,
+    )
+
+    assert result.ok
+    assert result.analysis is not None
+    assert result.analysis.facts_of_kind("static_call_summary")
+
+
+def test_inline_and_worker_static_calls_have_same_fact_data():
+    target = "dryml.code.algorithms.source:analyze_target"
+    inline = code.probe_target(
+        target,
+        algorithms=("static_calls",),
+        include_environment_record=False,
+    )
+    worker = code.probe_target(
+        target,
+        algorithms=("static_calls",),
+        include_environment_record=False,
+        timeout=10,
+    )
+
+    assert inline.ok and worker.ok
+    assert inline.analysis is not None and worker.analysis is not None
+    assert [fact.to_data() for fact in inline.analysis.facts] == [fact.to_data() for fact in worker.analysis.facts]
 
 
 def test_probe_unsupported_target_diagnostic():

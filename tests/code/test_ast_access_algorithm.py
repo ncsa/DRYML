@@ -6,6 +6,7 @@ import pytest
 
 import dryml.code as code
 from dryml.code.algorithms import ast_access
+from dryml.code.algorithms import static_analysis
 from dryml.code.ast_tools import collect_accesses_from_source
 
 
@@ -16,6 +17,10 @@ def test_ast_access_attribute_and_method_hints(requirement_targets):
     assert "experiment.train" in fact.data["attribute_accesses"]
     assert any(call["access"] == "experiment.train" for call in fact.data["method_calls"])
     assert result.facts_of_kind("call_site")
+    call = result.facts_of_kind("call_site")[0]
+    assert call.data["semantic_resolution"] == "not_attempted"
+    assert call.data["relative_line"] is not None
+    assert call.data["absolute_line"] is not None
 
 
 def test_ast_access_nested_current_behavior():
@@ -41,3 +46,33 @@ def test_old_ast_helper_compatibility():
     collector = collect_accesses_from_source("def f(obj):\n    return obj.value\n")
 
     assert any(access.root == "obj" and access.chain == ("value",) for access in collector.attr_accesses)
+
+
+def test_shared_static_parser_enforces_source_and_ast_bounds(requirement_targets, monkeypatch):
+    target = code.normalize_target(requirement_targets.run_training)
+    monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1)
+    parsed, source_diagnostic = static_analysis.parse_static_source(
+        target,
+        analyzer="ast_access",
+        source="def f():\n    return None\n",
+        filename=None,
+        start_line=None,
+    )
+
+    assert parsed is None
+    assert source_diagnostic is not None
+    assert source_diagnostic.data["limit_name"] == "source_bytes"
+
+    monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1_048_576)
+    monkeypatch.setattr(static_analysis, "MAX_AST_NODES", 1)
+    parsed, node_diagnostic = static_analysis.parse_static_source(
+        target,
+        analyzer="ast_access",
+        source="def f():\n    return None\n",
+        filename=None,
+        start_line=None,
+    )
+
+    assert parsed is None
+    assert node_diagnostic is not None
+    assert node_diagnostic.data["limit_name"] == "ast_nodes"
