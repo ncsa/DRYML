@@ -191,7 +191,7 @@ def target_from_import_path(
         return CodeTarget(spec=target_spec, diagnostics=tuple(diagnostics))
 
     try:
-        obj = _resolve_qualname(module, qualname)
+        obj, owner, attribute_name = _resolve_qualname(module, qualname)
     except Exception as exc:
         diagnostics.append(DiagnosticFact(
             severity="error",
@@ -201,7 +201,7 @@ def target_from_import_path(
         ))
         return CodeTarget(spec=target_spec, diagnostics=tuple(diagnostics))
 
-    live = normalize_target(obj, allow_import=False)
+    live = _target_from_static_resolution(obj, owner, attribute_name)
     return CodeTarget(
         spec=target_spec,
         obj=live.obj,
@@ -253,16 +253,23 @@ def target_from_callable(func: Callable[..., Any], *, metadata: Mapping[str, Any
 def target_from_method(method: Callable[..., Any], *, metadata: Mapping[str, Any] | None = None) -> CodeTarget:
     """Create a target from a live bound method."""
 
-    func = getattr(method, "__func__", method)
-    owner = method.__self__ if isinstance(getattr(method, "__self__", None), type) else type(getattr(method, "__self__", None))
-    kind = "class_method" if isinstance(getattr(method, "__self__", None), type) else "bound_method"
-    spec = _spec_for_object(func, kind, method_name=getattr(func, "__name__", None), metadata=metadata)
+    func = object.__getattribute__(method, "__func__")
+    receiver = object.__getattribute__(method, "__self__")
+    receiver_is_class = _is_class(receiver)
+    owner = receiver if receiver_is_class else type(receiver)
+    method_name = object.__getattribute__(func, "__name__")
+    kind = "class_method" if receiver_is_class else "bound_method"
+    spec = _spec_for_object(func, kind, method_name=method_name, metadata=metadata)
+    try:
+        raw_descriptor = _class_static_attribute(owner, method_name)
+    except AttributeError:
+        raw_descriptor = None
     return CodeTarget(
         spec=spec,
         obj=method,
         owner=owner,
-        attribute_name=getattr(func, "__name__", None),
-        raw_descriptor=getattr(owner, "__dict__", {}).get(getattr(func, "__name__", "")) if owner else None,
+        attribute_name=method_name,
+        raw_descriptor=raw_descriptor,
         unwrapped=func,
         metadata=metadata or {},
     )
@@ -288,7 +295,7 @@ def target_from_class_attribute(
 
     diagnostics: list[DiagnosticFact] = []
     try:
-        raw_descriptor = inspect.getattr_static(cls, name)
+        raw_descriptor = _class_static_attribute(cls, name)
     except AttributeError as exc:
         diagnostics.append(DiagnosticFact(
             severity="error",
@@ -342,7 +349,7 @@ def target_from_definition_method(
     """Create a representational target for a method on a definition/class."""
 
     try:
-        raw_descriptor = inspect.getattr_static(cls, method_name) if cls is not None else None
+        raw_descriptor = _class_static_attribute(cls, method_name) if cls is not None else None
     except AttributeError:
         raw_descriptor = None
     unwrapped = _unwrap_descriptor(raw_descriptor)
@@ -396,8 +403,8 @@ def _spec_for_object(
         import_path=_object_import_path(obj),
         method_name=method_name,
         metadata={
-            "module": getattr(obj, "__module__", None),
-            "qualname": getattr(obj, "__qualname__", None),
+            "module": _object_module(obj),
+            "qualname": _object_qualname(obj),
             **dict(metadata or {}),
         },
     )
@@ -414,13 +421,36 @@ def _parse_import_path(path: str) -> tuple[str, str] | None:
     return module_name, qualname
 
 
-def _resolve_qualname(root: Any, qualname: str) -> Any:
+def _resolve_qualname(root: Any, qualname: str) -> tuple[Any, type | None, str | None]:
+    """Resolve an import qualname without invoking descriptors or hooks."""
+
     obj = root
+    owner: type | None = None
+    attribute_name: str | None = None
     for part in qualname.split("."):
         if part == "<locals>":
             raise ValueError("Cannot resolve local qualname components.")
-        obj = getattr(obj, part)
-    return obj
+        owner = obj if _is_class(obj) else None
+        obj = _class_static_attribute(obj, part) if owner is not None else inspect.getattr_static(obj, part)
+        attribute_name = part
+    return obj, owner, attribute_name
+
+
+def _target_from_static_resolution(
+    obj: Any,
+    owner: type | None,
+    attribute_name: str | None,
+) -> CodeTarget:
+    """Normalize a statically resolved import target without descriptor binding."""
+
+    if owner is not None and attribute_name is not None:
+        target = target_from_class_attribute(owner, attribute_name)
+        return target
+    unwrapped = _unwrap_descriptor(obj)
+    if type(unwrapped) in {types.FunctionType, types.BuiltinFunctionType, types.BuiltinMethodType, type}:
+        return normalize_target(unwrapped, allow_import=False)
+    # A raw non-function descriptor has no safe live representation for analyzers.
+    return CodeTarget(spec=CodeTargetSpec("unknown"))
 
 
 def _object_import_path(obj: Any) -> str | None:
@@ -474,8 +504,18 @@ def _resolve_static_qualname(root: Any, qualname: str) -> Any:
     for part in qualname.split("."):
         if part == "<locals>":
             raise ValueError("Cannot resolve local qualname components.")
-        obj = inspect.getattr_static(obj, part)
+        obj = _class_static_attribute(obj, part) if _is_class(obj) else inspect.getattr_static(obj, part)
     return _unwrap_descriptor(obj)
+
+
+def _class_static_attribute(cls: type, name: str) -> Any:
+    """Read a class dictionary through ``type`` without metaclass dispatch."""
+
+    for base in type.__getattribute__(cls, "__mro__"):
+        namespace = type.__getattribute__(base, "__dict__")
+        if name in namespace:
+            return namespace[name]
+    raise AttributeError(name)
 
 
 __all__ = [

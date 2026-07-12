@@ -164,12 +164,13 @@ class StaticCallFact(CodeFact):
     def __post_init__(self) -> None:
         """Validate the bounded, serializable static-call fact contract."""
 
-        CodeFact.__post_init__(self)
         required = {
             "status", "confidence", "syntax", "display", "receiver",
             "method_name", "target", "reason", "relative_line",
             "absolute_line", "col_offset",
         }
+        if not isinstance(self.source, Mapping) or not isinstance(self.data, Mapping):
+            raise ValueError("StaticCallFact source and data must be mappings")
         missing = required.difference(self.data)
         if missing:
             raise ValueError(f"StaticCallFact data is missing required fields: {sorted(missing)!r}")
@@ -215,12 +216,15 @@ class StaticCallFact(CodeFact):
         else:
             if confidence != "conservative_hint" or target is not None:
                 raise ValueError("non-resolved StaticCallFact must be a conservative hint without a target")
-            if not isinstance(self.data["reason"], str) or len(self.data["reason"]) > 4_096:
-                raise ValueError("non-resolved StaticCallFact requires a bounded reason")
+            if not isinstance(self.data["reason"], str) or not self.data["reason"] or len(self.data["reason"]) > 4_096:
+                raise ValueError("non-resolved StaticCallFact requires a non-empty bounded reason")
         for field_name in ("relative_line", "absolute_line", "col_offset"):
             value = self.data[field_name]
             if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
                 raise ValueError(f"StaticCallFact {field_name} must be an integer or null")
+        # The fixed schema above proves conversion cannot recursively copy
+        # arbitrary metadata before JSON normalization.
+        CodeFact.__post_init__(self)
 
 
 @dataclass(frozen=True, slots=True)

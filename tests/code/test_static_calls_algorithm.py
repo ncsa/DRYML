@@ -35,6 +35,10 @@ class CallableWithoutExecution:
 CALLABLE_INSTANCE = CallableWithoutExecution()
 
 
+class ImportableGlobalClass:
+    pass
+
+
 class HostileCallable:
     def __getattribute__(self, name):
         raise AssertionError("static analysis must not inspect callable instance attributes")
@@ -91,6 +95,10 @@ class HostileModel(metaclass=HostileMeta):
 
 def direct_global_target():
     helper()
+
+
+def importable_global_class_target():
+    ImportableGlobalClass()
 
 
 def callable_instance_target():
@@ -205,6 +213,13 @@ def spoofed_helper():
 
 def spoofed_reference_target():
     spoofed_helper()
+
+
+LOCAL_GLOBAL_HELPER = lambda: None
+
+
+def local_global_reference_target():
+    LOCAL_GLOBAL_HELPER()
 
 
 class ClassSourceTarget:
@@ -329,6 +344,14 @@ def test_static_calls_is_registered_opt_in_and_non_invoking():
     assert result.facts_of_kind("static_call_summary")[0].data["complete"] is True
 
 
+def test_static_calls_resolves_safely_importable_global_classes():
+    _, facts = _facts(importable_global_class_target)
+
+    assert facts[0].data["status"] == "resolved"
+    assert facts[0].data["target"]["kind"] == "class"
+    assert facts[0].data["target"]["import_path"].endswith(":ImportableGlobalClass")
+
+
 def test_static_calls_resolves_only_safe_annotated_methods_without_invocation():
     global METHOD_EXECUTED
     METHOD_EXECUTED = False
@@ -407,8 +430,8 @@ def test_static_calls_does_not_publish_unverified_or_oversized_import_references
         spoofed_helper.__module__ = "builtins"
         spoofed_helper.__qualname__ = "len"
         _, facts = _facts(spoofed_reference_target)
-        assert facts[0].data["status"] == "resolved"
-        assert facts[0].data["target"]["import_path"] is None
+        assert facts[0].data["status"] == "unsupported"
+        assert facts[0].data["reason"] == "target_reference_unavailable"
 
         spoofed_helper.__module__ = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
         result, oversized_facts = _facts(spoofed_reference_target)
@@ -417,6 +440,13 @@ def test_static_calls_does_not_publish_unverified_or_oversized_import_references
     finally:
         spoofed_helper.__module__ = original_module
         spoofed_helper.__qualname__ = original_qualname
+
+
+def test_static_calls_does_not_exactly_resolve_globals_without_stable_identity():
+    _, facts = _facts(local_global_reference_target)
+
+    assert facts[0].data["status"] == "unsupported"
+    assert facts[0].data["reason"] == "target_reference_unavailable"
 
 
 def test_static_calls_does_not_inspect_hostile_targets_or_wrapped_metadata():
@@ -509,6 +539,30 @@ def test_static_calls_enforces_chain_and_scalar_bounds(monkeypatch):
     assert result.facts_of_kind("static_call_summary")[0].data["complete"] is True
 
 
+def test_static_calls_bounds_oversized_source_filenames_without_losing_summary(monkeypatch):
+    filename = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
+    monkeypatch.setattr(
+        static_calls,
+        "get_source_info",
+        lambda obj: SourceInfo("def synthetic():\n    helper()\n", filename, 1),
+    )
+
+    result, facts = _facts(direct_global_target)
+
+    assert facts[0].source["filename"] is None
+    assert result.facts_of_kind("static_call_summary")[0].source["filename"] is None
+
+    monkeypatch.setattr(
+        static_calls,
+        "get_source_info",
+        lambda obj: SourceInfo("def synthetic():\n    pass\n", filename, 1),
+    )
+    result, facts = _facts(no_call_target)
+
+    assert not facts
+    assert result.facts_of_kind("static_call_summary")[0].source["filename"] is None
+
+
 def test_static_calls_enforces_source_and_ast_bounds(monkeypatch):
     monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1)
     source_result, _ = _facts(direct_global_target)
@@ -564,4 +618,17 @@ def test_static_call_fact_rejects_unbounded_or_invalid_serialized_data():
     data = _facts(direct_global_target)[1][0].to_data()
     data["data"]["display"] = None
     with pytest.raises(ValueError, match="display must"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["data"]["status"] = "unsupported"
+    data["data"]["confidence"] = "conservative_hint"
+    data["data"]["target"] = None
+    data["data"]["reason"] = ""
+    with pytest.raises(ValueError, match="non-empty bounded reason"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["data"]["unexpected"] = [["x"] * 10_000]
+    with pytest.raises(ValueError, match="fixed static-call schema"):
         code.CodeFact.from_data(data)

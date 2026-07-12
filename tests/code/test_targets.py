@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 
 import dryml.code as code
 
@@ -17,6 +19,27 @@ class HostileDescriptor:
 
 class HostileDescriptorOwner:
     method = HostileDescriptor()
+
+
+class HostileBoundMeta(type):
+    def __getattribute__(cls, name):
+        if name == "__dict__":
+            raise AssertionError("bound method normalization must not read owner.__dict__ dynamically")
+        return super().__getattribute__(name)
+
+
+class HostileBoundOwner(metaclass=HostileBoundMeta):
+    def method(self):
+        return None
+
+
+class BoundMethodBase:
+    def inherited(self):
+        return None
+
+
+class BoundMethodChild(BoundMethodBase):
+    pass
 
 
 def test_import_path_target_resolves(requirement_targets):
@@ -110,3 +133,39 @@ def test_class_attribute_and_definition_targets_do_not_bind_descriptors():
     assert class_attribute.obj is class_attribute.raw_descriptor
     assert definition_method.raw_descriptor is HostileDescriptorOwner.__dict__["method"]
     assert definition_method.obj is definition_method.raw_descriptor
+
+
+def test_bound_method_normalization_avoids_metaclass_hooks_and_preserves_inherited_descriptor():
+    hostile = code.normalize_target(HostileBoundOwner().method)
+    inherited = code.normalize_target(BoundMethodChild().inherited)
+
+    assert hostile.raw_descriptor is hostile.unwrapped
+    assert inherited.owner is BoundMethodChild
+    assert inherited.raw_descriptor is BoundMethodBase.__dict__["inherited"]
+
+
+def test_import_path_resolution_does_not_invoke_module_or_descriptor_hooks(monkeypatch):
+    module = types.ModuleType("hostile_code_target_module")
+
+    def module_getattr(name):
+        raise AssertionError("import-path resolution must not invoke module __getattr__")
+
+    module.__getattr__ = module_getattr
+    module.Owner = HostileDescriptorOwner
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    missing = code.target_from_import_path(f"{module.__name__}:missing")
+    descriptor = code.target_from_import_path(f"{module.__name__}:Owner.method")
+
+    assert missing.diagnostics[0].code == "dryml.code.qualname_resolution_failed"
+    assert descriptor.raw_descriptor is HostileDescriptorOwner.__dict__["method"]
+
+
+def test_import_disabled_source_analysis_reports_unavailable():
+    result = code.analyze(
+        "dryml_requirement_targets:plain_importable_function",
+        algorithms=("source",),
+        context=code.CodeAnalysisContext(allow_import=False),
+    )
+
+    assert result.diagnostics_of_code("dryml.code.source_unavailable")

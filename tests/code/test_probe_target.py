@@ -63,6 +63,19 @@ def test_probe_result_rejects_inconsistent_or_unproven_success_protocol_data():
             "environment_record": None,
             "diagnostics": [],
         })
+    failed_analysis = code.CodeAnalysisResult(
+        target=code.CodeTargetSpec.from_import_path(f"{TARGET_MODULE}:plain_function"),
+        diagnostics=(code.DiagnosticFact(severity="error", code="dryml.code.test_failure"),),
+    )
+    with pytest.raises(ValueError, match="ok does not match diagnostics"):
+        code.CodeProbeResult.from_data({
+            "kind": "dryml.code_probe_result",
+            "schema_version": 1,
+            "ok": True,
+            "analysis": failed_analysis.to_data(),
+            "environment_record": None,
+            "diagnostics": [],
+        })
 
 
 def test_probe_direct_annotation_facts_for_function():
@@ -101,6 +114,14 @@ def test_current_process_timeout_rejects_live_non_serializable_function():
 
     assert not result.ok
     assert result.diagnostics[0].code == "code_probe.timeout"
+
+
+def test_worker_eligibility_rejects_main_and_local_import_paths():
+    from dryml.code.probe import _target_can_run_in_subprocess
+
+    assert not _target_can_run_in_subprocess(code.CodeTargetSpec.from_import_path("__main__:target"))
+    assert not _target_can_run_in_subprocess(code.CodeTargetSpec.from_import_path("example:factory.<locals>.target"))
+    assert _target_can_run_in_subprocess(code.CodeTargetSpec.from_import_path(f"{TARGET_MODULE}:plain_function"))
 
 
 def test_worker_probe_rejects_live_bound_method_receiver_state():

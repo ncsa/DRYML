@@ -74,7 +74,7 @@ class CodeProbeRequest:
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.target, CodeTargetSpec):
+        if type(self.target) is not CodeTargetSpec:
             object.__setattr__(self, "target", normalize_target(self.target, metadata=self.metadata).spec)
         object.__setattr__(self, "algorithms", _coerce_algorithms(self.algorithms))
         object.__setattr__(self, "args", tuple(json_compatible(self.args)))
@@ -150,10 +150,11 @@ class CodeProbeResult:
 
     def __post_init__(self) -> None:
         diagnostics = tuple(self.diagnostics or ())
-        if probe_ok(diagnostics) and self.analysis is None:
+        all_diagnostics = diagnostics + (() if self.analysis is None else self.analysis.diagnostics)
+        if probe_ok(all_diagnostics) and self.analysis is None:
             raise ValueError("successful CodeProbeResult requires analysis")
         object.__setattr__(self, "diagnostics", diagnostics)
-        object.__setattr__(self, "ok", probe_ok(diagnostics))
+        object.__setattr__(self, "ok", probe_ok(all_diagnostics))
 
     def to_data(self) -> dict[str, Any]:
         """Return JSON-compatible result data using schema version 1."""
@@ -182,7 +183,8 @@ class CodeProbeResult:
             raise TypeError("CodeProbeResult ok must be a boolean")
         diagnostics = tuple(DiagnosticFact.from_data(item) for item in data.get("diagnostics") or ())
         analysis = None if data.get("analysis") is None else CodeAnalysisResult.from_data(data["analysis"])
-        if data["ok"] != probe_ok(diagnostics):
+        all_diagnostics = diagnostics + (() if analysis is None else analysis.diagnostics)
+        if data["ok"] != probe_ok(all_diagnostics):
             raise ValueError("CodeProbeResult ok does not match diagnostics")
         if data["ok"] and analysis is None:
             raise ValueError("successful CodeProbeResult requires analysis")
@@ -342,10 +344,10 @@ def probe_target(
 
     code_target: CodeTarget | None = None
     try:
-        if isinstance(target, CodeTargetSpec):
+        if type(target) is CodeTargetSpec:
             target_spec = target
             target_kind = target.kind
-        elif isinstance(target, str):
+        elif type(target) is str:
             target_spec = CodeTargetSpec.from_import_path(target)
             target_kind = target_spec.kind
         else:
@@ -533,7 +535,12 @@ def _target_can_run_in_subprocess(target: CodeTargetSpec) -> bool:
     if target.kind == "bound_method" or not isinstance(target.import_path, str):
         return False
     module_name, separator, qualname = target.import_path.partition(":")
-    return bool(separator and module_name.strip() and qualname.strip())
+    if not separator or module_name == "__main__" or not module_name or not qualname:
+        return False
+    return (
+        all(part.isidentifier() for part in module_name.split("."))
+        and all(part.isidentifier() for part in qualname.split("."))
+    )
 
 
 def _non_serializable_target_result(target: CodeTargetSpec) -> CodeProbeResult:

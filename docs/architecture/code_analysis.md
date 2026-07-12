@@ -116,7 +116,9 @@ Dispatch integration is intentionally deferred. Sprint 3 lets `dryml.code.algori
 Static analysis and future dynamic tracing share the existing `CodeAnalyzer`
 protocol and `CodeAnalysisResult` model. `analyze(...)` directly runs selected
 analyzers and never intentionally invokes the submitted target body. Importing an
-import-path target can still execute module-level code.
+import-path target can still execute module-level code. After import, qualname
+components are inspected through static module/class dictionaries so descriptor,
+metaclass, and module dynamic-attribute hooks are not invoked.
 
 `probe_target(...)` only selects execution location for the same analyzers. An
 inline probe enters `RuntimeMode.PROBE` but does not imply a new OS process. A
@@ -184,9 +186,12 @@ containing only `kind`, `import_path`, `method_name`, and `subject_ref`.
 Unresolved, ambiguous, and unsupported facts use `confidence="conservative_hint"`.
 They are static possibilities, not runtime observations or dispatch requirements.
 
-Supported resolution forms are plain Python functions from the analyzed
-function's real globals mapping and direct methods on direct parameters with an
-ordinary concrete class annotation, inspected with `inspect.getattr_static`.
+Supported resolution forms are safely importable plain Python functions or
+ordinary classes from the analyzed function's real globals mapping and direct
+methods on direct parameters with an ordinary concrete class annotation,
+inspected without descriptor binding. A resolved fact must contain a verified
+stable import path; a callable with no defensible serialized identity remains
+unsupported.
 String annotations, unions, generics, protocols, aliases, reassignment, nested
 scopes, attribute chains, call-result receivers, properties, dynamic `getattr`,
 callable instances, non-standard metaclasses, and control-flow inference do not
@@ -210,6 +215,38 @@ than one diagnostic per site, so it does not emit an unbounded stream of
 semantic-resolution diagnostics.
 Source unavailable, source disabled, parse failure, and no matching call remain
 distinct outcomes.
+
+### Static Fact Examples
+
+Every serialized `StaticCallFact` has this fixed source and data schema. These
+examples omit only ordinary line-number variation:
+
+```json
+{"kind":"static_call","source":{"analyzer":"static_calls","target_kind":"function","filename":"example.py"},"data":{"status":"resolved","confidence":"exact_static","syntax":"direct_name","display":"helper","receiver":null,"method_name":"helper","target":{"kind":"function","import_path":"example:helper","method_name":null,"subject_ref":null},"reason":null,"relative_line":2,"absolute_line":12,"col_offset":4}}
+{"kind":"static_call","source":{"analyzer":"static_calls","target_kind":"function","filename":"example.py"},"data":{"status":"unresolved","confidence":"conservative_hint","syntax":"direct_name","display":"missing","receiver":null,"method_name":"missing","target":null,"reason":"global_name_unavailable","relative_line":2,"absolute_line":12,"col_offset":4}}
+{"kind":"static_call","source":{"analyzer":"static_calls","target_kind":"function","filename":"example.py"},"data":{"status":"ambiguous","confidence":"conservative_hint","syntax":"annotated_receiver_method","display":"model.train","receiver":"model","method_name":"train","target":null,"reason":"non_concrete_annotation","relative_line":2,"absolute_line":12,"col_offset":4}}
+{"kind":"static_call","source":{"analyzer":"static_calls","target_kind":"function","filename":"example.py"},"data":{"status":"unsupported","confidence":"conservative_hint","syntax":"attribute_chain","display":"helpers.train","receiver":"helpers","method_name":"train","target":null,"reason":"attribute_chain_unsupported","relative_line":2,"absolute_line":12,"col_offset":4}}
+```
+
+### Diagnostics and Safety Evidence
+
+| Condition | Severity | Diagnostic code |
+|---|---|---|
+| Source disabled | info | `dryml.code.source_disabled` |
+| Source unavailable | warning | `dryml.code.source_unavailable` |
+| Parse failure | error | `dryml.code.ast_parse_failed` |
+| Static source/AST/call bound | error | `dryml.code.static_<limit>_limit_exceeded` |
+| Oversized static target reference | error | `dryml.code.static_target_reference_limit_exceeded` |
+| Source-spec worker request | error | `code_probe.source_spec_reconstruction_unavailable` |
+| Unstable worker target | error | `code_probe.non_serializable_target` |
+| Live bound method in a worker | error | `code_probe.bound_method_receiver_unavailable` |
+
+`tests/code/test_static_calls_algorithm.py` proves global callables, methods,
+properties, callable instances, wrapper metadata, and metaclass lookups are not
+invoked. `tests/code/test_targets.py` proves import-path and bound-method
+normalization do not bind descriptors or invoke module/metaclass hooks.
+`tests/code/test_probe_target.py` proves probes do not execute submitted target
+bodies or instantiate classes.
 
 ## Non-Goals
 

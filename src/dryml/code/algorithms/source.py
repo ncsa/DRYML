@@ -94,7 +94,15 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
     """Return true for targets that can potentially expose source."""
 
-    return target.obj is not None or target.unwrapped is not None or target.spec.source_spec is not None
+    return (
+        target.obj is not None
+        or target.unwrapped is not None
+        or target.spec.source_spec is not None
+        # An explicitly selected source analyzer must explain why an import-path
+        # target cannot yield source while imports are disabled. Keep the default
+        # lightweight tuple's established unavailable-target behavior unchanged.
+        or (target.spec.import_path is not None and "source" in context.algorithms)
+    )
 
 
 ANALYZER = FunctionAnalyzer("source", analyze_target, can_analyze)

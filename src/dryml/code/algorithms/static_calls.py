@@ -160,13 +160,17 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     assert parsed is not None
 
     root = _analysis_root(parsed.tree)
+    # Binding information must cover the entire selected lexical scope before a
+    # site can be resolved, but call collection itself stops at its hard limit.
+    bound_names = _bound_names(root)
     collector = _CallCollector()
     collector.collect_root(root)
     globals_mapping = _globals_for_target(function, source_target)
     annotations = _parameter_annotations(function)
     parameter_names = _parameter_names(root)
     free_names = _free_names(function)
-    bound_names = _bound_names(root)
+    filename = bounded_string(parsed.filename)
+    target_kind = bounded_string(target.spec.kind) or "<bounded>"
     facts = tuple(
         _fact_for_call(
             target,
@@ -177,7 +181,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             parameter_names=parameter_names,
             free_names=free_names,
             bound_names=bound_names,
-            filename=parsed.filename,
+            filename=filename,
             start_line=parsed.start_line,
         )
         for call, nested_scope in collector.calls
@@ -185,7 +189,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     complete = not collector.exhausted
     summary = CodeFact(
         kind="static_call_summary",
-        source={"analyzer": "static_calls", "target_kind": target.spec.kind, "filename": parsed.filename},
+        source={"analyzer": "static_calls", "target_kind": target_kind, "filename": filename},
         data={
             "complete": complete,
             "call_sites_seen": collector.call_sites_seen,
@@ -329,7 +333,7 @@ def _fact_for_call(
             reason = "global_name_unavailable"
         else:
             value = globals_mapping[func.id]
-            target_data, target_reason = _safe_function_target_data(value)
+            target_data, target_reason = _safe_target_data(value)
             if target_data is None:
                 status = "unsupported"
                 reason = target_reason or "global_value_not_safe_function"
@@ -393,7 +397,11 @@ def _fact_for_call(
     confidence = "exact_static" if status == "resolved" else "conservative_hint"
     relative_line = getattr(call, "lineno", None)
     return StaticCallFact(
-        source={"analyzer": "static_calls", "target_kind": target.spec.kind, "filename": filename},
+        source={
+            "analyzer": "static_calls",
+            "target_kind": bounded_string(target.spec.kind) or "<bounded>",
+            "filename": bounded_string(filename),
+        },
         data={
             "status": status,
             "confidence": confidence,
@@ -580,25 +588,25 @@ def _resolve_annotated_method(annotation: Any, method_name: str | None) -> tuple
         candidate = descriptor
     else:
         return None, "unsupported", "annotated_member_not_safe_function"
-    target_data, target_reason = _safe_function_target_data(candidate, method_name=method_name)
+    target_data, target_reason = _safe_target_data(candidate, method_name=method_name)
     if target_data is None:
         return None, "unsupported", target_reason or "target_reference_limit_exceeded"
     return target_data, "resolved", None
 
 
-def _safe_function_target_data(
+def _safe_target_data(
     value: Any,
     *,
     method_name: str | None = None,
     subject_ref: str | None = None,
 ) -> tuple[dict[str, str | None] | None, str | None]:
-    """Describe a plain Python function without dynamic attribute access.
+    """Describe an importable plain function or ordinary class safely.
 
     Arbitrary callable instances and descriptors are intentionally unsupported:
     normalizing them can trigger user-defined attribute hooks.
     """
 
-    if type(value) is not types.FunctionType:
+    if type(value) not in {types.FunctionType, type}:
         return None, "global_value_not_safe_function"
     module_name = object.__getattribute__(value, "__module__")
     qualname = object.__getattribute__(value, "__qualname__")
@@ -612,10 +620,12 @@ def _safe_function_target_data(
         candidate_path = f"{module_name}:{qualname}"
         if len(candidate_path) > MAX_STATIC_SCALAR_CHARS:
             return None, "target_reference_limit_exceeded"
-        if _path_resolves_to_function(candidate_path, value):
+        if _path_resolves_to_target(candidate_path, value):
             import_path = candidate_path
+    if import_path is None:
+        return None, "target_reference_unavailable"
     target = bounded_target_mapping({
-        "kind": "function",
+        "kind": "class" if type(value) is type else "function",
         "import_path": import_path,
         "method_name": method_name,
         "subject_ref": subject_ref,
@@ -623,7 +633,7 @@ def _safe_function_target_data(
     return target, None if target is not None else "target_reference_limit_exceeded"
 
 
-def _path_resolves_to_function(path: str, value: types.FunctionType) -> bool:
+def _path_resolves_to_target(path: str, value: Any) -> bool:
     """Verify a prospective import path without dynamic module/class lookups."""
 
     module_name, qualname = path.split(":", 1)
