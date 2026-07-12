@@ -27,7 +27,14 @@ _MAX_LOCAL_WORLD_CPU_ASSIGNMENTS = 4096
 
 @dataclass(frozen=True, order=True, slots=True)
 class WorldWorkerKey:
-    """Stable JSON-friendly key for one local world worker."""
+    """Stable JSON-friendly key for one local world worker.
+
+    Attributes:
+        role: Requested world role name.
+        replica: Zero-based replica index within the role.
+        rank: Global worker rank.
+        local_rank: Same-host rank used by local execution.
+    """
 
     role: str
     replica: int
@@ -66,7 +73,14 @@ class WorldWorkerKey:
 
 @dataclass(frozen=True, slots=True)
 class LocalWorldAllocationPlan:
-    """Expanded deterministic local allocation result."""
+    """Expanded deterministic local allocation result.
+
+    Attributes:
+        world_spec: Canonical requested-world envelope.
+        world_allocation: Concrete assigned resource identifiers.
+        world_allocation_spec: Canonical allocation envelope.
+        worker_keys: Deterministically ranked role/replica workers.
+    """
 
     world_spec: Mapping[str, Any]
     world_allocation: WorldAllocation
@@ -76,7 +90,15 @@ class LocalWorldAllocationPlan:
 
 @dataclass(frozen=True, slots=True)
 class WorkerLaunchPlan:
-    """Launch plan for one role/replica worker in a local world."""
+    """Launch plan for one role/replica worker in a local world.
+
+    Attributes:
+        key: Worker role, replica, and rank identity.
+        dispatch_spec: Shared canonical dispatch intent.
+        execution_recipe: Shared backend execution recipe.
+        envelope: Worker-specific operation and allocation envelope.
+        store: Store used for worker inputs, outputs, and provenance.
+    """
 
     key: WorldWorkerKey
     dispatch_spec: Mapping[str, Any]
@@ -87,7 +109,19 @@ class WorkerLaunchPlan:
 
 @dataclass(frozen=True, slots=True)
 class LocalWorldPlan:
-    """Resolved launch plan for a coordinated local worker group."""
+    """Resolved launch plan for a coordinated local worker group.
+
+    Attributes:
+        dispatch_spec: Canonical dispatch intent.
+        execution_recipe: Local-world backend recipe.
+        operation_spec: Canonical operation executed by each worker.
+        world_spec: Requested world kept distinct from allocation.
+        world_allocation_spec: Concrete local resource assignment.
+        worker_plans: Ordered worker-specific launch plans.
+        store: Shared local store used by workers.
+        group_work_dir: Optional backend-owned group directory.
+        preserve_work_dir: Whether explicit close preserves that directory.
+    """
 
     dispatch_spec: Mapping[str, Any]
     execution_recipe: Mapping[str, Any]
@@ -102,7 +136,22 @@ class LocalWorldPlan:
 
 @dataclass(frozen=True, slots=True)
 class WorldDispatchResult:
-    """Aggregate result for explicit local-world dispatch."""
+    """Aggregate result for explicit local-world dispatch.
+
+    Attributes:
+        status: Aggregate terminal status.
+        dispatch_id: Persisted dispatch identity when available.
+        recipe_id: Persisted execution-recipe identity when available.
+        world_id: Requested-world identity.
+        world_allocation_id: Actual allocation identity.
+        primary: Deterministic primary worker result.
+        workers: Results keyed by role, replica, and rank.
+        execution_record_ids: Worker execution record identities.
+        produced_record_ids: Product record identities.
+        diagnostics: Aggregate backend diagnostics.
+        error: Structured aggregate failure.
+        cancellation: Structured cancellation details.
+    """
 
     status: str
     dispatch_id: str | None

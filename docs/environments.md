@@ -166,8 +166,10 @@ caller candidates, name-sorted registry entries, then the current environment.
 Resolution is bounded, deduplicates canonical specs, records attempts, and
 selects the first strictly compatible candidate when a requirement is supplied.
 Without a requirement it performs no probe fan-out and selects the first
-structurally launchable candidate. Registry labels are only probe prefilters,
-never proof of compatibility. `max_candidates`, `probe_timeout`,
+structurally launchable candidate. Unsupported container specs and Conda specs
+that cannot produce a local worker command are recorded and skipped without a
+probe. Registry labels are only probe prefilters, never proof of compatibility.
+`max_candidates`, `probe_timeout`,
 and `total_timeout` bound DRYML's own search work; a finite total timeout also
 bounds a built-in probe when no per-probe timeout is supplied. Injected probe
 runners and arbitrary candidate iterators are cooperative callbacks, so callers

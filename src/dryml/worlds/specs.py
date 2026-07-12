@@ -16,6 +16,7 @@ from .errors import ResourceValidationError, WorldSpecValidationError
 from .resources import CountConstraint, ResourceRequirement, ResourceSpec
 
 _ROLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_MAX_ROLE_NAME = 4096
 _MAX_TOPOLOGY_DEPTH = 8
 _MAX_TOPOLOGY_ITEMS = 64
 _MAX_TOPOLOGY_STRING = 4096
@@ -319,6 +320,8 @@ def _iter_valid_roles(roles: Mapping[str, Any]):
     for name, value in roles.items():
         if not isinstance(name, str) or not _ROLE_RE.match(name):
             raise WorldSpecValidationError("invalid role name", context={"role": name})
+        if len(name) > _MAX_ROLE_NAME:
+            raise WorldSpecValidationError("role name exceeds the bounded limit", context={"role": name[:64]})
         yield name, value
 
 

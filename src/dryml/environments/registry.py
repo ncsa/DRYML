@@ -125,7 +125,17 @@ class EnvironmentRegistry:
         return entry
 
     def get(self, name: str) -> EnvironmentRegistryEntry:
-        """Return a registered environment by name."""
+        """Return a registered environment without probing it.
+
+        Args:
+            name: Exact registered entry name.
+
+        Returns:
+            The immutable registry entry.
+
+        Raises:
+            EnvironmentRegistryError: If ``name`` is not registered.
+        """
 
         try:
             return self._entries[name]
@@ -159,12 +169,19 @@ class EnvironmentRegistry:
             ) from exc
 
     def list(self) -> tuple[EnvironmentRegistryEntry, ...]:
-        """Return registered entries in deterministic name order."""
+        """Return all entries in deterministic name order without probing."""
 
         return tuple(self._entries[name] for name in self._names)
 
     def iter_entries(self, *, limit: int | None = None):
-        """Yield name-sorted entries without materializing the full registry."""
+        """Yield name-sorted entries without probing or copying all entries.
+
+        Args:
+            limit: Optional maximum number of names to yield.
+
+        Yields:
+            Immutable registry entries in name order.
+        """
 
         names = self._names if limit is None else islice(self._names, limit)
         yield from (self._entries[name] for name in names)
@@ -176,7 +193,17 @@ class EnvironmentRegistry:
         tags: tuple[str, ...] = (),
         provides: tuple[str, ...] = (),
     ) -> EnvironmentRegistryEntry | None:
-        """Find the first deterministic entry matching labels and requirement hints."""
+        """Find the first entry matching deterministic label hints.
+
+        Args:
+            requirement: Optional source of required tags and capabilities.
+            tags: Additional tags that an entry must advertise.
+            provides: Additional capabilities that an entry must advertise.
+
+        Returns:
+            The first name-sorted hint match, or ``None``. Hints are not proof of
+            environment compatibility and this method does not probe.
+        """
 
         required_tags = set(tags) | set(requirement.tags if requirement else ())
         required_provides = set(provides) | set(requirement.capabilities if requirement else ())
@@ -189,7 +216,15 @@ class EnvironmentRegistry:
         return None
 
     def probe_registered(self, name: str, *, timeout: float | None = 30.0) -> EnvironmentProbeResult:
-        """Probe a registered environment by name."""
+        """Probe a registered environment by name.
+
+        Args:
+            name: Exact registered entry name.
+            timeout: Positive probe deadline in seconds, or ``None``.
+
+        Returns:
+            The structured environment probe result.
+        """
 
         return probe(self.get(name).spec, timeout=timeout)
 
@@ -201,7 +236,17 @@ class EnvironmentRegistry:
         timeout: float | None = 30.0,
         policy: str = "compatible",
     ) -> CompatibilityReport:
-        """Probe a named environment and check a requirement against it."""
+        """Probe a named environment and check a hard requirement.
+
+        Args:
+            name: Exact registered entry name.
+            requirement: Requirement checked against the probed record.
+            timeout: Positive probe deadline in seconds, or ``None``.
+            policy: Compatibility-report policy.
+
+        Returns:
+            Probe failure or requirement compatibility report.
+        """
 
         result = self.probe_registered(name, timeout=timeout)
         if not result.ok or result.record is None:
@@ -295,7 +340,15 @@ class EnvironmentRegistry:
         *,
         message: str = "no registered environment matched the requirement",
     ) -> CompatibilityReport:
-        """Return a structured report explaining registry selection failure."""
+        """Return a structured report explaining registry selection failure.
+
+        Args:
+            requirement: Optional unmatched hard requirement.
+            message: Human-readable failure summary.
+
+        Returns:
+            An error compatibility report with code ``registry_no_match``.
+        """
 
         issue = CompatibilityIssue(
             "registry_no_match",
@@ -306,13 +359,23 @@ class EnvironmentRegistry:
         return report_from_issues((issue,))
 
     def to_data(self) -> dict[str, Any]:
-        """Return JSON-compatible registry data."""
+        """Return JSON-compatible entries in deterministic name order."""
 
         return {"entries": [entry.to_data() for entry in self.list()]}
 
     @classmethod
     def from_data(cls, data: dict[str, Any]) -> "EnvironmentRegistry":
-        """Build a registry from serialized data."""
+        """Build a validated registry from serialized entry data.
+
+        Args:
+            data: Mapping containing an ``entries`` sequence.
+
+        Returns:
+            A new explicit in-memory registry.
+
+        Raises:
+            EnvironmentRegistryError: If an entry is invalid or duplicated.
+        """
 
         registry = cls()
         for entry_data in data.get("entries", ()):

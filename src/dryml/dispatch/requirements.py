@@ -75,7 +75,13 @@ class RequirementPolicy(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class CandidateConsideration:
-    """One deterministic candidate-precedence slot considered by planning."""
+    """One deterministic candidate-precedence slot considered by planning.
+
+    Attributes:
+        slot: Precedence slot name, such as ``explicit`` or ``current``.
+        status: Whether the slot was absent, considered, or selected.
+        candidate: Bounded canonical candidate data when the slot had a value.
+    """
 
     slot: str
     status: str
@@ -89,7 +95,15 @@ class CandidateConsideration:
 
 @dataclass(frozen=True, slots=True)
 class CandidateSelection:
-    """A selected environment, world, or runtime and its precedence trace."""
+    """A selected environment, world, or runtime and its precedence trace.
+
+    Attributes:
+        kind: Candidate subsystem: environment, world, or runtime.
+        candidate: Canonical selected candidate data.
+        source: Winning precedence source, including resolver or synthesized.
+        considered: Ordered trace of higher-precedence and selected slots.
+        diagnostics: Selection diagnostics retained for explanation.
+    """
 
     kind: str
     candidate: Mapping[str, Any]
@@ -111,7 +125,17 @@ class CandidateSelection:
 
 @dataclass(frozen=True, slots=True)
 class CandidateCheckReport:
-    """Normalized result of checking one selected candidate."""
+    """Normalized result of checking one selected candidate.
+
+    Attributes:
+        kind: Candidate subsystem that was checked.
+        status: Normalized check outcome.
+        compatible: Compatibility decision, or ``None`` when not evaluated.
+        requirement: Canonical hard requirement data.
+        candidate: Canonical checked candidate data.
+        details: Structured compatibility findings.
+        diagnostics: Probe or validation diagnostics supporting the result.
+    """
 
     kind: str
     status: str
@@ -1341,6 +1365,8 @@ def _normalized_target_data(normalized):
 
 
 def _bounded_probe_data(data):
+    if isinstance(data, Mapping):
+        data = {key: value for key, value in data.items() if key not in {"stdout", "stderr"}}
     return _bounded_data(data)
 
 

@@ -74,6 +74,7 @@ def main() -> int:
         "tests/dispatch/test_world_selection.py",
         "tests/dispatch/test_environment_probe_check.py",
         "tests/dispatch/test_local_world.py",
+        "tests/dispatch/test_world_requirement_check.py",
         "tests/dispatch/test_explain.py",
         "tests/notebook/test_local_defaults.py",
     ])

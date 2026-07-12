@@ -9,6 +9,9 @@ from typing import Any
 
 from .errors import ResourceValidationError
 
+
+_MAX_RESOURCE_NAME = 4096
+
 ByteSize = int
 
 _BYTE_RE = re.compile(r"^(0|[1-9][0-9]*)(B|MiB|GiB)$")
@@ -304,6 +307,8 @@ def _merge_constraint_maps(left: Mapping[str, CountConstraint], right: Mapping[s
 def _validate_name(name: str, kind: str) -> None:
     if not isinstance(name, str) or not name:
         raise ResourceValidationError(f"{kind} name must be a non-empty string", context={"name": name})
+    if len(name) > _MAX_RESOURCE_NAME:
+        raise ResourceValidationError(f"{kind} name exceeds the bounded limit", context={"name": name[:64]})
 
 
 __all__ = [

@@ -92,6 +92,29 @@ def test_synthesis_result_serialization_is_bounded():
     assert len(bounded["inventory"]["deep"]["value"]) == 4096
 
 
+def test_synthesis_rejects_names_that_could_collide_in_bounded_serialization():
+    oversized = "role_" + "x" * 4096
+
+    result = synthesize({"roles": {oversized: {}}}, inventory=LocalResourceInventory((0,)))
+
+    assert result.status == "invalid_requirement"
+    assert result.diagnostics[0].code == "invalid_requirement"
+
+
+def test_synthesis_bounds_role_input_before_normalizing_excess_entries():
+    class BoundedRoles(dict):
+        def items(self):
+            for index in range(4096):
+                yield f"role_{index}", {}
+            yield "excess", object()
+            raise AssertionError("synthesis read beyond the supported role bound")
+
+    result = synthesize({"roles": BoundedRoles()}, inventory=LocalResourceInventory((0,)))
+
+    assert result.status == "invalid_requirement"
+    assert result.diagnostics[0].code == "role_count_exceeds_local_limit"
+
+
 def test_synthesis_result_json_and_failed_require_world_are_structured():
     result = synthesize(
         {"roles": {"worker": {"resources": {"named": {"fast_disk": {"min": 1}}}}}},

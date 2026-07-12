@@ -298,6 +298,14 @@ class Dispatcher:
 
         Passing a :class:`DispatchPlan` preserves the original advanced API.
         Other targets are normalized through :meth:`plan` first.
+
+        Args:
+            operation: Existing plan or operation accepted by :meth:`plan`.
+            method_name: Optional DRYML object method name.
+            **kwargs: Planning arguments forwarded when ``operation`` is not a plan.
+
+        Returns:
+            Backend future for the submitted single-subprocess dispatch.
         """
 
         plan = operation if isinstance(operation, DispatchPlan) else self.plan(operation, method_name, **kwargs)
@@ -521,7 +529,14 @@ class Dispatcher:
         return LocalWorldPlan(dispatch, recipe, op_spec, world_spec, allocation_spec, tuple(worker_plans), target_store)
 
     def submit_world(self, plan: Any):
-        """Submit a local-world plan to the local-world coordinator."""
+        """Submit a local-world plan to the local-world coordinator.
+
+        Args:
+            plan: Plan returned by :meth:`plan_world`.
+
+        Returns:
+            A local-world future that owns worker and artifact cleanup.
+        """
 
         from .local_world import LocalWorldBackend
 

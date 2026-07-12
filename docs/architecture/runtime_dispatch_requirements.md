@@ -98,11 +98,14 @@ Timeout enforcement is parent-side for subprocess probes. When a current-process
 
 Baseline tests can become brittle if they assert private plan internals. Sprint 0 tests should prefer plan, dispatch spec, recipe, envelope, and public exception behavior.
 
-## Open Questions
+## Resolved Decisions
 
-- What public result shape should dispatch expose for requirement-resolution diagnostics?
-- Should requirement-policy escape hatches live on dispatch kwargs, runtime policy, or both?
-- Which operation metadata should persist requirement facts for execution records?
+- `DispatchExplanation` and `DispatchPlanningResolution` expose bounded structured
+  requirement, selection, check, resolver, synthesis, and allocation diagnostics.
+- Requirement policy is a dispatch planning input; runtime enforcement remains a
+  distinct worker-runtime policy.
+- DRYML-owned planning metadata persists canonical requirement facts and bounded
+  decisions without probe streams, environment secrets, or live objects.
 
 ## Follow-Up Sprints
 

@@ -382,6 +382,21 @@ def test_planning_metadata_excludes_probe_output(tmp_path):
     assert "AUDIT_SECRET" not in str(metadata)
 
 
+def test_planning_metadata_excludes_environment_probe_output():
+    from dryml.dispatch.requirements import _bounded_probe_data
+    from dryml.environments import CurrentEnvironmentSpec, EnvironmentProbeResult
+
+    probe = EnvironmentProbeResult(
+        CurrentEnvironmentSpec(),
+        False,
+        stdout="AUDIT_SECRET",
+        stderr="AUDIT_SECRET",
+        returncode=1,
+    )
+
+    assert "AUDIT_SECRET" not in str(_bounded_probe_data(probe.to_data()))
+
+
 def test_planning_metadata_bounds_deep_nested_data():
     from dryml.dispatch.requirements import _bounded_data
 

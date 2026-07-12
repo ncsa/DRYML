@@ -76,6 +76,11 @@ class LocalResourceInventory:
             normalized = tuple(_accelerator_identifier(value, name) for value in normalized)
             if len(set(normalized)) != len(normalized):
                 raise ResourceValidationError("accelerator inventory identifiers must be unique", context={"accelerator": name})
+            if len({str(value) for value in normalized}) != len(normalized):
+                raise ResourceValidationError(
+                    "accelerator inventory identifiers must be unique visibility tokens",
+                    context={"accelerator": name},
+                )
             accelerators[name] = tuple(sorted(normalized, key=lambda value: (str(type(value)), str(value))))
         if self.memory is not None:
             _nonneg_int(self.memory, "memory")
@@ -557,13 +562,12 @@ def _freeze_json(value: Any, *, depth: int = 0, budget: list[int]) -> Any:
         if len(value) > _MAX_METADATA_ITEMS:
             raise ResourceValidationError("inventory metadata mapping exceeds the bounded limit")
         result = {}
-        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
-            normalized_key = str(key)
-            if normalized_key in result:
-                raise ResourceValidationError("inventory metadata keys collide after JSON normalization", context={"key": normalized_key})
-            if len(normalized_key) > _MAX_METADATA_STRING:
+        if any(not isinstance(key, str) for key in value):
+            raise ResourceValidationError("inventory metadata object keys must be strings")
+        for key, item in sorted(value.items()):
+            if len(key) > _MAX_METADATA_STRING:
                 raise ResourceValidationError("inventory metadata key exceeds the bounded limit")
-            result[normalized_key] = _freeze_json(item, depth=depth + 1, budget=budget)
+            result[key] = _freeze_json(item, depth=depth + 1, budget=budget)
         return MappingProxyType(result)
     if isinstance(value, (tuple, list)):
         if len(value) > _MAX_METADATA_ITEMS:

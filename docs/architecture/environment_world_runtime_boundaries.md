@@ -71,10 +71,12 @@ In a notebook, a user may set a default requested world for later dispatch while
 - `src/dryml/code/probe.py`
 - `src/dryml/code/probe_worker.py`
 
-## Open Questions
+## Resolved Decisions
 
-- What minimum environment facts are required before dispatch can resolve requirements?
-- Should probe scheduling be owned by dispatch or by a provider/probe service?
+- Environment requirements are resolved against bounded `EnvironmentRecord`
+  facts produced by `dryml.environments` probes; labels remain prefilters only.
+- `dryml.environments` owns probe mechanics and reports, while dispatch decides
+  when precedence permits probing and reuses the selected evidence.
 
 ## Follow-Up Sprints
 

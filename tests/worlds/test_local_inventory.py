@@ -35,6 +35,11 @@ def test_inventory_rejects_unsafe_accelerator_visibility_identifiers(identifier)
         LocalResourceInventory.from_data({"cpus": [0], "accelerators": {"gpu": [identifier]}})
 
 
+def test_inventory_rejects_accelerator_identifiers_with_the_same_visibility_token():
+    with pytest.raises(ResourceValidationError, match="unique visibility tokens"):
+        LocalResourceInventory((0,), {"gpu": (0, "0")})
+
+
 @pytest.mark.parametrize("identifier", ("-1", "all", "none", "VOID"))
 def test_explicit_inventory_rejects_disabled_gpu_visibility_identifiers(identifier):
     with pytest.raises(ResourceValidationError, match="accelerator identifier"):
@@ -67,8 +72,11 @@ def test_lightweight_inventory_uses_explicit_accelerator_override_without_mutati
     assert environment == {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
 
 
-def test_injected_inventory_discovery_is_repeatably_deterministic(tmp_path):
+def test_injected_inventory_discovery_is_repeatably_deterministic(tmp_path, monkeypatch):
+    import dryml.worlds.inventory as inventory_module
+
     environment = {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
+    monkeypatch.setattr(inventory_module, "_local_memory", lambda _diagnostics: (1024, "test"))
 
     first = local_inventory(environ=environment, device_root=tmp_path)
     second = local_inventory(environ=environment, device_root=tmp_path)
@@ -125,6 +133,8 @@ def test_inventory_rejects_unbounded_or_non_json_metadata():
         LocalResourceInventory((0,), metadata={"value": math.nan})
     with pytest.raises(ResourceValidationError, match="string exceeds"):
         LocalResourceInventory((0,), metadata={"value": "x" * 4097})
+    with pytest.raises(ResourceValidationError, match="keys must be strings"):
+        LocalResourceInventory((0,), metadata={object(): "value"})
 
 
 def test_inventory_rejects_aggregate_metadata_expansion():

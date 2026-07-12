@@ -156,6 +156,21 @@ def synthesize(
         return _failure("error", None, None, policy, "invalid_inventory", "inventory must be a LocalResourceInventory", inventory_policy=inventory_policy, inventory_source="invalid")
     try:
         req = _coerce_requirement(requirement)
+    except _SynthesisFailure as exc:
+        return _failure(
+            exc.status,
+            None,
+            inventory,
+            policy,
+            exc.code,
+            str(exc),
+            exc.path,
+            exc.expected,
+            exc.observed,
+            exc.data,
+            inventory_policy=inventory_policy,
+            inventory_source="injected" if inventory is not None else "not_discovered",
+        )
     except Exception as exc:
         return _failure("invalid_requirement", None, inventory, policy, "invalid_requirement", str(exc), inventory_policy=inventory_policy, inventory_source="injected" if inventory is not None else "not_discovered")
     if _inventory_discovery_error is not None:
@@ -320,10 +335,43 @@ def _coerce_requirement(requirement: WorldRequirement | Mapping[str, Any] | None
     if isinstance(requirement, WorldRequirement):
         # Direct dataclass construction can bypass ``from_data`` validation.
         # Round-trip through canonical data before synthesis uses its fields.
-        return WorldRequirement.from_data(requirement.to_data())
+        roles = _bounded_role_mapping(requirement.roles)
+        return WorldRequirement.from_data(WorldRequirement(roles).to_data())
     if not isinstance(requirement, Mapping):
         raise WorldSpecValidationError("world requirement must be a mapping")
-    return WorldRequirement.from_data(requirement if "roles" in requirement else {"roles": requirement})
+    if "roles" in requirement:
+        if set(requirement) != {"roles"}:
+            return WorldRequirement.from_data(requirement)
+        roles = requirement["roles"]
+    else:
+        roles = requirement
+    return WorldRequirement.from_data({"roles": _bounded_role_mapping(roles)})
+
+
+def _bounded_role_mapping(roles: Any) -> dict[Any, Any]:
+    """Copy at most the locally supported number of requirement roles."""
+
+    if not isinstance(roles, Mapping):
+        raise WorldSpecValidationError("world requirement roles must be a non-empty mapping")
+    iterator = iter(roles.items())
+    result = {}
+    for index in range(_MAX_LOCAL_WORLD_WORKERS + 1):
+        try:
+            name, value = next(iterator)
+        except StopIteration:
+            return result
+        if index >= _MAX_LOCAL_WORLD_WORKERS:
+            raise _SynthesisFailure(
+                "invalid_requirement",
+                "role_count_exceeds_local_limit",
+                "local synthesis role count exceeds the worker limit",
+                "roles",
+                _MAX_LOCAL_WORLD_WORKERS,
+                index + 1,
+                {"limit": _MAX_LOCAL_WORLD_WORKERS, "roles": index + 1},
+            )
+        result[name] = value
+    return result
 
 
 def _choose(constraint: CountConstraint, *, minimum: int, path: str) -> int:
