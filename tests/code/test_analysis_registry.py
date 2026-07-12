@@ -7,13 +7,29 @@ from dryml.code.analysis import DEFAULT_ALGORITHMS
 from dryml.code.probe import DEFAULT_PROBE_ALGORITHMS
 
 
+EXPECTED_DEFAULT_ALGORITHMS = (
+    "callables",
+    "source",
+    "ast_access",
+    "symbol_capture",
+    "direct_annotations",
+    "method_contracts",
+)
+EXPECTED_DEFAULT_PROBE_ALGORITHMS = (
+    "callables",
+    "source",
+    "symbol_capture",
+    "direct_annotations",
+)
+
+
 def test_default_analyzers_are_registered():
     names = code.available_analyzers()
 
     assert {"callables", "source", "ast_access", "symbol_capture", "direct_annotations", "method_contracts", "static_calls"}.issubset(names)
     assert code.get_analyzer("callables").name == "callables"
-    assert "static_calls" not in DEFAULT_ALGORITHMS
-    assert "static_calls" not in DEFAULT_PROBE_ALGORITHMS
+    assert DEFAULT_ALGORITHMS == EXPECTED_DEFAULT_ALGORITHMS
+    assert DEFAULT_PROBE_ALGORITHMS == EXPECTED_DEFAULT_PROBE_ALGORITHMS
 
 
 def test_register_duplicate_and_replace(requirement_targets):

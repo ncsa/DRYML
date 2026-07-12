@@ -146,6 +146,7 @@ class FunctionAnalyzer:
 
 _ANALYZERS: dict[str, CodeAnalyzer] = {}
 _BUILTINS_REGISTERED = False
+_REGISTERING_BUILTINS = False
 
 
 def register_analyzer(analyzer: CodeAnalyzer, *, replace: bool = False) -> None:
@@ -156,6 +157,8 @@ def register_analyzer(analyzer: CodeAnalyzer, *, replace: bool = False) -> None:
         replace: Whether an existing analyzer with the same name may be replaced.
     """
 
+    if not _BUILTINS_REGISTERED and not _REGISTERING_BUILTINS:
+        _ensure_builtin_analyzers()
     name = analyzer.name
     if name in _ANALYZERS and not replace:
         raise ValueError(f"Analyzer {name!r} is already registered.")
@@ -186,6 +189,10 @@ def analyze(
     context: CodeAnalysisContext | None = None,
 ) -> CodeAnalysisResult:
     """Analyze a Python/DRYML code target and return reusable facts.
+
+    Analysis inspects metadata, source, and ASTs without intentionally invoking
+    the submitted target body. Resolving an import-path target can still execute
+    module-level import code.
 
     Args:
         target: Live object, import path string, target spec, or target wrapper.
@@ -243,14 +250,18 @@ def analyze(
 
 
 def _ensure_builtin_analyzers() -> None:
-    global _BUILTINS_REGISTERED
+    global _BUILTINS_REGISTERED, _REGISTERING_BUILTINS
     if _BUILTINS_REGISTERED:
         return
-    from .algorithms import ast_access, callables, direct_annotations, method_contracts, source, static_calls, symbol_capture
+    _REGISTERING_BUILTINS = True
+    try:
+        from .algorithms import ast_access, callables, direct_annotations, method_contracts, source, static_calls, symbol_capture
 
-    for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts, static_calls):
-        register_analyzer(module.ANALYZER, replace=True)
-    _BUILTINS_REGISTERED = True
+        for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts, static_calls):
+            register_analyzer(module.ANALYZER, replace=True)
+        _BUILTINS_REGISTERED = True
+    finally:
+        _REGISTERING_BUILTINS = False
 
 
 __all__ = [

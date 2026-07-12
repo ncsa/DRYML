@@ -7,6 +7,7 @@ import pytest
 import dryml.code as code
 from dryml.code.algorithms import ast_access
 from dryml.code.algorithms import static_analysis
+from dryml.code.algorithms.source import SourceInfo
 from dryml.code.ast_tools import collect_accesses_from_source
 
 
@@ -34,7 +35,7 @@ def test_ast_access_parse_failure_and_no_source(monkeypatch, requirement_targets
     def broken_parse(source):
         raise SyntaxError("bad")
 
-    monkeypatch.setattr(ast_access, "collect_accesses_from_source", broken_parse)
+    monkeypatch.setattr(static_analysis.ast, "parse", broken_parse)
     parse_failed = code.analyze(requirement_targets.run_training, algorithms=("ast_access",))
     no_source = code.analyze(len, algorithms=("ast_access",))
 
@@ -76,3 +77,42 @@ def test_shared_static_parser_enforces_source_and_ast_bounds(requirement_targets
     assert parsed is None
     assert node_diagnostic is not None
     assert node_diagnostic.data["limit_name"] == "ast_nodes"
+
+
+def test_ast_access_enforces_call_chain_and_scalar_bounds(monkeypatch):
+    monkeypatch.setattr(ast_access, "MAX_CALL_SITES", 1)
+    collector = collect_accesses_from_source("def f(obj):\n    obj.one()\n    obj.two()\n")
+    assert collector.call_limit_exhausted
+
+    monkeypatch.setattr(ast_access, "MAX_CHAIN_COMPONENTS", 1)
+    collector = collect_accesses_from_source("def f(obj):\n    obj.one.two()\n")
+    assert collector.method_calls[0].chain_limit_exceeded
+
+    oversized_name = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
+    source = f"def synthetic(obj):\n    obj.{oversized_name}\n"
+    monkeypatch.setattr(ast_access, "get_source_info", lambda obj: SourceInfo(source, "synthetic.py", 1))
+    result = code.analyze(lambda: None, algorithms=("ast_access",))
+    fact = result.facts_of_kind("ast_access")[0]
+    assert fact.data["attribute_details"][0]["scalar_limit_exceeded"] is True
+    assert fact.data["attribute_details"][0]["access"] == "obj.<bounded>"
+
+
+def test_ast_access_enforces_source_node_and_call_bounds_end_to_end(monkeypatch):
+    source = "def synthetic(obj):\n    obj.one()\n    obj.two()\n"
+    monkeypatch.setattr(ast_access, "get_source_info", lambda obj: SourceInfo(source, "synthetic.py", 1))
+
+    monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1)
+    source_result = code.analyze(lambda: None, algorithms=("ast_access",))
+    assert source_result.diagnostics_of_code("dryml.code.static_source_bytes_limit_exceeded")
+
+    monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1_048_576)
+    monkeypatch.setattr(static_analysis, "MAX_AST_NODES", 1)
+    node_result = code.analyze(lambda: None, algorithms=("ast_access",))
+    assert node_result.diagnostics_of_code("dryml.code.static_ast_nodes_limit_exceeded")
+
+    monkeypatch.setattr(static_analysis, "MAX_AST_NODES", 100_000)
+    monkeypatch.setattr(ast_access, "MAX_CALL_SITES", 1)
+    call_result = code.analyze(lambda: None, algorithms=("ast_access",))
+    fact = call_result.facts_of_kind("ast_access")[0]
+    assert fact.data["complete"] is False
+    assert call_result.diagnostics_of_code("dryml.code.static_call_sites_limit_exceeded")

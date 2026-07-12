@@ -1,20 +1,23 @@
 """Opt-in conservative static call resolution.
 
-Only direct calls through a function's real globals mapping and direct methods on
-concretely annotated parameters can resolve. Every other Python call form is a
-source-level possibility, never evidence that the call executes at runtime.
+Only plain Python functions in a target's real globals mapping and direct methods
+on direct parameters annotated with ordinary concrete classes can resolve. Aliases,
+closures, protocols, attribute chains, call-result receivers, properties, dynamic
+lookup, callable instances, and non-standard metaclasses remain non-resolved.
+Every fact is a source-level possibility, never evidence of runtime execution.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
+import types
 from collections.abc import Mapping
 from typing import Any
 
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, FunctionAnalyzer
 from dryml.code.facts import CodeFact, DiagnosticFact, StaticCallFact
-from dryml.code.targets import CodeTarget, CodeTargetSpec, normalize_target
+from dryml.code.targets import CodeTarget
 
 from .source import get_source_info
 from .static_analysis import (
@@ -37,9 +40,10 @@ class _CallCollector(ast.NodeVisitor):
     """Collect call expressions in deterministic source traversal order."""
 
     def __init__(self) -> None:
-        self.calls: list[ast.Call] = []
+        self.calls: list[tuple[ast.Call, bool]] = []
         self.call_sites_seen = 0
         self.exhausted = False
+        self._nested_scope_depth = 0
 
     def visit(self, node: ast.AST):
         if not self.exhausted:
@@ -51,8 +55,24 @@ class _CallCollector(ast.NodeVisitor):
         if self.call_sites_seen > MAX_CALL_SITES:
             self.exhausted = True
             return
-        self.calls.append(node)
+        self.calls.append((node, self._nested_scope_depth > 0))
         self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        """Record nested calls without applying outer-scope resolution."""
+
+        self._nested_scope_depth += 1
+        self.generic_visit(node)
+        self._nested_scope_depth -= 1
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        """Record nested calls without applying outer-scope resolution."""
+
+        self._nested_scope_depth += 1
+        self.generic_visit(node)
+        self._nested_scope_depth -= 1
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
@@ -90,25 +110,31 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
         return CodeAnalysisResult(target=target.spec, diagnostics=(parse_diagnostic,))
     assert parsed is not None
 
+    root = _analysis_root(parsed.tree)
     collector = _CallCollector()
-    collector.visit(parsed.tree)
+    if isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for statement in root.body:
+            collector.visit(statement)
+    else:
+        collector.visit(root)
     function = _function_for_target(target)
-    globals_mapping = getattr(function, "__globals__", {}) if function is not None else {}
+    globals_mapping = function.__globals__ if function is not None else {}
     annotations = _parameter_annotations(function)
     parameter_names = _parameter_names(function)
-    reassigned_names = _reassigned_names(parsed.tree)
+    bound_names = _bound_names(root)
     facts = tuple(
         _fact_for_call(
             target,
             call,
+            nested_scope=nested_scope,
             globals_mapping=globals_mapping,
             annotations=annotations,
             parameter_names=parameter_names,
-            reassigned_names=reassigned_names,
+            bound_names=bound_names,
             filename=parsed.filename,
             start_line=parsed.start_line,
         )
-        for call in collector.calls
+        for call, nested_scope in collector.calls
     )
     complete = not collector.exhausted
     summary = CodeFact(
@@ -134,9 +160,24 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 
 
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
-    """Return true for live targets whose source can be inspected."""
+    """Return true when this target can report source availability."""
 
-    return target.obj is not None or target.unwrapped is not None or target.spec.source_spec is not None
+    return (
+        target.obj is not None
+        or target.unwrapped is not None
+        or target.spec.source_spec is not None
+        or target.spec.import_path is not None
+    )
+
+
+def _analysis_root(tree: ast.AST) -> ast.AST:
+    """Return the inspected function definition without descending into children."""
+
+    if isinstance(tree, ast.Module):
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node
+    return tree
 
 
 def _function_for_target(target: CodeTarget) -> Any | None:
@@ -172,10 +213,11 @@ def _fact_for_call(
     target: CodeTarget,
     call: ast.Call,
     *,
+    nested_scope: bool,
     globals_mapping: Mapping[str, Any],
     annotations: Mapping[str, Any],
     parameter_names: set[str],
-    reassigned_names: set[str],
+    bound_names: set[str],
     filename: str | None,
     start_line: int | None,
 ) -> StaticCallFact:
@@ -188,23 +230,35 @@ def _fact_for_call(
     target_data: dict[str, str | None] | None = None
     reason: str | None = None
 
-    if isinstance(func, ast.Name):
+    if nested_scope:
+        status = "unsupported"
+        reason = "nested_scope_unsupported"
+        if isinstance(func, ast.Name):
+            syntax = "direct_name"
+            display = func.id
+            method_name = func.id
+        elif isinstance(func, ast.Attribute):
+            syntax = "attribute_chain"
+            display = func.attr
+            method_name = func.attr
+    elif isinstance(func, ast.Name):
         syntax = "direct_name"
         display = func.id
         method_name = func.id
-        if func.id not in globals_mapping:
+        if func.id in parameter_names:
+            reason = "parameter_name_unsupported"
+        elif func.id in bound_names:
+            reason = "local_name_unsupported"
+        elif func.id not in globals_mapping:
             reason = "global_name_unavailable"
         else:
             value = globals_mapping[func.id]
-            if not callable(value):
-                reason = "global_value_not_callable"
+            target_data = _safe_function_target_data(value)
+            if target_data is None:
+                status = "unsupported"
+                reason = "global_value_not_safe_function"
             else:
-                target_data = _target_data(value)
-                if target_data is None:
-                    status = "unsupported"
-                    reason = "target_reference_limit_exceeded"
-                else:
-                    status = "resolved"
+                status = "resolved"
     elif isinstance(func, ast.Attribute):
         flattened = _flatten_name_attributes(func)
         if flattened is None:
@@ -216,7 +270,7 @@ def _fact_for_call(
         else:
             receiver, chain, chain_limit_exceeded = flattened
             method_name = chain[-1] if chain else None
-            display = ".".join((receiver, *chain))
+            display = ".".join(((receiver or "<bounded>"), *chain))
             if chain_limit_exceeded:
                 syntax = "attribute_chain"
                 status = "unsupported"
@@ -227,7 +281,7 @@ def _fact_for_call(
                 reason = "attribute_chain_unsupported"
             elif receiver in annotations:
                 syntax = "annotated_receiver_method"
-                if receiver in reassigned_names:
+                if receiver in bound_names:
                     status = "unresolved"
                     reason = "receiver_reassigned"
                 else:
@@ -246,7 +300,15 @@ def _fact_for_call(
         reason = "unsupported_callable_expression"
         display = type(func).__name__.lower()
 
-    if any(value is None for value in (bounded_string(display), bounded_string(receiver), bounded_string(method_name)) if value is not None):
+    bounded_values = (
+        bounded_string(display),
+        bounded_string(receiver),
+        bounded_string(method_name),
+    )
+    if any(
+        original is not None and bounded is None
+        for original, bounded in zip((display, receiver, method_name), bounded_values, strict=True)
+    ):
         status = "unsupported"
         target_data = None
         reason = "scalar_limit_exceeded"
@@ -273,29 +335,91 @@ def _fact_for_call(
     )
 
 
-def _flatten_name_attributes(node: ast.Attribute) -> tuple[str, tuple[str, ...], bool] | None:
+def _flatten_name_attributes(node: ast.Attribute) -> tuple[str | None, tuple[str, ...], bool] | None:
     chain: list[str] = []
     current: ast.AST = node
     while isinstance(current, ast.Attribute):
+        if len(chain) == MAX_CHAIN_COMPONENTS:
+            return None, tuple(reversed(chain)), True
         chain.append(current.attr)
         current = current.value
     if not isinstance(current, ast.Name):
         return None
     chain.reverse()
-    return current.id, tuple(chain[:MAX_CHAIN_COMPONENTS]), len(chain) > MAX_CHAIN_COMPONENTS
+    return current.id, tuple(chain), False
 
 
-def _reassigned_names(tree: ast.AST) -> set[str]:
-    """Return names assigned in the target source without inferring their values."""
+class _BindingCollector(ast.NodeVisitor):
+    """Collect lexical bindings while deliberately skipping nested scopes."""
 
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        targets: tuple[ast.AST, ...] = ()
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
-            targets = (node.target,) if not isinstance(node, ast.Assign) else tuple(node.targets)
-        for assigned in targets:
-            names.update(_target_names(assigned))
-    return names
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def _add_targets(self, targets: tuple[ast.AST, ...]) -> None:
+        for target in targets:
+            self.names.update(_target_names(target))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self._add_targets(tuple(node.targets))
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._add_targets((node.target,))
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._add_targets((node.target,))
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self._add_targets((node.target,))
+        self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._add_targets((node.target,))
+        self.generic_visit(node)
+
+    visit_AsyncFor = visit_For
+
+    def visit_With(self, node: ast.With) -> None:
+        self._add_targets(tuple(item.optional_vars for item in node.items if item.optional_vars is not None))
+        self.generic_visit(node)
+
+    visit_AsyncWith = visit_With
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.names.update(alias.asname or alias.name.split(".", 1)[0] for alias in node.names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        self.names.update(alias.asname or alias.name for alias in node.names)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names.add(node.name)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return None
+
+
+def _bound_names(root: ast.AST) -> set[str]:
+    """Return bindings in the inspected function's lexical scope."""
+
+    collector = _BindingCollector()
+    if isinstance(root, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        for statement in root.body:
+            collector.visit(statement)
+    else:
+        collector.visit(root)
+    return collector.names
 
 
 def _target_names(node: ast.AST) -> set[str]:
@@ -309,33 +433,59 @@ def _target_names(node: ast.AST) -> set[str]:
 def _resolve_annotated_method(annotation: Any, method_name: str | None) -> tuple[dict[str, str | None] | None, str, str | None]:
     if method_name is None:
         return None, "unsupported", "method_name_unavailable"
-    if isinstance(annotation, str):
+    if type(annotation) is str:
         return None, "unresolved", "string_annotation"
-    if not inspect.isclass(annotation):
+    if not issubclass(type(annotation), type):
         return None, "ambiguous", "non_concrete_annotation"
+    if type(annotation) is not type:
+        return None, "ambiguous", "non_standard_annotation_class"
     try:
         descriptor = inspect.getattr_static(annotation, method_name)
     except AttributeError:
         return None, "unresolved", "annotated_method_missing"
-    if isinstance(descriptor, property):
+    if type(descriptor) is property:
         return None, "unsupported", "property_descriptor"
-    candidate = descriptor.__func__ if isinstance(descriptor, (staticmethod, classmethod)) else descriptor
-    if not callable(candidate):
-        return None, "unresolved", "annotated_member_not_callable"
-    subject = normalize_target(annotation, allow_import=False).spec.import_path
-    target_data = _target_data(candidate, method_name=method_name, subject_ref=subject)
+    if type(descriptor) in {staticmethod, classmethod}:
+        candidate = descriptor.__func__
+    elif isinstance(descriptor, types.FunctionType):
+        candidate = descriptor
+    else:
+        return None, "unsupported", "annotated_member_not_safe_function"
+    target_data = _safe_function_target_data(candidate, method_name=method_name)
     if target_data is None:
         return None, "unsupported", "target_reference_limit_exceeded"
     return target_data, "resolved", None
 
 
-def _target_data(value: Any, *, method_name: str | None = None, subject_ref: str | None = None) -> dict[str, str | None] | None:
-    spec: CodeTargetSpec = normalize_target(value, allow_import=False).spec
+def _safe_function_target_data(
+    value: Any,
+    *,
+    method_name: str | None = None,
+    subject_ref: str | None = None,
+) -> dict[str, str | None] | None:
+    """Describe a plain Python function without dynamic attribute access.
+
+    Arbitrary callable instances and descriptors are intentionally unsupported:
+    normalizing them can trigger user-defined attribute hooks.
+    """
+
+    if type(value) is not types.FunctionType:
+        return None
+    module_name = object.__getattribute__(value, "__module__")
+    qualname = object.__getattribute__(value, "__qualname__")
+    import_path = None
+    if (
+        isinstance(module_name, str)
+        and isinstance(qualname, str)
+        and module_name != "__main__"
+        and "<locals>" not in qualname
+    ):
+        import_path = f"{module_name}:{qualname}"
     return bounded_target_mapping({
-        "kind": spec.kind,
-        "import_path": spec.import_path,
-        "method_name": method_name if method_name is not None else spec.method_name,
-        "subject_ref": subject_ref if subject_ref is not None else spec.subject_ref,
+        "kind": "function",
+        "import_path": import_path,
+        "method_name": method_name,
+        "subject_ref": subject_ref,
     })
 
 

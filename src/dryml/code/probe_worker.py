@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
                     diagnostics=(diagnostic("code_probe.invalid_request", "Probe worker received an invalid request.", data={"error": repr(exc)}),),
                 )
             else:
-                result = run_probe_request(request)
+                result = run_probe_request(request, require_stable_import_path=True)
         sys.stdout.write(json.dumps(result.to_data(), sort_keys=True))
         sys.stdout.write("\n")
         return 0

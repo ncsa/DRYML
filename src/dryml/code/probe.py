@@ -229,13 +229,20 @@ def normalize_probe_request(request: CodeProbeRequest | Mapping[str, Any]) -> Co
     return normalized
 
 
-def run_probe_request(request: CodeProbeRequest | Mapping[str, Any], *, environment: Any | None = None) -> CodeProbeResult:
+def run_probe_request(
+    request: CodeProbeRequest | Mapping[str, Any],
+    *,
+    environment: Any | None = None,
+    require_stable_import_path: bool = False,
+) -> CodeProbeResult:
     """Execute a normalized code probe in the current process.
 
     Args:
         request: Probe request object or serialized request mapping.
         environment: Optional current-process environment metadata. Sprint 5 does
             not use this parameter to create or solve environments.
+        require_stable_import_path: Reject targets without an import path. Probe
+            workers enable this because they cannot reconstruct source specs.
 
     Returns:
         A ``CodeProbeResult`` containing code facts, diagnostics, optional
@@ -253,6 +260,8 @@ def run_probe_request(request: CodeProbeRequest | Mapping[str, Any], *, environm
             diagnostics=(diagnostic("code_probe.invalid_request", "Invalid code probe request.", data={"error": repr(exc)}),),
         )
 
+    if require_stable_import_path and not _target_can_run_in_subprocess(normalized.target):
+        return _non_serializable_target_result(normalized.target)
     return _run_probe_request_normalized(normalized, analysis_target=normalized.target)
 
 

@@ -139,14 +139,14 @@ class ShapeFact(CodeFact):
 
 @dataclass(frozen=True, slots=True)
 class ASTAccessFact(CodeFact):
-    """Fact describing static AST attribute and method-call hints."""
+    """Fact describing syntactic, non-authoritative AST access hints."""
 
     kind: str = "ast_access"
 
 
 @dataclass(frozen=True, slots=True)
 class CallSiteFact(CodeFact):
-    """Fact describing one static method-call-like site."""
+    """Fact describing one syntactic call-like site without semantic resolution."""
 
     kind: str = "call_site"
 
@@ -179,19 +179,36 @@ class StaticCallFact(CodeFact):
             raise ValueError(f"unsupported StaticCallFact status {status!r}")
         if confidence not in {"exact_static", "conservative_hint"}:
             raise ValueError(f"unsupported StaticCallFact confidence {confidence!r}")
+        if not isinstance(self.data["syntax"], str) or len(self.data["syntax"]) > 4_096:
+            raise ValueError("StaticCallFact syntax must be a bounded string")
+        if self.data["syntax"] not in {"direct_name", "annotated_receiver_method", "attribute_chain", "other"}:
+            raise ValueError(f"unsupported StaticCallFact syntax {self.data['syntax']!r}")
+        if self.source.get("analyzer") != "static_calls" or "target_kind" not in self.source:
+            raise ValueError("StaticCallFact source must identify the static_calls analyzer and target kind")
         for field_name in ("display", "receiver", "method_name", "reason"):
             value = self.data[field_name]
             if value is not None and (not isinstance(value, str) or len(value) > 4_096):
                 raise ValueError(f"StaticCallFact {field_name} must be a bounded string or null")
         target = self.data["target"]
         if status == "resolved":
+            if confidence != "exact_static" or self.data["reason"] is not None:
+                raise ValueError("resolved StaticCallFact must be exact_static without a reason")
             if not isinstance(target, Mapping) or set(target) != {"kind", "import_path", "method_name", "subject_ref"}:
                 raise ValueError("resolved StaticCallFact target must use the fixed target-reference schema")
             for value in target.values():
                 if value is not None and (not isinstance(value, str) or len(value) > 4_096):
                     raise ValueError("StaticCallFact target values must be bounded strings or null")
-        elif target is not None:
-            raise ValueError("non-resolved StaticCallFact target must be null")
+            if not isinstance(target["kind"], str) or not target["kind"]:
+                raise ValueError("resolved StaticCallFact target kind must be a non-empty string")
+        else:
+            if confidence != "conservative_hint" or target is not None:
+                raise ValueError("non-resolved StaticCallFact must be a conservative hint without a target")
+            if not isinstance(self.data["reason"], str) or len(self.data["reason"]) > 4_096:
+                raise ValueError("non-resolved StaticCallFact requires a bounded reason")
+        for field_name in ("relative_line", "absolute_line", "col_offset"):
+            value = self.data[field_name]
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                raise ValueError(f"StaticCallFact {field_name} must be an integer or null")
 
 
 @dataclass(frozen=True, slots=True)

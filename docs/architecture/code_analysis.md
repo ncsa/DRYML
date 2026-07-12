@@ -143,18 +143,20 @@ cross-environment tracing is not implied by this contract.
 
 ### Target and Location Support
 
-| Target | Direct `analyze` / inline probe | Worker probe | `static_calls` |
-|---|---|---|---|
-| Importable module function or class method | Supported | Supported by stable import path | Supported when source is available |
-| Import-path string/spec | Supported when imports are allowed | Supported | Supported after import/source retrieval |
-| Live notebook/local function or closure | Supported inline | Unsupported | Supported only when `inspect` supplies source |
-| Live bound method | Supported inline with owner metadata | Unsupported unless a stable importable method target is supplied | Supported under the same source and receiver bounds |
-| Source-spec-only target | Descriptive only; live-object analyzers report unavailable | Unsupported: reconstruction is not implemented | Unsupported until reconstruction exists |
+| Requested location | Import-path target | Live non-importable target | Source-spec-only target | Timeout guarantee |
+|---|---|---|---|---|
+| Direct `analyze(...)` | Inline import and analysis | Inline analysis | Descriptive only; live-object analyzers report unavailable | None |
+| `probe_target(..., environment=None, timeout=None)` | Inline probe runtime | Inline probe runtime | Descriptive only; no reconstruction | None |
+| Current Python with finite timeout | Worker subprocess | Structured rejection | Structured reconstruction-unavailable rejection | Managed process deadline |
+| `PythonExecutableSpec` | Worker subprocess | Structured rejection | Structured reconstruction-unavailable rejection | Managed process deadline when configured |
+| Supported `CondaEnvironmentSpec` | Worker subprocess | Structured rejection | Structured reconstruction-unavailable rejection | Managed process deadline when configured |
+| Container or remote environment | Existing unsupported diagnostic | Unsupported | Unsupported | Not applicable |
 
-A finite timeout, explicit Python executable, or supported Conda environment
-selects a worker and therefore requires a stable import path. A source spec is
-still serializable provenance data; it does not reconstruct closures, notebook
-frames, bound instances, or arbitrary dependencies.
+Workers independently require a stable import path, including requests sent
+directly to the worker protocol. A source spec is serializable provenance data;
+it does not reconstruct closures, notebook frames, bound instances, or arbitrary
+dependencies. Custom analyzers registered only in the orchestrator are not
+assumed to be available in a worker.
 
 ### Static Facts and Bounds
 
@@ -171,11 +173,13 @@ containing only `kind`, `import_path`, `method_name`, and `subject_ref`.
 Unresolved, ambiguous, and unsupported facts use `confidence="conservative_hint"`.
 They are static possibilities, not runtime observations or dispatch requirements.
 
-Supported resolution forms are a callable from the analyzed function's real
-globals mapping and a direct method on a direct parameter with a concrete class
-annotation, inspected with `inspect.getattr_static`. String annotations, unions,
-generics, aliases, reassignment, attribute chains, call-result receivers,
-properties, dynamic `getattr`, and control-flow inference do not resolve.
+Supported resolution forms are plain Python functions from the analyzed
+function's real globals mapping and direct methods on direct parameters with an
+ordinary concrete class annotation, inspected with `inspect.getattr_static`.
+String annotations, unions, generics, protocols, aliases, reassignment, nested
+scopes, attribute chains, call-result receivers, properties, dynamic `getattr`,
+callable instances, non-standard metaclasses, and control-flow inference do not
+resolve. This restriction avoids dynamic attribute hooks while constructing facts.
 
 Both static analyzers enforce these limits before unbounded fact expansion:
 

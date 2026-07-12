@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from typing import Protocol
 
 import dryml.code as code
 import pytest
 from dryml.code.algorithms import static_calls
+from dryml.code.algorithms import static_analysis
+from dryml.code.algorithms.source import SourceInfo
 
 
 HELPER_EXECUTED = False
@@ -30,6 +33,17 @@ class CallableWithoutExecution:
 
 
 CALLABLE_INSTANCE = CallableWithoutExecution()
+
+
+class HostileCallable:
+    def __getattribute__(self, name):
+        raise AssertionError("static analysis must not inspect callable instance attributes")
+
+    def __call__(self):
+        raise AssertionError("static analysis must not invoke callable instances")
+
+
+HOSTILE_CALLABLE = HostileCallable()
 
 
 class Model:
@@ -56,12 +70,30 @@ class PropertyModel:
         raise AssertionError("static analysis must not invoke properties")
 
 
+class ProtocolModel(Protocol):
+    def train(self): ...
+
+
+class HostileMeta(type):
+    def __getattribute__(cls, name):
+        raise AssertionError("static analysis must not invoke metaclass attribute hooks")
+
+
+class HostileModel(metaclass=HostileMeta):
+    def train(self):
+        return None
+
+
 def direct_global_target():
     helper()
 
 
 def callable_instance_target():
     CALLABLE_INSTANCE()
+
+
+def hostile_callable_target():
+    HOSTILE_CALLABLE()
 
 
 def annotated_method_target(model):
@@ -107,6 +139,20 @@ def union_annotation_target(model):
 union_annotation_target.__annotations__["model"] = Model | StaticModel
 
 
+def protocol_annotation_target(model):
+    model.train()
+
+
+protocol_annotation_target.__annotations__["model"] = ProtocolModel
+
+
+def hostile_meta_target(model):
+    model.train()
+
+
+hostile_meta_target.__annotations__["model"] = HostileModel
+
+
 def alias_target():
     alias = helper
     alias()
@@ -118,6 +164,36 @@ def reassigned_receiver_target(model):
 
 
 reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def parameter_shadows_global(helper):
+    helper()
+
+
+def local_shadows_global():
+    helper = lambda: None
+    helper()
+
+
+def loop_rebinds_receiver(model, models):
+    for model in models:
+        model.train()
+
+
+loop_rebinds_receiver.__annotations__["model"] = Model
+
+
+def nested_scope_target(model):
+    def nested():
+        model.train()
+    return nested
+
+
+nested_scope_target.__annotations__["model"] = Model
+
+
+def attribute_chain_target(model):
+    model.first.second()
 
 
 def nested_receiver_target(model):
@@ -189,9 +265,14 @@ def test_static_calls_reports_conservative_non_resolution_cases():
         (string_annotation_target, "string_annotation"),
         (missing_annotation_target, "missing_annotation"),
         (union_annotation_target, "non_concrete_annotation"),
-        (alias_target, "global_name_unavailable"),
+        (protocol_annotation_target, "non_standard_annotation_class"),
+        (alias_target, "local_name_unsupported"),
         (reassigned_receiver_target, "receiver_reassigned"),
         (nested_receiver_target, "call_result_receiver"),
+        (parameter_shadows_global, "parameter_name_unsupported"),
+        (local_shadows_global, "local_name_unsupported"),
+        (loop_rebinds_receiver, "receiver_reassigned"),
+        (nested_scope_target, "nested_scope_unsupported"),
     )
 
     for target, reason in cases:
@@ -202,10 +283,20 @@ def test_static_calls_reports_conservative_non_resolution_cases():
 
 def test_static_calls_does_not_invoke_callable_instances_or_dynamic_getattr():
     _, callable_facts = _facts(callable_instance_target)
+    _, hostile_facts = _facts(hostile_callable_target)
     _, dynamic_facts = _facts(dynamic_getattr_target)
 
-    assert callable_facts[0].data["status"] == "resolved"
+    assert callable_facts[0].data["status"] == "unsupported"
+    assert hostile_facts[0].data["status"] == "unsupported"
     assert all(fact.data["status"] != "resolved" for fact in dynamic_facts)
+
+
+def test_static_calls_inspects_hostile_metaclasses_without_dynamic_lookup():
+    result, facts = _facts(hostile_meta_target)
+
+    assert result.ok
+    assert facts[0].data["status"] == "ambiguous"
+    assert facts[0].data["reason"] == "non_standard_annotation_class"
 
 
 def test_static_call_facts_round_trip_with_each_status_and_are_json_compatible():
@@ -250,6 +341,43 @@ def test_static_calls_enforces_call_site_limit(monkeypatch):
     assert diagnostic.data == {"limit_name": "call_sites", "limit": 1, "observed_lower_bound": 2}
 
 
+def test_static_calls_enforces_chain_and_scalar_bounds(monkeypatch):
+    monkeypatch.setattr(static_calls, "MAX_CHAIN_COMPONENTS", 1)
+    _, chain_facts = _facts(attribute_chain_target)
+
+    assert chain_facts[0].data["status"] == "unsupported"
+    assert chain_facts[0].data["reason"] == "chain_limit_exceeded"
+
+    oversized_name = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
+    source = f"def synthetic():\n    {oversized_name}()\n"
+    monkeypatch.setattr(static_calls, "get_source_info", lambda obj: SourceInfo(source, "synthetic.py", 1))
+    result, scalar_facts = _facts(direct_global_target)
+
+    assert scalar_facts[0].data["reason"] == "scalar_limit_exceeded"
+    assert result.facts_of_kind("static_call_summary")[0].data["complete"] is True
+
+
+def test_static_calls_enforces_source_and_ast_bounds(monkeypatch):
+    monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1)
+    source_result, _ = _facts(direct_global_target)
+    assert source_result.diagnostics_of_code("dryml.code.static_source_bytes_limit_exceeded")
+
+    monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1_048_576)
+    monkeypatch.setattr(static_analysis, "MAX_AST_NODES", 1)
+    node_result, _ = _facts(direct_global_target)
+    assert node_result.diagnostics_of_code("dryml.code.static_ast_nodes_limit_exceeded")
+
+
+def test_static_calls_reports_unavailable_when_imports_are_disabled():
+    result = code.analyze(
+        "probe_targets:plain_function",
+        algorithms=("static_calls",),
+        context=code.CodeAnalysisContext(allow_import=False),
+    )
+
+    assert result.diagnostics_of_code("dryml.code.source_unavailable")
+
+
 def test_static_call_fact_rejects_unbounded_or_invalid_serialized_data():
     data = _facts(direct_global_target)[1][0].to_data()
     data["data"]["display"] = "x" * 4_097
@@ -259,4 +387,14 @@ def test_static_call_fact_rejects_unbounded_or_invalid_serialized_data():
     data = _facts(direct_global_target)[1][0].to_data()
     data["data"]["status"] = "guessed"
     with pytest.raises(ValueError, match="unsupported StaticCallFact status"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["data"]["confidence"] = "conservative_hint"
+    with pytest.raises(ValueError, match="must be exact_static"):
+        code.CodeFact.from_data(data)
+
+    data = _facts(direct_global_target)[1][0].to_data()
+    data["source"]["analyzer"] = "wrong"
+    with pytest.raises(ValueError, match="static_calls analyzer"):
         code.CodeFact.from_data(data)

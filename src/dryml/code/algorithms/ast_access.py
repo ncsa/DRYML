@@ -23,6 +23,7 @@ from .static_analysis import (
     MAX_STATIC_SCALAR_CHARS,
     STATIC_ANALYSIS_LIMITS,
     absolute_line,
+    bounded_string,
     limit_diagnostic,
     parse_static_source,
 )
@@ -55,12 +56,13 @@ def _flatten_attr(node: ast.AST):
     chain: list[str] = []
     cur = node
     while isinstance(cur, ast.Attribute):
+        if len(chain) == MAX_CHAIN_COMPONENTS:
+            return "<bounded>", tuple(reversed(chain)), True
         chain.append(cur.attr)
         cur = cur.value
     if isinstance(cur, ast.Name):
         chain.reverse()
-        exceeded = len(chain) > MAX_CHAIN_COMPONENTS
-        return cur.id, tuple(chain[:MAX_CHAIN_COMPONENTS]), exceeded
+        return cur.id, tuple(chain), False
     return None
 
 
@@ -128,6 +130,12 @@ def collect_accesses_from_source(source: str):
     """Parse *source* and return an :class:`AccessCollector` with findings."""
 
     tree = ast.parse(source)
+    return collect_accesses_from_tree(tree)
+
+
+def collect_accesses_from_tree(tree: ast.AST):
+    """Collect access hints from an already parsed, bounded syntax tree."""
+
     coll = AccessCollector()
     coll.visit(tree)
     return coll
@@ -163,17 +171,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
         return CodeAnalysisResult(target=target.spec, diagnostics=(parse_diagnostic,))
     assert parsed is not None
 
-    try:
-        # Keep the legacy helper as the collection seam after shared bounds pass.
-        collector = collect_accesses_from_source(parsed.source)
-    except SyntaxError as exc:
-        return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
-            severity="warning",
-            code="dryml.code.ast_parse_failed",
-            message="Source could not be parsed for AST access analysis.",
-            source={"analyzer": "ast_access", "target_kind": target.spec.kind},
-            data={"error": repr(exc)},
-        ),))
+    collector = collect_accesses_from_tree(parsed.tree)
     attr_details = [_attr_to_data(item, parsed.start_line) for item in collector.attr_accesses]
     call_details = [_call_to_data(item, parsed.start_line) for item in collector.method_calls]
     complete = not collector.call_limit_exhausted
@@ -211,38 +209,62 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
     """Return true for targets with a live object or unwrapped callable."""
 
-    return target.obj is not None or target.unwrapped is not None or target.spec.source_spec is not None
+    return (
+        target.obj is not None
+        or target.unwrapped is not None
+        or target.spec.source_spec is not None
+        or target.spec.import_path is not None
+    )
 
 
 def _attr_to_data(access: AttrAccess, start_line: int | None) -> dict[str, object]:
     relative_line = access.lineno
+    root, chain, access_name, scalar_limit_exceeded = _bounded_access_data(access.root, access.chain)
     return {
-        "root": access.root,
-        "chain": list(access.chain),
-        "access": ".".join((access.root, *access.chain)),
+        "root": root,
+        "chain": chain,
+        "access": access_name,
         "ctx": access.ctx,
         "lineno": relative_line,
         "relative_line": relative_line,
         "absolute_line": absolute_line(relative_line, start_line),
         "col_offset": access.col_offset,
         "chain_limit_exceeded": access.chain_limit_exceeded,
+        "scalar_limit_exceeded": scalar_limit_exceeded,
     }
 
 
 def _call_to_data(call: MethodCall, start_line: int | None) -> dict[str, object]:
     relative_line = call.lineno
+    root, chain, access_name, scalar_limit_exceeded = _bounded_access_data(call.root, call.chain)
     return {
-        "receiver": call.root,
-        "method": call.chain[-1] if call.chain else None,
-        "chain": list(call.chain),
-        "access": ".".join((call.root, *call.chain)),
+        "receiver": root,
+        "method": chain[-1] if chain else None,
+        "chain": chain,
+        "access": access_name,
         "lineno": relative_line,
         "relative_line": relative_line,
         "absolute_line": absolute_line(relative_line, start_line),
         "col_offset": call.col_offset,
         "chain_limit_exceeded": call.chain_limit_exceeded,
+        "scalar_limit_exceeded": scalar_limit_exceeded,
         "semantic_resolution": "not_attempted",
     }
+
+
+def _bounded_access_data(root: str, chain: tuple[str, ...]) -> tuple[str, list[str], str, bool]:
+    """Return scalar-bounded serialized syntax fields without expanding output."""
+
+    bounded_root = bounded_string(root)
+    bounded_chain = [bounded_string(item) for item in chain]
+    scalar_limit_exceeded = bounded_root is None or any(item is None for item in bounded_chain)
+    safe_root = bounded_root if bounded_root is not None else "<bounded>"
+    safe_chain = [item if item is not None else "<bounded>" for item in bounded_chain]
+    access_name = bounded_string(".".join((safe_root, *safe_chain)))
+    if access_name is None:
+        scalar_limit_exceeded = True
+        access_name = "<bounded>"
+    return safe_root, safe_chain, access_name, scalar_limit_exceeded
 
 
 ANALYZER = FunctionAnalyzer("ast_access", analyze_target, can_analyze)
@@ -260,5 +282,6 @@ __all__ = [
     "MAX_STATIC_SCALAR_CHARS",
     "MethodCall",
     "collect_accesses_from_source",
+    "collect_accesses_from_tree",
     "analyze_target",
 ]

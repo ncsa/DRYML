@@ -86,6 +86,33 @@ def test_worker_handles_unknown_algorithm():
     assert {item.code for item in result.diagnostics} == {"code_probe.unknown_algorithm"}
 
 
+def test_worker_rejects_orchestrator_only_analyzer():
+    code.register_analyzer(
+        code.FunctionAnalyzer("orchestrator_only", lambda target, context: code.CodeAnalysisResult(target.spec)),
+        replace=True,
+    )
+    completed = _run_worker(json.dumps(_request(algorithms=("orchestrator_only",)).to_data()))
+    result = _result(completed)
+
+    assert completed.returncode == 0
+    assert not result.ok
+    assert {item.code for item in result.diagnostics} == {"code_probe.unknown_algorithm"}
+
+
+def test_worker_rejects_source_spec_only_targets():
+    request = code.CodeProbeRequest(
+        target=code.CodeTargetSpec("source_spec", source_spec={"kind": "function", "source": "lambda: None"}),
+        include_environment_record=False,
+    )
+    completed = _run_worker(json.dumps(request.to_data()))
+    result = _result(completed)
+
+    assert completed.returncode == 0
+    assert not result.ok
+    assert result.analysis is None
+    assert result.diagnostics[0].code == "code_probe.source_spec_reconstruction_unavailable"
+
+
 def test_worker_runs_explicit_builtin_static_calls():
     completed = _run_worker(json.dumps(_request(algorithms=("static_calls",)).to_data()))
     result = _result(completed)
