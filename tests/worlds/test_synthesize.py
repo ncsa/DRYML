@@ -266,6 +266,20 @@ def test_synthesis_rejects_zero_only_and_authoritative_post_check(monkeypatch):
     assert result.status == "error"
 
 
+def test_synthesis_selects_replica_minimum_and_max_only_defaults():
+    minimum = synthesize(
+        {"roles": {"main": {"replicas": {"min": 2}, "resources": {"cpus": {"max": 1}}}}},
+        inventory=LocalResourceInventory((0, 1)),
+    )
+    maximum = synthesize(
+        {"roles": {"main": {"replicas": {"max": 3}}}},
+        inventory=LocalResourceInventory((0,)),
+    )
+
+    assert minimum.ok and minimum.world.roles["main"].replicas == 2
+    assert maximum.ok and maximum.world.roles["main"].replicas == 1
+
+
 def test_synthesis_revalidates_direct_requirement_instances():
     malformed = WorldRequirement({"main": RoleRequirement(resources=object())})  # type: ignore[arg-type]
 

@@ -118,6 +118,26 @@ def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
     assert result.status == "incomplete"
 
 
+def test_resolve_probes_hint_matching_registry_entry_before_selecting_later_match():
+    registry = EnvironmentRegistry()
+    false_hint = PythonExecutableSpec("/false-hint/python")
+    selected = PythonExecutableSpec("/selected/python")
+    registry.register("false-hint", false_hint, tags=("wanted",))
+    registry.register("selected", selected, tags=("wanted",))
+    calls = []
+
+    def runner(spec, *, timeout):
+        calls.append(spec)
+        tags = () if spec == false_hint else ("wanted",)
+        return EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=tags))
+
+    result = resolve(EnvironmentRequirement(tags=("wanted",)), registry=registry, include_current=False, probe_runner=runner)
+
+    assert result.selected == selected
+    assert [attempt.status for attempt in result.attempts] == ["incompatible", "selected"]
+    assert calls == [false_hint, selected]
+
+
 def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels():
     registry = EnvironmentRegistry()
     ignored = PythonExecutableSpec("/ignored/python")

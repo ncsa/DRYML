@@ -252,6 +252,7 @@ def _run_bounded_command(
         stderr=subprocess.PIPE,
         env=env,
         start_new_session=(os.name == "posix"),
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0,
     )
     selector = None
     try:
@@ -364,8 +365,24 @@ def _kill_probe_process_group(process: subprocess.Popen[bytes]) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    elif process.poll() is None:  # pragma: no cover - Windows lacks POSIX groups.
-        process.kill()
+    elif os.name == "nt":  # pragma: no cover - exercised by native Windows CI.
+        # ``kill()`` only terminates the probe leader. A timed-out probe can
+        # leave children holding inherited pipes, so ask Windows to reap the
+        # entire descendant tree before the final leader fallback.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
 
 
 def _run_bounded_command_threaded(
@@ -426,6 +443,10 @@ def _run_bounded_command_threaded(
         _kill_probe_process_group(process)
         process.wait()
     finally:
+        if any(thread.is_alive() for thread in readers):
+            # The leader can exit while descendants retain the capture pipes.
+            # Reap its tree before closing those pipes and returning timeout.
+            _kill_probe_process_group(process)
         for stream in (process.stdin, process.stdout, process.stderr):
             try:
                 stream.close() if stream is not None else None

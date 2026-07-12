@@ -1,3 +1,6 @@
+import pytest
+from collections.abc import Mapping
+
 import dryml.worlds as worlds
 
 
@@ -32,3 +35,48 @@ def test_multi_role_world_spec_is_requested_shape_only():
 
     assert set(spec["payload"]["roles"]) == {"trainer", "evaluator"}
     assert "allocation" not in spec["payload"]
+
+
+def test_world_spec_bounds_roles_and_resource_maps_before_normalization():
+    class Roles(Mapping):
+        def __len__(self):
+            return 4097
+
+        def __iter__(self):
+            return iter(())
+
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def items(self):
+            for index in range(4096):
+                yield f"role_{index}", {}
+            yield "excess", object()
+            raise AssertionError("world spec read past its role bound")
+
+    class Accelerators(Mapping):
+        def __len__(self):
+            return 257
+
+        def __iter__(self):
+            return iter(())
+
+        def __getitem__(self, key):
+            raise KeyError(key)
+
+        def items(self):
+            for index in range(256):
+                yield f"gpu_{index}", 0
+            yield "excess", object()
+            raise AssertionError("resource parser read past its map bound")
+
+    with pytest.raises(Exception, match="role count"):
+        worlds.WorldSpec.from_data({"roles": Roles()})
+    with pytest.raises(Exception, match="resource mapping"):
+        worlds.WorldSpec.from_data({"roles": {"main": {"process": {"resources": {"accelerators": Accelerators()}}}}})
+
+
+@pytest.mark.parametrize("env", ({"PATH": "one", "Path": "two"},))
+def test_world_spec_rejects_casefold_colliding_process_environment_keys(env):
+    with pytest.raises(Exception, match="differ only by case"):
+        worlds.WorldSpec.from_data({"roles": {"main": {"process": {"env": env}}}})

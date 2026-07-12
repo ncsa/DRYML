@@ -497,3 +497,30 @@ def test_incompatible_current_world_is_not_replaced_by_synthesis(monkeypatch):
 
     assert resolution.world_selection.source == "current"
     assert resolution.world_check.status == "incompatible"
+
+
+def test_incompatible_explicit_candidates_do_not_start_lower_precedence_search(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    def candidates():
+        raise AssertionError("resolver must not inspect candidates")
+        yield PythonExecutableSpec("/unreachable/python")
+
+    monkeypatch.setattr(requirements.worlds, "synthesize", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synthesis must not run")))
+    environment = resolve_dispatch_plan(
+        normalize_user_operation(incompatible_current_environment_target, allow_pickle=True),
+        environment=CurrentEnvironmentSpec(),
+        environment_candidates=candidates(),
+        requirement_policy="strict",
+    )
+    world = resolve_dispatch_plan(
+        normalize_user_operation(cpu_target, allow_pickle=True),
+        world=WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}),
+        inventory=LocalResourceInventory((0, 1)),
+        requirement_policy="strict",
+    )
+
+    assert environment.environment_selection.source == "explicit"
+    assert environment.environment_resolution is None
+    assert world.world_selection.source == "explicit"
+    assert world.world_synthesis is None

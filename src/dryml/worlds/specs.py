@@ -17,6 +17,7 @@ from .resources import CountConstraint, ResourceRequirement, ResourceSpec
 
 _ROLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 _MAX_ROLE_NAME = 4096
+_MAX_WORLD_ROLES = 4096
 _MAX_TOPOLOGY_DEPTH = 8
 _MAX_TOPOLOGY_ITEMS = 64
 _MAX_TOPOLOGY_STRING = 4096
@@ -41,6 +42,9 @@ def _validated_process_env(value: Any) -> dict[str, str]:
         raise WorldSpecValidationError(
             "process env keys must be non-empty strings and values must be strings"
         )
+    folded = [key.casefold() for key in value]
+    if len(set(folded)) != len(folded):
+        raise WorldSpecValidationError("process env keys must not differ only by case")
     return dict(value)
 
 
@@ -317,7 +321,12 @@ def attach_world_id(spec: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _iter_valid_roles(roles: Mapping[str, Any]):
-    for name, value in roles.items():
+    for index, (name, value) in enumerate(roles.items()):
+        if index >= _MAX_WORLD_ROLES:
+            raise WorldSpecValidationError(
+                "world role count exceeds the bounded limit",
+                context={"limit": _MAX_WORLD_ROLES},
+            )
         if not isinstance(name, str) or not _ROLE_RE.match(name):
             raise WorldSpecValidationError("invalid role name", context={"role": name})
         if len(name) > _MAX_ROLE_NAME:

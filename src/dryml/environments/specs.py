@@ -51,7 +51,10 @@ def _validated_env(value: Any) -> Mapping[str, str]:
         for key, item in value.items()
     ):
         raise EnvironmentSpecError("environment override keys must be non-empty strings and values must be strings")
-    return value
+    folded = [key.casefold() for key in value]
+    if len(set(folded)) != len(folded):
+        raise EnvironmentSpecError("environment override keys must not differ only by case")
+    return dict(value)
 
 
 def _validated_paths(value: Any) -> tuple[str, ...]:

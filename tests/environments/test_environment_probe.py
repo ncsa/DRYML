@@ -141,6 +141,36 @@ def test_bounded_command_waits_after_output_eof_until_deadline():
     assert not timed_out
 
 
+def test_windows_probe_cleanup_reaps_tree_after_leader_exits(monkeypatch):
+    import importlib
+    from types import SimpleNamespace
+
+    probe_module = importlib.import_module("dryml.environments.probe")
+    commands = []
+
+    class Process:
+        pid = 123
+
+        killed = False
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    monkeypatch.setattr(probe_module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(probe_module.subprocess, "run", lambda command, **kwargs: commands.append((command, kwargs)))
+
+    process = Process()
+    probe_module._kill_probe_process_group(process)
+
+    assert commands == [
+        (["taskkill", "/PID", "123", "/T", "/F"], {"check": False, "stdout": probe_module.subprocess.DEVNULL, "stderr": probe_module.subprocess.DEVNULL, "timeout": 5})
+    ]
+    assert process.killed
+
+
 @pytest.mark.skipif(os.name != "posix", reason="process-group timeout behavior is POSIX-specific")
 def test_probe_timeout_kills_descendants_holding_capture_pipes(tmp_path):
     script = tmp_path / "forking-python"

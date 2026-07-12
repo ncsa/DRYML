@@ -11,6 +11,7 @@ from .errors import ResourceValidationError
 
 
 _MAX_RESOURCE_NAME = 4096
+_MAX_RESOURCE_ENTRIES = 256
 
 ByteSize = int
 
@@ -218,9 +219,9 @@ class ResourceSpec:
         _as_nonneg_int("cpus", self.cpus)
         if self.memory is not None:
             parse_byte_size(self.memory)
-        for key, value in self.accelerators.items():
-            _validate_name(key, "accelerator")
-            _as_nonneg_int(f"accelerators.{key}", value)
+        _concrete_accelerator_map(self.accelerators)
+        _concrete_resource_map(self.devices, "device")
+        _concrete_resource_map(self.named, "named resource")
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any] | None) -> "ResourceSpec":
@@ -239,8 +240,8 @@ class ResourceSpec:
             cpus=_as_nonneg_int("cpus", data.get("cpus", 0)),
             memory=parse_byte_size(data.get("memory")),
             accelerators=_concrete_accelerator_map(accelerators),
-            devices=dict(data.get("devices") or {}),
-            named=dict(data.get("named") or {}),
+            devices=_concrete_resource_map(data.get("devices") or {}, "device"),
+            named=_concrete_resource_map(data.get("named") or {}, "named resource"),
         )
 
     def to_data(self) -> dict[str, Any]:
@@ -260,7 +261,7 @@ class ResourceSpec:
 
 def _byte_constraint_from_data(data: Mapping[str, Any], *, path: str) -> CountConstraint:
     converted: dict[str, int] = {}
-    for key, value in data.items():
+    for key, value in _bounded_mapping_items(data, path):
         if key not in {"min", "max", "exact"}:
             raise ResourceValidationError("byte constraint has unknown fields", context={"path": path, "field": key})
         parsed = parse_byte_size(value)
@@ -287,14 +288,40 @@ def _constraint_map(data: Any, *, path: str) -> dict[str, CountConstraint]:
     return result
 
 
-def _concrete_accelerator_map(values: Mapping[Any, Any]) -> dict[str, int]:
+def _concrete_accelerator_map(values: Any) -> dict[str, int]:
     """Validate concrete accelerator keys before canonicalizing the mapping."""
 
+    if not isinstance(values, Mapping):
+        raise ResourceValidationError("accelerators must be a mapping")
     result: dict[str, int] = {}
-    for key, value in values.items():
+    for key, value in _bounded_mapping_items(values, "accelerator"):
         _validate_name(key, "accelerator")
         result[key] = _as_nonneg_int(f"accelerators.{key}", value)
     return result
+
+
+def _concrete_resource_map(values: Any, kind: str) -> dict[str, Any]:
+    """Validate bounded concrete resource maps before allocator traversal."""
+
+    if not isinstance(values, Mapping):
+        raise ResourceValidationError(f"{kind} resources must be a mapping")
+    result: dict[str, Any] = {}
+    for key, value in _bounded_mapping_items(values, kind):
+        _validate_name(key, kind)
+        result[key] = value
+    return result
+
+
+def _bounded_mapping_items(values: Mapping[Any, Any], path: str):
+    """Yield a bounded mapping prefix without normalizing excess entries."""
+
+    for index, item in enumerate(values.items()):
+        if index >= _MAX_RESOURCE_ENTRIES:
+            raise ResourceValidationError(
+                "resource mapping exceeds the bounded entry limit",
+                context={"path": path, "limit": _MAX_RESOURCE_ENTRIES},
+            )
+        yield item
 
 
 def _merge_constraint_maps(left: Mapping[str, CountConstraint], right: Mapping[str, CountConstraint], *, path: str) -> dict[str, CountConstraint]:

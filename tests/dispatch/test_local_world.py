@@ -166,6 +166,15 @@ def test_allocate_local_world_rejects_unsupported_canonical_backend():
         allocate_local_world(world, inventory=_inventory())
 
 
+def test_allocate_local_world_rejects_unenacted_backend_parameters():
+    world = WorldSpec.from_data(
+        {"roles": {"worker": {"replicas": 1, "process": {}}}, "backend": {"kind": "local", "parameters": {"workers": 2}}}
+    ).to_data()
+
+    with pytest.raises(DispatchPlanningError, match="backend parameters"):
+        allocate_local_world(world, inventory=_inventory())
+
+
 def test_allocate_local_world_rejects_insufficient_cpu():
     world = {"trainer": {"replicas": 2, "process": {"resources": {"cpus": 2}}}}
 

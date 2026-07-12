@@ -167,6 +167,15 @@ def test_single_subprocess_plan_accepts_local_subprocess_backend(tmp_path):
     assert plan.envelope.launch["world_allocation_spec"]["metadata"]["world_id"] == plan.envelope.launch["world_id"]
 
 
+def test_single_subprocess_rejects_unenacted_backend_parameters():
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}, "backend": {"kind": "local_subprocess", "parameters": {"workers": 2}}}
+
+    explanation = Dispatcher().explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+
+    assert not explanation.launchable
+    assert any(item.code == "dryml.dispatch.single_subprocess_backend_parameters_unsupported" for item in explanation.resolution.diagnostics)
+
+
 def test_single_subprocess_rejects_unknown_memory_inventory(tmp_path):
     world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"memory": "1GiB"}}}}}
     with __import__("pytest").raises(DispatchPlanningError, match="memory request cannot be proven"):

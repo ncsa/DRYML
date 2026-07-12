@@ -1115,6 +1115,8 @@ def _local_subprocess_world_diagnostics(
     backend_kind = world.backend.get("kind")
     if backend_kind not in {"local", "local_subprocess"}:
         diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_backend_unsupported", "The local subprocess planner cannot enact the selected world backend.", data={"backend": dict(world.backend)}))
+    elif not isinstance(world.backend.get("parameters", {}), Mapping) or world.backend.get("parameters"):
+        diagnostics.append(_diagnostic("dryml.dispatch.single_subprocess_backend_parameters_unsupported", "The local subprocess planner cannot enact requested world backend parameters.", data={"backend": dict(world.backend)}))
     for role_name, role in world.roles.items():
         process = role.process
         resources = process.resources

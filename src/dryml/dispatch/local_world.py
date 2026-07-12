@@ -542,6 +542,12 @@ def _validate_local_world_backend(world: WorldSpec) -> None:
             "local-world dispatch supports only local or local_world backends",
             context={"backend": dict(world.backend), "kind": kind},
         )
+    parameters = world.backend.get("parameters", {})
+    if not isinstance(parameters, Mapping) or parameters:
+        raise DispatchPlanningError(
+            "local-world dispatch cannot enact requested backend parameters",
+            context={"backend": dict(world.backend)},
+        )
 
 
 def is_multi_worker_world(world_spec: Mapping[str, Any]) -> bool:
