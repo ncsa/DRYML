@@ -41,6 +41,18 @@ def test_synthesize_default_and_unknown_memory_failure_are_structured():
     assert insufficient_memory.diagnostics[0].code == "memory_unknown"
 
 
+def test_synthesize_reports_aggregate_replica_memory_shortfall():
+    requirement = WorldRequirement.from_data(
+        {"roles": {"worker": {"replicas": {"exact": 2}, "resources": {"memory": {"exact": 768}}}}}
+    )
+
+    result = synthesize(requirement, inventory=LocalResourceInventory((0, 1), memory=1024))
+
+    assert result.status == "insufficient_inventory"
+    assert result.diagnostics[0].code == "insufficient_memory"
+    assert result.diagnostics[0].to_data()["data"] == {"required": 1536, "available": 1024, "shortfall": 512}
+
+
 def test_synthesis_does_not_change_runtime_allocation():
     from dryml.runtime import active_runtime
 

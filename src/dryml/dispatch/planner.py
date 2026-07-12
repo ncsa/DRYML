@@ -29,7 +29,15 @@ _UNSET = object()
 
 @dataclass(frozen=True, slots=True)
 class DispatchPlan:
-    """Resolved one-operation local subprocess dispatch plan."""
+    """Resolved one-operation local subprocess dispatch plan.
+
+    Attributes:
+        dispatch_spec: Canonical dispatch specification and planning metadata.
+        execution_recipe: Canonical backend execution recipe.
+        envelope: Launch-only worker envelope with assigned resources.
+        store: Store used for marshalled operation and execution records.
+        resolution: Requirement and resolver decisions used to build the plan.
+    """
 
     dispatch_spec: Mapping[str, Any]
     execution_recipe: Mapping[str, Any]
@@ -98,15 +106,32 @@ class Dispatcher:
     ) -> DispatchPlan:
         """Build a requirement-checked dispatch plan and launch-only envelope.
 
-        ``operation`` may be an explicit OperationSpec, an importable callable,
-        a non-importable callable with ``allow_pickle=True``, or a DRYML
-        Definition/CDef/Object paired with ``method_name``. Explicit candidates
-        select a target but never override hard requirements. ``requirement_policy``
-        is ``strict``, ``warn``, or ``ignore``; when omitted it follows active
-        runtime enforcement. ``environment_candidates`` and
-        ``environment_registry`` are considered only after explicit/default/
-        current candidates are absent. ``inventory`` is reused for synthesis
-        and allocation; ``inventory_policy`` is ``lightweight`` or ``external``.
+        Args:
+            operation: Explicit operation spec, callable, or pickled callable.
+            method_name: Optional method for a DRYML definition/object target.
+            store: Per-call store overriding the dispatcher default.
+            environment: Explicit environment candidate.
+            runtime: Explicit worker runtime specification.
+            world: Explicit requested world payload, object, or canonical envelope.
+            requirement_policy: ``"strict"``, ``"warn"``, or ``"ignore"``.
+            analysis_policy: Optional code-analysis policy.
+            environment_candidates: Per-call ordered resolver candidates.
+            environment_registry: Per-call explicit resolver registry.
+            inventory: Per-call local inventory reused for synthesis/allocation.
+            inventory_policy: ``"lightweight"`` or opt-in ``"external"``.
+            resolver_policy: Resolver policy, currently ``"first_compatible"``.
+            record_policy: Persistence policy for execution provenance.
+            allow_pickle: Permit a non-importable callable transport.
+            args: Positional arguments for Python-shaped calls.
+            kwargs: Keyword arguments for Python-shaped calls.
+
+        Returns:
+            A launchable local-subprocess plan with actual assigned resources.
+
+        Explicit candidates select a target but never override hard requirements.
+        Resolver candidates and registries run only after explicit/default/current
+        environment slots are absent. Inventory is reused for synthesis and
+        allocation.
         """
 
         _report("dryml.dispatch.plan.start", "Building dispatch plan")
@@ -305,6 +330,29 @@ class Dispatcher:
         operation spec in every allocated role/replica worker. User code can
         branch on ``dryml.runtime.require_workload_allocation(...)`` or the
         ``DRYML_WORLD_*`` environment variables.
+
+        Args:
+            operation: Explicit operation spec, callable, or pickled callable.
+            method_name: Optional method for a DRYML definition/object target.
+            world: Explicit world or ``None`` to synthesize a hard requirement.
+            store: Per-call store overriding the dispatcher default.
+            environment: Explicit environment candidate.
+            runtime: Explicit worker runtime specification.
+            requirement_policy: ``"strict"``, ``"warn"``, or ``"ignore"``.
+            analysis_policy: Optional code-analysis policy.
+            record_policy: Persistence policy for execution provenance.
+            allow_pickle: Permit a non-importable callable transport.
+            args: Positional arguments for Python-shaped calls.
+            kwargs: Keyword arguments for Python-shaped calls.
+            inventory: Per-call inventory reused for synthesis/allocation.
+            inventory_policy: ``"lightweight"`` or opt-in ``"external"``.
+            environment_candidates: Per-call ordered resolver candidates.
+            environment_registry: Per-call explicit resolver registry.
+            resolver_policy: Resolver policy, currently ``"first_compatible"``.
+            oversubscribe: Permit the explicit local-world allocator to share IDs.
+
+        Returns:
+            A local-world plan containing one launch plan per assigned worker.
 
         An omitted ``world`` is synthesized only when no higher-precedence world
         exists and a hard world requirement is present. ``inventory`` and

@@ -30,9 +30,18 @@ def test_registry_duplicate_and_missing_name_errors():
         raise AssertionError("expected missing registry error")
 
 
-def test_registry_unregister_is_deterministic_and_probe_free():
+def test_registry_unregister_is_deterministic_and_probe_free(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("registry lifecycle must not probe")),
+    )
     registry = envs.EnvironmentRegistry()
     entry = registry.register("worker", envs.CurrentEnvironmentSpec())
+    assert registry.get("worker") == entry
+    assert registry.list() == (entry,)
     assert registry.unregister("worker") == entry
     try:
         registry.unregister("worker")

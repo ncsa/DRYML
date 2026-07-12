@@ -193,6 +193,17 @@ def test_total_timeout_bounds_a_probe_without_an_explicit_probe_timeout():
     assert observed and 0 < observed[0] <= 0.25
 
 
+def test_resolver_requires_a_finite_managed_probe_deadline():
+    with pytest.raises(ValueError, match="finite deadline"):
+        resolve(
+            EnvironmentRequirement(tags=("wanted",)),
+            candidates=(PythonExecutableSpec("/first/python"),),
+            include_current=False,
+            probe_timeout=None,
+            total_timeout=None,
+        )
+
+
 def test_resolver_metadata_bounds_large_candidate_values():
     result = resolve(None, candidates=(PythonExecutableSpec("x" * 5000),), include_current=False)
 
@@ -217,6 +228,10 @@ def test_resolver_reports_incomplete_after_bounded_duplicate_sequence():
     assert result.status == "incomplete"
     assert result.selected is None
     assert len(result.attempts) == 32
+    assert result.attempt_count == 264
+    assert result.probe_count == 1
+    assert result.probe_duration_s >= 0
+    assert result.to_data()["attempt_count"] == 264
     assert any(issue.code == "resolver_trace_truncated" for issue in result.diagnostics)
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
     assert any(issue.code == "resolver_input_truncated" for issue in result.diagnostics)

@@ -67,6 +67,16 @@ def test_lightweight_inventory_uses_explicit_accelerator_override_without_mutati
     assert environment == {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
 
 
+def test_injected_inventory_discovery_is_repeatably_deterministic(tmp_path):
+    environment = {"DRYML_LOCAL_ACCELERATORS": "gpu=2,0;fpga=a"}
+
+    first = local_inventory(environ=environment, device_root=tmp_path)
+    second = local_inventory(environ=environment, device_root=tmp_path)
+
+    assert first == second
+    assert first.to_data() == second.to_data()
+
+
 def test_lightweight_inventory_uses_default_device_root(monkeypatch):
     import dryml.worlds.inventory as inventory_module
 

@@ -80,6 +80,10 @@ class EnvironmentResolution:
         selected_record: Reusable environment record from the selected probe.
         selected_probe: Probe result corresponding to ``selected_record``.
         attempts: Ordered, bounded candidate attempt records.
+        attempt_count: Total candidate attempts, including records omitted from
+            the bounded public trace.
+        probe_count: Total probes started during resolution.
+        probe_duration_s: Aggregate measured duration of started probes.
         diagnostics: Bounded public resolver diagnostics.
         policy: Resolver selection policy.
     """
@@ -94,6 +98,9 @@ class EnvironmentResolution:
     attempts: tuple[EnvironmentResolutionAttempt, ...]
     diagnostics: tuple[CompatibilityIssue, ...]
     policy: str
+    attempt_count: int = 0
+    probe_count: int = 0
+    probe_duration_s: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -122,6 +129,9 @@ class EnvironmentResolution:
             "selected_record": _record_summary(self.selected_record),
             "selected_probe": _probe_summary(self.selected_probe),
             "attempts": [attempt.to_data() for attempt in self.attempts],
+            "attempt_count": self.attempt_count,
+            "probe_count": self.probe_count,
+            "probe_duration_s": self.probe_duration_s,
             "diagnostics": [_issue_summary(issue) for issue in self.diagnostics],
             "policy": self.policy,
         })
@@ -168,6 +178,8 @@ def resolve(
         raise ValueError("probe_timeout must be positive or None")
     if total_timeout is not None and (isinstance(total_timeout, bool) or not isinstance(total_timeout, (int, float)) or not math.isfinite(total_timeout) or total_timeout <= 0):
         raise ValueError("total_timeout must be positive or None")
+    if probe_timeout is None and total_timeout is None:
+        raise ValueError("probe_timeout or total_timeout must provide a finite deadline")
     runner = probe if probe_runner is None else probe_runner
     now = time.monotonic if clock is None else clock
     started = now()
@@ -188,6 +200,9 @@ def resolve(
     considered = 0
     truncated = False
     search_incomplete = False
+    attempt_count = 0
+    probe_count = 0
+    total_probe_duration_s = 0.0
     registry_entries, registry_state = _registry_entries(
         registry,
         max_items=raw_candidate_limit,
@@ -197,11 +212,38 @@ def resolve(
     )
 
     def record(attempt: EnvironmentResolutionAttempt) -> None:
-        nonlocal truncated
+        nonlocal truncated, attempt_count
+        attempt_count += 1
         if len(attempts) < _MAX_RECORDED_ATTEMPTS:
             attempts.append(attempt)
         else:
             truncated = True
+
+    def resolution(
+        status: str,
+        requirement: EnvironmentRequirement | None,
+        selected: EnvironmentSpec | None,
+        selected_name: str | None,
+        selected_source: str | None,
+        selected_record: EnvironmentRecord | None,
+        selected_probe: EnvironmentProbeResult | None,
+        diagnostics: tuple[CompatibilityIssue, ...],
+    ) -> EnvironmentResolution:
+        return EnvironmentResolution(
+            status,
+            requirement,
+            selected,
+            selected_name,
+            selected_source,
+            selected_record,
+            selected_probe,
+            tuple(attempts),
+            diagnostics,
+            policy,
+            attempt_count,
+            probe_count,
+            total_probe_duration_s,
+        )
 
     def result_diagnostics() -> tuple[CompatibilityIssue, ...]:
         diagnostics = []
@@ -262,7 +304,7 @@ def resolve(
                 ))
                 continue
             record(EnvironmentResolutionAttempt(source, name, spec, "selected"))
-            return EnvironmentResolution("selected", None, spec, name, source, None, None, tuple(attempts), result_diagnostics(), policy)
+            return resolution("selected", None, spec, name, source, None, None, result_diagnostics())
         try:
             remaining = None if total_timeout is None else max(0.0, total_timeout - (now() - started))
             timeout = remaining if probe_timeout is None else probe_timeout if remaining is None else min(probe_timeout, remaining)
@@ -271,16 +313,19 @@ def resolve(
                 search_incomplete = True
                 break
             probe_started = now()
+            probe_count += 1
             result = runner(spec, timeout=timeout)
-            probe_duration_s = max(0.0, now() - probe_started)
+            attempt_probe_duration_s = max(0.0, now() - probe_started)
+            total_probe_duration_s += attempt_probe_duration_s
             _validate_probe_result(result, identity)
             if _identity(result.spec) != identity:
                 issue = CompatibilityIssue("probe_spec_mismatch", "error", "environment probe result did not match the requested candidate")
-                record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,), probe_duration_s=probe_duration_s))
+                record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=(issue,), probe_duration_s=attempt_probe_duration_s))
                 continue
         except Exception as exc:
             issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}")
             duration = max(0.0, now() - probe_started)
+            total_probe_duration_s += duration
             record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,), probe_duration_s=duration))
             if total_timeout is not None and now() - started >= total_timeout:
                 # A malformed result or runner exception can consume the final
@@ -306,7 +351,7 @@ def resolve(
                 "probe_failed",
                 timed_out_result,
                 diagnostics=timeout_report.issues,
-                probe_duration_s=probe_duration_s,
+                probe_duration_s=attempt_probe_duration_s,
             ))
             # The completed probe consumed the resolver deadline, so later
             # ordered candidates remain unsearched and cannot be bypassed.
@@ -314,20 +359,20 @@ def resolve(
             break
         if not result.ok or result.record is None:
             diagnostics = () if result.report is None else result.report.issues
-            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics, probe_duration_s=probe_duration_s))
+            record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", result, diagnostics=diagnostics, probe_duration_s=attempt_probe_duration_s))
             continue
         report = requirement.check(result.record, policy="strict")
         if report.ok:
-            record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report, probe_duration_s=probe_duration_s))
-            return EnvironmentResolution("selected", requirement, spec, name, source, result.record, result, tuple(attempts), result_diagnostics(), policy)
-        record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues, probe_duration_s))
+            record(EnvironmentResolutionAttempt(source, name, spec, "selected", result, report, probe_duration_s=attempt_probe_duration_s))
+            return resolution("selected", requirement, spec, name, source, result.record, result, result_diagnostics())
+        record(EnvironmentResolutionAttempt(source, name, spec, "incompatible", result, report, report.issues, attempt_probe_duration_s))
     if search_incomplete or candidates_truncated or candidates_timed_out or registry_state["truncated"] or registry_state["timed_out"]:
         diagnostics = [CompatibilityIssue("resolver_input_truncated", "error", "environment candidate input was incomplete before compatibility could be determined")]
         diagnostics.extend(result_diagnostics())
-        return EnvironmentResolution("incomplete", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
+        return resolution("incomplete", requirement, None, None, None, None, None, tuple(diagnostics))
     diagnostics = [CompatibilityIssue("resolver_no_match", "error", "no candidate satisfied the environment requirement", expected=None if requirement is None else requirement.to_data())]
     diagnostics.extend(result_diagnostics())
-    return EnvironmentResolution("no_match", requirement, None, None, None, None, None, tuple(attempts), tuple(diagnostics), policy)
+    return resolution("no_match", requirement, None, None, None, None, None, tuple(diagnostics))
 
 
 def _candidates(

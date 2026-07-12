@@ -20,7 +20,16 @@ from .utils import coerce_tuple
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentRegistryEntry:
-    """Named environment spec plus selection labels."""
+    """Named environment spec plus resolver prefilter hints.
+
+    Attributes:
+        name: Unique deterministic registry key.
+        spec: Environment selected when this entry is resolved.
+        provides: Capability hints used to avoid impossible probes.
+        tags: Label hints used to avoid impossible probes.
+        requirement: Optional declared requirement hint; it is not proof of
+            runtime compatibility.
+    """
 
     name: str
     spec: EnvironmentSpec
@@ -86,9 +95,21 @@ class EnvironmentRegistry:
         tags: tuple[str, ...] = (),
         requirement: EnvironmentRequirement | None = None,
     ) -> EnvironmentRegistryEntry:
-        """Register a named environment spec.
+        """Register and return a named environment spec without probing it.
 
-        Duplicate names are rejected so selection remains deterministic.
+        Args:
+            name: Unique non-empty registry key.
+            spec: Environment specification to associate with ``name``.
+            provides: Optional capability prefilter hints.
+            tags: Optional label prefilter hints.
+            requirement: Optional requirement prefilter hint.
+
+        Returns:
+            The immutable registered entry.
+
+        Raises:
+            EnvironmentRegistryError: If the entry is invalid or ``name`` is
+                already registered.
         """
 
         entry = EnvironmentRegistryEntry(name, spec, provides=provides, tags=tags, requirement=requirement)

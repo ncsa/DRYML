@@ -3,7 +3,7 @@ from __future__ import annotations
 import dryml
 
 from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
-from dryml.worlds import WorldSpec, use
+from dryml.worlds import WorldSpec, attach_world_id, make_world_spec, use
 
 
 @dryml.world.default(cpus=2)
@@ -45,3 +45,26 @@ def test_enveloped_explicit_world_is_preserved():
 
     assert resolution.world_selection.source == "explicit"
     assert resolution.world_selection.candidate["roles"]["main"]["process"]["resources"]["cpus"] == 2
+
+
+@dryml.world.req(cpus={"min": 2})
+def target_with_hard_world_requirement():
+    return None
+
+
+def test_canonical_explicit_world_envelope_is_checked_and_selected():
+    envelope = attach_world_id(
+        make_world_spec(
+            {"main": {"replicas": 1, "process": {"resources": {"cpus": 2}}}}
+        )
+    )
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(target_with_hard_world_requirement, allow_pickle=True),
+        world=envelope,
+        requirement_policy="strict",
+    )
+
+    assert resolution.world_selection.source == "explicit"
+    assert resolution.world_check.status == "satisfied"
+    assert not any(item.code == "dryml.dispatch.single_subprocess_world_unsupported" for item in resolution.diagnostics)

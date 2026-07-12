@@ -137,7 +137,33 @@ class CandidateCheckReport:
 
 @dataclass(frozen=True, slots=True)
 class DispatchPlanningResolution:
-    """Complete serializable decisions for a normalized dispatch target."""
+    """Complete serializable planning decisions for a normalized dispatch target.
+
+    Attributes:
+        normalized_target: Bounded normalized operation identity and transport.
+        code_analysis: Static facts collected for the target, when available.
+        code_probe: Final code-probe evidence, when required.
+        bootstrap_environment: Environment used for initial target discovery.
+        bootstrap_code_probe: Initial target-discovery probe evidence.
+        final_code_probe: Selected-environment target validation evidence.
+        requirements: Merged annotation requirements and defaults.
+        environment_selection: Selected environment and precedence trace.
+        environment_record: Reusable selected environment inventory record.
+        environment_check: Final environment requirement result.
+        world_selection: Selected world and precedence trace.
+        world_check: Final requested-world requirement result.
+        runtime_selection: Selected worker runtime and precedence trace.
+        runtime_check: Final runtime requirement result.
+        requirement_policy: Effective strict, warn, or ignore policy.
+        runtime_enforcement: Effective runtime enforcement mode.
+        diagnostics: Bounded planning diagnostics.
+        launchable: Whether the equivalent plan can be launched safely.
+        environment_resolution: Resolver report when environment search ran.
+        world_synthesis: Synthesis report when a local world was synthesized.
+        inventory_summary: Bounded inventory used by synthesis or allocation.
+        world_allocation_summary: Actual local allocation summary when planned.
+        local_inventory: Internal reused inventory object; omitted from public data.
+    """
 
     normalized_target: Mapping[str, Any]
     code_analysis: CodeAnalysisResult | None
@@ -258,8 +284,8 @@ class DispatchExplanation:
 
         environment_resolution = self.resolution.environment_resolution
         environment_name = None if environment_resolution is None else environment_resolution.selected_name
-        attempts = () if environment_resolution is None else environment_resolution.attempts
-        probes = sum(attempt.probe is not None for attempt in attempts)
+        attempts = 0 if environment_resolution is None else environment_resolution.attempt_count
+        probes = 0 if environment_resolution is None else environment_resolution.probe_count
         inventory = self.resolution.inventory_summary
         inventory_text = ""
         if inventory is not None:
@@ -272,7 +298,7 @@ class DispatchExplanation:
         return (
             f"dispatch target={self.operation_preview.get('kind')} policy={self.resolution.requirement_policy.value} "
             f"environment={self.resolution.environment_selection.source} environment_name={environment_name} "
-            f"environment_attempts={len(attempts)} environment_probes={probes} "
+            f"environment_attempts={attempts} environment_probes={probes} "
             f"world={self.resolution.world_selection.source} runtime={self.resolution.runtime_selection.source} "
             f"launchable={self.launchable}{inventory_text}{blocking_text}"
         )
@@ -881,6 +907,9 @@ def _environment_data(value: Any) -> dict[str, Any]:
 def _world_data(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping) and "spec" in value:
         value = value["spec"]
+    if isinstance(value, Mapping) and value.get("schema") == "dryml.world.v1":
+        worlds.validate_world_spec(value)
+        value = value["payload"]
     if isinstance(value, WorldSpec):
         return value.to_data()
     # Sprint 6 accepted opaque local-backend world policy mappings. Preserve

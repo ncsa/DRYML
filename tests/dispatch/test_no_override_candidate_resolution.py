@@ -7,7 +7,7 @@ import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, use
+from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve, use
 from dryml.operations import make_function_call_spec
 from dryml.worlds import LocalResourceInventory, WorldSpec, use as use_world
 
@@ -184,6 +184,28 @@ def test_explanation_formats_synthesized_inventory_summary():
 
     assert "inventory_cpus=2" in str(explanation)
     assert "inventory_accelerators=['gpu']" in str(explanation)
+
+
+def test_explanation_formats_total_resolver_counts_not_bounded_trace_length():
+    explanation = Dispatcher().explain(make_function_call_spec("operator:add", args=[1, 2]))
+    resolution = explanation.resolution
+    environment_resolution = resolve(None, candidates=(CurrentEnvironmentSpec(),), include_current=False)
+
+    reported = replace(
+        explanation,
+        resolution=replace(
+            resolution,
+            environment_resolution=replace(
+                environment_resolution,
+                attempts=environment_resolution.attempts[:1],
+                attempt_count=37,
+                probe_count=11,
+            ),
+        ),
+    )
+
+    assert "environment_attempts=37" in str(reported)
+    assert "environment_probes=11" in str(reported)
 
 
 def test_plan_allocates_a_synthesized_one_worker_world(tmp_path):
