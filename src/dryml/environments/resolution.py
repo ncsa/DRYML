@@ -30,7 +30,18 @@ _MAX_SERIALIZED_NODES = 1024
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentResolutionAttempt:
-    """One ordered candidate considered by environment resolution."""
+    """One bounded environment candidate-resolution attempt.
+
+    Attributes:
+        source: Candidate origin such as ``"candidate"`` or ``"registry"``.
+        name: Optional registry entry name.
+        spec: Canonical candidate environment specification.
+        status: Selection, skip, probe, or compatibility outcome.
+        probe: Optional evidence returned by the candidate probe.
+        compatibility: Optional hard-requirement compatibility report.
+        diagnostics: Bounded public diagnostic summaries.
+        probe_duration_s: Measured cooperative probe duration in seconds.
+    """
 
     source: str
     name: str | None
@@ -52,13 +63,26 @@ class EnvironmentResolutionAttempt:
             "probe": _probe_summary(self.probe),
             "probe_duration_s": self.probe_duration_s,
             "compatibility": None if self.compatibility is None else _report_summary(self.compatibility),
-            "diagnostics": [issue.to_data() for issue in self.diagnostics],
+            "diagnostics": [_issue_summary(issue) for issue in self.diagnostics],
         })
 
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentResolution:
-    """Selected environment plus complete bounded resolution trace."""
+    """Selected environment and deterministic bounded resolution trace.
+
+    Attributes:
+        status: Overall ``selected``, ``no_match``, or ``incomplete`` outcome.
+        requirement: Optional hard requirement used for candidate checks.
+        selected: Selected environment specification, when available.
+        selected_name: Optional selected registry entry name.
+        selected_source: Candidate origin for the selected specification.
+        selected_record: Reusable environment record from the selected probe.
+        selected_probe: Probe result corresponding to ``selected_record``.
+        attempts: Ordered, bounded candidate attempt records.
+        diagnostics: Bounded public resolver diagnostics.
+        policy: Resolver selection policy.
+    """
 
     status: str
     requirement: EnvironmentRequirement | None
@@ -98,7 +122,7 @@ class EnvironmentResolution:
             "selected_record": _record_summary(self.selected_record),
             "selected_probe": _probe_summary(self.selected_probe),
             "attempts": [attempt.to_data() for attempt in self.attempts],
-            "diagnostics": [issue.to_data() for issue in self.diagnostics],
+            "diagnostics": [_issue_summary(issue) for issue in self.diagnostics],
             "policy": self.policy,
         })
 
@@ -256,8 +280,14 @@ def resolve(
                 continue
         except Exception as exc:
             issue = CompatibilityIssue("probe_failed", "error", f"environment probe raised {type(exc).__name__}")
-            duration = None if "probe_started" not in locals() else max(0.0, now() - probe_started)
+            duration = max(0.0, now() - probe_started)
             record(EnvironmentResolutionAttempt(source, name, spec, "probe_failed", diagnostics=(issue,), probe_duration_s=duration))
+            if total_timeout is not None and now() - started >= total_timeout:
+                # A malformed result or runner exception can consume the final
+                # budget just as a normal result can. Later candidates are
+                # unsearched, so this must not become a relaxed-policy fallback.
+                search_incomplete = True
+                break
             continue
         if total_timeout is not None and now() - started >= total_timeout:
             timeout_issue = CompatibilityIssue(
@@ -524,8 +554,26 @@ def _report_summary(report: CompatibilityReport) -> dict[str, Any]:
     return {
         "schema_version": report.schema_version,
         "status": report.status,
-        "issues": [issue.to_data() for issue in report.issues],
+        "issues": [_issue_summary(issue) for issue in report.issues],
         "details": {"redacted": True},
+    }
+
+
+def _issue_summary(issue: CompatibilityIssue) -> dict[str, Any]:
+    """Return safe public issue metadata from trusted or injected evidence."""
+
+    # Probe runners are injectable, so messages and observed values can contain
+    # environment overrides or credentials. Keep stable diagnosis identifiers
+    # and paths without serializing arbitrary runner-controlled values.
+    return {
+        "schema_version": issue.schema_version,
+        "code": issue.code,
+        "severity": issue.severity,
+        "message": f"environment compatibility issue: {issue.code}",
+        "requirement_path": issue.requirement_path,
+        "observed_path": issue.observed_path,
+        "expected": {"redacted": True} if issue.expected is not None else None,
+        "observed": {"redacted": True} if issue.observed is not None else None,
     }
 
 

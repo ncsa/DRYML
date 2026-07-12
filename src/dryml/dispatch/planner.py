@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Callable
 
@@ -44,17 +44,18 @@ class Dispatcher:
     Args:
         backend: Optional dispatch backend; local subprocess is the default.
         store: Optional default store used by plan and execution methods.
-        environment_candidates: Re-iterable resolver candidates retained across
-            calls. Per-call candidates override this value.
+        environment_candidates: Finite sequence of resolver candidates retained
+            across calls. Per-call candidates override this value.
         environment_registry: Optional explicit resolver registry.
         inventory: Optional injected local capacity facts.
         inventory_policy: ``"lightweight"`` or opt-in ``"external"`` discovery.
         resolver_policy: Optional resolver policy, currently
             ``"first_compatible"`` only.
 
-    Retained candidates must be re-iterable so repeated notebook calls cannot
-    consume a one-shot iterator. Per-call values override defaults without
-    mutating them.
+    Retained candidates must be a concrete sequence so repeated notebook calls
+    cannot consume a stateful iterator hidden behind an iterable wrapper.
+    Per-call values retain ordinary iterable support and override defaults
+    without mutating them.
     """
 
     def __init__(self, *, backend: Any | None = None, store: Any | None = None, environment_candidates: Any | None = None, environment_registry: Any | None = None, inventory: Any | None = None, inventory_policy: str = "lightweight", resolver_policy: str | None = None):
@@ -63,11 +64,10 @@ class Dispatcher:
         self.backend = backend if backend is not None else LocalSubprocessBackend()
         self.store = store
         if environment_candidates is not None:
-            first_iteration = iter(environment_candidates)
-            if first_iteration is iter(environment_candidates):
+            if isinstance(environment_candidates, (str, bytes)) or not isinstance(environment_candidates, Sequence):
                 raise TypeError(
-                    "Dispatcher environment_candidates must be a re-iterable; "
-                    "materialize one-shot iterators before configuring a dispatcher"
+                    "Dispatcher environment_candidates must be a finite re-iterable sequence; "
+                    "pass a list or tuple when retaining candidates across calls"
                 )
         self.environment_candidates = environment_candidates
         self.environment_registry = environment_registry
@@ -212,7 +212,7 @@ class Dispatcher:
                 make_dispatch_spec(
                     operation_id=op_spec["id"],
                     operation=op_spec,
-                    environment={"policy": "current", "spec": env_data},
+                    environment={"policy": resolution.environment_selection.source, "spec": env_data},
                     world={"policy": resolution.world_selection.source, "spec": world_data},
                     runtime={"policy": "worker", "spec": runtime_data},
                     records={"record_policy": record_policy, "provenance": record_policy != "none"},
@@ -410,8 +410,8 @@ class Dispatcher:
                 make_dispatch_spec(
                 operation_id=op_spec["id"],
                 operation=op_spec,
-                environment={"policy": "current", "spec": env_data},
-                world={"policy": "local_world", "spec": world_spec},
+                environment={"policy": resolution.environment_selection.source, "spec": env_data},
+                world={"policy": resolution.world_selection.source, "spec": world_spec},
                 runtime={"policy": "worker", "spec": runtime_data},
                 records={"record_policy": record_policy, "provenance": record_policy != "none"},
                 execution={"backend": "local_world"},
@@ -479,14 +479,34 @@ class Dispatcher:
         return backend.submit(plan)
 
     def run_world(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, **kwargs: Any):
-        """Plan, launch, and wait for an explicit local-world dispatch."""
+        """Plan, launch, and wait for an explicit local-world dispatch.
+
+        Args:
+            operation: Python-shaped callable or explicit operation specification.
+            method_name: Optional DRYML object method name.
+            **kwargs: Arguments accepted by :meth:`plan_world`, plus optional
+                worker-result ``timeout`` in seconds.
+
+        Returns:
+            The completed local-world result collection.
+        """
 
         plan = self.plan_world(operation, method_name, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
         future = self.submit_world(plan)
         return future.result(timeout=kwargs.get("timeout"))
 
     def run(self, operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, **kwargs: Any) -> DispatchResult:
-        """Plan, submit, wait, and return a public ``DispatchResult``."""
+        """Plan, submit, wait, and return a public ``DispatchResult``.
+
+        Args:
+            operation: Python-shaped callable or explicit operation specification.
+            method_name: Optional DRYML object method name.
+            **kwargs: Arguments accepted by :meth:`plan`, plus optional worker
+                result ``timeout`` in seconds.
+
+        Returns:
+            The completed dispatch result.
+        """
 
         plan = self.plan(operation, method_name, **{key: value for key, value in kwargs.items() if key not in {"timeout"}})
         future = self.submit(plan)
@@ -581,7 +601,18 @@ def plan(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, me
 
 
 def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchResult:
-    """Plan, submit, and wait for a Python-shaped or explicit operation."""
+    """Plan, submit, and wait for an operation.
+
+    Args:
+        operation: Python-shaped callable or explicit operation specification.
+        method_name: Optional DRYML object method name.
+        backend: Optional backend object or ``"local_subprocess"``.
+        store: Store used for marshalling and optional records.
+        **kwargs: Arguments accepted by :meth:`Dispatcher.run`.
+
+    Returns:
+        The completed public dispatch result.
+    """
 
     if backend in (None, "local_subprocess"):
         backend_obj = None
@@ -604,19 +635,50 @@ def explain(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable,
 
 
 def run_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, store: Any | None = None, **kwargs: Any):
-    """Convenience wrapper for ``Dispatcher(...).run_world(...)``."""
+    """Plan, launch, and wait for a local-world operation.
+
+    Args:
+        operation: Python-shaped callable or explicit operation specification.
+        method_name: Optional DRYML object method name.
+        store: Store used for shared marshalling and records.
+        **kwargs: Arguments accepted by :meth:`Dispatcher.run_world`.
+
+    Returns:
+        The completed local-world result collection.
+    """
 
     return Dispatcher(store=store).run_world(operation, method_name, **kwargs)
 
 
 def plan_world(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, store: Any | None = None, **kwargs: Any):
-    """Build an explicit local-world plan, synthesizing an omitted world when needed."""
+    """Build a local-world plan, synthesizing an omitted required world.
+
+    Args:
+        operation: Python-shaped callable or explicit operation specification.
+        method_name: Optional DRYML object method name.
+        store: Store used for shared marshalling and records.
+        **kwargs: Arguments accepted by :meth:`Dispatcher.plan_world`.
+
+    Returns:
+        A validated local-world execution plan.
+    """
 
     return Dispatcher(store=store).plan_world(operation, method_name, **kwargs)
 
 
 def submit(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any):
-    """Plan and submit a Python-shaped or explicit operation."""
+    """Plan and submit an operation without waiting for completion.
+
+    Args:
+        operation: Python-shaped callable or explicit operation specification.
+        method_name: Optional DRYML object method name.
+        backend: Optional backend object or ``"local_subprocess"``.
+        store: Store used for operation marshalling.
+        **kwargs: Arguments accepted by :meth:`Dispatcher.submit`.
+
+    Returns:
+        A backend future for the launched operation.
+    """
 
     dispatcher = Dispatcher(backend=None if backend in (None, "local_subprocess") else backend, store=store)
     return dispatcher.submit(operation, method_name, **kwargs)

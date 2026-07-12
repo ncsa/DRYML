@@ -254,6 +254,18 @@ def test_dispatcher_rejects_retained_one_shot_candidate_iterable_wrappers():
         Dispatcher(environment_candidates=OneShotCandidates())
 
 
+def test_dispatcher_rejects_retained_distinct_iterators_over_a_shared_cursor():
+    class SharedCursorCandidates:
+        def __init__(self):
+            self._cursor = iter((PythonExecutableSpec("/candidate/python"),))
+
+        def __iter__(self):
+            return (candidate for candidate in self._cursor)
+
+    with pytest.raises(TypeError, match="re-iterable"):
+        Dispatcher(environment_candidates=SharedCursorCandidates())
+
+
 def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeypatch):
     import dryml.dispatch.requirements as requirements
 

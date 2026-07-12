@@ -64,6 +64,7 @@ def test_dispatcher_submit_accepts_operation_and_forwards_environment_world(tmp_
     dispatcher = Dispatcher(store=store)
     planned = dispatcher.plan(mod.add, args=(1, 2), environment=environment, world=world)
     assert planned.envelope.environment_spec == environment
+    assert planned.envelope.dispatch_spec["payload"]["environment"]["policy"] == "explicit"
     assert planned.envelope.dispatch_spec["payload"]["world"]["policy"] == "explicit"
     assert planned.envelope.dispatch_spec["payload"]["world"]["spec"]["roles"]["main"]["replicas"] == 1
 

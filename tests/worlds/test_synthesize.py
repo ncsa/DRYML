@@ -41,6 +41,16 @@ def test_synthesize_default_and_unknown_memory_failure_are_structured():
     assert insufficient_memory.diagnostics[0].code == "memory_unknown"
 
 
+def test_synthesis_does_not_change_runtime_allocation():
+    from dryml.runtime import active_runtime
+
+    before = active_runtime()
+    result = synthesize(None, inventory=LocalResourceInventory((0,)))
+
+    assert result.ok
+    assert active_runtime() is before
+
+
 def test_synthesize_rejects_unsupported_named_resources():
     requirement = WorldRequirement.from_data(
         {"roles": {"worker": {"resources": {"named": {"fast_disk": {"min": 1}}}}}}

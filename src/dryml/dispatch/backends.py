@@ -55,9 +55,10 @@ class LocalSubprocessFuture:
         """Wait for the worker and return its compact response."""
 
         try:
-            self.wait_for_handshake(timeout=self.handshake_timeout)
-            self.process.wait(timeout=timeout)
-            self._read_response()
+            if self._response is None:
+                self.wait_for_handshake(timeout=self.handshake_timeout)
+                self.process.wait(timeout=timeout)
+                self._read_response()
             if self._exception is not None:
                 raise self._exception
             assert self._response is not None
@@ -110,7 +111,13 @@ class LocalSubprocessFuture:
         if self.done():
             # The leader may have exited while descendants still retain its
             # dedicated process group. Kill the group before reporting done.
+            if self._response is None:
+                try:
+                    self._read_response()
+                except Exception:
+                    pass
             self.kill()
+            self._cleanup()
             return False
         self._cancelled = True
         _report("dryml.dispatch.worker.cancel", "Cancelling local subprocess worker", operation_id=self.plan.envelope.operation_id, data={"pid": self.process.pid, "reason": reason})
@@ -125,12 +132,14 @@ class LocalSubprocessFuture:
                 self.kill()
                 if record:
                     self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": sig_name, "escalated": len(methods) > 1, "reason": reason})
+                self._cleanup()
                 return True
         methods.append("SIGKILL")
         self.kill()
         self._wait(wait)
         if record:
             self._response = self._parent_failure_response("cancelled", cancellation={"requested": True, "method": "SIGKILL", "escalated": True, "reason": reason})
+        self._cleanup()
         return True
 
     def terminate(self, *, grace: float | None = None) -> None:
@@ -261,7 +270,9 @@ class LocalSubprocessFuture:
         ) or (os.name == "nt" and self.process_tree and self._response is not None):
             # Reap descendants retained after the backend worker leader returns.
             self.kill()
-        for path in self.plan.envelope.launch.get("cleanup_paths", ()):  # type: ignore[union-attr]
+        launch = getattr(self.plan.envelope, "launch", {})
+        cleanup_paths = launch.get("cleanup_paths", ()) if isinstance(launch, Mapping) else ()
+        for path in cleanup_paths:
             if isinstance(path, str):
                 shutil.rmtree(path, ignore_errors=True)
         if not self.preserve_work_dir:

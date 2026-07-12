@@ -22,7 +22,17 @@ _MAX_LOCAL_WORLD_WORKERS = 4096
 
 @dataclass(frozen=True, slots=True)
 class WorldSynthesisDiagnostic:
-    """One bounded machine-readable local synthesis finding."""
+    """One bounded machine-readable local synthesis finding.
+
+    Attributes:
+        code: Stable diagnostic identifier.
+        severity: Finding severity.
+        message: Human-readable finding summary.
+        path: Optional canonical requirement path.
+        expected: Optional requested value.
+        observed: Optional available or observed value.
+        data: Optional bounded structured context.
+    """
 
     code: str
     severity: str
@@ -40,7 +50,19 @@ class WorldSynthesisDiagnostic:
 
 @dataclass(frozen=True, slots=True)
 class WorldSynthesisResult:
-    """Result and diagnostics from deterministic local world synthesis."""
+    """Result and diagnostics from deterministic local world synthesis.
+
+    Attributes:
+        status: Synthesis outcome such as ``"synthesized"`` or
+            ``"insufficient_inventory"``.
+        requirement: Canonical requested requirement, when supplied.
+        inventory: Bounded inventory summary used for synthesis.
+        world: Synthesized requested world, when successful.
+        compatibility: Authoritative post-synthesis compatibility report.
+        diagnostics: Ordered structured synthesis findings.
+        policy: Applied synthesis policy.
+        resource_inventory: Internal inventory reused by dispatch allocation.
+    """
 
     status: str
     requirement: WorldRequirement | None

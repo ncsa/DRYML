@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import json
+import os
 import subprocess
 import sys
 from itertools import count
@@ -84,6 +85,23 @@ def test_lightweight_inventory_uses_default_device_root(monkeypatch):
 def test_explicit_accelerator_groups_may_not_repeat():
     with pytest.raises(ResourceValidationError, match="repeats an accelerator group"):
         local_inventory(environ={"DRYML_LOCAL_ACCELERATORS": "gpu=0;gpu=1"})
+
+
+def test_explicit_accelerator_identifiers_are_bounded_before_integer_conversion():
+    with pytest.raises(ResourceValidationError, match="exceeds the bounded limit"):
+        local_inventory(environ={"DRYML_LOCAL_ACCELERATORS": f"gpu={'9' * 1235}"})
+
+
+def test_oversized_inherited_visibility_is_diagnostic_only(tmp_path):
+    inventory = local_inventory(
+        policy="external",
+        environ={"CUDA_VISIBLE_DEVICES": "9" * 1235},
+        device_root=tmp_path,
+        command_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("runner must not run")),
+    )
+
+    assert inventory.accelerators == {}
+    assert "CUDA_VISIBLE_DEVICES visibility was invalid" in inventory.metadata["diagnostics"]
 
 
 @pytest.mark.parametrize("timeout", (math.inf, math.nan))
@@ -238,11 +256,20 @@ def test_inventory_import_path_does_not_load_framework_modules():
         "import json, sys; "
         "from dryml.worlds import local_inventory; "
         "local_inventory(environ={}); "
-        "print(json.dumps(sorted(name for name in sys.modules if name.split('.')[0] in {'torch', 'tensorflow', 'jax', 'keras', 'cupy'})))"
+        "print(json.dumps(sorted(name for name in sys.modules if name.split('.')[0] in {'torch', 'tensorflow', 'jax', 'jaxlib', 'keras', 'cupy', 'pynvml', 'py3nvml', 'nvidia'})))"
     )
     output = subprocess.check_output([sys.executable, "-c", command], text=True)
 
     assert json.loads(output) == []
+
+
+def test_inventory_discovery_does_not_change_runtime_allocation():
+    from dryml.runtime import active_runtime
+
+    before = active_runtime()
+    local_inventory(environ={}, device_root=None)
+
+    assert active_runtime() is before
 
 
 def test_empty_cpu_affinity_is_not_reported_as_cpu_zero(monkeypatch):

@@ -417,6 +417,29 @@ def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_incomplete():
     assert attempt.probe.report.issues[-1].code == "resolver_total_timeout"
 
 
+@pytest.mark.parametrize("failure", (RuntimeError(), TypeError()))
+def test_resolver_marks_deadline_exhausting_probe_failures_as_incomplete(failure):
+    spec = PythonExecutableSpec("/candidate/python")
+    state = {"now": 0.0}
+
+    def runner(_candidate, *, timeout):
+        state["now"] = 1.0
+        raise failure
+
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        total_timeout=0.5,
+        clock=lambda: state["now"],
+        probe_runner=runner,
+    )
+
+    assert result.status == "incomplete"
+    assert result.attempts[0].status == "probe_failed"
+    assert result.attempts[0].probe_duration_s == 1.0
+
+
 def test_resolver_continues_after_malformed_protocol_record():
     malformed = PythonExecutableSpec("/malformed-protocol/python")
     selected = PythonExecutableSpec("/selected/python")
@@ -581,3 +604,30 @@ def test_resolver_serialization_redacts_injected_report_detail_secrets():
 
     assert "TOKEN" not in str(result.to_data())
     assert secret not in str(result.to_data())
+
+
+def test_resolver_serialization_redacts_injected_issue_secrets():
+    from dryml.environments.compatibility import CompatibilityReport
+
+    secret = "TOKEN=secret"
+    spec = PythonExecutableSpec("/candidate/python")
+    result = resolve(
+        EnvironmentRequirement(tags=("wanted",)),
+        candidates=(spec,),
+        include_current=False,
+        probe_runner=lambda candidate, *, timeout: EnvironmentProbeResult(
+            candidate,
+            False,
+            report=CompatibilityReport(
+                "incompatible",
+                issues=(CompatibilityIssue("runner_secret", "error", secret, expected=secret, observed=secret),),
+            ),
+        ),
+    )
+
+    data = result.to_data()
+    issue = data["attempts"][0]["probe"]["report"]["issues"][0]
+    assert secret not in str(data)
+    assert issue["message"] == "environment compatibility issue: runner_secret"
+    assert issue["expected"] == {"redacted": True}
+    assert issue["observed"] == {"redacted": True}

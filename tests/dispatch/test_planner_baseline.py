@@ -35,7 +35,7 @@ def _operation():
 def test_plan_defaults_environment_to_current_environment_spec_data(tmp_path):
     plan = Dispatcher(store=_store(tmp_path)).plan(_operation())
 
-    assert plan.dispatch_spec["payload"]["environment"]["policy"] == "current"
+    assert plan.dispatch_spec["payload"]["environment"]["policy"] == "fallback"
     assert plan.dispatch_spec["payload"]["environment"]["spec"]["kind"] == "current"
     assert plan.envelope.environment_spec["kind"] == "current"
 
@@ -112,4 +112,4 @@ def test_planner_resolves_target_annotations_into_authoritative_metadata(tmp_pat
 
     requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]
     assert "pandas>=2" in requirements["environment_requirement"]["requirements"]
-    assert plan.dispatch_spec["payload"]["environment"]["policy"] == "current"
+    assert plan.dispatch_spec["payload"]["environment"]["policy"] == "resolver"

@@ -325,7 +325,7 @@ def _accelerators_from_env(environ: Mapping[str, str], diagnostics: list[str]) -
         raw_values = tuple(item.strip() for item in values.split(","))
         if any(not value for value in raw_values):
             raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
-        parsed = tuple(int(value) if value.isdigit() else value for value in raw_values)
+        parsed = tuple(_decimal_nonneg_int(value, "explicit accelerator identifier") if value.isdigit() else value for value in raw_values)
         if not name or not parsed:
             raise ResourceValidationError("malformed DRYML_LOCAL_ACCELERATORS entry", context={"entry": group})
         if name in result:
@@ -377,7 +377,11 @@ def _visible_gpu_ids(environ: Mapping[str, str], diagnostics: list[str]) -> tupl
         if any(not value.isdigit() for value in values):
             diagnostics.append(f"{name} visibility was ambiguous")
             return set(), False
-        limits.append({int(value) for value in values})
+        try:
+            limits.append({_decimal_nonneg_int(value, f"{name} visibility identifier") for value in values})
+        except ResourceValidationError:
+            diagnostics.append(f"{name} visibility was invalid")
+            return set(), False
     if not limits:
         return None, True
     return set.intersection(*limits), True
@@ -415,6 +419,17 @@ def _nonneg_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value.bit_length() > _MAX_INTEGER_BITS:
         raise ResourceValidationError(f"{name} must be an integer >= 0", context={"value": value})
     return value
+
+
+def _decimal_nonneg_int(value: str, name: str) -> int:
+    """Parse one bounded decimal identifier before integer conversion."""
+
+    # Avoid Python's process-global decimal conversion limit and reject values
+    # that cannot fit the public resource identifier domain.
+    max_decimal_digits = int(_MAX_INTEGER_BITS * math.log10(2)) + 1
+    if len(value) > max_decimal_digits:
+        raise ResourceValidationError(f"{name} exceeds the bounded limit", context={"value": value[:64]})
+    return _nonneg_int(int(value), name)
 
 
 def _accelerator_identifier(value: Any, accelerator: str) -> str | int:

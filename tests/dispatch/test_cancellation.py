@@ -1,3 +1,4 @@
+import os
 import sys
 
 import pytest
@@ -25,6 +26,31 @@ def test_sleeping_worker_cancellation_records_cancelled(tmp_path, target_module)
 
     assert response.status == "cancelled"
     assert store.records.find_execution_records(status="cancelled")
+
+
+def test_cancellation_immediately_removes_launch_artifacts_and_keeps_response(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    environment = PythonExecutableSpec(
+        sys.executable,
+        pythonpath_policy="explicit",
+        extra_pythonpath=(str(target_module.parent),),
+    ).to_data()
+
+    def sleeping_local_callable():
+        import time
+
+        time.sleep(60)
+
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(sleeping_local_callable, allow_pickle=True, environment=environment)
+    future = dispatcher.submit(plan)
+    work_dir = future.work_dir
+    cleanup_paths = tuple(plan.envelope.launch["cleanup_paths"])
+
+    assert future.cancel(grace=0.1, reason="test") is True
+    assert not os.path.exists(work_dir)
+    assert all(not os.path.exists(path) for path in cleanup_paths)
+    assert future.result(timeout=5).status == "cancelled"
 
 
 def test_timeout_records_timeout(tmp_path, target_module):
