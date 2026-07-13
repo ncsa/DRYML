@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import json
+import math
+import re
 from typing import Any
 
 
@@ -71,7 +74,19 @@ class CodeFact:
             A typed fact where the kind is known, otherwise a generic fact.
         """
 
+        if not isinstance(data, Mapping):
+            raise TypeError("CodeFact data must be a mapping")
         kind = data.get("kind")
+        if kind == "dynamic_call":
+            if type(data) is not dict:
+                raise TypeError("DynamicCallFact wire data must be an exact dict")
+            if set(data) != {"kind", "source", "data"}:
+                raise ValueError("DynamicCallFact must use the fixed top-level schema")
+            return DynamicCallFact(
+                kind=kind,
+                source=data.get("source"),
+                data=data.get("data"),
+            )
         if kind == "diagnostic":
             return DiagnosticFact.from_data(data)
         if kind == "requirement":
@@ -235,6 +250,192 @@ class StaticCallFact(CodeFact):
         CodeFact.__post_init__(self)
 
 
+_DYNAMIC_REFERENCE_RE = re.compile(r"^[0-9a-f]{16,}$")
+_DYNAMIC_CDEF_REFERENCE_RE = re.compile(r"^cdef-v[1-9][0-9]*-[0-9a-f]{16,}$")
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicCallFact(CodeFact):
+    """One bounded method call directly observed by ``dryml.code.trace``.
+
+    Receiver references are hash-derived observation keys, not equality,
+    authorization, merge, or dispatch keys. Exact equality requires a live
+    structural comparison or a separately equality-verified registry.
+    ``method_facts`` contains only serialized facts from the current annotation
+    and method-contract APIs; this object never retains live trace values.
+    """
+
+    kind: str = "dynamic_call"
+
+    def __post_init__(self) -> None:
+        """Validate the complete fixed dynamic-call wire schema."""
+
+        if self.kind != "dynamic_call":
+            raise ValueError("DynamicCallFact kind must be 'dynamic_call'")
+        if type(self.source) is not dict or set(self.source) != {"analyzer", "target_kind"}:
+            raise ValueError("DynamicCallFact source must use the fixed schema")
+        if self.source.get("analyzer") != "dynamic_trace":
+            raise ValueError("DynamicCallFact source analyzer must be 'dynamic_trace'")
+        target_kind = self.source.get("target_kind")
+        if not isinstance(target_kind, str) or not target_kind or len(target_kind) > 4_096:
+            raise ValueError("DynamicCallFact target_kind must be a bounded non-empty string")
+
+        required = {
+            "sequence", "receiver_kind", "receiver_ref", "receiver_class",
+            "method_name", "args", "kwargs", "method_facts",
+        }
+        if type(self.data) is not dict or set(self.data) != required:
+            raise ValueError("DynamicCallFact data must use the fixed schema")
+        sequence = self.data["sequence"]
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            raise ValueError("DynamicCallFact sequence must be a non-negative integer")
+        receiver_kind = self.data["receiver_kind"]
+        if receiver_kind not in {"definition", "concrete_definition"}:
+            raise ValueError("DynamicCallFact receiver_kind is unsupported")
+        _validate_dynamic_reference(receiver_kind, self.data["receiver_ref"], field="receiver_ref")
+        receiver_class = self.data["receiver_class"]
+        if receiver_class is not None and not _valid_bounded_import_path(receiver_class):
+            raise ValueError("DynamicCallFact receiver_class must be a bounded import path or null")
+        method_name = self.data["method_name"]
+        if (
+            not isinstance(method_name, str)
+            or not method_name.isidentifier()
+            or method_name.startswith("__")
+            or method_name.endswith("__")
+            or len(method_name) > 512
+        ):
+            raise ValueError("DynamicCallFact method_name must be a bounded non-dunder identifier")
+
+        args = self.data["args"]
+        kwargs = self.data["kwargs"]
+        if not isinstance(args, list):
+            raise ValueError("DynamicCallFact args must be a JSON array")
+        if not isinstance(kwargs, dict) or any(type(key) is not str for key in kwargs):
+            raise ValueError("DynamicCallFact kwargs must be a string-key JSON object")
+        counter = [0]
+        _validate_dynamic_value(args, depth=0, active=set(), counter=counter)
+        _validate_dynamic_value(kwargs, depth=0, active=set(), counter=counter)
+
+        method_facts = self.data["method_facts"]
+        if not isinstance(method_facts, list) or len(method_facts) > 256:
+            raise ValueError("DynamicCallFact method_facts must be a bounded JSON array")
+        normalized_method_facts = []
+        allowed_method_kinds = {"annotation", "requirement", "method_contract", "shape"}
+        for fact_data in method_facts:
+            _validate_plain_json(fact_data, depth=0, active=set(), counter=[0])
+            if type(fact_data) is not dict or fact_data.get("kind") not in allowed_method_kinds:
+                raise ValueError("DynamicCallFact method_facts contains an unsupported fact")
+            normalized_method_facts.append(CodeFact.from_data(fact_data).to_data())
+
+        normalized_data = dict(self.data)
+        normalized_data["method_facts"] = normalized_method_facts
+        object.__setattr__(self, "data", normalized_data)
+        CodeFact.__post_init__(self)
+        encoded = json.dumps(self.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(encoded) > 1_048_576:
+            raise ValueError("DynamicCallFact exceeds the serialized byte limit")
+
+
+def _validate_dynamic_reference(kind: str, value: Any, *, field: str) -> None:
+    if not isinstance(value, str) or not value or len(value) > 4_096:
+        raise ValueError(f"DynamicCallFact {field} must be a bounded reference")
+    pattern = _DYNAMIC_REFERENCE_RE if kind == "definition" else _DYNAMIC_CDEF_REFERENCE_RE
+    if pattern.fullmatch(value) is None:
+        raise ValueError(f"DynamicCallFact {field} does not match receiver_kind")
+
+
+def _valid_bounded_import_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 4_096 or value.count(":") != 1:
+        return False
+    module, qualname = value.split(":", 1)
+    return bool(module and qualname and all(part.isidentifier() for part in module.split(".")) and all(part.isidentifier() for part in qualname.split(".")))
+
+
+def _validate_dynamic_value(value: Any, *, depth: int, active: set[int], counter: list[int]) -> None:
+    if depth > 32:
+        raise ValueError("DynamicCallFact value depth exceeds 32")
+    if value is None or type(value) is bool:
+        return
+    if type(value) is int:
+        if value.bit_length() > 4_096:
+            raise ValueError("DynamicCallFact integer exceeds 4096 bits")
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("DynamicCallFact floats must be finite")
+        return
+    if type(value) is str:
+        if len(value) > 4_096:
+            raise ValueError("DynamicCallFact strings must be bounded")
+        return
+    if type(value) not in {list, dict}:
+        raise ValueError("DynamicCallFact values must use the trace JSON grammar")
+    oid = id(value)
+    if oid in active:
+        raise ValueError("DynamicCallFact values must be acyclic")
+    active.add(oid)
+    try:
+        counter[0] += len(value)
+        if counter[0] > 10_000:
+            raise ValueError("DynamicCallFact value entries exceed 10000")
+        if type(value) is list:
+            for child in value:
+                _validate_dynamic_value(child, depth=depth + 1, active=active, counter=counter)
+            return
+        if set(value) == {"definition_kind", "definition_ref"}:
+            kind = value["definition_kind"]
+            if kind not in {"definition", "concrete_definition"}:
+                raise ValueError("DynamicCallFact nested definition_kind is unsupported")
+            _validate_dynamic_reference(kind, value["definition_ref"], field="definition_ref")
+            return
+        if any(type(key) is not str or len(key) > 4_096 for key in value):
+            raise ValueError("DynamicCallFact mapping keys must be bounded strings")
+        for child in value.values():
+            _validate_dynamic_value(child, depth=depth + 1, active=active, counter=counter)
+    finally:
+        active.remove(oid)
+
+
+def _validate_plain_json(value: Any, *, depth: int, active: set[int], counter: list[int]) -> None:
+    """Validate nested method-fact input before generic JSON conversion."""
+
+    if depth > 32:
+        raise ValueError("method fact JSON depth exceeds 32")
+    if value is None or type(value) is bool:
+        return
+    if type(value) is int:
+        if value.bit_length() > 4_096:
+            raise ValueError("method fact integer exceeds 4096 bits")
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("method fact float must be finite")
+        return
+    if type(value) is str:
+        if len(value) > 4_096:
+            raise ValueError("method fact string is too long")
+        return
+    if type(value) not in {list, dict}:
+        raise ValueError("method fact contains a non-JSON value")
+    oid = id(value)
+    if oid in active:
+        raise ValueError("method fact JSON must be acyclic")
+    active.add(oid)
+    try:
+        counter[0] += len(value)
+        if counter[0] > 10_000:
+            raise ValueError("method fact JSON contains too many entries")
+        children = value
+        if type(value) is dict:
+            if any(type(key) is not str or len(key) > 4_096 for key in value):
+                raise ValueError("method fact JSON keys must be bounded strings")
+            children = value.values()
+        for child in children:
+            _validate_plain_json(child, depth=depth + 1, active=active, counter=counter)
+    finally:
+        active.remove(oid)
+
+
 @dataclass(frozen=True, slots=True)
 class DiagnosticFact(CodeFact):
     """Structured diagnostic emitted during code analysis.
@@ -317,6 +518,7 @@ __all__ = [
     "CallableFact",
     "CodeFact",
     "DiagnosticFact",
+    "DynamicCallFact",
     "MethodContractFact",
     "RequirementFact",
     "ShapeFact",

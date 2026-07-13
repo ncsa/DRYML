@@ -7,7 +7,9 @@ from .analysis import (
     available_analyzers,
     get_analyzer,
     register_analyzer,
+    trace,
 )
+from .algorithms.dynamic_trace import DynamicTracePolicy, DynamicTraceProxyError
 from .callable_info import CallableInfo, analyze_callable
 from .compiler_info import CompilerInfo
 from .facts import (
@@ -17,6 +19,7 @@ from .facts import (
     CallableFact,
     CodeFact,
     DiagnosticFact,
+    DynamicCallFact,
     MethodContractFact,
     RequirementFact,
     ShapeFact,
@@ -60,6 +63,9 @@ __all__ = [
     "CodeTargetSpec",
     "CompilerInfo",
     "DiagnosticFact",
+    "DynamicCallFact",
+    "DynamicTracePolicy",
+    "DynamicTraceProxyError",
     "FunctionAnalyzer",
     "Method",
     "MethodContractFact",
@@ -86,4 +92,5 @@ __all__ = [
     "target_from_import_path",
     "target_from_method",
     "traits",
+    "trace",
 ]

@@ -2,7 +2,7 @@
 
 ## Status
 
-Sprint 9A implementation note for the reusable `dryml.code` analysis API.
+Sprint 9B implementation note for the reusable `dryml.code` analysis API.
 
 ## Current State
 
@@ -27,7 +27,7 @@ Dispatch, probes, annotations, and later analyzers need shared answers about Pyt
 - Method contract facts.
 - Shape hints where they are code-derived.
 - AST access and method-call hints.
-- Optional future dynamic trace call facts.
+- Explicit opt-in dynamic trace call facts.
 - Structured diagnostics.
 
 ## What Does Not Belong in dryml.code
@@ -113,7 +113,7 @@ Dispatch integration is intentionally deferred. Sprint 3 lets `dryml.code.algori
 
 ## Sprint 9A Analysis Contract
 
-Static analysis and future dynamic tracing share the existing `CodeAnalyzer`
+Static analysis and dynamic tracing share the existing `CodeAnalyzer`
 protocol and `CodeAnalysisResult` model. `analyze(...)` directly runs selected
 analyzers and never intentionally invokes the submitted target body. Importing an
 import-path target can still execute module-level code. After import, qualname
@@ -124,7 +124,7 @@ metaclass, and module dynamic-attribute hooks are not invoked.
 inline probe enters `RuntimeMode.PROBE` but does not imply a new OS process. A
 worker process may use only analyzers installed and registered in that worker.
 
-The Sprint 9B contract, not a currently exported API, is:
+Sprint 9B ships this invocation-bearing facade:
 
 ```python
 dryml.code.trace(
@@ -137,11 +137,14 @@ dryml.code.trace(
 ) -> CodeAnalysisResult
 ```
 
-`trace(...)` will be the invocation-bearing API and will require
+`trace(...)` is the invocation-bearing API and requires
 `CodeAnalysisContext.allow_dynamic_execution=True`. Its invocation data is
 explicit rather than hidden in metadata. Trace facts will use a distinct fact
-kind, inline live notebook targets are intended use cases, and subprocess or
-cross-environment tracing is not implied by this contract.
+kind, inline live notebook targets are supported use cases, and subprocess or
+cross-environment tracing is not part of this contract. The facade runs exactly
+the `dynamic_trace` modality; selecting that analyzer through `analyze(...)` or
+`probe_target(...)` remains non-invoking and returns
+`dryml.code.dynamic_trace_requires_trace_facade`.
 
 ### Target and Location Support
 
@@ -258,11 +261,203 @@ module/metaclass hooks, or truth-test raw descriptors during analysis.
 `tests/code/test_probe_target.py` proves probes do not execute submitted target
 bodies or instantiate classes.
 
+## Sprint 9B Dynamic Trace Contract
+
+### Explicit facade and trust boundary
+
+Tracing is deliberately separate from ordinary analysis:
+
+```python
+import dryml.code as code
+
+result = code.trace(
+    orchestration_function,
+    args=(model_definition,),
+    context=code.CodeAnalysisContext(allow_dynamic_execution=True),
+    policy=code.DynamicTracePolicy(max_calls=100),
+)
+```
+
+The facade validates a private typed invocation request and calls the dedicated
+runner in `dryml.code.algorithms.dynamic_trace`; it does not place invocation
+objects in context metadata, target metadata, analyzer state, or probe transport.
+Tracing executes trusted target code once in the caller's current process. It is
+not a sandbox, has no hard timeout, and does not prevent imports, I/O, mutation,
+threads, subprocesses, or other target side effects. `analyze(...)` and every
+probe location remain non-invoking, even when `dynamic_trace` is selected.
+
+`DynamicTracePolicy` is frozen and slotted. `max_calls` accepts exact integers
+from 1 through 10,000 (not `bool`); `require_proxy_only_args` and
+`collect_requirements` accept exact booleans. Untyped policy mappings are not
+coerced. By default all invocation leaves must be Definitions/CDefs. Setting
+`require_proxy_only_args=False` additionally permits bounded `None`, exact bool,
+integer, finite float, and string leaves.
+
+### Target and execution-location support
+
+| Target | Direct `trace(...)` | Notes |
+|---|---|---|
+| Live module synchronous Python function | Supported inline | Invoked once |
+| Live notebook/`__main__`, local function, closure, lambda | Supported inline | Uses the live object; no reconstruction |
+| Import-path synchronous Python function | Supported inline when imports are allowed | Import can execute trusted module code |
+| `CodeTarget` wrapping a supported function | Supported inline | Preserves live target/spec |
+| Unbound method function | Supported as an ordinary function | Caller supplies every explicit argument |
+| Source-spec-only target | Unsupported | No reconstruction |
+| Bound method, callable instance, class, builtin | Unsupported | Receiver/construction/call state is not invoked |
+| Async function/generator or generator function | Unsupported | No coroutine/generator is created |
+| Unknown/non-callable value | Unsupported | Structured target diagnostic |
+
+| Requested path | Dynamic invocation | Isolation/timeout |
+|---|---|---|
+| Direct `trace(...)` | Supported in current process | Cooperative; no hard timeout |
+| `analyze(..., algorithms=("dynamic_trace",))` | Never | Requires-trace-facade diagnostic |
+| Inline `probe_target(..., algorithms=("dynamic_trace",))` | Never | Existing inline probe role only |
+| Current-Python timeout worker | Never | Existing probe routing/diagnostics |
+| Python executable or Conda probe | Never | Existing probe routing/diagnostics |
+| Container or remote probe | Never | Existing unsupported probe behavior |
+
+The locked trace signature has no location or timeout parameter. Subprocess and
+selected-environment tracing are not implied.
+
+### Invocation grammar and receiver observation
+
+Exact built-in list, tuple, and `dict[str, value]` containers are recursively
+copied. Cycles and non-string keys are rejected before execution; mutable
+container aliases and repeated Definition/CDef proxy identity are preserved in
+the invocation copy. Caller containers are not mutated. Custom mappings,
+sequences, iterators, bytes, sets, dataclasses, DRYML Objects, NumPy values, and
+arbitrary instances are rejected without generic repr serialization.
+
+Receiver classes may be live classes, `ImportRef` values when imports are
+allowed, or trusted `SourceSpec` values when dynamic execution, imports, and
+source are all allowed. Resolution never builds the Definition/CDef. Proxy
+attribute lookup walks static class dictionaries and supports exact Python
+functions plus staticmethod/classmethod descriptors containing exact functions.
+It does not bind or execute real methods, properties, custom descriptors,
+metaclass hooks, or dynamic attribute hooks. Missing, non-method, and dunder
+attributes abort with a structured diagnostic.
+
+Definition observations have one of these forms:
+
+```json
+{"definition_kind":"definition","definition_ref":"<bounded-stable-hash>"}
+{"definition_kind":"concrete_definition","definition_ref":"cdef-v4-<bounded-stable-hash>"}
+```
+
+These are bounded correlation/candidate keys, not exact equality proofs. They
+must not be used alone for equality, requirement merging, authorization, or
+dispatch. Exact equality needs a live structural comparison or a separately
+owned registry that already verified equality. Importable receiver classes use a
+statically verified `module:qualname`; inline classes use `null`.
+
+### Facts, method facts, and outcomes
+
+Each accepted call emits a typed `DynamicCallFact` with exactly this schema:
+
+```json
+{"kind":"dynamic_call","source":{"analyzer":"dynamic_trace","target_kind":"local_function"},"data":{"sequence":0,"receiver_kind":"concrete_definition","receiver_ref":"cdef-v4-0123456789abcdef","receiver_class":null,"method_name":"train","args":[],"kwargs":{},"method_facts":[]}}
+```
+
+The full source/data schema is validated before generic recursive conversion.
+It contains no live callable, class, descriptor, Definition/CDef, proxy, source,
+traceback, frame, local, arbitrary repr output, or exception message.
+
+When both policy and context permit annotations, observed methods collect class
+and concrete-method fragments through `dryml.annotations` and preserve current
+`AnnotationFact`/`RequirementFact` resolution data. `collect_requirements=False`
+or `include_annotations=False` omits those facts. Applicable core2 Method facts
+are controlled independently by `include_method_contracts`. Their trait
+selectors use a fixed `{"backend": string|null, "batch_mode": string|null}`
+mapping rather than a Python representation; malformed selector metadata fails
+method-fact collection closed. No facts are read
+from legacy `__dry_compute_spec__`/`compute_reqs`, merged across calls, or used to
+select an environment, world, runtime, or dispatch candidate.
+
+Every run that starts execution adds exactly one `dynamic_trace_summary` with
+`complete`, `outcome`, `calls_recorded`, and `max_calls`. A successful zero-call
+run is therefore distinct from a pre-execution failure (no summary) and an
+incomplete run. Outcomes are `complete`, `call_limit_exceeded`,
+`unsupported_return_operation`, `unsupported_argument`,
+`unsupported_receiver_attribute`, `stale_proxy`,
+`method_fact_collection_failed`, `target_failed`, `result_limit_exceeded`,
+`diagnostics_limit_exceeded`, and `algorithm_failed`. Expected failures retain
+only prior complete call facts and use an incomplete summary.
+
+Proxy methods return a private unsupported value rather than `None`. Ignoring,
+assigning, passing through, or directly returning it is supported. Truth/length
+testing, iteration, indexing/mutation, attribute chaining, calling, arithmetic,
+comparison, awaiting, context management, numeric/bytes/index conversion,
+hashing, and formatting abort with
+`dryml.code.dynamic_trace_unsupported_return_operation`. Python identity tests
+(`value is None`, `value is other`) cannot be intercepted and have no diagnostic
+guarantee.
+
+### Bounds and diagnostics
+
+| Dimension | Hard limit |
+|---|---:|
+| Proxy calls | Policy maximum, hard ceiling 10,000 |
+| Argument/container depth | 32 |
+| Invocation or one-call container entries | 10,000 |
+| String scalar | 4,096 characters |
+| Integer magnitude | 4,096 bits |
+| Method name | 512 characters |
+| Receiver reference/class | 4,096 characters |
+| Method facts per call | 256 |
+| Serialized dynamic call | 1,048,576 bytes |
+| Serialized calls plus summary | 16,777,216 bytes |
+| Diagnostics | 256 |
+| Diagnostic code/message | 1,024 characters |
+| Definition hash depth (root 0) | 128 |
+| Definition hash value occurrences | 100,000 |
+| Definition hash edges | 200,000 |
+| Definition hash digest-update bytes | 4,194,304 |
+
+The bounded core2 hasher computes the existing stable digest in the same
+budgeted traversal. It charges memo hits, nested identity values, mapping keys,
+edges, and every digest update before exceeding a limit. Hard-limit diagnostics
+include `limit_name`, `limit`, and `observed_lower_bound` when meaningful; no
+truncated run reports complete.
+
+| Condition | Diagnostic code |
+|---|---|
+| Permission disabled | `dryml.code.dynamic_trace_disabled` |
+| Ordinary analyzer/probe path | `dryml.code.dynamic_trace_requires_trace_facade` |
+| Conflicting context algorithms | `dryml.code.dynamic_trace_invalid_context` |
+| Unsupported target | `dryml.code.dynamic_trace_unsupported_target` |
+| Unsupported/bounded argument | `dryml.code.dynamic_trace_unsupported_argument`, `dryml.code.dynamic_trace_argument_limit_exceeded` |
+| Receiver resolution/attribute failure | `dryml.code.dynamic_trace_receiver_resolution_failed`, `dryml.code.dynamic_trace_unsupported_receiver_attribute` |
+| Foreign or escaped active proxy | `dryml.code.dynamic_trace_stale_proxy` |
+| Call limit | `dryml.code.dynamic_trace_call_limit_exceeded` |
+| Unsupported return operation | `dryml.code.dynamic_trace_unsupported_return_operation` |
+| Method facts | `dryml.code.dynamic_trace_method_fact_collection_failed` |
+| Result/diagnostic limit | `dryml.code.dynamic_trace_result_limit_exceeded`, `dryml.code.dynamic_trace_diagnostics_limit_exceeded` |
+| Target exception | `dryml.code.dynamic_trace_target_failed` |
+| Unexpected framework failure | `dryml.code.algorithm_failed` |
+
+Target failures retain only a bounded exception type identity. Their message,
+repr, traceback, frames, and locals are not serialized.
+
+### State and cleanup
+
+Each trace owns a unique planner, lock, proxy memo, accumulators, lifecycle, and
+exact `ContextVar` token. The token is reset and the planner closed in `finally`
+before failures or interruptions propagate. Nested traces restore the outer
+planner; independent thread/task contexts do not share calls, limits, or
+diagnostics. A foreign proxy aborts the currently active trace. A proxy used in a
+thread with no copied current planner, after its owner closes, or from a copied
+context retained after close raises fixed-message `DynamicTraceProxyError`
+without mutating a returned result. The runner does not wait for target-spawned
+work and does not promise deterministic order for unsupported concurrent child
+work.
+
 ## Non-Goals
 
-- This note does not add dynamic tracing or export `trace(...)`.
 - This note does not implement source-spec subprocess reconstruction.
 - This note does not add static-call dispatch policy or alter dispatch planning.
+- This note does not add trace dispatch policy, subprocess/selected-environment
+  tracing, hard-timeout isolation, arbitrary Python interpretation, or return
+  proxies.
 
 ## Source Anchors
 
@@ -293,4 +488,5 @@ contract locked here:
 - Sprint 1: fact-oriented code analyzer API.
 - Sprint 2: Method semantic model moved to `dryml.core2.methods`.
 - Sprint 5: code probe worker.
-- Sprint 9: optional dynamic tracing algorithm.
+- Sprint 9B: standalone opt-in dynamic tracing algorithm.
+- Sprint 9C: optional dispatch consumption and graph-prototype retirement.

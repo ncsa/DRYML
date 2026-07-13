@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for Sprint 9A static-analysis boundaries.
+Accepted through Sprint 9B static-analysis and current-process trace boundaries.
 
 ## Context
 
@@ -12,11 +12,13 @@ Current helpers for callable inspection, source extraction, AST inspection, meth
 
 `dryml.code` owns reusable analysis algorithms that discover facts about Python and DRYML code. `dryml.dispatch` consumes those facts and makes launch decisions. `dryml.annotations` owns fragment and merge semantics. `dryml.core2` owns stable semantic model primitives. `core2` must not depend on `dryml.code`; `dryml.code` may depend on `core2`.
 
-Static analysis and future dynamic tracing share the `CodeAnalyzer`,
+Static analysis and dynamic tracing share the `CodeAnalyzer`,
 `CodeAnalysisContext`, `CodeAnalysisResult`, fact, and diagnostic protocol.
 They are analysis modalities, not separate public analyzer hierarchies.
-`analyze(...)` remains non-invoking. A future `trace(...)` API is the explicit
-invocation-bearing path and is not exported until Sprint 9B implements it.
+`analyze(...)` remains non-invoking. `trace(...)` is the explicit
+invocation-bearing path. It requires dynamic-execution permission and invokes a
+supported trusted synchronous function once with bounded Definition/CDef proxies
+in the current process.
 
 Probe execution selects an inline process, a managed subprocess, or a supported
 Python environment for the same analyzer semantics. It does not create a second
@@ -26,6 +28,15 @@ that worker environment.
 ## Consequences
 
 Future analysis features should be implemented as reusable analyzers. Dispatch can stay focused on planning and launch decisions. Code probes can run the same algorithms in probe processes. Core primitives remain importable without higher-level analysis dependencies. Static call facts describe source-level possibilities only; dispatch does not consume them as hard requirements in Sprint 9A.
+
+`dynamic_trace` is registered for protocol consistency but ordinary analyzer and
+probe invocation returns a requires-trace-facade diagnostic and never invokes the
+target. It is absent from both default analyzer tuples. Dynamic call facts are
+observations from one explicit inline run, not dispatch requirements or exact
+cross-run Definition identity. Tracing is cooperative trusted-code execution,
+not a sandbox, subprocess, selected-environment facility, or hard-timeout
+boundary. Dispatch integration and unchecked graph-prototype retirement remain
+Sprint 9C work.
 
 ## Alternatives Considered
 
@@ -42,4 +53,8 @@ Putting analysis inside dispatch would duplicate algorithms and tie them to one 
 
 ## Follow-up Work
 
-Sprint 9A adds bounded syntactic and conservative static-call analysis. Sprint 9B may implement the documented dynamic trace contract. Sprint 9C may add explicit dispatch policy for accepted facts and retire unchecked graph prototypes. Sprint 2 reviewed the `Method` model migration toward `core2.methods`.
+Sprint 9A added bounded syntactic and conservative static-call analysis. Sprint
+9B added the bounded current-process dynamic trace facade. Sprint 9C may add
+explicit dispatch policy for accepted facts and retire unchecked graph
+prototypes. Sprint 2 reviewed the `Method` model migration toward
+`core2.methods`.

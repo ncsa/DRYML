@@ -22,7 +22,10 @@ def test_method_target_emits_basic_contract_fact():
     fact = result.facts_of_kind("method_contract")[0]
 
     assert fact.data["method_contract_detected"] is True
-    assert fact.data["trait_impls"][0]["name"] == "call_default"
+    assert fact.data["trait_impls"] == [{
+        "name": "call_default",
+        "traits": {"backend": None, "batch_mode": None},
+    }]
 
 
 def test_general_analyze_does_not_crash_on_method_target():

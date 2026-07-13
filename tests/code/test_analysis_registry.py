@@ -29,7 +29,7 @@ EXPECTED_DEFAULT_PROBE_ALGORITHMS = (
 def test_default_analyzers_are_registered():
     names = code.available_analyzers()
 
-    assert {"callables", "source", "ast_access", "symbol_capture", "direct_annotations", "method_contracts", "static_calls"}.issubset(names)
+    assert {"callables", "source", "ast_access", "symbol_capture", "direct_annotations", "method_contracts", "static_calls", "dynamic_trace"}.issubset(names)
     assert code.get_analyzer("callables").name == "callables"
     assert DEFAULT_ALGORITHMS == EXPECTED_DEFAULT_ALGORITHMS
     assert DEFAULT_PROBE_ALGORITHMS == EXPECTED_DEFAULT_PROBE_ALGORITHMS

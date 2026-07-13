@@ -4,6 +4,7 @@ __all__ = [
     "ast_access",
     "callables",
     "direct_annotations",
+    "dynamic_trace",
     "method_contracts",
     "source",
     "static_calls",

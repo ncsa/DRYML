@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+import inspect
+import types
 from typing import Any, Protocol
 
 from .facts import CodeFact, DiagnosticFact, json_compatible
@@ -30,7 +32,8 @@ class CodeAnalysisContext:
         algorithms: Ordered analyzer names. Empty means the default lightweight set.
         allow_import: Whether import-path targets may be imported.
         allow_source: Whether source extraction is allowed.
-        allow_dynamic_execution: Reserved for future dynamic analyzers; defaults false.
+        allow_dynamic_execution: Explicit permission for invocation through
+            :func:`dryml.code.trace`; ordinary analysis remains non-invoking.
         include_annotations: Whether annotation analyzers should collect fragments.
         include_method_contracts: Whether method-contract analyzers should run.
         diagnostics_policy: ``"collect"`` converts failures to diagnostics; ``"raise"`` raises.
@@ -249,15 +252,156 @@ def analyze(
     return result
 
 
+def trace(
+    target: Any,
+    *,
+    args=(),
+    kwargs=None,
+    context=None,
+    policy=None,
+) -> CodeAnalysisResult:
+    """Invoke a supported trusted function once and record proxy method calls.
+
+    Tracing runs synchronously in the current process without sandboxing or a
+    hard timeout. It is disabled unless ``context`` is a
+    :class:`CodeAnalysisContext` with ``allow_dynamic_execution=True``. Only
+    exact tuple/dict invocation containers and the bounded Definition/CDef trace
+    grammar are accepted. Ordinary :func:`analyze` and probe APIs never acquire
+    these invocation semantics.
+
+    Args:
+        target: Live synchronous Python function, import path, or ``CodeTarget``
+            wrapping one. Bound methods, classes, callable instances, builtins,
+            generators, and async functions are unsupported.
+        args: Exact tuple of invocation arguments.
+        kwargs: ``None`` or an exact dict with string keys.
+        context: Analysis context granting dynamic execution. Empty algorithms
+            or exactly ``("dynamic_trace",)`` are accepted.
+        policy: Optional validated :class:`DynamicTracePolicy`.
+
+    Returns:
+        A :class:`CodeAnalysisResult` containing bounded ``DynamicCallFact``
+        records and, once execution starts, one ``dynamic_trace_summary``.
+    """
+
+    from .algorithms.dynamic_trace import DynamicTracePolicy, _InvocationRequest, run_trace
+
+    if context is not None and not isinstance(context, CodeAnalysisContext):
+        raise TypeError("context must be a CodeAnalysisContext or None")
+    selected_context = context if context is not None else CodeAnalysisContext()
+    if policy is not None and not isinstance(policy, DynamicTracePolicy):
+        raise TypeError("policy must be a DynamicTracePolicy or None")
+    selected_policy = policy if policy is not None else DynamicTracePolicy()
+    if type(args) is not tuple:
+        raise TypeError("args must be an exact tuple")
+    if kwargs is not None and type(kwargs) is not dict:
+        raise TypeError("kwargs must be an exact dict or None")
+    selected_kwargs = {} if kwargs is None else kwargs
+    if any(type(key) is not str for key in selected_kwargs):
+        raise TypeError("kwargs keys must be exact strings")
+
+    target_spec = _trace_target_spec_without_resolution(target)
+    if selected_context.allow_dynamic_execution is not True:
+        return CodeAnalysisResult(
+            target=target_spec,
+            diagnostics=(DiagnosticFact(
+                severity="error",
+                code="dryml.code.dynamic_trace_disabled",
+                message="Dynamic tracing requires explicit execution permission.",
+                source={"analyzer": "dynamic_trace", "target_kind": _trace_diagnostic_target_kind(target_spec)},
+            ),),
+        )
+    if selected_context.algorithms not in {(), ("dynamic_trace",)}:
+        return CodeAnalysisResult(
+            target=target_spec,
+            diagnostics=(DiagnosticFact(
+                severity="error",
+                code="dryml.code.dynamic_trace_invalid_context",
+                message="Dynamic tracing requires an empty or dynamic_trace-only algorithm selection.",
+                source={"analyzer": "dynamic_trace", "target_kind": _trace_diagnostic_target_kind(target_spec)},
+            ),),
+        )
+
+    try:
+        code_target = normalize_target(
+            target,
+            allow_import=selected_context.allow_import,
+            metadata=selected_context.metadata,
+        )
+    except Exception:
+        return _unsupported_trace_target(target_spec)
+    if code_target.diagnostics:
+        # Target normalization can contain general-purpose import diagnostics
+        # with exception repr data. The trace contract instead exposes one
+        # fixed, bounded target diagnostic and never serializes import exception
+        # messages or repr output.
+        return _unsupported_trace_target(code_target.spec)
+    if _trace_diagnostic_target_kind(code_target.spec) != code_target.spec.kind:
+        return _unsupported_trace_target(code_target.spec)
+    if type(code_target.obj) is not types.FunctionType:
+        return _unsupported_trace_target(code_target.spec)
+    if (
+        inspect.iscoroutinefunction(code_target.obj)
+        or inspect.isasyncgenfunction(code_target.obj)
+        or inspect.isgeneratorfunction(code_target.obj)
+    ):
+        return _unsupported_trace_target(code_target.spec)
+    return run_trace(_InvocationRequest(
+        target=code_target,
+        args=args,
+        kwargs=dict(selected_kwargs),
+        context=selected_context,
+        policy=selected_policy,
+    ))
+
+
+def _trace_target_spec_without_resolution(target: Any) -> CodeTargetSpec:
+    """Describe a trace target without importing or invoking target hooks."""
+
+    if type(target) is CodeTarget:
+        return target.spec
+    if type(target) is CodeTargetSpec:
+        return target
+    if type(target) is str:
+        return CodeTargetSpec("import_path", import_path=target)
+    if type(target) is types.FunctionType:
+        name = object.__getattribute__(target, "__name__")
+        qualname = object.__getattribute__(target, "__qualname__")
+        kind = "lambda" if name == "<lambda>" else "local_function" if "<locals>" in qualname else "unbound_method" if "." in qualname else "function"
+        return CodeTargetSpec(kind)
+    if type(target) is types.MethodType:
+        return CodeTargetSpec("bound_method")
+    if isinstance(target, type):
+        return CodeTargetSpec("class")
+    return CodeTargetSpec("unknown")
+
+
+def _unsupported_trace_target(target_spec: CodeTargetSpec) -> CodeAnalysisResult:
+    return CodeAnalysisResult(
+        target=target_spec,
+        diagnostics=(DiagnosticFact(
+            severity="error",
+            code="dryml.code.dynamic_trace_unsupported_target",
+            message="Dynamic trace target is unsupported.",
+            source={"analyzer": "dynamic_trace", "target_kind": _trace_diagnostic_target_kind(target_spec)},
+        ),),
+    )
+
+
+def _trace_diagnostic_target_kind(target_spec: CodeTargetSpec) -> str:
+    value = target_spec.kind
+    return value if isinstance(value, str) and value and len(value) <= 4_096 else "unknown"
+
+
 def _ensure_builtin_analyzers() -> None:
     global _BUILTINS_REGISTERED, _REGISTERING_BUILTINS
     if _BUILTINS_REGISTERED:
         return
     _REGISTERING_BUILTINS = True
     try:
-        from .algorithms import ast_access, callables, direct_annotations, method_contracts, source, static_calls, symbol_capture
+        from .algorithms import ast_access, callables, direct_annotations, dynamic_trace, method_contracts, source, static_calls, symbol_capture
 
-        for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts, static_calls):
+        for module in (callables, source, ast_access, symbol_capture, direct_annotations, method_contracts, static_calls, dynamic_trace):
             register_analyzer(module.ANALYZER, replace=True)
         _BUILTINS_REGISTERED = True
     finally:
@@ -275,4 +419,5 @@ __all__ = [
     "available_analyzers",
     "get_analyzer",
     "register_analyzer",
+    "trace",
 ]
