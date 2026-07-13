@@ -113,3 +113,28 @@ def test_planner_resolves_target_annotations_into_authoritative_metadata(tmp_pat
     requirements = plan.dispatch_spec["payload"]["metadata"]["dryml.requirements"]
     assert "pandas>=2" in requirements["environment_requirement"]["requirements"]
     assert plan.dispatch_spec["payload"]["environment"]["policy"] == plan.resolution.environment_selection.source
+
+
+def test_ordinary_planning_does_not_request_dynamic_tracing(monkeypatch, tmp_path):
+    """Default planning keeps the opt-in trace modality out of its analysis call."""
+
+    import dryml.dispatch.requirements as dispatch_requirements
+
+    original_analyze = dispatch_requirements.analyze
+    contexts = []
+
+    def analyze_without_trace(*args, **kwargs):
+        context = kwargs["context"]
+        contexts.append(context)
+        assert context.allow_dynamic_execution is False
+        assert "dynamic_trace" not in context.algorithms
+        return original_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(dispatch_requirements, "analyze", analyze_without_trace)
+    Dispatcher(store=_store(tmp_path)).plan(
+        targets.run_training,
+        allow_pickle=True,
+        requirement_policy="ignore",
+    )
+
+    assert contexts

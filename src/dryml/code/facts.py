@@ -252,6 +252,27 @@ class StaticCallFact(CodeFact):
 
 _DYNAMIC_REFERENCE_RE = re.compile(r"^[0-9a-f]{16,}$")
 _DYNAMIC_CDEF_REFERENCE_RE = re.compile(r"^cdef-v[1-9][0-9]*-[0-9a-f]{16,}$")
+_ANNOTATION_NAMESPACE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+_ANNOTATION_SOURCE_KINDS = {
+    "decorator", "provider", "override", "stored_record", "cached_probe", "synthetic",
+}
+_ANNOTATION_TARGET_KINDS = {"function", "method", "class", "provider", "operation_kind", "synthetic"}
+_REQUIREMENT_TRACE_FIELDS = {
+    "namespace", "kind", "label", "target_label", "module", "qualname",
+    "priority", "merge_policy", "fragment_index", "data",
+}
+_REQUIREMENT_RESOLUTION_FIELDS = {
+    "environment_requirement", "world_requirement", "runtime_requirement",
+    "environment_default", "world_default", "runtime_default", "fragments",
+    "source_traces", "diagnostics", "merge_report",
+}
+_METHOD_CONTRACT_FIELDS = {
+    "method_contract_detected", "class_module", "class_qualname", "trait_impls",
+    "has_user_call",
+}
+_SHAPE_FACT_FIELDS = {"input_handles", "output_handles"}
+_BACKEND_VALUES = {"numpy", "tf", "torch", "jax"}
+_BATCH_MODE_VALUES = {"batched", "element"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,11 +341,8 @@ class DynamicCallFact(CodeFact):
         if not isinstance(method_facts, list) or len(method_facts) > 256:
             raise ValueError("DynamicCallFact method_facts must be a bounded JSON array")
         normalized_method_facts = []
-        allowed_method_kinds = {"annotation", "requirement", "method_contract", "shape"}
         for fact_data in method_facts:
-            _validate_plain_json(fact_data, depth=0, active=set(), counter=[0])
-            if type(fact_data) is not dict or fact_data.get("kind") not in allowed_method_kinds:
-                raise ValueError("DynamicCallFact method_facts contains an unsupported fact")
+            _validate_dynamic_method_fact_wire(fact_data)
             normalized_method_facts.append(CodeFact.from_data(fact_data).to_data())
 
         normalized_data = dict(self.data)
@@ -434,6 +452,297 @@ def _validate_plain_json(value: Any, *, depth: int, active: set[int], counter: l
             _validate_plain_json(child, depth=depth + 1, active=active, counter=counter)
     finally:
         active.remove(oid)
+
+
+def _validate_dynamic_method_fact_wire(value: Any) -> None:
+    """Validate one nested method fact before typed restoration.
+
+    ``DynamicCallFact`` accepts only the standard wire forms emitted by the
+    annotation and method-contract analyzers.  Validate their exact top-level
+    schemas before ``CodeFact.from_data`` can apply its permissive legacy
+    defaults or recursively normalize arbitrary mappings.
+    """
+
+    _validate_plain_json(value, depth=0, active=set(), counter=[0])
+    if type(value) is not dict:
+        raise ValueError("DynamicCallFact method_facts entries must be exact dicts")
+
+    kind = value.get("kind")
+    expected = {"kind", "source", "data"}
+    if kind == "requirement":
+        expected.update({
+            "namespace",
+            "requirement_kind",
+            "fragment",
+            "priority",
+            "merge_policy",
+        })
+    elif kind not in {"annotation", "method_contract", "shape"}:
+        raise ValueError("DynamicCallFact method_facts contains an unsupported fact")
+    if set(value) != expected:
+        raise ValueError("DynamicCallFact method fact must use its fixed wire schema")
+    if type(value["source"]) is not dict or type(value["data"]) is not dict:
+        raise ValueError("DynamicCallFact method fact source and data must be exact dicts")
+
+    if kind in {"annotation", "requirement"}:
+        _validate_annotation_method_fact_wire(value)
+    elif kind == "method_contract":
+        _validate_method_contract_fact_wire(value)
+    else:
+        _validate_shape_fact_wire(value)
+
+
+def _validate_annotation_namespace(value: Any) -> None:
+    if type(value) is not str or _ANNOTATION_NAMESPACE_RE.fullmatch(value) is None:
+        raise ValueError("DynamicCallFact annotation namespace is invalid")
+
+
+def _validate_annotation_fragment_wire(value: Any) -> None:
+    """Validate the exact AnnotationFragment.to_data() form used in method facts."""
+
+    required = {"namespace", "kind", "fragment", "source", "priority", "merge_policy", "schema_version"}
+    if type(value) is not dict or set(value) != required:
+        raise ValueError("DynamicCallFact annotation fragment must use the standard wire schema")
+    _validate_annotation_namespace(value["namespace"])
+    if value["kind"] not in {"requirement", "default"}:
+        raise ValueError("DynamicCallFact annotation fragment kind is invalid")
+    if type(value["fragment"]) is not dict:
+        raise ValueError("DynamicCallFact annotation fragment payload must be an exact dict")
+    if isinstance(value["priority"], bool) or not isinstance(value["priority"], int):
+        raise ValueError("DynamicCallFact annotation fragment priority is invalid")
+    if value["merge_policy"] is not None and type(value["merge_policy"]) is not str:
+        raise ValueError("DynamicCallFact annotation fragment merge_policy is invalid")
+    if value["schema_version"] != 1:
+        raise ValueError("DynamicCallFact annotation fragment schema version is invalid")
+    _validate_annotation_source_trace_wire(value["source"])
+    if value["source"]["namespace"] not in {None, value["namespace"]}:
+        raise ValueError("DynamicCallFact annotation source namespace is inconsistent")
+
+
+def _validate_annotation_source_trace_wire(value: Any) -> None:
+    required = {"kind", "target", "label", "namespace", "path", "metadata"}
+    if type(value) is not dict or set(value) != required:
+        raise ValueError("DynamicCallFact annotation source must use the standard wire schema")
+    if value["kind"] not in _ANNOTATION_SOURCE_KINDS:
+        raise ValueError("DynamicCallFact annotation source kind is invalid")
+    for field in ("label", "path"):
+        if value[field] is not None and type(value[field]) is not str:
+            raise ValueError(f"DynamicCallFact annotation source {field} is invalid")
+    if value["namespace"] is not None:
+        _validate_annotation_namespace(value["namespace"])
+    if type(value["metadata"]) is not dict:
+        raise ValueError("DynamicCallFact annotation source metadata must be an exact dict")
+    target = value["target"]
+    if target is None:
+        return
+    target_required = {"kind", "module", "qualname", "owner_module", "owner_qualname", "metadata"}
+    if type(target) is not dict or set(target) != target_required:
+        raise ValueError("DynamicCallFact annotation target must use the standard wire schema")
+    if target["kind"] not in _ANNOTATION_TARGET_KINDS:
+        raise ValueError("DynamicCallFact annotation target kind is invalid")
+    if any(target[field] is not None and type(target[field]) is not str for field in ("module", "qualname", "owner_module", "owner_qualname")):
+        raise ValueError("DynamicCallFact annotation target fields are invalid")
+    if type(target["metadata"]) is not dict:
+        raise ValueError("DynamicCallFact annotation target metadata must be an exact dict")
+
+
+def _validate_direct_annotation_source(value: Any, annotation_source: Any) -> None:
+    if type(value) is not dict or set(value) != {"analyzer", "target_kind", "annotation_source"}:
+        raise ValueError("DynamicCallFact annotation method fact source is invalid")
+    if value["analyzer"] != "direct_annotations":
+        raise ValueError("DynamicCallFact annotation method fact analyzer is invalid")
+    if type(value["target_kind"]) is not str or not value["target_kind"]:
+        raise ValueError("DynamicCallFact annotation method fact target kind is invalid")
+    _validate_annotation_source_trace_wire(value["annotation_source"])
+    if value["annotation_source"] != annotation_source:
+        raise ValueError("DynamicCallFact annotation method fact source does not match its fragment")
+
+
+def _validate_annotation_method_fact_wire(value: dict[str, Any]) -> None:
+    if value["kind"] == "annotation":
+        _validate_annotation_fragment_wire(value["data"])
+        _validate_direct_annotation_source(value["source"], value["data"]["source"])
+        return
+
+    _validate_annotation_namespace(value["namespace"])
+    if value["requirement_kind"] not in {"requirement", "default"}:
+        raise ValueError("DynamicCallFact requirement method fact kind is invalid")
+    if type(value["fragment"]) is not dict:
+        raise ValueError("DynamicCallFact requirement method fact fragment must be an exact dict")
+    if isinstance(value["priority"], bool) or not isinstance(value["priority"], int):
+        raise ValueError("DynamicCallFact requirement method fact priority is invalid")
+    if value["merge_policy"] is not None and type(value["merge_policy"]) is not str:
+        raise ValueError("DynamicCallFact requirement method fact merge_policy is invalid")
+    required_data = {"annotation", "source_trace", "resolution"}
+    if set(value["data"]) != required_data:
+        raise ValueError("DynamicCallFact requirement method fact data is invalid")
+    annotation = value["data"]["annotation"]
+    _validate_annotation_fragment_wire(annotation)
+    if (
+        annotation["namespace"] != value["namespace"]
+        or annotation["kind"] != value["requirement_kind"]
+        or annotation["fragment"] != value["fragment"]
+        or annotation["priority"] != value["priority"]
+        or annotation["merge_policy"] != value["merge_policy"]
+    ):
+        raise ValueError("DynamicCallFact requirement method fact does not match its annotation")
+    _validate_direct_annotation_source(value["source"], annotation["source"])
+    source_trace = value["data"]["source_trace"]
+    resolution = value["data"]["resolution"]
+    _validate_requirement_source_trace_wire(source_trace, annotation=annotation)
+    _validate_requirement_resolution_wire(
+        resolution,
+        annotation=annotation,
+        source_trace=source_trace,
+    )
+
+
+def _validate_requirement_source_trace_wire(value: Any, *, annotation: dict[str, Any]) -> None:
+    """Validate one exact ``RequirementSourceTrace.to_data`` mapping."""
+
+    if type(value) is not dict or set(value) != _REQUIREMENT_TRACE_FIELDS:
+        raise ValueError("DynamicCallFact requirement source trace is invalid")
+    _validate_annotation_namespace(value["namespace"])
+    if value["kind"] not in {"requirement", "default"}:
+        raise ValueError("DynamicCallFact requirement source trace kind is invalid")
+    if type(value["label"]) is not str:
+        raise ValueError("DynamicCallFact requirement source trace label is invalid")
+    for field in ("target_label", "module", "qualname", "merge_policy"):
+        if value[field] is not None and type(value[field]) is not str:
+            raise ValueError(f"DynamicCallFact requirement source trace {field} is invalid")
+    if isinstance(value["priority"], bool) or not isinstance(value["priority"], int):
+        raise ValueError("DynamicCallFact requirement source trace priority is invalid")
+    if (
+        isinstance(value["fragment_index"], bool)
+        or not isinstance(value["fragment_index"], int)
+        or value["fragment_index"] < 0
+    ):
+        raise ValueError("DynamicCallFact requirement source trace fragment index is invalid")
+    data = value["data"]
+    if type(data) is not dict or set(data) not in ({"source"}, {"source", "resolution_source"}):
+        raise ValueError("DynamicCallFact requirement source trace data is invalid")
+    _validate_annotation_source_trace_wire(data["source"])
+    if "resolution_source" in data and type(data["resolution_source"]) is not str:
+        raise ValueError("DynamicCallFact requirement source trace resolution source is invalid")
+    if (
+        value["namespace"] != annotation["namespace"]
+        or value["kind"] != annotation["kind"]
+        or value["priority"] != annotation["priority"]
+        or value["merge_policy"] != annotation["merge_policy"]
+        or data["source"] != annotation["source"]
+    ):
+        raise ValueError("DynamicCallFact requirement source trace does not match its annotation")
+
+
+def _validate_requirement_resolution_wire(
+    value: Any,
+    *,
+    annotation: dict[str, Any],
+    source_trace: dict[str, Any],
+) -> None:
+    """Validate the serialized ``RequirementResolution`` used by one fact."""
+
+    if type(value) is not dict or set(value) != _REQUIREMENT_RESOLUTION_FIELDS:
+        raise ValueError("DynamicCallFact requirement resolution is invalid")
+    fragments = value["fragments"]
+    traces = value["source_traces"]
+    diagnostics = value["diagnostics"]
+    if type(fragments) is not list or type(traces) is not list or len(fragments) != len(traces):
+        raise ValueError("DynamicCallFact requirement resolution fragments are invalid")
+    if type(diagnostics) is not list:
+        raise ValueError("DynamicCallFact requirement resolution diagnostics are invalid")
+    for fragment in fragments:
+        _validate_annotation_fragment_wire(fragment)
+    for trace, fragment in zip(traces, fragments, strict=True):
+        _validate_requirement_source_trace_wire(trace, annotation=fragment)
+    index = source_trace["fragment_index"]
+    if index >= len(fragments) or fragments[index] != annotation or traces[index] != source_trace:
+        raise ValueError("DynamicCallFact requirement resolution does not match its requirement")
+    for diagnostic in diagnostics:
+        _validate_requirement_diagnostic_wire(diagnostic)
+    _validate_requirement_merge_report_wire(value["merge_report"])
+
+
+def _validate_requirement_diagnostic_wire(value: Any) -> None:
+    required = {"level", "code", "message", "target_label", "data"}
+    if type(value) is not dict or set(value) != required:
+        raise ValueError("DynamicCallFact requirement resolution diagnostic is invalid")
+    if value["level"] not in {"debug", "info", "warning", "error"}:
+        raise ValueError("DynamicCallFact requirement resolution diagnostic level is invalid")
+    if type(value["code"]) is not str or type(value["message"]) is not str:
+        raise ValueError("DynamicCallFact requirement resolution diagnostic fields are invalid")
+    if value["target_label"] is not None and type(value["target_label"]) is not str:
+        raise ValueError("DynamicCallFact requirement resolution diagnostic target is invalid")
+    if type(value["data"]) is not dict:
+        raise ValueError("DynamicCallFact requirement resolution diagnostic data is invalid")
+
+
+def _validate_requirement_merge_report_wire(value: Any) -> None:
+    if value is None:
+        return
+    if type(value) is not dict or set(value) != {"ok", "issues"}:
+        raise ValueError("DynamicCallFact requirement merge report is invalid")
+    if type(value["ok"]) is not bool or type(value["issues"]) is not list:
+        raise ValueError("DynamicCallFact requirement merge report fields are invalid")
+    required_issue = {"severity", "namespace", "path", "message", "expected", "actual", "sources"}
+    for issue in value["issues"]:
+        if type(issue) is not dict or set(issue) != required_issue:
+            raise ValueError("DynamicCallFact requirement merge issue is invalid")
+        if issue["severity"] not in {"debug", "info", "warning", "error"}:
+            raise ValueError("DynamicCallFact requirement merge issue severity is invalid")
+        _validate_annotation_namespace(issue["namespace"])
+        for field in ("path", "message"):
+            if issue[field] is not None and type(issue[field]) is not str:
+                raise ValueError("DynamicCallFact requirement merge issue fields are invalid")
+        if type(issue["sources"]) is not list:
+            raise ValueError("DynamicCallFact requirement merge issue sources are invalid")
+        for source in issue["sources"]:
+            _validate_annotation_source_trace_wire(source)
+
+
+def _validate_method_contract_source(value: Any) -> None:
+    if type(value) is not dict or set(value) != {"analyzer", "target_kind"}:
+        raise ValueError("DynamicCallFact method-contract source is invalid")
+    if value["analyzer"] != "method_contracts":
+        raise ValueError("DynamicCallFact method-contract analyzer is invalid")
+    if type(value["target_kind"]) is not str or not value["target_kind"]:
+        raise ValueError("DynamicCallFact method-contract target kind is invalid")
+
+
+def _validate_method_contract_fact_wire(value: dict[str, Any]) -> None:
+    _validate_method_contract_source(value["source"])
+    if set(value["data"]) != _METHOD_CONTRACT_FIELDS:
+        raise ValueError("DynamicCallFact method-contract data is invalid")
+    if value["data"]["method_contract_detected"] is not True or type(value["data"]["has_user_call"]) is not bool:
+        raise ValueError("DynamicCallFact method-contract flags are invalid")
+    if any(value["data"][field] is not None and type(value["data"][field]) is not str for field in ("class_module", "class_qualname")):
+        raise ValueError("DynamicCallFact method-contract class fields are invalid")
+    if type(value["data"]["trait_impls"]) is not list:
+        raise ValueError("DynamicCallFact method-contract trait implementations are invalid")
+    for implementation in value["data"]["trait_impls"]:
+        if type(implementation) is not dict or set(implementation) != {"name", "traits"} or not _valid_bounded_nonempty_string(implementation["name"]):
+            raise ValueError("DynamicCallFact method-contract trait implementation is invalid")
+        traits = implementation["traits"]
+        if type(traits) is not dict or set(traits) != {"backend", "batch_mode"}:
+            raise ValueError("DynamicCallFact method-contract traits are invalid")
+        if traits["backend"] is not None and traits["backend"] not in _BACKEND_VALUES:
+            raise ValueError("DynamicCallFact method-contract backend is invalid")
+        if traits["batch_mode"] is not None and traits["batch_mode"] not in _BATCH_MODE_VALUES:
+            raise ValueError("DynamicCallFact method-contract trait values are invalid")
+
+
+def _validate_shape_fact_wire(value: dict[str, Any]) -> None:
+    """Validate the narrow method-contract ShapeFact wire form used by traces."""
+
+    _validate_method_contract_source(value["source"])
+    if type(value["data"]) is not dict or set(value["data"]) != _SHAPE_FACT_FIELDS:
+        raise ValueError("DynamicCallFact shape data is invalid")
+    if type(value["data"]["input_handles"]) is not list or type(value["data"]["output_handles"]) is not list:
+        raise ValueError("DynamicCallFact shape handles are invalid")
+
+
+def _valid_bounded_nonempty_string(value: Any) -> bool:
+    return type(value) is str and bool(value) and len(value) <= 4_096
 
 
 @dataclass(frozen=True, slots=True)

@@ -140,6 +140,186 @@ def test_dynamic_call_fact_rejects_wrong_kind_directly():
 
 
 @pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda fact: fact.pop("source"),
+        lambda fact: fact.update(extra=True),
+        lambda fact: fact.update(source=[]),
+        lambda fact: fact.update(data=[]),
+        lambda fact: fact.pop("namespace"),
+        lambda fact: fact.update(namespace="environment", extra=True),
+        lambda fact: fact.update(fragment=[]),
+        lambda fact: fact.update(priority=True),
+    ],
+)
+def test_dynamic_call_fact_rejects_malformed_nested_method_fact_wire(mutate):
+    method_fact = {
+        "kind": "requirement",
+        "source": {"analyzer": "direct_annotations"},
+        "data": {"annotation": {}},
+        "namespace": "environment",
+        "requirement_kind": "requirement",
+        "fragment": {"requirements": ["numpy"]},
+        "priority": 0,
+        "merge_policy": None,
+    }
+    mutate(method_fact)
+    data = {
+        "kind": "dynamic_call",
+        "source": {"analyzer": "dynamic_trace", "target_kind": "function"},
+        "data": {
+            "sequence": 0,
+            "receiver_kind": "definition",
+            "receiver_ref": "0123456789abcdef",
+            "receiver_class": None,
+            "method_name": "train",
+            "args": [],
+            "kwargs": {},
+            "method_facts": [method_fact],
+        },
+    }
+
+    with pytest.raises((TypeError, ValueError)):
+        code.CodeFact.from_data(data)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda fact: fact.update(namespace="not a namespace"),
+        lambda fact: fact.update(requirement_kind="other"),
+        lambda fact: fact["source"].update(analyzer="other"),
+        lambda fact: fact["source"].update(target_kind=""),
+        lambda fact: fact["data"].pop("resolution"),
+        lambda fact: fact["data"]["annotation"].update(schema_version=2),
+    ],
+)
+def test_dynamic_call_fact_rejects_semantically_invalid_nested_requirement_fact(mutate):
+    import dryml
+
+    @dryml.env.req(requirements=("numpy",))
+    def annotated_target():
+        pass
+
+    requirement = next(
+        fact.to_data()
+        for fact in code.analyze(annotated_target, algorithms=("direct_annotations",)).facts
+        if fact.kind == "requirement"
+    )
+    mutate(requirement)
+    data = {
+        "kind": "dynamic_call",
+        "source": {"analyzer": "dynamic_trace", "target_kind": "function"},
+        "data": {
+            "sequence": 0,
+            "receiver_kind": "definition",
+            "receiver_ref": "0123456789abcdef",
+            "receiver_class": None,
+            "method_name": "train",
+            "args": [],
+            "kwargs": {},
+            "method_facts": [requirement],
+        },
+    }
+
+    with pytest.raises((TypeError, ValueError)):
+        code.CodeFact.from_data(data)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda fact: fact["data"].update(source_trace=[]),
+        lambda fact: fact["data"]["source_trace"].update(namespace="world"),
+        lambda fact: fact["data"]["source_trace"].update(fragment_index=1),
+        lambda fact: fact["data"]["resolution"].pop("source_traces"),
+        lambda fact: fact["data"]["resolution"]["source_traces"][0]["data"].update(source={"kind": "synthetic", "target": None, "label": None, "namespace": None, "path": None, "metadata": {}}),
+        lambda fact: fact["data"]["resolution"]["fragments"][0].update(priority=1),
+    ],
+)
+def test_dynamic_call_fact_rejects_inconsistent_requirement_trace_or_resolution(mutate):
+    import dryml
+
+    @dryml.env.req(requirements=("numpy",))
+    def annotated_target():
+        pass
+
+    requirement = next(
+        fact.to_data()
+        for fact in code.analyze(annotated_target, algorithms=("direct_annotations",)).facts
+        if fact.kind == "requirement"
+    )
+    mutate(requirement)
+    data = {
+        "kind": "dynamic_call",
+        "source": {"analyzer": "dynamic_trace", "target_kind": "function"},
+        "data": {
+            "sequence": 0,
+            "receiver_kind": "definition",
+            "receiver_ref": "0123456789abcdef",
+            "receiver_class": None,
+            "method_name": "train",
+            "args": [],
+            "kwargs": {},
+            "method_facts": [requirement],
+        },
+    }
+
+    with pytest.raises((TypeError, ValueError)):
+        code.CodeFact.from_data(data)
+
+
+@pytest.mark.parametrize(
+    "method_fact",
+    [
+        {
+            "kind": "method_contract",
+            "source": {"analyzer": "method_contracts", "target_kind": "class"},
+            "data": {
+                "method_contract_detected": True,
+                "class_module": None,
+                "class_qualname": None,
+                "trait_impls": [{"name": "run", "traits": {"backend": "invalid", "batch_mode": None}}],
+                "has_user_call": False,
+            },
+        },
+        {
+            "kind": "shape",
+            "source": {"analyzer": "method_contracts", "target_kind": "class"},
+            "data": {"input_handles": [], "output_handles": []},
+        },
+        {
+            "kind": "shape",
+            "source": {"analyzer": "method_contracts", "target_kind": "class"},
+            "data": {"input_handles": [], "output_handles": {}},
+        },
+    ],
+)
+def test_dynamic_call_fact_validates_method_contract_domains_and_shape_wire(method_fact):
+    data = {
+        "kind": "dynamic_call",
+        "source": {"analyzer": "dynamic_trace", "target_kind": "function"},
+        "data": {
+            "sequence": 0,
+            "receiver_kind": "definition",
+            "receiver_ref": "0123456789abcdef",
+            "receiver_class": None,
+            "method_name": "train",
+            "args": [],
+            "kwargs": {},
+            "method_facts": [method_fact],
+        },
+    }
+
+    if method_fact["kind"] == "shape" and isinstance(method_fact["data"]["output_handles"], list):
+        restored = code.CodeFact.from_data(data)
+        assert isinstance(restored, code.DynamicCallFact)
+    else:
+        with pytest.raises((TypeError, ValueError)):
+            code.CodeFact.from_data(data)
+
+
+@pytest.mark.parametrize(
     ("receiver_kind", "prefix"),
     [("definition", ""), ("concrete_definition", "cdef-v4-")],
 )

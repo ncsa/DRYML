@@ -38,6 +38,7 @@ from dryml.code.facts import (
     MethodContractFact,
     RequirementFact,
     ShapeFact,
+    _validate_dynamic_method_fact_wire,
 )
 from dryml.code.targets import (
     CodeTarget,
@@ -283,32 +284,7 @@ def _validated_method_fact_wire(fact: CodeFact) -> tuple[dict[str, Any], int]:
     wire = fact.to_data()
     if type(wire) is not dict:
         raise ValueError("method fact wire data must be an exact dict")
-    kind = wire.get("kind")
-    expected = {"kind", "source", "data"}
-    if kind == "requirement":
-        expected.update({
-            "namespace",
-            "requirement_kind",
-            "fragment",
-            "priority",
-            "merge_policy",
-        })
-    if kind not in {"annotation", "requirement", "method_contract", "shape"}:
-        raise ValueError("unsupported method fact kind")
-    if set(wire) != expected or type(wire["source"]) is not dict or type(wire["data"]) is not dict:
-        raise ValueError("method fact does not use its standard wire form")
-    if kind == "requirement" and (
-        type(wire["namespace"]) is not str
-        or type(wire["requirement_kind"]) is not str
-        or type(wire["fragment"]) is not dict
-        or isinstance(wire["priority"], bool)
-        or not isinstance(wire["priority"], int)
-        or (
-            wire["merge_policy"] is not None
-            and type(wire["merge_policy"]) is not str
-        )
-    ):
-        raise ValueError("requirement method fact has invalid fields")
+    _validate_dynamic_method_fact_wire(wire)
 
     _validate_method_fact_value(wire)
     restored = CodeFact.from_data(wire)
@@ -422,12 +398,18 @@ class _Planner:
 
     def record_call(self, proxy: _DefinitionProxy, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> _UnsupportedTraceValue:
         try:
-            _ensure_proxy_owner(self)
-            # Keep limit admission, sequence assignment, method-fact collection,
-            # byte accounting, and append in one per-trace critical section.
-            # Child work with a copied context is supported for integrity, not
-            # deterministic scheduling order.
+            # A foreign current planner must be inspected and aborted under its
+            # own lock, before this owner lock is acquired.  Otherwise close on
+            # the foreign planner can turn its public stale-proxy outcome into
+            # an internal _TraceAbort.
+            if _CURRENT_PLANNER.get() is not self:
+                _ensure_proxy_owner(self)
             with self.lock:
+                # Owner admission and every lifecycle-sensitive recording step
+                # share this lock. A copied context that reaches a proxy while
+                # close owns the lock observes the closed owner and receives the
+                # public escaped-proxy error rather than an internal abort.
+                _ensure_proxy_owner(self)
                 return self._record_call_locked(proxy, method_name, args, kwargs)
         except (_TraceAbort, DynamicTraceProxyError):
             raise
@@ -479,18 +461,18 @@ class _Planner:
         fact = DynamicCallFact(source=raw["source"], data=data)
         with self.lock:
             total = self.result_bytes + encoded_size
-            reserve = _encoded_summary_size(
+            summary_size = _encoded_summary_size(
                 target_kind=self.target_kind,
-                outcome="method_fact_collection_failed",
-                calls_recorded=self.request.policy.max_calls,
+                outcome=self.outcome,
+                calls_recorded=len(self.facts) + 1,
                 max_calls=self.request.policy.max_calls,
             )
-            if total + reserve > MAX_RESULT_BYTES:
+            if total + summary_size > MAX_RESULT_BYTES:
                 self.abort(
                     "result_limit_exceeded",
                     "dryml.code.dynamic_trace_result_limit_exceeded",
                     "Dynamic trace result byte limit exceeded.",
-                    data={"limit_name": "result_bytes", "limit": MAX_RESULT_BYTES, "observed_lower_bound": total + reserve},
+                    data={"limit_name": "result_bytes", "limit": MAX_RESULT_BYTES, "observed_lower_bound": total + summary_size},
                 )
             if self.state != "active":
                 raise _TraceAbort()
@@ -690,46 +672,51 @@ class _DefinitionProxy:
     def _method_attribute(self, name: str):
         planner = object.__getattribute__(self, "_planner")
         _ensure_proxy_owner(planner)
-        if isinstance(name, str) and len(name) > MAX_METHOD_NAME_CHARS:
-            planner.abort(
-                "unsupported_receiver_attribute",
-                "dryml.code.dynamic_trace_unsupported_receiver_attribute",
-                "Dynamic trace receiver method name limit exceeded.",
-                data={
-                    "limit_name": "method_name_chars",
-                    "limit": MAX_METHOD_NAME_CHARS,
-                    "observed_lower_bound": len(name),
-                },
-            )
-        if (
-            not isinstance(name, str)
-            or not name.isidentifier()
-            or name in {"definition", "build", "concretize"}
-            or name.startswith("__")
-            or name.endswith("__")
-        ):
-            planner.abort(
-                "unsupported_receiver_attribute",
-                "dryml.code.dynamic_trace_unsupported_receiver_attribute",
-                "Dynamic trace receiver attribute is unsupported.",
-            )
-        cls = object.__getattribute__(self, "_receiver_class")
-        try:
-            raw = _static_class_attribute(cls, name)
-        except AttributeError:
-            planner.abort(
-                "unsupported_receiver_attribute",
-                "dryml.code.dynamic_trace_unsupported_receiver_attribute",
-                "Dynamic trace receiver attribute is unsupported.",
-            )
-        candidate = object.__getattribute__(raw, "__func__") if type(raw) in {staticmethod, classmethod} else raw
-        if type(candidate) is not types.FunctionType:
-            planner.abort(
-                "unsupported_receiver_attribute",
-                "dryml.code.dynamic_trace_unsupported_receiver_attribute",
-                "Dynamic trace receiver attribute is unsupported.",
-            )
-        return _MethodProxy(planner, self, name)
+        # Keep the post-admission lookup and every failure conversion under the
+        # owner lock. A copied context can otherwise pass admission, lose the
+        # owner to close, then leak the private _TraceAbort from planner.abort.
+        with planner.lock:
+            _ensure_proxy_owner(planner)
+            if isinstance(name, str) and len(name) > MAX_METHOD_NAME_CHARS:
+                planner.abort(
+                    "unsupported_receiver_attribute",
+                    "dryml.code.dynamic_trace_unsupported_receiver_attribute",
+                    "Dynamic trace receiver method name limit exceeded.",
+                    data={
+                        "limit_name": "method_name_chars",
+                        "limit": MAX_METHOD_NAME_CHARS,
+                        "observed_lower_bound": len(name),
+                    },
+                )
+            if (
+                not isinstance(name, str)
+                or not name.isidentifier()
+                or name in {"definition", "build", "concretize"}
+                or name.startswith("__")
+                or name.endswith("__")
+            ):
+                planner.abort(
+                    "unsupported_receiver_attribute",
+                    "dryml.code.dynamic_trace_unsupported_receiver_attribute",
+                    "Dynamic trace receiver attribute is unsupported.",
+                )
+            cls = object.__getattribute__(self, "_receiver_class")
+            try:
+                raw = _static_class_attribute(cls, name)
+            except AttributeError:
+                planner.abort(
+                    "unsupported_receiver_attribute",
+                    "dryml.code.dynamic_trace_unsupported_receiver_attribute",
+                    "Dynamic trace receiver attribute is unsupported.",
+                )
+            candidate = object.__getattribute__(raw, "__func__") if type(raw) in {staticmethod, classmethod} else raw
+            if type(candidate) is not types.FunctionType:
+                planner.abort(
+                    "unsupported_receiver_attribute",
+                    "dryml.code.dynamic_trace_unsupported_receiver_attribute",
+                    "Dynamic trace receiver attribute is unsupported.",
+                )
+            return _MethodProxy(planner, self, name)
 
     def __repr__(self) -> str:
         return "<dryml dynamic Definition proxy>"
@@ -820,15 +807,24 @@ class _UnsupportedTraceValue:
 
 def _ensure_proxy_owner(owner: _Planner) -> None:
     current = _CURRENT_PLANNER.get()
-    if current is owner and owner.state == "active":
-        return
-    if current is not None and current is not owner and current.state == "active":
-        current.abort(
-            "stale_proxy",
-            "dryml.code.dynamic_trace_stale_proxy",
-            "Dynamic trace proxy belongs to another active trace.",
-        )
-    raise DynamicTraceProxyError()
+    if current is not None and current is not owner:
+        # Do not read or abort the foreign planner outside its lifecycle lock.
+        # This path deliberately does not acquire owner.lock, so concurrent
+        # foreign-owner calls cannot invert the two planner locks.
+        with current.lock:
+            if current.state == "active":
+                current.abort(
+                    "stale_proxy",
+                    "dryml.code.dynamic_trace_stale_proxy",
+                    "Dynamic trace proxy belongs to another active trace.",
+                )
+    # Inspect the owner's lifecycle while holding its lock.  Do not take this
+    # lock on the foreign-owner path above: two foreign proxy calls must not
+    # invert owner/current lock order.
+    with owner.lock:
+        if current is owner and owner.state == "active":
+            return
+        raise DynamicTraceProxyError()
 
 
 def _static_class_attribute(cls: type, name: str) -> Any:
@@ -1083,16 +1079,18 @@ def _unsupported_argument_failure(planner: _Planner) -> _PrevalidationFailure:
 
 
 def _summary(planner: _Planner) -> CodeFact:
-    summary = CodeFact(
-        "dynamic_trace_summary",
-        source={"analyzer": "dynamic_trace", "target_kind": planner.target_kind},
-        data={
-            "complete": planner.outcome == "complete",
-            "outcome": planner.outcome,
-            "calls_recorded": len(planner.facts),
-            "max_calls": planner.request.policy.max_calls,
-        },
-    )
+    def make_summary() -> CodeFact:
+        return CodeFact(
+            "dynamic_trace_summary",
+            source={"analyzer": "dynamic_trace", "target_kind": planner.target_kind},
+            data={
+                "complete": planner.outcome == "complete",
+                "outcome": planner.outcome,
+                "calls_recorded": len(planner.facts),
+                "max_calls": planner.request.policy.max_calls,
+            },
+        )
+    summary = make_summary()
     size = len(json.dumps(summary.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
     if planner.result_bytes + size > MAX_RESULT_BYTES and planner.outcome != "result_limit_exceeded":
         planner.add_diagnostic(_diagnostic(
@@ -1102,11 +1100,13 @@ def _summary(planner: _Planner) -> CodeFact:
             data={"limit_name": "result_bytes", "limit": MAX_RESULT_BYTES, "observed_lower_bound": planner.result_bytes + size},
         ))
         planner.outcome = "result_limit_exceeded"
-        summary = CodeFact(
-            "dynamic_trace_summary",
-            source={"analyzer": "dynamic_trace", "target_kind": planner.target_kind},
-            data={"complete": False, "outcome": planner.outcome, "calls_recorded": len(planner.facts), "max_calls": planner.request.policy.max_calls},
-        )
+        summary = make_summary()
+        size = len(json.dumps(summary.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        while planner.facts and planner.result_bytes + size > MAX_RESULT_BYTES:
+            removed = planner.facts.pop()
+            planner.result_bytes -= len(json.dumps(removed.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+            summary = make_summary()
+            size = len(json.dumps(summary.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
     return summary
 
 

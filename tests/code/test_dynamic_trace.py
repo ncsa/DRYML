@@ -826,7 +826,19 @@ def test_method_fact_count_exact_boundary_and_n_plus_one(monkeypatch):
         return code.CodeAnalysisResult(
             target=target.spec,
             facts=tuple(
-                code.MethodContractFact(data={"index": index})
+                code.MethodContractFact(
+                    source={"analyzer": "method_contracts", "target_kind": "class"},
+                    data={
+                        "method_contract_detected": True,
+                        "class_module": None,
+                        "class_qualname": None,
+                        "trait_impls": [{
+                            "name": f"method_{index}",
+                            "traits": {"backend": None, "batch_mode": None},
+                        }],
+                        "has_user_call": False,
+                    },
+                )
                 for index in range(count)
             ),
         )
@@ -1035,6 +1047,112 @@ def test_copied_context_cannot_append_after_close():
     with pytest.raises(code.DynamicTraceProxyError):
         copied.run(lambda: proxy.train())
     assert result.to_data() == before
+
+
+def test_owner_close_during_attribute_failure_raises_public_proxy_error(monkeypatch):
+    """Closing after attribute admission cannot leak the private trace abort."""
+
+    import contextvars
+    import dryml.code.algorithms.dynamic_trace as dynamic_trace
+
+    admitted = threading.Event()
+    closed = threading.Event()
+    errors = []
+    threads = []
+    original_ensure = dynamic_trace._ensure_proxy_owner
+    original_close = dynamic_trace._Planner.close
+    admissions = 0
+
+    def pause_after_first_admission(owner):
+        nonlocal admissions
+        original_ensure(owner)
+        admissions += 1
+        if admissions == 1:
+            admitted.set()
+            assert closed.wait(timeout=5)
+
+    def close_and_release(planner):
+        original_close(planner)
+        closed.set()
+
+    monkeypatch.setattr(dynamic_trace, "_ensure_proxy_owner", pause_after_first_admission)
+    monkeypatch.setattr(dynamic_trace._Planner, "close", close_and_release)
+
+    def target(model):
+        copied = contextvars.copy_context()
+
+        def child():
+            try:
+                copied.run(lambda: model.missing)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=child)
+        threads.append(thread)
+        thread.start()
+        assert admitted.wait(timeout=5)
+
+    result = code.trace(target, args=(Definition(TraceModel),), context=_enabled())
+    threads[0].join(timeout=5)
+    assert not threads[0].is_alive()
+    assert result.ok
+    assert len(errors) == 1
+    assert isinstance(errors[0], code.DynamicTraceProxyError)
+
+
+def test_copied_foreign_context_close_race_raises_public_proxy_error(monkeypatch):
+    """A copied foreign planner closing cannot leak a private trace abort."""
+
+    import contextvars
+    import dryml.code.algorithms.dynamic_trace as dynamic_trace
+
+    close_started = threading.Event()
+    child_attempting = threading.Event()
+    child_ready = threading.Event()
+    errors = []
+    threads = []
+    racing_planners = []
+    original_close = dynamic_trace._Planner.close
+
+    def close_while_child_is_admitting(planner):
+        if planner not in racing_planners:
+            return original_close(planner)
+        with planner.lock:
+            close_started.set()
+            assert child_attempting.wait(timeout=5)
+            planner.state = "closed"
+
+    monkeypatch.setattr(dynamic_trace._Planner, "close", close_while_child_is_admitting)
+
+    def target(model):
+        def inner(_other):
+            racing_planners.append(dynamic_trace._CURRENT_PLANNER.get())
+            copied = contextvars.copy_context()
+
+            def child():
+                child_ready.set()
+                assert close_started.wait(timeout=5)
+                child_attempting.set()
+                try:
+                    copied.run(lambda: model.train())
+                except BaseException as exc:
+                    errors.append(exc)
+
+            thread = threading.Thread(target=child)
+            threads.append(thread)
+            thread.start()
+            assert child_ready.wait(timeout=5)
+
+        inner_result = code.trace(inner, args=(Definition(TraceModel),), context=_enabled())
+        assert inner_result.ok
+
+    result = code.trace(target, args=(Definition(TraceModel),), context=_enabled())
+    threads[0].join(timeout=5)
+    assert not threads[0].is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], code.DynamicTraceProxyError)
+    assert result.ok
+    assert not result.facts_of_kind("dynamic_call")
 
 
 def test_overlapping_thread_traces_do_not_mix_facts_or_limits():
@@ -1333,20 +1451,15 @@ def test_aggregate_result_admission_exact_boundary_and_n_plus_one(monkeypatch):
         args=(Definition(TraceModel),),
         context=context,
     )
-    call = baseline.facts_of_kind("dynamic_call")[0]
-    call_size = len(json.dumps(
-        call.to_data(),
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8"))
-    reserve = dynamic_trace._encoded_summary_size(
-        target_kind=baseline.target.kind,
-        outcome="method_fact_collection_failed",
-        calls_recorded=10_000,
-        max_calls=10_000,
-    )
-    exact_limit = call_size + reserve
+    def encoded_fact_size(fact):
+        return len(json.dumps(
+            fact.to_data(),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8"))
+
+    exact_limit = sum(encoded_fact_size(fact) for fact in baseline.facts)
 
     monkeypatch.setattr(dynamic_trace, "MAX_RESULT_BYTES", exact_limit)
     exact = code.trace(
@@ -1356,6 +1469,7 @@ def test_aggregate_result_admission_exact_boundary_and_n_plus_one(monkeypatch):
     )
     assert exact.ok
     assert len(exact.facts_of_kind("dynamic_call")) == 1
+    assert sum(encoded_fact_size(fact) for fact in exact.facts) == exact_limit
 
     monkeypatch.setattr(dynamic_trace, "MAX_RESULT_BYTES", exact_limit - 1)
     exceeded = code.trace(

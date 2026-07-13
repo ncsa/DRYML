@@ -139,7 +139,7 @@ dryml.code.trace(
 
 `trace(...)` is the invocation-bearing API and requires
 `CodeAnalysisContext.allow_dynamic_execution=True`. Its invocation data is
-explicit rather than hidden in metadata. Trace facts will use a distinct fact
+explicit rather than hidden in metadata. Trace facts use a distinct fact
 kind, inline live notebook targets are supported use cases, and subprocess or
 cross-environment tracing is not part of this contract. The facade runs exactly
 the `dynamic_trace` modality; selecting that analyzer through `analyze(...)` or
@@ -369,7 +369,11 @@ or `include_annotations=False` omits those facts. Applicable core2 Method facts
 are controlled independently by `include_method_contracts`. Their trait
 selectors use a fixed `{"backend": string|null, "batch_mode": string|null}`
 mapping rather than a Python representation; malformed selector metadata fails
-method-fact collection closed. No facts are read
+method-fact collection closed. Nested requirement facts validate exact
+`RequirementSourceTrace` and `RequirementResolution` wire forms and must match
+their enclosing annotation. Nested shape facts, when present, use the
+`method_contracts` source and fixed `input_handles`/`output_handles` array data
+form. No facts are read
 from legacy `__dry_compute_spec__`/`compute_reqs`, merged across calls, or used to
 select an environment, world, runtime, or dispatch candidate.
 
