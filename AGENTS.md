@@ -31,9 +31,15 @@ Try to avoid executing the full test suite often. There are some tests which are
 `tf` - tf specific DRYML plugin
 `torch` - torch specific DRYML plugin
 
-## Draft Commit Message
+## Commit Workflow
 
-A draft commit message should be written to `COMMIT-MSG`. This file may already exist in which case it includes a draft already in progress. Append your new version after the current text. The user will make final edits given the history of the evolving message. Check the last commit message before editing. A previous draft message may have already been checked in. In which case, inspect the diff and make the commit message reflect that diff.
+When the user requests a commit:
+
+1. Stage only the intended files for that commit.
+2. Review the staged changes with `git diff --cached` and verify they contain no unrelated or private data.
+3. Draft the commit message in a temporary file outside the repository, such as `/tmp/opencode/<commit>-message.txt`.
+4. Commit with `git commit -F <temporary-file>`.
+5. Remove the temporary message file only after the commit succeeds; retain it when the commit fails.
 
 ### Other
 `examples` - Example dryml programs to illustrate dryml use cases
