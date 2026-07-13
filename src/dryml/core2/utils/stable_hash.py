@@ -344,6 +344,7 @@ class _BoundedStableHasher:
 
         self.budget.charge_value(depth, incoming_edge)
         kind = node_kind(value)
+        self._require_explicit_identity_decomposition(value, kind)
         atomic = kind in {
             NodeKind.POD,
             NodeKind.TYPE,
@@ -370,6 +371,38 @@ class _BoundedStableHasher:
             return digest
         finally:
             self.active_ids.remove(key)
+
+    @staticmethod
+    def _require_explicit_identity_decomposition(value, kind) -> None:
+        """Reject custom atomic leaf types before any leaf hook can run."""
+
+        from ..canonical import NodeKind
+        from ..cardinality import Cardinality
+        from ..config import ConfigRef
+        from ..dtype import DType
+        from ..factory import FactorySpec
+        from ..symbol import ImportRef, SourceSpec
+        from ..tensor_spec import TensorSpec
+
+        # Enum members have an explicit generic decomposition below. The other
+        # allowlisted identity values are only bounded for their exact current
+        # types; accepting subclasses would permit an unbounded leaf override.
+        if kind is NodeKind.IDENTITY_VALUE and isinstance(value, Enum):
+            return
+        if kind is NodeKind.IDENTITY_VALUE and type(value) not in {
+            DType, TensorSpec, Cardinality, ConfigRef, FactorySpec,
+        }:
+            raise TypeError(
+                "Unsupported identity-value type for bounded stable hashing: "
+                f"{type(value)!r}"
+            )
+        if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC} and type(value) not in {
+            ImportRef, SourceSpec,
+        }:
+            raise TypeError(
+                "Unsupported atomic leaf type for bounded stable hashing: "
+                f"{type(value)!r}"
+            )
 
     def _hash_atomic(self, value, *, depth: int) -> str:
         from ..cardinality import Cardinality
@@ -563,6 +596,7 @@ class _BoundedStableHasher:
     def _account_only(self, value, *, depth: int, incoming_edge: bool) -> None:
         """Charge identity metadata recursively without writing a child digest."""
 
+        from ..canonical import node_kind
         from ..cardinality import Cardinality
         from ..config import CONFIG_MISSING, ConfigRef
         from ..dtype import DType
@@ -572,6 +606,7 @@ class _BoundedStableHasher:
         from ..tensor_spec import TensorSpec
 
         self.budget.charge_value(depth, incoming_edge)
+        self._require_explicit_identity_decomposition(value, node_kind(value))
         if type(value) is int:
             bits = value.bit_length()
             if bits > self.limits.max_integer_bits:

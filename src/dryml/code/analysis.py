@@ -311,7 +311,7 @@ def trace(
                 source={"analyzer": "dynamic_trace", "target_kind": _trace_diagnostic_target_kind(target_spec)},
             ),),
         )
-    if selected_context.algorithms not in {(), ("dynamic_trace",)}:
+    if selected_context.algorithms not in ((), ("dynamic_trace",)):
         return CodeAnalysisResult(
             target=target_spec,
             diagnostics=(DiagnosticFact(

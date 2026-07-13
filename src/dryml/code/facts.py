@@ -400,10 +400,12 @@ def _validate_dynamic_value(value: Any, *, depth: int, active: set[int], counter
             for child in value:
                 _validate_dynamic_value(child, depth=depth + 1, active=active, counter=counter)
             return
-        if set(value) == {"definition_kind", "definition_ref"}:
+        if (
+            set(value) == {"definition_kind", "definition_ref"}
+            and type(value["definition_kind"]) is str
+            and value["definition_kind"] in {"definition", "concrete_definition"}
+        ):
             kind = value["definition_kind"]
-            if kind not in {"definition", "concrete_definition"}:
-                raise ValueError("DynamicCallFact nested definition_kind is unsupported")
             _validate_dynamic_reference(kind, value["definition_ref"], field="definition_ref")
             return
         if any(type(key) is not str or len(key) > 4_096 for key in value):

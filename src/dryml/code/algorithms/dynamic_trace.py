@@ -371,18 +371,6 @@ class _Planner:
         try:
             receiver_class = _resolve_receiver_class(value, self.request.context)
             receiver_class_path = _verified_class_import_path(receiver_class)
-            reference = _definition_reference(value)
-        except StableHashLimitError as exc:
-            raise _PrevalidationFailure(_diagnostic(
-                "dryml.code.dynamic_trace_argument_limit_exceeded",
-                "Dynamic trace receiver identity limit exceeded.",
-                target_kind=self.target_kind,
-                data={
-                    "limit_name": f"hash_{exc.limit_name}",
-                    "limit": exc.limit,
-                    "observed_lower_bound": exc.observed_lower_bound,
-                },
-            )) from None
         except _ReferenceLimitError as exc:
             raise _PrevalidationFailure(_diagnostic(
                 "dryml.code.dynamic_trace_receiver_resolution_failed",
@@ -398,6 +386,31 @@ class _Planner:
             raise _PrevalidationFailure(_diagnostic(
                 "dryml.code.dynamic_trace_receiver_resolution_failed",
                 "Dynamic trace receiver class could not be resolved.",
+                target_kind=self.target_kind,
+            )) from None
+        try:
+            reference = _definition_reference(value)
+        except StableHashLimitError as exc:
+            raise _PrevalidationFailure(_diagnostic(
+                "dryml.code.dynamic_trace_argument_limit_exceeded",
+                "Dynamic trace receiver identity limit exceeded.",
+                target_kind=self.target_kind,
+                data={
+                    "limit_name": f"hash_{exc.limit_name}",
+                    "limit": exc.limit,
+                    "observed_lower_bound": exc.observed_lower_bound,
+                },
+            )) from None
+        except TypeError:
+            raise _PrevalidationFailure(_diagnostic(
+                "dryml.code.dynamic_trace_unsupported_argument",
+                "Dynamic trace receiver identity is unsupported.",
+                target_kind=self.target_kind,
+            )) from None
+        except Exception:
+            raise _PrevalidationFailure(_diagnostic(
+                "dryml.code.dynamic_trace_unsupported_argument",
+                "Dynamic trace receiver identity is unsupported.",
                 target_kind=self.target_kind,
             )) from None
         proxy = _DefinitionProxy(

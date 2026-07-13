@@ -11,6 +11,7 @@ import pytest
 import dryml
 import dryml.code as code
 from dryml.core2 import ConcreteDefinition, Definition
+from dryml.core2.dtype import DType
 from dryml.core2.methods import Method, Traits, traits
 from dryml.core2.object import Object
 from dryml.core2.symbol import ImportRef, SourceSpec
@@ -152,6 +153,24 @@ def test_facade_types_and_context_fail_before_execution():
         with pytest.raises(TypeError):
             call()
     result = code.trace(target, context=code.CodeAnalysisContext(allow_dynamic_execution=True, algorithms=("source",)))
+    assert result.diagnostics_of_code("dryml.code.dynamic_trace_invalid_context")
+    assert called == []
+
+
+def test_unhashable_trace_algorithm_selection_fails_before_execution():
+    called = []
+
+    def target():
+        called.append(True)
+
+    result = code.trace(
+        target,
+        context=code.CodeAnalysisContext(
+            allow_dynamic_execution=True,
+            algorithms=([],),
+        ),
+    )
+
     assert result.diagnostics_of_code("dryml.code.dynamic_trace_invalid_context")
     assert called == []
 
@@ -300,6 +319,31 @@ def test_definition_and_cdef_calls_record_without_build_or_real_method():
     assert TraceModel.built is False
     assert TraceModel.called is False
     json.dumps(result.to_data())
+
+
+def test_trace_rejects_identity_subclass_leaf_hook_before_invocation():
+    class HookDType(DType):
+        hook_called = False
+
+        def __stable_leaf_bytes__(self):
+            type(self).hook_called = True
+            return b"unbounded-custom-leaf"
+
+    executed = []
+
+    def target(model):
+        executed.append(True)
+        model.train()
+
+    result = code.trace(
+        target,
+        args=(Definition(TraceModel, dtype=HookDType("float", 32)),),
+        context=_enabled(),
+    )
+
+    assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
+    assert HookDType.hook_called is False
+    assert executed == []
 
 
 def test_current_annotation_facts_are_attached_and_switchable():
@@ -651,6 +695,20 @@ def test_live_definition_created_outside_invocation_is_flattened_in_observed_cal
     observed = result.facts_of_kind("dynamic_call")[0].data["args"][0]["external"]
     assert observed["definition_kind"] == "concrete_definition"
     assert observed["definition_ref"].startswith("cdef-v4-")
+
+
+def test_observed_ordinary_definition_shaped_dictionary_round_trips():
+    ordinary = {"definition_kind": "ordinary", "definition_ref": "ordinary"}
+    result = code.trace(
+        lambda model: model.train(ordinary),
+        args=(Definition(TraceModel),),
+        context=_enabled(include_annotations=False, include_method_contracts=False),
+    )
+
+    assert result.ok
+    assert result.facts_of_kind("dynamic_call")[0].data["args"] == [ordinary]
+    restored = code.CodeAnalysisResult.from_data(json.loads(json.dumps(result.to_data())))
+    assert restored.facts_of_kind("dynamic_call")[0].data["args"] == [ordinary]
 
 
 def test_call_limit_retains_prior_facts_and_aborts_target():
