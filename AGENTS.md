@@ -33,13 +33,17 @@ Try to avoid executing the full test suite often. There are some tests which are
 
 ## Commit Workflow
 
-When the user requests a commit:
+After every verified coherent set of implementation, test, documentation, or policy changes, commit it unless the user explicitly says not to commit, verification fails, or the work remains incomplete:
 
-1. Stage only the intended files for that commit.
-2. Review the staged changes with `git diff --cached` and verify they contain no unrelated or private data.
-3. Draft the commit message in a temporary file outside the repository, such as `/tmp/opencode/<commit>-message.txt`.
-4. Commit with `git commit -F <temporary-file>`.
-5. Remove the temporary message file only after the commit succeeds; retain it when the commit fails.
+1. Inspect `git status`, the relevant `git diff`, and `git log --oneline -10` before staging.
+2. Stage only the intended files for that commit.
+3. Review the staged changes with `git diff --cached` and verify they contain no unrelated or private data.
+4. Draft a concise repository-style commit message that describes the changes and relevant verification in a temporary owner-only file outside the repository, such as `/tmp/opencode/<commit>-message.txt`.
+5. Commit with `git commit -F <temporary-file>`.
+6. Remove the temporary message file only after the commit succeeds; retain it when the commit fails.
+7. Report the resulting commit SHA and any required parent-repository submodule-pointer follow-up.
+
+Do not amend, push, broadly stage, reset, discard, stash, or rewrite history. Leave incomplete or failed work uncommitted and report the blocker.
 
 ### Other
 `examples` - Example dryml programs to illustrate dryml use cases
