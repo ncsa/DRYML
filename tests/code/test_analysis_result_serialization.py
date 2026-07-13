@@ -235,6 +235,7 @@ def test_dynamic_call_fact_rejects_semantically_invalid_nested_requirement_fact(
         lambda fact: fact["data"]["resolution"].pop("source_traces"),
         lambda fact: fact["data"]["resolution"]["source_traces"][0]["data"].update(source={"kind": "synthetic", "target": None, "label": None, "namespace": None, "path": None, "metadata": {}}),
         lambda fact: fact["data"]["resolution"]["fragments"][0].update(priority=1),
+        lambda fact: fact["data"]["resolution"]["environment_requirement"]["requirements"].append("other>=1"),
     ],
 )
 def test_dynamic_call_fact_rejects_inconsistent_requirement_trace_or_resolution(mutate):

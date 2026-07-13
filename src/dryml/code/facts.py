@@ -661,6 +661,35 @@ def _validate_requirement_resolution_wire(
     for diagnostic in diagnostics:
         _validate_requirement_diagnostic_wire(diagnostic)
     _validate_requirement_merge_report_wire(value["merge_report"])
+    _validate_requirement_resolution_semantics(value)
+
+
+def _validate_requirement_resolution_semantics(value: dict[str, Any]) -> None:
+    """Require nested resolutions to match the authoritative annotation result.
+
+    Dynamic-call facts persist a full ``RequirementResolution`` snapshot.  Its
+    component payloads must therefore be more than individually well-shaped:
+    they must be the exact current resolution of the serialized fragments.
+    Keep this import local so ordinary fact construction retains its lightweight
+    dependency surface.
+    """
+
+    try:
+        from dryml.annotations import AnnotationFragment, resolve_fragments
+
+        fragments = tuple(
+            AnnotationFragment.from_data(fragment)
+            for fragment in value["fragments"]
+        )
+        canonical = resolve_fragments(fragments).to_data()
+    except Exception as exc:
+        raise ValueError(
+            "DynamicCallFact requirement resolution is semantically invalid"
+        ) from exc
+    if canonical != value:
+        raise ValueError(
+            "DynamicCallFact requirement resolution does not match its fragments"
+        )
 
 
 def _validate_requirement_diagnostic_wire(value: Any) -> None:

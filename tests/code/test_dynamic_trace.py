@@ -1459,7 +1459,13 @@ def test_aggregate_result_admission_exact_boundary_and_n_plus_one(monkeypatch):
             allow_nan=False,
         ).encode("utf-8"))
 
-    exact_limit = sum(encoded_fact_size(fact) for fact in baseline.facts)
+    call = baseline.facts_of_kind("dynamic_call")[0]
+    reserved_summary_size = dynamic_trace._reserved_summary_size(
+        target_kind=call.source["target_kind"],
+        calls_recorded=1,
+        max_calls=10_000,
+    )
+    exact_limit = encoded_fact_size(call) + reserved_summary_size
 
     monkeypatch.setattr(dynamic_trace, "MAX_RESULT_BYTES", exact_limit)
     exact = code.trace(
@@ -1469,7 +1475,7 @@ def test_aggregate_result_admission_exact_boundary_and_n_plus_one(monkeypatch):
     )
     assert exact.ok
     assert len(exact.facts_of_kind("dynamic_call")) == 1
-    assert sum(encoded_fact_size(fact) for fact in exact.facts) == exact_limit
+    assert sum(encoded_fact_size(fact) for fact in exact.facts) <= exact_limit
 
     monkeypatch.setattr(dynamic_trace, "MAX_RESULT_BYTES", exact_limit - 1)
     exceeded = code.trace(
@@ -1484,3 +1490,45 @@ def test_aggregate_result_admission_exact_boundary_and_n_plus_one(monkeypatch):
     assert diagnostic.data["observed_lower_bound"] == exact_limit
     assert not exceeded.facts_of_kind("dynamic_call")
     assert _summary(exceeded).data["outcome"] == "result_limit_exceeded"
+
+
+def test_failure_summary_fits_reserved_aggregate_result_budget(monkeypatch):
+    import dryml.code.algorithms.dynamic_trace as dynamic_trace
+
+    context = _enabled(include_annotations=False, include_method_contracts=False)
+
+    def succeeds_after_call(model):
+        model.train()
+
+    baseline = code.trace(
+        succeeds_after_call,
+        args=(Definition(TraceModel),),
+        context=context,
+    )
+    call = baseline.facts_of_kind("dynamic_call")[0]
+    max_result_bytes = (
+        len(json.dumps(call.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        + dynamic_trace._reserved_summary_size(
+            target_kind=call.source["target_kind"],
+            calls_recorded=1,
+            max_calls=10_000,
+        )
+    )
+    monkeypatch.setattr(dynamic_trace, "MAX_RESULT_BYTES", max_result_bytes)
+
+    def fails_after_call(model):
+        model.train()
+        raise RuntimeError("trace target failure")
+
+    result = code.trace(
+        fails_after_call,
+        args=(Definition(TraceModel),),
+        context=context,
+    )
+    assert result.diagnostics_of_code("dryml.code.dynamic_trace_target_failed")
+    assert len(result.facts_of_kind("dynamic_call")) == 1
+    assert _summary(result).data["outcome"] == "target_failed"
+    assert sum(
+        len(json.dumps(fact.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        for fact in result.facts
+    ) <= max_result_bytes

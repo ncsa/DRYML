@@ -72,6 +72,20 @@ MAX_HASH_OCCURRENCES = 100_000
 MAX_HASH_EDGES = 200_000
 MAX_HASH_ENCODED_BYTES = 4_194_304
 
+_SUMMARY_OUTCOMES = (
+    "complete",
+    "call_limit_exceeded",
+    "unsupported_return_operation",
+    "unsupported_argument",
+    "unsupported_receiver_attribute",
+    "stale_proxy",
+    "method_fact_collection_failed",
+    "target_failed",
+    "result_limit_exceeded",
+    "diagnostics_limit_exceeded",
+    "algorithm_failed",
+)
+
 _HASH_LIMITS = StableHashLimits(
     max_depth=MAX_HASH_DEPTH,
     max_occurrences=MAX_HASH_OCCURRENCES,
@@ -461,9 +475,12 @@ class _Planner:
         fact = DynamicCallFact(source=raw["source"], data=data)
         with self.lock:
             total = self.result_bytes + encoded_size
-            summary_size = _encoded_summary_size(
+            # A later target or trace-domain failure changes the final summary's
+            # outcome text. Reserve the largest permitted final-summary wire
+            # form now, rather than admitting a call that only fits a complete
+            # summary and then overflowing after an incomplete outcome.
+            summary_size = _reserved_summary_size(
                 target_kind=self.target_kind,
-                outcome=self.outcome,
                 calls_recorded=len(self.facts) + 1,
                 max_calls=self.request.policy.max_calls,
             )
@@ -1079,34 +1096,24 @@ def _unsupported_argument_failure(planner: _Planner) -> _PrevalidationFailure:
 
 
 def _summary(planner: _Planner) -> CodeFact:
-    def make_summary() -> CodeFact:
-        return CodeFact(
-            "dynamic_trace_summary",
-            source={"analyzer": "dynamic_trace", "target_kind": planner.target_kind},
-            data={
-                "complete": planner.outcome == "complete",
-                "outcome": planner.outcome,
-                "calls_recorded": len(planner.facts),
-                "max_calls": planner.request.policy.max_calls,
-            },
-        )
-    summary = make_summary()
-    size = len(json.dumps(summary.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
-    if planner.result_bytes + size > MAX_RESULT_BYTES and planner.outcome != "result_limit_exceeded":
-        planner.add_diagnostic(_diagnostic(
-            "dryml.code.dynamic_trace_result_limit_exceeded",
-            "Dynamic trace result byte limit exceeded.",
-            target_kind=planner.target_kind,
-            data={"limit_name": "result_bytes", "limit": MAX_RESULT_BYTES, "observed_lower_bound": planner.result_bytes + size},
-        ))
-        planner.outcome = "result_limit_exceeded"
-        summary = make_summary()
-        size = len(json.dumps(summary.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
-        while planner.facts and planner.result_bytes + size > MAX_RESULT_BYTES:
-            removed = planner.facts.pop()
-            planner.result_bytes -= len(json.dumps(removed.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
-            summary = make_summary()
-            size = len(json.dumps(summary.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+    """Build the final summary covered by call-admission byte reservation."""
+
+    summary = CodeFact(
+        "dynamic_trace_summary",
+        source={"analyzer": "dynamic_trace", "target_kind": planner.target_kind},
+        data={
+            "complete": planner.outcome == "complete",
+            "outcome": planner.outcome,
+            "calls_recorded": len(planner.facts),
+            "max_calls": planner.request.policy.max_calls,
+        },
+    )
+    size = _encoded_fact_size(summary)
+    if planner.result_bytes + size > MAX_RESULT_BYTES:
+        # Every admitted call reserved the largest final-summary form, so this
+        # can only occur before any call was admitted under an externally
+        # altered test limit. Do not discard validated calls to mask it.
+        raise RuntimeError("dynamic trace summary exceeded its reserved result budget")
     return summary
 
 
@@ -1121,7 +1128,29 @@ def _encoded_summary_size(*, target_kind: str, outcome: str, calls_recorded: int
             "max_calls": max_calls,
         },
     )
-    return len(json.dumps(fact.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+    return _encoded_fact_size(fact)
+
+
+def _reserved_summary_size(*, target_kind: str, calls_recorded: int, max_calls: int) -> int:
+    """Return the largest permitted final-summary wire size for an admission."""
+
+    return max(
+        _encoded_summary_size(
+            target_kind=target_kind,
+            outcome=outcome,
+            calls_recorded=calls_recorded,
+            max_calls=max_calls,
+        )
+        for outcome in _SUMMARY_OUTCOMES
+    )
+
+
+def _encoded_fact_size(fact: CodeFact) -> int:
+    """Return the canonical JSON byte count for one trace fact."""
+
+    return len(json.dumps(
+        fact.to_data(), sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8"))
 
 
 def run_trace(request: _InvocationRequest) -> CodeAnalysisResult:
