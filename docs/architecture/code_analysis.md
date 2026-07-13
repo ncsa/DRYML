@@ -186,12 +186,13 @@ containing only `kind`, `import_path`, `method_name`, and `subject_ref`.
 Unresolved, ambiguous, and unsupported facts use `confidence="conservative_hint"`.
 They are static possibilities, not runtime observations or dispatch requirements.
 
-Supported resolution forms are safely importable plain Python functions or
-ordinary classes from the analyzed function's real globals mapping and direct
-methods on direct parameters with an ordinary concrete class annotation,
-inspected without descriptor binding. A resolved fact must contain a verified
-stable import path; a callable with no defensible serialized identity remains
-unsupported.
+Supported resolution forms are safely importable plain Python or builtin
+functions and ordinary classes from the analyzed function's real globals mapping
+and direct methods on direct parameters with an ordinary concrete class
+annotation, inspected without descriptor binding. Every resolved target has a
+verified import path. Inline-only lambdas, `__main__` methods, and bound builtin
+methods remain conservative because their serialized reference cannot uniquely
+describe the callable without retaining live state.
 String annotations, unions, generics, protocols, aliases, reassignment, nested
 scopes, attribute chains, call-result receivers, properties, dynamic `getattr`,
 callable instances, non-standard metaclasses, and control-flow inference do not
@@ -240,11 +241,14 @@ examples omit only ordinary line-number variation:
 | Source-spec worker request | error | `code_probe.source_spec_reconstruction_unavailable` |
 | Unstable worker target | error | `code_probe.non_serializable_target` |
 | Live bound method in a worker | error | `code_probe.bound_method_receiver_unavailable` |
+| Invalid worker timeout | error | `code_probe.invalid_timeout` |
 
 `tests/code/test_static_calls_algorithm.py` proves global callables, methods,
 properties, callable instances, wrapper metadata, and metaclass lookups are not
-invoked. `tests/code/test_targets.py` proves import-path and bound-method
-normalization do not bind descriptors or invoke module/metaclass hooks.
+invoked. `tests/code/test_callable_algorithm.py` proves callable analysis avoids
+hostile target and metaclass metadata hooks. `tests/code/test_targets.py` proves
+import-path and bound-method normalization do not bind descriptors, invoke
+module/metaclass hooks, or truth-test raw descriptors during analysis.
 `tests/code/test_probe_target.py` proves probes do not execute submitted target
 bodies or instantiate classes.
 

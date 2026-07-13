@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import operator
 from typing import Protocol
 
 import dryml.code as code
@@ -37,6 +38,11 @@ CALLABLE_INSTANCE = CallableWithoutExecution()
 
 class ImportableGlobalClass:
     pass
+
+
+class MainModuleModel:
+    def train(self):
+        return None
 
 
 class HostileCallable:
@@ -99,6 +105,18 @@ def direct_global_target():
 
 def importable_global_class_target():
     ImportableGlobalClass()
+
+
+BUILTIN_HELPER = operator.add
+BOUND_BUILTIN_HELPER = [].append
+
+
+def builtin_global_target():
+    BUILTIN_HELPER(1, 2)
+
+
+def bound_builtin_global_target():
+    BOUND_BUILTIN_HELPER(1)
 
 
 def callable_instance_target():
@@ -222,6 +240,13 @@ def local_global_reference_target():
     LOCAL_GLOBAL_HELPER()
 
 
+def main_module_annotation_target(model):
+    model.train()
+
+
+main_module_annotation_target.__annotations__["model"] = MainModuleModel
+
+
 class ClassSourceTarget:
     pass
 
@@ -250,6 +275,12 @@ def nested_scope_target(model):
 
 
 nested_scope_target.__annotations__["model"] = Model
+
+
+def nested_callable_expression_target():
+    def nested():
+        return (lambda: None)()
+    return nested
 
 
 def closure_factory():
@@ -352,6 +383,20 @@ def test_static_calls_resolves_safely_importable_global_classes():
     assert facts[0].data["target"]["import_path"].endswith(":ImportableGlobalClass")
 
 
+def test_static_calls_resolves_safe_builtin_globals():
+    _, facts = _facts(builtin_global_target)
+
+    assert facts[0].data["status"] == "resolved"
+    assert facts[0].data["target"]["import_path"] == "_operator:add"
+
+
+def test_static_calls_rejects_bound_builtin_globals_without_receiver_identity():
+    _, facts = _facts(bound_builtin_global_target)
+
+    assert facts[0].data["status"] == "unsupported"
+    assert facts[0].data["reason"] == "global_value_not_safe_function"
+
+
 def test_static_calls_resolves_only_safe_annotated_methods_without_invocation():
     global METHOD_EXECUTED
     METHOD_EXECUTED = False
@@ -436,17 +481,45 @@ def test_static_calls_does_not_publish_unverified_or_oversized_import_references
         spoofed_helper.__module__ = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
         result, oversized_facts = _facts(spoofed_reference_target)
         assert oversized_facts[0].data["reason"] == "target_reference_limit_exceeded"
-        assert result.diagnostics_of_code("dryml.code.static_target_reference_limit_exceeded")
+        diagnostic = result.diagnostics_of_code("dryml.code.static_target_reference_limit_exceeded")[0]
+        assert diagnostic.data == {
+            "limit_name": "scalar_chars",
+            "limit": static_analysis.MAX_STATIC_SCALAR_CHARS,
+            "observed_lower_bound": static_analysis.MAX_STATIC_SCALAR_CHARS + 1,
+        }
+        assert result.facts_of_kind("static_call_summary")[0].data["complete"] is False
     finally:
         spoofed_helper.__module__ = original_module
         spoofed_helper.__qualname__ = original_qualname
 
 
-def test_static_calls_does_not_exactly_resolve_globals_without_stable_identity():
+def test_static_calls_rejects_globals_without_stable_import_identity():
     _, facts = _facts(local_global_reference_target)
 
     assert facts[0].data["status"] == "unsupported"
     assert facts[0].data["reason"] == "target_reference_unavailable"
+
+
+def test_static_calls_rejects_main_module_annotated_methods_without_import_path():
+    original_module = MainModuleModel.train.__module__
+    try:
+        MainModuleModel.train.__module__ = "__main__"
+        _, facts = _facts(main_module_annotation_target)
+    finally:
+        MainModuleModel.train.__module__ = original_module
+
+    assert facts[0].data["status"] == "unsupported"
+    assert facts[0].data["reason"] == "target_reference_unavailable"
+
+
+def test_static_calls_handles_nested_callable_expressions_conservatively():
+    result, facts = _facts(nested_callable_expression_target)
+
+    assert not result.diagnostics_of_code("dryml.code.algorithm_failed")
+    assert facts[0].data["status"] == "unsupported"
+    assert facts[0].data["display"] == "lambda"
+    assert facts[0].data["reason"] == "nested_scope_unsupported"
+    assert result.facts_of_kind("static_call_summary")[0].data["complete"] is True
 
 
 def test_static_calls_does_not_inspect_hostile_targets_or_wrapped_metadata():
@@ -509,6 +582,9 @@ def test_static_calls_enforces_call_site_limit(monkeypatch):
     monkeypatch.setattr(static_calls, "MAX_CALL_SITES", 1)
 
     result, facts = _facts(direct_global_target)
+    assert len(facts) == 1
+    assert result.facts_of_kind("static_call_summary")[0].data["complete"] is True
+    assert not result.diagnostics_of_code("dryml.code.static_call_sites_limit_exceeded")
     # The fixture has one site; use a second AST call by analyzing this local function.
     def two_calls():
         helper()
@@ -537,6 +613,19 @@ def test_static_calls_enforces_chain_and_scalar_bounds(monkeypatch):
 
     assert scalar_facts[0].data["reason"] == "scalar_limit_exceeded"
     assert result.facts_of_kind("static_call_summary")[0].data["complete"] is True
+
+
+def test_static_calls_accepts_exact_chain_and_scalar_limits(monkeypatch):
+    monkeypatch.setattr(static_calls, "MAX_CHAIN_COMPONENTS", 2)
+    _, chain_facts = _facts(attribute_chain_target)
+    assert chain_facts[0].data["reason"] == "attribute_chain_unsupported"
+
+    exact_name = "x" * static_analysis.MAX_STATIC_SCALAR_CHARS
+    source = f"def synthetic():\n    {exact_name}()\n"
+    monkeypatch.setattr(static_calls, "get_source_info", lambda obj: SourceInfo(source, "synthetic.py", 1))
+    _, scalar_facts = _facts(direct_global_target)
+    assert scalar_facts[0].data["display"] == exact_name
+    assert scalar_facts[0].data["reason"] == "global_name_unavailable"
 
 
 def test_static_calls_bounds_oversized_source_filenames_without_losing_summary(monkeypatch):
@@ -572,6 +661,10 @@ def test_static_calls_enforces_source_and_ast_bounds(monkeypatch):
     monkeypatch.setattr(static_analysis, "MAX_AST_NODES", 1)
     node_result, _ = _facts(direct_global_target)
     assert node_result.diagnostics_of_code("dryml.code.static_ast_nodes_limit_exceeded")
+    node_summary = node_result.facts_of_kind("static_call_summary")[0]
+    assert node_summary.data["complete"] is False
+    assert node_summary.data["call_sites_seen"] == 0
+    assert node_summary.data["facts_emitted"] == 0
 
 
 def test_static_calls_reports_unavailable_when_imports_are_disabled():
@@ -632,3 +725,13 @@ def test_static_call_fact_rejects_unbounded_or_invalid_serialized_data():
     data["data"]["unexpected"] = [["x"] * 10_000]
     with pytest.raises(ValueError, match="fixed static-call schema"):
         code.CodeFact.from_data(data)
+
+    for field_name, value, message in (
+        ("relative_line", 0, "must be positive"),
+        ("absolute_line", -1, "must be positive"),
+        ("col_offset", -1, "must be non-negative"),
+    ):
+        data = _facts(direct_global_target)[1][0].to_data()
+        data["data"][field_name] = value
+        with pytest.raises(ValueError, match=message):
+            code.CodeFact.from_data(data)

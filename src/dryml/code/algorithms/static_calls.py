@@ -1,9 +1,11 @@
 """Opt-in conservative static call resolution.
 
-Only plain Python functions in a target's real globals mapping and direct methods
-on direct parameters annotated with ordinary concrete classes can resolve. Aliases,
-closures, protocols, attribute chains, call-result receivers, properties, dynamic
-lookup, callable instances, and non-standard metaclasses remain non-resolved.
+Only safely importable plain Python or builtin functions, ordinary classes in a
+target's real globals mapping, and direct methods on direct parameters annotated
+with ordinary concrete classes can resolve. Aliases, closures, protocols,
+attribute chains, call-result receivers, properties, dynamic lookup, callable
+instances, bound builtin methods, lambda identities, and non-standard metaclasses
+remain non-resolved.
 Every fact is a source-level possibility, never evidence of runtime execution.
 """
 
@@ -139,7 +141,13 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             source={"analyzer": "static_calls", "target_kind": target.spec.kind},
         ),))
     function = _function_for_target(target)
-    source_target = function or target.unwrapped or target.obj
+    source_target = (
+        function
+        if function is not None
+        else target.unwrapped
+        if target.unwrapped is not None
+        else target.obj
+    )
     info = get_source_info(source_target) if source_target is not None else None
     if info is None:
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
@@ -156,6 +164,12 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
         start_line=info.start_line,
     )
     if parse_diagnostic is not None:
+        if parse_diagnostic.code == "dryml.code.static_ast_nodes_limit_exceeded":
+            return CodeAnalysisResult(
+                target=target.spec,
+                facts=(_summary_fact(target, filename=info.filename, complete=False),),
+                diagnostics=(parse_diagnostic,),
+            )
         return CodeAnalysisResult(target=target.spec, diagnostics=(parse_diagnostic,))
     assert parsed is not None
 
@@ -170,7 +184,6 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     parameter_names = _parameter_names(root)
     free_names = _free_names(function)
     filename = bounded_string(parsed.filename)
-    target_kind = bounded_string(target.spec.kind) or "<bounded>"
     facts = tuple(
         _fact_for_call(
             target,
@@ -186,16 +199,16 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
         )
         for call, nested_scope in collector.calls
     )
-    complete = not collector.exhausted
-    summary = CodeFact(
-        kind="static_call_summary",
-        source={"analyzer": "static_calls", "target_kind": target_kind, "filename": filename},
-        data={
-            "complete": complete,
-            "call_sites_seen": collector.call_sites_seen,
-            "facts_emitted": len(facts),
-            "limits": STATIC_ANALYSIS_LIMITS,
-        },
+    target_reference_exhausted = any(
+        fact.data["reason"] == "target_reference_limit_exceeded" for fact in facts
+    )
+    complete = not collector.exhausted and not target_reference_exhausted
+    summary = _summary_fact(
+        target,
+        filename=filename,
+        complete=complete,
+        call_sites_seen=collector.call_sites_seen,
+        facts_emitted=len(facts),
     )
     diagnostics: list[DiagnosticFact] = []
     if collector.exhausted:
@@ -206,13 +219,17 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             limit=MAX_CALL_SITES,
             observed_lower_bound=collector.call_sites_seen,
         ))
-    if any(fact.data["reason"] == "target_reference_limit_exceeded" for fact in facts):
+    if target_reference_exhausted:
         diagnostics.append(DiagnosticFact(
             severity="error",
             code="dryml.code.static_target_reference_limit_exceeded",
             message="A static call target reference exceeded the serialized scalar limit.",
             source={"analyzer": "static_calls", "target_kind": target.spec.kind},
-            data={"limit_name": "scalar_chars", "limit": MAX_STATIC_SCALAR_CHARS},
+            data={
+                "limit_name": "scalar_chars",
+                "limit": MAX_STATIC_SCALAR_CHARS,
+                "observed_lower_bound": MAX_STATIC_SCALAR_CHARS + 1,
+            },
         ))
     return CodeAnalysisResult(target=target.spec, facts=(*facts, summary), diagnostics=tuple(diagnostics))
 
@@ -239,7 +256,7 @@ def _analysis_root(tree: ast.AST) -> ast.AST:
 
 
 def _function_for_target(target: CodeTarget) -> Any | None:
-    candidate = target.unwrapped or target.obj
+    candidate = target.unwrapped if target.unwrapped is not None else target.obj
     if type(candidate) is types.MethodType:
         return object.__getattribute__(candidate, "__func__")
     return candidate if type(candidate) is types.FunctionType else None
@@ -319,6 +336,8 @@ def _fact_for_call(
             syntax = "attribute_chain"
             display = func.attr
             method_name = func.attr
+        else:
+            display = type(func).__name__.lower()
     elif isinstance(func, ast.Name):
         syntax = "direct_name"
         display = func.id
@@ -594,20 +613,50 @@ def _resolve_annotated_method(annotation: Any, method_name: str | None) -> tuple
     return target_data, "resolved", None
 
 
+def _summary_fact(
+    target: CodeTarget,
+    *,
+    filename: str | None,
+    complete: bool,
+    call_sites_seen: int = 0,
+    facts_emitted: int = 0,
+) -> CodeFact:
+    """Build the mandatory bounded summary for one static-call analysis run."""
+
+    return CodeFact(
+        kind="static_call_summary",
+        source={
+            "analyzer": "static_calls",
+            "target_kind": bounded_string(target.spec.kind) or "<bounded>",
+            "filename": bounded_string(filename),
+        },
+        data={
+            "complete": complete,
+            "call_sites_seen": call_sites_seen,
+            "facts_emitted": facts_emitted,
+            "limits": STATIC_ANALYSIS_LIMITS,
+        },
+    )
+
+
 def _safe_target_data(
     value: Any,
     *,
     method_name: str | None = None,
     subject_ref: str | None = None,
 ) -> tuple[dict[str, str | None] | None, str | None]:
-    """Describe an importable plain function or ordinary class safely.
+    """Describe a plain function or ordinary class without dynamic access.
 
     Arbitrary callable instances and descriptors are intentionally unsupported:
     normalizing them can trigger user-defined attribute hooks.
     """
 
-    if type(value) not in {types.FunctionType, type}:
+    if type(value) not in {types.FunctionType, types.BuiltinFunctionType, type}:
         return None, "global_value_not_safe_function"
+    if type(value) is types.BuiltinFunctionType:
+        receiver = object.__getattribute__(value, "__self__")
+        if receiver is not None and type(receiver) is not types.ModuleType:
+            return None, "global_value_not_safe_function"
     module_name = object.__getattribute__(value, "__module__")
     qualname = object.__getattribute__(value, "__qualname__")
     import_path = None

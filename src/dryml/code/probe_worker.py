@@ -12,7 +12,7 @@ import argparse
 import json
 import sys
 
-from dryml.code.probe import CodeProbeRequest, CodeProbeResult, diagnostic, run_probe_request
+from dryml.code.probe import _InvalidTimeoutError, CodeProbeRequest, CodeProbeResult, diagnostic, run_probe_request
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,6 +38,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             try:
                 request = CodeProbeRequest.from_data(payload)
+            except _InvalidTimeoutError:
+                result = CodeProbeResult(
+                    ok=False,
+                    analysis=None,
+                    environment_record=None,
+                    diagnostics=(diagnostic(
+                        "code_probe.invalid_timeout",
+                        "Code probe timeout must be a finite positive number of seconds.",
+                    ),),
+                )
             except Exception as exc:
                 result = CodeProbeResult(
                     ok=False,

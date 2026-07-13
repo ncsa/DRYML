@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import types
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,53 +39,55 @@ class CallableInfo:
 
 
 def analyze_callable(obj) -> CallableInfo:
-    """Inspect *obj* and return compatibility callable information."""
+    """Inspect *obj* without invoking its callable or metadata hooks."""
 
-    if inspect.ismethod(obj):
-        func = obj.__func__
-        bound_self = obj.__self__
+    if type(obj) is types.MethodType:
+        func = object.__getattribute__(obj, "__func__")
+        bound_self = object.__getattribute__(obj, "__self__")
         return CallableInfo(
             original=obj,
             func=func,
             bound_self=bound_self,
             signature=inspect.signature(func),
-            qualname=getattr(func, "__qualname__", None),
-            module=getattr(func, "__module__", None),
+            qualname=_safe_callable_metadata(func, "__qualname__"),
+            module=_safe_callable_metadata(func, "__module__"),
             is_bound_method=True,
             is_function=False,
             is_callable_instance=False,
         )
 
-    if inspect.isfunction(obj):
+    if type(obj) is types.FunctionType:
         return CallableInfo(
             original=obj,
             func=obj,
             bound_self=None,
             signature=inspect.signature(obj),
-            qualname=getattr(obj, "__qualname__", None),
-            module=getattr(obj, "__module__", None),
+            qualname=_safe_callable_metadata(obj, "__qualname__"),
+            module=_safe_callable_metadata(obj, "__module__"),
             is_bound_method=False,
             is_function=True,
             is_callable_instance=False,
         )
 
     if callable(obj):
-        call = getattr(type(obj), "__call__", None)
+        call = inspect.getattr_static(type(obj), "__call__", None)
+        if type(call) in {staticmethod, classmethod}:
+            call = object.__getattribute__(call, "__func__")
         if call is None:
-            raise TypeError(f"Callable object {obj!r} has no type.__call__")
+            raise TypeError("Callable object has no statically discoverable type.__call__")
         return CallableInfo(
             original=obj,
             func=call,
             bound_self=obj,
             signature=inspect.signature(call),
-            qualname=getattr(call, "__qualname__", None),
-            module=getattr(call, "__module__", None),
+            qualname=_safe_callable_metadata(call, "__qualname__"),
+            module=_safe_callable_metadata(call, "__module__"),
             is_bound_method=False,
             is_function=False,
             is_callable_instance=True,
         )
 
-    raise TypeError(f"Object {obj!r} is not callable")
+    raise TypeError("Object is not callable")
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
@@ -109,7 +112,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             data={"error": repr(exc)},
         ))
 
-    analyzed = info.func if info is not None else getattr(obj, "__func__", obj)
+    analyzed = info.func if info is not None else obj
     import_path = _import_path_for(analyzed)
     if import_path is None and target.spec.import_path is not None:
         import_path = target.spec.import_path
@@ -120,20 +123,24 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             code="dryml.code.not_importable",
             message="Callable does not have a verified stable import path.",
             source={"analyzer": "callables", "target_kind": target.spec.kind},
-            data={"module": getattr(analyzed, "__module__", None), "qualname": getattr(analyzed, "__qualname__", None)},
+            data={
+                "module": _safe_callable_metadata(analyzed, "__module__"),
+                "qualname": _safe_callable_metadata(analyzed, "__qualname__"),
+            },
         ))
 
+    owner_module, owner_qualname = _safe_owner_metadata(target.owner)
     data = {
-        "module": getattr(analyzed, "__module__", None),
-        "qualname": getattr(analyzed, "__qualname__", None),
-        "name": getattr(analyzed, "__name__", type(obj).__name__),
+        "module": _safe_callable_metadata(analyzed, "__module__"),
+        "qualname": _safe_callable_metadata(analyzed, "__qualname__"),
+        "name": _safe_callable_metadata(analyzed, "__name__") or _safe_type_name(obj),
         "is_callable": callable(obj),
-        "is_function": inspect.isfunction(obj),
-        "is_bound_method": inspect.ismethod(obj),
-        "is_lambda": getattr(analyzed, "__name__", None) == "<lambda>",
+        "is_function": type(obj) is types.FunctionType,
+        "is_bound_method": type(obj) is types.MethodType,
+        "is_lambda": _safe_callable_metadata(analyzed, "__name__") == "<lambda>",
         "is_callable_instance": bool(info.is_callable_instance) if info is not None else False,
-        "owner_module": getattr(target.owner, "__module__", None) if target.owner else None,
-        "owner_qualname": getattr(target.owner, "__qualname__", None) if target.owner else None,
+        "owner_module": owner_module,
+        "owner_qualname": owner_qualname,
         "signature": signature,
         "importable": importable,
         "import_path": import_path if importable else None,
@@ -143,6 +150,40 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
         facts=(CallableFact(source=_source(target), data=data),),
         diagnostics=tuple(diagnostics),
     )
+
+
+def _safe_owner_metadata(owner: type | None) -> tuple[str | None, str | None]:
+    """Return ordinary-class owner metadata without metaclass dispatch."""
+
+    if type(owner) is not type:
+        return None, None
+    module = object.__getattribute__(owner, "__module__")
+    qualname = object.__getattribute__(owner, "__qualname__")
+    return (
+        module if isinstance(module, str) else None,
+        qualname if isinstance(qualname, str) else None,
+    )
+
+
+def _safe_callable_metadata(obj: Any, name: str) -> str | None:
+    """Read standard callable metadata without arbitrary attribute dispatch."""
+
+    if type(obj) not in {
+        types.FunctionType,
+        types.MethodType,
+        types.BuiltinFunctionType,
+        types.BuiltinMethodType,
+    }:
+        return None
+    value = object.__getattribute__(obj, name)
+    return value if isinstance(value, str) else None
+
+
+def _safe_type_name(obj: Any) -> str:
+    """Return a type name without consulting a target object's hooks."""
+
+    name = object.__getattribute__(type(obj), "__name__")
+    return name if isinstance(name, str) else "callable"
 
 
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
@@ -161,8 +202,8 @@ def _source(target: CodeTarget) -> dict[str, Any]:
 
 
 def _import_path_for(obj: Any) -> str | None:
-    module = getattr(obj, "__module__", None)
-    qualname = getattr(obj, "__qualname__", None)
+    module = _safe_callable_metadata(obj, "__module__")
+    qualname = _safe_callable_metadata(obj, "__qualname__")
     if not module or not qualname or module == "__main__" or "<locals>" in qualname:
         return None
     return f"{module}:{qualname}"
@@ -172,9 +213,11 @@ def _verify_import_path(path: str, obj: Any) -> bool:
     try:
         module_name, qualname = path.split(":", 1)
         module = importlib.import_module(module_name)
-        resolved = module
+        resolved: Any = module
         for part in qualname.split("."):
-            resolved = getattr(resolved, part)
+            resolved = inspect.getattr_static(resolved, part)
+        if type(resolved) in {staticmethod, classmethod}:
+            resolved = object.__getattribute__(resolved, "__func__")
     except Exception:
         return False
     return resolved is obj

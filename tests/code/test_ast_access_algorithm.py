@@ -72,6 +72,18 @@ def test_public_ast_helper_enforces_source_and_node_bounds(monkeypatch):
         collect_accesses_from_source("def f():\n    return None\n")
 
 
+def test_public_ast_helper_accepts_exact_source_and_node_limits(monkeypatch):
+    source = "def f():\n    return None\n"
+    monkeypatch.setattr(ast_access, "MAX_SOURCE_BYTES", len(source.encode("utf-8")))
+    tree = ast.parse(source)
+    monkeypatch.setattr(ast_access, "MAX_AST_NODES", sum(1 for _ in ast.walk(tree)))
+
+    collector = collect_accesses_from_source(source)
+
+    assert not collector.attr_accesses
+    assert not collector.method_calls
+
+
 def test_shared_static_parser_enforces_source_and_ast_bounds(requirement_targets, monkeypatch):
     target = code.normalize_target(requirement_targets.run_training)
     monkeypatch.setattr(static_analysis, "MAX_SOURCE_BYTES", 1)
@@ -139,3 +151,17 @@ def test_ast_access_enforces_source_node_and_call_bounds_end_to_end(monkeypatch)
     fact = call_result.facts_of_kind("ast_access")[0]
     assert fact.data["complete"] is False
     assert call_result.diagnostics_of_code("dryml.code.static_call_sites_limit_exceeded")
+
+
+def test_ast_access_bounds_filename_metadata(monkeypatch):
+    filename = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
+    monkeypatch.setattr(
+        ast_access,
+        "get_source_info",
+        lambda obj: SourceInfo("def synthetic(obj):\n    obj.train()\n", filename, 1),
+    )
+
+    result = code.analyze(lambda: None, algorithms=("ast_access",))
+
+    assert result.facts_of_kind("ast_access")[0].source["filename"] is None
+    assert result.facts_of_kind("call_site")[0].source["filename"] is None

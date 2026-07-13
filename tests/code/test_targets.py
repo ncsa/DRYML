@@ -21,6 +21,15 @@ class HostileDescriptorOwner:
     method = HostileDescriptor()
 
 
+class HostileTruthinessDescriptor:
+    def __bool__(self):
+        raise AssertionError("analysis must not truth-test raw descriptors")
+
+
+class HostileTruthinessOwner:
+    method = HostileTruthinessDescriptor()
+
+
 class HostileBoundMeta(type):
     def __getattribute__(cls, name):
         if name == "__dict__":
@@ -169,3 +178,19 @@ def test_import_disabled_source_analysis_reports_unavailable():
     )
 
     assert result.diagnostics_of_code("dryml.code.source_unavailable")
+
+
+def test_source_analyzers_do_not_truth_test_raw_descriptors():
+    target = code.target_from_class_attribute(HostileTruthinessOwner, "method")
+
+    for algorithm in ("source", "ast_access", "static_calls", "symbol_capture"):
+        result = code.analyze(target, algorithms=(algorithm,))
+        assert not result.diagnostics_of_code("dryml.code.algorithm_failed")
+
+
+def test_direct_analysis_of_bound_method_preserves_owner_metadata():
+    result = code.analyze(BoundMethodChild().inherited, algorithms=("callables",))
+    fact = result.facts_of_kind("callable")[0]
+
+    assert fact.data["is_bound_method"] is True
+    assert fact.data["owner_qualname"] == "BoundMethodChild"

@@ -9,6 +9,24 @@ class CallableInstance:
         return value * scale
 
 
+class HostileCallable:
+    def __getattribute__(self, name):
+        raise AssertionError("callable analysis must not dynamically inspect targets")
+
+    def __call__(self):
+        raise AssertionError("callable analysis must not invoke targets")
+
+
+class HostileMeta(type):
+    def __getattribute__(cls, name):
+        raise AssertionError("callable analysis must not invoke metaclass hooks")
+
+
+class HostileMetaCallable(metaclass=HostileMeta):
+    def __call__(self):
+        raise AssertionError("callable analysis must not invoke targets")
+
+
 def test_callable_algorithm_module_function(requirement_targets):
     result = code.analyze(requirement_targets.plain_importable_function, algorithms=("callables",))
     fact = result.facts_of_kind("callable")[0]
@@ -42,3 +60,13 @@ def test_old_analyze_callable_compatibility(requirement_targets):
 
     assert info.is_function is True
     assert info.qualname == "plain_importable_function"
+
+
+def test_callable_algorithm_avoids_hostile_callable_and_metaclass_metadata():
+    hostile_result = code.analyze(HostileCallable(), algorithms=("callables",))
+    metaclass_result = code.analyze(HostileMetaCallable(), algorithms=("callables",))
+
+    assert hostile_result.facts_of_kind("callable")
+    assert metaclass_result.facts_of_kind("callable")
+    assert not hostile_result.diagnostics_of_code("dryml.code.algorithm_failed")
+    assert not metaclass_result.diagnostics_of_code("dryml.code.algorithm_failed")

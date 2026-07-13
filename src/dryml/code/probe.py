@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import subprocess
 import sys
 from collections.abc import Iterable, Mapping
@@ -39,6 +40,10 @@ PROBE_SCHEMA_VERSION = 1
 DEFAULT_PROBE_ALGORITHMS = ("callables", "source", "symbol_capture", "direct_annotations")
 PROBE_WORKER_ARGS = ("-m", "dryml.code.probe_worker", "--json")
 PROBE_RESULT_KIND = "dryml.code_probe_result"
+
+
+class _InvalidTimeoutError(ValueError):
+    """Raised when a serialized probe timeout is not a usable deadline."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +88,7 @@ class CodeProbeRequest:
         object.__setattr__(self, "policy", str(self.policy).strip().lower())
         object.__setattr__(self, "metadata", dict(json_compatible(self.metadata)))
         if self.timeout_s is not None:
-            object.__setattr__(self, "timeout_s", float(self.timeout_s))
+            object.__setattr__(self, "timeout_s", _validated_timeout(self.timeout_s))
 
     def to_data(self) -> dict[str, Any]:
         """Return JSON-compatible request data using schema version 1."""
@@ -342,6 +347,19 @@ def probe_target(
     rather than attempting package solving, container execution, or world synthesis.
     """
 
+    try:
+        timeout = _validated_timeout(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic(
+                "code_probe.invalid_timeout",
+                "Code probe timeout must be a finite positive number of seconds.",
+            ),),
+        )
+
     code_target: CodeTarget | None = None
     try:
         if type(target) is CodeTargetSpec:
@@ -434,6 +452,18 @@ def probe_target_in_subprocess(
 ) -> CodeProbeResult:
     """Launch a probe worker command and decode its JSON result."""
 
+    try:
+        timeout = _validated_timeout(timeout) if timeout is not None else None
+    except (TypeError, ValueError):
+        return CodeProbeResult(
+            ok=False,
+            analysis=None,
+            environment_record=None,
+            diagnostics=(diagnostic(
+                "code_probe.invalid_timeout",
+                "Code probe timeout must be a finite positive number of seconds.",
+            ),),
+        )
     payload = json.dumps(request.to_data(), sort_keys=True).encode("utf-8")
     try:
         returncode, protocol, protocol_truncated, stderr_bytes, stderr_truncated, timed_out = _run_bounded_command(
@@ -521,6 +551,15 @@ def _coerce_algorithms(value: Iterable[str] | str | None) -> tuple[str, ...]:
         return (value,)
     algorithms = tuple(str(item) for item in value)
     return algorithms or DEFAULT_PROBE_ALGORITHMS
+
+
+def _validated_timeout(timeout: Any) -> float:
+    """Return a finite positive worker deadline or raise ``ValueError``."""
+
+    value = float(timeout)
+    if not math.isfinite(value) or value <= 0:
+        raise _InvalidTimeoutError("timeout must be finite and positive")
+    return value
 
 
 def _validate_schema_version(data: Mapping[str, Any]) -> None:

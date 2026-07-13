@@ -380,7 +380,7 @@ def _target_from_object(
     return CodeTarget(
         spec=_spec_for_object(obj, kind, metadata=metadata),
         obj=obj,
-        unwrapped=unwrapped or _unwrap_descriptor(obj),
+        unwrapped=unwrapped if unwrapped is not None else _unwrap_descriptor(obj),
         metadata=metadata or {},
     )
 

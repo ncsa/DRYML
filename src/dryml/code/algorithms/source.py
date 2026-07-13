@@ -60,7 +60,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             message="Source extraction is disabled by context.",
             source={"analyzer": "source", "target_kind": target.spec.kind},
         ),))
-    obj = target.unwrapped or target.obj
+    obj = target.unwrapped if target.unwrapped is not None else target.obj
     if obj is None:
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
             severity="warning",

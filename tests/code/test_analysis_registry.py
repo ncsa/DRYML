@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import pytest
 
 import dryml.code as code
@@ -30,6 +33,22 @@ def test_default_analyzers_are_registered():
     assert code.get_analyzer("callables").name == "callables"
     assert DEFAULT_ALGORITHMS == EXPECTED_DEFAULT_ALGORITHMS
     assert DEFAULT_PROBE_ALGORITHMS == EXPECTED_DEFAULT_PROBE_ALGORITHMS
+
+
+def test_core2_and_code_keep_their_import_boundaries():
+    core2 = subprocess.run(
+        [sys.executable, "-c", "import dryml.core2, sys; assert 'dryml.code' not in sys.modules"],
+        capture_output=True,
+        text=True,
+    )
+    code_import = subprocess.run(
+        [sys.executable, "-c", "import dryml.code, sys; assert 'dryml.dispatch' not in sys.modules"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert core2.returncode == 0, core2.stderr
+    assert code_import.returncode == 0, code_import.stderr
 
 
 def test_empty_probe_algorithm_selection_round_trips_to_probe_defaults(requirement_targets):

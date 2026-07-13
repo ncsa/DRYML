@@ -160,7 +160,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             message="AST access analysis requires source extraction.",
             source={"analyzer": "ast_access", "target_kind": target.spec.kind},
         ),))
-    obj = target.unwrapped or target.obj
+    obj = target.unwrapped if target.unwrapped is not None else target.obj
     info = get_source_info(obj) if obj is not None else None
     if info is None:
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
@@ -184,8 +184,10 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     attr_details = [_attr_to_data(item, parsed.start_line) for item in collector.attr_accesses]
     call_details = [_call_to_data(item, parsed.start_line) for item in collector.method_calls]
     complete = not collector.call_limit_exhausted
+    target_kind = bounded_string(target.spec.kind) or "<bounded>"
+    filename = bounded_string(parsed.filename)
     facts = [ASTAccessFact(
-        source={"analyzer": "ast_access", "target_kind": target.spec.kind, "filename": parsed.filename},
+        source={"analyzer": "ast_access", "target_kind": target_kind, "filename": filename},
         data={
             "attribute_accesses": [item["access"] for item in attr_details],
             "attribute_details": attr_details,
@@ -197,8 +199,8 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     facts.extend(CallSiteFact(
         source={
             "analyzer": "ast_access",
-            "target_kind": target.spec.kind,
-            "filename": parsed.filename,
+            "target_kind": target_kind,
+            "filename": filename,
             "line": item["lineno"],
         },
         data=item,

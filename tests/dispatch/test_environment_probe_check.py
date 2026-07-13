@@ -55,7 +55,7 @@ def test_final_probe_uses_import_path_even_when_target_kind_is_function(monkeypa
     calls = []
 
     def fake_probe(code_target, **kwargs):
-        calls.append((code_target, kwargs["environment"].to_data()))
+        calls.append((code_target, kwargs))
         return CodeProbeResult(True, CodeAnalysisResult(target), inspect_current())
 
     monkeypatch.setattr(requirements, "probe_target", fake_probe)
@@ -67,5 +67,6 @@ def test_final_probe_uses_import_path_even_when_target_kind_is_function(monkeypa
     )
 
     assert len(calls) == 1
+    assert "algorithms" not in calls[0][1]
     assert resolution.final_code_probe is not None
     assert resolution.environment_record is not None

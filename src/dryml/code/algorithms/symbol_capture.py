@@ -12,7 +12,7 @@ from dryml.core2.symbol import ImportRef, SourceSpec, symbol_ref
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
     """Expose core symbol references as reusable code facts."""
 
-    obj = target.unwrapped or target.obj
+    obj = target.unwrapped if target.unwrapped is not None else target.obj
     if target.spec.import_path and obj is None:
         return CodeAnalysisResult(target=target.spec, facts=(SymbolFact(
             source={"analyzer": "symbol_capture", "target_kind": target.spec.kind},
@@ -42,7 +42,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
 def can_analyze(target: CodeTarget, context: CodeAnalysisContext) -> bool:
     """Return true for import-path, function, and class targets."""
 
-    obj = target.unwrapped or target.obj
+    obj = target.unwrapped if target.unwrapped is not None else target.obj
     return target.spec.import_path is not None or inspect.isfunction(obj) or inspect.isclass(obj)
 
 

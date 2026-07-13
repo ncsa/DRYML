@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 
 import dryml
 import dryml.code as code
@@ -155,6 +156,29 @@ def test_probe_inline_main_module_function_remains_available(monkeypatch):
     assert result.ok
     assert result.analysis is not None
     assert result.analysis.facts_of_kind("callable")
+
+
+def test_direct_analysis_of_main_module_function_remains_available(monkeypatch):
+    def notebook_target():
+        return "not executed"
+
+    monkeypatch.setattr(notebook_target, "__module__", "__main__")
+    result = code.analyze(notebook_target, algorithms=("callables",))
+
+    assert result.facts_of_kind("callable")
+    assert result.diagnostics_of_code("dryml.code.not_importable")
+
+
+@pytest.mark.parametrize("timeout", (0, -1, math.nan, math.inf))
+def test_probe_rejects_invalid_worker_timeouts(timeout):
+    result = code.probe_target(
+        f"{TARGET_MODULE}:plain_function",
+        include_environment_record=False,
+        timeout=timeout,
+    )
+
+    assert not result.ok
+    assert result.diagnostics[0].code == "code_probe.invalid_timeout"
 
 
 def test_probe_method_classmethod_and_staticmethod_annotations():

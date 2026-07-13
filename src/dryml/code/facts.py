@@ -222,6 +222,12 @@ class StaticCallFact(CodeFact):
             value = self.data[field_name]
             if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
                 raise ValueError(f"StaticCallFact {field_name} must be an integer or null")
+        for field_name in ("relative_line", "absolute_line"):
+            value = self.data[field_name]
+            if value is not None and value < 1:
+                raise ValueError(f"StaticCallFact {field_name} must be positive when present")
+        if self.data["col_offset"] is not None and self.data["col_offset"] < 0:
+            raise ValueError("StaticCallFact col_offset must be non-negative when present")
         # The fixed schema above proves conversion cannot recursively copy
         # arbitrary metadata before JSON normalization.
         CodeFact.__post_init__(self)
