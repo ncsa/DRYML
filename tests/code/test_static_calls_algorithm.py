@@ -61,6 +61,14 @@ class HostileWrapped:
         raise AssertionError("static analysis must not inspect __wrapped__ metadata")
 
 
+class HostileAnnotations(dict):
+    def __contains__(self, key):
+        raise AssertionError("static analysis must not inspect custom annotation mappings")
+
+    def __getitem__(self, key):
+        raise AssertionError("static analysis must not inspect custom annotation mappings")
+
+
 class Model:
     def train(self):
         global METHOD_EXECUTED
@@ -213,6 +221,53 @@ def dynamic_attribute_reassigned_receiver_target(model):
 dynamic_attribute_reassigned_receiver_target.__annotations__["model"] = Model
 
 
+def instance_dictionary_reassigned_receiver_target(model):
+    model.__dict__["train"] = helper
+    model.train()
+
+
+instance_dictionary_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def explicit_setattr_reassigned_receiver_target(model):
+    object.__setattr__(model, "train", helper)
+    model.train()
+
+
+explicit_setattr_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def bound_setattr_reassigned_receiver_target(model):
+    model.__setattr__("train", helper)
+    model.train()
+
+
+bound_setattr_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def dictionary_update_reassigned_receiver_target(model):
+    model.__dict__.update(train=helper)
+    model.train()
+
+
+dictionary_update_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def unbound_dictionary_reassigned_receiver_target(model):
+    dict.__setitem__(model.__dict__, "train", helper)
+    model.train()
+
+
+unbound_dictionary_reassigned_receiver_target.__annotations__["model"] = Model
+
+
+def hostile_annotations_target(model):
+    model.train()
+
+
+hostile_annotations_target.__annotations__ = HostileAnnotations({"model": Model})
+
+
 def local_annotation_target():
     model = object()
     model.train()
@@ -323,6 +378,28 @@ def decorator_factory():
     return lambda function: function
 
 
+DIRECT_LAMBDA_TARGET = decorator_factory()(lambda: helper())
+LAMBDA_PARAMETER_TARGET = lambda helper: helper()
+
+
+def lambda_default_helper():
+    return None
+
+
+LAMBDA_DEFAULT_TARGET = lambda lambda_default_helper=lambda_default_helper(): lambda_default_helper
+
+
+def local_lambda_default_factory():
+    def helper():
+        return None
+
+    return lambda value=helper(): value
+
+
+LOCAL_LAMBDA_DEFAULT_TARGET = local_lambda_default_factory()
+LOCAL_LAMBDA_DEFAULT_TARGET.__qualname__ = "spoofed_global_lambda"
+
+
 @decorator_factory()
 def decorated_default_target(value=helper()):
     helper()
@@ -428,6 +505,11 @@ def test_static_calls_reports_conservative_non_resolution_cases():
         (reassigned_receiver_target, "receiver_reassigned"),
         (attribute_reassigned_receiver_target, "receiver_reassigned"),
         (dynamic_attribute_reassigned_receiver_target, "receiver_reassigned"),
+        (instance_dictionary_reassigned_receiver_target, "receiver_reassigned"),
+        (explicit_setattr_reassigned_receiver_target, "receiver_reassigned"),
+        (bound_setattr_reassigned_receiver_target, "receiver_reassigned"),
+        (dictionary_update_reassigned_receiver_target, "receiver_reassigned"),
+        (unbound_dictionary_reassigned_receiver_target, "receiver_reassigned"),
         (local_annotation_target, "attribute_chain_unsupported"),
         (nested_receiver_target, "call_result_receiver"),
         (parameter_shadows_global, "parameter_name_unsupported"),
@@ -457,6 +539,14 @@ def test_static_calls_does_not_invoke_callable_instances_or_dynamic_getattr():
     assert all(fact.data["status"] != "resolved" for fact in dynamic_facts)
 
 
+def test_static_calls_does_not_execute_custom_annotation_mappings():
+    result, facts = _facts(hostile_annotations_target)
+
+    assert result.ok
+    assert facts[0].data["status"] == "unsupported"
+    assert facts[0].data["reason"] == "annotation_mapping_unsupported"
+
+
 def test_static_calls_reports_unknown_globals_and_class_source_availability():
     unknown_result, unknown_facts = _facts(unknown_global_target)
     class_result = code.analyze(ClassSourceTarget, algorithms=("static_calls",))
@@ -475,8 +565,13 @@ def test_static_calls_does_not_publish_unverified_or_oversized_import_references
         spoofed_helper.__module__ = "builtins"
         spoofed_helper.__qualname__ = "len"
         _, facts = _facts(spoofed_reference_target)
-        assert facts[0].data["status"] == "unsupported"
-        assert facts[0].data["reason"] == "target_reference_unavailable"
+        assert facts[0].data["status"] == "resolved"
+        assert facts[0].data["target"] == {
+            "kind": "function",
+            "import_path": None,
+            "method_name": None,
+            "subject_ref": "global:spoofed_helper",
+        }
 
         spoofed_helper.__module__ = "x" * (static_analysis.MAX_STATIC_SCALAR_CHARS + 1)
         result, oversized_facts = _facts(spoofed_reference_target)
@@ -497,10 +592,10 @@ def test_static_calls_rejects_globals_without_stable_import_identity():
     _, facts = _facts(local_global_reference_target)
 
     assert facts[0].data["status"] == "unsupported"
-    assert facts[0].data["reason"] == "target_reference_unavailable"
+    assert facts[0].data["reason"] == "lambda_identity_unsupported"
 
 
-def test_static_calls_rejects_main_module_annotated_methods_without_import_path():
+def test_static_calls_resolves_main_module_annotated_methods_inline():
     original_module = MainModuleModel.train.__module__
     try:
         MainModuleModel.train.__module__ = "__main__"
@@ -508,8 +603,47 @@ def test_static_calls_rejects_main_module_annotated_methods_without_import_path(
     finally:
         MainModuleModel.train.__module__ = original_module
 
+    assert facts[0].data["status"] == "resolved"
+    assert facts[0].data["target"]["import_path"] is None
+    assert facts[0].data["target"]["subject_ref"] == "parameter:model.train"
+
+
+def test_static_calls_resolves_main_module_globals_inline():
+    original_module = helper.__module__
+    try:
+        helper.__module__ = "__main__"
+        _, facts = _facts(direct_global_target)
+    finally:
+        helper.__module__ = original_module
+
+    assert facts[0].data["status"] == "resolved"
+    assert facts[0].data["target"]["import_path"] is None
+    assert facts[0].data["target"]["subject_ref"] == "global:helper"
+
+
+def test_static_calls_isolates_direct_lambda_body_from_surrounding_calls():
+    result, facts = _facts(DIRECT_LAMBDA_TARGET)
+
+    assert result.ok
+    assert [fact.data["display"] for fact in facts] == ["helper"]
+    assert facts[0].data["status"] == "resolved"
+
+
+def test_static_calls_preserves_lambda_parameters_and_default_calls():
+    _, parameter_facts = _facts(LAMBDA_PARAMETER_TARGET)
+    _, default_facts = _facts(LAMBDA_DEFAULT_TARGET)
+
+    assert parameter_facts[0].data["status"] == "unresolved"
+    assert parameter_facts[0].data["reason"] == "parameter_name_unsupported"
+    assert [fact.data["display"] for fact in default_facts] == ["lambda_default_helper"]
+    assert default_facts[0].data["status"] == "resolved"
+
+
+def test_static_calls_does_not_guess_local_lambda_default_scope():
+    _, facts = _facts(LOCAL_LAMBDA_DEFAULT_TARGET)
+
     assert facts[0].data["status"] == "unsupported"
-    assert facts[0].data["reason"] == "target_reference_unavailable"
+    assert facts[0].data["reason"] == "enclosing_scope_unavailable"
 
 
 def test_static_calls_handles_nested_callable_expressions_conservatively():
@@ -593,8 +727,9 @@ def test_static_calls_enforces_call_site_limit(monkeypatch):
     result, facts = _facts(two_calls)
     summary = result.facts_of_kind("static_call_summary")[0]
 
-    assert len(facts) == 1
+    assert not facts
     assert summary.data["complete"] is False
+    assert summary.data["facts_emitted"] == 0
     diagnostic = result.diagnostics_of_code("dryml.code.static_call_sites_limit_exceeded")[0]
     assert diagnostic.data == {"limit_name": "call_sites", "limit": 1, "observed_lower_bound": 2}
 
@@ -735,3 +870,7 @@ def test_static_call_fact_rejects_unbounded_or_invalid_serialized_data():
         data["data"][field_name] = value
         with pytest.raises(ValueError, match=message):
             code.CodeFact.from_data(data)
+
+    valid = _facts(direct_global_target)[1][0]
+    with pytest.raises(ValueError, match="kind must be"):
+        code.StaticCallFact(kind="other", source=valid.source, data=valid.data)

@@ -186,13 +186,15 @@ containing only `kind`, `import_path`, `method_name`, and `subject_ref`.
 Unresolved, ambiguous, and unsupported facts use `confidence="conservative_hint"`.
 They are static possibilities, not runtime observations or dispatch requirements.
 
-Supported resolution forms are safely importable plain Python or builtin
+Supported resolution forms are safely described plain Python or builtin
 functions and ordinary classes from the analyzed function's real globals mapping
 and direct methods on direct parameters with an ordinary concrete class
-annotation, inspected without descriptor binding. Every resolved target has a
-verified import path. Inline-only lambdas, `__main__` methods, and bound builtin
-methods remain conservative because their serialized reference cannot uniquely
-describe the callable without retaining live state.
+annotation, inspected without descriptor binding. Importable resolved targets
+retain a verified import path. Inline-only globals and annotated methods instead
+retain a bounded source-level `subject_ref`; their null import path does not make
+them worker-runnable. Lambdas and bound builtin methods remain conservative
+because their identity depends on live state that the fixed target mapping cannot
+describe defensibly.
 String annotations, unions, generics, protocols, aliases, reassignment, nested
 scopes, attribute chains, call-result receivers, properties, dynamic `getattr`,
 callable instances, non-standard metaclasses, and control-flow inference do not
@@ -209,8 +211,11 @@ Both static analyzers enforce these limits before unbounded fact expansion:
 | Semantic-resolution diagnostics | 1,000 |
 | Serialized display/reference scalars | 4,096 characters |
 
-Bound exhaustion returns an error diagnostic with `limit_name`, `limit`, and
-`observed_lower_bound`; static-call summaries then set `complete` to false.
+Source, AST-node, call-site, and target-reference hard-bound exhaustion returns
+an error diagnostic with `limit_name`, `limit`, and `observed_lower_bound`;
+static-call summaries then set `complete` to false. Chain exhaustion produces a
+per-site unsupported fact, while non-target display scalar overflow uses a
+bounded replacement and can leave the summary complete.
 `static_calls` represents per-site resolution outcomes as bounded facts rather
 than one diagnostic per site, so it does not emit an unbounded stream of
 semantic-resolution diagnostics.
@@ -244,9 +249,10 @@ examples omit only ordinary line-number variation:
 | Invalid worker timeout | error | `code_probe.invalid_timeout` |
 
 `tests/code/test_static_calls_algorithm.py` proves global callables, methods,
-properties, callable instances, wrapper metadata, and metaclass lookups are not
-invoked. `tests/code/test_callable_algorithm.py` proves callable analysis avoids
-hostile target and metaclass metadata hooks. `tests/code/test_targets.py` proves
+properties, callable instances, annotation mappings, wrapper metadata, and
+metaclass lookups are not invoked. `tests/code/test_callable_algorithm.py` proves
+callable analysis avoids hostile target, wrapper, and metaclass metadata hooks.
+`tests/code/test_targets.py` proves
 import-path and bound-method normalization do not bind descriptors, invoke
 module/metaclass hooks, or truth-test raw descriptors during analysis.
 `tests/code/test_probe_target.py` proves probes do not execute submitted target
@@ -272,6 +278,10 @@ bodies or instantiate classes.
 - `src/dryml/core2/tensor_spec.py`
 
 ## Open Questions
+
+Remaining Sprint 9B contract questions for Sprint 9A acceptance: none. The
+following longer-term design questions remain outside the Sprint 9B invocation
+contract locked here:
 
 - Should facts be dataclasses, records specs, or both?
 - Which diagnostics must be JSON-compatible in Sprint 1?

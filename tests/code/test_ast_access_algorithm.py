@@ -165,3 +165,17 @@ def test_ast_access_bounds_filename_metadata(monkeypatch):
 
     assert result.facts_of_kind("ast_access")[0].source["filename"] is None
     assert result.facts_of_kind("call_site")[0].source["filename"] is None
+
+
+def test_ast_access_reports_exact_relative_and_absolute_lines(monkeypatch):
+    monkeypatch.setattr(
+        ast_access,
+        "get_source_info",
+        lambda obj: SourceInfo("def synthetic(obj):\n    obj.train()\n", "synthetic.py", 20),
+    )
+
+    result = code.analyze(lambda: None, algorithms=("ast_access",))
+    call = result.facts_of_kind("call_site")[0]
+
+    assert call.data["relative_line"] == 2
+    assert call.data["absolute_line"] == 21

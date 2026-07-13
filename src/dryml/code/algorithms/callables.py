@@ -11,6 +11,16 @@ from dryml.code.facts import CallableFact, DiagnosticFact
 from dryml.code.targets import CodeTarget
 
 
+class _DefaultPlaceholder:
+    def __repr__(self) -> str:
+        return "..."
+
+
+_DEFAULT_PLACEHOLDER = _DefaultPlaceholder()
+_ANNOTATION_PLACEHOLDER = _DefaultPlaceholder()
+_SAFE_SCALAR_TYPES = {type(None), bool, int, float, complex, str, bytes}
+
+
 @dataclass(frozen=True)
 class CallableInfo:
     """Normalized information about a Python callable.
@@ -48,7 +58,7 @@ def analyze_callable(obj) -> CallableInfo:
             original=obj,
             func=func,
             bound_self=bound_self,
-            signature=inspect.signature(func),
+            signature=_safe_signature(func),
             qualname=_safe_callable_metadata(func, "__qualname__"),
             module=_safe_callable_metadata(func, "__module__"),
             is_bound_method=True,
@@ -61,7 +71,7 @@ def analyze_callable(obj) -> CallableInfo:
             original=obj,
             func=obj,
             bound_self=None,
-            signature=inspect.signature(obj),
+            signature=_safe_signature(obj),
             qualname=_safe_callable_metadata(obj, "__qualname__"),
             module=_safe_callable_metadata(obj, "__module__"),
             is_bound_method=False,
@@ -79,7 +89,7 @@ def analyze_callable(obj) -> CallableInfo:
             original=obj,
             func=call,
             bound_self=obj,
-            signature=inspect.signature(call),
+            signature=_safe_signature(call),
             qualname=_safe_callable_metadata(call, "__qualname__"),
             module=_safe_callable_metadata(call, "__module__"),
             is_bound_method=False,
@@ -102,7 +112,7 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     signature = None
     try:
         info = analyze_callable(obj)
-        signature = str(info.signature)
+        signature = _safe_signature_text(info.signature)
     except Exception as exc:
         diagnostics.append(DiagnosticFact(
             severity="warning",
@@ -163,6 +173,71 @@ def _safe_owner_metadata(owner: type | None) -> tuple[str | None, str | None]:
         module if isinstance(module, str) else None,
         qualname if isinstance(qualname, str) else None,
     )
+
+
+def _safe_signature(obj: Any) -> inspect.Signature:
+    """Inspect a signature without following wrappers or custom mappings."""
+
+    if type(obj) is types.FunctionType:
+        annotations = object.__getattribute__(obj, "__annotations__")
+        kwdefaults = object.__getattribute__(obj, "__kwdefaults__")
+        if type(annotations) is not dict or (
+            kwdefaults is not None and type(kwdefaults) is not dict
+        ):
+            raise TypeError("callable metadata uses a custom mapping")
+    signature = inspect.signature(obj, follow_wrapped=False, eval_str=False)
+    if type(signature) is not inspect.Signature:
+        raise TypeError("callable metadata uses a custom Signature type")
+    if any(type(parameter) is not inspect.Parameter for parameter in signature.parameters.values()):
+        raise TypeError("callable metadata uses a custom Parameter type")
+    return signature
+
+
+def _safe_signature_text(signature: inspect.Signature) -> str:
+    """Render a signature without invoking user-controlled representations."""
+
+    parameters = []
+    for parameter in signature.parameters.values():
+        default = parameter.default
+        if default is not inspect.Parameter.empty and not _has_safe_repr(default):
+            default = _DEFAULT_PLACEHOLDER
+        annotation = parameter.annotation
+        if annotation is not inspect.Parameter.empty and not _has_safe_repr(annotation):
+            annotation = _ANNOTATION_PLACEHOLDER
+        parameters.append(parameter.replace(
+            default=default,
+            annotation=annotation,
+        ))
+    return_annotation = signature.return_annotation
+    if return_annotation is not inspect.Signature.empty and not _has_safe_repr(return_annotation):
+        return_annotation = _ANNOTATION_PLACEHOLDER
+    return str(signature.replace(
+        parameters=parameters,
+        return_annotation=return_annotation,
+    ))
+
+
+def _has_safe_repr(value: Any, seen: set[int] | None = None) -> bool:
+    """Return whether builtin representation cannot dispatch to user code."""
+
+    if type(value) in _SAFE_SCALAR_TYPES or value is Ellipsis or value is NotImplemented:
+        return True
+    if type(value) is type:
+        return True
+    if type(value) not in {tuple, list, set, frozenset, dict}:
+        return False
+    seen = set() if seen is None else seen
+    identity = id(value)
+    if identity in seen:
+        return False
+    seen.add(identity)
+    if type(value) is dict:
+        items = (*value.keys(), *value.values())
+    else:
+        items = value
+    result = all(_has_safe_repr(item, seen) for item in items)
+    seen.remove(identity)
+    return result
 
 
 def _safe_callable_metadata(obj: Any, name: str) -> str | None:

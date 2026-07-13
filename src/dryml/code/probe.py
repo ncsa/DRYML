@@ -583,7 +583,7 @@ def _target_can_run_in_subprocess(target: CodeTargetSpec) -> bool:
 
 
 def _non_serializable_target_result(target: CodeTargetSpec) -> CodeProbeResult:
-    if target.source_spec is not None and not target.import_path:
+    if target.source_spec is not None:
         return CodeProbeResult(
             ok=False,
             analysis=None,

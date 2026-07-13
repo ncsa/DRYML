@@ -164,6 +164,8 @@ class StaticCallFact(CodeFact):
     def __post_init__(self) -> None:
         """Validate the bounded, serializable static-call fact contract."""
 
+        if self.kind != "static_call":
+            raise ValueError("StaticCallFact kind must be 'static_call'")
         required = {
             "status", "confidence", "syntax", "display", "receiver",
             "method_name", "target", "reason", "relative_line",

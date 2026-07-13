@@ -94,6 +94,19 @@ def test_empty_source_spec_and_malformed_import_path_are_not_worker_eligible():
     assert malformed_result.diagnostics[0].code == "code_probe.non_serializable_target"
 
 
+def test_source_spec_with_unusable_import_path_reports_reconstruction_limit():
+    executable = PythonExecutableSpec(executable=sys.executable, pythonpath_policy="dryml-source")
+    target = code.CodeTargetSpec(
+        "source_spec",
+        import_path="__main__:target",
+        source_spec={"kind": "function", "source": "lambda: None"},
+    )
+
+    result = code.probe_target(target, environment=executable, include_environment_record=False)
+
+    assert result.diagnostics[0].code == "code_probe.source_spec_reconstruction_unavailable"
+
+
 def test_subprocess_probe_rejects_non_serializable_local_function():
     def local_target():
         return None
