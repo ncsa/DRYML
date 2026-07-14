@@ -305,10 +305,24 @@ def test_python_pod_subclass_hooks_are_not_invoked():
             type(self).called = True
             return super().encode(*args, **kwargs)
 
+    class HookMeta(type):
+        called = False
+
+        def __repr__(cls):
+            HookMeta.called = True
+            return "HookMetaInt"
+
+    class HookMetaInt(int, metaclass=HookMeta):
+        pass
+
     for value, value_type in ((HookInt(1), HookInt), (HookString("value"), HookString)):
         with pytest.raises(TypeError, match="Unsupported Python POD subclass"):
             bounded_stable_hash_function(value)
         assert value_type.called is False
+
+    with pytest.raises(TypeError, match="Unsupported Python POD subclass"):
+        bounded_stable_hash_function(HookMetaInt(1))
+    assert HookMeta.called is False
 
 
 def test_limit_configuration_is_strict():

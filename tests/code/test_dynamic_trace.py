@@ -361,11 +361,25 @@ def test_trace_rejects_pod_subclass_representation_hooks_before_invocation():
             type(self).hook_called = True
             return super().encode(*args, **kwargs)
 
+    class HookMeta(type):
+        hook_called = False
+
+        def __repr__(cls):
+            HookMeta.hook_called = True
+            return "HookMetaInt"
+
+    class HookMetaInt(int, metaclass=HookMeta):
+        pass
+
     for definition_factory in (
         lambda value: Definition(TraceModel, value=value),
         lambda value: ConcreteDefinition(TraceModel, (), {"value": value}),
     ):
-        for value, value_type in ((HookInt(1), HookInt), (HookString("value"), HookString)):
+        for value, value_type in (
+            (HookInt(1), HookInt),
+            (HookString("value"), HookString),
+            (HookMetaInt(1), HookMeta),
+        ):
             value_type.hook_called = False
             executed = []
             result = code.trace(
@@ -784,11 +798,25 @@ def test_external_definition_pod_subclass_is_unsupported_observed_argument():
             type(self).hook_called = True
             return super().encode(*args, **kwargs)
 
+    class HookMeta(type):
+        hook_called = False
+
+        def __repr__(cls):
+            HookMeta.hook_called = True
+            return "HookMetaInt"
+
+    class HookMetaInt(int, metaclass=HookMeta):
+        pass
+
     for external_factory in (
         lambda value: Definition(TraceModel, value=value),
         lambda value: ConcreteDefinition(TraceModel, (), {"value": value}),
     ):
-        for value, value_type in ((HookInt(1), HookInt), (HookString("value"), HookString)):
+        for value, value_type in (
+            (HookInt(1), HookInt),
+            (HookString("value"), HookString),
+            (HookMetaInt(1), HookMeta),
+        ):
             value_type.hook_called = False
             external = external_factory(value)
             result = code.trace(

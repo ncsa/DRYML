@@ -396,10 +396,7 @@ class _BoundedStableHasher:
             and isinstance(value, (int, float, str, bytes))
             and type(value) not in {bool, int, float, str, bytes}
         ):
-            raise TypeError(
-                "Unsupported Python POD subclass for bounded stable hashing: "
-                f"{type(value)!r}"
-            )
+            raise TypeError("Unsupported Python POD subclass for bounded stable hashing")
 
         # Enum members have an explicit generic decomposition below. The other
         # allowlisted identity values are only bounded for their exact current
