@@ -329,21 +329,38 @@ def test_trace_rejects_identity_subclass_leaf_hook_before_invocation():
             type(self).hook_called = True
             return b"unbounded-custom-leaf"
 
+    class HookMeta(type):
+        hook_called = False
+
+        def __repr__(cls):
+            HookMeta.hook_called = True
+            return "HookMetaDType"
+
+    class HookMetaDType(DType, metaclass=HookMeta):
+        pass
+
     executed = []
 
     def target(model):
         executed.append(True)
         model.train()
 
-    result = code.trace(
-        target,
-        args=(Definition(TraceModel, dtype=HookDType("float", 32)),),
-        context=_enabled(),
-    )
+    for dtype, hook_type in (
+        (HookDType("float", 32), HookDType),
+        (HookMetaDType("float", 32), HookMeta),
+    ):
+        HookDType.hook_called = False
+        HookMeta.hook_called = False
+        result = code.trace(
+            target,
+            args=(Definition(TraceModel, dtype=dtype),),
+            context=_enabled(),
+        )
 
-    assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
-    assert HookDType.hook_called is False
-    assert executed == []
+        assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
+        assert not result.facts_of_kind("dynamic_trace_summary")
+        assert hook_type.hook_called is False
+        assert executed == []
 
 
 def test_trace_rejects_pod_subclass_representation_hooks_before_invocation():
@@ -760,27 +777,43 @@ def test_external_definition_identity_subclass_is_unsupported_observed_argument(
             type(self).hook_called = True
             return b"unbounded-custom-leaf"
 
-    external = external_factory(HookDType("float", 32))
+    class HookMeta(type):
+        hook_called = False
 
-    def target(model):
-        model.train()
-        model.train(external)
+        def __repr__(cls):
+            HookMeta.hook_called = True
+            return "HookMetaDType"
 
-    result = code.trace(
-        target,
-        args=(Definition(TraceModel),),
-        context=_enabled(include_annotations=False, include_method_contracts=False),
-    )
+    class HookMetaDType(DType, metaclass=HookMeta):
+        pass
 
-    assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
-    assert len(result.facts_of_kind("dynamic_call")) == 1
-    assert _summary(result).data == {
-        "complete": False,
-        "outcome": "unsupported_argument",
-        "calls_recorded": 1,
-        "max_calls": 10_000,
-    }
-    assert HookDType.hook_called is False
+    for dtype, hook_type in (
+        (HookDType("float", 32), HookDType),
+        (HookMetaDType("float", 32), HookMeta),
+    ):
+        HookDType.hook_called = False
+        HookMeta.hook_called = False
+        external = external_factory(dtype)
+
+        def target(model):
+            model.train()
+            model.train(external)
+
+        result = code.trace(
+            target,
+            args=(Definition(TraceModel),),
+            context=_enabled(include_annotations=False, include_method_contracts=False),
+        )
+
+        assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
+        assert len(result.facts_of_kind("dynamic_call")) == 1
+        assert _summary(result).data == {
+            "complete": False,
+            "outcome": "unsupported_argument",
+            "calls_recorded": 1,
+            "max_calls": 10_000,
+        }
+        assert hook_type.hook_called is False
 
 
 def test_external_definition_pod_subclass_is_unsupported_observed_argument():

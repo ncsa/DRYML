@@ -290,6 +290,34 @@ def test_custom_stable_leaf_hook_is_not_invoked():
     assert Custom.called is False
 
 
+def test_atomic_subclass_metaclass_repr_is_not_invoked():
+    class HookMeta(type):
+        called = False
+
+        def __repr__(cls):
+            HookMeta.called = True
+            return "HookMetaDType"
+
+    class HookDType(DType, metaclass=HookMeta):
+        pass
+
+    class HookImportRef(ImportRef, metaclass=HookMeta):
+        pass
+
+    class HookSourceSpec(SourceSpec, metaclass=HookMeta):
+        pass
+
+    for value, message in (
+        (HookDType("float", 32), "Unsupported identity-value subclass"),
+        (HookImportRef("builtins", "dict"), "Unsupported symbol-reference subclass"),
+        (HookSourceSpec.from_source("class Local: pass", kind="class", name="Local"), "Unsupported symbol-reference subclass"),
+    ):
+        HookMeta.called = False
+        with pytest.raises(TypeError, match=message):
+            bounded_stable_hash_function(value)
+        assert HookMeta.called is False
+
+
 def test_python_pod_subclass_hooks_are_not_invoked():
     class HookInt(int):
         called = False

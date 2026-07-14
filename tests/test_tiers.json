@@ -1467,6 +1467,7 @@
     "tests/core/test_utils_recurse.py::test_map_leaves_basic_nested_structure": "smoke",
     "tests/core/test_utils_recurse.py::test_map_leaves_predicate_only_maps_matching_leaves": "smoke",
     "tests/core/test_utils_recurse.py::test_map_leaves_preserves_empty_containers": "smoke",
+    "tests/core2/test_bounded_stable_hash.py::test_atomic_subclass_metaclass_repr_is_not_invoked": "smoke",
     "tests/core2/test_bounded_stable_hash.py::test_bounded_hash_preserves_existing_digest[1.5]": "smoke",
     "tests/core2/test_bounded_stable_hash.py::test_bounded_hash_preserves_existing_digest[7]": "smoke",
     "tests/core2/test_bounded_stable_hash.py::test_bounded_hash_preserves_existing_digest[Choice.A]": "smoke",

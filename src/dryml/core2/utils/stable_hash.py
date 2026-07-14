@@ -406,17 +406,11 @@ class _BoundedStableHasher:
         if kind is NodeKind.IDENTITY_VALUE and type(value) not in {
             DType, TensorSpec, Cardinality, ConfigRef, FactorySpec,
         }:
-            raise TypeError(
-                "Unsupported identity-value type for bounded stable hashing: "
-                f"{type(value)!r}"
-            )
+            raise TypeError("Unsupported identity-value subclass for bounded stable hashing")
         if kind in {NodeKind.IMPORT_REF, NodeKind.SOURCE_SPEC} and type(value) not in {
             ImportRef, SourceSpec,
         }:
-            raise TypeError(
-                "Unsupported atomic leaf type for bounded stable hashing: "
-                f"{type(value)!r}"
-            )
+            raise TypeError("Unsupported symbol-reference subclass for bounded stable hashing")
 
     def _hash_atomic(self, value, *, depth: int) -> str:
         from ..cardinality import Cardinality
