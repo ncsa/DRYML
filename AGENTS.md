@@ -8,7 +8,7 @@ There is a `docs` directory containing explanatory material showing how to use t
 ## Tests
 Running the test suite is handled with `tests.sh`. Ignore tests in `tests/{old,dev}` they are currently old. I usually execute like this: `./tests.sh --ignore tests/old --ignore tests/dev -x tests`. The script passes additional arguments through, and you can run focused tests by specifying the files or folders you want to run.
 
-Try to avoid executing the full test suite often. There are some tests which are very 'heavy' and take a long time to run. `tests/core` is okay to run.
+Never start development with `./tests.sh full`; some maintained tests are intentionally heavy and make poor first-line feedback. Start with a reproducer or the narrowest affected tests, then run focused files and subsystem suites such as `tests/core`. Run broader or rolling compatibility only after focused tests pass. Run `./tests.sh full` at most once at final closeout when the governing sprint or user requires it, and do not repeat it after every repair without a material documented reason.
 
 ## Directory explanation
 
