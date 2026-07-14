@@ -290,6 +290,27 @@ def test_custom_stable_leaf_hook_is_not_invoked():
     assert Custom.called is False
 
 
+def test_python_pod_subclass_hooks_are_not_invoked():
+    class HookInt(int):
+        called = False
+
+        def __str__(self):
+            type(self).called = True
+            return super().__str__()
+
+    class HookString(str):
+        called = False
+
+        def encode(self, *args, **kwargs):
+            type(self).called = True
+            return super().encode(*args, **kwargs)
+
+    for value, value_type in ((HookInt(1), HookInt), (HookString("value"), HookString)):
+        with pytest.raises(TypeError, match="Unsupported Python POD subclass"):
+            bounded_stable_hash_function(value)
+        assert value_type.called is False
+
+
 def test_limit_configuration_is_strict():
     with pytest.raises(TypeError):
         bounded_stable_hash_function(1, limits=StableHashLimits(max_depth=True))

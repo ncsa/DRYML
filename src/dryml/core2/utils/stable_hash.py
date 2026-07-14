@@ -374,7 +374,7 @@ class _BoundedStableHasher:
 
     @staticmethod
     def _require_explicit_identity_decomposition(value, kind) -> None:
-        """Reject custom atomic leaf types before any leaf hook can run."""
+        """Reject unsupported atomic leaf variants before representation hooks run."""
 
         from ..canonical import NodeKind
         from ..cardinality import Cardinality
@@ -383,6 +383,23 @@ class _BoundedStableHasher:
         from ..factory import FactorySpec
         from ..symbol import ImportRef, SourceSpec
         from ..tensor_spec import TensorSpec
+
+        # ``node_kind`` intentionally classifies native scalar subclasses as
+        # POD so Definitions retain their normal canonical surface.  The
+        # bounded hasher cannot accept those subclasses, however: the legacy
+        # leaf encoder uses ``str(value)`` for integers and ``value.encode()``
+        # for strings, either of which can dispatch to an unbounded custom
+        # hook.  Admit only exact native POD leaves before any leaf encoder or
+        # representation/conversion operation is reached.
+        if (
+            kind is NodeKind.POD
+            and isinstance(value, (int, float, str, bytes))
+            and type(value) not in {bool, int, float, str, bytes}
+        ):
+            raise TypeError(
+                "Unsupported Python POD subclass for bounded stable hashing: "
+                f"{type(value)!r}"
+            )
 
         # Enum members have an explicit generic decomposition below. The other
         # allowlisted identity values are only bounded for their exact current
@@ -698,7 +715,8 @@ def bounded_stable_hash_function(structure, *, limits: StableHashLimits | None =
 
     Unlike a preflight check, budget accounting occurs in the same traversal
     that computes the digest, so a Definition cannot pass validation and then
-    trigger an unmetered second hash walk.
+    trigger an unmetered second hash walk. Native Python POD subclasses are
+    rejected before their representation or conversion hooks can run.
     """
 
     selected = limits or StableHashLimits()

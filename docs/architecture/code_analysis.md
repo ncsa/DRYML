@@ -293,6 +293,11 @@ coerced. By default all invocation leaves must be Definitions/CDefs. Setting
 `require_proxy_only_args=False` additionally permits bounded `None`, exact bool,
 integer, finite float, and string leaves.
 
+Those scalar leaves are exact native built-in values: subclasses of `int`,
+`float`, `str`, and `bytes` are unsupported by bounded Definition/CDef identity
+generation and are rejected before a custom representation or conversion hook
+can run.
+
 ### Target and execution-location support
 
 | Target | Direct `trace(...)` | Notes |

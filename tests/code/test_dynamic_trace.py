@@ -346,6 +346,39 @@ def test_trace_rejects_identity_subclass_leaf_hook_before_invocation():
     assert executed == []
 
 
+def test_trace_rejects_pod_subclass_representation_hooks_before_invocation():
+    class HookInt(int):
+        hook_called = False
+
+        def __str__(self):
+            type(self).hook_called = True
+            return super().__str__()
+
+    class HookString(str):
+        hook_called = False
+
+        def encode(self, *args, **kwargs):
+            type(self).hook_called = True
+            return super().encode(*args, **kwargs)
+
+    for definition_factory in (
+        lambda value: Definition(TraceModel, value=value),
+        lambda value: ConcreteDefinition(TraceModel, (), {"value": value}),
+    ):
+        for value, value_type in ((HookInt(1), HookInt), (HookString("value"), HookString)):
+            value_type.hook_called = False
+            executed = []
+            result = code.trace(
+                lambda model: executed.append(model),
+                args=(definition_factory(value),),
+                context=_enabled(),
+            )
+            assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
+            assert not result.facts_of_kind("dynamic_trace_summary")
+            assert value_type.hook_called is False
+            assert executed == []
+
+
 def test_current_annotation_facts_are_attached_and_switchable():
     result = code.trace(module_trace_target, args=(Definition(TraceModel),), context=_enabled())
     method_facts = result.facts_of_kind("dynamic_call")[0].data["method_facts"]
@@ -734,6 +767,44 @@ def test_external_definition_identity_subclass_is_unsupported_observed_argument(
         "max_calls": 10_000,
     }
     assert HookDType.hook_called is False
+
+
+def test_external_definition_pod_subclass_is_unsupported_observed_argument():
+    class HookInt(int):
+        hook_called = False
+
+        def __str__(self):
+            type(self).hook_called = True
+            return super().__str__()
+
+    class HookString(str):
+        hook_called = False
+
+        def encode(self, *args, **kwargs):
+            type(self).hook_called = True
+            return super().encode(*args, **kwargs)
+
+    for external_factory in (
+        lambda value: Definition(TraceModel, value=value),
+        lambda value: ConcreteDefinition(TraceModel, (), {"value": value}),
+    ):
+        for value, value_type in ((HookInt(1), HookInt), (HookString("value"), HookString)):
+            value_type.hook_called = False
+            external = external_factory(value)
+            result = code.trace(
+                lambda model: (model.train(), model.train(external)),
+                args=(Definition(TraceModel),),
+                context=_enabled(include_annotations=False, include_method_contracts=False),
+            )
+            assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
+            assert len(result.facts_of_kind("dynamic_call")) == 1
+            assert _summary(result).data == {
+                "complete": False,
+                "outcome": "unsupported_argument",
+                "calls_recorded": 1,
+                "max_calls": 10_000,
+            }
+            assert value_type.hook_called is False
 
 
 def test_observed_ordinary_definition_shaped_dictionary_round_trips():
