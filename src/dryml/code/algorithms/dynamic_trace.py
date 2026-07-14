@@ -1006,6 +1006,12 @@ def _encode_observed_call(planner: _Planner, args: tuple[Any, ...], kwargs: dict
                     "Dynamic trace observed definition identity limit exceeded.",
                     data={"limit_name": f"hash_{exc.limit_name}", "limit": exc.limit, "observed_lower_bound": exc.observed_lower_bound},
                 )
+            except TypeError:
+                planner.abort(
+                    "unsupported_argument",
+                    "dryml.code.dynamic_trace_unsupported_argument",
+                    "Dynamic trace observed an unsupported method argument.",
+                )
         if type(value) in {list, tuple, dict}:
             oid = id(value)
             if oid in active:

@@ -219,6 +219,8 @@
     "tests/code/test_dynamic_trace.py::test_disabled_trace_does_not_resolve_import_path": "smoke",
     "tests/code/test_dynamic_trace.py::test_empty_exact_containers_are_valid_in_proxy_only_mode": "smoke",
     "tests/code/test_dynamic_trace.py::test_enabled_import_path_respects_import_permission_and_redacts_failures": "smoke",
+    "tests/code/test_dynamic_trace.py::test_external_definition_identity_subclass_is_unsupported_observed_argument[concrete_definition]": "smoke",
+    "tests/code/test_dynamic_trace.py::test_external_definition_identity_subclass_is_unsupported_observed_argument[definition]": "smoke",
     "tests/code/test_dynamic_trace.py::test_facade_types_and_context_fail_before_execution": "smoke",
     "tests/code/test_dynamic_trace.py::test_failed_nested_trace_restores_outer_planner": "smoke",
     "tests/code/test_dynamic_trace.py::test_failure_summary_fits_reserved_aggregate_result_budget": "smoke",

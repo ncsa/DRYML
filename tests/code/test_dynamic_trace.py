@@ -697,6 +697,45 @@ def test_live_definition_created_outside_invocation_is_flattened_in_observed_cal
     assert observed["definition_ref"].startswith("cdef-v4-")
 
 
+@pytest.mark.parametrize(
+    "external_factory",
+    (
+        lambda dtype: Definition(TraceModel, dtype=dtype),
+        lambda dtype: ConcreteDefinition(TraceModel, (), {"dtype": dtype}),
+    ),
+    ids=("definition", "concrete_definition"),
+)
+def test_external_definition_identity_subclass_is_unsupported_observed_argument(external_factory):
+    class HookDType(DType):
+        hook_called = False
+
+        def __stable_leaf_bytes__(self):
+            type(self).hook_called = True
+            return b"unbounded-custom-leaf"
+
+    external = external_factory(HookDType("float", 32))
+
+    def target(model):
+        model.train()
+        model.train(external)
+
+    result = code.trace(
+        target,
+        args=(Definition(TraceModel),),
+        context=_enabled(include_annotations=False, include_method_contracts=False),
+    )
+
+    assert result.diagnostics_of_code("dryml.code.dynamic_trace_unsupported_argument")
+    assert len(result.facts_of_kind("dynamic_call")) == 1
+    assert _summary(result).data == {
+        "complete": False,
+        "outcome": "unsupported_argument",
+        "calls_recorded": 1,
+        "max_calls": 10_000,
+    }
+    assert HookDType.hook_called is False
+
+
 def test_observed_ordinary_definition_shaped_dictionary_round_trips():
     ordinary = {"definition_kind": "ordinary", "definition_ref": "ordinary"}
     result = code.trace(
