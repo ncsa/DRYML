@@ -1508,11 +1508,6 @@ def _admit_trace_result(
         )
         return direct_fragments, provenance, (diagnostic,)
 
-    if calls is not None and summary is not None and len(calls) > _TRACE_MAX_CALLS:
-        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
-        provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
-        return direct_fragments, provenance, (diagnostic,)
-
     if summary["data"]["complete"] is True and result.diagnostics:
         # A complete 9B summary cannot carry post-start diagnostics.  This is
         # inconsistent result evidence, not an incomplete trace outcome: the
@@ -1527,6 +1522,11 @@ def _admit_trace_result(
             normalized, policy, target, input_id, run_id, True, summary,
             [fact.to_data() for fact in admitted_calls], diagnostic,
         )
+        return direct_fragments, provenance, (diagnostic,)
+
+    if calls is not None and summary is not None and len(calls) > _TRACE_MAX_CALLS:
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
+        provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
         return direct_fragments, provenance, (diagnostic,)
 
     if summary["data"]["complete"] is not True:

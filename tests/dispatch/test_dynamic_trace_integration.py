@@ -605,6 +605,47 @@ def test_complete_trace_with_nonpreexecution_diagnostic_returns_failed_plan_and_
     assert explanation.resolution.dynamic_trace.data["status"] == "evidence_rejected"
 
 
+def test_oversized_complete_trace_with_diagnostic_remains_rejected_for_plan_and_explain(monkeypatch, tmp_path):
+    """Inconsistent complete evidence takes precedence over projection overflow."""
+    import dryml.dispatch.requirements as requirements
+
+    def oversized_complete_result_with_diagnostic(*_args, **kwargs):
+        return CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=tuple(_dynamic_call(index) for index in range(257)) + (_summary(calls=257),),
+            diagnostics=(DiagnosticFact(
+                severity="error",
+                code="dryml.code.dynamic_trace_algorithm_failed",
+                message="must reject inconsistent complete evidence before overflow",
+            ),),
+        )
+
+    monkeypatch.setattr(requirements, "trace", oversized_complete_result_with_diagnostic)
+    dispatcher = Dispatcher(store=_store(tmp_path))
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        dispatcher.plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["trace_input_id"] and evidence["trace_run_id"]
+    assert evidence["execution_started"] is True
+    assert evidence["summary"] is None
+    assert evidence["calls"] == []
+    assert evidence["diagnostics"][0]["code"] == "dryml.dispatch.dynamic_trace_evidence_rejected"
+
+    explanation = dispatcher.explain(
+        traceable_target,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+    assert explanation.launchable is False
+    explanation_evidence = explanation.resolution.dynamic_trace.data
+    assert explanation_evidence["status"] == "evidence_rejected"
+    assert explanation_evidence["summary"] is None
+    assert explanation_evidence["calls"] == []
+
+
 def test_admission_accepts_context_metadata_in_returned_target(monkeypatch, tmp_path):
     import dryml.dispatch.requirements as requirements
 
