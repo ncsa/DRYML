@@ -569,6 +569,42 @@ def test_admission_rejects_recognized_preexecution_diagnostic_mixed_with_summary
     assert evidence["summary"]["data"]["calls_recorded"] == 0
 
 
+def test_complete_trace_with_nonpreexecution_diagnostic_returns_failed_plan_and_explain(monkeypatch, tmp_path):
+    """Inconsistent post-start evidence remains a rejected, non-launchable carrier."""
+    import dryml.dispatch.requirements as requirements
+
+    def complete_result_with_diagnostic(*_args, **kwargs):
+        return CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(_summary(),),
+            diagnostics=(DiagnosticFact(
+                severity="error",
+                code="dryml.code.dynamic_trace_algorithm_failed",
+                message="must reject inconsistent complete evidence",
+            ),),
+        )
+
+    monkeypatch.setattr(requirements, "trace", complete_result_with_diagnostic)
+    dispatcher = Dispatcher(store=_store(tmp_path))
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        dispatcher.plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["execution_started"] is True
+    assert evidence["summary"]["data"]["complete"] is True
+    assert evidence["diagnostics"][0]["code"] == "dryml.dispatch.dynamic_trace_evidence_rejected"
+
+    explanation = dispatcher.explain(
+        traceable_target,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+    assert explanation.launchable is False
+    assert explanation.resolution.dynamic_trace.data["status"] == "evidence_rejected"
+
+
 def test_admission_accepts_context_metadata_in_returned_target(monkeypatch, tmp_path):
     import dryml.dispatch.requirements as requirements
 

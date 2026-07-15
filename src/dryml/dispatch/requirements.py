@@ -1512,7 +1512,23 @@ def _admit_trace_result(
         )
         return direct_fragments, provenance, (diagnostic,)
 
-    if summary["data"]["complete"] is not True or result.diagnostics:
+    if summary["data"]["complete"] is True and result.diagnostics:
+        # A complete 9B summary cannot carry post-start diagnostics.  This is
+        # inconsistent result evidence, not an incomplete trace outcome: the
+        # incomplete-carrier invariant intentionally requires an incomplete
+        # summary.  Preserve independently validated start evidence only in the
+        # rejected carrier so plan and explain can report their bounded failure.
+        diagnostic = _trace_diagnostic(
+            "dryml.dispatch.dynamic_trace_evidence_rejected",
+            trace_diagnostic_codes=safe_diagnostic_codes,
+        )
+        provenance = _rejected_trace_provenance(
+            normalized, policy, target, input_id, run_id, True, summary,
+            [fact.to_data() for fact in admitted_calls], diagnostic,
+        )
+        return direct_fragments, provenance, (diagnostic,)
+
+    if summary["data"]["complete"] is not True:
         status = "failed" if summary["data"].get("outcome") == "target_failed" else "incomplete"
         diagnostic = _trace_diagnostic(
             "dryml.dispatch.dynamic_trace_failed" if status == "failed" else "dryml.dispatch.dynamic_trace_incomplete",

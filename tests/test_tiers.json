@@ -1593,6 +1593,7 @@
     "tests/dispatch/test_dynamic_trace_integration.py::test_analysis_policy_mixed_type_unknown_keys_raise_dispatch_error": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_byte_overflow_is_projected_without_raw_validation_error": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_complete_provenance_requires_valid_summary_and_strict_status_invariants": "smoke",
+    "tests/dispatch/test_dynamic_trace_integration.py::test_complete_trace_with_nonpreexecution_diagnostic_returns_failed_plan_and_explain": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_context_metadata_snapshot_survives_mutation_during_normalization_and_before_trace[explain]": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_context_metadata_snapshot_survives_mutation_during_normalization_and_before_trace[plan]": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_direct_callable_normalizer_cannot_create_trace_ready_target": "smoke",
