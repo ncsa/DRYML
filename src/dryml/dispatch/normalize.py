@@ -413,12 +413,11 @@ def _method_target_from_cdef(
         op = attach_operation_id(make_method_call_spec(cdef_id, method_name, args=args, kwargs=kwargs, metadata=_normalization_metadata(user_target_kind, "method_call", code_target)))
     except OperationSpecError as exc:
         raise DispatchPlanningError(str(exc), context=exc.context) from exc
-    live_target = getattr(cls, method_name, None) if cls is not None and hasattr(cls, method_name) else None
     return NormalizedDispatchTarget(
         op,
         {"call_transport": "method_call", "portable": True},
         code_target,
-        live_annotation_targets=() if live_target is None else (live_target,),
+        live_annotation_targets=(),
         subject_class=cls,
         method_name=method_name,
         transport="method_call",

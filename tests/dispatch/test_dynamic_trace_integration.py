@@ -94,6 +94,10 @@ class DescriptorSentinel:
         raise AssertionError("trace eligibility must not invoke descriptors")
 
 
+class StoredDescriptorObject(Object):
+    train = DescriptorSentinel()
+
+
 def generator_target():
     yield None
 
@@ -517,6 +521,45 @@ def test_stored_method_targets_keep_store_and_input_identity_without_persisting(
     assert evidence["status"] == "pre_execution_failed"
     assert evidence["trace_input_id"]
     assert evidence["trace_run_id"] is None
+
+
+@pytest.mark.parametrize("use_object", [False, True])
+def test_trace_unsupported_stored_method_does_not_bind_descriptor(monkeypatch, tmp_path, use_object):
+    subject = StoredDescriptorObject() if use_object else ConcreteDefinition(StoredDescriptorObject)
+    cdef = subject.definition if use_object else subject
+    cdef_id = format_cdef_id(cdef.stable_hash())
+
+    class StoredCDefStore:
+        def has(self, value):
+            return value == cdef
+
+        def object_dir_for_cdef_id(self, value):
+            assert value == cdef_id
+            return str(tmp_path)
+
+    store = StoredCDefStore()
+    pickle_save(cdef, tmp_path / "def.pkl")
+    if use_object:
+        monkeypatch.setattr(
+            "dryml.dispatch.normalize.Repo.save",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not persist")),
+        )
+
+    normalized = normalize_user_operation(
+        subject,
+        "train",
+        store=store,
+        trace_enabled=True,
+        persist_object=True,
+    )
+    resolution = resolve_dispatch_plan(
+        normalized,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+
+    assert normalized.live_annotation_targets == ()
+    assert resolution.dynamic_trace.data["status"] == "pre_execution_failed"
 
 
 def test_admission_rejects_unexpected_fact_even_with_complete_zero_call_summary(monkeypatch, tmp_path):
