@@ -159,10 +159,24 @@ def normalize_user_operation(
         trace_positions = ()
     norm_method = _validate_optional_method_name(method_name)
 
+    # Trace-enabled method targets are unsupported, but a stored CDef/Object
+    # still needs the ordinary non-mutating method-call carrier so dispatch can
+    # construct its input identity before reporting that unsupported request.
+    # A plain Definition would concretize and an Object would persist below, so
+    # reject or suppress those mutations before entering their normal branches.
+    if trace_enabled and isinstance(operation, Definition) and not isinstance(operation, ConcreteDefinition):
+        raise DispatchPlanningError("dynamic tracing does not support plain Definition method targets")
     if is_definition_or_cdef(operation):
         return normalize_definition_method_operation(operation, norm_method, store=store, args=norm_args, kwargs=norm_kwargs)
     if is_dryml_object_instance(operation):
-        return normalize_object_method_operation(operation, norm_method, store=store, args=norm_args, kwargs=norm_kwargs, persist=persist_object)
+        return normalize_object_method_operation(
+            operation,
+            norm_method,
+            store=store,
+            args=norm_args,
+            kwargs=norm_kwargs,
+            persist=False if trace_enabled else persist_object,
+        )
     if looks_like_operation_spec(operation):
         if norm_method is not None:
             raise DispatchPlanningError("method_name cannot be supplied with an explicit OperationSpec")
@@ -400,6 +414,7 @@ def _method_target_from_cdef(
         method_name=method_name,
         transport="method_call",
         definition_target=cdef,
+        trace_store=store,
     )
 
 

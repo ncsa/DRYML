@@ -15,6 +15,7 @@ import dryml
 from dryml.code import CodeAnalysisContext, CodeAnalysisResult, DynamicTracePolicy, target_from_callable
 from dryml.code.facts import CodeFact, DiagnosticFact, DynamicCallFact
 from dryml.core2.definition import ConcreteDefinition, Definition
+from dryml.core2.object import Object
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
@@ -45,6 +46,12 @@ class TraceRequirementModel:
     @dryml.env.req(requirements=("trace-method>=1",))
     def train(self):
         raise AssertionError("trace must use a proxy")
+
+
+class StoredTraceObject(Object):
+    @dryml.env.req(requirements=("stored-object-method>=1",))
+    def train(self):
+        raise AssertionError("trace must not invoke a stored method target")
 
 
 def nested_requirement_target(model):
@@ -246,7 +253,15 @@ def test_trace_uses_worker_resolver_cdef_invocation_and_adds_nested_fragments(tm
 def test_trace_result_admission_keeps_preexecution_and_rejected_identity_rules(monkeypatch, tmp_path, result, status, run_present):
     import dryml.dispatch.requirements as requirements
 
-    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=result.facts,
+            diagnostics=result.diagnostics,
+        ),
+    )
     with pytest.raises(DispatchPlanningError) as excinfo:
         Dispatcher(store=_store(tmp_path)).plan(
             traceable_target,
@@ -444,6 +459,65 @@ def test_plain_definition_trace_argument_rejects_without_concretize_or_target(mo
     assert _calls == []
 
 
+def test_trace_definition_method_target_rejects_before_concretization(monkeypatch, tmp_path):
+    definition = Definition(TraceRequirementModel)
+    monkeypatch.setattr(
+        Definition,
+        "concretize",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not concretize")),
+    )
+
+    with pytest.raises(DispatchPlanningError, match="plain Definition method"):
+        Dispatcher(store=_store(tmp_path)).plan(
+            definition,
+            "train",
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+
+@pytest.mark.parametrize("use_object", [False, True])
+def test_stored_method_targets_keep_store_and_input_identity_without_persisting(monkeypatch, tmp_path, use_object):
+    subject = StoredTraceObject() if use_object else ConcreteDefinition(TraceRequirementModel)
+    cdef = subject.definition if use_object else subject
+    cdef_id = format_cdef_id(cdef.stable_hash())
+
+    class StoredCDefStore:
+        def has(self, value):
+            return value == cdef
+
+        def object_dir_for_cdef_id(self, value):
+            assert value == cdef_id
+            return str(tmp_path)
+
+    store = StoredCDefStore()
+    pickle_save(cdef, tmp_path / "def.pkl")
+    if use_object:
+        monkeypatch.setattr(
+            "dryml.dispatch.normalize.Repo.save",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not persist")),
+        )
+
+    normalized = normalize_user_operation(
+        subject,
+        "train",
+        store=store,
+        trace_enabled=True,
+        persist_object=True,
+    )
+    resolution = resolve_dispatch_plan(
+        normalized,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+
+    evidence = resolution.dynamic_trace.to_data()
+    assert normalized.trace_store is store
+    assert evidence["status"] == "pre_execution_failed"
+    assert evidence["trace_input_id"]
+    assert evidence["trace_run_id"] is None
+
+
 def test_admission_rejects_unexpected_fact_even_with_complete_zero_call_summary(monkeypatch, tmp_path):
     import dryml.dispatch.requirements as requirements
 
@@ -497,8 +571,14 @@ def test_admission_rejects_recognized_preexecution_diagnostic_mixed_with_summary
 def test_admission_accepts_context_metadata_in_returned_target(monkeypatch, tmp_path):
     import dryml.dispatch.requirements as requirements
 
-    result = CodeAnalysisResult(target_from_callable(traceable_target, metadata={"run_id": "audit"}).spec, facts=(_summary(),))
-    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(_summary(),),
+        ),
+    )
 
     plan = Dispatcher(store=_store(tmp_path)).plan(
         traceable_target,
@@ -508,6 +588,122 @@ def test_admission_accepts_context_metadata_in_returned_target(monkeypatch, tmp_
 
     assert plan.resolution.dynamic_trace.data["status"] == "complete"
     assert "audit" not in json.dumps(plan.resolution.dynamic_trace.to_data())
+
+
+def test_trace_result_requires_current_input_and_run_correlation(monkeypatch, tmp_path):
+    """A stale same-function result without this facade run's metadata rejects."""
+    import dryml.dispatch.requirements as requirements
+
+    stale = CodeAnalysisResult(target_from_callable(traceable_target).spec, facts=(_summary(),))
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: stale)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(
+            traceable_target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["trace_input_id"] and evidence["trace_run_id"]
+    assert "_dryml_dispatch_trace" not in json.dumps(evidence)
+
+
+def test_trace_input_identity_includes_complete_facade_target_metadata(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(_summary(),),
+        ),
+    )
+    dispatcher = Dispatcher(store=_store(tmp_path))
+    first = dispatcher.explain(
+        traceable_target,
+        analysis_policy={"context": CodeAnalysisContext(metadata={"variant": "one"}), "dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+    second = dispatcher.explain(
+        traceable_target,
+        analysis_policy={"context": CodeAnalysisContext(metadata={"variant": "two"}), "dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+
+    assert first.resolution.dynamic_trace.data["trace_input_id"] != second.resolution.dynamic_trace.data["trace_input_id"]
+
+
+def test_parsed_trace_request_is_not_an_accepted_public_policy_form(tmp_path):
+    parsed = parse_analysis_policy({"dynamic_trace": True})
+
+    with pytest.raises(DispatchPlanningError, match="public CodeAnalysisContext or mapping"):
+        parse_analysis_policy(parsed)
+    with pytest.raises(DispatchPlanningError, match="public CodeAnalysisContext or mapping"):
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy=parsed)
+
+
+def test_rejected_provenance_requires_true_when_valid_summary_proves_start():
+    data = {
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": None,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": 1, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "evidence_rejected",
+        "summary": _summary().to_data(),
+        "calls": [],
+        "accepted_fragments": [],
+        "duplicate_observations": [],
+        "diagnostics": [{
+            "code": "dryml.dispatch.dynamic_trace_evidence_rejected",
+            "severity": "error",
+            "data": {"trace_diagnostic_codes": []},
+        }],
+    }
+    with pytest.raises(ValueError, match="proves execution start"):
+        DynamicTraceProvenance(data)
+
+
+def test_trace_diagnostics_use_fixed_schema_and_preserve_underlying_codes(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=(_summary(complete=False, outcome="algorithm_failed"),),
+        diagnostics=(DiagnosticFact(
+            severity="error",
+            code="dryml.code.dynamic_trace_algorithm_failed",
+            message="must not be projected",
+        ),),
+    )
+
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=result.facts,
+            diagnostics=result.diagnostics,
+        ),
+    )
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(
+            traceable_target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+    diagnostic = excinfo.value.context["dynamic_trace"]["diagnostics"][0]
+    assert set(diagnostic) == {"code", "severity", "data"}
+    assert diagnostic["code"] == "dryml.dispatch.dynamic_trace_incomplete"
+    assert diagnostic["data"] == {"trace_diagnostic_codes": ["dryml.code.dynamic_trace_algorithm_failed"]}
 
 
 def _summary(*, complete=True, outcome="complete", calls=0, max_calls=10_000):
@@ -646,7 +842,11 @@ def test_provenance_policy_uses_exact_dynamic_trace_bounds():
         "calls": [],
         "accepted_fragments": [],
         "duplicate_observations": [],
-        "diagnostics": [{"code": "dryml.dispatch.dynamic_trace_provenance_limit_exceeded", "severity": "error"}],
+        "diagnostics": [{
+            "code": "dryml.dispatch.dynamic_trace_provenance_limit_exceeded",
+            "severity": "error",
+            "data": {"trace_diagnostic_codes": []},
+        }],
     }
     assert DynamicTraceProvenance.from_data(data).to_data() == data
     for max_calls in (0, 10_001):
@@ -936,7 +1136,11 @@ def test_provenance_rejects_each_top_level_count_and_scalar_overflow():
         "calls": [],
         "accepted_fragments": [],
         "duplicate_observations": [],
-        "diagnostics": [{"code": "dryml.dispatch.dynamic_trace_unsupported_input", "severity": "error"}],
+        "diagnostics": [{
+            "code": "dryml.dispatch.dynamic_trace_unsupported_input",
+            "severity": "error",
+            "data": {"trace_diagnostic_codes": []},
+        }],
     }
     overlong = {**base, "diagnostics": [{"code": "x" * 4097, "severity": "error"}]}
     with pytest.raises(ValueError):

@@ -181,8 +181,12 @@ unknown summary outcomes, and other malformed or mixed evidence are
 that rejection: evidence proving execution started retains nonempty input/run
 IDs and `execution_started=true`; genuinely unknown start is represented by
 `null`. Only independently validated bounded summary/call wires can be retained
-for diagnostics, never for requirement resolution or publication. Carriers
-contain fixed code/severity diagnostics only: no exception messages, tracebacks,
+for diagnostics, never for requirement resolution or publication. Each carrier
+diagnostic uses the fixed machine schema `{"code": str, "severity":
+"info"|"warning"|"error", "data": {"trace_diagnostic_codes": [str,
+...]}}`. The bounded `trace_diagnostic_codes` array preserves safely available
+underlying 9B code identifiers without promoting their messages or arbitrary
+data into the projection. Carriers contain no exception messages, tracebacks,
 locals, source, environment values, streams, live objects, or arbitrary repr.
 If accepted trace facts change a `pickle_small` final candidate to a different
 Python environment, planning cleans the temporary pickle and blocks launch while

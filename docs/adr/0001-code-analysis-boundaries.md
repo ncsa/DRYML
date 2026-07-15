@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted through Sprint 9C dispatch integration and current-process trace boundaries.
+Accepted through Sprint 9B. Sprint 9C dispatch integration remains pending its
+completion gate, focused verification, and final audit/acceptance decision.
 
 ## Context
 
@@ -62,7 +63,9 @@ Putting analysis inside dispatch would duplicate algorithms and tie them to one 
 ## Follow-up Work
 
 Sprint 9A added bounded syntactic and conservative static-call analysis. Sprint
-9B added the bounded current-process dynamic trace facade. Sprint 9C adds the
-explicit dispatch policy and bounded planning carrier for accepted facts;
-unchecked graph prototypes remain absent from tracked distributions. Sprint 2 reviewed the `Method` model migration toward
+9B added the bounded current-process dynamic trace facade. Sprint 9C is
+implementing an explicit dispatch policy and bounded planning carrier for
+accepted facts; it must not be recorded as accepted until its completion gate is
+met. Unchecked graph prototypes remain absent from tracked distributions. Sprint
+2 reviewed the `Method` model migration toward
 `core2.methods`.
