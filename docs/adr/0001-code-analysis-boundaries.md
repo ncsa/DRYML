@@ -3,7 +3,8 @@
 ## Status
 
 Accepted through Sprint 9C. ADR 0006 records the explicit maintained-full
-verification deviation accepted for Sprint 9C closeout.
+verification deviation, and ADR 0007 records the separate final-candidate
+focused/rolling verification deviation accepted for Sprint 9C closeout.
 
 ## Context
 
@@ -65,7 +66,7 @@ Putting analysis inside dispatch would duplicate algorithms and tie them to one 
 Sprint 9A added bounded syntactic and conservative static-call analysis. Sprint
 9B added the bounded current-process dynamic trace facade. Sprint 9C added the
 explicit dispatch policy and bounded planning carrier for accepted facts. Its
-maintained-full closeout exception and required future rerun conditions are
-recorded in ADR 0006. Unchecked graph prototypes remain absent from tracked
-distributions. Sprint 2 reviewed the `Method` model migration toward
-`core2.methods`.
+maintained-full and final-candidate focused/rolling exceptions, including required
+future rerun conditions, are recorded in ADRs 0006 and 0007. Unchecked graph
+prototypes remain absent from tracked distributions. Sprint 2 reviewed the
+`Method` model migration toward `core2.methods`.
