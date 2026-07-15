@@ -120,7 +120,9 @@ and `dynamic_trace`. When present, `context` must be a
 `CodeAnalysisContext`; `None` is not an omission. The trace member is exactly `True` (the default
 `DynamicTracePolicy`) or an already validated `DynamicTracePolicy`; falsey or
 truthy substitutes, mappings, and unknown keys are rejected before operation
-normalization or pickle transport creation.
+normalization or pickle transport creation. Dispatch takes a private deep JSON
+snapshot of accepted context metadata at that boundary. Later caller mutation
+cannot change discovery, trace identity, or facade metadata for that request.
 
 Only a live, exact, synchronous Python function is traceable.  Explicit
 `PickledCallable` is traceable only after its preliminary candidate is confirmed
@@ -175,8 +177,15 @@ four normalized transport tokens `import_path`, `pickle_small`,
 `operation_spec`, and `method_call` are accepted; an unknown token is a schema
 error rather than being serialized or substituted. Raw dynamic-call positional
 and keyword arguments are used only transiently for trace admission and fragment
-extraction; every provenance call wire persists empty `args` and `kwargs` so
-call-time secrets cannot enter explanation, metadata, or sidecars.
+extraction. Persisted calls use a separate canonical projection containing only
+the receiver observation, method name, method-fact count, and safe annotation
+fragment digests. It omits arguments, method-fact wires, source metadata, and
+environment data, so call-time and annotation-metadata secrets cannot enter
+explanations, metadata, or sidecars. Restoration rejects legacy dynamic-call
+wires and every noncanonical projection rather than coercing it into redaction.
+Before accepted traced fragments enter requirement resolution, dispatch also
+removes their non-semantic annotation source and target metadata; requirement
+semantics and structured source identity remain unchanged.
 
 A null `trace_input_id` is allowed only when the effective invocation itself
 could not be constructed. Dispatch admits a no-summary `pre_execution_failed`

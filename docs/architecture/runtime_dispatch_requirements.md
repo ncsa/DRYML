@@ -64,6 +64,10 @@ annotations remains the sole merge authority. Trace failure, incomplete or
 rejected evidence, and provenance overflow are structural planning failures,
 independent of strict/warn/ignore. This trusted-code execution has neither a
 sandbox nor hard timeout and is never relocated to a probe or worker.
+At its public policy boundary, dispatch creates a private deep JSON metadata
+snapshot of the caller context. Discovery, trace-input identity, and facade
+derivation use that snapshot only, so a later mutation cannot change an
+in-flight request's effective metadata.
 
 The dispatch trace projection is versioned and bounded. It carries per-request
 input/run identity and recognized `pre_execution_failed`/`evidence_rejected`
@@ -83,10 +87,16 @@ enters annotations resolution. The carrier accepts only `import_path`,
 unknown tokens, enforces 9B `max_calls` 1..10,000 plus dispatch count/depth/
 string/byte limits, and redacts exception text, tracebacks, source, environment,
 streams, live objects, arbitrary repr, and all dynamic-call positional/keyword
-argument values. Raw call arguments are transient admission/fragment evidence;
-persisted provenance call wires have empty `args` and `kwargs`. Projection
-overflow retains a valid summary with empty calls as `provenance_limit_exceeded`;
-it never truncates.
+argument values. Raw call wires are transient admission/fragment evidence and
+are validated before persistence projection. Persisted calls are strict canonical
+summaries: receiver observation, method name, method-fact count, and annotation
+fragment digests only. They omit arguments, method-fact/source wires, and
+environment metadata; restoration rejects legacy or malformed wires rather than
+coercing them into redacted values. Projection overflow retains a valid summary
+with empty calls as `provenance_limit_exceeded`; it never truncates.
+Accepted trace fragments likewise drop annotation source/target metadata before
+they enter persisted requirement resolution, while retaining their semantic
+fragment data and structured source identity.
 For `pickle_small`, a final candidate that is not the current Python after an
 accepted trace is non-launchable but preserves that completed carrier through
 cleanup.

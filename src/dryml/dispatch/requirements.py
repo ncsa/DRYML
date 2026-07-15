@@ -144,11 +144,12 @@ class DynamicTraceProvenance:
     9B policy/summary schemas.  Rejected evidence is diagnostic-only: a valid
     summary/call prefix may prove start but never enters requirement resolution;
     complete carriers bind calls to the carrier target and observations to
-    canonical serialized annotation facts; overflow retains a valid summary with
-    empty calls. Raw call arguments are transient admission evidence: persisted
-    call wires always use empty ``args`` and ``kwargs``. It stores fixed
-    code/severity diagnostics rather than target exceptions, source, environment
-    values, streams, live objects, or arbitrary representations.
+    canonical persisted method-fact digests; overflow retains a valid summary
+    with empty calls. Raw dynamic-call wires are admission-only. Persistence
+    stores a separate projection with no arguments, method-fact wires, source
+    metadata, or environment data. It stores fixed code/severity diagnostics
+    rather than target exceptions, source, environment values, streams, live
+    objects, or arbitrary representations.
     """
 
     data: Mapping[str, Any]
@@ -157,7 +158,6 @@ class DynamicTraceProvenance:
         if type(self.data) is not dict:
             raise ValueError("dynamic trace provenance must be an exact dictionary")
         value = dict(self.data)
-        value["calls"] = _redact_trace_call_arguments(value.get("calls"))
         required = {
             "schema", "schema_version", "requested", "trace_input_id",
             "trace_run_id", "execution_location", "execution_started",
@@ -208,7 +208,7 @@ class DynamicTraceProvenance:
             raise _TraceProvenanceLimitError("dynamic trace provenance exceeds byte limit")
         _validate_trace_policy(value["policy"])
         summary = value["summary"]
-        calls = _validated_trace_calls(value["calls"], target=target)
+        calls = _validated_persisted_trace_calls(value["calls"], target=target)
         if status == "complete":
             _validate_trace_observations(calls, value["accepted_fragments"], value["duplicate_observations"])
         _validate_trace_diagnostics(value["diagnostics"])
@@ -220,7 +220,7 @@ class DynamicTraceProvenance:
                 raise ValueError("invalid rejected trace provenance evidence")
             if value["execution_started"] is None and (calls or summary is not None):
                 raise ValueError("rejected trace provenance evidence proves execution start")
-            if [call.data["sequence"] for call in calls] != list(range(len(calls))):
+            if [call["sequence"] for call in calls] != list(range(len(calls))):
                 raise ValueError("rejected trace provenance calls must be contiguous")
             if summary is not None:
                 _validate_trace_summary(summary, policy=value["policy"], target=target)
@@ -236,7 +236,7 @@ class DynamicTraceProvenance:
             if value["execution_started"] is not True:
                 raise ValueError("trace provenance status requires execution start")
             _validate_trace_summary(summary, policy=value["policy"], target=target)
-            if [call.data["sequence"] for call in calls] != list(range(len(calls))):
+            if [call["sequence"] for call in calls] != list(range(len(calls))):
                 raise ValueError("trace provenance calls must be contiguous")
             if summary["data"]["calls_recorded"] != len(calls):
                 raise ValueError("trace provenance summary call count differs")
@@ -262,29 +262,120 @@ class DynamicTraceProvenance:
         return cls(data)
 
 
-def _redact_trace_call_arguments(calls: Any) -> Any:
-    """Return provenance call wires with all raw invocation values removed.
+_PERSISTED_TRACE_CALL_SCHEMA = "dryml.dispatch.dynamic_trace.call.v1"
 
-    Dynamic-call values are needed only while dispatch admits a trace result and
-    extracts annotation fragments.  No later provenance consumer needs them, so
-    strip both positional values and keyword names/values before the strict
-    carrier validates or serializes its isolated copy.  Malformed wires remain
-    malformed for the normal schema validation path.
+
+def _annotation_fragment_key(fact_data: Mapping[str, Any]) -> str | None:
+    """Return the safe canonical digest for one admitted annotation fact."""
+
+    fact = CodeFact.from_data(fact_data)
+    if not isinstance(fact, AnnotationFact):
+        return None
+    fragment = _safe_trace_fragment(annotations.AnnotationFragment.from_data(fact.data))
+    encoded = json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _safe_trace_fragment(fragment: annotations.AnnotationFragment) -> annotations.AnnotationFragment:
+    """Remove non-semantic source metadata before a trace fragment is persisted.
+
+    Annotation source and target metadata are useful to a live analyzer but may
+    carry environment-derived values.  Dispatch retains the structured source
+    identity while dropping only those non-semantic metadata mappings before the
+    fragment enters the persisted planning resolution.
     """
 
+    data = fragment.to_data()
+    source = dict(data["source"])
+    source["metadata"] = {}
+    if source["target"] is not None:
+        target = dict(source["target"])
+        target["metadata"] = {}
+        source["target"] = target
+    data["source"] = source
+    return annotations.AnnotationFragment.from_data(data)
+
+
+def _project_trace_calls(calls: Any, *, target: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Validate admitted raw wires, then create the canonical persistence form.
+
+    This deliberately validates before dropping any field.  In particular, an
+    invalid non-list ``args`` or non-mapping ``kwargs`` cannot be rewritten into
+    an apparently valid redacted call.
+    """
+
+    admitted = _validated_trace_calls(calls, target=target)
+    projected = []
+    for call in admitted:
+        data = call.data
+        annotation_keys = []
+        for fact_data in data["method_facts"]:
+            key = _annotation_fragment_key(fact_data)
+            if key is not None:
+                annotation_keys.append(key)
+        projected.append({
+            "schema": _PERSISTED_TRACE_CALL_SCHEMA,
+            "sequence": data["sequence"],
+            "receiver_kind": data["receiver_kind"],
+            "receiver_ref": data["receiver_ref"],
+            "receiver_class": data["receiver_class"],
+            "method_name": data["method_name"],
+            "method_fact_count": len(data["method_facts"]),
+            "annotation_fragment_keys": annotation_keys,
+        })
+    return projected
+
+
+def _validated_persisted_trace_calls(calls: Any, *, target: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Restore only canonical redacted call projections from persistence."""
+
     if type(calls) is not list:
-        return calls
-    redacted = []
+        raise ValueError("invalid dynamic trace call evidence")
+    projected = []
+    required = {
+        "schema", "sequence", "receiver_kind", "receiver_ref", "receiver_class",
+        "method_name", "method_fact_count", "annotation_fragment_keys",
+    }
     for call in calls:
-        if type(call) is not dict:
-            redacted.append(call)
-            continue
-        data = call.get("data")
-        if type(data) is not dict:
-            redacted.append(dict(call))
-            continue
-        redacted.append({**call, "data": {**data, "args": [], "kwargs": {}}})
-    return redacted
+        if type(call) is not dict or set(call) != required or call.get("schema") != _PERSISTED_TRACE_CALL_SCHEMA:
+            raise ValueError("dynamic trace calls must use the canonical persistence projection")
+        sequence = call["sequence"]
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("invalid persisted dynamic trace sequence")
+        receiver_kind = call["receiver_kind"]
+        if receiver_kind not in {"definition", "concrete_definition"}:
+            raise ValueError("invalid persisted dynamic trace receiver kind")
+        receiver_ref = call["receiver_ref"]
+        receiver_pattern = r"[0-9a-f]{16,}" if receiver_kind == "definition" else r"cdef-v[1-9][0-9]*-[0-9a-f]{16,}"
+        if type(receiver_ref) is not str or re.fullmatch(receiver_pattern, receiver_ref) is None:
+            raise ValueError("invalid persisted dynamic trace receiver reference")
+        receiver_class = call["receiver_class"]
+        if receiver_class is not None and (
+            type(receiver_class) is not str
+            or len(receiver_class) > _TRACE_MAX_STRING
+            or receiver_class.count(":") != 1
+            or not all(part.isidentifier() for part in receiver_class.replace(":", ".").split("."))
+        ):
+            raise ValueError("invalid persisted dynamic trace receiver class")
+        method_name = call["method_name"]
+        if (
+            type(method_name) is not str
+            or not method_name.isidentifier()
+            or method_name.startswith("__")
+            or method_name.endswith("__")
+            or len(method_name) > 512
+        ):
+            raise ValueError("invalid persisted dynamic trace method")
+        fact_count = call["method_fact_count"]
+        keys = call["annotation_fragment_keys"]
+        if type(fact_count) is not int or fact_count < 0 or fact_count > 256 or type(keys) is not list or len(keys) > fact_count:
+            raise ValueError("invalid persisted dynamic trace method-fact summary")
+        if any(type(key) is not str or re.fullmatch(r"[0-9a-f]{64}", key) is None for key in keys):
+            raise ValueError("invalid persisted dynamic trace annotation digest")
+        if target is not None and target.get("target_kind") is None:
+            raise ValueError("invalid persisted dynamic trace target")
+        projected.append(dict(call))
+    return projected
 
 
 def _validate_trace_provenance_value(value: Any, *, depth: int = 0) -> None:
@@ -349,7 +440,7 @@ def _validate_trace_summary(value: Any, *, policy: Mapping[str, Any], target: Ma
 
 
 def _validate_trace_observations(
-    calls: list[DynamicCallFact],
+    calls: list[Mapping[str, Any]],
     accepted: list[Any],
     duplicates: list[Any],
 ) -> None:
@@ -358,16 +449,10 @@ def _validate_trace_observations(
     expected: dict[tuple[int, str, str], int] = {}
     call_fragments: dict[int, set[str]] = {}
     for call in calls:
-        sequence = call.data["sequence"]
-        method = call.data["method_name"]
+        sequence = call["sequence"]
+        method = call["method_name"]
         keys = call_fragments.setdefault(sequence, set())
-        for fact_data in call.data["method_facts"]:
-            fact = CodeFact.from_data(fact_data)
-            if not isinstance(fact, AnnotationFact):
-                continue
-            fragment = annotations.AnnotationFragment.from_data(fact.data)
-            fragment_data = json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":"))
-            key = hashlib.sha256(fragment_data.encode()).hexdigest()
+        for key in call["annotation_fragment_keys"]:
             expected[(sequence, method, key)] = expected.get((sequence, method, key), 0) + 1
             keys.add(key)
 
@@ -725,17 +810,17 @@ def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
     A direct context is a compatibility form and deliberately cannot request a
     trace, even if it grants dynamic-execution permission.  The mapping form is
     closed so misspellings cannot silently authorize target invocation. The
-    mapping is copied once into the immutable private request used by a public
-    planning entrypoint; an explicit ``context=None`` is invalid rather than an
-    omitted context.
+    mapping and context metadata are copied once into the immutable private
+    request used by a public planning entrypoint; an explicit ``context=None``
+    is invalid rather than an omitted context.
     """
 
     if isinstance(policy, _DynamicTraceRequest):
         raise DispatchPlanningError("analysis_policy must use the public CodeAnalysisContext or mapping form")
     if policy is None:
-        return _DynamicTraceRequest(CodeAnalysisContext(), DEFAULT_PROBE_TIMEOUT_S)
+        return _DynamicTraceRequest(_snapshot_analysis_context(CodeAnalysisContext()), DEFAULT_PROBE_TIMEOUT_S)
     if isinstance(policy, CodeAnalysisContext):
-        return _DynamicTraceRequest(policy, DEFAULT_PROBE_TIMEOUT_S)
+        return _DynamicTraceRequest(_snapshot_analysis_context(policy), DEFAULT_PROBE_TIMEOUT_S)
     if not isinstance(policy, Mapping):
         raise DispatchPlanningError("analysis_policy must be a CodeAnalysisContext or mapping")
     policy = dict(policy)
@@ -764,7 +849,29 @@ def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
         trace_policy = policy["dynamic_trace"]
     else:
         raise DispatchPlanningError("analysis_policy.dynamic_trace must be exactly True or a DynamicTracePolicy")
-    return _DynamicTraceRequest(context, float(timeout), trace_policy)
+    return _DynamicTraceRequest(_snapshot_analysis_context(context), float(timeout), trace_policy)
+
+
+def _snapshot_analysis_context(context: CodeAnalysisContext) -> CodeAnalysisContext:
+    """Return a private context with an isolated JSON metadata snapshot.
+
+    Dispatch derives discovery, trace identity, and facade metadata from this
+    value only.  A frozen context does not make a caller-owned nested metadata
+    mapping immutable, so copying it at the public policy boundary prevents a
+    later mutation from changing one request's effective analysis identity.
+    """
+
+    metadata = json.loads(json.dumps(context.metadata, sort_keys=True, separators=(",", ":")))
+    return CodeAnalysisContext(
+        algorithms=tuple(context.algorithms),
+        allow_import=context.allow_import,
+        allow_source=context.allow_source,
+        allow_dynamic_execution=context.allow_dynamic_execution,
+        include_annotations=context.include_annotations,
+        include_method_contracts=context.include_method_contracts,
+        diagnostics_policy=context.diagnostics_policy,
+        metadata=metadata,
+    )
 
 
 def resolve_dispatch_plan(
@@ -1422,7 +1529,7 @@ def _trace_provenance(
         "policy": _trace_policy_data(policy) if policy is not None else {"max_calls": 0, "require_proxy_only_args": True, "collect_requirements": True},
         "status": status,
         "summary": None if summary is None else dict(summary),
-        "calls": [] if calls is None else calls,
+        "calls": [] if calls is None else _project_trace_calls(calls, target=target),
         "accepted_fragments": [] if accepted_fragments is None else accepted_fragments,
         "duplicate_observations": [] if duplicate_observations is None else duplicate_observations,
         "diagnostics": [_trace_diagnostic_data(item) for item in diagnostics or ()],
@@ -1738,7 +1845,7 @@ def _combine_trace_fragments(
             fact = CodeFact.from_data(fact_data)
             if not isinstance(fact, AnnotationFact):
                 continue
-            fragment = annotations.AnnotationFragment.from_data(fact.data)
+            fragment = _safe_trace_fragment(annotations.AnnotationFragment.from_data(fact.data))
             key = json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":"))
             observation = {"sequence": call.data["sequence"], "method": call.data["method_name"], "fragment_key": hashlib.sha256(key.encode()).hexdigest()}
             if key in seen:

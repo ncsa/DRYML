@@ -22,7 +22,7 @@ from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.operations import PickledCallable
 from dryml.dispatch.protocol import WorkerResponse
 from dryml.dispatch.normalize import normalize_user_operation
-from dryml.dispatch.requirements import DynamicTraceProvenance, _effective_trace_invocation, parse_analysis_policy, resolve_dispatch_plan
+from dryml.dispatch.requirements import DynamicTraceProvenance, _effective_trace_invocation, _project_trace_calls, parse_analysis_policy, resolve_dispatch_plan
 from dryml.operations import resolve_call_arguments
 from dryml.core2.utils.general import pickle_save
 from dryml.formats.refs import format_cdef_id
@@ -746,7 +746,7 @@ def test_stale_envelope_retains_independently_validated_start_evidence(monkeypat
     assert evidence["status"] == "evidence_rejected"
     assert evidence["execution_started"] is True
     assert evidence["summary"]["data"]["calls_recorded"] == 1
-    assert [call["data"]["sequence"] for call in evidence["calls"]] == [0]
+    assert [call["sequence"] for call in evidence["calls"]] == [0]
 
 
 def test_unknown_9b_summary_outcome_is_rejected_not_incomplete(monkeypatch, tmp_path):
@@ -782,7 +782,7 @@ def test_policy_mismatch_retains_independently_validated_calls_that_prove_start(
     assert evidence["status"] == "evidence_rejected"
     assert evidence["execution_started"] is True
     assert evidence["summary"] is None
-    assert [call["data"]["sequence"] for call in evidence["calls"]] == [0]
+    assert [call["sequence"] for call in evidence["calls"]] == [0]
 
 
 def test_257_call_projection_overflow_keeps_summary_in_bounded_carrier(monkeypatch, tmp_path):
@@ -855,7 +855,7 @@ def test_provenance_policy_uses_exact_dynamic_trace_bounds():
 
 
 def test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation():
-    calls = [
+    raw_calls = [
         DynamicCallFact(
             source={"analyzer": "dynamic_trace", "target_kind": "function"},
             data={
@@ -887,7 +887,7 @@ def test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation
             source={"analyzer": "dynamic_trace", "target_kind": "function"},
             data={"complete": True, "outcome": "complete", "calls_recorded": 65, "max_calls": 65},
         ).to_data(),
-        "calls": calls,
+        "calls": _project_trace_calls(raw_calls, target={"target_kind": "function", "transport": "import_path"}),
         "accepted_fragments": [],
         "duplicate_observations": [],
         "diagnostics": [],
@@ -904,6 +904,16 @@ def test_provenance_omits_admitted_call_arguments_from_all_carriers(monkeypatch,
     call = _dynamic_call(0)
     call.data["args"] = ["synthetic-positional-secret"]
     call.data["kwargs"] = {"api_key": "synthetic-secret-token"}
+    fragment_data = dryml.annotations.fragments_for(TraceRequirementModel)[0].to_data()
+    fragment_data["source"]["metadata"] = {"environment": {"API_TOKEN": "synthetic-method-fact-secret"}}
+    call.data["method_facts"] = [AnnotationFact(
+        data=fragment_data,
+        source={
+            "analyzer": "direct_annotations",
+            "target_kind": "function",
+            "annotation_source": fragment_data["source"],
+        },
+    ).to_data()]
 
     def trace_with_sensitive_argument(*_args, **kwargs):
         return CodeAnalysisResult(
@@ -937,10 +947,83 @@ def test_provenance_omits_admitted_call_arguments_from_all_carriers(monkeypatch,
         store.records.read_spec(plan.execution_recipe["id"], family="execution_recipe")["payload"]["annotation_report"]["dryml.dispatch.dynamic_trace"],
     )
     for carrier in carriers:
-        assert not carrier["calls"][0]["data"]["args"]
-        assert not carrier["calls"][0]["data"]["kwargs"]
+        assert set(carrier["calls"][0]) == {
+            "schema", "sequence", "receiver_kind", "receiver_ref", "receiver_class",
+            "method_name", "method_fact_count", "annotation_fragment_keys",
+        }
+        assert "args" not in repr(carrier["calls"][0])
+        assert "kwargs" not in repr(carrier["calls"][0])
+        assert "method_facts" not in repr(carrier["calls"][0])
         assert "synthetic-positional-secret" not in repr(carrier)
         assert "synthetic-secret-token" not in repr(carrier)
+        assert "synthetic-method-fact-secret" not in repr(carrier)
+    assert "synthetic-method-fact-secret" not in repr(plan.resolution.to_data())
+    assert "synthetic-method-fact-secret" not in repr(plan.dispatch_spec)
+    assert "synthetic-method-fact-secret" not in repr(plan.execution_recipe)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("args", ["synthetic-nonempty"]),
+    ("args", "malformed"),
+    ("kwargs", {"token": "synthetic-nonempty"}),
+    ("kwargs", "malformed"),
+])
+def test_provenance_restoration_rejects_noncanonical_or_malformed_call_wires(field, value):
+    """Persisted provenance never coerces legacy dynamic-call wires into redaction."""
+
+    raw = _dynamic_call(0).to_data()
+    raw["data"][field] = value
+    data = {
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": True,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": 1, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "complete",
+        "summary": _summary(calls=1, max_calls=1).to_data(),
+        "calls": [raw],
+        "accepted_fragments": [],
+        "duplicate_observations": [],
+        "diagnostics": [],
+    }
+    with pytest.raises(ValueError, match="canonical persistence projection"):
+        DynamicTraceProvenance.from_data(data)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("args", "malformed"),
+    ("kwargs", "malformed"),
+])
+def test_admission_rejects_malformed_raw_call_arguments_before_projection(monkeypatch, tmp_path, field, value):
+    """A malformed facade result cannot be rewritten into persisted redaction."""
+
+    import dryml.dispatch.requirements as requirements
+
+    call = _dynamic_call(0)
+    call.data[field] = value
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(call, _summary(calls=1)),
+        ),
+    )
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(
+            traceable_target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["calls"] == []
 
 
 @pytest.mark.parametrize("observation", [
@@ -1277,7 +1360,10 @@ def test_provenance_correlates_duplicate_fragments_across_methods_and_same_call_
         "policy": {"max_calls": 2, "require_proxy_only_args": True, "collect_requirements": True},
         "status": "complete",
         "summary": _summary(calls=2, max_calls=2).to_data(),
-        "calls": [first.to_data(), later.to_data()],
+        "calls": _project_trace_calls(
+            [first.to_data(), later.to_data()],
+            target={"target_kind": "function", "transport": "import_path"},
+        ),
         "accepted_fragments": [{"sequence": 0, "method": "prepare", "fragment_key": fragment_key}],
         "duplicate_observations": [
             {"sequence": 0, "method": "prepare", "fragment_key": fragment_key, "first": "trace:0"},
@@ -1392,3 +1478,60 @@ def test_explicit_none_analysis_policy_context_is_not_omission(monkeypatch, tmp_
     )
     with pytest.raises(DispatchPlanningError, match="context"):
         Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"context": None})
+
+
+@pytest.mark.parametrize("entrypoint", ["plan", "explain"])
+def test_context_metadata_snapshot_survives_mutation_during_normalization_and_before_trace(monkeypatch, tmp_path, entrypoint):
+    """One request uses its validation-time context snapshot across trace phases."""
+
+    import dryml.dispatch.planner as planner
+    import dryml.dispatch.requirements as requirements
+
+    caller_context = CodeAnalysisContext(metadata={"variant": "initial", "nested": {"phase": "initial"}})
+    observed_discovery = []
+    observed_trace = []
+    original_normalize = planner.normalize_user_operation
+    original_analyze = requirements.analyze
+    original_input_id = requirements._trace_input_id
+
+    def mutate_during_normalization(*args, **kwargs):
+        caller_context.metadata["variant"] = "mutated-after-validation"
+        caller_context.metadata["nested"]["phase"] = "normalization"
+        return original_normalize(*args, **kwargs)
+
+    def analyze_spy(*args, **kwargs):
+        observed_discovery.append(json.loads(json.dumps(kwargs["context"].metadata)))
+        return original_analyze(*args, **kwargs)
+
+    def mutate_between_identity_and_trace(*args, **kwargs):
+        result = original_input_id(*args, **kwargs)
+        caller_context.metadata["nested"]["phase"] = "before-trace"
+        return result
+
+    def trace_spy(*_args, **kwargs):
+        observed_trace.append(json.loads(json.dumps(kwargs["context"].metadata)))
+        return CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(_summary(),),
+        )
+
+    monkeypatch.setattr(planner, "normalize_user_operation", mutate_during_normalization)
+    monkeypatch.setattr(requirements, "analyze", analyze_spy)
+    monkeypatch.setattr(requirements, "_trace_input_id", mutate_between_identity_and_trace)
+    monkeypatch.setattr(requirements, "trace", trace_spy)
+
+    result = getattr(Dispatcher(store=_store(tmp_path)), entrypoint)(
+        traceable_target,
+        analysis_policy={"context": caller_context, "dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+
+    assert observed_discovery == [{"variant": "initial", "nested": {"phase": "initial"}}]
+    assert observed_trace == [{
+        "variant": "initial",
+        "nested": {"phase": "initial"},
+        "_dryml_dispatch_trace_input_id": result.resolution.dynamic_trace.data["trace_input_id"],
+        "_dryml_dispatch_trace_run_id": result.resolution.dynamic_trace.data["trace_run_id"],
+    }]
+    assert caller_context.metadata["nested"]["phase"] == "before-trace"
+    assert result.resolution.dynamic_trace.data["status"] == "complete"
