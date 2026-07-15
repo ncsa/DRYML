@@ -137,7 +137,9 @@ class DynamicTraceProvenance:
     The carrier admits only the current normalized transport tokens and exact
     9B policy/summary schemas.  Rejected evidence is diagnostic-only: a valid
     summary/call prefix may prove start but never enters requirement resolution;
-    overflow retains a valid summary with empty calls.  It stores fixed
+    complete carriers bind calls to the carrier target and observations to
+    canonical serialized annotation facts; overflow retains a valid summary with
+    empty calls.  It stores fixed
     code/severity diagnostics rather than target exceptions, source, environment
     values, streams, live objects, or arbitrary representations.
     """
@@ -194,8 +196,9 @@ class DynamicTraceProvenance:
             raise ValueError("dynamic trace provenance exceeds byte limit")
         _validate_trace_policy(value["policy"])
         summary = value["summary"]
-        calls = _validated_trace_calls(value["calls"])
-        _validate_trace_observations(value["accepted_fragments"], value["duplicate_observations"])
+        calls = _validated_trace_calls(value["calls"], target=target)
+        if status == "complete":
+            _validate_trace_observations(calls, value["accepted_fragments"], value["duplicate_observations"])
         _validate_trace_diagnostics(value["diagnostics"])
         if status == "pre_execution_failed":
             if summary is not None or calls or value["accepted_fragments"] or value["duplicate_observations"] or not value["diagnostics"]:
@@ -306,29 +309,61 @@ def _validate_trace_summary(value: Any, *, policy: Mapping[str, Any], target: Ma
     return fact
 
 
-def _validated_trace_calls(values: list[Any]) -> list[DynamicCallFact]:
-    calls: list[DynamicCallFact] = []
-    for value in values:
-        if type(value) is not dict:
-            raise ValueError("invalid dynamic trace call wire")
-        fact = CodeFact.from_data(value)
-        if not isinstance(fact, DynamicCallFact):
-            raise ValueError("non-dynamic call in trace provenance")
-        calls.append(fact)
-    return calls
+def _validate_trace_observations(
+    calls: list[DynamicCallFact],
+    accepted: list[Any],
+    duplicates: list[Any],
+) -> None:
+    """Require one canonical observation for every serialized annotation fact."""
 
+    expected: dict[tuple[int, str, str], int] = {}
+    call_fragments: dict[tuple[int, str], set[str]] = {}
+    for call in calls:
+        sequence = call.data["sequence"]
+        method = call.data["method_name"]
+        keys = call_fragments.setdefault((sequence, method), set())
+        for fact_data in call.data["method_facts"]:
+            fact = CodeFact.from_data(fact_data)
+            if not isinstance(fact, AnnotationFact):
+                continue
+            fragment = annotations.AnnotationFragment.from_data(fact.data)
+            fragment_data = json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":"))
+            key = hashlib.sha256(fragment_data.encode()).hexdigest()
+            expected[(sequence, method, key)] = expected.get((sequence, method, key), 0) + 1
+            keys.add(key)
 
-def _validate_trace_observations(accepted: list[Any], duplicates: list[Any]) -> None:
+    observed: dict[tuple[int, str, str], int] = {}
     for item in accepted:
         if type(item) is not dict or set(item) != {"sequence", "method", "fragment_key"}:
             raise ValueError("invalid accepted trace fragment observation")
-        if type(item["sequence"]) is not int or item["sequence"] < 0 or type(item["method"]) is not str or type(item["fragment_key"]) is not str:
+        if (
+            type(item["sequence"]) is not int
+            or item["sequence"] < 0
+            or type(item["method"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", item["fragment_key"]) is None
+        ):
             raise ValueError("invalid accepted trace fragment observation value")
+        key = (item["sequence"], item["method"], item["fragment_key"])
+        observed[key] = observed.get(key, 0) + 1
     for item in duplicates:
         if type(item) is not dict or set(item) != {"sequence", "method", "fragment_key", "first"}:
             raise ValueError("invalid duplicate trace fragment observation")
-        if type(item["sequence"]) is not int or item["sequence"] < 0 or any(type(item[key]) is not str for key in ("method", "fragment_key", "first")):
+        if (
+            type(item["sequence"]) is not int
+            or item["sequence"] < 0
+            or type(item["method"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", item["fragment_key"]) is None
+            or type(item["first"]) is not str
+        ):
             raise ValueError("invalid duplicate trace fragment observation value")
+        key = (item["sequence"], item["method"], item["fragment_key"])
+        if item["first"] != "direct":
+            match = re.fullmatch(r"trace:(\d+)", item["first"])
+            if match is None or int(match.group(1)) >= item["sequence"] or item["fragment_key"] not in call_fragments.get((int(match.group(1)), item["method"]), set()):
+                raise ValueError("invalid duplicate trace fragment first observation")
+        observed[key] = observed.get(key, 0) + 1
+    if observed != expected:
+        raise ValueError("trace observations do not match annotation method facts")
 
 
 def _validate_trace_diagnostics(values: list[Any]) -> None:
@@ -643,6 +678,11 @@ def parse_analysis_policy(policy: Any | None) -> DynamicTraceRequest:
         return DynamicTraceRequest(policy, DEFAULT_PROBE_TIMEOUT_S)
     if not isinstance(policy, Mapping):
         raise DispatchPlanningError("analysis_policy must be a CodeAnalysisContext or mapping")
+    if any(type(key) is not str for key in policy):
+        raise DispatchPlanningError(
+            "analysis_policy contains unsupported fields",
+            context={"fields": ["<non-string>"]},
+        )
     unknown = set(policy) - {"context", "probe_timeout_s", "dynamic_trace"}
     if unknown:
         raise DispatchPlanningError("analysis_policy contains unsupported fields", context={"fields": sorted(unknown)})
@@ -1150,7 +1190,8 @@ def _trace_dispatch_invocation(
     )
     run_id = f"trace-run-v1-{uuid.uuid4().hex}"
     result = trace(live_target, args=trace_args, kwargs=trace_kwargs, context=trace_context, policy=request.policy)
-    return _admit_trace_result(normalized, request.policy, direct_fragments, target, input_id, run_id, result)
+    expected_target = target_from_callable(live_target, metadata=trace_context.metadata).spec.to_data()
+    return _admit_trace_result(normalized, request.policy, direct_fragments, target, input_id, run_id, expected_target, result)
 
 
 def _effective_trace_invocation(normalized: NormalizedDispatchTarget) -> tuple[tuple[Any, ...], dict[str, Any]]:
@@ -1306,6 +1347,7 @@ def _admit_trace_result(
     target: dict[str, str] | None,
     input_id: str,
     run_id: str,
+    expected_target: Mapping[str, Any],
     result: Any,
 ) -> tuple[tuple[annotations.AnnotationFragment, ...], DynamicTraceProvenance, tuple[DiagnosticFact, ...]]:
     """Validate 9B result shape before any fact reaches requirement resolution."""
@@ -1314,36 +1356,38 @@ def _admit_trace_result(
     # envelope so a stale target cannot erase a bounded summary/call prefix that
     # independently proves execution started.  Rejected evidence remains
     # diagnostic-only and never reaches fragment resolution.
-    summary = None
+    summary = _independently_validated_trace_summary(result, policy=policy, target=target)
     try:
-        calls = _independently_validated_trace_calls(result)
+        calls = _independently_validated_trace_calls(result, target=target)
     except Exception:
         calls = None
     try:
-        admitted_calls, summary = _validated_trace_result_evidence(result, policy=policy, target=target)
-        calls = admitted_calls
-        sequences = [fact.data["sequence"] for fact in calls]
-        if sequences != list(range(len(calls))) or summary["data"]["calls_recorded"] != len(calls):
+        admitted_calls, admitted_summary = _validated_trace_result_evidence(result, policy=policy, target=target)
+        sequences = [fact.data["sequence"] for fact in admitted_calls]
+        if sequences != list(range(len(admitted_calls))) or admitted_summary["data"]["calls_recorded"] != len(admitted_calls):
             raise ValueError("invalid call sequence")
     except Exception:
-        summary = None
-    expected_envelope = _trace_result_has_expected_envelope(normalized, result)
+        admitted_calls = None
+        admitted_summary = None
+    expected_envelope = _trace_result_has_expected_envelope(normalized, result, expected_target)
     safe_diagnostics = _safe_trace_result_diagnostics(result)
     if calls is not None and summary is not None and len(calls) > _TRACE_MAX_CALLS:
         diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
         provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
         return direct_fragments, provenance, (diagnostic,)
     if (
-        expected_envelope
-        and
-        not result.facts
-        and result.diagnostics
+        expected_envelope and not result.facts and result.diagnostics
         and all(item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics)
     ):
         diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")
         provenance = _trace_provenance(normalized, policy, target=target, status="pre_execution_failed", input_id=input_id, run_id=None, started=False, diagnostics=[diagnostic, *safe_diagnostics])
         return direct_fragments, provenance, (diagnostic,)
-    if not expected_envelope or calls is None or summary is None:
+    mixed_preexecution_diagnostic = (
+        type(result) is CodeAnalysisResult
+        and type(result.diagnostics) is tuple
+        and any(type(item) is DiagnosticFact and item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics)
+    )
+    if not expected_envelope or mixed_preexecution_diagnostic or admitted_calls is None or admitted_summary is None:
         diagnostic = _trace_diagnostic(
             "dryml.dispatch.dynamic_trace_identity_mismatch"
             if not expected_envelope else "dryml.dispatch.dynamic_trace_evidence_rejected"
@@ -1359,18 +1403,18 @@ def _admit_trace_result(
         status = "failed" if summary["data"].get("outcome") == "target_failed" else "incomplete"
         diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_failed" if status == "failed" else "dryml.dispatch.dynamic_trace_incomplete")
         try:
-            provenance = _trace_provenance(normalized, policy, target=target, status=status, input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in calls], diagnostics=[diagnostic, *safe_diagnostics])
+            provenance = _trace_provenance(normalized, policy, target=target, status=status, input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in admitted_calls], diagnostics=[diagnostic, *safe_diagnostics])
         except ValueError:
             provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
         return direct_fragments, provenance, (diagnostic,)
 
-    fragments, accepted, duplicates = _combine_trace_fragments(direct_fragments, calls)
+    fragments, accepted, duplicates = _combine_trace_fragments(direct_fragments, admitted_calls)
     if len(accepted) > _TRACE_MAX_FRAGMENTS or len(duplicates) > _TRACE_MAX_DUPLICATES:
         diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
         provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
         return direct_fragments, provenance, (diagnostic,)
     try:
-        provenance = _trace_provenance(normalized, policy, target=target, status="complete", input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in calls], accepted_fragments=accepted, duplicate_observations=duplicates)
+        provenance = _trace_provenance(normalized, policy, target=target, status="complete", input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in admitted_calls], accepted_fragments=accepted, duplicate_observations=duplicates)
     except ValueError:
         provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
         return direct_fragments, provenance, (_trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded"),)
@@ -1429,7 +1473,11 @@ def _rejected_trace_provenance(
         )
 
 
-def _trace_result_has_expected_envelope(normalized: NormalizedDispatchTarget, result: Any) -> bool:
+def _trace_result_has_expected_envelope(
+    normalized: NormalizedDispatchTarget,
+    result: Any,
+    expected_target: Mapping[str, Any],
+) -> bool:
     """Validate the whole 9B result envelope against this facade invocation."""
 
     if type(result) is not CodeAnalysisResult or type(result.facts) is not tuple or type(result.diagnostics) is not tuple:
@@ -1438,13 +1486,12 @@ def _trace_result_has_expected_envelope(normalized: NormalizedDispatchTarget, re
     if type(live_target) is not types.FunctionType:
         return False
     try:
-        expected = target_from_callable(live_target).spec.to_data()
         result_data = result.to_data()
     except Exception:
         return False
     if type(result_data) is not dict or set(result_data) != {"target", "facts", "diagnostics", "ok"}:
         return False
-    if result_data["target"] != expected or result_data["ok"] is not result.ok:
+    if result_data["target"] != expected_target or result_data["ok"] is not result.ok:
         return False
     return all(type(item) is DiagnosticFact for item in result.diagnostics)
 
@@ -1487,16 +1534,47 @@ def _validated_trace_result_evidence(
             raise ValueError("unexpected trace result fact")
     if len(summaries) != 1:
         raise ValueError("trace result requires exactly one summary")
-    _validate_trace_summary(summaries[0], policy=_trace_policy_data(policy), target=target)
-    return calls, summaries[0]
+    summary = _independently_validated_trace_summary(result, policy=policy, target=target)
+    if summary is None:
+        raise ValueError("invalid trace result summary")
+    return _validated_trace_calls([fact.to_data() for fact in calls], target=target), summary
 
 
-def _independently_validated_trace_calls(result: Any) -> list[DynamicCallFact]:
+def _independently_validated_trace_summary(
+    result: Any,
+    *,
+    policy: DynamicTracePolicy,
+    target: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Retain one self-validating summary despite unrelated rejected facts."""
+
+    if type(result) is not CodeAnalysisResult or type(result.facts) is not tuple:
+        return None
+    summaries = []
+    for original in result.facts:
+        if not isinstance(original, CodeFact):
+            continue
+        try:
+            wire = original.to_data()
+            if type(wire) is dict and wire.get("kind") == "dynamic_trace_summary":
+                _validate_trace_summary(wire, policy=_trace_policy_data(policy), target=target)
+                summaries.append(wire)
+        except Exception:
+            continue
+    return summaries[0] if len(summaries) == 1 else None
+
+
+def _independently_validated_trace_calls(
+    result: Any,
+    *,
+    target: Mapping[str, Any] | None,
+) -> list[DynamicCallFact]:
     """Return a contiguous bounded call sequence without trusting its summary."""
 
     if type(result) is not CodeAnalysisResult or type(result.facts) is not tuple:
         raise ValueError("invalid trace result evidence envelope")
     calls: list[DynamicCallFact] = []
+    saw_call = False
     for original in result.facts:
         if not isinstance(original, CodeFact):
             continue
@@ -1505,8 +1583,31 @@ def _independently_validated_trace_calls(result: Any) -> list[DynamicCallFact]:
             continue
         fact = CodeFact.from_data(wire)
         if isinstance(fact, DynamicCallFact):
+            saw_call = True
             calls.append(fact)
-    if not calls or [fact.data["sequence"] for fact in calls] != list(range(len(calls))):
+    if not saw_call:
+        raise ValueError("no independently valid trace calls")
+    return _validated_trace_calls([fact.to_data() for fact in calls], target=target)
+
+
+def _validated_trace_calls(
+    values: list[Any],
+    *,
+    target: Mapping[str, Any] | None = None,
+) -> list[DynamicCallFact]:
+    """Restore one contiguous call sequence bound to the carrier target."""
+
+    calls: list[DynamicCallFact] = []
+    for value in values:
+        if type(value) is not dict:
+            raise ValueError("invalid dynamic trace call wire")
+        fact = CodeFact.from_data(value)
+        if not isinstance(fact, DynamicCallFact):
+            raise ValueError("non-dynamic call in trace provenance")
+        if target is not None and fact.source["target_kind"] != target["target_kind"]:
+            raise ValueError("dynamic trace call target mismatch")
+        calls.append(fact)
+    if [fact.data["sequence"] for fact in calls] != list(range(len(calls))):
         raise ValueError("no independently valid contiguous trace calls")
     return calls
 

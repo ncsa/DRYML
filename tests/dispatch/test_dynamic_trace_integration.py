@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -19,7 +21,7 @@ from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.operations import PickledCallable
 from dryml.dispatch.protocol import WorkerResponse
 from dryml.dispatch.normalize import normalize_user_operation
-from dryml.dispatch.requirements import DynamicTraceProvenance, _effective_trace_invocation, resolve_dispatch_plan
+from dryml.dispatch.requirements import DynamicTraceProvenance, _effective_trace_invocation, parse_analysis_policy, resolve_dispatch_plan
 from dryml.operations import resolve_call_arguments
 from dryml.core2.utils.general import pickle_save
 from dryml.formats.refs import format_cdef_id
@@ -106,6 +108,11 @@ def test_dynamic_trace_policy_is_validated_before_normalization(monkeypatch, tmp
     )
     with pytest.raises(DispatchPlanningError, match="dynamic_trace"):
         Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": False})
+
+
+def test_analysis_policy_mixed_type_unknown_keys_raise_dispatch_error():
+    with pytest.raises(DispatchPlanningError, match="unsupported fields"):
+        parse_analysis_policy({"dynamic_trace": True, "unknown": None, 1: None})
 
 
 def test_opt_in_plan_traces_once_with_private_forced_collect_context(monkeypatch, tmp_path):
@@ -459,7 +466,48 @@ def test_admission_rejects_unexpected_fact_even_with_complete_zero_call_summary(
     evidence = excinfo.value.context["dynamic_trace"]
     assert evidence["status"] == "evidence_rejected"
     assert evidence["trace_input_id"] and evidence["trace_run_id"]
+    assert evidence["execution_started"] is True
+    assert evidence["summary"]["data"]["calls_recorded"] == 0
     assert evidence["calls"] == []
+
+
+def test_admission_rejects_recognized_preexecution_diagnostic_mixed_with_summary(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=(_summary(),),
+        diagnostics=(DiagnosticFact(
+            severity="error",
+            code="dryml.code.dynamic_trace_unsupported_argument",
+            message="recognized only when diagnostic-only",
+        ),),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["execution_started"] is True
+    assert evidence["summary"]["data"]["calls_recorded"] == 0
+
+
+def test_admission_accepts_context_metadata_in_returned_target(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(target_from_callable(traceable_target, metadata={"run_id": "audit"}).spec, facts=(_summary(),))
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+
+    plan = Dispatcher(store=_store(tmp_path)).plan(
+        traceable_target,
+        analysis_policy={"context": CodeAnalysisContext(metadata={"run_id": "audit"}), "dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+
+    assert plan.resolution.dynamic_trace.data["status"] == "complete"
+    assert "audit" not in json.dumps(plan.resolution.dynamic_trace.to_data())
 
 
 def _summary(*, complete=True, outcome="complete", calls=0, max_calls=10_000):
@@ -646,6 +694,60 @@ def test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation
     })
 
     assert len(provenance.to_data()["calls"]) == 65
+
+
+@pytest.mark.parametrize("observation", [
+    {"sequence": 99, "method": "unrelated", "fragment_key": "not-a-digest"},
+    {"sequence": 99, "method": "unrelated", "fragment_key": hashlib.sha256(b"unrelated").hexdigest()},
+])
+def test_provenance_rejects_observations_unrelated_to_calls_or_annotation_facts(observation):
+    call = _dynamic_call(0).to_data()
+    summary = _summary(calls=1).to_data()
+    data = {
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": True,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": 1, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "complete",
+        "summary": summary,
+        "calls": [call],
+        "accepted_fragments": [observation],
+        "duplicate_observations": [],
+        "diagnostics": [],
+    }
+    with pytest.raises(ValueError):
+        DynamicTraceProvenance(data)
+
+
+def test_provenance_rejects_call_target_kind_that_differs_from_carrier_target():
+    call = DynamicCallFact(
+        source={"analyzer": "dynamic_trace", "target_kind": "local_function"},
+        data=_dynamic_call(0).data,
+    ).to_data()
+    data = {
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": True,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": 1, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "complete",
+        "summary": _summary(calls=1).to_data(),
+        "calls": [call],
+        "accepted_fragments": [],
+        "duplicate_observations": [],
+        "diagnostics": [],
+    }
+    with pytest.raises(ValueError):
+        DynamicTraceProvenance(data)
 
 
 def test_store_live_cdef_mismatch_blocks_before_trace_or_target(monkeypatch, tmp_path):
