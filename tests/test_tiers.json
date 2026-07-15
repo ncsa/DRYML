@@ -1614,7 +1614,6 @@
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_rejects_call_target_kind_that_differs_from_carrier_target": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_rejects_each_top_level_count_and_scalar_overflow": "smoke",
-    "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_rejects_observations_unrelated_to_calls_or_annotation_facts": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_rejects_observations_unrelated_to_calls_or_annotation_facts[observation0]": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_rejects_observations_unrelated_to_calls_or_annotation_facts[observation1]": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_requested_trace_failure_blocks_plan_and_explain_under_ignore": "smoke",
