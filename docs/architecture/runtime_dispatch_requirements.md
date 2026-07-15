@@ -85,18 +85,17 @@ unknown start as `null`. Retained rejected evidence is diagnostic-only and never
 enters annotations resolution. The carrier accepts only `import_path`,
 `pickle_small`, `operation_spec`, and `method_call` transport tokens, rejects
 unknown tokens, enforces 9B `max_calls` 1..10,000 plus dispatch count/depth/
-string/byte limits, and redacts exception text, tracebacks, source, environment,
-streams, live objects, arbitrary repr, and all dynamic-call positional/keyword
-argument values. Raw call wires are transient admission/fragment evidence and
-are validated before persistence projection. Persisted calls are strict canonical
-summaries: receiver observation, method name, method-fact count, and annotation
-fragment digests only. They omit arguments, method-fact/source wires, and
-environment metadata; restoration rejects legacy or malformed wires rather than
-coercing them into redacted values. Projection overflow retains a valid summary
-with empty calls as `provenance_limit_exceeded`; it never truncates.
-Accepted trace fragments likewise drop annotation source/target metadata before
-they enter persisted requirement resolution, while retaining their semantic
-fragment data and structured source identity.
+string/byte limits, and excludes exception text, tracebacks, raw source,
+environment values, streams, live objects, and arbitrary repr. Its `calls` field
+uses the specified ordered full `DynamicCallFact` wires; accepted annotation
+fragments enter canonical deduplication and authoritative resolution unchanged.
+Because v1 has no redacted alternate call schema, dispatch fails closed before
+resolution and persistence when a call has recorded arguments, an annotation has
+a local source path or unrecognized source/target metadata, or a fragment carries
+environment overrides. The established bounded
+`legacy_environment_fragment_mode` source metadata remains semantic and is
+preserved unchanged. Projection overflow retains a valid summary with empty
+calls as `provenance_limit_exceeded`; it never truncates or rewrites evidence.
 For `pickle_small`, a final candidate that is not the current Python after an
 accepted trace is non-launchable but preserves that completed carrier through
 cleanup.

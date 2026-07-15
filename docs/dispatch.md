@@ -175,17 +175,17 @@ an over-limit trace is not mistaken for an empty trace. The policy restored from
 the carrier has the exact 9B bounds (`max_calls` 1 through 10,000), and only the
 four normalized transport tokens `import_path`, `pickle_small`,
 `operation_spec`, and `method_call` are accepted; an unknown token is a schema
-error rather than being serialized or substituted. Raw dynamic-call positional
-and keyword arguments are used only transiently for trace admission and fragment
-extraction. Persisted calls use a separate canonical projection containing only
-the receiver observation, method name, method-fact count, and safe annotation
-fragment digests. It omits arguments, method-fact wires, source metadata, and
-environment data, so call-time and annotation-metadata secrets cannot enter
-explanations, metadata, or sidecars. Restoration rejects legacy dynamic-call
-wires and every noncanonical projection rather than coercing it into redaction.
-Before accepted traced fragments enter requirement resolution, dispatch also
-removes their non-semantic annotation source and target metadata; requirement
-semantics and structured source identity remain unchanged.
+error rather than being serialized or substituted. The v1 `calls` field retains
+ordered, complete `DynamicCallFact` wires, and annotation fragments enter
+deduplication and resolution with their canonical source metadata unchanged.
+Dispatch therefore accepts only a closed persistence-safe subset: recorded call
+arguments must be empty; annotation source paths, target metadata, and
+environment override maps must be empty; source metadata may contain only the
+established `legacy_environment_fragment_mode` semantic key with its bounded
+`base`, `add`, or `override` value. If completed evidence falls outside this
+subset, dispatch rejects the requested trace before fragment resolution or
+persistence. It does not redact the evidence, silently change the v1 schema, or
+write a plan or sidecar containing that evidence.
 
 A null `trace_input_id` is allowed only when the effective invocation itself
 could not be constructed. Dispatch admits a no-summary `pre_execution_failed`

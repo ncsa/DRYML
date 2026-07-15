@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import types
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from dryml.code import CodeTargetSpec, target_from_callable, target_from_definition_method
@@ -142,6 +142,9 @@ def normalize_user_operation(
         kwargs: Explicit user keyword arguments for the target call.
         allow_pickle: Whether non-importable callables may use the existing
             ``pickle_small`` same-environment transport.
+        trace_enabled: Require the strict trace target/invocation grammar and
+            retain the live target as proof that trace-aware normalization
+            completed successfully.
 
     Returns:
         A normalized target with operation, launch, and code-target metadata.
@@ -198,7 +201,7 @@ def normalize_user_operation(
     if callable(operation) or isinstance(operation, PickledCallable):
         if norm_method is not None:
             raise DispatchPlanningError("method_name is only valid for DRYML Definition/CDef/Object targets")
-        return normalize_callable_operation(
+        normalized = normalize_callable_operation(
             operation,
             args=norm_args,
             kwargs=norm_kwargs,
@@ -207,6 +210,9 @@ def normalize_user_operation(
             trace_cdef_positions=trace_positions,
             trace_store=store,
         )
+        if trace_enabled:
+            return replace(normalized, trace_live_target=trace_candidate)
+        return normalized
     raise DispatchPlanningError(
         "unsupported dispatch target; expected callable, OperationSpec, or DRYML Definition/CDef/Object plus method name",
         context={"type": type(operation).__name__},
@@ -281,7 +287,11 @@ def normalize_callable_operation(
     trace_cdef_positions: tuple[tuple[str, str], ...] = (),
     trace_store: Any | None = None,
 ) -> NormalizedDispatchTarget:
-    """Normalize a Python callable through import-path or pickle transport."""
+    """Normalize a callable without independently authorizing dynamic tracing.
+
+    Only :func:`normalize_user_operation` may install the private live trace
+    target after its stricter trace-aware invocation and target validation.
+    """
 
     explicit_pickle = isinstance(operation, PickledCallable)
     func = operation.callable if explicit_pickle else operation
@@ -310,7 +320,6 @@ def normalize_callable_operation(
             metadata_target,
             live_annotation_targets=(func,),
             transport="import_path",
-            trace_live_target=func,
             trace_store=trace_store,
             trace_cdef_side_table={} if trace_cdef_side_table is None else trace_cdef_side_table,
             trace_cdef_positions=trace_cdef_positions,
@@ -333,7 +342,7 @@ def normalize_callable_operation(
         normalized.transport,
         normalized.diagnostics,
         normalized.definition_target,
-        func,
+        None,
         trace_store,
         {} if trace_cdef_side_table is None else trace_cdef_side_table,
         trace_cdef_positions,
