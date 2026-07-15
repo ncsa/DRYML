@@ -1618,6 +1618,7 @@
     "tests/dispatch/test_dynamic_trace_integration.py::test_plan_world_traces_through_its_single_planning_pipeline": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_policy_mismatch_retains_independently_validated_calls_that_prove_start": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_correlates_duplicate_fragments_across_methods_and_same_call_order": "smoke",
+    "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_omits_admitted_call_arguments_from_all_carriers": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_policy_uses_exact_dynamic_trace_bounds": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_provenance_rejects_call_target_kind_that_differs_from_carrier_target": "smoke",

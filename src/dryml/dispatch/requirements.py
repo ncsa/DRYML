@@ -145,7 +145,8 @@ class DynamicTraceProvenance:
     summary/call prefix may prove start but never enters requirement resolution;
     complete carriers bind calls to the carrier target and observations to
     canonical serialized annotation facts; overflow retains a valid summary with
-    empty calls.  It stores fixed
+    empty calls. Raw call arguments are transient admission evidence: persisted
+    call wires always use empty ``args`` and ``kwargs``. It stores fixed
     code/severity diagnostics rather than target exceptions, source, environment
     values, streams, live objects, or arbitrary representations.
     """
@@ -156,6 +157,7 @@ class DynamicTraceProvenance:
         if type(self.data) is not dict:
             raise ValueError("dynamic trace provenance must be an exact dictionary")
         value = dict(self.data)
+        value["calls"] = _redact_trace_call_arguments(value.get("calls"))
         required = {
             "schema", "schema_version", "requested", "trace_input_id",
             "trace_run_id", "execution_location", "execution_started",
@@ -258,6 +260,31 @@ class DynamicTraceProvenance:
         """Restore strict versioned provenance without accepting extra fields."""
 
         return cls(data)
+
+
+def _redact_trace_call_arguments(calls: Any) -> Any:
+    """Return provenance call wires with all raw invocation values removed.
+
+    Dynamic-call values are needed only while dispatch admits a trace result and
+    extracts annotation fragments.  No later provenance consumer needs them, so
+    strip both positional values and keyword names/values before the strict
+    carrier validates or serializes its isolated copy.  Malformed wires remain
+    malformed for the normal schema validation path.
+    """
+
+    if type(calls) is not list:
+        return calls
+    redacted = []
+    for call in calls:
+        if type(call) is not dict:
+            redacted.append(call)
+            continue
+        data = call.get("data")
+        if type(data) is not dict:
+            redacted.append(dict(call))
+            continue
+        redacted.append({**call, "data": {**data, "args": [], "kwargs": {}}})
+    return redacted
 
 
 def _validate_trace_provenance_value(value: Any, *, depth: int = 0) -> None:

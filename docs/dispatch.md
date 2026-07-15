@@ -173,7 +173,10 @@ an over-limit trace is not mistaken for an empty trace. The policy restored from
 the carrier has the exact 9B bounds (`max_calls` 1 through 10,000), and only the
 four normalized transport tokens `import_path`, `pickle_small`,
 `operation_spec`, and `method_call` are accepted; an unknown token is a schema
-error rather than being serialized or substituted.
+error rather than being serialized or substituted. Raw dynamic-call positional
+and keyword arguments are used only transiently for trace admission and fragment
+extraction; every provenance call wire persists empty `args` and `kwargs` so
+call-time secrets cannot enter explanation, metadata, or sidecars.
 
 A null `trace_input_id` is allowed only when the effective invocation itself
 could not be constructed. Dispatch admits a no-summary `pre_execution_failed`

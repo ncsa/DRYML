@@ -896,6 +896,53 @@ def test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation
     assert len(provenance.to_data()["calls"]) == 65
 
 
+def test_provenance_omits_admitted_call_arguments_from_all_carriers(monkeypatch, tmp_path):
+    """Accepted call arguments stay transient and never reach provenance copies."""
+
+    import dryml.dispatch.requirements as requirements
+
+    call = _dynamic_call(0)
+    call.data["args"] = ["synthetic-positional-secret"]
+    call.data["kwargs"] = {"api_key": "synthetic-secret-token"}
+
+    def trace_with_sensitive_argument(*_args, **kwargs):
+        return CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(call, _summary(calls=1)),
+        )
+
+    monkeypatch.setattr(requirements, "trace", trace_with_sensitive_argument)
+    store = _store(tmp_path)
+    dispatcher = Dispatcher(store=store)
+    explanation = dispatcher.explain(
+        traceable_target,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+    plan = dispatcher.plan(
+        traceable_target,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+
+    assert call.data["args"] == ["synthetic-positional-secret"]
+    assert call.data["kwargs"] == {"api_key": "synthetic-secret-token"}
+    carriers = (
+        explanation.to_data()["resolution"]["dynamic_trace"],
+        plan.resolution.dynamic_trace.to_data(),
+        plan.dispatch_spec["payload"]["metadata"]["dryml.dispatch.dynamic_trace"],
+        plan.execution_recipe["payload"]["annotation_report"]["dryml.dispatch.dynamic_trace"],
+        plan.envelope.reporting["planning"]["dryml.dispatch.dynamic_trace"],
+        store.records.read_spec(plan.dispatch_spec["id"], family="dispatch")["payload"]["metadata"]["dryml.dispatch.dynamic_trace"],
+        store.records.read_spec(plan.execution_recipe["id"], family="execution_recipe")["payload"]["annotation_report"]["dryml.dispatch.dynamic_trace"],
+    )
+    for carrier in carriers:
+        assert not carrier["calls"][0]["data"]["args"]
+        assert not carrier["calls"][0]["data"]["kwargs"]
+        assert "synthetic-positional-secret" not in repr(carrier)
+        assert "synthetic-secret-token" not in repr(carrier)
+
+
 @pytest.mark.parametrize("observation", [
     {"sequence": 99, "method": "unrelated", "fragment_key": "not-a-digest"},
     {"sequence": 99, "method": "unrelated", "fragment_key": hashlib.sha256(b"unrelated").hexdigest()},

@@ -82,8 +82,11 @@ enters annotations resolution. The carrier accepts only `import_path`,
 `pickle_small`, `operation_spec`, and `method_call` transport tokens, rejects
 unknown tokens, enforces 9B `max_calls` 1..10,000 plus dispatch count/depth/
 string/byte limits, and redacts exception text, tracebacks, source, environment,
-streams, live objects, and arbitrary repr. Projection overflow retains a valid
-summary with empty calls as `provenance_limit_exceeded`; it never truncates.
+streams, live objects, arbitrary repr, and all dynamic-call positional/keyword
+argument values. Raw call arguments are transient admission/fragment evidence;
+persisted provenance call wires have empty `args` and `kwargs`. Projection
+overflow retains a valid summary with empty calls as `provenance_limit_exceeded`;
+it never truncates.
 For `pickle_small`, a final candidate that is not the current Python after an
 accepted trace is non-launchable but preserves that completed carrier through
 cleanup.
