@@ -1480,10 +1480,6 @@ def _admit_trace_result(
                 normalized, policy, target, input_id, run_id, True, None, [], diagnostic,
             )
             return direct_fragments, provenance, (diagnostic,)
-    if calls is not None and summary is not None and len(calls) > _TRACE_MAX_CALLS:
-        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
-        provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
-        return direct_fragments, provenance, (diagnostic,)
     if (
         expected_envelope and not result.facts and result.diagnostics
         and all(item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics)
@@ -1510,6 +1506,11 @@ def _admit_trace_result(
             normalized, policy, target, input_id, run_id, started, summary,
             [] if calls is None else [fact.to_data() for fact in calls], diagnostic,
         )
+        return direct_fragments, provenance, (diagnostic,)
+
+    if calls is not None and summary is not None and len(calls) > _TRACE_MAX_CALLS:
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
+        provenance = _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
         return direct_fragments, provenance, (diagnostic,)
 
     if summary["data"]["complete"] is True and result.diagnostics:
@@ -1589,7 +1590,7 @@ def _rejected_trace_provenance(
     calls: list[dict[str, Any]],
     diagnostic: DiagnosticFact,
 ) -> DynamicTraceProvenance:
-    """Project rejected evidence without allowing an overflow to escape raw."""
+    """Project rejected evidence without letting a projection limit change its status."""
 
     try:
         return _trace_provenance(
@@ -1598,8 +1599,18 @@ def _rejected_trace_provenance(
             calls=calls, diagnostics=[diagnostic],
         )
     except _TraceProvenanceLimitError:
-        if summary is not None:
-            return _provenance_limit_exceeded(normalized, policy, target, input_id, run_id, summary)
+        # Rejection takes precedence over projection limits.  Retain a
+        # separately validated summary only when the status schema permits it;
+        # otherwise omit oversized evidence rather than relabeling
+        # stale/malformed input as an ordinary provenance-overflow failure.
+        try:
+            return _trace_provenance(
+                normalized, policy, target=target, status="evidence_rejected",
+                input_id=input_id, run_id=run_id, started=started, summary=summary,
+                diagnostics=[diagnostic],
+            )
+        except (_TraceProvenanceLimitError, ValueError):
+            pass
     except ValueError:
         pass
     # The valid carrier records only the trusted start-state conclusion when no
@@ -1607,7 +1618,7 @@ def _rejected_trace_provenance(
     return _trace_provenance(
         normalized, policy, target=target, status="evidence_rejected",
         input_id=input_id, run_id=run_id, started=True if started or summary is not None or calls else None,
-        diagnostics=[_trace_diagnostic("dryml.dispatch.dynamic_trace_evidence_rejected")],
+        diagnostics=[diagnostic],
     )
 
 

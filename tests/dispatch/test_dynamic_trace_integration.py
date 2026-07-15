@@ -786,6 +786,32 @@ def test_stale_envelope_retains_independently_validated_start_evidence(monkeypat
     assert [call["data"]["sequence"] for call in evidence["calls"]] == [0]
 
 
+def test_stale_envelope_over_call_limit_remains_rejected(monkeypatch, tmp_path):
+    """Stale complete evidence is rejected before its calls exceed projection bounds."""
+    import dryml.dispatch.requirements as requirements
+
+    stale = CodeAnalysisResult(
+        target_from_callable(failing_trace_target).spec,
+        facts=tuple(_dynamic_call(index) for index in range(257)) + (_summary(calls=257),),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: stale)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(
+            traceable_target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["trace_input_id"] and evidence["trace_run_id"]
+    assert evidence["execution_started"] is True
+    assert evidence["summary"] is None
+    assert evidence["calls"] == []
+    assert evidence["diagnostics"][0]["code"] == "dryml.dispatch.dynamic_trace_identity_mismatch"
+
+
 def test_unknown_9b_summary_outcome_is_rejected_not_incomplete(monkeypatch, tmp_path):
     import dryml.dispatch.requirements as requirements
 
@@ -825,11 +851,14 @@ def test_policy_mismatch_retains_independently_validated_calls_that_prove_start(
 def test_257_call_projection_overflow_keeps_summary_in_bounded_carrier(monkeypatch, tmp_path):
     import dryml.dispatch.requirements as requirements
 
-    result = CodeAnalysisResult(
-        target_from_callable(traceable_target).spec,
-        facts=tuple(_dynamic_call(index) for index in range(257)) + (_summary(calls=257),),
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=tuple(_dynamic_call(index) for index in range(257)) + (_summary(calls=257),),
+        ),
     )
-    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
 
     with pytest.raises(DispatchPlanningError) as excinfo:
         Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
@@ -848,11 +877,14 @@ def test_byte_overflow_is_projected_without_raw_validation_error(monkeypatch, tm
         call = _dynamic_call(index)
         call.data["receiver_ref"] = "cdef-v4-" + "a" * 4_088
         calls.append(call)
-    result = CodeAnalysisResult(
-        target_from_callable(traceable_target).spec,
-        facts=tuple(calls) + (_summary(calls=256),),
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=tuple(calls) + (_summary(calls=256),),
+        ),
     )
-    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
 
     with pytest.raises(DispatchPlanningError) as excinfo:
         Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")

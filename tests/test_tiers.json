@@ -1643,6 +1643,7 @@
     "tests/dispatch/test_dynamic_trace_integration.py::test_resolver_scalar_forms_follow_default_and_scalar_enabled_trace_policy[ref(cdef-v4-0123456789abcdef)]": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_run_world_traces_only_through_its_planning_call": "medium",
     "tests/dispatch/test_dynamic_trace_integration.py::test_safe_semantic_metadata_is_unchanged_for_authoritative_resolution": "smoke",
+    "tests/dispatch/test_dynamic_trace_integration.py::test_stale_envelope_over_call_limit_remains_rejected": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_stale_envelope_retains_independently_validated_start_evidence": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_store_live_cdef_mismatch_blocks_before_trace_or_target": "smoke",
     "tests/dispatch/test_dynamic_trace_integration.py::test_stored_method_targets_keep_store_and_input_identity_without_persisting[False]": "heavy",
