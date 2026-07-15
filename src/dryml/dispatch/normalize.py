@@ -80,12 +80,20 @@ class NormalizedDispatchTarget:
     transport: str = "operation_spec"
     diagnostics: tuple[Any, ...] = ()
     definition_target: Definition | ConcreteDefinition | None = None
+    # Trace-only state is deliberately private to one planning request.  It is
+    # never copied into the operation spec, launch data, or persisted metadata.
+    trace_live_target: Callable[..., Any] | None = None
+    trace_store: Any | None = None
+    trace_cdef_side_table: Mapping[str, tuple[ConcreteDefinition, ...]] = field(default_factory=dict)
+    trace_cdef_positions: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operation_spec", dict(self.operation_spec))
         object.__setattr__(self, "launch", dict(self.launch))
         object.__setattr__(self, "live_annotation_targets", tuple(self.live_annotation_targets))
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "trace_cdef_side_table", {key: tuple(value) for key, value in self.trace_cdef_side_table.items()})
+        object.__setattr__(self, "trace_cdef_positions", tuple(self.trace_cdef_positions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +113,7 @@ def normalize_user_operation(
     kwargs: Mapping[str, Any] | None = None,
     allow_pickle: bool = False,
     persist_object: bool = True,
+    trace_enabled: bool = False,
 ) -> NormalizedDispatchTarget:
     """Normalize a user dispatch target into the existing OperationSpec IR.
 
@@ -126,8 +135,13 @@ def normalize_user_operation(
         DispatchPlanningError: If the target cannot be normalized safely.
     """
 
-    norm_args = _normalize_args(args)
-    norm_kwargs = _normalize_kwargs(kwargs)
+    if trace_enabled:
+        norm_args, norm_kwargs, trace_cdefs, trace_positions = _trace_normalize_invocation(args, kwargs, store=store)
+    else:
+        norm_args = _normalize_args(args)
+        norm_kwargs = _normalize_kwargs(kwargs)
+        trace_cdefs = {}
+        trace_positions = ()
     norm_method = _validate_optional_method_name(method_name)
 
     if is_definition_or_cdef(operation):
@@ -143,7 +157,15 @@ def normalize_user_operation(
     if callable(operation) or isinstance(operation, PickledCallable):
         if norm_method is not None:
             raise DispatchPlanningError("method_name is only valid for DRYML Definition/CDef/Object targets")
-        return normalize_callable_operation(operation, args=norm_args, kwargs=norm_kwargs, allow_pickle=allow_pickle)
+        return normalize_callable_operation(
+            operation,
+            args=norm_args,
+            kwargs=norm_kwargs,
+            allow_pickle=allow_pickle,
+            trace_cdef_side_table=trace_cdefs,
+            trace_cdef_positions=trace_positions,
+            trace_store=store,
+        )
     raise DispatchPlanningError(
         "unsupported dispatch target; expected callable, OperationSpec, or DRYML Definition/CDef/Object plus method name",
         context={"type": type(operation).__name__},
@@ -213,6 +235,9 @@ def normalize_callable_operation(
     args: tuple[Any, ...] = (),
     kwargs: Mapping[str, Any] | None = None,
     allow_pickle: bool = False,
+    trace_cdef_side_table: Mapping[str, tuple[ConcreteDefinition, ...]] | None = None,
+    trace_cdef_positions: tuple[tuple[str, str], ...] = (),
+    trace_store: Any | None = None,
 ) -> NormalizedDispatchTarget:
     """Normalize a Python callable through import-path or pickle transport."""
 
@@ -243,6 +268,10 @@ def normalize_callable_operation(
             metadata_target,
             live_annotation_targets=(func,),
             transport="import_path",
+            trace_live_target=func,
+            trace_store=trace_store,
+            trace_cdef_side_table={} if trace_cdef_side_table is None else trace_cdef_side_table,
+            trace_cdef_positions=trace_cdef_positions,
         )
 
     if not allow_pickle and not explicit_pickle:
@@ -251,7 +280,22 @@ def normalize_callable_operation(
             "callable is not importable; pass allow_pickle=True or define it at module scope",
             context={"reason": reason, "module": importability.module, "qualname": importability.qualname},
         )
-    return _normalize_pickled_callable(func, args=args, kwargs=kwargs or {}, importability=importability)
+    normalized = _normalize_pickled_callable(func, args=args, kwargs=kwargs or {}, importability=importability)
+    return NormalizedDispatchTarget(
+        normalized.operation_spec,
+        normalized.launch,
+        normalized.code_target,
+        normalized.live_annotation_targets,
+        normalized.subject_class,
+        normalized.method_name,
+        normalized.transport,
+        normalized.diagnostics,
+        normalized.definition_target,
+        func,
+        trace_store,
+        {} if trace_cdef_side_table is None else trace_cdef_side_table,
+        trace_cdef_positions,
+    )
 
 
 def normalize_definition_method_operation(
@@ -383,6 +427,61 @@ def _normalize_pickled_callable(
     except BaseException:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise
+
+
+def _trace_normalize_invocation(
+    args: Any,
+    kwargs: Any,
+    *,
+    store: Any | None,
+) -> tuple[tuple[Any, ...], dict[str, Any], dict[str, tuple[ConcreteDefinition, ...]], tuple[tuple[str, str], ...]]:
+    """Return the canonical trace grammar and private live-CDef side table.
+
+    The normal operation grammar intentionally accepts Python-shaped lists and
+    mappings.  Requested tracing is narrower: it needs an exact, reproducible
+    worker call before trusted code can run.  Concrete definitions become raw
+    worker CDef references while the corresponding live values remain only in
+    this request-local table.
+    """
+
+    if type(args) is not tuple:
+        raise DispatchPlanningError("dynamic tracing requires args to be an exact tuple")
+    if kwargs is None:
+        kwargs = {}
+    if type(kwargs) is not dict:
+        raise DispatchPlanningError("dynamic tracing requires kwargs to be an exact dict")
+    if any(type(key) is not str for key in kwargs):
+        raise DispatchPlanningError("dynamic tracing requires exact string kwargs keys")
+
+    side_table: dict[str, list[ConcreteDefinition]] = {}
+    positions: list[tuple[str, str]] = []
+    seen_containers: set[int] = set()
+
+    def convert(value: Any, path: str) -> Any:
+        if isinstance(value, Definition) and not isinstance(value, ConcreteDefinition):
+            raise DispatchPlanningError("dynamic tracing does not support plain Definition arguments")
+        if isinstance(value, ConcreteDefinition):
+            if store is None or not _store_has_cdef(store, value):
+                raise DispatchPlanningError("dynamic tracing requires every ConcreteDefinition argument to be present in the store")
+            cdef_id = format_cdef_id(value.stable_hash())
+            side_table.setdefault(cdef_id, []).append(value)
+            positions.append((path, cdef_id))
+            return cdef_id
+        if type(value) in {list, tuple, dict}:
+            identity = id(value)
+            if identity in seen_containers:
+                raise DispatchPlanningError("dynamic tracing does not support aliased or cyclic invocation containers")
+            seen_containers.add(identity)
+            if type(value) is dict:
+                if any(type(key) is not str for key in value):
+                    raise DispatchPlanningError("dynamic tracing requires exact string mapping keys")
+                return {key: convert(item, f"{path}/{key}") for key, item in value.items()}
+            return [convert(item, f"{path}/{index}") for index, item in enumerate(value)]
+        return value
+
+    converted_args = tuple(convert(value, f"args/{index}") for index, value in enumerate(args))
+    converted_kwargs = {key: convert(value, f"kwargs/{key}") for key, value in kwargs.items()}
+    return converted_args, converted_kwargs, {key: tuple(values) for key, values in side_table.items()}, tuple(positions)
 
 
 def _normalize_args(args: tuple[Any, ...] | list[Any] | None) -> tuple[Any, ...]:

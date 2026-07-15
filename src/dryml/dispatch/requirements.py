@@ -8,26 +8,33 @@ solve environments; it delegates local world synthesis to :mod:`dryml.worlds`.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
+import re
 import sys
+import types
+import uuid
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
 
 from dryml import annotations, environments, runtime, worlds
-from dryml.code import analyze, probe_target
+from dryml.code import DynamicCallFact, DynamicTracePolicy, analyze, probe_target, trace
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult
-from dryml.code.facts import AnnotationFact, DiagnosticFact
+from dryml.code.facts import AnnotationFact, CodeFact, DiagnosticFact
 from dryml.code.probe import CodeProbeResult
 from dryml.code.targets import CodeTargetSpec
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.utils.general import pickle_load
 from dryml.environments.records import EnvironmentRecord
 from dryml.environments.specs import EnvironmentSpec, PythonExecutableSpec, spec_from_data
 from dryml.runtime import RuntimeEnforcement, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
 from dryml.worlds.specs import WorldSpec
+from dryml.operations import resolve_call_arguments
 
 from .errors import DispatchPlanningError
 from .normalize import NormalizedDispatchTarget
@@ -35,6 +42,19 @@ from .normalize import NormalizedDispatchTarget
 
 PLANNING_METADATA_VERSION = 2
 DEFAULT_PROBE_TIMEOUT_S = 30.0
+_TRACE_SCHEMA = "dryml.dispatch.dynamic_trace.v1"
+_TRACE_MAX_CALLS = 256
+_TRACE_MAX_FRAGMENTS = 1024
+_TRACE_MAX_DUPLICATES = 1024
+_TRACE_MAX_DIAGNOSTICS = 256
+_TRACE_PREEXEC_CODES = frozenset({
+    "dryml.code.dynamic_trace_disabled",
+    "dryml.code.dynamic_trace_invalid_context",
+    "dryml.code.dynamic_trace_unsupported_target",
+    "dryml.code.dynamic_trace_unsupported_argument",
+    "dryml.code.dynamic_trace_argument_limit_exceeded",
+    "dryml.code.dynamic_trace_receiver_resolution_failed",
+})
 _MAX_METADATA_DEPTH = 8
 _MAX_METADATA_ITEMS = 64
 _MAX_METADATA_STRING = 4096
@@ -61,6 +81,7 @@ _RESERVED_PLANNING_KEYS = frozenset(
         "dryml.runtime_enforcement",
         "dryml.dispatch.launchable",
         "dryml.dispatch.diagnostics",
+        "dryml.dispatch.dynamic_trace",
     }
 )
 
@@ -71,6 +92,85 @@ class RequirementPolicy(str, Enum):
     STRICT = "strict"
     WARN = "warn"
     IGNORE = "ignore"
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicTraceRequest:
+    """Validated opt-in analysis-policy extension for one dispatch request.
+
+    ``analysis_policy`` remains backwards compatible with a direct
+    :class:`CodeAnalysisContext`.  Only this mapping-derived request can enable
+    invocation; permission on the caller context alone is never an opt-in.
+    """
+
+    context: CodeAnalysisContext
+    probe_timeout_s: float
+    policy: DynamicTracePolicy | None = None
+
+    @property
+    def requested(self) -> bool:
+        """Return whether this request explicitly selected dynamic tracing."""
+
+        return self.policy is not None
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicTraceProvenance:
+    """Bounded, serializable per-request dynamic-trace planning evidence."""
+
+    data: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        value = dict(self.data)
+        required = {
+            "schema", "schema_version", "requested", "trace_input_id",
+            "trace_run_id", "execution_location", "execution_started",
+            "target", "policy", "status", "summary", "calls",
+            "accepted_fragments", "duplicate_observations", "diagnostics",
+        }
+        if set(value) != required or value.get("schema") != _TRACE_SCHEMA or value.get("schema_version") != 1:
+            raise ValueError("invalid dynamic trace provenance schema")
+        if value.get("requested") is not True or value.get("execution_location") != "current_process":
+            raise ValueError("invalid dynamic trace provenance request/location")
+        if value.get("status") not in {"pre_execution_failed", "complete", "failed", "incomplete", "provenance_limit_exceeded", "evidence_rejected"}:
+            raise ValueError("invalid dynamic trace provenance status")
+        if value.get("execution_started") not in {True, False, None}:
+            raise ValueError("invalid dynamic trace execution state")
+        input_id, run_id = value.get("trace_input_id"), value.get("trace_run_id")
+        if value["status"] == "pre_execution_failed":
+            if run_id is not None or value["execution_started"] is not False:
+                raise ValueError("pre-execution trace provenance cannot have a run")
+        elif not isinstance(input_id, str) or not input_id or not isinstance(run_id, str) or not run_id:
+            raise ValueError("post-start/rejected trace provenance requires input and run IDs")
+        if input_id is not None and (not isinstance(input_id, str) or not input_id):
+            raise ValueError("invalid trace input ID")
+        if run_id is not None and (not isinstance(run_id, str) or not run_id):
+            raise ValueError("invalid trace run ID")
+        if not isinstance(value.get("calls"), list) or len(value["calls"]) > _TRACE_MAX_CALLS:
+            raise ValueError("invalid dynamic trace call evidence")
+        for name, limit in (("accepted_fragments", _TRACE_MAX_FRAGMENTS), ("duplicate_observations", _TRACE_MAX_DUPLICATES), ("diagnostics", _TRACE_MAX_DIAGNOSTICS)):
+            if not isinstance(value.get(name), list) or len(value[name]) > limit:
+                raise ValueError("dynamic trace provenance limit exceeded")
+        target = value.get("target")
+        if target is not None and (
+            type(target) is not dict
+            or set(target) != {"target_kind", "transport"}
+            or not isinstance(target["target_kind"], str)
+            or target["transport"] not in {"import_path", "pickle_small", "operation_spec", "method_call"}
+        ):
+            raise ValueError("invalid dynamic trace target")
+        object.__setattr__(self, "data", value)
+
+    def to_data(self) -> dict[str, Any]:
+        """Return an isolated JSON-ready provenance copy."""
+
+        return json.loads(json.dumps(self.data, sort_keys=True, separators=(",", ":"), allow_nan=False))
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> "DynamicTraceProvenance":
+        """Restore strict versioned provenance without accepting extra fields."""
+
+        return cls(data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +287,7 @@ class DispatchPlanningResolution:
         inventory_summary: Bounded inventory used by synthesis or allocation.
         world_allocation_summary: Actual local allocation summary when planned.
         local_inventory: Internal reused inventory object; omitted from public data.
+        dynamic_trace: Opt-in current-process trace evidence, never operation metadata.
     """
 
     normalized_target: Mapping[str, Any]
@@ -212,6 +313,7 @@ class DispatchPlanningResolution:
     inventory_summary: Mapping[str, Any] | None = None
     world_allocation_summary: Mapping[str, Any] | None = None
     local_inventory: worlds.LocalResourceInventory | None = None
+    dynamic_trace: DynamicTraceProvenance | None = None
 
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-ready planning decisions without live targets."""
@@ -239,6 +341,7 @@ class DispatchPlanningResolution:
             "runtime_enforcement": self.runtime_enforcement.value,
             "diagnostics": [item.to_data() for item in self.diagnostics],
             "launchable": self.launchable,
+            "dynamic_trace": None if self.dynamic_trace is None else self.dynamic_trace.to_data(),
         })
 
     def metadata(self) -> dict[str, Any]:
@@ -270,6 +373,7 @@ class DispatchPlanningResolution:
             "dryml.runtime_enforcement": self.runtime_enforcement.value,
             "dryml.dispatch.launchable": self.launchable,
             "dryml.dispatch.diagnostics": data["diagnostics"],
+            **({"dryml.dispatch.dynamic_trace": data["dynamic_trace"]} if data["dynamic_trace"] is not None else {}),
         }
 
 
@@ -351,6 +455,44 @@ def effective_requirement_policy(explicit: RequirementPolicy | str | None, enfor
     }[current]
 
 
+def parse_analysis_policy(policy: Any | None) -> DynamicTraceRequest:
+    """Strictly parse dispatch analysis policy before normalization or tracing.
+
+    A direct context is a compatibility form and deliberately cannot request a
+    trace, even if it grants dynamic-execution permission.  The mapping form is
+    closed so misspellings cannot silently authorize target invocation.
+    """
+
+    if isinstance(policy, DynamicTraceRequest):
+        return policy
+    if policy is None:
+        return DynamicTraceRequest(CodeAnalysisContext(), DEFAULT_PROBE_TIMEOUT_S)
+    if isinstance(policy, CodeAnalysisContext):
+        return DynamicTraceRequest(policy, DEFAULT_PROBE_TIMEOUT_S)
+    if not isinstance(policy, Mapping):
+        raise DispatchPlanningError("analysis_policy must be a CodeAnalysisContext or mapping")
+    unknown = set(policy) - {"context", "probe_timeout_s", "dynamic_trace"}
+    if unknown:
+        raise DispatchPlanningError("analysis_policy contains unsupported fields", context={"fields": sorted(unknown)})
+    context = policy.get("context")
+    if context is None:
+        context = CodeAnalysisContext()
+    if not isinstance(context, CodeAnalysisContext):
+        raise DispatchPlanningError("analysis_policy.context must be a CodeAnalysisContext")
+    timeout = policy.get("probe_timeout_s", DEFAULT_PROBE_TIMEOUT_S)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise DispatchPlanningError("analysis_policy.probe_timeout_s must be a positive number")
+    if "dynamic_trace" not in policy:
+        trace_policy = None
+    elif type(policy["dynamic_trace"]) is bool and policy["dynamic_trace"] is True:
+        trace_policy = DynamicTracePolicy()
+    elif isinstance(policy["dynamic_trace"], DynamicTracePolicy):
+        trace_policy = policy["dynamic_trace"]
+    else:
+        raise DispatchPlanningError("analysis_policy.dynamic_trace must be exactly True or a DynamicTracePolicy")
+    return DynamicTraceRequest(context, float(timeout), trace_policy)
+
+
 def resolve_dispatch_plan(
     normalized: NormalizedDispatchTarget,
     *,
@@ -397,15 +539,29 @@ def resolve_dispatch_plan(
     _validate_sprint8_policies(inventory_policy, resolver_policy)
     if inventory is not None and not isinstance(inventory, worlds.LocalResourceInventory):
         raise DispatchPlanningError("inventory must be a LocalResourceInventory")
-    analysis_context, probe_timeout_s = _analysis_options(analysis_policy)
+    analysis_request = parse_analysis_policy(analysis_policy)
+    analysis_context, probe_timeout_s = analysis_request.context, analysis_request.probe_timeout_s
     fragments, analysis, bootstrap_probe, bootstrap_environment, discovery_diagnostics, complete = _discover(
         normalized,
         environment,
         analysis_context=analysis_context,
         probe_timeout_s=probe_timeout_s,
     )
-    resolution = annotations.resolve_fragments(fragments, source="dryml.dispatch")
+    trace_provenance = None
+    trace_diagnostics: tuple[DiagnosticFact, ...] = ()
+    if analysis_request.requested:
+        fragments, trace_provenance, trace_diagnostics = _trace_dispatch_invocation(
+            normalized,
+            analysis_request,
+            fragments,
+        )
+        complete = complete and trace_provenance.data["status"] == "complete"
+    resolution = annotations.resolve_fragments(
+        fragments,
+        source="dryml.dispatch.dynamic_trace" if analysis_request.requested else "dryml.dispatch",
+    )
     diagnostics = list(discovery_diagnostics)
+    diagnostics.extend(trace_diagnostics)
     diagnostics.extend(_annotation_diagnostics(resolution))
 
     env_selection, env_spec, environment_resolution = _select_environment(
@@ -426,7 +582,7 @@ def resolve_dispatch_plan(
         inventory_policy=inventory_policy,
     )
     runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
-    structural_safe = True
+    structural_safe = trace_provenance is None or trace_provenance.data["status"] == "complete"
     if environment_resolution is not None and not environment_resolution.ok:
         incomplete = environment_resolution.status == "incomplete"
         diagnostics.append(_diagnostic(
@@ -735,6 +891,7 @@ def resolve_dispatch_plan(
         ),
         world_allocation_summary=None,
         local_inventory=selected_inventory,
+        dynamic_trace=trace_provenance,
     )
 
 
@@ -747,6 +904,281 @@ def explanation_for(normalized: NormalizedDispatchTarget, **kwargs: Any) -> Disp
     # compatibility finding is intentionally presented as a warning.
     blocking = () if result.launchable else errors or tuple(result.diagnostics)
     return DispatchExplanation(result, dict(normalized.operation_spec), blocking)
+
+
+def _trace_dispatch_invocation(
+    normalized: NormalizedDispatchTarget,
+    request: DynamicTraceRequest,
+    direct_fragments: tuple[annotations.AnnotationFragment, ...],
+) -> tuple[tuple[annotations.AnnotationFragment, ...], DynamicTraceProvenance, tuple[DiagnosticFact, ...]]:
+    """Trace one worker-effective invocation and admit only complete evidence.
+
+    This is intentionally a dispatch carrier, not an analysis implementation:
+    it derives the worker argument grammar, calls the public code facade once,
+    then returns typed annotation fragments to the sole annotations resolver.
+    """
+
+    target = _trace_target_data(normalized)
+    try:
+        trace_args, trace_kwargs = _effective_trace_invocation(normalized)
+        input_id = _trace_input_id(normalized, request.policy, trace_args, trace_kwargs)
+    except Exception:
+        provenance = _trace_provenance(
+            normalized, request.policy, target=target, status="pre_execution_failed",
+            input_id=None, run_id=None, started=False,
+            diagnostics=[_trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")],
+        )
+        return direct_fragments, provenance, (_trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input"),)
+
+    live_target = normalized.trace_live_target
+    if type(live_target) is not types.FunctionType:
+        provenance = _trace_provenance(
+            normalized, request.policy, target=target, status="pre_execution_failed",
+            input_id=input_id, run_id=None, started=False,
+            diagnostics=[_trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")],
+        )
+        return direct_fragments, provenance, (_trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input"),)
+
+    trace_context = replace(
+        request.context,
+        allow_dynamic_execution=True,
+        algorithms=("dynamic_trace",),
+        diagnostics_policy="collect",
+    )
+    run_id = f"trace-run-v1-{uuid.uuid4().hex}"
+    result = trace(live_target, args=trace_args, kwargs=trace_kwargs, context=trace_context, policy=request.policy)
+    return _admit_trace_result(normalized, request.policy, direct_fragments, target, input_id, run_id, result)
+
+
+def _effective_trace_invocation(normalized: NormalizedDispatchTarget) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Use the operation resolver with non-building planning-store callbacks."""
+
+    store = normalized.trace_store
+    if store is None:
+        raise ValueError("trace invocation requires a planning store")
+    operation = dict(normalized.operation_spec)
+    payload = dict(operation.get("payload") or {})
+    if normalized.transport == "pickle_small":
+        args = payload.get("args")
+        count = normalized.launch.get("identity_arg_count")
+        if (
+            type(args) is not list
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 0
+            or count > len(args)
+            or len(args[count:]) != 1
+            or type(args[count]) is not dict
+            or set(args[count]) != {"$literal"}
+            or not isinstance(args[count]["$literal"], str)
+            or re.fullmatch(r"dryml\.pickled_callable\.sha256:[0-9a-f]{64}", args[count]["$literal"]) is None
+        ):
+            raise ValueError("invalid pickle_small trace marker")
+        payload["args"] = args[:count]
+        operation["payload"] = payload
+        operation.pop("id", None)
+
+    def materialize(cdef_id: str) -> ConcreteDefinition:
+        stored = _load_trace_cdef(store, cdef_id)
+        supplied = normalized.trace_cdef_side_table.get(cdef_id, ())
+        if any(stored != live for live in supplied):
+            raise ValueError("stored CDef differs from caller CDef")
+        return supplied[0] if supplied else stored
+
+    resolved = resolve_call_arguments(operation, materialize_cdef=materialize, make_cdef_ref=lambda cdef_id: cdef_id)
+    return tuple(resolved.args), dict(resolved.kwargs)
+
+
+def _load_trace_cdef(store: Any, cdef_id: str) -> ConcreteDefinition:
+    """Load a stored CDef structurally without building a DRYML object."""
+
+    path = os.path.join(store.object_dir_for_cdef_id(cdef_id), "def.pkl")
+    if not os.path.isfile(path):
+        raise ValueError("stored CDef is unavailable")
+    value = pickle_load(path)
+    if not isinstance(value, ConcreteDefinition):
+        raise ValueError("stored definition is not concrete")
+    return value
+
+
+def _trace_input_id(
+    normalized: NormalizedDispatchTarget,
+    policy: DynamicTracePolicy | None,
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+) -> str:
+    if policy is None:
+        raise ValueError("missing trace policy")
+    record = {
+        "schema": "dryml.dispatch.trace_input.v1",
+        "operation_id": normalized.operation_spec.get("id"),
+        "operation_kind": normalized.operation_spec.get("kind"),
+        "target": _trace_target_data(normalized),
+        "canonical_invocation": (normalized.operation_spec.get("payload") or {}),
+        "effective_invocation": {"args": _trace_identity_value(args), "kwargs": _trace_identity_value(dict(kwargs))},
+        "cdef_positions": list(normalized.trace_cdef_positions),
+        "policy": _trace_policy_data(policy),
+    }
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return "trace-input-v1-" + hashlib.sha256(encoded).hexdigest()
+
+
+def _trace_identity_value(value: Any) -> Any:
+    if isinstance(value, ConcreteDefinition):
+        return {"$trace_cdef": value.stable_hash()}
+    if type(value) is tuple:
+        return [_trace_identity_value(item) for item in value]
+    if type(value) is list:
+        return [_trace_identity_value(item) for item in value]
+    if type(value) is dict:
+        return {key: _trace_identity_value(item) for key, item in value.items()}
+    return value
+
+
+def _trace_target_data(normalized: NormalizedDispatchTarget) -> dict[str, str] | None:
+    if normalized.code_target is None:
+        return None
+    return {"target_kind": normalized.code_target.kind, "transport": normalized.transport}
+
+
+def _trace_policy_data(policy: DynamicTracePolicy) -> dict[str, Any]:
+    return {
+        "max_calls": policy.max_calls,
+        "require_proxy_only_args": policy.require_proxy_only_args,
+        "collect_requirements": policy.collect_requirements,
+    }
+
+
+def _trace_diagnostic(code: str) -> DiagnosticFact:
+    messages = {
+        "dryml.dispatch.dynamic_trace_unsupported_input": "Requested dynamic trace input is unsupported.",
+        "dryml.dispatch.dynamic_trace_failed": "Requested dynamic trace failed after execution started.",
+        "dryml.dispatch.dynamic_trace_incomplete": "Requested dynamic trace is incomplete.",
+        "dryml.dispatch.dynamic_trace_identity_mismatch": "Dynamic trace evidence does not match this request.",
+        "dryml.dispatch.dynamic_trace_evidence_rejected": "Dynamic trace evidence was rejected.",
+        "dryml.dispatch.dynamic_trace_provenance_limit_exceeded": "Dynamic trace provenance exceeds dispatch limits.",
+    }
+    return _diagnostic(code, messages[code])
+
+
+def _trace_provenance(
+    normalized: NormalizedDispatchTarget,
+    policy: DynamicTracePolicy | None,
+    *,
+    target: dict[str, str] | None,
+    status: str,
+    input_id: str | None,
+    run_id: str | None,
+    started: bool | None,
+    summary: Mapping[str, Any] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    accepted_fragments: list[dict[str, Any]] | None = None,
+    duplicate_observations: list[dict[str, Any]] | None = None,
+    diagnostics: list[DiagnosticFact] | None = None,
+) -> DynamicTraceProvenance:
+    del normalized
+    return DynamicTraceProvenance({
+        "schema": _TRACE_SCHEMA,
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": input_id,
+        "trace_run_id": run_id,
+        "execution_location": "current_process",
+        "execution_started": started,
+        "target": target,
+        "policy": _trace_policy_data(policy) if policy is not None else {"max_calls": 0, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": status,
+        "summary": None if summary is None else dict(summary),
+        "calls": [] if calls is None else calls,
+        "accepted_fragments": [] if accepted_fragments is None else accepted_fragments,
+        "duplicate_observations": [] if duplicate_observations is None else duplicate_observations,
+        "diagnostics": [{"code": item.code, "severity": item.severity} for item in diagnostics or ()],
+    })
+
+
+def _admit_trace_result(
+    normalized: NormalizedDispatchTarget,
+    policy: DynamicTracePolicy,
+    direct_fragments: tuple[annotations.AnnotationFragment, ...],
+    target: dict[str, str] | None,
+    input_id: str,
+    run_id: str,
+    result: Any,
+) -> tuple[tuple[annotations.AnnotationFragment, ...], DynamicTraceProvenance, tuple[DiagnosticFact, ...]]:
+    """Validate 9B result shape before any fact reaches requirement resolution."""
+
+    if not isinstance(result, CodeAnalysisResult) or normalized.code_target is None or result.target.kind != normalized.code_target.kind:
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_identity_mismatch")
+        provenance = _trace_provenance(normalized, policy, target=target, status="evidence_rejected", input_id=input_id, run_id=run_id, started=None, diagnostics=[diagnostic])
+        return direct_fragments, provenance, (diagnostic,)
+    safe_diagnostics = tuple(
+        _diagnostic(item.code, "Dynamic trace reported a diagnostic.", severity=item.severity)
+        for item in result.diagnostics if isinstance(item, DiagnosticFact)
+    )
+    if not result.facts and result.diagnostics and all(item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics):
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")
+        provenance = _trace_provenance(normalized, policy, target=target, status="pre_execution_failed", input_id=input_id, run_id=None, started=False, diagnostics=[diagnostic, *safe_diagnostics])
+        return direct_fragments, provenance, (diagnostic,)
+    try:
+        calls = [CodeFact.from_data(fact.to_data()) for fact in result.facts if getattr(fact, "kind", None) == "dynamic_call"]
+        if not all(isinstance(fact, DynamicCallFact) for fact in calls):
+            raise ValueError("invalid calls")
+        summaries = [fact for fact in result.facts if getattr(fact, "kind", None) == "dynamic_trace_summary"]
+        if len(summaries) != 1 or set(summaries[0].data) != {"complete", "outcome", "calls_recorded", "max_calls"}:
+            raise ValueError("invalid summary")
+        summary = summaries[0].to_data()
+        sequences = [fact.data["sequence"] for fact in calls]
+        if sequences != list(range(len(calls))) or summary["data"]["calls_recorded"] != len(calls):
+            raise ValueError("invalid call sequence")
+        if len(calls) > _TRACE_MAX_CALLS:
+            diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
+            provenance = _trace_provenance(normalized, policy, target=target, status="provenance_limit_exceeded", input_id=input_id, run_id=run_id, started=True, summary=summary, diagnostics=[diagnostic])
+            return direct_fragments, provenance, (diagnostic,)
+    except Exception:
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_evidence_rejected")
+        provenance = _trace_provenance(normalized, policy, target=target, status="evidence_rejected", input_id=input_id, run_id=run_id, started=None, diagnostics=[diagnostic])
+        return direct_fragments, provenance, (diagnostic,)
+
+    if summary["data"]["complete"] is not True or result.diagnostics:
+        status = "failed" if summary["data"].get("outcome") == "target_failed" else "incomplete"
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_failed" if status == "failed" else "dryml.dispatch.dynamic_trace_incomplete")
+        provenance = _trace_provenance(normalized, policy, target=target, status=status, input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in calls], diagnostics=[diagnostic, *safe_diagnostics])
+        return direct_fragments, provenance, (diagnostic,)
+
+    fragments, accepted, duplicates = _combine_trace_fragments(direct_fragments, calls)
+    if len(accepted) > _TRACE_MAX_FRAGMENTS or len(duplicates) > _TRACE_MAX_DUPLICATES:
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
+        provenance = _trace_provenance(normalized, policy, target=target, status="provenance_limit_exceeded", input_id=input_id, run_id=run_id, started=True, summary=summary, diagnostics=[diagnostic])
+        return direct_fragments, provenance, (diagnostic,)
+    provenance = _trace_provenance(normalized, policy, target=target, status="complete", input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in calls], accepted_fragments=accepted, duplicate_observations=duplicates)
+    return fragments, provenance, ()
+
+
+def _combine_trace_fragments(
+    direct: tuple[annotations.AnnotationFragment, ...],
+    calls: list[DynamicCallFact],
+) -> tuple[tuple[annotations.AnnotationFragment, ...], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply only ingress ordering/deduplication before annotation ownership."""
+
+    result = list(direct)
+    seen = {json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":")): "direct" for fragment in direct}
+    accepted: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
+    for call in calls:
+        for fact_data in call.data["method_facts"]:
+            fact = CodeFact.from_data(fact_data)
+            if not isinstance(fact, AnnotationFact):
+                continue
+            fragment = annotations.AnnotationFragment.from_data(fact.data)
+            key = json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":"))
+            observation = {"sequence": call.data["sequence"], "method": call.data["method_name"], "fragment_key": hashlib.sha256(key.encode()).hexdigest()}
+            if key in seen:
+                duplicates.append({**observation, "first": seen[key]})
+                continue
+            seen[key] = f"trace:{call.data['sequence']}"
+            result.append(fragment)
+            accepted.append(observation)
+    return tuple(result), accepted, duplicates
 
 
 def _discover(
@@ -804,24 +1236,8 @@ def _discover(
 def _analysis_options(policy: Any | None) -> tuple[CodeAnalysisContext, float]:
     """Validate bounded dispatch analysis/probe options before discovery starts."""
 
-    if policy is None:
-        return CodeAnalysisContext(), DEFAULT_PROBE_TIMEOUT_S
-    if isinstance(policy, CodeAnalysisContext):
-        return policy, DEFAULT_PROBE_TIMEOUT_S
-    if not isinstance(policy, Mapping):
-        raise DispatchPlanningError("analysis_policy must be a CodeAnalysisContext or mapping")
-    unknown = set(policy) - {"context", "probe_timeout_s"}
-    if unknown:
-        raise DispatchPlanningError("analysis_policy contains unsupported fields", context={"fields": sorted(unknown)})
-    context = policy.get("context")
-    if context is None:
-        context = CodeAnalysisContext()
-    if not isinstance(context, CodeAnalysisContext):
-        raise DispatchPlanningError("analysis_policy.context must be a CodeAnalysisContext")
-    timeout = policy.get("probe_timeout_s", DEFAULT_PROBE_TIMEOUT_S)
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-        raise DispatchPlanningError("analysis_policy.probe_timeout_s must be a positive number")
-    return context, float(timeout)
+    request = parse_analysis_policy(policy)
+    return request.context, request.probe_timeout_s
 
 
 def _validate_sprint8_policies(inventory_policy: str, resolver_policy: str | None) -> None:
@@ -1440,10 +1856,13 @@ __all__ = [
     "CandidateCheckReport",
     "CandidateConsideration",
     "CandidateSelection",
+    "DynamicTraceProvenance",
+    "DynamicTraceRequest",
     "DispatchExplanation",
     "DispatchPlanningResolution",
     "RequirementPolicy",
     "effective_requirement_policy",
     "explanation_for",
+    "parse_analysis_policy",
     "resolve_dispatch_plan",
 ]

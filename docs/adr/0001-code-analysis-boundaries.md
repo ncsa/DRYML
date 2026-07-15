@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted through Sprint 9B static-analysis and current-process trace boundaries.
+Accepted through Sprint 9C dispatch integration and current-process trace boundaries.
 
 ## Context
 
@@ -32,11 +32,12 @@ Future analysis features should be implemented as reusable analyzers. Dispatch c
 `dynamic_trace` is registered for protocol consistency but ordinary analyzer and
 probe invocation returns a requires-trace-facade diagnostic and never invokes the
 target. It is absent from both default analyzer tuples. Dynamic call facts are
-observations from one explicit inline run, not dispatch requirements or exact
-cross-run Definition identity. Tracing is cooperative trusted-code execution,
-not a sandbox, subprocess, selected-environment facility, or hard-timeout
-boundary. Dispatch integration and unchecked graph-prototype retirement remain
-Sprint 9C work.
+observations from one explicit inline run, not exact cross-run Definition
+identity. Dispatch consumes them only after an explicit, strict
+`analysis_policy.dynamic_trace` request, validates bounded result evidence, and
+passes direct plus accepted annotation fragments to `dryml.annotations` for the
+authoritative merge. Tracing remains cooperative trusted-code execution, not a
+sandbox, subprocess, selected-environment facility, or hard-timeout boundary.
 
 ## Alternatives Considered
 
@@ -54,7 +55,7 @@ Putting analysis inside dispatch would duplicate algorithms and tie them to one 
 ## Follow-up Work
 
 Sprint 9A added bounded syntactic and conservative static-call analysis. Sprint
-9B added the bounded current-process dynamic trace facade. Sprint 9C may add
-explicit dispatch policy for accepted facts and retire unchecked graph
-prototypes. Sprint 2 reviewed the `Method` model migration toward
+9B added the bounded current-process dynamic trace facade. Sprint 9C adds the
+explicit dispatch policy and bounded planning carrier for accepted facts;
+unchecked graph prototypes remain absent from tracked distributions. Sprint 2 reviewed the `Method` model migration toward
 `core2.methods`.

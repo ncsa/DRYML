@@ -19,7 +19,7 @@ from .errors import DispatchPlanningError
 from .normalize import normalize_user_operation
 from .operations import PickledCallable
 from .protocol import DispatchResult, ExecutionEnvelope
-from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, resolve_dispatch_plan
+from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, parse_analysis_policy, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
 from .stores import require_supported_plan, select_marshal_plan
@@ -144,8 +144,9 @@ class Dispatcher:
         effective_candidates = self.environment_candidates if environment_candidates is _UNSET else environment_candidates
         effective_registry = self.environment_registry if environment_registry is _UNSET else environment_registry
         effective_inventory = self.inventory if inventory is _UNSET else inventory
+        analysis_request = parse_analysis_policy(analysis_policy)
         _report("dryml.dispatch.requirements.gather", "Gathering environment/world/runtime requirements")
-        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
+        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs, trace_enabled=analysis_request.requested)
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
         _report("dryml.dispatch.requirements.merge", "Merging requirements and defaults", operation_id=op_spec.get("id"))
@@ -156,7 +157,7 @@ class Dispatcher:
                 world=world,
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
-                analysis_policy=analysis_policy,
+                analysis_policy=analysis_request,
                 environment_candidates=effective_candidates,
                 environment_registry=effective_registry,
                 inventory=effective_inventory,
@@ -170,6 +171,11 @@ class Dispatcher:
             raise
         if not resolution.launchable:
             _cleanup_launch(launch)
+            if resolution.dynamic_trace is not None and resolution.dynamic_trace.data["status"] != "complete":
+                raise DispatchPlanningError(
+                    "requested dynamic trace did not produce complete planning evidence",
+                    context={"dynamic_trace": resolution.dynamic_trace.to_data()},
+                )
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
                 raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
             if any(item.code == "dryml.dispatch.single_subprocess_world_unsupported" for item in resolution.diagnostics):
@@ -381,7 +387,8 @@ class Dispatcher:
         effective_candidates = self.environment_candidates if environment_candidates is _UNSET else environment_candidates
         effective_registry = self.environment_registry if environment_registry is _UNSET else environment_registry
         effective_inventory = self.inventory if inventory is _UNSET else inventory
-        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs)
+        analysis_request = parse_analysis_policy(analysis_policy)
+        normalized = normalize_user_operation(operation, method_name, store=target_store, allow_pickle=allow_pickle, args=args, kwargs=kwargs, trace_enabled=analysis_request.requested)
         op_spec = dict(normalized.operation_spec)
         launch = dict(normalized.launch)
         try:
@@ -391,7 +398,7 @@ class Dispatcher:
                 world=world,
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
-                analysis_policy=analysis_policy,
+                analysis_policy=analysis_request,
                 environment_candidates=effective_candidates,
                 environment_registry=effective_registry,
                 inventory=effective_inventory,
@@ -404,6 +411,11 @@ class Dispatcher:
             raise
         if not resolution.launchable:
             _cleanup_launch(launch)
+            if resolution.dynamic_trace is not None and resolution.dynamic_trace.data["status"] != "complete":
+                raise DispatchPlanningError(
+                    "requested dynamic trace did not produce complete planning evidence",
+                    context={"dynamic_trace": resolution.dynamic_trace.to_data()},
+                )
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
                 raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
             raise DispatchPlanningError("dispatch world plan is not launchable; call dispatch.explain(...) for requirement diagnostics", context={"planning": resolution.to_data()})
@@ -637,6 +649,7 @@ class Dispatcher:
         effective_candidates = self.environment_candidates if environment_candidates is _UNSET else environment_candidates
         effective_registry = self.environment_registry if environment_registry is _UNSET else environment_registry
         effective_inventory = self.inventory if inventory is _UNSET else inventory
+        analysis_request = parse_analysis_policy(analysis_policy)
         normalized = normalize_user_operation(
             operation,
             method_name,
@@ -645,6 +658,7 @@ class Dispatcher:
             args=args,
             kwargs=kwargs,
             persist_object=False,
+            trace_enabled=analysis_request.requested,
         )
         try:
             return explanation_for(
@@ -653,7 +667,7 @@ class Dispatcher:
                 world=world,
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
-                analysis_policy=analysis_policy,
+                analysis_policy=analysis_request,
                 environment_candidates=effective_candidates,
                 environment_registry=effective_registry,
                 inventory=effective_inventory,

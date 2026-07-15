@@ -77,8 +77,7 @@ they cannot bypass invalid operation structure, worker/allocation safety, or the
 same-environment restriction of `PickledCallable`/`pickle_small` transport.
 
 Use `explain(...)` to inspect the same pipeline without launching a worker,
-allocating workload resources, creating execution records, or running a user
-function body:
+allocating workload resources, or creating execution records:
 
 ```python
 explanation = dryml.dispatch.explain(
@@ -93,13 +92,48 @@ print(explanation.resolution.environment_check.to_data())
 Explanation may perform bounded static analysis, code/environment probes,
 explicit-registry resolution, and read-only local inventory/synthesis when
 needed. It does not launch workloads, activate an allocation, persist records,
-solve/install packages, or perform dynamic tracing. It does run the same
+or solve/install packages. It does run the same
 non-allocating local capacity validation as planning, so an explanation is not
 launchable when the selected one-worker world cannot fit the supplied or
 discovered inventory. `plan(...)` and `plan_world(...)` then validate the actual
 backend allocation against hard world requirements before constructing workers
 when requirement policy is `strict`; `warn` and `ignore` retain their established
 compatibility semantics while never bypassing allocation feasibility.
+
+### Explicit current-process dynamic trace
+
+Dynamic tracing is off by default. It is requested only with the closed
+`analysis_policy` mapping; a `CodeAnalysisContext`, including one with
+`allow_dynamic_execution=True`, remains a non-tracing compatibility form.
+
+```python
+plan = dispatcher.plan(
+    orchestration_function,
+    store=repo.default_store,
+    args=(stored_cdef,),
+    analysis_policy={"dynamic_trace": True},
+)
+```
+
+The only mapping members are `context`, a positive finite `probe_timeout_s`,
+and `dynamic_trace`. The trace member is exactly `True` (the default
+`DynamicTracePolicy`) or an already validated `DynamicTracePolicy`; falsey or
+truthy substitutes, mappings, and unknown keys are rejected before operation
+normalization or pickle transport creation.
+
+For an eligible live synchronous Python function, dispatch derives the worker
+argument grammar through the normal operation resolver, calls
+`dryml.code.trace(...)` once in the caller process, and resolves direct plus
+accepted traced annotation fragments through `dryml.annotations`. `explain`
+does the same one explicitly requested trace, but remains non-launching and
+non-persisting. Requested trace failures, incomplete results, malformed
+evidence, and provenance-limit failures block planning under `strict`, `warn`,
+and `ignore`; partial facts are never treated as an empty requirement set.
+
+This executes trusted user code in the current process. It is not a sandbox,
+does not have a hard timeout, and is not sent to a probe, selected environment,
+or worker. Per-run bounded trace evidence is carried in dispatch/recipe/envelope
+planning metadata and explanations, not in immutable operation metadata.
 
 ## Unsupported Graph Prototype Package
 
