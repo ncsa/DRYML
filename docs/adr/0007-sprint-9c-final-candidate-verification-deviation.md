@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted by the user on 2026-07-15 for Sprint 9C closeout.
+Accepted by the user on 2026-07-15 for Sprint 9C closeout and explicitly
+extended to repaired implementation candidate
+`2b55c44ddba5ef85a8002f792d97c02a8326c15d` on the same date.
 
 ## Context
 
@@ -13,12 +15,21 @@ changed rejected-evidence admission and diagnostic projection, and a test repair
 isolated cancellation lifecycle coverage from unrelated probes. The final nested
 commit then added the exact provenance-boundary matrix required by Sprint 9C.
 
-The final candidate has green narrow evidence: all 88 dynamic-trace integration
-tests pass, including construction and restoration at every exact provenance
-bound and N+1, and all three cancellation lifecycle tests pass under their heavy
-selection. Earlier post-repair evidence also includes a green 217-test governing
-focused run and a green 678-test dispatch/code/annotations run, but those results
-do not cover every later commit together. The latest green rolling run covered
+The initial candidate had green narrow evidence: all 88 dynamic-trace integration
+tests passed, including construction and restoration at every exact provenance
+bound and N+1, and all three cancellation lifecycle tests passed under their heavy
+selection. A later audit identified descriptor binding during normalization of
+trace-unsupported stored method targets and missing profiling for the replacement
+boundary tests. Implementation candidate `2b55c44` removes the dynamic descriptor
+lookup, adds stored CDef/Object sentinels, and records tiers for all replacement
+and repair tests. The dynamic-trace integration and normalization files pass
+together (`97 passed in 78.30s`). Unknown-only profiling passed all nine new
+nodes; its heavy phase selected no unknown tests, stale tier metadata was removed,
+and generated timing files were removed after merging.
+
+Earlier post-repair evidence also includes a green 217-test governing focused run
+and a green 678-test dispatch/code/annotations run, but those results do not cover
+every later commit together. The latest green rolling run covered
 `2dc0783a5c333b0ea944e8aed2e2e9ed892b8bdb`, before the later repairs.
 
 The shared host is not suitable for meaningful probe-dependent reruns. At the
@@ -34,10 +45,11 @@ a separate explicit disposition.
 ## Decision
 
 Accept Sprint 9C without rerunning the governing focused set or rolling selection
-against nested candidate `2ef3992c273f97fc9a6a5901eff8e4c51a8c301f` on this
-host. Preserve the prior green suite evidence, final-candidate narrow evidence,
-and host snapshot as an explicit verification deviation. Do not describe the
-governing focused set or rolling selection as passing on the final candidate.
+against repaired implementation candidate
+`2b55c44ddba5ef85a8002f792d97c02a8326c15d` on this host. Preserve the prior
+green suite evidence, final-candidate narrow/profile evidence, and host snapshot
+as an explicit verification deviation. Do not describe the governing focused set
+or rolling selection as passing on the final candidate.
 
 This decision dispositions `AUD-9C-FINAL-001` for Sprint 9C closeout. It does not
 waive implementation findings, the exact-boundary coverage requirement, or the
@@ -49,10 +61,11 @@ releases.
 
 Sprint 9C retains residual compatibility risk because all final-candidate changes
 have not passed together through the governing focused and rolling selections.
-The strongest final-candidate evidence is the complete dynamic-trace integration
-file and cancellation lifecycle file, supplemented by earlier green governing
-and rolling results. Future audits must treat this as accepted verification debt,
-not as a green final-candidate suite result.
+The strongest final-candidate evidence is the combined dynamic-trace integration
+and normalization run, completed new-test profiling, and cancellation lifecycle
+file, supplemented by earlier green governing and rolling results. Future audits
+must treat this as accepted verification debt, not as a green final-candidate
+suite result.
 
 A focused or rolling failure reproduced on a suitable host remains actionable
 and is not covered by this acceptance. Any product correction after such a
