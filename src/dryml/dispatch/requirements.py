@@ -329,11 +329,11 @@ def _validate_trace_observations(
     """Require one canonical observation for every serialized annotation fact."""
 
     expected: dict[tuple[int, str, str], int] = {}
-    call_fragments: dict[tuple[int, str], set[str]] = {}
+    call_fragments: dict[int, set[str]] = {}
     for call in calls:
         sequence = call.data["sequence"]
         method = call.data["method_name"]
-        keys = call_fragments.setdefault((sequence, method), set())
+        keys = call_fragments.setdefault(sequence, set())
         for fact_data in call.data["method_facts"]:
             fact = CodeFact.from_data(fact_data)
             if not isinstance(fact, AnnotationFact):
@@ -371,7 +371,11 @@ def _validate_trace_observations(
         key = (item["sequence"], item["method"], item["fragment_key"])
         if item["first"] != "direct":
             match = re.fullmatch(r"trace:(\d+)", item["first"])
-            if match is None or int(match.group(1)) >= item["sequence"] or item["fragment_key"] not in call_fragments.get((int(match.group(1)), item["method"]), set()):
+            if (
+                match is None
+                or int(match.group(1)) > item["sequence"]
+                or item["fragment_key"] not in call_fragments.get(int(match.group(1)), set())
+            ):
                 raise ValueError("invalid duplicate trace fragment first observation")
         observed[key] = observed.get(key, 0) + 1
     if observed != expected:
@@ -633,12 +637,19 @@ class DispatchExplanation:
     def to_data(self) -> dict[str, Any]:
         """Return JSON-ready explanation data."""
 
-        return _bounded_data({
-            "resolution": self.resolution.to_data(),
+        resolution = self.resolution.to_data()
+        dynamic_trace = resolution.pop("dynamic_trace")
+        data = _bounded_data({
+            "resolution": resolution,
             "operation_preview": dict(self.operation_preview),
             "blocking_diagnostics": [item.to_data() for item in self.blocking_diagnostics],
             "launchable": self.launchable,
         })
+        # DynamicTraceProvenance already validated its independent schema and
+        # bounds. Do not silently truncate it through the generic explanation
+        # metadata projection.
+        data["resolution"]["dynamic_trace"] = dynamic_trace
+        return data
 
     def __str__(self) -> str:
         """Format a concise human-readable planning summary."""
@@ -686,7 +697,10 @@ def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
 
     A direct context is a compatibility form and deliberately cannot request a
     trace, even if it grants dynamic-execution permission.  The mapping form is
-    closed so misspellings cannot silently authorize target invocation.
+    closed so misspellings cannot silently authorize target invocation. The
+    mapping is copied once into the immutable private request used by a public
+    planning entrypoint; an explicit ``context=None`` is invalid rather than an
+    omitted context.
     """
 
     if isinstance(policy, _DynamicTraceRequest):
@@ -697,6 +711,7 @@ def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
         return _DynamicTraceRequest(policy, DEFAULT_PROBE_TIMEOUT_S)
     if not isinstance(policy, Mapping):
         raise DispatchPlanningError("analysis_policy must be a CodeAnalysisContext or mapping")
+    policy = dict(policy)
     if any(type(key) is not str for key in policy):
         raise DispatchPlanningError(
             "analysis_policy contains unsupported fields",
@@ -705,9 +720,10 @@ def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
     unknown = set(policy) - {"context", "probe_timeout_s", "dynamic_trace"}
     if unknown:
         raise DispatchPlanningError("analysis_policy contains unsupported fields", context={"fields": sorted(unknown)})
-    context = policy.get("context")
-    if context is None:
+    if "context" not in policy:
         context = CodeAnalysisContext()
+    else:
+        context = policy["context"]
     if not isinstance(context, CodeAnalysisContext):
         raise DispatchPlanningError("analysis_policy.context must be a CodeAnalysisContext")
     timeout = policy.get("probe_timeout_s", DEFAULT_PROBE_TIMEOUT_S)
@@ -739,6 +755,7 @@ def resolve_dispatch_plan(
     inventory: worlds.LocalResourceInventory | None = None,
     inventory_policy: str = "lightweight",
     resolver_policy: str | None = None,
+    _analysis_request: _DynamicTraceRequest | None = None,
 ) -> DispatchPlanningResolution:
     """Resolve requirements and candidate checks for one normalized target.
 
@@ -770,7 +787,12 @@ def resolve_dispatch_plan(
     _validate_sprint8_policies(inventory_policy, resolver_policy)
     if inventory is not None and not isinstance(inventory, worlds.LocalResourceInventory):
         raise DispatchPlanningError("inventory must be a LocalResourceInventory")
-    analysis_request = parse_analysis_policy(analysis_policy)
+    if _analysis_request is None:
+        analysis_request = parse_analysis_policy(analysis_policy)
+    elif type(_analysis_request) is _DynamicTraceRequest:
+        analysis_request = _analysis_request
+    else:
+        raise DispatchPlanningError("invalid internal dispatch analysis request")
     analysis_context, probe_timeout_s = analysis_request.context, analysis_request.probe_timeout_s
     fragments, analysis, bootstrap_probe, bootstrap_environment, discovery_diagnostics, complete = _discover(
         normalized,
@@ -1431,8 +1453,10 @@ def _admit_trace_result(
         expected_envelope and not result.facts and result.diagnostics
         and all(item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics)
     ):
-        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")
-        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input", trace_diagnostic_codes=safe_diagnostic_codes)
+        if len(safe_diagnostic_codes) > _TRACE_MAX_DIAGNOSTICS:
+            diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_provenance_limit_exceeded")
+        else:
+            diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input", trace_diagnostic_codes=safe_diagnostic_codes)
         provenance = _trace_provenance(normalized, policy, target=target, status="pre_execution_failed", input_id=input_id, run_id=None, started=False, diagnostics=[diagnostic])
         return direct_fragments, provenance, (diagnostic,)
     mixed_preexecution_diagnostic = (

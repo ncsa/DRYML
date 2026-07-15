@@ -116,7 +116,8 @@ plan = dispatcher.plan(
 ```
 
 The only mapping members are `context`, a positive finite `probe_timeout_s`,
-and `dynamic_trace`. The trace member is exactly `True` (the default
+and `dynamic_trace`. When present, `context` must be a
+`CodeAnalysisContext`; `None` is not an omission. The trace member is exactly `True` (the default
 `DynamicTracePolicy`) or an already validated `DynamicTracePolicy`; falsey or
 truthy substitutes, mappings, and unknown keys are rejected before operation
 normalization or pickle transport creation.
@@ -146,7 +147,9 @@ cannot be reconstructed without building fail before the facade or target.
 For an eligible input, dispatch calls `dryml.code.trace(...)` exactly once in the
 caller process and resolves direct fragments followed by accepted trace calls
 and serialized method facts through `dryml.annotations`. Identical fragments are
-first-occurrence deduplicated; later observations remain provenance only.
+first-occurrence deduplicated in call and serialized-method-fact order; later
+observations remain provenance only, including observations through a different
+method or later fact in the same call.
 `explain` performs that same explicitly requested trace, but remains
 non-launching and non-persisting. Requested trace failures, incomplete results,
 malformed/rejected evidence, and provenance-limit failures block planning under
@@ -161,7 +164,10 @@ Per-run bounded trace evidence is carried in dispatch/recipe/envelope planning
 metadata and explanations, not in immutable operation metadata. The versioned
 projection allows at most 256 calls, 1,024 accepted/duplicate observations, 256
 diagnostics, 4,096 characters per scalar, depth 32, and 1 MiB JSON; overflow is
-reported as `provenance_limit_exceeded`, never truncated. Its validated complete
+reported as `provenance_limit_exceeded`, never truncated. A recognized
+pre-execution result whose diagnostic-code projection exceeds its bound instead
+uses a bounded non-launchable pre-execution carrier; it is never allowed to leak
+an internal limit exception. Its validated complete
 or incomplete 9B summary is retained while calls and observations are empty, so
 an over-limit trace is not mistaken for an empty trace. The policy restored from
 the carrier has the exact 9B bounds (`max_calls` 1 through 10,000), and only the

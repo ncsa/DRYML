@@ -13,7 +13,7 @@ import pytest
 
 import dryml
 from dryml.code import CodeAnalysisContext, CodeAnalysisResult, DynamicTracePolicy, target_from_callable
-from dryml.code.facts import CodeFact, DiagnosticFact, DynamicCallFact
+from dryml.code.facts import AnnotationFact, CodeFact, DiagnosticFact, DynamicCallFact
 from dryml.core2.definition import ConcreteDefinition, Definition
 from dryml.core2.object import Object
 from dryml.core2.store.dir import DirStore
@@ -1197,3 +1197,151 @@ def test_run_world_traces_only_through_its_planning_call(tmp_path):
     )
 
     assert _calls == ["trace"]
+
+
+def test_provenance_correlates_duplicate_fragments_across_methods_and_same_call_order():
+    fragment = dryml.annotations.fragments_for(TraceRequirementModel)[0]
+    fragment_data = fragment.to_data()
+    method_fact = AnnotationFact(
+        data=fragment_data,
+        source={
+            "analyzer": "direct_annotations",
+            "target_kind": "function",
+            "annotation_source": fragment_data["source"],
+        },
+    ).to_data()
+    first = _dynamic_call(0)
+    first.data.update({"method_name": "prepare", "method_facts": [method_fact, method_fact]})
+    later = _dynamic_call(1)
+    later.data.update({"method_name": "train", "method_facts": [method_fact]})
+    fragment_key = hashlib.sha256(
+        json.dumps(fragment.to_data(), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+    provenance = DynamicTraceProvenance({
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": True,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": 2, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "complete",
+        "summary": _summary(calls=2, max_calls=2).to_data(),
+        "calls": [first.to_data(), later.to_data()],
+        "accepted_fragments": [{"sequence": 0, "method": "prepare", "fragment_key": fragment_key}],
+        "duplicate_observations": [
+            {"sequence": 0, "method": "prepare", "fragment_key": fragment_key, "first": "trace:0"},
+            {"sequence": 1, "method": "train", "fragment_key": fragment_key, "first": "trace:0"},
+        ],
+        "diagnostics": [],
+    })
+
+    assert provenance.to_data()["duplicate_observations"][1]["first"] == "trace:0"
+
+
+def test_explanation_serialization_preserves_valid_65_call_trace_provenance(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=tuple(_dynamic_call(index) for index in range(65)) + (_summary(calls=65, max_calls=65),),
+    )
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=result.facts,
+        ),
+    )
+
+    explanation = Dispatcher(store=_store(tmp_path)).explain(
+        traceable_target,
+        analysis_policy={"dynamic_trace": DynamicTracePolicy(max_calls=65)},
+        requirement_policy="ignore",
+    )
+
+    assert len(explanation.to_data()["resolution"]["dynamic_trace"]["calls"]) == 65
+
+
+def test_over_limit_recognized_preexecution_diagnostics_use_bounded_failure_carrier(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    diagnostics = tuple(
+        DiagnosticFact(
+            severity="error",
+            code="dryml.code.dynamic_trace_unsupported_argument",
+            message="must not be projected",
+        )
+        for _ in range(257)
+    )
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            diagnostics=diagnostics,
+        ),
+    )
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(
+            traceable_target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "pre_execution_failed"
+    assert evidence["diagnostics"] == [{
+        "code": "dryml.dispatch.dynamic_trace_provenance_limit_exceeded",
+        "severity": "error",
+        "data": {"trace_diagnostic_codes": []},
+    }]
+
+
+@pytest.mark.parametrize("entrypoint", ["plan", "plan_world", "explain"])
+def test_entrypoints_use_one_validated_policy_snapshot_through_resolution(monkeypatch, tmp_path, entrypoint):
+    import dryml.dispatch.planner as planner
+
+    policy = {"dynamic_trace": True}
+    original = planner.normalize_user_operation
+
+    def mutate_policy(*args, **kwargs):
+        policy.clear()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(planner, "normalize_user_operation", mutate_policy)
+    _calls.clear()
+    dispatcher = Dispatcher(store=_store(tmp_path))
+    if entrypoint == "plan":
+        dispatcher.plan(traceable_target, analysis_policy=policy, requirement_policy="ignore")
+    elif entrypoint == "plan_world":
+        dispatcher.plan_world(
+            traceable_target,
+            analysis_policy=policy,
+            requirement_policy="ignore",
+            record_policy="none",
+        )
+    else:
+        dispatcher.explain(traceable_target, analysis_policy=policy, requirement_policy="ignore")
+
+    assert policy == {}
+    assert _calls == ["trace"]
+
+
+def test_explicit_none_analysis_policy_context_is_not_omission(monkeypatch, tmp_path):
+    with pytest.raises(DispatchPlanningError, match="context"):
+        parse_analysis_policy({"context": None})
+    import dryml.dispatch.planner as planner
+
+    monkeypatch.setattr(
+        planner,
+        "normalize_user_operation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not normalize")),
+    )
+    with pytest.raises(DispatchPlanningError, match="context"):
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"context": None})
