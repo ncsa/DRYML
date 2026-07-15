@@ -101,6 +101,13 @@ backend allocation against hard world requirements before constructing workers
 when requirement policy is `strict`; `warn` and `ignore` retain their established
 compatibility semantics while never bypassing allocation feasibility.
 
+## Unsupported Graph Prototype Package
+
+`dryml.graph` is not a supported DRYML package or public export. Clean source
+exports, wheels, and source distributions exclude it; applications must not
+import it. This contract concerns tracked distribution contents only and does not
+delete or otherwise modify any untracked local prototype directory.
+
 ## Local Worlds
 
 `Dispatcher.run_world(...)` is the explicit Sprint 8 entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
