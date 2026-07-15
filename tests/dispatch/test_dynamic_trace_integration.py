@@ -56,6 +56,24 @@ def interrupting_target():
     raise KeyboardInterrupt()
 
 
+class ConstructorSentinel:
+    def __init__(self):
+        raise AssertionError("trace must not construct classes")
+
+
+class CallableSentinel:
+    def __call__(self):
+        raise AssertionError("trace must not call callable instances")
+
+
+def generator_target():
+    yield None
+
+
+async def async_target():
+    return None
+
+
 def _store(tmp_path):
     return DirStore(tmp_path / "store", query_index="none")
 
@@ -578,3 +596,33 @@ def test_provenance_rejects_each_top_level_count_and_scalar_overflow():
         DynamicTraceProvenance(overlong)
     with pytest.raises(ValueError):
         DynamicTraceProvenance({**base, "diagnostics": base["diagnostics"] * 257})
+
+
+@pytest.mark.parametrize("target", [ConstructorSentinel, CallableSentinel(), len, generator_target, async_target])
+def test_unsupported_live_target_rows_do_not_construct_or_invoke(target, tmp_path):
+    try:
+        explanation = Dispatcher(store=_store(tmp_path)).explain(
+            target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+    except DispatchPlanningError:
+        # Non-importable callable instances retain ordinary normalization
+        # rejection; trace must not make them dispatchable.
+        return
+
+    assert not explanation.launchable
+    assert explanation.resolution.dynamic_trace.data["status"] == "pre_execution_failed"
+
+
+def test_run_world_traces_only_through_its_planning_call(tmp_path):
+    _calls.clear()
+    Dispatcher(store=_store(tmp_path)).run_world(
+        traceable_target,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+        record_policy="none",
+        timeout=60,
+    )
+
+    assert _calls == ["trace"]
