@@ -38,6 +38,13 @@ identity. Dispatch consumes them only after an explicit, strict
 passes direct plus accepted annotation fragments to `dryml.annotations` for the
 authoritative merge. Tracing remains cooperative trusted-code execution, not a
 sandbox, subprocess, selected-environment facility, or hard-timeout boundary.
+Dispatch gates opt-in targets as exact synchronous Python functions before
+generic callable inspection or pickle creation. Its versioned diagnostic carrier
+admits only the exact 9B no-summary pre-execution diagnostic set; stale or
+malformed evidence is rejected after independent bounded summary/call validation
+and never becomes structural input. Unknown transport tokens and provenance
+overflow fail closed, and carrier redaction excludes exception/source/environment
+data and live objects.
 
 ## Alternatives Considered
 

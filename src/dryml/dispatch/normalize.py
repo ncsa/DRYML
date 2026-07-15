@@ -14,6 +14,7 @@ import inspect
 import os
 import shutil
 import tempfile
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -168,6 +169,18 @@ def normalize_user_operation(
         return normalize_existing_operation_spec(operation, store=store, args=norm_args, kwargs=norm_kwargs)
     if isinstance(operation, Mapping):
         _raise_invalid_operation_mapping(operation)
+    # Requested tracing has a narrower target contract than ordinary dispatch.
+    # Check it before generic callable normalization reads callable attributes,
+    # resolves importability, or creates a pickle transport.  In particular,
+    # callable instances can expose arbitrary attribute hooks even though they
+    # are not traceable 9C targets.
+    if trace_enabled:
+        trace_candidate = operation.callable if isinstance(operation, PickledCallable) else operation
+        if not _is_trace_eligible_function(trace_candidate):
+            raise DispatchPlanningError(
+                "dynamic tracing requires a live exact synchronous Python function",
+                context={"dynamic_trace": "unsupported_target"},
+            )
     if callable(operation) or isinstance(operation, PickledCallable):
         if norm_method is not None:
             raise DispatchPlanningError("method_name is only valid for DRYML Definition/CDef/Object targets")
@@ -555,6 +568,23 @@ def _callable_importability(func: Callable[..., Any]) -> _Importability:
     if resolved is not func:
         return _Importability(None, "import_mismatch", module_name, qualname)
     return _Importability(f"{module_name}:{qualname}", None, module_name, qualname)
+
+
+def _is_trace_eligible_function(value: Any) -> bool:
+    """Return whether *value* is an exact synchronous Python trace target.
+
+    This deliberately reads function implementation state only after an exact
+    type check.  It must not inspect user-defined callable, descriptor, or
+    wrapper attributes while deciding whether an opt-in trace is supported.
+    """
+
+    if type(value) is not types.FunctionType:
+        return False
+    return not (
+        inspect.iscoroutinefunction(value)
+        or inspect.isasyncgenfunction(value)
+        or inspect.isgeneratorfunction(value)
+    )
 
 
 def _is_bound_instance_method(func: Any) -> bool:

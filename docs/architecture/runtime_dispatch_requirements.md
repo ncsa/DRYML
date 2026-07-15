@@ -71,6 +71,23 @@ states in dispatch, recipe, envelope, and explanation metadata only. Immutable
 OperationSpec metadata is trace-free; reserved planning keys are removed before
 operation-sidecar publication.
 
+Admission is fail-closed but diagnostic-preserving. A no-summary pre-execution
+carrier is accepted only for the exact 9B diagnostic-only/no-fact outcome set
+and known non-start; stale envelope/target evidence, malformed summaries,
+unknown outcomes, and mixed evidence are `evidence_rejected`. Summary/call wires
+are independently validated before envelope rejection, so validated evidence
+can prove `execution_started=true`; otherwise the rejected carrier represents
+unknown start as `null`. Retained rejected evidence is diagnostic-only and never
+enters annotations resolution. The carrier accepts only `import_path`,
+`pickle_small`, `operation_spec`, and `method_call` transport tokens, rejects
+unknown tokens, enforces 9B `max_calls` 1..10,000 plus dispatch count/depth/
+string/byte limits, and redacts exception text, tracebacks, source, environment,
+streams, live objects, and arbitrary repr. Projection overflow retains a valid
+summary with empty calls as `provenance_limit_exceeded`; it never truncates.
+For `pickle_small`, a final candidate that is not the current Python after an
+accepted trace is non-launchable but preserves that completed carrier through
+cleanup.
+
 The resolver consumes a bounded candidate prefix before probing, deduplicates
 canonical identities, and validates worker probe protocol evidence before using
 it. Planning metadata has bounded depth, item, string, and aggregate-node limits.

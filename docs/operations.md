@@ -101,3 +101,11 @@ assert located.spec_id.startswith("op-v1-")
 Operation specs remain sidecar metadata under `records/specs/operation/`.
 
 Dispatch metadata wraps operation IDs without changing operation identity. `DispatchSpec` records request policy/override intent with `dispatch-v1-*` IDs, while `ExecutionRecipe` records resolved plan metadata with `recipe-v1-*` IDs. Neither executes the operation. When explicit current-process dynamic tracing is requested, its per-run input/run identity and bounded provenance belong only to the dispatch/recipe/envelope/explanation carriers; they are never written to an `OperationSpec` or its operation sidecar.
+
+For `pickle_small`, canonical operation arguments retain the one internal
+`{"$literal": "dryml.pickled_callable.sha256:..."}` identity marker. Dispatch
+validates its exact suffix and `identity_arg_count`, strips it only from the
+private current-process trace invocation, and leaves the operation payload and
+ID unchanged. A final post-trace same-Python rejection cleans the launch-only
+pickle and returns the completed trace carrier; it does not publish or execute
+the operation.

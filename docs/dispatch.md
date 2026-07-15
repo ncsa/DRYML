@@ -127,6 +127,10 @@ to use the current Python.  OperationSpec-only, source-only, CDef/object method,
 bound-method, callable-instance, class, builtin, coroutine, generator, and
 unsupported-container targets fail before invocation.  Trace-aware calls require
 an exact outer `tuple` of arguments and exact `dict[str, value]` kwargs.
+Dispatch performs that exact-function gate before generic callable inspection,
+importability metadata reads, or pickle creation, so unsupported callable
+instances, classes, wrappers, and descriptors are not inspected merely to decide
+trace eligibility.
 
 Dispatch first canonicalizes the ordinary worker payload, then derives the
 *effective worker invocation* with `resolve_call_arguments()`: raw CDef IDs are
@@ -157,9 +161,32 @@ Per-run bounded trace evidence is carried in dispatch/recipe/envelope planning
 metadata and explanations, not in immutable operation metadata. The versioned
 projection allows at most 256 calls, 1,024 accepted/duplicate observations, 256
 diagnostics, 4,096 characters per scalar, depth 32, and 1 MiB JSON; overflow is
-rejected, never truncated. A null `trace_input_id` is allowed only when the
-effective invocation itself could not be constructed. Rejected evidence always
-retains nonempty input/run IDs and never contributes requirements.
+reported as `provenance_limit_exceeded`, never truncated. Its validated complete
+or incomplete 9B summary is retained while calls and observations are empty, so
+an over-limit trace is not mistaken for an empty trace. The policy restored from
+the carrier has the exact 9B bounds (`max_calls` 1 through 10,000), and only the
+four normalized transport tokens `import_path`, `pickle_small`,
+`operation_spec`, and `method_call` are accepted; an unknown token is a schema
+error rather than being serialized or substituted.
+
+A null `trace_input_id` is allowed only when the effective invocation itself
+could not be constructed. Dispatch admits a no-summary `pre_execution_failed`
+carrier only for the exact 9B diagnostic-only set (`dynamic_trace_disabled`,
+`dynamic_trace_invalid_context`, `dynamic_trace_unsupported_target`,
+`dynamic_trace_unsupported_argument`, `dynamic_trace_argument_limit_exceeded`,
+and `dynamic_trace_receiver_resolution_failed`), with no facts and a target
+known not to have started. Stale target/envelope evidence, malformed summaries,
+unknown summary outcomes, and other malformed or mixed evidence are
+`evidence_rejected`. Dispatch independently validates a summary and calls before
+that rejection: evidence proving execution started retains nonempty input/run
+IDs and `execution_started=true`; genuinely unknown start is represented by
+`null`. Only independently validated bounded summary/call wires can be retained
+for diagnostics, never for requirement resolution or publication. Carriers
+contain fixed code/severity diagnostics only: no exception messages, tracebacks,
+locals, source, environment values, streams, live objects, or arbitrary repr.
+If accepted trace facts change a `pickle_small` final candidate to a different
+Python environment, planning cleans the temporary pickle and blocks launch while
+returning that completed diagnostic trace carrier.
 
 ## Unsupported Graph Prototype Package
 

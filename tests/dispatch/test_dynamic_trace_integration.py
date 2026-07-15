@@ -12,7 +12,7 @@ import pytest
 import dryml
 from dryml.code import CodeAnalysisContext, CodeAnalysisResult, DynamicTracePolicy, target_from_callable
 from dryml.code.facts import CodeFact, DiagnosticFact, DynamicCallFact
-from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.definition import ConcreteDefinition, Definition
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
@@ -20,6 +20,7 @@ from dryml.dispatch.operations import PickledCallable
 from dryml.dispatch.protocol import WorkerResponse
 from dryml.dispatch.normalize import normalize_user_operation
 from dryml.dispatch.requirements import DynamicTraceProvenance, _effective_trace_invocation, resolve_dispatch_plan
+from dryml.operations import resolve_call_arguments
 from dryml.core2.utils.general import pickle_save
 from dryml.formats.refs import format_cdef_id
 from dryml.operations import attach_operation_id, make_function_call_spec
@@ -64,6 +65,23 @@ class ConstructorSentinel:
 class CallableSentinel:
     def __call__(self):
         raise AssertionError("trace must not call callable instances")
+
+
+class InspectionHookCallable:
+    """Callable sentinel whose generic callable metadata is unsafe to inspect."""
+
+    def __getattribute__(self, name):
+        if name in {"__name__", "__module__", "__qualname__", "__reduce__", "__reduce_ex__"}:
+            raise AssertionError(f"trace eligibility must not inspect {name}")
+        return super().__getattribute__(name)
+
+    def __call__(self):
+        raise AssertionError("trace eligibility must not invoke callable instances")
+
+
+class DescriptorSentinel:
+    def __get__(self, _instance, _owner):
+        raise AssertionError("trace eligibility must not invoke descriptors")
 
 
 def generator_target():
@@ -336,6 +354,26 @@ def test_effective_invocation_matches_worker_resolver_for_nested_reference_and_l
     assert trace_kwargs == {"values": {"raw": cdef, "escaped": cdef_id}}
     assert normalized.trace_cdef_positions == (("args/0", cdef_id), ("args/1/3/nested/0", cdef_id))
 
+    worker_calls = []
+
+    def worker_materialize(value):
+        worker_calls.append(("materialize", value))
+        return cdef
+
+    worker = resolve_call_arguments(
+        normalized.operation_spec,
+        materialize_cdef=worker_materialize,
+        make_cdef_ref=lambda value: value,
+    )
+    assert worker.args == trace_args
+    assert worker.kwargs == trace_kwargs
+    assert worker_calls == [
+        ("materialize", cdef_id),
+        ("materialize", cdef_id),
+        ("materialize", cdef_id),
+        ("materialize", cdef_id),
+    ]
+
 
 @pytest.mark.parametrize("args", [(), ("retained",)])
 def test_pickle_small_marker_is_retained_for_identity_and_stripped_for_effective_invocation(tmp_path, args):
@@ -354,6 +392,49 @@ def test_pickle_small_marker_is_retained_for_identity_and_stripped_for_effective
     malformed = replace(normalized, launch={**normalized.launch, "identity_arg_count": len(args) + 1})
     with pytest.raises(ValueError, match="pickle_small"):
         _effective_trace_invocation(malformed)
+    malformed_suffix = replace(
+        normalized,
+        operation_spec={
+            **normalized.operation_spec,
+            "payload": {**normalized.operation_spec["payload"], "args": [*normalized.operation_spec["payload"]["args"][:-1], {"$literal": "wrong"}]},
+        },
+    )
+    with pytest.raises(ValueError, match="pickle_small"):
+        _effective_trace_invocation(malformed_suffix)
+
+
+@pytest.mark.parametrize("argument", ["ref(cdef-v4-0123456789abcdef)", {"$literal": "cdef-v4-0123456789abcdef"}])
+def test_resolver_scalar_forms_follow_default_and_scalar_enabled_trace_policy(argument, tmp_path):
+    _calls.clear()
+    dispatcher = Dispatcher(store=_store(tmp_path))
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        dispatcher.plan(argument_target, args=(argument,), analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+    assert excinfo.value.context["dynamic_trace"]["status"] == "pre_execution_failed"
+    assert _calls == []
+
+    dispatcher.plan(
+        argument_target,
+        args=(argument,),
+        analysis_policy={"dynamic_trace": DynamicTracePolicy(require_proxy_only_args=False)},
+        requirement_policy="ignore",
+    )
+    assert _calls == [(("cdef-v4-0123456789abcdef",), {})]
+
+
+def test_plain_definition_trace_argument_rejects_without_concretize_or_target(monkeypatch, tmp_path):
+    definition = Definition(TraceRequirementModel)
+    _calls.clear()
+    monkeypatch.setattr(Definition, "concretize", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not concretize")))
+
+    with pytest.raises(DispatchPlanningError, match="plain Definition"):
+        Dispatcher(store=_store(tmp_path)).plan(
+            argument_target,
+            args=(definition,),
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+    assert _calls == []
 
 
 def test_admission_rejects_unexpected_fact_even_with_complete_zero_call_summary(monkeypatch, tmp_path):
@@ -379,6 +460,150 @@ def test_admission_rejects_unexpected_fact_even_with_complete_zero_call_summary(
     assert evidence["status"] == "evidence_rejected"
     assert evidence["trace_input_id"] and evidence["trace_run_id"]
     assert evidence["calls"] == []
+
+
+def _summary(*, complete=True, outcome="complete", calls=0, max_calls=10_000):
+    return CodeFact(
+        "dynamic_trace_summary",
+        source={"analyzer": "dynamic_trace", "target_kind": "function"},
+        data={"complete": complete, "outcome": outcome, "calls_recorded": calls, "max_calls": max_calls},
+    )
+
+
+def _dynamic_call(sequence):
+    return DynamicCallFact(
+        source={"analyzer": "dynamic_trace", "target_kind": "function"},
+        data={
+            "sequence": sequence,
+            "receiver_kind": "concrete_definition",
+            "receiver_ref": "cdef-v4-0123456789abcdef",
+            "receiver_class": None,
+            "method_name": "train",
+            "args": [],
+            "kwargs": {},
+            "method_facts": [],
+        },
+    )
+
+
+def test_stale_envelope_retains_independently_validated_start_evidence(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    stale = CodeAnalysisResult(
+        target_from_callable(failing_trace_target).spec,
+        facts=(_dynamic_call(0), _summary(calls=1)),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: stale)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["execution_started"] is True
+    assert evidence["summary"]["data"]["calls_recorded"] == 1
+    assert [call["data"]["sequence"] for call in evidence["calls"]] == [0]
+
+
+def test_unknown_9b_summary_outcome_is_rejected_not_incomplete(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=(_summary(complete=False, outcome="future_outcome"),),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["execution_started"] is None
+
+
+def test_policy_mismatch_retains_independently_validated_calls_that_prove_start(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=(_dynamic_call(0), _summary(calls=1, max_calls=1)),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["execution_started"] is True
+    assert evidence["summary"] is None
+    assert [call["data"]["sequence"] for call in evidence["calls"]] == [0]
+
+
+def test_257_call_projection_overflow_keeps_summary_in_bounded_carrier(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=tuple(_dynamic_call(index) for index in range(257)) + (_summary(calls=257),),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "provenance_limit_exceeded"
+    assert evidence["summary"]["data"]["calls_recorded"] == 257
+    assert evidence["calls"] == []
+
+
+def test_byte_overflow_is_projected_without_raw_validation_error(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    calls = []
+    for index in range(256):
+        call = _dynamic_call(index)
+        call.data["receiver_ref"] = "cdef-v4-" + "a" * 4_088
+        calls.append(call)
+    result = CodeAnalysisResult(
+        target_from_callable(traceable_target).spec,
+        facts=tuple(calls) + (_summary(calls=256),),
+    )
+    monkeypatch.setattr(requirements, "trace", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "provenance_limit_exceeded"
+    assert evidence["calls"] == []
+    assert evidence["summary"]["data"]["calls_recorded"] == 256
+
+
+def test_provenance_policy_uses_exact_dynamic_trace_bounds():
+    data = {
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": True,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": 10_000, "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "provenance_limit_exceeded",
+        "summary": _summary(calls=257).to_data(),
+        "calls": [],
+        "accepted_fragments": [],
+        "duplicate_observations": [],
+        "diagnostics": [{"code": "dryml.dispatch.dynamic_trace_provenance_limit_exceeded", "severity": "error"}],
+    }
+    assert DynamicTraceProvenance.from_data(data).to_data() == data
+    for max_calls in (0, 10_001):
+        with pytest.raises(ValueError):
+            DynamicTraceProvenance({**data, "policy": {**data["policy"], "max_calls": max_calls}})
 
 
 def test_provenance_preserves_65_valid_calls_without_generic_metadata_truncation():
@@ -454,6 +679,26 @@ def test_store_live_cdef_mismatch_blocks_before_trace_or_target(monkeypatch, tmp
     assert excinfo.value.context["dynamic_trace"]["trace_input_id"] is None
     assert traced == []
     assert _calls == []
+
+
+def test_final_pickle_environment_rejection_retains_completed_trace_carrier(monkeypatch, tmp_path):
+    import dryml.dispatch.requirements as requirements
+
+    checks = iter((True, False))
+    monkeypatch.setattr(requirements, "_same_python_environment", lambda _value: next(checks))
+    _calls.clear()
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        Dispatcher(store=_store(tmp_path)).plan(
+            PickledCallable(traceable_target),
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert _calls == ["trace"]
+    assert evidence["status"] == "complete"
+    assert evidence["trace_input_id"] and evidence["trace_run_id"]
 
 
 def test_overlapping_and_nested_dispatch_traces_keep_request_evidence_isolated(tmp_path):
@@ -613,6 +858,26 @@ def test_unsupported_live_target_rows_do_not_construct_or_invoke(target, tmp_pat
 
     assert not explanation.launchable
     assert explanation.resolution.dynamic_trace.data["status"] == "pre_execution_failed"
+
+
+@pytest.mark.parametrize("factory", [InspectionHookCallable, lambda: InspectionHookCallable, DescriptorSentinel])
+def test_opt_in_unsupported_targets_are_rejected_before_generic_inspection(factory, tmp_path):
+    target = factory()
+    with pytest.raises(DispatchPlanningError, match="exact synchronous Python function"):
+        Dispatcher(store=_store(tmp_path)).explain(
+            target,
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
+
+
+def test_explicit_pickle_unsupported_callable_is_rejected_before_serialization(tmp_path):
+    with pytest.raises(DispatchPlanningError, match="exact synchronous Python function"):
+        Dispatcher(store=_store(tmp_path)).explain(
+            PickledCallable(InspectionHookCallable()),
+            analysis_policy={"dynamic_trace": True},
+            requirement_policy="ignore",
+        )
 
 
 def test_run_world_traces_only_through_its_planning_call(tmp_path):

@@ -179,6 +179,14 @@ class Dispatcher:
                     "requested dynamic trace did not produce complete planning evidence",
                     context={"dynamic_trace": resolution.dynamic_trace.to_data()},
                 )
+            if (
+                resolution.dynamic_trace is not None
+                and any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics)
+            ):
+                raise DispatchPlanningError(
+                    "PickledCallable dispatch is restricted to the same Python executable",
+                    context={"dynamic_trace": resolution.dynamic_trace.to_data()},
+                )
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
                 raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
             if any(item.code == "dryml.dispatch.single_subprocess_world_unsupported" for item in resolution.diagnostics):
@@ -417,6 +425,14 @@ class Dispatcher:
             if resolution.dynamic_trace is not None and resolution.dynamic_trace.data["status"] != "complete":
                 raise DispatchPlanningError(
                     "requested dynamic trace did not produce complete planning evidence",
+                    context={"dynamic_trace": resolution.dynamic_trace.to_data()},
+                )
+            if (
+                resolution.dynamic_trace is not None
+                and any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics)
+            ):
+                raise DispatchPlanningError(
+                    "PickledCallable dispatch is restricted to the same Python executable",
                     context={"dynamic_trace": resolution.dynamic_trace.to_data()},
                 )
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
