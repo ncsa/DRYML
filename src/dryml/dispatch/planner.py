@@ -114,7 +114,10 @@ class Dispatcher:
             runtime: Explicit worker runtime specification.
             world: Explicit requested world payload, object, or canonical envelope.
             requirement_policy: ``"strict"``, ``"warn"``, or ``"ignore"``.
-            analysis_policy: Optional code-analysis policy.
+            analysis_policy: A `CodeAnalysisContext` compatibility value or a
+                closed mapping. Only mapping `dynamic_trace=True` or an already
+                validated `DynamicTracePolicy` requests one trusted,
+                current-process trace; it is otherwise default-off.
             environment_candidates: Per-call ordered resolver candidates.
             environment_registry: Per-call explicit resolver registry.
             inventory: Per-call local inventory reused for synthesis/allocation.
@@ -618,7 +621,11 @@ class Dispatcher:
         code/environment probe when static discovery is incomplete. Resolver,
         registry, inventory, and policy arguments accept the same values as
         :meth:`plan`, but explanation does not create allocation records or
-        activate a workload allocation.
+        activate a workload allocation. With explicit mapping
+        `analysis_policy.dynamic_trace`, it executes the same one eligible,
+        trusted current-process trace as planning; this is not sandboxed and has
+        no hard timeout. A requested trace is structural evidence, so rejected,
+        incomplete, or over-limit evidence makes the explanation non-launchable.
 
         Args:
             operation: Python-shaped callable or explicit operation specification.

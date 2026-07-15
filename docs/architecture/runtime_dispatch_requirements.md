@@ -2,7 +2,7 @@
 
 ## Status
 
-Historical Sprint 0 baseline note, updated through Sprint 8 dispatch planning.
+Current architecture note, updated through Sprint 9C dispatch planning.
 
 ## Current State
 
@@ -12,6 +12,9 @@ DRYML currently separates declaration, planning, and execution across several mo
 - `dryml.dispatch.Dispatcher.plan(...)` builds a `DispatchSpec`, `ExecutionRecipe`, and worker `ExecutionEnvelope`.
 - `dryml.operations.OperationSpec` mappings are the canonical operation IR accepted by dispatch planning.
 - `dryml.runtime.RuntimeMode` records the current process role.
+- `dryml.code.trace(...)` is the sole invocation-bearing analysis facade;
+  `dryml.dispatch` owns only explicit opt-in policy, worker-effective invocation
+  reconstruction, provenance admission, and launch decisions.
 
 ## Problem Statement
 
@@ -29,14 +32,17 @@ For example, a target that requires a GPU must not silently become valid because
 
 ## Current Dispatch Planning Behavior
 
-At `a6d3550`, `Dispatcher.plan(...)` behaves as follows:
+`Dispatcher.plan(...)` currently behaves as follows:
 
 - `environment=None` is converted to `CurrentEnvironmentSpec().to_data()` and stored in dispatch/environment and the launch envelope.
-- `world=None` is represented as `{"policy": "single_worker"}`.
-- Mapping operations are validated as `OperationSpec`-like data and receive an operation ID.
-- Python callables require `allow_pickle=True`; otherwise planning raises `DispatchPlanningError`.
-- Python callables with `allow_pickle=True` use the existing small-pickle transport through `dryml.dispatch.operations:import_function` and are restricted to the same Python environment.
-- Reporting includes requirement gather and merge steps, but dispatch does not yet resolve operation annotations into candidate checks.
+- An importable Python function uses an import-path operation; explicit or
+  non-importable pickle transport is `pickle_small` and remains current-Python
+  only.
+- Mapping operations are validated as `OperationSpec`-like data and receive an
+  operation ID; planning metadata and per-run trace evidence are not operation
+  metadata.
+- Planning resolves annotation requirements/defaults, selects candidates, checks
+  compatibility, and validates backend allocation before launch.
 
 ## Requirement Collection Boundary
 
@@ -47,6 +53,23 @@ Dispatch still does not consume those results during planning in Sprint 3. Candi
 ## Dispatch Planning Pipeline
 
 Dispatch normalizes user targets into an `OperationSpec`, collects code and annotation facts, merges hard requirements and defaults, selects candidate environment/world/runtime data, checks candidates, and then launches through the backend. Environment precedence is explicit, annotation default, context current, resolver, then current fallback; world precedence is explicit, annotation default, context current, synthesized local world, then fallback. DRYML-managed resolver probes are deadline-bounded; local inventory uses OS facts and any injected external command runner remains cooperative. An actual worker allocation is validated again before execution. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
+
+An `analysis_policy={"dynamic_trace": True | DynamicTracePolicy(...)}` request
+adds one narrow branch. It is default-off even if a supplied
+`CodeAnalysisContext` permits dynamic execution. Dispatch derives a fresh,
+forced-collect trace context, reconstructs the resolver-equivalent current
+worker invocation without building CDefs, and invokes one eligible live function
+in the orchestrator process. Direct fragments precede admitted trace fragments;
+annotations remains the sole merge authority. Trace failure, incomplete or
+rejected evidence, and provenance overflow are structural planning failures,
+independent of strict/warn/ignore. This trusted-code execution has neither a
+sandbox nor hard timeout and is never relocated to a probe or worker.
+
+The dispatch trace projection is versioned and bounded. It carries per-request
+input/run identity and recognized `pre_execution_failed`/`evidence_rejected`
+states in dispatch, recipe, envelope, and explanation metadata only. Immutable
+OperationSpec metadata is trace-free; reserved planning keys are removed before
+operation-sidecar publication.
 
 The resolver consumes a bounded candidate prefix before probing, deduplicates
 canonical identities, and validates worker probe protocol evidence before using

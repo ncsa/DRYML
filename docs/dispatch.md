@@ -121,19 +121,45 @@ and `dynamic_trace`. The trace member is exactly `True` (the default
 truthy substitutes, mappings, and unknown keys are rejected before operation
 normalization or pickle transport creation.
 
-For an eligible live synchronous Python function, dispatch derives the worker
-argument grammar through the normal operation resolver, calls
-`dryml.code.trace(...)` once in the caller process, and resolves direct plus
-accepted traced annotation fragments through `dryml.annotations`. `explain`
-does the same one explicitly requested trace, but remains non-launching and
-non-persisting. Requested trace failures, incomplete results, malformed
-evidence, and provenance-limit failures block planning under `strict`, `warn`,
-and `ignore`; partial facts are never treated as an empty requirement set.
+Only a live, exact, synchronous Python function is traceable.  Explicit
+`PickledCallable` is traceable only after its preliminary candidate is confirmed
+to use the current Python.  OperationSpec-only, source-only, CDef/object method,
+bound-method, callable-instance, class, builtin, coroutine, generator, and
+unsupported-container targets fail before invocation.  Trace-aware calls require
+an exact outer `tuple` of arguments and exact `dict[str, value]` kwargs.
+
+Dispatch first canonicalizes the ordinary worker payload, then derives the
+*effective worker invocation* with `resolve_call_arguments()`: raw CDef IDs are
+read structurally from the planning Store without building objects;
+`ref(cdef-v...)` remains an ID string; `{"$literal": value}` unwraps once; and
+nested lists/mappings retain canonical shape. Caller-supplied live CDefs are
+checked structurally against the Store before their private trace proxy is used.
+For `pickle_small`, the canonical identity marker remains in the operation, but
+the validated marker suffix is stripped at `identity_arg_count` before tracing.
+Malformed marker/count data, missing/mismatched CDefs, aliases, and inputs that
+cannot be reconstructed without building fail before the facade or target.
+
+For an eligible input, dispatch calls `dryml.code.trace(...)` exactly once in the
+caller process and resolves direct fragments followed by accepted trace calls
+and serialized method facts through `dryml.annotations`. Identical fragments are
+first-occurrence deduplicated; later observations remain provenance only.
+`explain` performs that same explicitly requested trace, but remains
+non-launching and non-persisting. Requested trace failures, incomplete results,
+malformed/rejected evidence, and provenance-limit failures block planning under
+`strict`, `warn`, and `ignore`; partial facts are never treated as an empty
+requirement set.
 
 This executes trusted user code in the current process. It is not a sandbox,
 does not have a hard timeout, and is not sent to a probe, selected environment,
-or worker. Per-run bounded trace evidence is carried in dispatch/recipe/envelope
-planning metadata and explanations, not in immutable operation metadata.
+or worker. Dispatch forces the private facade context to collect post-start
+trace failures even when the caller context uses `diagnostics_policy="raise"`.
+Per-run bounded trace evidence is carried in dispatch/recipe/envelope planning
+metadata and explanations, not in immutable operation metadata. The versioned
+projection allows at most 256 calls, 1,024 accepted/duplicate observations, 256
+diagnostics, 4,096 characters per scalar, depth 32, and 1 MiB JSON; overflow is
+rejected, never truncated. A null `trace_input_id` is allowed only when the
+effective invocation itself could not be constructed. Rejected evidence always
+retains nonempty input/run IDs and never contributes requirements.
 
 ## Unsupported Graph Prototype Package
 

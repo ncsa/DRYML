@@ -22,7 +22,7 @@ from enum import Enum
 from typing import Any
 
 from dryml import annotations, environments, runtime, worlds
-from dryml.code import DynamicCallFact, DynamicTracePolicy, analyze, probe_target, trace
+from dryml.code import DynamicCallFact, DynamicTracePolicy, analyze, probe_target, target_from_callable, trace
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult
 from dryml.code.facts import AnnotationFact, CodeFact, DiagnosticFact
 from dryml.code.probe import CodeProbeResult
@@ -47,6 +47,9 @@ _TRACE_MAX_CALLS = 256
 _TRACE_MAX_FRAGMENTS = 1024
 _TRACE_MAX_DUPLICATES = 1024
 _TRACE_MAX_DIAGNOSTICS = 256
+_TRACE_MAX_STRING = 4096
+_TRACE_MAX_DEPTH = 32
+_TRACE_MAX_BYTES = 1_048_576
 _TRACE_PREEXEC_CODES = frozenset({
     "dryml.code.dynamic_trace_disabled",
     "dryml.code.dynamic_trace_invalid_context",
@@ -121,6 +124,8 @@ class DynamicTraceProvenance:
     data: Mapping[str, Any]
 
     def __post_init__(self) -> None:
+        if type(self.data) is not dict:
+            raise ValueError("dynamic trace provenance must be an exact dictionary")
         value = dict(self.data)
         required = {
             "schema", "schema_version", "requested", "trace_input_id",
@@ -132,20 +137,21 @@ class DynamicTraceProvenance:
             raise ValueError("invalid dynamic trace provenance schema")
         if value.get("requested") is not True or value.get("execution_location") != "current_process":
             raise ValueError("invalid dynamic trace provenance request/location")
-        if value.get("status") not in {"pre_execution_failed", "complete", "failed", "incomplete", "provenance_limit_exceeded", "evidence_rejected"}:
+        status = value.get("status")
+        if status not in {"pre_execution_failed", "complete", "failed", "incomplete", "provenance_limit_exceeded", "evidence_rejected"}:
             raise ValueError("invalid dynamic trace provenance status")
         if value.get("execution_started") not in {True, False, None}:
             raise ValueError("invalid dynamic trace execution state")
         input_id, run_id = value.get("trace_input_id"), value.get("trace_run_id")
-        if value["status"] == "pre_execution_failed":
+        if input_id is not None and (type(input_id) is not str or not input_id):
+            raise ValueError("invalid trace input ID")
+        if run_id is not None and (type(run_id) is not str or not run_id):
+            raise ValueError("invalid trace run ID")
+        if status == "pre_execution_failed":
             if run_id is not None or value["execution_started"] is not False:
                 raise ValueError("pre-execution trace provenance cannot have a run")
         elif not isinstance(input_id, str) or not input_id or not isinstance(run_id, str) or not run_id:
             raise ValueError("post-start/rejected trace provenance requires input and run IDs")
-        if input_id is not None and (not isinstance(input_id, str) or not input_id):
-            raise ValueError("invalid trace input ID")
-        if run_id is not None and (not isinstance(run_id, str) or not run_id):
-            raise ValueError("invalid trace run ID")
         if not isinstance(value.get("calls"), list) or len(value["calls"]) > _TRACE_MAX_CALLS:
             raise ValueError("invalid dynamic trace call evidence")
         for name, limit in (("accepted_fragments", _TRACE_MAX_FRAGMENTS), ("duplicate_observations", _TRACE_MAX_DUPLICATES), ("diagnostics", _TRACE_MAX_DIAGNOSTICS)):
@@ -155,10 +161,52 @@ class DynamicTraceProvenance:
         if target is not None and (
             type(target) is not dict
             or set(target) != {"target_kind", "transport"}
-            or not isinstance(target["target_kind"], str)
+            or type(target["target_kind"]) is not str
+            or not target["target_kind"]
             or target["transport"] not in {"import_path", "pickle_small", "operation_spec", "method_call"}
         ):
             raise ValueError("invalid dynamic trace target")
+        if status != "pre_execution_failed" and target is None:
+            raise ValueError("post-start/rejected trace provenance requires a target")
+        _validate_trace_provenance_value(value)
+        if len(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")) > _TRACE_MAX_BYTES:
+            raise ValueError("dynamic trace provenance exceeds byte limit")
+        _validate_trace_policy(value["policy"])
+        summary = value["summary"]
+        calls = _validated_trace_calls(value["calls"])
+        _validate_trace_observations(value["accepted_fragments"], value["duplicate_observations"])
+        _validate_trace_diagnostics(value["diagnostics"])
+        if status == "pre_execution_failed":
+            if summary is not None or calls or value["accepted_fragments"] or value["duplicate_observations"] or not value["diagnostics"]:
+                raise ValueError("invalid pre-execution trace provenance evidence")
+        elif status == "evidence_rejected":
+            if value["execution_started"] not in {True, None} or value["accepted_fragments"] or value["duplicate_observations"] or not value["diagnostics"]:
+                raise ValueError("invalid rejected trace provenance evidence")
+            if [call.data["sequence"] for call in calls] != list(range(len(calls))):
+                raise ValueError("rejected trace provenance calls must be contiguous")
+            if summary is not None:
+                _validate_trace_summary(summary, policy=value["policy"], target=target)
+                if summary["data"]["calls_recorded"] != len(calls):
+                    raise ValueError("rejected trace provenance summary call count differs")
+        else:
+            if value["execution_started"] is not True:
+                raise ValueError("trace provenance status requires execution start")
+            _validate_trace_summary(summary, policy=value["policy"], target=target)
+            if [call.data["sequence"] for call in calls] != list(range(len(calls))):
+                raise ValueError("trace provenance calls must be contiguous")
+            if summary["data"]["calls_recorded"] != len(calls):
+                raise ValueError("trace provenance summary call count differs")
+            if status == "complete":
+                if summary["data"]["complete"] is not True or value["diagnostics"]:
+                    raise ValueError("complete trace provenance requires complete summary and no diagnostics")
+            elif status in {"failed", "incomplete"}:
+                if summary["data"]["complete"] is not False or value["accepted_fragments"] or value["duplicate_observations"] or not value["diagnostics"]:
+                    raise ValueError("incomplete trace provenance has invalid evidence")
+                if (status == "failed") != (summary["data"]["outcome"] == "target_failed"):
+                    raise ValueError("invalid failed/incomplete trace provenance outcome")
+            elif status == "provenance_limit_exceeded":
+                if calls or value["accepted_fragments"] or value["duplicate_observations"] or not value["diagnostics"]:
+                    raise ValueError("provenance-limit trace cannot retain a truncated prefix")
         object.__setattr__(self, "data", value)
 
     def to_data(self) -> dict[str, Any]:
@@ -171,6 +219,100 @@ class DynamicTraceProvenance:
         """Restore strict versioned provenance without accepting extra fields."""
 
         return cls(data)
+
+
+def _validate_trace_provenance_value(value: Any, *, depth: int = 0) -> None:
+    """Reject, rather than coerce or truncate, the provenance JSON grammar."""
+
+    if depth > _TRACE_MAX_DEPTH:
+        raise ValueError("dynamic trace provenance exceeds nesting limit")
+    if value is None or type(value) is bool:
+        return
+    if type(value) is int:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("dynamic trace provenance floats must be finite")
+        return
+    if type(value) is str:
+        if len(value) > _TRACE_MAX_STRING:
+            raise ValueError("dynamic trace provenance string exceeds limit")
+        return
+    if type(value) is list:
+        for item in value:
+            _validate_trace_provenance_value(item, depth=depth + 1)
+        return
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str or len(key) > _TRACE_MAX_STRING:
+                raise ValueError("dynamic trace provenance keys must be bounded strings")
+            _validate_trace_provenance_value(item, depth=depth + 1)
+        return
+    raise ValueError("dynamic trace provenance must use JSON values")
+
+
+def _validate_trace_policy(value: Any) -> None:
+    if type(value) is not dict or set(value) != {"max_calls", "require_proxy_only_args", "collect_requirements"}:
+        raise ValueError("invalid dynamic trace provenance policy")
+    if type(value["max_calls"]) is not int or value["max_calls"] < 0:
+        raise ValueError("invalid dynamic trace provenance max_calls")
+    if type(value["require_proxy_only_args"]) is not bool or type(value["collect_requirements"]) is not bool:
+        raise ValueError("invalid dynamic trace provenance policy booleans")
+
+
+def _validate_trace_summary(value: Any, *, policy: Mapping[str, Any], target: Mapping[str, Any] | None) -> CodeFact:
+    if type(value) is not dict or set(value) != {"kind", "source", "data"}:
+        raise ValueError("invalid dynamic trace summary wire")
+    fact = CodeFact.from_data(value)
+    if fact.kind != "dynamic_trace_summary" or type(fact.source) is not dict or set(fact.source) != {"analyzer", "target_kind"}:
+        raise ValueError("invalid dynamic trace summary")
+    data = fact.data
+    if type(data) is not dict or set(data) != {"complete", "outcome", "calls_recorded", "max_calls"}:
+        raise ValueError("invalid dynamic trace summary data")
+    if type(data["complete"]) is not bool or type(data["outcome"]) is not str:
+        raise ValueError("invalid dynamic trace summary outcome")
+    if type(data["calls_recorded"]) is not int or data["calls_recorded"] < 0:
+        raise ValueError("invalid dynamic trace summary call count")
+    if data["max_calls"] != policy["max_calls"]:
+        raise ValueError("dynamic trace summary policy mismatch")
+    if fact.source["analyzer"] != "dynamic_trace" or (target is not None and fact.source["target_kind"] != target["target_kind"]):
+        raise ValueError("dynamic trace summary target mismatch")
+    if (data["outcome"] == "complete") != data["complete"]:
+        raise ValueError("dynamic trace summary completion mismatch")
+    return fact
+
+
+def _validated_trace_calls(values: list[Any]) -> list[DynamicCallFact]:
+    calls: list[DynamicCallFact] = []
+    for value in values:
+        if type(value) is not dict:
+            raise ValueError("invalid dynamic trace call wire")
+        fact = CodeFact.from_data(value)
+        if not isinstance(fact, DynamicCallFact):
+            raise ValueError("non-dynamic call in trace provenance")
+        calls.append(fact)
+    return calls
+
+
+def _validate_trace_observations(accepted: list[Any], duplicates: list[Any]) -> None:
+    for item in accepted:
+        if type(item) is not dict or set(item) != {"sequence", "method", "fragment_key"}:
+            raise ValueError("invalid accepted trace fragment observation")
+        if type(item["sequence"]) is not int or item["sequence"] < 0 or type(item["method"]) is not str or type(item["fragment_key"]) is not str:
+            raise ValueError("invalid accepted trace fragment observation value")
+    for item in duplicates:
+        if type(item) is not dict or set(item) != {"sequence", "method", "fragment_key", "first"}:
+            raise ValueError("invalid duplicate trace fragment observation")
+        if type(item["sequence"]) is not int or item["sequence"] < 0 or any(type(item[key]) is not str for key in ("method", "fragment_key", "first")):
+            raise ValueError("invalid duplicate trace fragment observation value")
+
+
+def _validate_trace_diagnostics(values: list[Any]) -> None:
+    for value in values:
+        if type(value) is not dict or set(value) != {"code", "severity"}:
+            raise ValueError("invalid dynamic trace diagnostic")
+        if type(value["code"]) is not str or not value["code"] or type(value["severity"]) is not str or value["severity"] not in {"info", "warning", "error"}:
+            raise ValueError("invalid dynamic trace diagnostic value")
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,7 +460,7 @@ class DispatchPlanningResolution:
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-ready planning decisions without live targets."""
 
-        return _bounded_data({
+        data = {
             "normalized_target": dict(self.normalized_target),
             "code_analysis": _analysis_summary(self.code_analysis),
             "code_probe": _probe_summary(self.code_probe),
@@ -342,7 +484,13 @@ class DispatchPlanningResolution:
             "diagnostics": [item.to_data() for item in self.diagnostics],
             "launchable": self.launchable,
             "dynamic_trace": None if self.dynamic_trace is None else self.dynamic_trace.to_data(),
-        })
+        }
+        # DynamicTraceProvenance already rejects every schema, depth, scalar,
+        # count, and byte overflow.  Passing it through the generic metadata
+        # truncator would silently change valid 65th+ observations.
+        bounded = _bounded_data({key: value for key, value in data.items() if key != "dynamic_trace"})
+        bounded["dynamic_trace"] = data["dynamic_trace"]
+        return bounded
 
     def metadata(self) -> dict[str, Any]:
         """Return authoritative dispatch metadata for this resolution."""
@@ -550,10 +698,31 @@ def resolve_dispatch_plan(
     trace_provenance = None
     trace_diagnostics: tuple[DiagnosticFact, ...] = ()
     if analysis_request.requested:
+        preliminary_environment = None
+        if normalized.launch.get("same_environment_only"):
+            # pickle_small is the one transport whose direct candidate must be
+            # accepted before trusted current-process target execution.  This
+            # preliminary selection is intentionally repeated after accepted
+            # trace facts, because those facts can change the final candidate.
+            preliminary = annotations.resolve_fragments(
+                fragments,
+                source="dryml.dispatch.dynamic_trace",
+            )
+            _, preliminary_environment, _ = _select_environment(
+                environment,
+                preliminary.environment_default,
+                requirement=preliminary.environment_requirement,
+                candidates=environment_candidates,
+                registry=environment_registry,
+                resolver_policy=resolver_policy,
+                bootstrap_probe=bootstrap_probe,
+                bootstrap_environment=bootstrap_environment,
+            )
         fragments, trace_provenance, trace_diagnostics = _trace_dispatch_invocation(
             normalized,
             analysis_request,
             fragments,
+            preliminary_environment=preliminary_environment,
         )
         complete = complete and trace_provenance.data["status"] == "complete"
     resolution = annotations.resolve_fragments(
@@ -910,6 +1079,8 @@ def _trace_dispatch_invocation(
     normalized: NormalizedDispatchTarget,
     request: DynamicTraceRequest,
     direct_fragments: tuple[annotations.AnnotationFragment, ...],
+    *,
+    preliminary_environment: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[annotations.AnnotationFragment, ...], DynamicTraceProvenance, tuple[DiagnosticFact, ...]]:
     """Trace one worker-effective invocation and admit only complete evidence.
 
@@ -929,6 +1100,14 @@ def _trace_dispatch_invocation(
             diagnostics=[_trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")],
         )
         return direct_fragments, provenance, (_trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input"),)
+
+    if preliminary_environment is not None and not _same_python_environment(preliminary_environment):
+        diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")
+        provenance = _trace_provenance(
+            normalized, request.policy, target=target, status="pre_execution_failed",
+            input_id=input_id, run_id=None, started=False, diagnostics=[diagnostic],
+        )
+        return direct_fragments, provenance, (diagnostic,)
 
     live_target = normalized.trace_live_target
     if type(live_target) is not types.FunctionType:
@@ -954,8 +1133,6 @@ def _effective_trace_invocation(normalized: NormalizedDispatchTarget) -> tuple[t
     """Use the operation resolver with non-building planning-store callbacks."""
 
     store = normalized.trace_store
-    if store is None:
-        raise ValueError("trace invocation requires a planning store")
     operation = dict(normalized.operation_spec)
     payload = dict(operation.get("payload") or {})
     if normalized.transport == "pickle_small":
@@ -979,6 +1156,8 @@ def _effective_trace_invocation(normalized: NormalizedDispatchTarget) -> tuple[t
         operation.pop("id", None)
 
     def materialize(cdef_id: str) -> ConcreteDefinition:
+        if store is None:
+            raise ValueError("trace CDef invocation requires a planning store")
         stored = _load_trace_cdef(store, cdef_id)
         supplied = normalized.trace_cdef_side_table.get(cdef_id, ())
         if any(stored != live for live in supplied):
@@ -1107,26 +1286,21 @@ def _admit_trace_result(
 ) -> tuple[tuple[annotations.AnnotationFragment, ...], DynamicTraceProvenance, tuple[DiagnosticFact, ...]]:
     """Validate 9B result shape before any fact reaches requirement resolution."""
 
-    if not isinstance(result, CodeAnalysisResult) or normalized.code_target is None or result.target.kind != normalized.code_target.kind:
+    if not _trace_result_has_expected_envelope(normalized, result):
         diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_identity_mismatch")
         provenance = _trace_provenance(normalized, policy, target=target, status="evidence_rejected", input_id=input_id, run_id=run_id, started=None, diagnostics=[diagnostic])
         return direct_fragments, provenance, (diagnostic,)
-    safe_diagnostics = tuple(
-        _diagnostic(item.code, "Dynamic trace reported a diagnostic.", severity=item.severity)
-        for item in result.diagnostics if isinstance(item, DiagnosticFact)
-    )
-    if not result.facts and result.diagnostics and all(item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics):
+    safe_diagnostics = _safe_trace_result_diagnostics(result)
+    if (
+        not result.facts
+        and result.diagnostics
+        and all(item.code in _TRACE_PREEXEC_CODES for item in result.diagnostics)
+    ):
         diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_unsupported_input")
         provenance = _trace_provenance(normalized, policy, target=target, status="pre_execution_failed", input_id=input_id, run_id=None, started=False, diagnostics=[diagnostic, *safe_diagnostics])
         return direct_fragments, provenance, (diagnostic,)
     try:
-        calls = [CodeFact.from_data(fact.to_data()) for fact in result.facts if getattr(fact, "kind", None) == "dynamic_call"]
-        if not all(isinstance(fact, DynamicCallFact) for fact in calls):
-            raise ValueError("invalid calls")
-        summaries = [fact for fact in result.facts if getattr(fact, "kind", None) == "dynamic_trace_summary"]
-        if len(summaries) != 1 or set(summaries[0].data) != {"complete", "outcome", "calls_recorded", "max_calls"}:
-            raise ValueError("invalid summary")
-        summary = summaries[0].to_data()
+        calls, summary = _validated_trace_result_evidence(result, policy=policy, target=target)
         sequences = [fact.data["sequence"] for fact in calls]
         if sequences != list(range(len(calls))) or summary["data"]["calls_recorded"] != len(calls):
             raise ValueError("invalid call sequence")
@@ -1152,6 +1326,64 @@ def _admit_trace_result(
         return direct_fragments, provenance, (diagnostic,)
     provenance = _trace_provenance(normalized, policy, target=target, status="complete", input_id=input_id, run_id=run_id, started=True, summary=summary, calls=[fact.to_data() for fact in calls], accepted_fragments=accepted, duplicate_observations=duplicates)
     return fragments, provenance, ()
+
+
+def _trace_result_has_expected_envelope(normalized: NormalizedDispatchTarget, result: Any) -> bool:
+    """Validate the whole 9B result envelope against this facade invocation."""
+
+    if type(result) is not CodeAnalysisResult or type(result.facts) is not tuple or type(result.diagnostics) is not tuple:
+        return False
+    live_target = normalized.trace_live_target
+    if type(live_target) is not types.FunctionType:
+        return False
+    try:
+        expected = target_from_callable(live_target).spec.to_data()
+        result_data = result.to_data()
+    except Exception:
+        return False
+    if type(result_data) is not dict or set(result_data) != {"target", "facts", "diagnostics", "ok"}:
+        return False
+    if result_data["target"] != expected or result_data["ok"] is not result.ok:
+        return False
+    return all(type(item) is DiagnosticFact for item in result.diagnostics)
+
+
+def _safe_trace_result_diagnostics(result: CodeAnalysisResult) -> tuple[DiagnosticFact, ...]:
+    """Copy only fixed diagnostic code/severity fields after envelope checks."""
+
+    return tuple(
+        _diagnostic(item.code, "Dynamic trace reported a diagnostic.", severity=item.severity)
+        for item in result.diagnostics
+    )
+
+
+def _validated_trace_result_evidence(
+    result: CodeAnalysisResult,
+    *,
+    policy: DynamicTracePolicy,
+    target: Mapping[str, Any] | None,
+) -> tuple[list[DynamicCallFact], dict[str, Any]]:
+    """Independently validate every result fact and reject unexpected mixes."""
+
+    calls: list[DynamicCallFact] = []
+    summaries: list[dict[str, Any]] = []
+    for original in result.facts:
+        if not isinstance(original, CodeFact):
+            raise ValueError("invalid trace result fact")
+        wire = original.to_data()
+        if type(wire) is not dict:
+            raise ValueError("invalid trace result wire")
+        fact = CodeFact.from_data(wire)
+        if isinstance(fact, DynamicCallFact):
+            calls.append(fact)
+        elif fact.kind == "dynamic_trace_summary":
+            summaries.append(wire)
+        else:
+            raise ValueError("unexpected trace result fact")
+    if len(summaries) != 1:
+        raise ValueError("trace result requires exactly one summary")
+    _validate_trace_summary(summaries[0], policy=_trace_policy_data(policy), target=target)
+    return calls, summaries[0]
 
 
 def _combine_trace_fragments(

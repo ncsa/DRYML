@@ -75,7 +75,7 @@ Operation IDs are spec IDs from the `operation` family:
 op-v1-<sha256>
 ```
 
-The ID is computed by the existing `dryml.records` spec-family machinery from `schema`, `schema_version`, `kind`, and `payload`. It excludes `id`, `metadata`, store paths, indexes, and timestamps unless the timestamp is deliberately placed in `payload`.
+The ID is computed by the existing `dryml.records` spec-family machinery from `schema`, `schema_version`, `kind`, and `payload`. It excludes `id`, `metadata`, store paths, indexes, and timestamps unless the timestamp is deliberately placed in `payload`. This does **not** make arbitrary metadata variants safe to publish: operation sidecars are immutable by their whole canonical bytes. Dispatch strips reserved planning/trace metadata before normalization, so traced and untraced equivalent operations keep byte-identical, trace-free operation sidecars.
 
 ## CDef, Ref, And Literal Semantics
 
@@ -100,4 +100,4 @@ assert located.spec_id.startswith("op-v1-")
 
 Operation specs remain sidecar metadata under `records/specs/operation/`.
 
-Future dispatch metadata wraps operation IDs without changing operation identity. `DispatchSpec` records request policy/override intent with `dispatch-v1-*` IDs, while `ExecutionRecipe` records resolved plan metadata with `recipe-v1-*` IDs. Neither executes the operation.
+Dispatch metadata wraps operation IDs without changing operation identity. `DispatchSpec` records request policy/override intent with `dispatch-v1-*` IDs, while `ExecutionRecipe` records resolved plan metadata with `recipe-v1-*` IDs. Neither executes the operation. When explicit current-process dynamic tracing is requested, its per-run input/run identity and bounded provenance belong only to the dispatch/recipe/envelope/explanation carriers; they are never written to an `OperationSpec` or its operation sidecar.

@@ -49,6 +49,20 @@ _RESERVED_NORMALIZATION_KEYS = frozenset(
         "dryml.code_target",
     }
 )
+# Planning evidence is request/run-specific.  Operation sidecars are immutable
+# for their whole canonical bytes even though their IDs exclude metadata, so an
+# explicit OperationSpec must never carry caller-provided planning evidence.
+_RESERVED_PLANNING_KEYS = frozenset(
+    {
+        "dryml.dispatch.planning_version", "dryml.code_analysis", "dryml.code_probe",
+        "dryml.requirements", "dryml.requirement_sources", "dryml.environment_selection",
+        "dryml.environment_probe", "dryml.environment_check", "dryml.environment_resolution",
+        "dryml.world_selection", "dryml.world_check", "dryml.world_synthesis",
+        "dryml.local_inventory", "dryml.world_allocation", "dryml.runtime_selection",
+        "dryml.runtime_check", "dryml.requirement_policy", "dryml.runtime_enforcement",
+        "dryml.dispatch.launchable", "dryml.dispatch.diagnostics", "dryml.dispatch.dynamic_trace",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +240,7 @@ def normalize_existing_operation_spec(
         method_name=method_name,
         transport="operation_spec",
         definition_target=definition_target,
+        trace_store=store,
     )
 
 
@@ -636,7 +651,7 @@ def _attach_normalization_metadata(
     result = dict(op)
     metadata = dict(result.get("metadata") or {})
     update = _normalization_metadata(user_target_kind, transport, code_target)
-    for key in _RESERVED_NORMALIZATION_KEYS:
+    for key in _RESERVED_NORMALIZATION_KEYS | _RESERVED_PLANNING_KEYS:
         metadata.pop(key, None)
     metadata.update(update)
     result["metadata"] = metadata
