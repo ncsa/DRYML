@@ -605,6 +605,58 @@ def test_complete_trace_with_nonpreexecution_diagnostic_returns_failed_plan_and_
     assert explanation.resolution.dynamic_trace.data["status"] == "evidence_rejected"
 
 
+def test_complete_summary_with_257_diagnostics_remains_bounded_rejected_evidence(monkeypatch, tmp_path):
+    """Rejected diagnostic overflow cannot expose a private provenance exception."""
+    import dryml.dispatch.requirements as requirements
+
+    diagnostics = tuple(
+        DiagnosticFact(
+            severity="error",
+            code="dryml.code.dynamic_trace_algorithm_failed",
+            message="must not be projected",
+        )
+        for _ in range(257)
+    )
+    monkeypatch.setattr(
+        requirements,
+        "trace",
+        lambda *_args, **kwargs: CodeAnalysisResult(
+            target_from_callable(traceable_target, metadata=kwargs["context"].metadata).spec,
+            facts=(_summary(),),
+            diagnostics=diagnostics,
+        ),
+    )
+    dispatcher = Dispatcher(store=_store(tmp_path))
+
+    with pytest.raises(DispatchPlanningError) as excinfo:
+        dispatcher.plan(traceable_target, analysis_policy={"dynamic_trace": True}, requirement_policy="ignore")
+
+    evidence = excinfo.value.context["dynamic_trace"]
+    assert evidence["status"] == "evidence_rejected"
+    assert evidence["trace_input_id"] and evidence["trace_run_id"]
+    assert evidence["execution_started"] is True
+    assert evidence["summary"]["data"]["calls_recorded"] == 0
+    assert evidence["calls"] == []
+    assert evidence["diagnostics"] == [{
+        "code": "dryml.dispatch.dynamic_trace_evidence_rejected",
+        "severity": "error",
+        "data": {"trace_diagnostic_codes": []},
+    }]
+
+    explanation = dispatcher.explain(
+        traceable_target,
+        analysis_policy={"dynamic_trace": True},
+        requirement_policy="ignore",
+    )
+    assert explanation.launchable is False
+    explanation_evidence = explanation.resolution.dynamic_trace.to_data()
+    assert explanation_evidence["status"] == evidence["status"]
+    assert explanation_evidence["trace_input_id"] and explanation_evidence["trace_run_id"]
+    assert explanation_evidence["summary"] == evidence["summary"]
+    assert explanation_evidence["calls"] == evidence["calls"]
+    assert explanation_evidence["diagnostics"] == evidence["diagnostics"]
+
+
 def test_oversized_complete_trace_with_diagnostic_remains_rejected_for_plan_and_explain(monkeypatch, tmp_path):
     """Inconsistent complete evidence takes precedence over projection overflow."""
     import dryml.dispatch.requirements as requirements

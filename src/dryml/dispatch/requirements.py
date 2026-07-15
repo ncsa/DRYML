@@ -1592,6 +1592,14 @@ def _rejected_trace_provenance(
 ) -> DynamicTraceProvenance:
     """Project rejected evidence without letting a projection limit change its status."""
 
+    raw_codes = diagnostic.data.get("trace_diagnostic_codes", ()) if type(diagnostic.data) is dict else ()
+    bounded_diagnostic = diagnostic
+    if (
+        type(raw_codes) not in {tuple, list}
+        or len(raw_codes) > _TRACE_MAX_DIAGNOSTICS
+        or any(type(code) is not str or not code or len(code) > _TRACE_MAX_STRING for code in raw_codes)
+    ):
+        bounded_diagnostic = _trace_diagnostic("dryml.dispatch.dynamic_trace_evidence_rejected")
     try:
         return _trace_provenance(
             normalized, policy, target=target, status="evidence_rejected",
@@ -1607,7 +1615,7 @@ def _rejected_trace_provenance(
             return _trace_provenance(
                 normalized, policy, target=target, status="evidence_rejected",
                 input_id=input_id, run_id=run_id, started=started, summary=summary,
-                diagnostics=[diagnostic],
+                diagnostics=[bounded_diagnostic],
             )
         except (_TraceProvenanceLimitError, ValueError):
             pass
@@ -1618,7 +1626,7 @@ def _rejected_trace_provenance(
     return _trace_provenance(
         normalized, policy, target=target, status="evidence_rejected",
         input_id=input_id, run_id=run_id, started=True if started or summary is not None or calls else None,
-        diagnostics=[diagnostic],
+        diagnostics=[bounded_diagnostic],
     )
 
 
