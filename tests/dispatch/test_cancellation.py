@@ -10,6 +10,7 @@ from dryml.operations import attach_operation_id, make_function_call_spec
 
 def _plan(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
+    # Keep cancellation coverage independent of probe startup; see ADR 0006.
     environment = CurrentEnvironmentSpec().to_data()
     op = attach_operation_id(make_function_call_spec("time:sleep", args=[60]))
     dispatcher = Dispatcher(store=store)
