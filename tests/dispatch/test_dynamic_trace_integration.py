@@ -1423,8 +1423,8 @@ def test_traced_and_untraced_operation_sidecar_bytes_are_identical(tmp_path):
     assert traced.dispatch_spec["id"] != ordinary.dispatch_spec["id"]
 
 
-def test_provenance_rejects_each_top_level_count_and_scalar_overflow():
-    base = {
+def _pre_execution_provenance_data():
+    return {
         "schema": "dryml.dispatch.dynamic_trace.v1",
         "schema_version": 1,
         "requested": True,
@@ -1445,11 +1445,163 @@ def test_provenance_rejects_each_top_level_count_and_scalar_overflow():
             "data": {"trace_diagnostic_codes": []},
         }],
     }
-    overlong = {**base, "diagnostics": [{"code": "x" * 4097, "severity": "error"}]}
-    with pytest.raises(ValueError):
-        DynamicTraceProvenance(overlong)
-    with pytest.raises(ValueError):
-        DynamicTraceProvenance({**base, "diagnostics": base["diagnostics"] * 257})
+
+
+def _complete_provenance_data(calls, *, accepted=(), duplicates=()):
+    count = len(calls)
+    return {
+        "schema": "dryml.dispatch.dynamic_trace.v1",
+        "schema_version": 1,
+        "requested": True,
+        "trace_input_id": "trace-input-v1-test",
+        "trace_run_id": "trace-run-v1-test",
+        "execution_location": "current_process",
+        "execution_started": True,
+        "target": {"target_kind": "function", "transport": "import_path"},
+        "policy": {"max_calls": max(1, count), "require_proxy_only_args": True, "collect_requirements": True},
+        "status": "complete",
+        "summary": _summary(calls=count, max_calls=max(1, count)).to_data(),
+        "calls": [call.to_data() for call in calls],
+        "accepted_fragments": list(accepted),
+        "duplicate_observations": list(duplicates),
+        "diagnostics": [],
+    }
+
+
+def _assert_exact_and_over_provenance_bounds(exact, over):
+    for restore in (DynamicTraceProvenance, DynamicTraceProvenance.from_data):
+        assert restore(exact).to_data() == exact
+        with pytest.raises(ValueError):
+            restore(over)
+
+
+def test_provenance_call_count_exact_bound_and_n_plus_one():
+    exact = _complete_provenance_data([_dynamic_call(index) for index in range(256)])
+    over = {
+        **exact,
+        "policy": {**exact["policy"], "max_calls": 257},
+        "summary": _summary(calls=257, max_calls=257).to_data(),
+        "calls": [*exact["calls"], _dynamic_call(256).to_data()],
+    }
+
+    _assert_exact_and_over_provenance_bounds(exact, over)
+
+
+def _fragment_fact(priority):
+    fragment = {
+        "namespace": "environment",
+        "kind": "requirement",
+        "fragment": {},
+        "source": {
+            "kind": "synthetic",
+            "target": None,
+            "label": None,
+            "namespace": None,
+            "path": None,
+            "metadata": {},
+        },
+        "priority": priority,
+        "merge_policy": None,
+        "schema_version": 1,
+    }
+    fact = AnnotationFact(
+        data=fragment,
+        source={"analyzer": "direct_annotations", "target_kind": "function", "annotation_source": fragment["source"]},
+    ).to_data()
+    key = hashlib.sha256(json.dumps(fragment, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return fact, key
+
+
+def test_provenance_accepted_fragment_count_exact_bound_and_n_plus_one():
+    facts_and_keys = [_fragment_fact(index) for index in range(1024)]
+    calls = []
+    accepted = []
+    for sequence in range(4):
+        batch = facts_and_keys[sequence * 256:(sequence + 1) * 256]
+        call = _dynamic_call(sequence)
+        call.data["method_facts"] = [fact for fact, _key in batch]
+        calls.append(call)
+        accepted.extend(
+            {"sequence": sequence, "method": "train", "fragment_key": key}
+            for _fact, key in batch
+        )
+    exact = _complete_provenance_data(calls, accepted=accepted)
+    over = {**exact, "accepted_fragments": [*accepted, accepted[0]]}
+
+    _assert_exact_and_over_provenance_bounds(exact, over)
+
+
+def test_provenance_duplicate_count_exact_bound_and_n_plus_one():
+    fact, key = _fragment_fact(0)
+    calls = []
+    accepted = [{"sequence": 0, "method": "train", "fragment_key": key}]
+    duplicates = []
+    for sequence, count in enumerate((256, 256, 256, 256, 1)):
+        call = _dynamic_call(sequence)
+        call.data["method_facts"] = [fact] * count
+        calls.append(call)
+        duplicates.extend(
+            {"sequence": sequence, "method": "train", "fragment_key": key, "first": "trace:0"}
+            for _index in range(count - (sequence == 0))
+        )
+    exact = _complete_provenance_data(calls, accepted=accepted, duplicates=duplicates)
+    over = {**exact, "duplicate_observations": [*duplicates, duplicates[0]]}
+
+    _assert_exact_and_over_provenance_bounds(exact, over)
+
+
+def test_provenance_diagnostic_count_exact_bound_and_n_plus_one():
+    diagnostic = _pre_execution_provenance_data()["diagnostics"][0]
+    exact = {**_pre_execution_provenance_data(), "diagnostics": [diagnostic.copy() for _index in range(256)]}
+    over = {**exact, "diagnostics": [*exact["diagnostics"], diagnostic]}
+
+    _assert_exact_and_over_provenance_bounds(exact, over)
+
+
+def test_provenance_scalar_length_exact_bound_and_n_plus_one():
+    exact = _pre_execution_provenance_data()
+    exact["diagnostics"][0]["code"] = "x" * 4096
+    over = json.loads(json.dumps(exact))
+    over["diagnostics"][0]["code"] += "x"
+
+    _assert_exact_and_over_provenance_bounds(exact, over)
+
+
+def test_provenance_nesting_depth_exact_bound_and_n_plus_one():
+    def nested_argument(layers):
+        value = "x"
+        for _index in range(layers):
+            value = [value]
+        return value
+
+    exact_call = _dynamic_call(0)
+    exact_call.data["args"] = [nested_argument(27)]
+    over_call = _dynamic_call(0)
+    over_call.data["args"] = [nested_argument(28)]
+
+    _assert_exact_and_over_provenance_bounds(
+        _complete_provenance_data([exact_call]),
+        _complete_provenance_data([over_call]),
+    )
+
+
+def test_provenance_canonical_json_bytes_exact_bound_and_n_plus_one():
+    exact = _pre_execution_provenance_data()
+    codes = ["x"] * 256
+    exact["diagnostics"][0]["data"]["trace_diagnostic_codes"] = codes
+    remaining = 1_048_576 - len(json.dumps(exact, sort_keys=True, separators=(",", ":")).encode())
+    for index in range(len(codes)):
+        growth = min(4095, remaining)
+        codes[index] += "x" * growth
+        remaining -= growth
+    assert remaining == 0
+    assert len(json.dumps(exact, sort_keys=True, separators=(",", ":")).encode()) == 1_048_576
+
+    over = json.loads(json.dumps(exact))
+    adjustable = next(index for index, code in enumerate(over["diagnostics"][0]["data"]["trace_diagnostic_codes"]) if len(code) < 4096)
+    over["diagnostics"][0]["data"]["trace_diagnostic_codes"][adjustable] += "x"
+
+    _assert_exact_and_over_provenance_bounds(exact, over)
 
 
 @pytest.mark.parametrize("target", [ConstructorSentinel, CallableSentinel(), len, generator_target, async_target])
