@@ -178,10 +178,11 @@ class StaticCallFact(CodeFact):
             ``"static_calls"``, ``target_kind`` must be a bounded non-empty
             string, and optional ``filename`` must be a bounded string or
             ``None``.
-        data: Fixed static-call payload mapping containing status, confidence,
-            syntax, target, source-location, and bounded display fields. Its
-            status-dependent target and reason fields must also satisfy the
-            fixed schema.
+        data: Fixed static-call payload mapping with exactly ``status``,
+            ``confidence``, ``syntax``, ``display``, ``receiver``,
+            ``method_name``, ``target``, ``reason``, ``relative_line``,
+            ``absolute_line``, and ``col_offset``. Its status-dependent target
+            and reason fields must also satisfy the fixed schema and bounds.
         kind: Fixed fact kind, ``"static_call"``.
 
     Raises:
@@ -307,10 +308,11 @@ class DynamicCallFact(CodeFact):
     Args:
         source: Fixed dynamic-trace source mapping with ``analyzer`` set to
             ``"dynamic_trace"`` and a bounded non-empty ``target_kind``.
-        data: Fixed dynamic-call payload mapping containing the sequence,
-            receiver reference, method name, serialized arguments, keyword
-            mapping, and serialized method facts. Values must satisfy the
-            dynamic-call reference, type, and size bounds.
+        data: Fixed dynamic-call payload mapping with exactly ``sequence``,
+            ``receiver_kind``, ``receiver_ref``, ``receiver_class``,
+            ``method_name``, ``args``, ``kwargs``, and ``method_facts``.
+            Values must satisfy the dynamic-call reference, type, and size
+            bounds.
         kind: Fixed fact kind, ``"dynamic_call"``.
 
     Raises:
