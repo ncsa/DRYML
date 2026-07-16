@@ -152,7 +152,10 @@ candidate.
 
 ## Requirement Fragments
 
-Decorators are sugar over requirement fragments. They are not the future provider system.
+Decorators are sugar over requirement fragments. Static decorators declare known
+requirements and defaults in Python code, while dynamic providers obtain facts
+that require importing framework code, user modules, or target-environment
+packages.
 
 ```python
 @envs.req(requirements=("torch>=2.4,<2.7",), tags=("torch",))

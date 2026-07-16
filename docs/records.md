@@ -383,4 +383,4 @@ Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewrit
 
 ## Non-Goals
 
-Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. The records layer does not itself launch workers; dispatch provides local worker launch and can persist execution provenance through these records. Real framework adapters, blob storage, compiler/JIT execution, and the public Artifact API remain future titled-sprint work.
+Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. The records layer does not itself launch workers; dispatch provides local worker launch and can persist execution provenance through these records. Real framework adapters, blob storage, and compiler/JIT execution remain future titled-sprint work.
