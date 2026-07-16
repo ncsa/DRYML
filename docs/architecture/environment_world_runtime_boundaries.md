@@ -32,7 +32,7 @@ Probe processes do not need the final workload world and should normally run wit
 
 `dryml.code.probe_target(...)` is the combined code-analysis probe surface. It can run in the current Python process, through `CurrentEnvironmentSpec`, or through an explicit Python executable worker. It may optionally include an `EnvironmentRecord` collected inside the process that ran the analysis. Unsupported environment launch paths return diagnostics rather than creating environments, solving packages, using containers, or synthesizing worlds.
 
-Current-process probes can inspect live local/notebook targets because they preserve the live `CodeTarget` wrapper. Worker/subprocess probes cross a JSON boundary and therefore require a stable `module:qualname` import path; `source_spec` remains descriptive data and is not reconstructed in Sprint 9A. Timeout enforcement is subprocess-based; current-process probes with timeouts route import-path targets through the current Python worker and reject other targets with a structured diagnostic.
+Current-process probes can inspect live local/notebook targets because they preserve the live `CodeTarget` wrapper. Worker/subprocess probes cross a JSON boundary and therefore require a stable `module:qualname` import path; `source_spec` remains descriptive data and is not reconstructed. Timeout enforcement is subprocess-based; current-process probes with timeouts route import-path targets through the current Python worker and reject other targets with a structured diagnostic.
 
 ## Notebook Current/Default State
 
@@ -90,5 +90,5 @@ and asks a backend to create allocations; it does not make registry state global
 An ordinary notebook keeps its registry in a local variable and uses
 `environments.use(...)`/`worlds.use(...)` for restorable defaults. Inventory and
 synthesis still leave the notebook at `NoAllocation`; only a worker receives the
-actual allocation. Resolver and inventory work are bounded per request, with
-cross-plan caching deferred to a later performance sprint.
+actual allocation. Resolver and inventory work are bounded per request and do
+not use cross-plan caching.

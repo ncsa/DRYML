@@ -20,43 +20,78 @@ DRYML aims to be as lightweight as possible. The user should be able to grab onl
 
 ## Dispatch, Planning, and Analysis Quickstart
 
-Create a Store first, then pass normal Python targets to dispatch. Functions must
-be importable for the portable path; stored CDef methods use their stable Store
-identity. Both forms normalize to the advanced canonical `OperationSpec` IR
-internally.
+Follow this workflow in order when starting with DRYML.
+
+### 1. Create or open a Store
 
 ```python
 import dryml
 from dryml.core2.store.dir import DirStore
 
 store = DirStore("work/store", query_index="none")
-result = dryml.dispatch.run(importable_function, store=store, args=(2, 3))
-method_result = dryml.dispatch.run(model_cdef, "train", store=store, args=(dataset_cdef,))
 ```
 
-Use [operations](docs/operations.md) when you deliberately need to construct
-that advanced IR yourself. [Dispatch](docs/dispatch.md) documents candidate
-selection and [`dispatch.explain(...)`](docs/dispatch.md#requirement-aware-planning),
-which is non-launching and reports bounded planning facts.
+### 2. Declare requirements and defaults
 
-Declare hard requirements separately from soft defaults. Current environment and
-world values are context-local defaults for future planning, not allocation of
-this process:
+Declare hard requirements separately from soft defaults. Put a portable function
+at module scope, for example in `my_package/tasks.py`:
 
 ```python
 @dryml.env.req(requirements=("numpy>=1",))
 @dryml.world.req(cpus={"min": 1})
+@dryml.world.default(cpus=1)
 def importable_function(left, right):
     return left + right
-
-with dryml.environments.use(dryml.environments.CurrentEnvironmentSpec()):
-    explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
 ```
+
+### 3. Dispatch a module-level function
+
+Functions use a verified import path for the portable path:
+
+```python
+from my_package.tasks import importable_function
+
+result = dryml.dispatch.run(importable_function, store=store, args=(2, 3))
+```
+
+### 4. Dispatch a stored CDef method
+
+Stored CDef methods use their stable Store identity:
+
+```python
+method_result = dryml.dispatch.run(
+    model_cdef, "train", store=store, args=(dataset_cdef,)
+)
+```
+
+### 5. Explain a plan before launching
+
+[`dispatch.explain(...)`](docs/dispatch.md#requirement-aware-planning) is
+non-launching and reports bounded planning facts:
+
+```python
+explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
+```
+
+### 6. Set notebook planning defaults
+
+Current environment and world values are context-local defaults for later
+planning, not allocation of this process:
+
+```python
+with dryml.environments.use(dryml.environments.CurrentEnvironmentSpec()):
+    with dryml.worlds.use(dryml.worlds.synthesize(None).require_world()):
+        explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
+```
+
+### 7. Use plain mode for trusted inline work
 
 For trusted inline local work, `with dryml.runtime.plain():` uses an inline
 allocation with enforcement off. It is not worker isolation or a dispatch
 replacement. See [world/runtime](docs/world_runtime.md) and the
 [notebook example](examples/notebooks/local_defaults_and_plain_mode.ipynb).
+
+### 8. Analyze code without invoking it
 
 Code analysis is an explicit submodule import:
 
@@ -66,9 +101,18 @@ import dryml.code as code
 facts = code.analyze(importable_function)  # does not intentionally invoke it
 ```
 
+### 9. Opt into trusted current-process tracing
+
 `code.trace(...)` is separate: it executes supported trusted code once in the
 current process, is not a sandbox, and has no hard timeout. Read the
 [analysis architecture](docs/architecture/code_analysis.md) before opting in.
+
+### 10. Use OperationSpec only for advanced IR control
+
+Both Python-shaped dispatch forms normalize to the canonical `OperationSpec` IR.
+Use [operations](docs/operations.md) only when you deliberately need to construct
+that advanced IR yourself.
+
 Runnable lightweight workflows are available for
 [requirements/explain](examples/requirements/requirements_and_explain.py),
 [Python-shaped dispatch](examples/dispatch/python_shaped_dispatch.py),

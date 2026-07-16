@@ -135,6 +135,24 @@ compatibility semantics while never bypassing allocation feasibility.
 
 ### Explicit current-process dynamic trace
 
+#### Target and execution-location support
+
+| Target/path | Direct `analyze` | Isolated/timeout probe | Selected environment probe | `trace` | Opt-in dispatch trace |
+|---|---|---|---|---|---|
+| Live module function | Supported | Supported when importable/reconstructible | Supported when importable there | Supported for an exact synchronous function and supported arguments | Supported under the narrower dispatch grammar |
+| Live notebook/local function | Supported inline | Unsupported without reconstructible target | Unsupported | Supported inline under trace policy | Supported only when normal dispatch transport is valid, including explicit same-Python pickle rules |
+| Import-path target | Supported with import permission | Supported | Supported | Unsupported without exact live function | Unsupported |
+| Bound method | Supported by ordinary direct analyzers | Not generally reconstructible | Not generally reconstructible | Unsupported | Unsupported |
+| Source-spec-only target | Static/source facts where implemented | No source-backed reconstruction | Unsupported | Unsupported | Unsupported |
+| Definition/CDef method dispatch | Direct class/method requirement collection | Existing static/probe behavior only | Existing static/probe behavior only | A live orchestration function may accept Definition proxies | Method-target tracing unsupported; ordinary method dispatch supported |
+
+`analyze(...)` does not intentionally invoke a target body. `trace(...)` runs
+trusted code once in the current process; it is not a sandbox and has no hard
+timeout. A probe changes runtime role/location, not analyzer semantics. Dispatch
+tracing is explicit and default-off; requested structural trace failures block
+planning rather than being ignored by compatibility policy. Source-backed
+subprocess reconstruction is not implemented.
+
 Dynamic tracing is off by default. It is requested only with the closed
 `analysis_policy` mapping; a `CodeAnalysisContext`, including one with
 `allow_dynamic_execution=True`, remains a non-tracing compatibility form.
@@ -203,9 +221,9 @@ reported as `provenance_limit_exceeded`, never truncated. A recognized
 pre-execution result whose diagnostic-code projection exceeds its bound instead
 uses a bounded non-launchable pre-execution carrier; it is never allowed to leak
 an internal limit exception. Its validated complete
-or incomplete 9B summary is retained while calls and observations are empty, so
+or incomplete summary is retained while calls and observations are empty, so
 an over-limit trace is not mistaken for an empty trace. The policy restored from
-the carrier has the exact 9B bounds (`max_calls` 1 through 10,000), and only the
+the carrier has the documented bounds (`max_calls` 1 through 10,000), and only the
 four normalized transport tokens `import_path`, `pickle_small`,
 `operation_spec`, and `method_call` are accepted; an unknown token is a schema
 error rather than being serialized or substituted. The v1 `calls` field retains
@@ -222,7 +240,7 @@ write a plan or sidecar containing that evidence.
 
 A null `trace_input_id` is allowed only when the effective invocation itself
 could not be constructed. Dispatch admits a no-summary `pre_execution_failed`
-carrier only for the exact 9B diagnostic-only set (`dynamic_trace_disabled`,
+carrier only for the exact documented diagnostic-only set (`dynamic_trace_disabled`,
 `dynamic_trace_invalid_context`, `dynamic_trace_unsupported_target`,
 `dynamic_trace_unsupported_argument`, `dynamic_trace_argument_limit_exceeded`,
 and `dynamic_trace_receiver_resolution_failed`), with no facts and a target
@@ -236,7 +254,7 @@ for diagnostics, never for requirement resolution or publication. Each carrier
 diagnostic uses the fixed machine schema `{"code": str, "severity":
 "info"|"warning"|"error", "data": {"trace_diagnostic_codes": [str,
 ...]}}`. The bounded `trace_diagnostic_codes` array preserves safely available
-underlying 9B code identifiers without promoting their messages or arbitrary
+underlying diagnostic code identifiers without promoting their messages or arbitrary
 data into the projection. Carriers contain no exception messages, tracebacks,
 locals, source, environment values, streams, live objects, or arbitrary repr.
 If accepted trace facts change a `pickle_small` final candidate to a different
@@ -252,7 +270,7 @@ delete or otherwise modify any untracked local prototype directory.
 
 ## Local Worlds
 
-`Dispatcher.run_world(...)` is the explicit Sprint 8 entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
+`Dispatcher.run_world(...)` is the explicit entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
 
 ```python
 from dryml.dispatch import Dispatcher
@@ -324,7 +342,7 @@ Python path policies are:
 
 When provenance is enabled, operation, dispatch, and execution-recipe specs are written beside the execution record so provenance refs are store-resolvable. `ExecutionRecord` sidecars are emitted for success, user-code failure, timeout, cancellation, and parent-side protocol failures when metadata permits. stdout/stderr products use self product refs such as `products/<execution-record-id>/stdout.txt` and `stderr.txt`.
 
-In local-world mode, `plan_world(...)` writes the requested `WorldSpec`, operation spec, dispatch spec, execution recipe, and actual `WorldAllocation` spec when provenance is enabled, before worker execution records reference them. Per-worker execution records are the Sprint 10 provenance authority; each includes `world_id`, `world_allocation_id`, worker key payload data, and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured independently and copied into each worker execution record's product directory.
+In local-world mode, `plan_world(...)` writes the requested `WorldSpec`, operation spec, dispatch spec, execution recipe, and actual `WorldAllocation` spec when provenance is enabled, before worker execution records reference them. Per-worker execution records are the provenance authority; each includes `world_id`, `world_allocation_id`, worker key payload data, and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured independently and copied into each worker execution record's product directory.
 
 ## Cancellation
 

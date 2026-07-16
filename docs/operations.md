@@ -2,11 +2,11 @@
 
 `dryml.operations` defines portable operation-call specs as canonical JSON metadata. Operation specs are regular `dryml.records` specs in the existing `operation` family. They are not `Object` instances, are not stored under `objects/`, and do not change `ConcreteDefinition` identity or object save/load behavior. They remain the supported advanced canonical IR; normal callers usually use the Python-shaped APIs in [dispatch](dispatch.md).
 
-The `operation` spec family remains an open metadata family at the lower `dryml.records` layer. `dryml.operations.validate_operation_spec()` defines the portable Sprint 2 call-spec subset that future dispatch code should require explicitly.
+The `operation` spec family remains an open metadata family at the lower `dryml.records` layer. `dryml.operations.validate_operation_spec()` defines the portable call-spec subset accepted by dispatch planning.
 
 ## Function Calls
 
-Use `make_function_call_spec()` to describe a future function call without importing or executing the target:
+Use `make_function_call_spec()` to describe a function call without importing or executing the target:
 
 ```python
 from dryml.operations import attach_operation_id, make_function_call_spec
@@ -87,7 +87,7 @@ Inside operation `args`, `kwargs`, and method-call `subject`:
 {"$literal": "cdef-v4-..."} means pass the literal string.
 ```
 
-`resolve_call_arguments()` implements only a resolver skeleton. By default it returns `MaterializeCDefArg` and `CDefRefArg` placeholders. Future dispatch code can provide explicit `materialize_cdef` and `make_cdef_ref` callbacks. Sprint 2 does not import function targets, select environments, launch workers, or execute operations.
+`resolve_call_arguments()` returns `MaterializeCDefArg` and `CDefRefArg` placeholders by default. Dispatch supplies explicit `materialize_cdef` and `make_cdef_ref` callbacks when it reconstructs a worker invocation.
 
 ## Storage
 

@@ -94,7 +94,7 @@ Compatibility imports remain available:
 
 ## Relationship to Method and Method Handles
 
-`Method`, `Traits`, `CompilerInfo`, `BatchMode` re-export convenience, and the `traits` decorator now live under `dryml.core2.methods`. `dryml.code` re-exports these names for compatibility, but code-analysis algorithms only inspect method facts; they do not own the semantic model. Future method handle or signature semantic APIs should also live under `dryml.core2.methods` if they are introduced.
+`Method`, `Traits`, `CompilerInfo`, `BatchMode` re-export convenience, and the `traits` decorator now live under `dryml.core2.methods`. `dryml.code` re-exports these names for compatibility, but code-analysis algorithms only inspect method facts; they do not own the semantic model. Method handle or signature semantic APIs belong under `dryml.core2.methods`.
 
 Preferred import:
 
@@ -117,7 +117,7 @@ under its explicit policy, while `dryml.annotations` remains the merge authority
 Analysis itself does not select environments, allocate worlds, enforce runtime
 policy, launch workers, or decide candidate compatibility.
 
-## Sprint 9A Analysis Contract
+## Analysis Contract
 
 Static analysis and dynamic tracing share the existing `CodeAnalyzer`
 protocol and `CodeAnalysisResult` model. `analyze(...)` directly runs selected
@@ -130,7 +130,7 @@ metaclass, and module dynamic-attribute hooks are not invoked.
 inline probe enters `RuntimeMode.PROBE` but does not imply a new OS process. A
 worker process may use only analyzers installed and registered in that worker.
 
-Sprint 9B ships this invocation-bearing facade:
+The invocation-bearing facade is:
 
 ```python
 dryml.code.trace(
@@ -286,7 +286,7 @@ module/metaclass hooks, or truth-test raw descriptors during analysis.
 `tests/code/test_probe_target.py` proves probes do not execute submitted target
 bodies or instantiate classes.
 
-## Sprint 9B Dynamic Trace Contract
+## Dynamic Trace Contract
 
 ### Explicit facade and trust boundary
 
@@ -489,7 +489,7 @@ work.
 
 - This note does not implement source-spec subprocess reconstruction.
 - This note does not add static-call dispatch policy or alter dispatch planning.
-- This note does not add trace dispatch policy, subprocess/selected-environment
+- This note does not define dispatch trace policy, subprocess/selected-environment
   tracing, hard-timeout isolation, arbitrary Python interpretation, or return
   proxies.
 
@@ -508,12 +508,11 @@ work.
 
 ## Open Questions
 
-Remaining Sprint 9B contract questions for Sprint 9A acceptance: none. The
-following longer-term design questions remain outside the Sprint 9B invocation
-contract locked here:
+No current contract questions remain. The following longer-term design questions
+remain outside the invocation contract documented here:
 
 - Should facts be dataclasses, records specs, or both?
-- Which diagnostics must be JSON-compatible in Sprint 1?
+- Which diagnostics must be JSON-compatible?
 - How much source-backed fallback should be accepted before probes are required?
 - Should later probe/dispatch metadata use a source-text policy such as `metadata_only`, `include_text`, or `hash_only` instead of always serializing full source text?
 

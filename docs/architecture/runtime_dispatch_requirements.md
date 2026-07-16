@@ -2,7 +2,7 @@
 
 ## Status
 
-Current architecture note, updated through Sprint 9C dispatch planning.
+Current architecture note.
 
 ## Current State
 
@@ -79,7 +79,7 @@ OperationSpec metadata is trace-free; reserved planning keys are removed before
 operation-sidecar publication.
 
 Admission is fail-closed but diagnostic-preserving. A no-summary pre-execution
-carrier is accepted only for the exact 9B diagnostic-only/no-fact outcome set
+carrier is accepted only for the exact documented diagnostic-only/no-fact outcome set
 and known non-start; stale envelope/target evidence, malformed summaries,
 unknown outcomes, and mixed evidence are `evidence_rejected`. Summary/call wires
 are independently validated before envelope rejection, so validated evidence
@@ -87,7 +87,7 @@ can prove `execution_started=true`; otherwise the rejected carrier represents
 unknown start as `null`. Retained rejected evidence is diagnostic-only and never
 enters annotations resolution. The carrier accepts only `import_path`,
 `pickle_small`, `operation_spec`, and `method_call` transport tokens, rejects
-unknown tokens, enforces 9B `max_calls` 1..10,000 plus dispatch count/depth/
+unknown tokens, enforces `max_calls` 1..10,000 plus dispatch count/depth/
 string/byte limits, and excludes exception text, tracebacks, raw source,
 environment values, streams, live objects, and arbitrary repr. Its `calls` field
 uses the specified ordered full `DynamicCallFact` wires; accepted annotation
@@ -133,12 +133,7 @@ Timeout enforcement is parent-side for subprocess probes. When a current-process
 ## Non-Goals
 
 - This note does not specify exact implementation classes.
-- Historical baseline sections do not supersede the current dispatch behavior
-  described above.
 - This note does not specify exact dispatch integration classes.
-- Sprint 3 implements annotation requirement resolution APIs, but does not implement Python-shaped dispatch normalization or dispatch candidate checking.
-- Sprint 4 implements runtime enforcement policy and current/default environment/world APIs, but still does not implement dispatch candidate checking.
-- Sprint 5 implements lightweight code probes, but still does not implement dispatch requirement resolution or candidate checking.
 
 ## Source Anchors
 
@@ -155,7 +150,8 @@ Timeout enforcement is parent-side for subprocess probes. When a current-process
 
 ## Risks
 
-Baseline tests can become brittle if they assert private plan internals. Sprint 0 tests should prefer plan, dispatch spec, recipe, envelope, and public exception behavior.
+Tests can become brittle if they assert private plan internals. Prefer plan,
+dispatch spec, recipe, envelope, and public exception behavior.
 
 ## Resolved Decisions
 
@@ -166,13 +162,6 @@ Baseline tests can become brittle if they assert private plan internals. Sprint 
 - DRYML-owned planning metadata persists canonical requirement facts and bounded
   decisions without probe streams, environment secrets, or live objects.
 
-## Follow-Up Sprints
-
-- Sprint 3: annotation collection and merge semantics.
-- Sprint 5: lightweight code probe service.
-- Sprint 6: Python-shaped operation normalization.
-- Sprint 7: dispatch requirement resolution and candidate checking.
-- Sprint 8: environment/world resolver behavior.
 # Synthesized Worlds
 
 Synthesis produces a `WorldSpec` only. Backend planning converts it into a
