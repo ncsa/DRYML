@@ -89,4 +89,7 @@ Resolve them with the containing record ID. Product bytes do not affect CDef ide
 
 ## Non-Goals
 
-`ExecutionRecord` is optional provenance and is not required for load/adapt. The public Artifact API remains future work over selected `DataRecord` products. Framework-specific adapters and compiler/JIT lowering are also deferred.
+`ExecutionRecord` is optional provenance and is not required for load/adapt. The
+shipped object-based `dryml.artifacts` API is distinct from store-owned
+`DataRecord` products; `DataRecord` does not implement or select Artifacts.
+Framework-specific adapters and compiler/JIT lowering are deferred.

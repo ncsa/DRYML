@@ -10,6 +10,7 @@ Use the Pythonic facades for normal code:
 import dryml
 
 @dryml.env.req(packages={"torch": ">=2.4"}, tags=("training",))
+@dryml.env.default(dryml.environments.CurrentEnvironmentSpec())
 @dryml.world.req(accelerators={"gpu": {"min": 1}})
 @dryml.world.default(cpus=8, memory="32GiB", accelerators={"gpu": 1})
 @dryml.runtime.default(torch={"num_threads": 8}, env={"OMP_NUM_THREADS": "8"})
@@ -18,6 +19,13 @@ def train(model, dataset):
 ```
 
 `dryml.env.req(...)` declares hard software constraints such as Python versions, package requirements, capabilities, and tags. `packages={"torch": ">=2.4"}` becomes the PEP 508 requirement `torch>=2.4`; `packages={"torch": None}` becomes `torch`.
+
+`dryml.env.default(...)` declares an overrideable environment candidate. Pass an
+environment spec object or its JSON-ready mapping, for example
+`dryml.environments.CurrentEnvironmentSpec()`. Dispatch selects an explicit
+`environment=` candidate before this annotation default; the selected candidate
+must still satisfy any hard environment requirements. The decorator attaches
+metadata only and does not activate an environment or runtime.
 
 `dryml.world.req(...)` declares hard resource and topology constraints. The default role is `main`; pass `roles={...}` for a full multi-role requirement payload.
 

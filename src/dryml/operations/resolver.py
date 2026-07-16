@@ -15,7 +15,12 @@ from .specs import validate_operation_spec
 
 @dataclass(frozen=True, slots=True)
 class MaterializeCDefArg:
-    """Placeholder for a CDef that future dispatch code should materialize."""
+    """CDef ID placeholder returned when resolution has no materialization callback.
+
+    ``resolve_call_arguments(...)`` returns this placeholder for a CDef reference
+    when ``materialize_cdef`` is omitted. Current dispatch supplies that callback
+    to materialize the referenced CDef instead.
+    """
 
     cdef_id: str
 

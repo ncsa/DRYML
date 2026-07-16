@@ -33,16 +33,22 @@ store = DirStore("work/store", query_index="none")
 
 ### 2. Declare requirements and defaults
 
-Declare hard requirements separately from soft defaults. Put a portable function
-at module scope, for example in `my_package/tasks.py`:
+Declare hard requirements separately from soft environment, world, and runtime
+defaults. Put a portable function at module scope, for example in
+`my_package/tasks.py`:
 
 ```python
 @dryml.env.req(requirements=("numpy>=1",))
+@dryml.env.default(dryml.environments.CurrentEnvironmentSpec())
 @dryml.world.req(cpus={"min": 1})
 @dryml.world.default(cpus=1)
+@dryml.runtime.default(mode="worker")
 def importable_function(left, right):
     return left + right
 ```
+
+Explicit dispatch candidates override these annotation defaults; hard
+requirements still constrain the selected candidates.
 
 ### 3. Dispatch a module-level function
 
