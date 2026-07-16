@@ -244,10 +244,12 @@ class CondaEnvironmentSpec:
 
 @dataclass(frozen=True, slots=True)
 class ContainerEnvironmentSpec:
-    """Structural container environment reference.
+    """Structural container environment reference for shipped spec records.
 
-    Container execution/probing is intentionally deferred; this spec is a
-    serializable placeholder for future dispatch and record sprints.
+    ``image`` and optional ``runtime`` serialize as environment-spec data for
+    records and planning metadata. Container execution and probing are
+    unsupported; constructing or serializing this value does not launch a
+    container.
     """
 
     image: str

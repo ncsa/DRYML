@@ -109,6 +109,12 @@ class DynamicTracePolicy:
         collect_requirements: Collect current annotation and requirement facts
             for observed methods. Method contracts remain controlled separately
             by :class:`CodeAnalysisContext`.
+
+    Raises:
+        TypeError: If ``max_calls`` is not an integer or either collection flag
+            is not an exact bool.
+        ValueError: If ``max_calls`` is outside the inclusive 1 through 10,000
+            range.
     """
 
     max_calls: int = MAX_CALLS

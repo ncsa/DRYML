@@ -141,8 +141,9 @@ class DynamicTraceProvenance:
     """Bounded, serializable per-request dynamic-trace planning evidence.
 
     The carrier admits only the current normalized transport tokens and exact
-    9B policy/summary schemas.  Rejected evidence is diagnostic-only: a valid
-    summary/call prefix may prove start but never enters requirement resolution;
+    ``dryml.dispatch.dynamic_trace.v1`` policy/summary schemas. Rejected
+    evidence is diagnostic-only: a valid summary/call prefix may prove start but
+    never enters requirement resolution;
     complete carriers bind full ``DynamicCallFact`` wires to the carrier target
     and observations to canonical serialized annotation facts; overflow retains
     a valid summary with empty calls. Evidence that cannot be retained unchanged

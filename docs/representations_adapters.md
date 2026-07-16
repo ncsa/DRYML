@@ -73,9 +73,12 @@ registry.register(
 
 `run_adapter_plan(...)` resolves source storage, gives the runner a `ProductWriteSession`, writes target products under `products/<target-record-id>/`, writes the target state/data/program record with a self product-dir ref, writes an `AdapterRecord`, and returns located refs.
 
-Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records in this sprint; durable failure provenance is deferred to future `ExecutionRecord` or failed-adapter records.
+Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records; durable failure provenance is not implemented.
 
-No real Torch, TensorFlow, JAX, DeepSpeed, Conda worker, subprocess dispatch, cancellation, or worker handshake is implemented here. Future dispatch v2 can consume adapter plans and emit `ExecutionRecord` provenance later.
+The local adapter runner does not implement real Torch, TensorFlow, JAX,
+DeepSpeed, Conda-worker, subprocess-dispatch, cancellation, or worker-handshake
+execution. Dispatch does not consume adapter plans or emit `ExecutionRecord`
+provenance for them.
 
 ## Product Identity
 

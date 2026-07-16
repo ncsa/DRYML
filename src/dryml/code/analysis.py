@@ -282,6 +282,17 @@ def trace(
     Returns:
         A :class:`CodeAnalysisResult` containing bounded ``DynamicCallFact``
         records and, once execution starts, one ``dynamic_trace_summary``.
+        Disabled execution, incompatible trace-algorithm selection, unsupported
+        targets or trace grammar, bounded-result failures, and ordinary target
+        exceptions are returned as structured diagnostics rather than raised.
+
+    Raises:
+        TypeError: If ``context`` is not a :class:`CodeAnalysisContext` or
+            ``None``; ``policy`` is not a :class:`DynamicTracePolicy` or
+            ``None``; ``args`` is not an exact tuple; ``kwargs`` is neither an
+            exact dict nor ``None``; or a keyword key is not an exact string.
+        BaseException: An interruption raised by the invoked target propagates
+            after trace state is restored.
     """
 
     from .algorithms.dynamic_trace import DynamicTracePolicy, _InvocationRequest, run_trace

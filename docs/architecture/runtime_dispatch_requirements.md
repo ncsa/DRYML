@@ -36,7 +36,11 @@ For example, a target that requires a GPU must not silently become valid because
 
 `Dispatcher.plan(...)` behaves as follows:
 
-- `environment=None` is converted to `CurrentEnvironmentSpec().to_data()` and stored in dispatch/environment and the launch envelope.
+- With `environment=None`, planning first considers an annotation default and the
+  context-current environment. When neither is available, a configured resolver
+  may select a compatible candidate; `CurrentEnvironmentSpec().to_data()` is the
+  fallback only when those higher-precedence candidates and resolver selection
+  are absent.
 - An importable Python function uses an import-path operation; explicit or
   non-importable pickle transport is `pickle_small` and remains current-Python
   only.
