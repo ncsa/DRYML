@@ -21,6 +21,8 @@ CHANGED_DOCUMENTS = (
     "docs/architecture/runtime_dispatch_requirements.md",
     "docs/architecture/environment_world_runtime_boundaries.md",
     "docs/architecture/annotation_requirement_collection.md",
+    "docs/records.md",
+    "docs/reporting.md",
 )
 LINK_RE = re.compile(r"(?<!!)\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
