@@ -291,6 +291,10 @@ def trace(
             ``None``; ``policy`` is not a :class:`DynamicTracePolicy` or
             ``None``; ``args`` is not an exact tuple; ``kwargs`` is neither an
             exact dict nor ``None``; or a keyword key is not an exact string.
+        CodeAnalysisError: If an unexpected trace implementation or analyzer
+            failure occurs while ``context.diagnostics_policy`` is ``"raise"``,
+            after trace state is restored. Ordinary target failures and
+            supported trace failures are returned as structured diagnostics.
         BaseException: An interruption raised by the invoked target propagates
             after trace state is restored.
     """

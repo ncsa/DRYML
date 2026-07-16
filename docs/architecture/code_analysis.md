@@ -10,11 +10,11 @@ Current architecture for the shipped reusable `dryml.code` analysis API.
 
 ## Problem Statement
 
-Dispatch, probes, annotations, and later analyzers need shared answers about Python targets. Those answers should not be duplicated inside dispatch or hidden inside annotation merging.
+Dispatch, probes, annotations, and analyzers use shared answers about Python targets. Those answers are not duplicated inside dispatch or hidden inside annotation merging.
 
 ## Guiding Principle
 
-`dryml.code` should collect reusable algorithms that discover facts about code. It should not decide where operations run. Dispatch should consume code facts when selecting and checking candidates. Probes should be able to run code-analysis algorithms outside the orchestrator when useful.
+`dryml.code` collects reusable algorithms that discover facts about code. It does not decide where operations run. Dispatch consumes code facts when selecting and checking candidates. Probes reuse code-analysis algorithms outside the orchestrator when useful.
 
 ## What Belongs in dryml.code
 
@@ -110,7 +110,7 @@ from dryml.code import Method, Traits, CompilerInfo, traits
 
 ## Relationship to dispatch and probes
 
-Dispatch should ask `dryml.code` for code facts and then apply requirement/candidate logic. Code probes should reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.
+Dispatch asks `dryml.code` for code facts and then applies requirement/candidate logic. Code probes reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.
 
 `dryml.code` emits facts and diagnostics only. Dispatch consumes accepted facts
 under its explicit policy, while `dryml.annotations` remains the merge authority.
@@ -489,9 +489,10 @@ work.
 
 - This note does not implement source-spec subprocess reconstruction.
 - This note does not add static-call dispatch policy or alter dispatch planning.
-- This note does not define dispatch trace policy, subprocess/selected-environment
-  tracing, hard-timeout isolation, arbitrary Python interpretation, or return
-  proxies.
+- This note does not change the shipped dispatch-trace policy: tracing is
+  explicit and default-off, and requested structural trace failures block
+  planning. Subprocess/selected-environment tracing, hard-timeout isolation,
+  arbitrary Python interpretation, and return proxies remain unsupported.
 
 ## Source Anchors
 
