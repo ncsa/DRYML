@@ -338,12 +338,40 @@ def probe_target(
 ) -> CodeProbeResult:
     """Normalize and probe a target in the current or requested Python environment.
 
+    Args:
+        target: Live Python target, import-path string, or ``CodeTargetSpec`` to
+            inspect with the registered non-invoking analyzers.
+        environment: Execution location. ``None`` or
+            ``CurrentEnvironmentSpec`` runs inline unless ``timeout`` requests
+            an isolated current-Python worker. ``PythonExecutableSpec`` and
+            ``CondaEnvironmentSpec`` run a probe worker in that environment.
+        algorithms: Analyzer names to run, or the lightweight default set when
+            omitted.
+        include_environment_record: Include an ``EnvironmentRecord`` observed
+            in the process that performs analysis.
+        timeout: Finite positive subprocess deadline in seconds. Supplying one
+            requires a target with a stable worker-reconstructible import path.
+        policy: Probe policy name passed to the analyzers. ``"lightweight"`` is
+            the supported policy.
+        metadata: JSON-compatible caller metadata passed through target
+            normalization and analyzer context.
+
+    Returns:
+        A ``CodeProbeResult`` containing analysis facts, optional environment
+        data, captured output, and structured diagnostics. Invalid targets or
+        timeouts, unsupported locations, non-reconstructible worker targets,
+        import/analysis failures, worker startup failures, timeouts, and
+        protocol errors normally produce ``ok=False`` rather than raising.
+
     Import-path targets may execute module-level code while being imported by
-    Python. Probe mode does not execute target function bodies or instantiate
-    classes. Subprocess execution requires a stable import path and cannot carry
-    live bound-method receiver state; source-spec reconstruction is not
-    implemented. Unsupported environment specs return structured diagnostics
-    rather than attempting package solving, container execution, or world synthesis.
+    Python in the current process or selected probe worker. Probe mode uses
+    ``RuntimeMode.PROBE`` with no workload allocation and does not execute target
+    function bodies, instantiate classes, or enable dynamic tracing. Probes run
+    trusted imports and analyzers; process isolation is a lifecycle boundary,
+    not a sandbox. Subprocess execution cannot carry live bound-method receiver
+    state, and source-spec reconstruction is not implemented. Unsupported
+    environment specs return structured diagnostics rather than attempting
+    package solving, container execution, or world synthesis.
     """
 
     try:

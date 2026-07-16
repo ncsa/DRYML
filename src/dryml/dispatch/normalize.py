@@ -74,7 +74,8 @@ class NormalizedDispatchTarget:
         operation_spec: Canonical operation spec mapping to feed into the
             existing dispatch pipeline.
         launch: Launch-only transport data for the backend. Live paths and
-            pickle files belong here, not in operation metadata.
+            pickle files belong here, not in operation metadata. Any
+            ``cleanup_paths`` are owned by the consuming planner/backend.
         code_target: JSON-serializable target metadata for later requirement
             analysis.
         live_annotation_targets: In-memory Python objects that later planning
@@ -84,6 +85,20 @@ class NormalizedDispatchTarget:
         method_name: User-requested method name for method dispatch.
         transport: Normalized transport label.
         diagnostics: Non-blocking normalization diagnostics.
+        definition_target: In-memory Definition or CDef associated with a
+            method operation, when it can be resolved from the supplied store.
+        trace_live_target: Request-local live function retained only after
+            strict trace-aware normalization.
+        trace_store: Request-local store used to resolve traced Definition
+            references.
+        trace_cdef_side_table: Request-local mapping from serialized CDef
+            references to the corresponding live concrete definitions.
+        trace_cdef_positions: Canonical argument positions occupied by traced
+            CDef references.
+
+    Construction defensively copies mapping and sequence fields. Trace-only
+    fields remain in memory and are not copied into operation or launch
+    metadata.
     """
 
     operation_spec: Mapping[str, Any]
@@ -142,15 +157,29 @@ def normalize_user_operation(
         kwargs: Explicit user keyword arguments for the target call.
         allow_pickle: Whether non-importable callables may use the existing
             ``pickle_small`` same-environment transport.
+        persist_object: For a live DRYML Object method target, save the object
+            to ``store`` before constructing the method operation. If false,
+            its existing definition must already be present in the store.
         trace_enabled: Require the strict trace target/invocation grammar and
             retain the live target as proof that trace-aware normalization
-            completed successfully.
+            completed successfully. Normalization itself does not execute the
+            target. Trace-enabled object normalization never persists it.
 
     Returns:
         A normalized target with operation, launch, and code-target metadata.
 
     Raises:
         DispatchPlanningError: If the target cannot be normalized safely.
+        Exception: A serialization or filesystem error from an allowed pickle
+            transport is propagated after its partial temporary work is
+            removed.
+
+    Normalizing a plain Definition method may concretize it against ``store``.
+    Normalizing a live Object with ``persist_object=True`` saves it without an
+    execution record. An allowed pickle transport serializes the callable to a
+    temporary directory listed in the returned ``launch["cleanup_paths"]``;
+    dispatch planners and backends remove that directory, while direct callers
+    are responsible for consuming and cleaning the launch data.
     """
 
     if trace_enabled:

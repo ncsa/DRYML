@@ -750,9 +750,25 @@ def run(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, met
 def explain(operation: Mapping[str, Any] | Callable[..., Any] | PickledCallable, method_name: str | None = None, *, backend: Any | str | None = None, store: Any | None = None, **kwargs: Any) -> DispatchExplanation:
     """Explain a Python-shaped or explicit operation without launching it.
 
-    ``operation``, ``method_name``, ``store``, and ``**kwargs`` follow
-    :meth:`Dispatcher.explain`; ``backend`` must be local subprocess. Returns a
-    non-persisting explanation, though bounded discovery and probes may run.
+    Args:
+        operation: Python-shaped callable or explicit operation specification.
+        method_name: Optional DRYML object method name.
+        backend: ``None`` or ``"local_subprocess"``; other backends are not
+            supported by this facade.
+        store: Optional store used for operation normalization.
+        **kwargs: Arguments accepted by :meth:`Dispatcher.explain`.
+
+    Returns:
+        A non-persisting, non-launching ``DispatchExplanation``. Bounded local
+        discovery and code/environment probes may still run.
+
+    Raises:
+        DispatchPlanningError: If the backend or request cannot be planned.
+
+    When ``analysis_policy`` explicitly requests dynamic tracing, explanation
+    executes the eligible trusted target once in the current process, just like
+    planning. That execution is not sandboxed and has no hard timeout. A failed
+    or incomplete requested trace makes the explanation non-launchable.
     """
 
     if backend not in (None, "local_subprocess"):
