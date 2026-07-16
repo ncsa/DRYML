@@ -113,6 +113,9 @@ elif [[ "$1" == "full" ]]; then
 elif [[ "$1" == "profile" ]]; then
     shift
     run_profile "$@"
+elif [[ "$1" == "measure" ]]; then
+    shift
+    python ./tests/tools/measure_suite.py "$@"
 elif [[ "$1" == -* ]]; then
     run_full "$@"
 else

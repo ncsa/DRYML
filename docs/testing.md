@@ -6,6 +6,17 @@ Categories are the existing test directories, such as `core`, `environments`, `d
 
 ## Daily Commands
 
+Capture a non-mutating external measurement artifact:
+
+```bash
+./tests.sh measure --output-dir /tmp/dryml-measure-smoke smoke
+```
+
+`measure` requires a fresh directory outside the repository. It preserves the
+tier manifest and writes versioned `run.json`, `nodes.json`, per-phase timing
+JSON, and bounded stdout/stderr logs. It is distinct from `profile`, which
+updates `tests/test_tiers.json` after timing unknown nodes.
+
 Run the fastest smoke bucket:
 
 ```bash

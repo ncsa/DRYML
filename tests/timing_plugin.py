@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,12 @@ def pytest_addoption(parser):
         action="store_true",
         help="When profiling, run only tests missing from baseline node_tiers.",
     )
+    group.addoption(
+        "--dryml-timing-phase",
+        action="store",
+        default=None,
+        help="Optional phase label recorded with a timing artifact.",
+    )
 
 
 def pytest_configure(config):
@@ -52,6 +59,13 @@ def pytest_configure(config):
         config.addinivalue_line("markers", f"category_{category}: auto-applied DRYML category")
     config._dryml_tier_baseline = baseline
     config._dryml_timing_records = []
+    config._dryml_timing_started_at = time.monotonic()
+    config._dryml_collection_finished_at = None
+
+
+def pytest_collection_finish(session):
+    """Record collection completion without changing test selection."""
+    session.config._dryml_collection_finished_at = time.monotonic()
 
 
 def pytest_collection_modifyitems(config, items):
@@ -82,29 +96,53 @@ def pytest_sessionfinish(session, exitstatus):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
-    if report.when != "call":
-        return
     config = item.config
     records = getattr(config, "_dryml_timing_records", None)
     if records is None:
         return
-    records.append(
-        {
+    record = next((entry for entry in records if entry["nodeid"] == report.nodeid), None)
+    if record is None:
+        record = {
             "nodeid": report.nodeid,
             "path": path_for_nodeid(report.nodeid),
             "category": category_for_nodeid(report.nodeid),
-            "duration_seconds": float(report.duration),
-            "outcome": report.outcome,
+            "tier": tier_for_item(item, config._dryml_tier_baseline),
+            "setup_seconds": None,
+            "call_seconds": None,
+            "teardown_seconds": None,
+            "total_seconds": None,
+            "outcome": None,
+            # Retained for the profile updater's established input schema.
+            "duration_seconds": None,
         }
-    )
+        records.append(record)
+    if report.when in {"setup", "call", "teardown"}:
+        record[f"{report.when}_seconds"] = float(report.duration)
+    if report.when == "call":
+        record["outcome"] = report.outcome
+        record["duration_seconds"] = float(report.duration)
+    elif report.outcome == "skipped" and record["outcome"] is None:
+        record["outcome"] = "skipped"
+    phase_values = (record["setup_seconds"], record["call_seconds"], record["teardown_seconds"])
+    if any(value is not None for value in phase_values):
+        record["total_seconds"] = sum(value or 0.0 for value in phase_values)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     records = getattr(config, "_dryml_timing_records", [])
     timing_output = config.getoption("--dryml-timing-output")
     if timing_output:
+        started_at = getattr(config, "_dryml_timing_started_at", None)
+        collection_finished_at = getattr(config, "_dryml_collection_finished_at", None)
+        now = time.monotonic()
         payload = {
-            "version": 1,
+            "version": 2,
+            "phase": config.getoption("--dryml-timing-phase"),
+            "session_wall_seconds": None if started_at is None else now - started_at,
+            "collection_seconds": (
+                None if started_at is None or collection_finished_at is None
+                else collection_finished_at - started_at
+            ),
             "records": sorted(records, key=lambda item: item["nodeid"]),
         }
         output_path = Path(timing_output)
