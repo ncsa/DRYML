@@ -69,4 +69,7 @@ explicit dispatch policy and bounded planning carrier for accepted facts. Its
 maintained-full and final-candidate focused/rolling exceptions, including required
 future rerun conditions, are recorded in ADRs 0006 and 0007. Unchecked graph
 prototypes remain absent from tracked distributions. Sprint 2 reviewed the
-`Method` model migration toward `core2.methods`.
+`Method` model migration toward `core2.methods`. Alias-aware static resolution,
+dynamic alias provenance, and general Python call tracing remain explicitly
+deferred under ADR 0008; ordinary dynamic aliases to admitted Definition proxies
+already retain normal Python identity and call behavior.
