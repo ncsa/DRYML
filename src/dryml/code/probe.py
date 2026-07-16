@@ -53,17 +53,16 @@ class CodeProbeRequest:
     Args:
         target: Serializable code target spec. Other target inputs are
             normalized to a spec during construction.
-        algorithms: Analyzer names to run. Defaults to the lightweight analyzer
-            set used by Sprint 5.
+        algorithms: Analyzer names to run. Defaults to the built-in lightweight
+            analyzer set.
         include_environment_record: Whether to include an observed
             ``EnvironmentRecord`` from the process running the probe.
         args: Reserved JSON-compatible positional metadata. The probe does not
             call the target with these arguments.
         kwargs: Reserved JSON-compatible keyword metadata. The probe does not
             call the target with these arguments.
-        runtime_mode: Only ``"probe"`` is supported in Sprint 5.
-        policy: Probe policy name. ``"lightweight"`` is the only behavioral
-            policy in Sprint 5.
+        runtime_mode: ``"probe"`` is the supported runtime mode.
+        policy: Probe policy name. ``"lightweight"`` is the supported policy.
         timeout_s: Optional parent-side subprocess timeout in seconds.
         metadata: JSON-compatible caller metadata passed to analyzers.
     """
@@ -226,7 +225,7 @@ def probe_ok(diagnostics: Iterable[DiagnosticFact]) -> bool:
 
 
 def normalize_probe_request(request: CodeProbeRequest | Mapping[str, Any]) -> CodeProbeRequest:
-    """Normalize a request object or mapping and validate Sprint 5 policy."""
+    """Normalize a request object or mapping and validate supported probe policy."""
 
     normalized = request if isinstance(request, CodeProbeRequest) else CodeProbeRequest.from_data(request)
     if normalized.runtime_mode != "probe":
@@ -246,8 +245,8 @@ def run_probe_request(
 
     Args:
         request: Probe request object or serialized request mapping.
-        environment: Optional current-process environment metadata. Sprint 5 does
-            not use this parameter to create or solve environments.
+        environment: Optional current-process environment metadata. This
+            parameter does not create or solve environments.
         require_stable_import_path: Reject targets without an import path. Probe
             workers enable this because they cannot reconstruct source specs.
 

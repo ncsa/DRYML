@@ -24,7 +24,7 @@ Provider fragments are appended after target fragments. This preserves existing 
 
 ## RequirementResolution
 
-`RequirementResolution` contains merged environment, world, and runtime requirements/defaults where the current model supports them. It also preserves raw fragments, source traces, diagnostics, and merge report data through `to_data()` for future dispatch/probe provenance.
+`RequirementResolution` contains merged environment, world, and runtime requirements/defaults where the current model supports them. It also preserves raw fragments, source traces, diagnostics, and merge report data through `to_data()` for dispatch and probe provenance.
 
 ## Boundaries
 
