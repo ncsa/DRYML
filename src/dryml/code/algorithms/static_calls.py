@@ -373,7 +373,11 @@ def _enclosing_scope_is_globals(function: Any | None) -> bool:
     if function is None:
         return False
     code = object.__getattribute__(function, "__code__")
-    qualname = code.co_qualname
+    qualname = getattr(code, "co_qualname", None)
+    if qualname is None:
+        if code.co_flags & inspect.CO_NESTED:
+            return False
+        qualname = object.__getattribute__(function, "__qualname__")
     return isinstance(qualname, str) and "." not in qualname
 
 

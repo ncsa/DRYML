@@ -1,6 +1,8 @@
 flake8
 pytest
 pytest-cov
+setuptools >= 42
+wheel
 tensorflow; python_version < "3.14"
 jax >= 0.5, < 0.6; python_version < "3.14"
 jaxlib >= 0.5, < 0.6; python_version < "3.14"

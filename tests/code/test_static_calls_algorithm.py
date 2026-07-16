@@ -646,6 +646,21 @@ def test_static_calls_does_not_guess_local_lambda_default_scope():
     assert facts[0].data["reason"] == "enclosing_scope_unavailable"
 
 
+def test_static_calls_supports_code_objects_without_qualnames(monkeypatch):
+    def legacy_getattr(value, name, default=None):
+        if name == "co_qualname":
+            return default
+        return getattr(value, name, default)
+
+    monkeypatch.setattr(static_calls, "getattr", legacy_getattr, raising=False)
+    _, global_facts = _facts(LAMBDA_DEFAULT_TARGET)
+    _, local_facts = _facts(LOCAL_LAMBDA_DEFAULT_TARGET)
+
+    assert global_facts[0].data["status"] == "resolved"
+    assert local_facts[0].data["status"] == "unsupported"
+    assert local_facts[0].data["reason"] == "enclosing_scope_unavailable"
+
+
 def test_static_calls_handles_nested_callable_expressions_conservatively():
     result, facts = _facts(nested_callable_expression_target)
 

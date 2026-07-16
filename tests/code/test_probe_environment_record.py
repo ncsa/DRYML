@@ -78,7 +78,12 @@ def test_conda_spec_routes_import_path_to_worker(monkeypatch):
     result = code.probe_target(TARGET, environment=environment, include_environment_record=False, timeout=10)
 
     assert result.ok
-    assert captured["command"] == ["/opt/test-conda/bin/python", "-m", "dryml.code.probe_worker", "--json"]
+    assert captured["command"] == [
+        environment.direct_python_executable(),
+        "-m",
+        "dryml.code.probe_worker",
+        "--json",
+    ]
     assert captured["timeout"] == 10
 
 

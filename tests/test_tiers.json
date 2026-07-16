@@ -398,6 +398,7 @@
     "tests/code/test_static_calls_algorithm.py::test_static_calls_resolves_only_safe_annotated_methods_without_invocation": "smoke",
     "tests/code/test_static_calls_algorithm.py::test_static_calls_resolves_safe_builtin_globals": "smoke",
     "tests/code/test_static_calls_algorithm.py::test_static_calls_resolves_safely_importable_global_classes": "smoke",
+    "tests/code/test_static_calls_algorithm.py::test_static_calls_supports_code_objects_without_qualnames": "smoke",
     "tests/code/test_symbol_capture_algorithm.py::test_symbol_capture_importable_function_and_class": "smoke",
     "tests/code/test_symbol_capture_algorithm.py::test_symbol_capture_local_lambda_and_closure_diagnostics": "smoke",
     "tests/code/test_symbol_capture_algorithm.py::test_symbol_fact_serializes_to_json": "smoke",
