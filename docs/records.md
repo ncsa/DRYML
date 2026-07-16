@@ -160,7 +160,7 @@ Specs use the same envelope pattern with family-specific schemas and ID prefixes
 | `annotation` | `annotation` | `dryml.annotation.v1` | `annotation` |
 | `generic` | `generic` | caller supplied | `spec` |
 
-Operation specs now support Sprint 2 `function_call` and `method_call` payloads through `dryml.operations`. They are interned JSON specs only; they do not implement execution, dispatch, worlds, providers, or runtime behavior. Dispatch specs describe request intent with `dispatch-v1-*` IDs. Execution recipes describe resolved plan metadata with `recipe-v1-*` IDs. World, runtime, and annotation specs remain metadata placeholders.
+Operation specs support `function_call` and `method_call` payloads through `dryml.operations`. They are interned JSON specs; dispatch plans them and backend workers execute the resolved operation. Dispatch specs describe request intent with `dispatch-v1-*` IDs. Execution recipes describe resolved plan metadata with `recipe-v1-*` IDs. World, runtime, and annotation specs describe the corresponding dispatched requirements, defaults, or allocation/runtime metadata.
 
 Spec envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload` for the same identity reason as records.
 
@@ -383,4 +383,4 @@ Writes use canonical JSON bytes and atomic temp-file-plus-replace writes. Rewrit
 
 ## Non-Goals
 
-Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. Full dispatch v2, real worker launch, real framework adapters, blob storage, compiler/JIT execution, and the public Artifact API remain future titled-sprint work.
+Records/specs are not Objects, do not subclass `Object`, and are not stored under `objects/`. There is no SQLite or index dependency for correctness. The records layer does not itself launch workers; dispatch provides local worker launch and can persist execution provenance through these records. Real framework adapters, blob storage, compiler/JIT execution, and the public Artifact API remain future titled-sprint work.

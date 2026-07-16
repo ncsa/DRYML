@@ -57,7 +57,7 @@ Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structur
 
 PEP 508 environment markers are evaluated from the `EnvironmentRecord` being checked, not from the coordinator process. If a marker references platform metadata that the record cannot provide, the check reports an `unknown` compatibility issue instead of silently using local platform facts.
 
-Environment checks are software-focused. CUDA, GPU allocation, process topology, and framework runtime configuration are future provider/context/world work, not ordinary `EnvironmentRequirement` fields.
+Environment checks are software-focused. CUDA, GPU allocation, process topology, and framework runtime configuration belong to world, runtime, and provider policy, not ordinary `EnvironmentRequirement` fields.
 
 ## Content IDs
 

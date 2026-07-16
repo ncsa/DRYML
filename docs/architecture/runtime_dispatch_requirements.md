@@ -30,7 +30,7 @@ Decorators declare hard requirements and soft defaults. Dispatch kwargs select c
 
 `@dryml.env.req(...)` and `@dryml.world.req(...)` declare hard constraints. `@dryml.world.default(...)` and `@dryml.runtime.default(...)` declare overrideable defaults. Dispatch kwargs such as `environment=...`, `world=...`, and `runtime=...` should choose explicit candidates and override annotation defaults, not hard requirements.
 
-For example, a target that requires a GPU must not silently become valid because a user passes a CPU-only world. A later `requirement_policy` may warn or ignore, but the default planning path should preserve the distinction.
+For example, a target that requires a GPU must not silently become valid because a user passes a CPU-only world. `requirement_policy="warn"` or `"ignore"` can relax compatibility enforcement, but the default planning path preserves the distinction.
 
 ## Current Dispatch Planning Behavior
 

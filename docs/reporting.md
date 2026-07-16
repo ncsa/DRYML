@@ -58,7 +58,7 @@ Progress reporting is fail-soft by default: malformed event payloads or reporter
 
 ## Subprocess Protocols
 
-Provider probes and future workers must keep protocol stdout machine-readable. Reporting events in child processes are either suppressed, captured, sent through structured protocol fields, or emitted by the parent after decoding worker results. The provider probe worker redirects internal stdout/stderr while constructing its JSON response.
+Provider probes and local workers keep protocol stdout machine-readable. Reporting events in child processes are either suppressed, captured, sent through structured protocol fields, or emitted by the parent after decoding worker results. The provider probe worker redirects internal stdout/stderr while constructing its JSON response.
 
 ## Record And Adapter Events
 
