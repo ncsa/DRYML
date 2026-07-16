@@ -44,7 +44,13 @@ _ACTIVE_BOOTSTRAP: ContextVar[RuntimeBootstrapState | None] = ContextVar("dryml_
 
 
 def active_runtime() -> RuntimeState:
-    """Return the current active runtime state."""
+    """Return the context-local state for the current process.
+
+    Returns:
+        The active ``RuntimeState``. The default is orchestrator mode with
+        ``NoAllocation``; this accessor does not activate a runtime or allocate
+        resources.
+    """
 
     return _ACTIVE_RUNTIME.get()
 
@@ -111,7 +117,27 @@ def enter_runtime(
     spec: RuntimeContextSpec | None = None,
     enforcement: RuntimeEnforcement | str | None = None,
 ) -> Iterator[RuntimeState]:
-    """Temporarily enter a runtime mode with reset/token semantics."""
+    """Temporarily activate one validated context-local runtime state.
+
+    Args:
+        mode: Process role accepted by ``RuntimeMode.coerce``.
+        allocation: Allocation view. Worker and inline modes require a real
+            allocation; orchestrator and probe modes require ``NoAllocation``.
+        spec: Optional process-local runtime configuration.
+        enforcement: Optional strict, warn, or off policy; the current policy is
+            retained when omitted.
+
+    Yields:
+        The active validated ``RuntimeState``.
+
+    Raises:
+        RuntimeTransitionError: If the mode/allocation combination is invalid.
+
+    Side Effects:
+        Sets context-local runtime state only for the body and restores the
+        prior state on normal exit, exception, or interruption. It does not
+        launch a worker or allocate backend resources.
+    """
 
     state = _make_state(mode, allocation, spec, enforcement)
     token = _ACTIVE_RUNTIME.set(state)
@@ -169,12 +195,17 @@ def disabled() -> Iterator[None]:
 
 @contextmanager
 def plain() -> Iterator[RuntimeState]:
-    """Temporarily enter lightweight local Python execution mode.
+    """Temporarily run trusted local code inline with enforcement off.
 
-    Sprint 4 plain mode uses ``RuntimeMode.INLINE``, a minimal local
-    ``RuntimeAllocationView``, and ``RuntimeEnforcement.OFF``. The allocation is
-    only a process-local runtime view; it is not a requested world or backend
-    world allocation.
+    Yields:
+        An ``INLINE`` ``RuntimeState`` with a fresh minimal local allocation and
+        ``RuntimeEnforcement.OFF``.
+
+    Side Effects:
+        Replaces context-local runtime state for the body and restores it on
+        normal exit, exception, or interruption. The allocation is only a
+        process-local view; this context manager does not request a world,
+        launch a worker, or provide process isolation.
     """
 
     with enter_runtime(RuntimeMode.INLINE, _make_plain_allocation(), enforcement=RuntimeEnforcement.OFF) as state:

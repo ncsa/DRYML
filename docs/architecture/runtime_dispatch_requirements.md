@@ -16,9 +16,11 @@ DRYML currently separates declaration, planning, and execution across several mo
   `dryml.dispatch` owns only explicit opt-in policy, worker-effective invocation
   reconstruction, provenance admission, and launch decisions.
 
-## Problem Statement
+## Ownership Boundary
 
-Future sprints need to make normal Python-shaped dispatch calls work while preserving clear boundaries. Decorators should not execute work, dispatch kwargs should not silently erase hard requirements, and runtime enforcement should not be confused with process role.
+Normal Python-shaped dispatch is shipped while preserving clear boundaries.
+Decorators do not execute work, dispatch kwargs do not silently erase hard
+requirements, and runtime enforcement is distinct from process role.
 
 ## Guiding Principle
 
@@ -32,7 +34,7 @@ For example, a target that requires a GPU must not silently become valid because
 
 ## Current Dispatch Planning Behavior
 
-`Dispatcher.plan(...)` currently behaves as follows:
+`Dispatcher.plan(...)` behaves as follows:
 
 - `environment=None` is converted to `CurrentEnvironmentSpec().to_data()` and stored in dispatch/environment and the launch envelope.
 - An importable Python function uses an import-path operation; explicit or
@@ -46,9 +48,10 @@ For example, a target that requires a GPU must not silently become valid because
 
 ## Requirement Collection Boundary
 
-Sprint 3 adds `dryml.annotations.RequirementResolution` plus collection helpers such as `own_fragments`, `fragments_for_method`, `fragments_for_definition_method`, `resolve_target_requirements`, `resolve_method_requirements`, and `resolve_definition_method_requirements`. These APIs merge declared environment, world, and runtime requirements/defaults and preserve raw fragments, source traces, diagnostics, and report data.
-
-Dispatch still does not consume those results during planning in Sprint 3. Candidate environment/world/runtime selection and compatibility checks remain deferred to later dispatch sprints.
+`dryml.annotations.RequirementResolution` and its collection helpers merge
+declared environment, world, and runtime requirements/defaults while preserving
+raw fragments, source traces, diagnostics, and report data. Dispatch consumes
+that resolution during planning but does not reimplement its merge semantics.
 
 ## Dispatch Planning Pipeline
 
@@ -113,7 +116,11 @@ Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcemen
 
 ## Lightweight Code Probes
 
-Sprint 5 adds `dryml.code.probe_target(...)`, `dryml.code.run_probe_request(...)`, `CodeProbeRequest`, and `CodeProbeResult`. A code probe runs the existing code analyzers under `RuntimeMode.PROBE` with `NoAllocation`, captures user-code stdout/stderr, and returns JSON-compatible code facts, diagnostics, and an optional `EnvironmentRecord` from the process that ran the probe.
+`dryml.code.probe_target(...)`, `dryml.code.run_probe_request(...)`,
+`CodeProbeRequest`, and `CodeProbeResult` run existing code analyzers under
+`RuntimeMode.PROBE` with `NoAllocation`, capture user-code stdout/stderr, and
+return JSON-compatible code facts, diagnostics, and an optional
+`EnvironmentRecord` from the process that ran the probe.
 
 The default lightweight analyzer set is `callables`, `source`, `symbol_capture`, and `direct_annotations`. Probe mode may import a target module to resolve an import path, so module-level import side effects remain possible. Probe mode does not intentionally execute target function bodies, instantiate target classes, run dynamic tracing, synthesize worlds, allocate workload resources, or change dispatch selection.
 

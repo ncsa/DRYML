@@ -2,8 +2,7 @@
 
 ## Status
 
-Historical baseline note anchored to `a6d3550`, updated through Sprint 8 local
-inventory, world synthesis, and environment resolution.
+Current ownership boundary for environments, worlds, runtime, and dispatch.
 
 ## Current State
 
@@ -39,7 +38,9 @@ Current-process probes can inspect live local/notebook targets because they pres
 
 `dryml.environments.current()` and `dryml.worlds.current()` represent context-local notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` means the actual allocation of this process. Setting a current world does not allocate resources and does not imply that the current process owns that world.
 
-`dryml.worlds.discover_current()` first returns the explicit context-local current world. In Sprint 4, when no explicit current world is set, it returns the caller default rather than synthesizing worlds or converting runtime allocation into a requested world.
+`dryml.worlds.discover_current()` first returns the explicit context-local current
+world. When no explicit current world is set, it returns the caller default rather
+than synthesizing worlds or converting runtime allocation into a requested world.
 
 ## Dispatch Candidate Selection Direction
 
@@ -51,11 +52,12 @@ In a notebook, a user may set a default requested world for later dispatch while
 
 ## Non-Goals
 
-- Sprint 4 current/default APIs do not allocate resources.
-- Sprint 4 `worlds.discover_current()` does not synthesize worlds.
-- Sprint 4 runtime enforcement does not implement dispatch candidate checking.
-- Sprint 5 code probes do not execute target function bodies, dynamic tracing, workload workers, or dispatch candidate selection.
-- Sprint 0 does not implement environment or world registry/resolver behavior.
+- Current/default APIs do not allocate resources.
+- `worlds.discover_current()` does not synthesize worlds.
+- Code probes do not execute target function bodies, dynamic tracing, workload
+  workers, or dispatch candidate selection.
+- Environment registry resolution is bounded candidate selection, not package
+  solving.
 
 ## Source Anchors
 
@@ -78,13 +80,7 @@ In a notebook, a user may set a default requested world for later dispatch while
 - `dryml.environments` owns probe mechanics and reports, while dispatch decides
   when precedence permits probing and reuses the selected evidence.
 
-## Follow-Up Sprints
-
-- Sprint 4: runtime enforcement and current env/world APIs.
-- Sprint 5: lightweight code probe service.
-- Sprint 7: dispatch requirement checks.
-- Sprint 8: resolver and registry behavior.
-# Sprint 8 Local Discovery Boundary
+# Local Discovery Boundary
 
 `dryml.worlds` owns import-safe local inventory and deterministic requested-world
 synthesis. `dryml.environments` owns explicit registry candidate resolution and

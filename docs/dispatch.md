@@ -2,6 +2,27 @@
 
 `dryml.dispatch` contains both the canonical metadata plane and the reference local execution backend: a one-operation local subprocess worker.
 
+## Python-Shaped Dispatch
+
+Normal callers pass an importable module-level function or a stored CDef plus a
+method name. Dispatch normalizes both forms into the canonical `OperationSpec`
+IR; manual IR construction remains supported for advanced use in
+[operations](operations.md).
+
+```python
+from dryml.core2.store.dir import DirStore
+import dryml
+
+store = DirStore("work/store", query_index="none")
+result = dryml.dispatch.run(importable_function, store=store, args=(2, 3))
+method_result = dryml.dispatch.run(model_cdef, "train", store=store, args=(dataset_cdef,))
+```
+
+An importable function uses a verified `module:qualname` path. A non-importable
+callable requires explicit `allow_pickle=True` and stays same-Python-only. CDef
+method dispatch requires the subject to be present in the supplied Store; it is
+the reproducible object-method path.
+
 ## Metadata
 
 `DispatchSpec` is request intent: operation ID plus policies and overrides that affect dispatch identity. `ExecutionRecipe` is resolved plan metadata: backend, environment/runtime choices, store strategy, input/output plan, and log plan. Both are canonical JSON specs, not DRYML Objects.
@@ -87,6 +108,18 @@ explanation = dryml.dispatch.explain(
 )
 print(explanation.launchable)
 print(explanation.resolution.environment_check.to_data())
+```
+
+For stable examples, inspect bounded fields instead of rendering the full
+explanation, whose IDs and diagnostics vary with the request:
+
+```python
+summary = {
+    "launchable": explanation.launchable,
+    "environment_source": explanation.resolution.environment_selection.source,
+    "world_source": explanation.resolution.world_selection.source,
+    "diagnostic_count": len(explanation.resolution.diagnostics),
+}
 ```
 
 Explanation may perform bounded static analysis, code/environment probes,

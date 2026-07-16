@@ -37,7 +37,10 @@ operation = dryml.operations.attach_operation_id(
 result = dryml.dispatch.run(operation, backend="local_subprocess")
 ```
 
-Use function and method operation specs for portable dispatch. `PickledCallable` is only a same-environment convenience path.
+Normal callers can instead pass an importable function or stored CDef plus method
+name to `dryml.dispatch.run(...)`; [dispatch](dispatch.md) shows the
+Python-shaped APIs. Explicit operation specs remain the advanced portable IR.
+`PickledCallable` is only a same-Python convenience path.
 
 ## Runtime Guards
 
@@ -50,3 +53,4 @@ Missing allocation errors point to the runtime layer because active allocation i
 - [Annotations](annotations.md)
 - [Dispatch](dispatch.md)
 - [World/Runtime Split](world_runtime.md)
+- [Code Analysis](architecture/code_analysis.md)

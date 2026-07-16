@@ -2,7 +2,7 @@
 
 ## Status
 
-Sprint 9B implementation note for the reusable `dryml.code` analysis API.
+Current architecture for the shipped reusable `dryml.code` analysis API.
 
 ## Current State
 
@@ -36,7 +36,10 @@ Dispatch, probes, annotations, and later analyzers need shared answers about Pyt
 
 ## Fact-Oriented API
 
-Sprint 1 introduces a public `dryml.code.analyze(...)` API that returns a structured `CodeAnalysisResult`. The result contains facts and diagnostics rather than a launch decision. Facts are serializable through `to_data()` so dispatch and future probes can persist or pass them between processes.
+`dryml.code.analyze(...)` returns a structured `CodeAnalysisResult`. The result
+contains facts and diagnostics rather than a launch decision. Facts are
+serializable through `to_data()` so dispatch and probes can persist or pass them
+between processes.
 
 Core public types:
 
@@ -109,7 +112,10 @@ from dryml.code import Method, Traits, CompilerInfo, traits
 
 Dispatch should ask `dryml.code` for code facts and then apply requirement/candidate logic. Code probes should reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.
 
-Dispatch integration is intentionally deferred. Sprint 3 lets `dryml.code.algorithms.direct_annotations` delegate merge semantics to `dryml.annotations`, but the analyzer still emits facts and diagnostics only. It does not select environments, allocate worlds, enforce runtime policy, launch workers, or decide candidate compatibility.
+`dryml.code` emits facts and diagnostics only. Dispatch consumes accepted facts
+under its explicit policy, while `dryml.annotations` remains the merge authority.
+Analysis itself does not select environments, allocate worlds, enforce runtime
+policy, launch workers, or decide candidate compatibility.
 
 ## Sprint 9A Analysis Contract
 
@@ -147,6 +153,25 @@ the `dynamic_trace` modality; selecting that analyzer through `analyze(...)` or
 `dryml.code.dynamic_trace_requires_trace_facade`.
 
 ### Target and Location Support
+
+The user-facing support matrix is intentionally narrower than a generic table of
+implementation mechanisms:
+
+| Target/path | Direct `analyze` | Isolated/timeout probe | Selected environment probe | `trace` | Opt-in dispatch trace |
+|---|---|---|---|---|---|
+| Live module function | Supported | Supported when importable/reconstructible | Supported when importable there | Supported for an exact synchronous function and supported arguments | Supported under the narrower dispatch grammar |
+| Live notebook/local function | Supported inline | Unsupported without reconstructible target | Unsupported | Supported inline under trace policy | Supported only when normal dispatch transport is valid, including explicit same-Python pickle rules |
+| Import-path target | Supported with import permission | Supported | Supported | Unsupported without exact live function | Unsupported |
+| Bound method | Supported by ordinary direct analyzers | Not generally reconstructible | Not generally reconstructible | Unsupported | Unsupported |
+| Source-spec-only target | Static/source facts where implemented | No source-backed reconstruction | Unsupported | Unsupported | Unsupported |
+| Definition/CDef method dispatch | Direct class/method requirement collection | Existing static/probe behavior only | Existing static/probe behavior only | A live orchestration function may accept Definition proxies | Method-target tracing unsupported; ordinary method dispatch supported |
+
+`analyze(...)` does not intentionally invoke a target body. `trace(...)` runs
+trusted code once in the current process; it is not a sandbox and has no hard
+timeout. A probe changes runtime role/location, not analyzer semantics.
+Dispatch tracing is explicit and default-off; requested structural trace failures
+block planning rather than being ignored by compatibility policy. Source-backed
+subprocess reconstruction is not implemented.
 
 | Input | Direct `analyze` | Inline `probe_target` | Subprocess probe | `static_calls` |
 |---|---|---|---|---|
@@ -492,10 +517,7 @@ contract locked here:
 - How much source-backed fallback should be accepted before probes are required?
 - Should later probe/dispatch metadata use a source-text policy such as `metadata_only`, `include_text`, or `hash_only` instead of always serializing full source text?
 
-## Follow-Up Sprints
+## Deferred Work
 
-- Sprint 1: fact-oriented code analyzer API.
-- Sprint 2: Method semantic model moved to `dryml.core2.methods`.
-- Sprint 5: code probe worker.
-- Sprint 9B: standalone opt-in dynamic tracing algorithm.
-- Sprint 9C: optional dispatch consumption and graph-prototype retirement.
+Alias-aware static resolution, alias provenance, and general Python call tracing
+remain deferred under [ADR 0008](../adr/0008-deferred-alias-aware-code-analysis.md).

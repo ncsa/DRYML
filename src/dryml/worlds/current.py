@@ -35,6 +35,10 @@ def set_current(world: Any) -> Any:
 
     Returns:
         The previous current value, or ``None`` when it was unset.
+
+    Side Effects:
+        Updates only a context-local future-planning default. It does not create
+        a ``WorldAllocation`` or assign resources to the current process.
     """
 
     previous = current(default=None)
@@ -43,7 +47,7 @@ def set_current(world: Any) -> Any:
 
 
 def reset_current() -> None:
-    """Clear the context-local requested default world."""
+    """Clear the context-local requested default world without deallocating work."""
 
     _CURRENT_WORLD.set(_UNSET)
 
@@ -57,6 +61,10 @@ def use(world: Any) -> Iterator[Any]:
 
     Yields:
         The provided *world*.
+
+    Side Effects:
+        Restores the prior context-local default on normal or exceptional exit;
+        no runtime allocation is created or changed.
     """
 
     token = _CURRENT_WORLD.set(world)
@@ -67,12 +75,12 @@ def use(world: Any) -> Iterator[Any]:
 
 
 def discover_current(*, default: Any = None) -> Any:
-    """Discover the current requested world within Sprint 4 scope.
+    """Return the context-local requested world or a caller default.
 
     Explicit context-local state has priority. When unset, this function returns
     *default*. It intentionally does not synthesize worlds, parse ``DRYML_WORLD``
     environment variables, or convert active runtime allocation into a requested
-    world because those behaviors belong to later resolver/allocation sprints.
+    world. Synthesis and allocation remain explicit operations.
 
     Args:
         default: Value returned when no explicit current world has been set.

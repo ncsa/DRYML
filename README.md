@@ -18,6 +18,65 @@ When DRYML serializes an `Object` to disk, it uses a `Repo` and one or more back
 
 DRYML aims to be as lightweight as possible. The user should be able to grab only the they need and nothing else. It does not pull in heavy dependencies unless the user wants them. Most `dryml` submodules are separable and can be used without the rest of DRYML's machinery as well. Use what you like and leave the rest!
 
+## Dispatch, Planning, and Analysis Quickstart
+
+Create a Store first, then pass normal Python targets to dispatch. Functions must
+be importable for the portable path; stored CDef methods use their stable Store
+identity. Both forms normalize to the advanced canonical `OperationSpec` IR
+internally.
+
+```python
+import dryml
+from dryml.core2.store.dir import DirStore
+
+store = DirStore("work/store", query_index="none")
+result = dryml.dispatch.run(importable_function, store=store, args=(2, 3))
+method_result = dryml.dispatch.run(model_cdef, "train", store=store, args=(dataset_cdef,))
+```
+
+Use [operations](docs/operations.md) when you deliberately need to construct
+that advanced IR yourself. [Dispatch](docs/dispatch.md) documents candidate
+selection and [`dispatch.explain(...)`](docs/dispatch.md#requirement-aware-planning),
+which is non-launching and reports bounded planning facts.
+
+Declare hard requirements separately from soft defaults. Current environment and
+world values are context-local defaults for future planning, not allocation of
+this process:
+
+```python
+@dryml.env.req(requirements=("numpy>=1",))
+@dryml.world.req(cpus={"min": 1})
+def importable_function(left, right):
+    return left + right
+
+with dryml.environments.use(dryml.environments.CurrentEnvironmentSpec()):
+    explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
+```
+
+For trusted inline local work, `with dryml.runtime.plain():` uses an inline
+allocation with enforcement off. It is not worker isolation or a dispatch
+replacement. See [world/runtime](docs/world_runtime.md) and the
+[notebook example](examples/notebooks/local_defaults_and_plain_mode.ipynb).
+
+Code analysis is an explicit submodule import:
+
+```python
+import dryml.code as code
+
+facts = code.analyze(importable_function)  # does not intentionally invoke it
+```
+
+`code.trace(...)` is separate: it executes supported trusted code once in the
+current process, is not a sandbox, and has no hard timeout. Read the
+[analysis architecture](docs/architecture/code_analysis.md) before opting in.
+Runnable lightweight workflows are available for
+[requirements/explain](examples/requirements/requirements_and_explain.py),
+[Python-shaped dispatch](examples/dispatch/python_shaped_dispatch.py),
+[notebook defaults/plain mode](examples/notebooks/local_defaults_and_plain_mode.ipynb),
+and [static/dynamic analysis](examples/code_analysis/static_and_dynamic_analysis.py).
+Migration from removed context/execute APIs is covered by the
+[migration guide](docs/migration/legacy_context_execute_removal.md).
+
 
 # The DRYML Object Graph
 
@@ -107,6 +166,7 @@ ConcreteDefinition(
 | `dryml.worlds` | Resource/topology requirements and allocations, such as CPU, memory, accelerator, role, and process specs. |
 | `dryml.runtime` | Process-local runtime mode, active allocation, device visibility, framework bootstrap, and import/workload guardrails. |
 | `dryml.annotations` | Decorators and metadata collection for attaching environment, world, and runtime requirements to code. |
+| `dryml.code` | Explicitly imported reusable non-invoking analysis, optional probes, and trusted opt-in current-process tracing. |
 | `dryml.operations` | Portable function and method call specifications used by execution and dispatch layers. |
 | `dryml.dispatch` | Local subprocess/local-world execution, worker protocol, cancellation, logs, and dispatch result handling. |
 | `dryml.records` | Structured records for environments, execution, representations, products, logs, and sidecar metadata. |

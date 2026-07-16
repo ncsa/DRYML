@@ -35,6 +35,10 @@ def set_current(spec: Any) -> Any:
 
     Returns:
         The previous current value, or ``None`` when it was unset.
+
+    Side Effects:
+        Updates only context-local planning state. It does not probe, validate,
+        activate, or allocate the selected environment.
     """
 
     previous = current(default=None)
@@ -43,7 +47,11 @@ def set_current(spec: Any) -> Any:
 
 
 def reset_current() -> None:
-    """Clear the context-local current environment default."""
+    """Clear the context-local current environment default.
+
+    This changes only future planning selection in the current context; it does
+    not alter an active runtime or environment process.
+    """
 
     _CURRENT_ENVIRONMENT.set(_UNSET)
 
@@ -57,6 +65,10 @@ def use(spec: Any) -> Iterator[Any]:
 
     Yields:
         The provided *spec*.
+
+    Side Effects:
+        Restores the prior context-local value after normal or exceptional exit
+        without probing or activating an environment.
     """
 
     token = _CURRENT_ENVIRONMENT.set(spec)

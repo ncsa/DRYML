@@ -1,6 +1,6 @@
 # DRYML Operations
 
-`dryml.operations` defines portable operation-call specs as canonical JSON metadata. Operation specs are regular `dryml.records` specs in the existing `operation` family. They are not `Object` instances, are not stored under `objects/`, and do not change `ConcreteDefinition` identity or object save/load behavior.
+`dryml.operations` defines portable operation-call specs as canonical JSON metadata. Operation specs are regular `dryml.records` specs in the existing `operation` family. They are not `Object` instances, are not stored under `objects/`, and do not change `ConcreteDefinition` identity or object save/load behavior. They remain the supported advanced canonical IR; normal callers usually use the Python-shaped APIs in [dispatch](dispatch.md).
 
 The `operation` spec family remains an open metadata family at the lower `dryml.records` layer. `dryml.operations.validate_operation_spec()` defines the portable Sprint 2 call-spec subset that future dispatch code should require explicitly.
 

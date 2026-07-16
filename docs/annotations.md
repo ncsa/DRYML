@@ -38,7 +38,14 @@ def analyze():
     ...
 ```
 
-Fragments are collected with `fragments_for(...)`, `fragments_for_class(...)`, `fragments_for_callable(...)`, or `collect_fragments(...)`. Provider/probe code can participate later by passing synthetic `AnnotationFragment` instances through `provider_fragments=`.
+Fragments are collected with `own_fragments(...)`, `fragments_for_method(...)`,
+`fragments_for_definition_method(...)`, and `collect_fragments(...)`. Class MRO
+fragments are base-to-subclass; a method's fragments come from its concrete
+implementation, so an override does not inherit base method fragments by default.
+Both classmethod and staticmethod decorator orders are supported. Definition/CDef
+method collection resolves the class without building the object. Provider/probe
+code can participate by passing synthetic `AnnotationFragment` instances through
+`provider_fragments=`.
 
 Generic mapping fragments support `merge_policy="merge"` by default. The small policy set for early provider/default composition is `merge`, `replace`, `append`, and `error_on_conflict`. Environment requirements use namespace-specific `base`, `add`, and `override` semantics instead of the mapping policy set.
 
@@ -52,9 +59,19 @@ if not result.report.ok:
     print(result.report.explain())
 ```
 
-`resolve_requirements(...)` merges hard requirements. `resolve_defaults(...)` merges defaults and applies user overrides. `resolve(...)` validates the final default world spec against hard world requirements and returns structured `AnnotationIssue` entries with source traces.
+`resolve_target_requirements(...)`, `resolve_method_requirements(...)`, and
+`resolve_definition_method_requirements(...)` return the authoritative
+`RequirementResolution`, including fragments and source traces.
+`resolve_requirements(...)` merges hard requirements. `resolve_defaults(...)`
+merges defaults and applies user overrides. `resolve(...)` validates the final
+default world spec against hard world requirements and returns structured
+`AnnotationIssue` entries with source traces. Dispatch consumes this resolution;
+it owns candidate selection and launch policy.
 
-Runtime requirement fragments can be collected through the low-level `namespace="runtime"` API, but public runtime requirement sugar and runtime-default compatibility enforcement are intentionally deferred. Treat `resolve_requirements(...).runtime` as metadata for future dispatch/provider work, not as a launch-ready compatibility check.
+Runtime requirement fragments can be collected through the low-level
+`namespace="runtime"` API. Public `dryml.runtime.default(...)` declares a soft
+runtime default; runtime compatibility remains checked by dispatch/runtime policy
+rather than by the decorator itself.
 
 Overrides are applied after defaults. Empty mappings in overrides replace the corresponding default mapping, so `{"frameworks": {}}` clears runtime framework defaults. For explicit nested control, use `{"$replace": value}` to replace a subtree or `{"$delete": True}` to delete a key.
 
@@ -75,7 +92,8 @@ with dryml.runtime.activate(mode="worker", allocation=allocation, spec=runtime_s
     train(model, dataset)
 ```
 
-Future dispatch/provider work can consume the same fragments, apply overrides, validate requirements, and then enter the runtime barrier in the correct worker process.
+Dispatch can consume the same fragments, apply overrides, validate requirements,
+and then enter the runtime barrier in the correct worker process.
 
 ## Dynamic Provider Fragments
 

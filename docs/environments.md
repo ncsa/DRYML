@@ -17,6 +17,24 @@ print(info.id)
 
 Inspection uses `importlib.metadata` for installed distributions. It does not import package runtime modules to learn versions.
 
+## Context-Local Planning Defaults
+
+`current()`, `set_current(...)`, `reset_current()`, and `use(...)` manage a
+context-local default candidate for later dispatch or explain calls. They do not
+activate a runtime, allocate resources, mutate a registry, or import ML
+frameworks.
+
+```python
+import dryml.environments as environments
+
+with environments.use(environments.CurrentEnvironmentSpec()):
+    assert environments.current() is not None
+```
+
+An explicit dispatch candidate takes precedence over this default. A current
+environment remains subject to declared hard requirements and bounded candidate
+checks.
+
 ## Requirements And Reports
 
 Use Python packaging requirement strings for package constraints.

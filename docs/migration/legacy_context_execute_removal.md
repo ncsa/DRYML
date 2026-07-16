@@ -1,36 +1,40 @@
-# Legacy Runtime API Removal
+# Legacy Context and Execute Migration
 
-DRYML removed the old public context and process-execution packages. New code should use environments, worlds, runtime guards, annotations, operation specs, and dispatch.
+DRYML removed the old public context and process-execution packages. New code
+uses environments, worlds, runtime, annotations, dispatch, and—only for advanced
+control—the canonical `OperationSpec` IR.
 
 ## Migration Map
 
-| Old concept | New API |
-|---|---|
-| Context resource dictionaries | `dryml.world.req(...)`, `dryml.world.default(...)`, `dryml.worlds.WorldRequirement`, `dryml.worlds.WorldSpec` |
-| Active process resource checks | `dryml.runtime.require_allocation(...)`, `require_worker_allocation(...)`, `assert_no_workload_allocation(...)` |
-| Software/package requirements | `dryml.env.req(...)`, `dryml.environments.EnvironmentRequirement` |
-| Process/local execution helpers | `dryml.dispatch.run(...)`, `Dispatcher.run(...)`, `Dispatcher.submit(...)` |
-| Pickled callable process calls | Canonical `dryml.operations.make_function_call_spec(...)` or `make_method_call_spec(...)` |
+| From | To | Required distinction |
+|---|---|---|
+| Legacy context resource dictionaries | `dryml.world.req(...)`, `dryml.world.default(...)`, `WorldRequirement`, and `WorldSpec` | A requested world and this process's actual allocation are distinct. |
+| Legacy execute/process helpers | `dryml.dispatch.run(function, ...)` or `run(cdef, "method", ...)` | Normal users pass functions or CDef plus method name. |
+| Manual OperationSpec-first examples | Python-shaped dispatch | Explicit `OperationSpec` remains supported advanced IR. |
+| `dryml.code` method-model imports | `dryml.core2.methods` | Compatibility aliases remain warning-free; Sprint 10 adds no deprecation. |
+| Removed `dryml.graph` prototypes | `dryml.code` analyzers and `trace(...)` | No compatibility package exists; static possibilities and dynamic observations differ. |
+| Notebook process assumptions | Current environment/world defaults and active runtime allocation | Setting defaults does not allocate resources. |
+| Local execution with checks | `runtime.plain()` | Plain mode is inline enforcement-off execution, not dispatched isolation. |
+| Non-importable callable assumptions | Explicit `allow_pickle=True` | Pickle transport remains same-Python-only. |
 
-## New Shape
+## Current Shape
 
 ```python
 import dryml
+from dryml.core2.store.dir import DirStore
 
 
-@dryml.env.req(packages={"numpy": ">=1.26"})
+@dryml.env.req(packages={"numpy": ">=1"})
 @dryml.world.req(cpus={"min": 1})
-@dryml.world.default(cpus=1)
-@dryml.runtime.default(mode="worker")
 def add(x, y):
-    dryml.runtime.require_worker_allocation("add() runs in a worker")
     return x + y
 
 
-operation = dryml.operations.attach_operation_id(
-    dryml.operations.make_function_call_spec("my_project.tasks:add", args=[2, 3])
-)
-result = dryml.dispatch.run(operation, backend="local_subprocess")
+store = DirStore("work/store", query_index="none")
+result = dryml.dispatch.run(add, store=store, args=(2, 3))
 ```
 
-World requirements are planning metadata. Runtime allocation is process-local state. Dispatch activates worker runtime before importing targets or materializing objects.
+Dispatch activates worker runtime before importing targets or materializing CDefs.
+`runtime.plain()` is the deliberate alternative for trusted inline work. See
+[dispatch](../dispatch.md), [world/runtime](../world_runtime.md), and the
+[runnable examples](../../examples/dispatch/python_shaped_dispatch.py).

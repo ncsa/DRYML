@@ -2,7 +2,8 @@
 
 ## Status
 
-Sprint 3 implementation note for authoritative requirement collection and resolution under `dryml.annotations`.
+Current authoritative requirement collection and resolution under
+`dryml.annotations`.
 
 ## Public API
 
@@ -27,4 +28,7 @@ Provider fragments are appended after target fragments. This preserves existing 
 
 ## Boundaries
 
-Sprint 3 does not change dispatch behavior. Requirement declaration remains separate from dispatch candidate selection, environment/world compatibility checks, probes, runtime enforcement policy, and worker launch behavior.
+Requirement declaration remains separate from dispatch candidate selection,
+environment/world compatibility checks, probes, runtime enforcement policy, and
+worker launch behavior. Dispatch consumes `RequirementResolution`; it does not
+own collection or merge semantics.

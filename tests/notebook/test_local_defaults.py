@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import linecache
+from pathlib import Path
 import subprocess
 import sys
+import types
 
 import dryml
 import pytest
@@ -69,3 +72,40 @@ def test_notebook_explain_does_not_import_framework_modules():
     output = subprocess.check_output([sys.executable, "-c", command], text=True)
 
     assert json.loads(output) == []
+
+
+def test_documented_local_defaults_notebook_executes_without_jupyter_or_frameworks():
+    """Execute the tracked notebook's code cells in one standard-library namespace."""
+
+    notebook = Path(__file__).resolve().parents[2] / "examples/notebooks/local_defaults_and_plain_mode.ipynb"
+    document = json.loads(notebook.read_text(encoding="utf-8"))
+    assert document["nbformat"] == 4
+    assert all(cell.get("execution_count") is None and not cell.get("outputs") for cell in document["cells"] if cell["cell_type"] == "code")
+
+    before_environment = dryml.environments.current()
+    before_world = dryml.worlds.current()
+    before_runtime = active_runtime()
+    before_frameworks = {
+        name for name in sys.modules if name.split(".", 1)[0] in {"torch", "tensorflow", "jax", "jaxlib", "keras", "cupy"}
+    }
+    module_name = "dryml_documentation_notebook"
+    module = types.ModuleType(module_name)
+    sys.modules[module_name] = module
+    try:
+        for index, cell in enumerate(document["cells"]):
+            if cell["cell_type"] == "code":
+                source = "".join(cell["source"])
+                filename = f"{notebook}::cell-{index}"
+                module.__file__ = filename
+                linecache.cache[filename] = (len(source), None, source.splitlines(keepends=True), filename)
+                exec(compile(source, filename, "exec"), module.__dict__)
+    finally:
+        sys.modules.pop(module_name, None)
+
+    after_frameworks = {
+        name for name in sys.modules if name.split(".", 1)[0] in {"torch", "tensorflow", "jax", "jaxlib", "keras", "cupy"}
+    }
+    assert dryml.environments.current() is before_environment
+    assert dryml.worlds.current() is before_world
+    assert active_runtime() is before_runtime
+    assert after_frameworks == before_frameworks
