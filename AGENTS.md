@@ -1,5 +1,25 @@
 # DRYML Repo Policies
 
+## Parent Sprint Coordination
+
+This framework repository owns implementation, tests, and durable product
+documentation, but it does not select development sprints. The parent workspace
+at `/data0/matthew/Projects/NCSA/DRYML` owns sprint plans, specifications,
+trackers, policies, participating-repository scope, and commit order.
+
+Before sprint work, read the parent `AGENTS.md` and use its resolved selector
+and exact document paths. The current parent default is
+`requirements-dispatch/11`; do not infer a sprint from this repository, flat
+filenames, status text, numeric order, or unchecked tracker rows. If sprint work
+is requested from this child without a parent-resolved selector, return to the
+coordination root or ask the user to resolve the scope. Normal framework work
+does not require sprint selection.
+
+For a resolved cross-repository sprint, keep the selector fixed across all
+Builder and Auditor handoffs. Commit verified framework changes in this
+repository before the parent updates sprint evidence or this repository's
+submodule pointer.
+
 ## Documentation
 Primary documentation is via docstrings, keep those updated for all classes/methods. Docstrings should detail what classes are responsible for and method docstrings should detail their actions as well as arguments/types and return types.
 
