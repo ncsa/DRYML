@@ -172,6 +172,25 @@ class StaticCallFact(CodeFact):
 
     ``status`` and ``confidence`` live in ``data``. A resolved fact identifies a
     defensible static target; it never claims the call executes at runtime.
+
+    Args:
+        source: Fixed static-call source mapping: ``analyzer`` must be
+            ``"static_calls"``, ``target_kind`` must be a bounded non-empty
+            string, and optional ``filename`` must be a bounded string or
+            ``None``.
+        data: Fixed static-call payload mapping containing status, confidence,
+            syntax, target, source-location, and bounded display fields. Its
+            status-dependent target and reason fields must also satisfy the
+            fixed schema.
+        kind: Fixed fact kind, ``"static_call"``.
+
+    Raises:
+        ValueError: If ``kind`` differs, either mapping is incomplete or does
+            not match its fixed schema, or a schema value violates its allowed
+            values or bounds.
+
+    Construction validates only the local serialized fact data; it does not
+    resolve or invoke a target.
     """
 
     kind: str = "static_call"
@@ -284,6 +303,23 @@ class DynamicCallFact(CodeFact):
     structural comparison or a separately equality-verified registry.
     ``method_facts`` contains only serialized facts from the current annotation
     and method-contract APIs; this object never retains live trace values.
+
+    Args:
+        source: Fixed dynamic-trace source mapping with ``analyzer`` set to
+            ``"dynamic_trace"`` and a bounded non-empty ``target_kind``.
+        data: Fixed dynamic-call payload mapping containing the sequence,
+            receiver reference, method name, serialized arguments, keyword
+            mapping, and serialized method facts. Values must satisfy the
+            dynamic-call reference, type, and size bounds.
+        kind: Fixed fact kind, ``"dynamic_call"``.
+
+    Raises:
+        ValueError: If ``kind`` differs, either mapping is incomplete or does
+            not match its fixed schema, or a schema value violates its allowed
+            values or bounds.
+
+    Construction validates only the local serialized fact data; it does not
+    invoke the traced target or retain live trace values.
     """
 
     kind: str = "dynamic_call"
