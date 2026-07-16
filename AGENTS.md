@@ -18,7 +18,11 @@ Never start development with `./tests.sh full`; some maintained tests are intent
 `code` - utilities for method instrumentation
 `execute` - The remote execution subsystem of DRYML
 `context` - The compute context subsystem of DRYML
-`graph` - Generic graph algorithms. Used in various places by DRYML
+`core2/utils/graph` - Supported generic graph algorithms used by DRYML.
+
+There is no tracked `src/dryml/graph` package. Any untracked directory at that
+path is unsupported user work and must not be edited, staged, deleted, or used
+as a project fixture without explicit user direction.
 `data` - The Dataset API submodule
 `models` - The Model API submodule
 `artifacts` - The Artifacts API submodule
@@ -46,4 +50,6 @@ After every verified coherent set of implementation, test, documentation, or pol
 Do not amend, push, broadly stage, reset, discard, stash, or rewrite history. Leave incomplete or failed work uncommitted and report the blocker.
 
 ### Other
-`examples` - Example dryml programs to illustrate dryml use cases
+Tracked files under `examples` are DRYML example programs. Pre-existing
+untracked example files remain user work; stage and test only exact paths added
+for an approved task.
