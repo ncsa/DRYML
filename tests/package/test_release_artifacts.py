@@ -232,8 +232,8 @@ def test_artifact_metadata_and_optional_extras_are_exact(release_artifacts):
     )
     assert Version(source_version) == Version(wheel_metadata["Version"])
     readme = (source / "README.md").read_text().strip()
-    assert wheel_metadata.get_payload().strip() == readme
-    assert sdist_metadata.get_payload().strip() == readme
+    assert wheel_metadata.get_payload().splitlines() == readme.splitlines()
+    assert sdist_metadata.get_payload().splitlines() == readme.splitlines()
     assert "?token=" not in wheel_metadata.get_payload().lower()
     assert set(wheel_metadata.get_all("Provides-Extra")) == set(EXTRAS)
 
