@@ -5,6 +5,7 @@ import math
 
 import dryml
 import dryml.code as code
+import dryml.code.probe as probe_module
 import pytest
 
 
@@ -249,7 +250,33 @@ def test_probe_unsupported_target_diagnostic():
 def test_probe_import_failure_diagnostic_includes_probe_code():
     result = code.probe_target("probe_import_failure:target", include_environment_record=False)
     assert not result.ok
-    assert "code_probe.import_error" in _codes(result)
+    diagnostic = next(item for item in result.diagnostics if item.code == "code_probe.import_error")
+    assert diagnostic.data == {
+        "provider": "current_process",
+        "target": {"kind": "import_path", "import_path": "probe_import_failure:target"},
+    }
+
+
+def test_probe_timeout_has_distinct_bounded_target_and_provider(monkeypatch):
+    request = code.CodeProbeRequest(
+        target=code.CodeTargetSpec.from_import_path(f"{TARGET_MODULE}:plain_function"),
+        include_environment_record=False,
+    )
+    monkeypatch.setattr(
+        probe_module,
+        "_run_bounded_command",
+        lambda *_args, **_kwargs: (0, b"", False, b"", False, True),
+    )
+
+    result = probe_module.probe_target_in_subprocess(request, ["private-python-path"], timeout=0.1)
+
+    assert not result.ok
+    diagnostic = result.diagnostics[0]
+    assert diagnostic.code == "code_probe.timeout"
+    assert diagnostic.data == {
+        "provider": "subprocess",
+        "target": {"kind": "import_path", "import_path": f"{TARGET_MODULE}:plain_function"},
+    }
 
 
 def test_probe_does_not_execute_target_function_body_or_instantiate_class():

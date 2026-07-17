@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from dryml.core2.definition import ConcreteDefinition, Definition
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import PickledCallable, normalize_user_operation
@@ -60,6 +61,11 @@ def test_non_importable_callables_fail_without_pickle_and_work_with_pickle():
     with pytest.raises(DispatchPlanningError, match="allow_pickle=True") as exc_info:
         normalize_user_operation(local_function)
     assert exc_info.value.context["reason"] == "local_function"
+    assert "same-Python" in str(exc_info.value)
+    assert "same-environment" in str(exc_info.value)
+    assert exc_info.value.context["allow_pickle"] is True
+    assert exc_info.value.context["transport"] == "pickle_small"
+    assert exc_info.value.context["transport_restrictions"] == ["same_python", "same_environment"]
 
     pickled = normalize_user_operation(local_function, allow_pickle=True, args=("x",))
     assert pickled.transport == "pickle_small"
@@ -81,8 +87,15 @@ def test_callable_instance_and_bound_method_policy_is_explicit():
 
     assert normalize_user_operation(CallableInstance(), allow_pickle=True).transport == "pickle_small"
 
-    with pytest.raises(DispatchPlanningError, match="bound instance method"):
+    with pytest.raises(DispatchPlanningError, match="bound instance method") as bound_exc:
         normalize_user_operation(BoundMethodTarget().method, allow_pickle=True)
+    assert "dispatch.submit(cdef" in str(bound_exc.value)
+    assert "PickledCallable" in str(bound_exc.value)
+    assert bound_exc.value.context == {
+        "reason": "ambiguous_method_target",
+        "target_form": "bound_instance_method",
+        "accepted_forms": ["cdef_plus_method_name", "explicit_pickled_callable"],
+    }
 
     explicit = normalize_user_operation(PickledCallable(BoundMethodTarget().method), args=(2,))
     assert explicit.transport == "pickle_small"
@@ -105,6 +118,20 @@ def test_cdef_checked_before_mapping_and_method_metadata_populated(tmp_path, tar
     assert normalized.transport == "method_call"
     assert normalized.subject_class in (None, mod.Box)
     assert normalized.operation_spec["metadata"]["dryml.code_target"]["kind"] == "definition_method"
+
+
+@pytest.mark.parametrize(
+    ("subject", "target_form"),
+    ((Definition(CallableInstance), "definition_method"), (ConcreteDefinition(CallableInstance), "cdef_method")),
+)
+def test_definition_method_without_store_is_actionable(subject, target_form):
+    with pytest.raises(DispatchPlanningError) as exc_info:
+        normalize_user_operation(subject, "__call__")
+
+    assert "Store" in str(exc_info.value)
+    assert "materializ" in str(exc_info.value)
+    assert "execut" in str(exc_info.value)
+    assert exc_info.value.context == {"reason": "store_required", "target_form": target_form}
 
 
 def test_operation_spec_path_and_invalid_mapping_errors():

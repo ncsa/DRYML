@@ -261,6 +261,27 @@ If accepted trace facts change a `pickle_small` final candidate to a different
 Python environment, planning cleans the temporary pickle and blocks launch while
 returning that completed diagnostic trace carrier.
 
+### Bounded planning provenance
+
+Planning metadata version 3 keeps the existing operation, dispatch, execution
+recipe, and worker-envelope v1 schemas. It adds
+`dryml.dispatch.analysis_outcomes`, whose closed entries make code-probe,
+environment-probe, and dynamic-trace outcomes explicit. A skipped probe is
+`{"outcome": "not_required"}`; tracing that was not requested records
+`requested=false`, `completed=false`, and `outcome="not_requested"`. Requested
+trace outcomes record both booleans plus the existing bounded trace status.
+
+The persisted `dryml.code_analysis` value is a provenance projection, not a
+serialized analyzer result. It retains the stable target reference, counts for
+known fact kinds (with one `other` bucket), diagnostic codes/severities, and
+aggregate success. Source text, arbitrary fact
+or diagnostic payloads, live-object representations, probe/process streams,
+environment dumps, credentials, host benchmark details, and invocation
+arguments remain transient. Resolved requirements and their source traces are
+retained separately under `dryml.requirements` and
+`dryml.requirement_sources`; compatibility reports, candidate sources,
+effective policies, and enforcement outcomes retain their existing keys.
+
 ## Unsupported Graph Prototype Package
 
 `dryml.graph` is not a supported DRYML package or public export. Clean source

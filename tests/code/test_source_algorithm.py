@@ -20,7 +20,9 @@ def test_source_unavailable_and_disabled_diagnostics():
     unavailable = code.analyze(len, algorithms=("source",))
     disabled = code.analyze(len, algorithms=("source",), context=code.CodeAnalysisContext(allow_source=False))
 
-    assert unavailable.diagnostics_of_code("dryml.code.source_unavailable")
+    source_diagnostic = unavailable.diagnostics_of_code("dryml.code.source_unavailable")[0]
+    assert source_diagnostic.data["supported_action"] == "analyze_live_source_backed_target"
+    assert "live source-backed target" in source_diagnostic.message
     assert disabled.diagnostics_of_code("dryml.code.source_disabled")
 
 

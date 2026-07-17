@@ -24,13 +24,22 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
     try:
         ref = symbol_ref(obj)
     except Exception as exc:
-        code = "dryml.code.closure_unsupported" if _has_closure(obj) else "dryml.code.symbol_capture_failed"
+        closure = _has_closure(obj)
+        code = "dryml.code.closure_unsupported" if closure else "dryml.code.symbol_capture_failed"
+        message = (
+            "Closure reconstruction is unsupported; analyze the live closure inline or define it at module scope."
+            if closure
+            else "Could not capture a stable symbol reference for the target."
+        )
+        data = {"error": repr(exc)}
+        if closure:
+            data["supported_action"] = "analyze_inline_or_define_at_module_scope"
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
             severity="warning",
             code=code,
-            message="Could not capture a stable symbol reference for the target.",
+            message=message,
             source={"analyzer": "symbol_capture", "target_kind": target.spec.kind},
-            data={"error": repr(exc)},
+            data=data,
         ),))
 
     return CodeAnalysisResult(target=target.spec, facts=(SymbolFact(

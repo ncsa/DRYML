@@ -65,17 +65,18 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
             severity="warning",
             code="dryml.code.source_unavailable",
-            message="No live object is available for source extraction.",
+            message="No live object is available for source extraction; analyze a live source-backed target.",
             source={"analyzer": "source", "target_kind": target.spec.kind},
+            data={"supported_action": "analyze_live_source_backed_target"},
         ),))
     info = get_source_info(obj)
     if info is None:
         return CodeAnalysisResult(target=target.spec, diagnostics=(DiagnosticFact(
             severity="warning",
             code="dryml.code.source_unavailable",
-            message="Source text is unavailable for the target.",
+            message="Source text is unavailable for the target; analyze a live source-backed target.",
             source={"analyzer": "source", "target_kind": target.spec.kind},
-            data={"object_type": type(obj).__name__},
+            data={"object_type": type(obj).__name__, "supported_action": "analyze_live_source_backed_target"},
         ),))
     line_count = len(info.source.splitlines())
     end_line = info.start_line + line_count - 1 if info.start_line is not None else None

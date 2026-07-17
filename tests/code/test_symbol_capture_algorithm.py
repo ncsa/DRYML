@@ -26,7 +26,10 @@ def test_symbol_capture_local_lambda_and_closure_diagnostics(requirement_targets
 
     assert local_result.facts_of_kind("symbol") or local_result.diagnostics
     assert lambda_result.facts_of_kind("symbol") or lambda_result.diagnostics
-    assert closure_result.diagnostics_of_code("dryml.code.closure_unsupported")
+    closure_diagnostic = closure_result.diagnostics_of_code("dryml.code.closure_unsupported")[0]
+    assert closure_diagnostic.data["supported_action"] == "analyze_inline_or_define_at_module_scope"
+    assert "inline" in closure_diagnostic.message
+    assert "module scope" in closure_diagnostic.message
 
 
 def test_symbol_fact_serializes_to_json(requirement_targets):

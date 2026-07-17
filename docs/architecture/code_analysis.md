@@ -108,6 +108,10 @@ Compatibility imports remain supported:
 from dryml.code import Method, Traits, CompilerInfo, traits
 ```
 
+These compatibility imports are warning-free. This development release does not
+schedule their deprecation; changing that contract requires a separately
+approved compatibility decision.
+
 ## Relationship to dispatch and probes
 
 Dispatch asks `dryml.code` for code facts and then applies requirement/candidate logic. Code probes reuse the same algorithms in a lightweight `RuntimeMode.PROBE` process when orchestrator-local analysis is insufficient or risky.

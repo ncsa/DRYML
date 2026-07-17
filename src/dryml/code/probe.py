@@ -443,7 +443,7 @@ def probe_target(
                 diagnostics=(diagnostic(
                     "code_probe.timeout",
                     "Current-process timeout is unsupported for live non-serializable code probe targets.",
-                    data={"target": target_spec.to_data()},
+                    data={"provider": "current_process", "target": _diagnostic_target(target_spec)},
                 ),),
             )
         if code_target is not None:
@@ -513,7 +513,11 @@ def probe_target_in_subprocess(
             ok=False,
             analysis=None,
             environment_record=None,
-            diagnostics=(diagnostic("code_probe.timeout", f"Code probe timed out after {timeout} seconds."),),
+            diagnostics=(diagnostic(
+                "code_probe.timeout",
+                f"Code probe timed out after {timeout} seconds.",
+                data={"provider": "subprocess", "target": _diagnostic_target(request.target)},
+            ),),
             stdout=stdout,
             stderr=stderr,
         )
@@ -673,7 +677,7 @@ def _probe_diagnostics_from_analysis(analysis: CodeAnalysisResult) -> tuple[Diag
         diagnostics.append(diagnostic(
             "code_probe.import_error",
             "Code probe target import failed.",
-            data={"target": analysis.target.to_data()},
+            data={"provider": "current_process", "target": _diagnostic_target(analysis.target)},
         ))
     if any(item.code == "dryml.code.algorithm_failed" for item in analysis.diagnostics):
         diagnostics.append(diagnostic(
@@ -682,6 +686,17 @@ def _probe_diagnostics_from_analysis(analysis: CodeAnalysisResult) -> tuple[Diag
             data={"target": analysis.target.to_data()},
         ))
     return tuple(diagnostics)
+
+
+def _diagnostic_target(target: CodeTargetSpec) -> dict[str, str]:
+    """Return bounded target identity without source, metadata, or live values."""
+
+    data = {"kind": target.kind[:64]}
+    for name in ("import_path", "method_name", "subject_ref"):
+        value = getattr(target, name)
+        if isinstance(value, str):
+            data[name] = value[:512]
+    return data
 
 
 def _python_command(spec: PythonExecutableSpec) -> list[str]:

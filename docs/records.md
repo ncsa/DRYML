@@ -295,6 +295,17 @@ Manifest paths are relative POSIX paths and include byte size plus SHA-256 diges
 
 `ExecutionRecord` is the typed wrapper for optional `kind="execution"` provenance. Required payload fields are `execution_kind`, `operation_id`, `backend`, and `status`. Status values are `ok`, `failed`, `cancelled`, `timeout`, `unsupported`, `skipped`, and `degraded`. Execution kinds are `python`, `probe`, `adapter`, `compiler`, `lowering`, `internal`, and `unknown`.
 
+Dispatch execution records associate a worker result with persisted operation,
+dispatch, and execution-recipe specs through `operation_id`, `dispatch_id`, and
+`recipe_id`. The record's bounded `backend` identity and `worker_key` identify
+the backend and local-world role/replica/rank assignment. Planning details are
+not duplicated into the record: the dispatch and recipe references lead to
+planning metadata version 3, including explicit no-probe/no-trace outcomes,
+bounded analysis identity/count summaries, requirements and source traces,
+candidate and compatibility reports, and effective enforcement policy/outcome.
+The underlying operation, dispatch, recipe, envelope, and record schemas remain
+version 1; only the versioned planning-metadata projection changed.
+
 Status context is validated. `ok` records must not carry `error` or `cancellation`; `failed` and `timeout` records require `error` or `diagnostics`; `cancelled` records require `cancellation`; and cancellation facts are only valid on cancelled records. Empty `error` objects are rejected unless diagnostics provide the failure details. `started_at` and `ended_at` use parseable RFC3339 UTC strings such as `2026-07-04T12:34:56Z`, and `duration_ms` must be finite and non-negative.
 
 Consumed and produced records use structured links:

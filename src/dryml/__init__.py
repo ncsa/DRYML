@@ -1,6 +1,6 @@
 import importlib
 
-__version__ = "0.3.0-dev"
+__version__ = "0.3.0.dev0"
 
 _SUBMODULE_EXPORTS = {
     "annotations": "dryml.annotations",

@@ -5,6 +5,7 @@ import sys
 
 import pytest
 
+from dryml.core2.definition import Definition
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, run
@@ -60,6 +61,21 @@ def test_definition_or_cdef_method_errors_are_actionable(tmp_path, target_module
         Dispatcher(store=store).plan(box.definition, "")
     with pytest.raises(DispatchPlanningError, match="subject CDef is not present"):
         Dispatcher(store=store).plan(box.definition, "plus")
+
+
+def test_definition_and_cdef_method_dispatch_without_store_is_actionable(target_module):
+    mod = importlib.import_module("dispatch_target")
+    subjects = ((Definition(mod.Box, 1), "definition_method"), (mod.Box(1).definition, "cdef_method"))
+
+    for entrypoint in ("plan", "plan_world"):
+        for subject, target_form in subjects:
+            with pytest.raises(DispatchPlanningError) as exc_info:
+                getattr(Dispatcher(), entrypoint)(subject, "plus")
+
+            assert "Store" in str(exc_info.value)
+            assert "materializ" in str(exc_info.value)
+            assert "execut" in str(exc_info.value)
+            assert exc_info.value.context == {"reason": "store_required", "target_form": target_form}
 
 
 def test_definition_method_dispatch_requires_existing_stored_subject(tmp_path, target_module):

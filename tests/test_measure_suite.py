@@ -1,5 +1,8 @@
+import ast
 import io
 import json
+import re
+import subprocess
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -427,13 +430,103 @@ def test_log_redaction_preserves_windows_newlines_and_size_bound(tmp_path):
 def test_ci_workflow_uses_one_measurement_and_bounded_artifacts_per_job():
     workflow = (measure_suite.ROOT / ".github/workflows/tests.yaml").read_text()
 
-    assert workflow.count("actions/upload-artifact@v4") == 2
+    expected_actions = {
+        "actions/checkout": "08c6903cd8c0fde910a37f88322edcfb5dd907a8",
+        "actions/setup-python": "e797f83bcb11b83ae66e0230d6156d7c80228e7c",
+        "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "codecov/codecov-action": "57e3a136b779b570ffcdbf80b3bdc90e7fab3de2",
+    }
+    for action, revision in expected_actions.items():
+        assert f"{action}@{revision}" in workflow
+    assert not re.search(r"uses:\s+[^\s]+@v\d", workflow)
+    assert workflow.count("actions/upload-artifact@") == 2
     assert workflow.count("retention-days: 14") == 2
     assert "measure --output-dir" in workflow
     assert "matrix.python-version == '3.12'" in workflow
     assert "files: ${{ runner.temp }}/dryml-measure/coverage.xml" in workflow
     assert "disable_search: true" in workflow
     assert "fail_ci_if_error: true" in workflow
+    assert workflow.count("if-no-files-found: error") == 2
+    assert workflow.count("timeout-minutes:") == 2
+    assert workflow.count("Verify Bounded Timing Artifact") == 2
+    assert workflow.count("assert not missing") == 2
+    assert workflow.count('["status"] == "success"') == 2
+    assert workflow.count('run["schema"] == 2') == 2
+    assert workflow.count('run["candidate"]["nested_commit"] == expected_sha') == 2
+    assert workflow.count('run["candidate"]["nested_tracked_clean"] is True') == 2
+    assert workflow.count('run["counts"]["complete"] is True') == 2
+    assert workflow.count('[phase["phase"] for phase in run["phases"]] == ["medium", "heavy"]') == 2
+    assert workflow.count('run["environment"]["os"] == expected_os') == 2
+    assert workflow.count('ci["python"]["version"].startswith(expected_python + ".")') == 2
+    assert workflow.count("len(files) <= 20_000") == 2
+    assert workflow.count("100 * 1024 * 1024") == 2
+    assert "ci-metadata.json" in workflow
+    assert "runner.os" in workflow
+    assert "runner.arch" in workflow
+    assert "ImageOS" in workflow
+    assert "ImageVersion" in workflow
+    assert workflow.count('"setuptools"') == 4
+    assert workflow.count('"wheel"') == 4
+    assert workflow.count("--extra-index-url https://download.pytorch.org/whl/cpu") == 2
+    assert "--extra-index-url" not in (
+        measure_suite.ROOT / "test_requirements.txt"
+    ).read_text()
+
+
+def test_current_runtime_enforcement_limitation_is_the_only_strict_xfail():
+    tracked_tests = subprocess.check_output(
+        ["git", "ls-files", "--", "tests/*.py"],
+        cwd=measure_suite.ROOT,
+        text=True,
+    ).splitlines()
+    xfails = []
+    for relative in tracked_tests:
+        if relative.startswith(("tests/old/", "tests/dev/")):
+            continue
+        tree = ast.parse((measure_suite.ROOT / relative).read_text(), filename=relative)
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            if not (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "xfail"
+            ):
+                continue
+            owner = parents.get(call)
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = parents.get(owner)
+            nodeid = (
+                f"{relative}::{owner.name}"
+                if owner is not None
+                else f"{relative}:line-{call.lineno}"
+            )
+            keywords = {
+                item.arg: ast.literal_eval(item.value)
+                for item in call.keywords
+            }
+            xfails.append((
+                nodeid,
+                keywords.get("strict"),
+                keywords.get("reason"),
+            ))
+
+    expected_reason = (
+        "currently unsupported: runtime_enforcement OFF does not bypass "
+        "dispatch planning and launch requirements"
+    )
+    pytest_config = (measure_suite.ROOT / "pyproject.toml").read_text()
+
+    assert xfails == [(
+        "tests/runtime/test_future_enforcement_xfail.py::test_dispatch_respects_runtime_enforcement_off",
+        True,
+        expected_reason,
+    )]
+    assert "current_limitation: current unsupported behavior" in pytest_config
 
 
 def test_full_runner_defers_coverage_reports_until_after_append():

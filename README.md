@@ -2,7 +2,7 @@
 
 ![Tests](https://github.com/ncsa/dryml/actions/workflows/tests.yaml/badge.svg)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
-[![codecov](https://codecov.io/gh/ncsa/dryml/branch/main/graph/badge.svg?token=ELz0TSuOzo)](https://codecov.io/gh/ncsa/dryml)
+[![codecov](https://codecov.io/gh/ncsa/dryml/branch/main/graph/badge.svg)](https://codecov.io/gh/ncsa/dryml)
 
 **Don't Repeat Yourself Machine Learning:** A meta-library library to reduce code duplication, automate model testing, perform hyper parameters searches, simplify model/experiment naming, encourage object separability, ease code analysis, automate model testing, perform hyper parameter searches, and improve serialization.
 

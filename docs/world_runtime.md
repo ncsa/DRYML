@@ -47,6 +47,13 @@ with dryml.runtime.plain():
     object_instance.train(data)
 ```
 
+Process-local enforcement `OFF` currently applies to trusted inline runtime
+guards only. Dispatch planning and launch do not currently bypass their normal
+requirements when called inside `runtime.disabled()` or `runtime.plain()`; that
+combination is unsupported. Use inline execution for the enforcement-off path,
+or satisfy the ordinary dispatch Store, target transport, candidate, and launch
+contracts.
+
 ## Runtime Setup Order
 
 Workers and explicit inline execution should derive a `RuntimeAllocationView` from `WorldAllocation`, enter runtime mode, build/apply device visibility and bootstrap plans, then import frameworks or materialize objects. Framework-backed DRYML modules use `import_configured_framework(...)` so DRYML does not newly import heavy frameworks before runtime bootstrap. If user code already imported a framework, the helper reuses that loaded module instead of retroactively blocking normal object construction. Existing framework-object ingestion may read dtype/shape metadata without importing a framework; conversions that create framework-native objects require either active bootstrap or an already-imported framework. Bootstrap activation must match the active runtime mode/allocation and records process-local bootstrap state separate from the exported environment marker. By default, runtime bootstrap includes the `plain` adapter and framework adapters named in `RuntimeContextSpec.frameworks`; callers that need strict pre-import checks can pass an explicit `FrameworkBootstrapPolicy(..., strict_preimport=True)`. CPU affinity and hard memory limits require explicit process-control opt-in in reusable current-process activation scopes.

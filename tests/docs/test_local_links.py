@@ -1,8 +1,9 @@
-"""Bounded offline Markdown-link checks for Sprint 10 documentation."""
+"""Bounded offline Markdown-link checks for release-facing documentation."""
 
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -25,7 +26,7 @@ CHANGED_DOCUMENTS = (
     "docs/reporting.md",
     "docs/representations_adapters.md",
 )
-LINK_RE = re.compile(r"(?<!!)\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
+LINK_RE = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
 
 
@@ -45,10 +46,17 @@ def _anchors(document: Path) -> set[str]:
 
 
 def test_changed_markdown_links_are_local_and_resolve():
-    """Check changed docs only; never crawl external URLs or untracked paths."""
+    """Check bounded docs and images without crawling external URLs."""
 
     repository = Path(__file__).resolve().parents[2]
+    tracked = {
+        line
+        for line in subprocess.check_output(
+            ["git", "ls-files"], cwd=repository, text=True,
+        ).splitlines()
+    }
     for relative in CHANGED_DOCUMENTS:
+        assert relative in tracked, f"documentation input is not tracked: {relative}"
         document = repository / relative
         text = document.read_text(encoding="utf-8")
         for match in LINK_RE.finditer(text):
@@ -59,5 +67,8 @@ def test_changed_markdown_links_are_local_and_resolve():
             resolved = (document.parent / path_text).resolve() if path_text else document
             assert resolved.is_file(), f"{relative}: missing local link target {target!r}"
             assert resolved.is_relative_to(repository), f"{relative}: target escapes repository: {target!r}"
+            assert resolved.relative_to(repository).as_posix() in tracked, (
+                f"{relative}: local link target is not tracked: {target!r}"
+            )
             if separator:
                 assert fragment in _anchors(resolved), f"{relative}: missing anchor {fragment!r} in {target!r}"

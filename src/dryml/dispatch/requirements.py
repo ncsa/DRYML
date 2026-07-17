@@ -40,7 +40,7 @@ from .errors import DispatchPlanningError
 from .normalize import NormalizedDispatchTarget
 
 
-PLANNING_METADATA_VERSION = 2
+PLANNING_METADATA_VERSION = 3
 DEFAULT_PROBE_TIMEOUT_S = 30.0
 _TRACE_SCHEMA = "dryml.dispatch.dynamic_trace.v1"
 _TRACE_MAX_CALLS = 256
@@ -77,6 +77,21 @@ _MAX_METADATA_DEPTH = 8
 _MAX_METADATA_ITEMS = 64
 _MAX_METADATA_STRING = 4096
 _MAX_METADATA_NODES = 8192
+_PERSISTED_ANALYSIS_FACT_KINDS = frozenset({
+    "annotation",
+    "ast_access",
+    "call_site",
+    "callable",
+    "diagnostic",
+    "dynamic_call",
+    "dynamic_trace_summary",
+    "method_contract",
+    "requirement",
+    "shape",
+    "source",
+    "static_call",
+    "symbol",
+})
 _RESERVED_PLANNING_KEYS = frozenset(
     {
         "dryml.dispatch.planning_version",
@@ -100,6 +115,7 @@ _RESERVED_PLANNING_KEYS = frozenset(
         "dryml.dispatch.launchable",
         "dryml.dispatch.diagnostics",
         "dryml.dispatch.dynamic_trace",
+        "dryml.dispatch.analysis_outcomes",
     }
 )
 
@@ -418,7 +434,7 @@ class CandidateConsideration:
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-ready consideration data."""
 
-        return {"slot": self.slot, "status": self.status, "candidate": None if self.candidate is None else _safe_candidate_data(self.candidate)}
+        return {"slot": self.slot, "status": self.status, "candidate": None if self.candidate is None else _bounded_data(self.candidate)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,7 +460,7 @@ class CandidateSelection:
 
         return {
             "kind": self.kind,
-            "candidate": _safe_candidate_data(self.candidate),
+            "candidate": _bounded_data(self.candidate),
             "source": self.source,
             "considered": [item.to_data() for item in self.considered],
             "diagnostics": [item.to_data() for item in self.diagnostics],
@@ -481,7 +497,7 @@ class CandidateCheckReport:
             "status": self.status,
             "compatible": self.compatible,
             "requirement": None if self.requirement is None else dict(self.requirement),
-            "candidate": None if self.candidate is None else _safe_candidate_data(self.candidate),
+            "candidate": None if self.candidate is None else _bounded_data(self.candidate),
             "details": [dict(item) for item in self.details],
             "diagnostics": [item.to_data() for item in self.diagnostics],
         }
@@ -584,29 +600,30 @@ class DispatchPlanningResolution:
         data = self.to_data()
         return {
             "dryml.dispatch.planning_version": PLANNING_METADATA_VERSION,
-            "dryml.code_analysis": data["code_analysis"],
+            "dryml.code_analysis": _persisted_analysis_summary(self.code_analysis),
             "dryml.code_probe": {
-                "bootstrap_environment": data["bootstrap_environment"],
-                "bootstrap_probe": data["bootstrap_code_probe"],
-                "final_probe": data["final_code_probe"],
+                "bootstrap_environment": _persisted_candidate_data(self.bootstrap_environment),
+                "bootstrap_probe": _persisted_probe_summary(self.bootstrap_code_probe),
+                "final_probe": _persisted_probe_summary(self.final_code_probe),
             },
             "dryml.requirements": data["requirements"],
             "dryml.requirement_sources": data["requirements"].get("source_traces", []),
-            "dryml.environment_selection": data["environment_selection"],
+            "dryml.environment_selection": _persisted_selection_data(self.environment_selection),
             "dryml.environment_probe": _environment_record_summary(self.environment_record),
-            "dryml.environment_check": data["environment_check"],
+            "dryml.environment_check": _persisted_check_data(self.environment_check),
             "dryml.environment_resolution": data["environment_resolution"],
-            "dryml.world_selection": data["world_selection"],
-            "dryml.world_check": data["world_check"],
+            "dryml.world_selection": _persisted_selection_data(self.world_selection),
+            "dryml.world_check": _persisted_check_data(self.world_check),
             "dryml.world_synthesis": data["world_synthesis"],
             "dryml.local_inventory": data["inventory_summary"],
             "dryml.world_allocation": data["world_allocation_summary"],
-            "dryml.runtime_selection": data["runtime_selection"],
-            "dryml.runtime_check": data["runtime_check"],
+            "dryml.runtime_selection": _persisted_selection_data(self.runtime_selection),
+            "dryml.runtime_check": _persisted_check_data(self.runtime_check),
             "dryml.requirement_policy": self.requirement_policy.value,
             "dryml.runtime_enforcement": self.runtime_enforcement.value,
             "dryml.dispatch.launchable": self.launchable,
-            "dryml.dispatch.diagnostics": data["diagnostics"],
+            "dryml.dispatch.diagnostics": [_diagnostic_summary(item) for item in self.diagnostics[:_MAX_METADATA_ITEMS]],
+            "dryml.dispatch.analysis_outcomes": _analysis_outcomes(self),
             **({"dryml.dispatch.dynamic_trace": data["dynamic_trace"]} if data["dynamic_trace"] is not None else {}),
         }
 
@@ -2433,7 +2450,14 @@ def _check_diagnostics(reports, policy, selections):
             f"dryml.dispatch.{report.kind}_check_{report.status}",
             f"Selected {selection.source} {report.kind} candidate does not satisfy dispatch requirements.",
             severity=severity,
-            data={"check": report.to_data(), "details": details, "policy": policy.value, "action": action},
+            data={
+                "check": report.to_data(),
+                "candidate_source": selection.source,
+                "details": details,
+                "policy": policy.value,
+                "reason": report.status,
+                "action": action,
+            },
         ))
     return diagnostics
 
@@ -2478,6 +2502,97 @@ def _analysis_summary(analysis):
     return None if analysis is None else _bounded_data(analysis.to_data())
 
 
+def _persisted_probe_summary(probe):
+    if probe is None:
+        return None
+    return {
+        "kind": "dryml.code_probe_result",
+        "schema_version": 1,
+        "ok": probe.ok,
+        "analysis": _persisted_analysis_summary(probe.analysis),
+        "environment_record": _environment_record_summary(probe.environment_record),
+        "diagnostics": [_diagnostic_summary(item) for item in probe.diagnostics[:_MAX_METADATA_ITEMS]],
+    }
+
+
+def _persisted_analysis_summary(analysis):
+    if analysis is None:
+        return None
+    target = analysis.target
+    fact_counts: dict[str, int] = {}
+    for fact in analysis.facts:
+        kind = fact.kind if fact.kind in _PERSISTED_ANALYSIS_FACT_KINDS else "other"
+        fact_counts[kind] = fact_counts.get(kind, 0) + 1
+    return {
+        "target": {
+            "kind": target.kind,
+            "import_path": target.import_path,
+            "method_name": target.method_name,
+            "subject_ref": target.subject_ref,
+        },
+        "fact_counts": dict(sorted(fact_counts.items())),
+        "diagnostics": [_diagnostic_summary(item) for item in analysis.diagnostics[:_MAX_METADATA_ITEMS]],
+        "ok": analysis.ok,
+    }
+
+
+def _diagnostic_summary(diagnostic):
+    """Retain stable diagnostic identity without messages or arbitrary data."""
+
+    return {"code": diagnostic.code, "severity": diagnostic.severity}
+
+
+def _analysis_outcomes(resolution):
+    """Return explicit probe/trace outcomes for planning metadata v3."""
+
+    probes = (
+        ("bootstrap", resolution.bootstrap_code_probe),
+        ("final", resolution.final_code_probe),
+    )
+    attempted = [
+        {"stage": stage, "ok": probe.ok}
+        for stage, probe in probes
+        if probe is not None
+    ]
+    code_probe = (
+        {"outcome": "not_required"}
+        if not attempted
+        else {
+            "outcome": "completed" if resolution.code_probe.ok else "failed",
+            "stages": attempted,
+        }
+    )
+    if resolution.environment_record is None:
+        environment_probe = {
+            "outcome": "failed"
+            if resolution.environment_check.status == "error"
+            else "not_required"
+        }
+    else:
+        environment_probe = {
+            "outcome": "record_available",
+            "record_id": resolution.environment_record.id,
+        }
+    if resolution.dynamic_trace is None:
+        dynamic_trace = {
+            "requested": False,
+            "completed": False,
+            "outcome": "not_requested",
+        }
+    else:
+        status = resolution.dynamic_trace.data["status"]
+        dynamic_trace = {
+            "requested": True,
+            "completed": status == "complete",
+            "outcome": status,
+        }
+    return {
+        "code_probe": code_probe,
+        "environment_probe": environment_probe,
+        "dynamic_trace": dynamic_trace,
+    }
+
+
 def _environment_record_summary(record):
     if record is None:
         return None
@@ -2500,8 +2615,6 @@ def _bounded_data(value, *, depth=0, budget=None):
     if isinstance(value, Mapping):
         items = []
         for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
-            if str(key) == "env":
-                continue
             items.append((str(key)[:_MAX_METADATA_STRING], _bounded_data(item, depth=depth + 1, budget=budget)))
             if len(items) >= _MAX_METADATA_ITEMS:
                 break
@@ -2513,13 +2626,62 @@ def _bounded_data(value, *, depth=0, budget=None):
     return str(value)[:_MAX_METADATA_STRING]
 
 
-def _safe_candidate_data(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    """Redact runtime environment overrides from persisted planning metadata."""
+def _persisted_candidate_data(candidate: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Retain candidate identity/compatibility fields without arbitrary payloads."""
 
-    data = _bounded_data(dict(candidate))
-    if data.get("kind") in {"python", "conda", "container"}:
-        data.pop("env", None)
-    return data
+    if candidate is None:
+        return None
+    return _bounded_data(_without_sensitive_candidate_fields(candidate))
+
+
+def _without_sensitive_candidate_fields(value):
+    if isinstance(value, Mapping):
+        return {
+            key: _without_sensitive_candidate_fields(item)
+            for key, item in value.items()
+            if str(key).casefold() not in {
+                "env", "environment_variables", "metadata", "password",
+                "secret", "token", "credential", "credentials",
+            }
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_sensitive_candidate_fields(item) for item in value]
+    return value
+
+
+def _persisted_selection_data(selection: CandidateSelection) -> dict[str, Any]:
+    return {
+        "kind": selection.kind,
+        "candidate": _persisted_candidate_data(selection.candidate),
+        "source": selection.source,
+        "considered": [
+            {
+                "slot": item.slot,
+                "status": item.status,
+                "candidate": _persisted_candidate_data(item.candidate),
+            }
+            for item in selection.considered
+        ],
+        "diagnostics": [
+            _diagnostic_summary(item)
+            for item in selection.diagnostics[:_MAX_METADATA_ITEMS]
+        ],
+    }
+
+
+def _persisted_check_data(report: CandidateCheckReport) -> dict[str, Any]:
+    return {
+        "kind": report.kind,
+        "status": report.status,
+        "compatible": report.compatible,
+        "requirement": None if report.requirement is None else _bounded_data(report.requirement),
+        "candidate": _persisted_candidate_data(report.candidate),
+        "details": _bounded_data(_without_sensitive_candidate_fields(report.details)),
+        "diagnostics": [
+            _diagnostic_summary(item)
+            for item in report.diagnostics[:_MAX_METADATA_ITEMS]
+        ],
+    }
 
 
 __all__ = [

@@ -1,0 +1,10 @@
+include LICENSE
+include README.md
+recursive-include docs *
+include examples/requirements/requirements_and_explain.py
+include examples/dispatch/python_shaped_dispatch.py
+include examples/code_analysis/static_and_dynamic_analysis.py
+include examples/notebooks/local_defaults_and_plain_mode.ipynb
+prune tests
+global-exclude *.py[cod]
+global-exclude __pycache__

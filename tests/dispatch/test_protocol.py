@@ -1,6 +1,17 @@
 import pytest
 
-from dryml.dispatch import ExecutionEnvelope, WorkerHandshakeResponse, WorkerResponse, WorkerStoreRef
+from dryml.dispatch import (
+    ExecutionEnvelope,
+    WorkerHandshakeResponse,
+    WorkerResponse,
+    WorkerStoreRef,
+    attach_dispatch_id,
+    attach_recipe_id,
+    make_dispatch_spec,
+    make_execution_recipe,
+    validate_dispatch_spec,
+    validate_execution_recipe,
+)
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA
 from dryml.formats.ids import content_id
 from dryml.operations import attach_operation_id, make_function_call_spec
@@ -36,6 +47,64 @@ def test_protocol_models_round_trip(tmp_path):
     assert envelope.store_refs[0].path == str(tmp_path)
     assert response.status == "ok"
     assert handshake.protocol_version == 1
+
+
+def test_planning_metadata_v2_carriers_remain_compatible(tmp_path):
+    planning_v2 = {
+        "dryml.dispatch.planning_version": 2,
+        "dryml.code_analysis": {
+            "target": {"kind": "function", "import_path": "pkg.mod:fn"},
+            "facts": [{"kind": "callable", "source": {}, "data": {"name": "fn"}}],
+            "diagnostics": [],
+        },
+        "dryml.code_probe": {
+            "bootstrap_environment": {"kind": "current", "schema_version": 1},
+            "bootstrap_probe": None,
+            "final_probe": None,
+        },
+        "dryml.environment_selection": {
+            "kind": "environment",
+            "candidate": {"kind": "current", "schema_version": 1},
+            "source": "explicit",
+            "considered": [],
+            "diagnostics": [],
+        },
+        "dryml.environment_check": {
+            "kind": "environment",
+            "status": "not_required",
+            "compatible": None,
+            "requirement": None,
+            "candidate": {"kind": "current", "schema_version": 1},
+            "details": [],
+            "diagnostics": [],
+        },
+    }
+    operation = attach_operation_id(make_function_call_spec("pkg.mod:fn"))
+    dispatch = attach_dispatch_id(make_dispatch_spec(
+        operation_id=operation["id"],
+        metadata=planning_v2,
+    ))
+    recipe = attach_recipe_id(make_execution_recipe(
+        dispatch_id=dispatch["id"],
+        operation_id=operation["id"],
+        backend={"name": "dryml.local_subprocess"},
+        annotation_report=planning_v2,
+    ))
+    envelope = ExecutionEnvelope(
+        dispatch_spec=dispatch,
+        execution_recipe=recipe,
+        operation_spec=operation,
+        store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path)),),
+        reporting={"planning": planning_v2},
+    )
+
+    assert validate_dispatch_spec(dispatch) == dispatch
+    assert validate_execution_recipe(recipe) == recipe
+    serialized = envelope.to_json()
+    assert ExecutionEnvelope.from_json(serialized).to_json() == serialized
+    assert serialized["dispatch_spec"]["payload"]["metadata"] == planning_v2
+    assert serialized["execution_recipe"]["payload"]["annotation_report"] == planning_v2
+    assert serialized["reporting"]["planning"] == planning_v2
 
 
 def test_protocol_invalid_shapes_reject_strings(tmp_path):

@@ -16,7 +16,7 @@ from dryml.runtime import RuntimeAllocationView, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
 
 from .errors import DispatchPlanningError
-from .normalize import normalize_user_operation
+from .normalize import is_definition_or_cdef, normalize_user_operation
 from .operations import PickledCallable
 from .protocol import DispatchResult, ExecutionEnvelope
 from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, parse_analysis_policy, resolve_dispatch_plan
@@ -140,6 +140,8 @@ class Dispatcher:
         _report("dryml.dispatch.plan.start", "Building dispatch plan")
         target_store = store or self.store
         if target_store is None:
+            if is_definition_or_cdef(operation):
+                normalize_user_operation(operation, method_name, args=args, kwargs=kwargs)
             raise DispatchPlanningError("Dispatcher.plan requires a store for local subprocess marshalling")
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
@@ -392,6 +394,8 @@ class Dispatcher:
         _report("dryml.dispatch.world.plan.start", "Building local world dispatch plan")
         target_store = store or self.store
         if target_store is None:
+            if is_definition_or_cdef(operation):
+                normalize_user_operation(operation, method_name, args=args, kwargs=kwargs)
             raise DispatchPlanningError("Dispatcher.plan_world requires a store for shared DirStore marshalling")
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy

@@ -62,6 +62,7 @@ _RESERVED_PLANNING_KEYS = frozenset(
         "dryml.local_inventory", "dryml.world_allocation", "dryml.runtime_selection",
         "dryml.runtime_check", "dryml.requirement_policy", "dryml.runtime_enforcement",
         "dryml.dispatch.launchable", "dryml.dispatch.diagnostics", "dryml.dispatch.dynamic_trace",
+        "dryml.dispatch.analysis_outcomes",
     }
 )
 
@@ -326,9 +327,14 @@ def normalize_callable_operation(
     func = operation.callable if explicit_pickle else operation
     if _is_bound_instance_method(func) and not explicit_pickle:
         raise DispatchPlanningError(
-            "bound instance method dispatch is not supported for this target; "
+            "bound instance method target is ambiguous; "
             "use dispatch.submit(cdef, \"method\", ...), or PickledCallable(...) "
-            "for explicit same-environment pickle transport"
+            "for explicit same-environment pickle transport",
+            context={
+                "reason": "ambiguous_method_target",
+                "target_form": "bound_instance_method",
+                "accepted_forms": ["cdef_plus_method_name", "explicit_pickled_callable"],
+            },
         )
 
     importability = _callable_importability(func)
@@ -357,8 +363,16 @@ def normalize_callable_operation(
     if not allow_pickle and not explicit_pickle:
         reason = importability.reason or "not_importable"
         raise DispatchPlanningError(
-            "callable is not importable; pass allow_pickle=True or define it at module scope",
-            context={"reason": reason, "module": importability.module, "qualname": importability.qualname},
+            "callable is not importable; define it at module scope, or pass allow_pickle=True "
+            "for same-Python, same-environment execution",
+            context={
+                "reason": reason,
+                "module": importability.module,
+                "qualname": importability.qualname,
+                "allow_pickle": True,
+                "transport": "pickle_small",
+                "transport_restrictions": ["same_python", "same_environment"],
+            },
         )
     normalized = _normalize_pickled_callable(func, args=args, kwargs=kwargs or {}, importability=importability)
     return NormalizedDispatchTarget(
@@ -390,7 +404,11 @@ def normalize_definition_method_operation(
 
     method = _require_method_name(method_name)
     if store is None:
-        raise DispatchPlanningError("store is required to dispatch this DRYML method target")
+        target_form = "cdef_method" if isinstance(subject, ConcreteDefinition) else "definition_method"
+        raise DispatchPlanningError(
+            "A Store is required to materialize this DRYML method subject for execution.",
+            context={"reason": "store_required", "target_form": target_form},
+        )
     cdef = subject.concretize(repo=Repo(stores=[store])) if isinstance(subject, Definition) else subject
     if not isinstance(cdef, ConcreteDefinition):
         raise DispatchPlanningError("could not persist/reference dispatch subject for method call")

@@ -38,5 +38,6 @@ markers = [
     "category_torch: auto-applied DRYML test category",
     "category_worlds: auto-applied DRYML test category",
     "category_uncategorized: auto-applied DRYML test category",
-    "future_behavior: expected-failure tests documenting planned future behavior",
+    "future_behavior: executable contracts for future-facing APIs that already pass",
+    "current_limitation: current unsupported behavior retained as a strict expected failure",
 ]

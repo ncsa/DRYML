@@ -35,6 +35,11 @@ def test_strict_world_incompatibility_blocks_selected_cpu_world_without_search()
     resolution = resolve_dispatch_plan(normalize_user_operation(gpu_target, allow_pickle=True), world=cpu_world, requirement_policy="strict")
     assert resolution.world_selection.source == "explicit"
     assert resolution.world_check.status == "incompatible"
+    diagnostic = next(item for item in resolution.diagnostics if item.code == "dryml.dispatch.world_check_incompatible")
+    assert diagnostic.data["check"]["requirement"] == resolution.world_check.requirement
+    assert diagnostic.data["candidate_source"] == "explicit"
+    assert diagnostic.data["policy"] == "strict"
+    assert diagnostic.data["reason"] == "incompatible"
     assert resolution.launchable is False
 
 
@@ -374,9 +379,10 @@ def test_planning_metadata_excludes_probe_output(tmp_path):
     from dryml.code.facts import DiagnosticFact
     from dryml.code.probe import CodeProbeResult
 
-    resolution = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(
+    explanation = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(
         make_function_call_spec("operator:add", args=[1, 2]),
-    ).resolution
+    )
+    resolution = explanation.resolution
     assert resolution.code_analysis is not None
     probe = CodeProbeResult(
         True,
@@ -386,8 +392,22 @@ def test_planning_metadata_excludes_probe_output(tmp_path):
         stdout="AUDIT_SECRET",
         stderr="AUDIT_SECRET",
     )
-    metadata = replace(resolution, code_probe=probe, bootstrap_code_probe=probe, final_code_probe=probe).metadata()
+    with_probe = replace(
+        resolution,
+        code_probe=probe,
+        bootstrap_code_probe=probe,
+        final_code_probe=probe,
+    )
+    public = with_probe.to_data()
+    public_explanation = replace(explanation, resolution=with_probe).to_data()
+    metadata = with_probe.metadata()
 
+    assert public["code_probe"]["diagnostics"][0]["message"] == "safe"
+    assert public["code_probe"]["analysis"]["facts"]
+    assert public_explanation["resolution"]["code_probe"] == public["code_probe"]
+    assert metadata["dryml.code_probe"]["bootstrap_probe"]["diagnostics"] == [
+        {"code": "audit", "severity": "warning"},
+    ]
     assert "AUDIT_SECRET" not in str(metadata)
 
 
