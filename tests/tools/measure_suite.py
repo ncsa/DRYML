@@ -232,7 +232,7 @@ def measure(argv: list[str] | None = None) -> int:
     aggregate_counts = _aggregate_counts(phases)
     coverage_reports = _coverage_reports(args.pytest_args)
     candidate = _candidate_identity()
-    if None in (candidate["nested_commit"], candidate["parent_commit"]):
+    if candidate["nested_commit"] is None:
         artifact_errors.append("candidate identity unavailable")
         if status == "success":
             status = "incomplete"
@@ -456,9 +456,11 @@ def _git_output(root: Path, *arguments: str) -> str | None:
 def _candidate_identity() -> dict[str, Any]:
     nested_status = _git_output(ROOT, "status", "--porcelain=v1", "--untracked-files=no")
     parent_status = _git_output(PARENT_ROOT, "status", "--porcelain=v1", "--untracked-files=no")
+    parent_commit = _git_output(PARENT_ROOT, "rev-parse", "HEAD")
     return {
         "nested_commit": _git_output(ROOT, "rev-parse", "HEAD"),
-        "parent_commit": _git_output(PARENT_ROOT, "rev-parse", "HEAD"),
+        "parent_commit": parent_commit,
+        "parent_repository_available": parent_commit is not None,
         "nested_tracked_clean": nested_status == "" if nested_status is not None else None,
         "parent_tracked_clean": parent_status == "" if parent_status is not None else None,
     }

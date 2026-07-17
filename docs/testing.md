@@ -20,6 +20,11 @@ unsupported modes fail at argument validation. Use `--invalidate-reason TEXT`
 when host pressure or another reference condition makes an otherwise completed
 sample incomparable. It is distinct from `profile`, which updates
 `tests/test_tiers.json` after timing unknown nodes.
+The nested repository commit is always required in a successful measurement.
+When DRYML runs inside its coordination workspace, artifacts also record the
+parent commit and tracked-clean state. Standalone checkouts, including normal
+GitHub Actions jobs, report the parent repository as unavailable rather than
+misclassifying an otherwise complete measurement.
 
 `full` measurement enables combined coverage by default. CI and other callers
 that need the same complete behavioral selection without coverage use:

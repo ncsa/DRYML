@@ -52,6 +52,13 @@ def test_measure_writes_versioned_non_mutating_artifacts(tmp_path, monkeypatch):
         }
 
     monkeypatch.setattr(measure_suite, "run_phase", fake_run_phase)
+    monkeypatch.setattr(measure_suite, "_candidate_identity", lambda: {
+        "nested_commit": "nested-sha",
+        "parent_commit": None,
+        "parent_repository_available": False,
+        "nested_tracked_clean": True,
+        "parent_tracked_clean": None,
+    })
 
     assert measure_suite.measure(["--output-dir", str(output_dir), "smoke", "-q"]) == 0
     run = json.loads((output_dir / "run.json").read_text())
@@ -59,6 +66,8 @@ def test_measure_writes_versioned_non_mutating_artifacts(tmp_path, monkeypatch):
     assert run["schema"] == 2
     assert run["status"] == "success"
     assert run["coverage"]["enabled"] is False
+    assert run["candidate"]["parent_repository_available"] is False
+    assert run["candidate"]["parent_commit"] is None
     assert run["counts"]["outcomes"] == {"passed": 1}
     assert nodes["records"] == [{"nodeid": "tests/x.py::test_x"}]
     assert ET.parse(output_dir / "junit.xml").getroot().attrib["tests"] == "1"
