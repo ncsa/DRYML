@@ -58,6 +58,8 @@ Run the full suite with coverage:
 ```
 
 The default `./tests.sh` behavior remains a full run with coverage. Internally, full runs execute smoke/medium files first and heavy files second. This avoids collecting heavyweight framework tests during the fast/mid part of the run while still producing combined coverage through `pytest-cov` append mode.
+Requested XML, HTML, or other coverage reports are generated only by the heavy
+phase after the combined coverage data is complete.
 
 ## Speed Tiers
 

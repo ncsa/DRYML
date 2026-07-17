@@ -138,6 +138,17 @@ def test_full_no_coverage_preserves_both_behavioral_phases():
     assert [spec[3:] for spec in specs] == [(False, False), (False, False)]
 
 
+def test_coverage_reports_are_deferred_until_the_final_phase():
+    arguments = ["-q", "--cov-report=xml", "--cov-report", "html"]
+
+    assert measure_suite._phase_pytest_args(
+        arguments, defer_coverage_reports=True,
+    ) == ["-q", "--cov-report="]
+    assert measure_suite._phase_pytest_args(
+        arguments, defer_coverage_reports=False,
+    ) == arguments
+
+
 def test_heavy_phase_enables_context_bootstrap(tmp_path, monkeypatch):
     observed = {}
 
@@ -219,3 +230,16 @@ def test_ci_workflow_uses_one_measurement_and_bounded_artifacts_per_job():
     assert workflow.count("retention-days: 14") == 2
     assert "measure --output-dir" in workflow
     assert "matrix.python-version == '3.12'" in workflow
+
+
+def test_full_runner_defers_coverage_reports_until_after_append():
+    runner = (measure_suite.ROOT / "tests.sh").read_text()
+
+    medium_command, heavy_command = (
+        line for line in runner.splitlines()
+        if "pytest --cov=dryml" in line and "_selected[@]" in line
+    )
+    assert "--cov-report=" in medium_command
+    assert "coverage_stripped_args" in medium_command
+    assert "--cov-append" in heavy_command
+    assert "stripped_args" in heavy_command

@@ -65,11 +65,33 @@ strip_suite_paths() {
     done
 }
 
+strip_coverage_reports() {
+    coverage_stripped_args=()
+    local skip_value=0
+    for arg in "$@"; do
+        if [ "$skip_value" -eq 1 ]; then
+            skip_value=0
+            continue
+        fi
+        case "$arg" in
+            --cov-report)
+                skip_value=1
+                ;;
+            --cov-report=*)
+                ;;
+            *)
+                coverage_stripped_args+=("$arg")
+                ;;
+        esac
+    done
+}
+
 run_full() {
     strip_suite_paths "$@"
+    strip_coverage_reports "${stripped_args[@]}"
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
-    pytest --cov=dryml -m "speed_smoke or speed_medium" "${medium_selected[@]}" "${stripped_args[@]}"
+    pytest --cov=dryml --cov-report= -m "speed_smoke or speed_medium" "${medium_selected[@]}" "${coverage_stripped_args[@]}"
     DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --cov=dryml --cov-append -m "speed_heavy" "${heavy_selected[@]}" "${stripped_args[@]}"
 }
 

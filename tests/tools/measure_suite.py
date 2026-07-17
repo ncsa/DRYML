@@ -175,6 +175,10 @@ def measure(argv: list[str] | None = None) -> int:
     host_before = _host_snapshot()
     try:
         for phase, tiers, markexpr, coverage, append in phase_specs:
+            phase_pytest_args = _phase_pytest_args(
+                args.pytest_args,
+                defer_coverage_reports=coverage and len(phase_specs) > 1 and not append,
+            )
             result = run_phase(
                 output_dir=output_dir,
                 phase=phase,
@@ -182,7 +186,7 @@ def measure(argv: list[str] | None = None) -> int:
                 markexpr=markexpr,
                 coverage=coverage,
                 append_coverage=append,
-                pytest_args=args.pytest_args,
+                pytest_args=phase_pytest_args,
             )
             phases.append(result)
             if result["returncode"]:
@@ -452,6 +456,22 @@ def _coverage_reports(arguments: list[str]) -> list[str]:
         elif argument == "--cov-report" and index + 1 < len(arguments):
             reports.append(arguments[index + 1])
     return reports
+
+
+def _phase_pytest_args(arguments: list[str], *, defer_coverage_reports: bool) -> list[str]:
+    if not defer_coverage_reports:
+        return list(arguments)
+    filtered = []
+    skip_value = False
+    for argument in arguments:
+        if skip_value:
+            skip_value = False
+            continue
+        if argument == "--cov-report":
+            skip_value = True
+        elif not argument.startswith("--cov-report="):
+            filtered.append(argument)
+    return [*filtered, "--cov-report="]
 
 
 if __name__ == "__main__":
