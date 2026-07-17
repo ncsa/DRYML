@@ -1,5 +1,6 @@
 import builtins
 import sys
+import tracemalloc  # Prime pytest's unraisable helper before TFDS replaces __import__.
 import types
 
 import numpy as np
