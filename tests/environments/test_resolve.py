@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dryml.environments import CompatibilityIssue, CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve
+from dryml.environments import CompatibilityIssue, CondaEnvironmentSpec, ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentProbeResult, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, resolve
 from dryml.environments.compatibility import report_from_issues
 
 
@@ -45,7 +45,7 @@ def test_resolve_without_requirement_skips_unsupported_container_candidate():
     assert result.attempts[0].status == "unsupported"
 
 
-def test_resolve_with_requirement_skips_unsupported_container_without_probe():
+def test_resolve_with_requirement_skips_unsupported_container_without_probe(sample_environment_record):
     calls = []
 
     result = resolve(
@@ -53,7 +53,7 @@ def test_resolve_with_requirement_skips_unsupported_container_without_probe():
         candidates=(ContainerEnvironmentSpec("example/image"),),
         include_current=False,
         probe_runner=lambda *args, **kwargs: calls.append(args) or EnvironmentProbeResult(
-            CurrentEnvironmentSpec(), True, record=replace(inspect_current(), tags=("wanted",))
+            CurrentEnvironmentSpec(), True, record=replace(sample_environment_record, tags=("wanted",))
         ),
     )
 
@@ -81,7 +81,7 @@ def test_resolve_deduplicates_after_selected_candidate():
     assert result.selected == spec
 
 
-def test_resolve_records_incompatible_duplicate_then_selected_and_reuses_record():
+def test_resolve_records_incompatible_duplicate_then_selected_and_reuses_record(sample_environment_record):
     calls = []
     requirement = EnvironmentRequirement(tags=("selected",))
     first = PythonExecutableSpec("/a/python")
@@ -89,7 +89,7 @@ def test_resolve_records_incompatible_duplicate_then_selected_and_reuses_record(
 
     def runner(spec, *, timeout):
         calls.append((spec.executable, timeout))
-        record = replace(inspect_current(), tags=("selected",) if spec.executable.endswith("b/python") else ())
+        record = replace(sample_environment_record, tags=("selected",) if spec.executable.endswith("b/python") else ())
         return EnvironmentProbeResult(spec, True, record=record)
 
     result = resolve(requirement, candidates=(first, first.to_data(), second), include_current=False, probe_runner=runner)
@@ -98,6 +98,7 @@ def test_resolve_records_incompatible_duplicate_then_selected_and_reuses_record(
     assert result.selected == second
     assert result.selected_record is not None and result.selected_record.tags == ("selected",)
     assert [call[0] for call in calls] == ["/a/python", "/b/python"]
+    assert result.probe_count == 2
 
 
 def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
@@ -118,7 +119,7 @@ def test_resolve_prefilters_registry_labels_and_enforces_candidate_limit():
     assert result.status == "incomplete"
 
 
-def test_resolve_probes_hint_matching_registry_entry_before_selecting_later_match():
+def test_resolve_probes_hint_matching_registry_entry_before_selecting_later_match(sample_environment_record):
     registry = EnvironmentRegistry()
     false_hint = PythonExecutableSpec("/false-hint/python")
     selected = PythonExecutableSpec("/selected/python")
@@ -129,7 +130,7 @@ def test_resolve_probes_hint_matching_registry_entry_before_selecting_later_matc
     def runner(spec, *, timeout):
         calls.append(spec)
         tags = () if spec == false_hint else ("wanted",)
-        return EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=tags))
+        return EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=tags))
 
     result = resolve(EnvironmentRequirement(tags=("wanted",)), registry=registry, include_current=False, probe_runner=runner)
 
@@ -138,7 +139,7 @@ def test_resolve_probes_hint_matching_registry_entry_before_selecting_later_matc
     assert calls == [false_hint, selected]
 
 
-def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels():
+def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels(sample_environment_record):
     registry = EnvironmentRegistry()
     ignored = PythonExecutableSpec("/ignored/python")
     selected = PythonExecutableSpec("/selected/python")
@@ -152,7 +153,7 @@ def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels(
         return EnvironmentProbeResult(
             spec,
             True,
-            record=replace(inspect_current(), tags=("wanted",) if spec == selected else ()),
+            record=replace(sample_environment_record, tags=("wanted",) if spec == selected else ()),
         )
 
     result = resolve(
@@ -172,12 +173,12 @@ def test_resolve_orders_candidates_then_registry_and_prefilters_registry_labels(
     assert calls == [rejected, selected]
 
 
-def test_resolve_records_an_all_incompatible_no_match_trace():
+def test_resolve_records_an_all_incompatible_no_match_trace(sample_environment_record):
     result = resolve(
         EnvironmentRequirement(tags=("wanted",)),
         candidates=(PythonExecutableSpec("/candidate/python"),),
         include_current=False,
-        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=())),
+        probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=())),
     )
 
     assert result.status == "no_match"
@@ -219,7 +220,7 @@ def test_resolver_metadata_redacts_environment_overrides():
     assert first.id != second.id
 
 
-def test_resolver_trace_distinguishes_redacted_environment_override_candidates():
+def test_resolver_trace_distinguishes_redacted_environment_override_candidates(sample_environment_record):
     first = PythonExecutableSpec("/first", env={"TOKEN": "one"})
     second = PythonExecutableSpec("/second", env={"TOKEN": "two"})
 
@@ -228,7 +229,7 @@ def test_resolver_trace_distinguishes_redacted_environment_override_candidates()
         candidates=(first, second),
         include_current=False,
         probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
-            spec, True, record=replace(inspect_current(), tags=())
+            spec, True, record=replace(sample_environment_record, tags=())
         ),
     )
 
@@ -269,13 +270,13 @@ def test_resolver_metadata_bounds_large_candidate_values():
     assert len(result.to_data()["selected"]["executable"]) == 4096
 
 
-def test_resolver_reports_incomplete_after_bounded_duplicate_sequence():
+def test_resolver_reports_incomplete_after_bounded_duplicate_sequence(sample_environment_record):
     requirement = EnvironmentRequirement(tags=("selected",))
     rejected = PythonExecutableSpec("/rejected/python")
     selected = PythonExecutableSpec("/selected/python")
 
     def runner(spec, *, timeout):
-        return EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=("selected",) if spec == selected else ()))
+        return EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=("selected",) if spec == selected else ()))
 
     result = resolve(
         requirement,
@@ -317,7 +318,7 @@ def test_resolver_records_timeout_before_an_unconsidered_candidate():
     assert [attempt.status for attempt in result.attempts] == ["not_considered_timeout"]
 
 
-def test_resolver_continues_after_a_invalid_probe_runner_result():
+def test_resolver_continues_after_a_invalid_probe_runner_result(sample_environment_record):
     requirement = EnvironmentRequirement(tags=("selected",))
     rejected = PythonExecutableSpec("/invalid/python")
     selected = PythonExecutableSpec("/selected/python")
@@ -326,7 +327,7 @@ def test_resolver_continues_after_a_invalid_probe_runner_result():
         requirement,
         candidates=(rejected, selected),
         include_current=False,
-        probe_runner=lambda spec, *, timeout: None if spec == rejected else EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=("selected",))),
+        probe_runner=lambda spec, *, timeout: None if spec == rejected else EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=("selected",))),
     )
 
     assert result.selected == selected
@@ -367,7 +368,7 @@ def test_resolver_bounds_duplicate_only_candidate_input():
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
 
 
-def test_resolver_reports_incomplete_after_bounded_registry_aliases():
+def test_resolver_reports_incomplete_after_bounded_registry_aliases(sample_environment_record):
     registry = EnvironmentRegistry()
     for index in range(300):
         registry.register(f"alias-{index:02}", CurrentEnvironmentSpec())
@@ -381,7 +382,7 @@ def test_resolver_reports_incomplete_after_bounded_registry_aliases():
         probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
             spec,
             True,
-            record=replace(inspect_current(), tags=("wanted",))
+            record=replace(sample_environment_record, tags=("wanted",))
             if isinstance(spec, PythonExecutableSpec) and spec.executable == "/selected/python"
             else None,
         )
@@ -523,13 +524,13 @@ def test_resolver_does_not_double_count_malformed_probe_duration():
     assert result.probe_duration_s == 2.0
 
 
-def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_incomplete():
+def test_resolver_marks_a_probe_that_exhausts_total_timeout_as_incomplete(sample_environment_record):
     spec = PythonExecutableSpec("/candidate/python")
     state = {"now": 0.0}
 
     def runner(candidate, *, timeout):
         state["now"] = 1.0
-        return EnvironmentProbeResult(candidate, True, record=replace(inspect_current(), tags=("wanted",)))
+        return EnvironmentProbeResult(candidate, True, record=replace(sample_environment_record, tags=("wanted",)))
 
     result = resolve(
         EnvironmentRequirement(tags=("wanted",)),
@@ -572,7 +573,7 @@ def test_resolver_marks_deadline_exhausting_probe_failures_as_incomplete(failure
     assert result.attempts[0].probe_duration_s == 1.0
 
 
-def test_resolver_continues_after_malformed_protocol_record():
+def test_resolver_continues_after_malformed_protocol_record(sample_environment_record):
     malformed = PythonExecutableSpec("/malformed-protocol/python")
     selected = PythonExecutableSpec("/selected/python")
 
@@ -586,7 +587,7 @@ def test_resolver_continues_after_malformed_protocol_record():
             report=report_from_issues((CompatibilityIssue("probe_failed", "error", "environment probe record could not be decoded"),)),
         )
         if spec == malformed
-        else EnvironmentProbeResult(spec, True, record=replace(inspect_current(), tags=("wanted",))),
+        else EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=("wanted",))),
     )
 
     assert result.selected == selected
@@ -669,7 +670,7 @@ def test_resolver_bounds_finite_list_and_tuple_aliases(aliases):
     assert any(issue.code == "resolver_candidates_truncated" for issue in result.diagnostics)
 
 
-def test_resolver_does_not_select_lower_precedence_registry_after_candidate_truncation():
+def test_resolver_does_not_select_lower_precedence_registry_after_candidate_truncation(sample_environment_record):
     rejected = PythonExecutableSpec("/rejected/python")
     registry = EnvironmentRegistry()
     registry.register("selected", PythonExecutableSpec("/selected/python"))
@@ -684,7 +685,7 @@ def test_resolver_does_not_select_lower_precedence_registry_after_candidate_trun
             spec,
             True,
             record=replace(
-                inspect_current(),
+                sample_environment_record,
                 tags=("wanted",) if spec.executable == "/selected/python" else (),
             ),
         ),
@@ -695,7 +696,7 @@ def test_resolver_does_not_select_lower_precedence_registry_after_candidate_trun
     assert all(attempt.source != "registry" for attempt in result.attempts)
 
 
-def test_resolver_does_not_select_current_after_registry_truncation():
+def test_resolver_does_not_select_current_after_registry_truncation(sample_environment_record):
     rejected = CurrentEnvironmentSpec()
     registry = EnvironmentRegistry()
     for index in range(300):
@@ -709,7 +710,7 @@ def test_resolver_does_not_select_current_after_registry_truncation():
         probe_runner=lambda spec, *, timeout: EnvironmentProbeResult(
             spec,
             True,
-            record=replace(inspect_current(), tags=()),
+            record=replace(sample_environment_record, tags=()),
         ),
     )
 

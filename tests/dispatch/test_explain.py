@@ -76,7 +76,7 @@ def test_failed_bootstrap_target_probe_remains_blocking_under_relaxed_policies()
         assert not explanation.resolution.bootstrap_code_probe.ok
 
 
-def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
+def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch, sample_environment_record):
     import sys
 
     import dryml.dispatch.requirements as requirements
@@ -84,7 +84,7 @@ def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
     from dryml.code.facts import DiagnosticFact
     from dryml.code.probe import CodeProbeResult
     from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
-    from dryml.environments import PythonExecutableSpec, inspect_current
+    from dryml.environments import PythonExecutableSpec
     from dryml.operations import make_function_call_spec
 
     normalized = normalize_user_operation(make_function_call_spec("operator:add", args=[1, 2]))
@@ -98,7 +98,8 @@ def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
         probes.append(target)
         if len(probes) == 1:
             return CodeProbeResult(False, None, None, (DiagnosticFact(severity="error", code="code_probe.import_failed", message="bootstrap failed"),))
-        return CodeProbeResult(True, CodeAnalysisResult(target), inspect_current())
+        result = CodeProbeResult(True, CodeAnalysisResult(target), sample_environment_record)
+        return CodeProbeResult.from_data(result.to_data())
 
     monkeypatch.setattr(requirements, "analyze", lambda *_args, **_kwargs: incomplete)
     monkeypatch.setattr(requirements, "probe_target", fake_probe)
@@ -111,9 +112,10 @@ def test_successful_final_probe_supersedes_failed_bootstrap_probe(monkeypatch):
 
     assert resolution.launchable
     assert resolution.final_code_probe is not None and resolution.final_code_probe.ok
+    assert len(probes) == 2
 
 
-def test_final_probe_environment_default_does_not_retain_resolver_candidate(monkeypatch):
+def test_final_probe_environment_default_does_not_retain_resolver_candidate(monkeypatch, sample_environment_record):
     import sys
 
     import dryml.dispatch.requirements as requirements
@@ -122,7 +124,7 @@ def test_final_probe_environment_default_does_not_retain_resolver_candidate(monk
     from dryml.code.facts import AnnotationFact, DiagnosticFact
     from dryml.code.probe import CodeProbeResult
     from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
-    from dryml.environments import EnvironmentProbeResult, PythonExecutableSpec, inspect_current
+    from dryml.environments import EnvironmentProbeResult, PythonExecutableSpec
     from dryml.operations import make_function_call_spec
 
     @dryml.env.default(PythonExecutableSpec("/final/default/python").to_data())
@@ -143,14 +145,16 @@ def test_final_probe_environment_default_does_not_retain_resolver_candidate(monk
         probes.append(target)
         if len(probes) == 1:
             return CodeProbeResult(False, None, None, (DiagnosticFact(severity="error", code="code_probe.import_failed", message="bootstrap failed"),))
-        return CodeProbeResult(True, final_analysis, inspect_current())
+        result = CodeProbeResult(True, final_analysis, sample_environment_record)
+        return CodeProbeResult.from_data(result.to_data())
 
     monkeypatch.setattr(requirements, "analyze", lambda *_args, **_kwargs: incomplete)
     monkeypatch.setattr(requirements, "probe_target", fake_probe)
+    environment_probes = []
     monkeypatch.setattr(
         requirements.environments,
         "probe",
-        lambda spec, **_kwargs: EnvironmentProbeResult(spec=spec, ok=True, record=inspect_current()),
+        lambda spec, **_kwargs: environment_probes.append(spec) or EnvironmentProbeResult(spec=spec, ok=True, record=sample_environment_record),
     )
 
     resolution = resolve_dispatch_plan(
@@ -162,6 +166,8 @@ def test_final_probe_environment_default_does_not_retain_resolver_candidate(monk
     assert resolution.environment_selection.source == "resolver"
     assert not resolution.launchable
     assert any(item.code == "dryml.dispatch.final_probe_annotation_mismatch" for item in resolution.diagnostics)
+    assert len(probes) == 2
+    assert environment_probes == []
 
 
 def test_implicit_fallback_inventory_failure_has_explain_plan_parity(monkeypatch, tmp_path):
@@ -203,14 +209,14 @@ def test_implicit_fallback_plan_discovers_inventory_once(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
-def test_resolver_reuses_matching_bootstrap_environment_record(monkeypatch):
+def test_resolver_reuses_matching_bootstrap_environment_record(monkeypatch, sample_environment_record):
     import dryml.dispatch.requirements as requirements
     from dryml.code.analysis import CodeAnalysisResult
     from dryml.code.probe import CodeProbeResult
     from dryml.code.targets import CodeTargetSpec
-    from dryml.environments import CurrentEnvironmentSpec, EnvironmentRequirement, inspect_current
+    from dryml.environments import CurrentEnvironmentSpec, EnvironmentRequirement
 
-    bootstrap = CodeProbeResult(True, CodeAnalysisResult(CodeTargetSpec.from_import_path("operator:add")), inspect_current())
+    bootstrap = CodeProbeResult(True, CodeAnalysisResult(CodeTargetSpec.from_import_path("operator:add")), sample_environment_record)
     monkeypatch.setattr(requirements.environments, "probe", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected reprobe")))
 
     _selection, _data, resolution = requirements._select_environment(
@@ -225,7 +231,7 @@ def test_resolver_reuses_matching_bootstrap_environment_record(monkeypatch):
     assert resolution.selected_source == "current"
 
 
-def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(monkeypatch):
+def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(monkeypatch, sample_environment_record):
     import sys
 
     import dryml.dispatch.requirements as requirements
@@ -233,7 +239,7 @@ def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(mo
     from dryml.code.facts import AnnotationFact, DiagnosticFact
     from dryml.code.probe import CodeProbeResult
     from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
-    from dryml.environments import PythonExecutableSpec, inspect_current
+    from dryml.environments import PythonExecutableSpec
     from dryml.operations import make_function_call_spec
 
     normalized = normalize_user_operation(make_function_call_spec("operator:add", args=[1, 2]))
@@ -256,7 +262,8 @@ def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(mo
         probes.append(target)
         if len(probes) == 1:
             return CodeProbeResult(False, None, None, (DiagnosticFact(severity="error", code="code_probe.import_failed", message="bootstrap failed"),))
-        return CodeProbeResult(True, final_analysis, inspect_current())
+        result = CodeProbeResult(True, final_analysis, sample_environment_record)
+        return CodeProbeResult.from_data(result.to_data())
 
     monkeypatch.setattr(requirements, "analyze", lambda *_args, **_kwargs: incomplete)
     monkeypatch.setattr(requirements, "probe_target", fake_probe)
@@ -269,6 +276,7 @@ def test_final_probe_topology_requirement_is_rechecked_after_failed_bootstrap(mo
 
     assert not resolution.launchable
     assert any(item.code == "dryml.dispatch.local_world_topology_unsupported" for item in resolution.diagnostics)
+    assert len(probes) == 2
 
 
 def test_plan_cleans_pickle_artifacts_when_marshalling_fails(monkeypatch):

@@ -8,11 +8,26 @@ from dryml.code.analysis import CodeAnalysisResult
 from dryml.code.probe import CodeProbeResult
 from dryml.code.targets import CodeTargetSpec
 from dryml.dispatch import NormalizedDispatchTarget, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import inspect_current
 from dryml.operations import make_function_call_spec
 
 
-def test_live_complete_discovery_skips_code_probe_and_environment_probe_without_requirement():
+def test_live_complete_discovery_skips_code_probe_and_environment_probe_without_requirement(monkeypatch):
+    import dryml.dispatch.requirements as requirements
+
+    code_probes = []
+    environment_probes = []
+
+    def unexpected_code_probe(*_args, **_kwargs):
+        code_probes.append(True)
+        raise AssertionError("complete planning must not code-probe")
+
+    def unexpected_environment_probe(*_args, **_kwargs):
+        environment_probes.append(True)
+        raise AssertionError("complete planning must not environment-probe")
+
+    monkeypatch.setattr(requirements, "probe_target", unexpected_code_probe)
+    monkeypatch.setattr(requirements.environments, "probe", unexpected_environment_probe)
+
     @dryml.world.default(cpus=1)
     def target():
         return None
@@ -21,6 +36,8 @@ def test_live_complete_discovery_skips_code_probe_and_environment_probe_without_
     assert resolution.code_probe is None
     assert resolution.environment_record is None
     assert resolution.environment_check.status == "not_required"
+    assert code_probes == []
+    assert environment_probes == []
 
 
 def test_environment_requirement_is_checked_against_selected_candidate_record():
@@ -47,7 +64,7 @@ def test_missing_explicit_final_environment_is_structurally_blocking_without_req
     assert resolution.code_probe is not None
 
 
-def test_final_probe_uses_import_path_even_when_target_kind_is_function(monkeypatch):
+def test_final_probe_uses_import_path_even_when_target_kind_is_function(monkeypatch, sample_environment_record):
     import dryml.dispatch.requirements as requirements
 
     target = CodeTargetSpec("function", import_path="operator:add")
@@ -56,7 +73,8 @@ def test_final_probe_uses_import_path_even_when_target_kind_is_function(monkeypa
 
     def fake_probe(code_target, **kwargs):
         calls.append((code_target, kwargs))
-        return CodeProbeResult(True, CodeAnalysisResult(target), inspect_current())
+        result = CodeProbeResult(True, CodeAnalysisResult(target), sample_environment_record)
+        return CodeProbeResult.from_data(result.to_data())
 
     monkeypatch.setattr(requirements, "probe_target", fake_probe)
     monkeypatch.setattr(requirements.environments, "probe", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("final probe record must be reused")))

@@ -1,5 +1,6 @@
 from fixtures import store_resource_factory, create_name, create_temp_file, \
-    create_temp_named_file, create_temp_dir, primary_store_set, ray
+    create_temp_named_file, create_temp_dir, primary_store_set, ray, \
+    sample_environment_record
 import builtins
 import os
 import sys
@@ -27,4 +28,5 @@ __all__ = [
     create_temp_dir,
     create_temp_named_file,
     ray,
+    sample_environment_record,
 ]

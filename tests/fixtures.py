@@ -8,9 +8,37 @@ from typing import Literal, Sequence
 from dataclasses import dataclass
 from dryml.core2.store.store import Store
 from dryml.core2.repo import make_store
+import dryml.environments as envs
 
 
 StoreDef = Literal["directory", "zip_filepath", "buffer", "zip_buffer"]
+
+
+def make_sample_environment_record(**kwargs):
+    data = {
+        "python": envs.PythonRecord("3.11.8", "CPython", executable="/usr/bin/python"),
+        "platform": envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
+        "distributions": {
+            "DryML": envs.PackageRecord("DryML", "0.3.0"),
+            "torch": envs.PackageRecord("torch", "2.5.1"),
+        },
+        "dryml": envs.DrymlRuntimeRecord(
+            version="0.3.0-dev",
+            execution_protocol="1",
+            schema_versions={"environment_record": 1},
+            features=("dryml.environments.v1", "custom.capability"),
+        ),
+        "kind": "venv",
+        "tags": ("dev", "torch"),
+        "details": {"virtual_env": "/tmp/venv"},
+    }
+    data.update(kwargs)
+    return envs.EnvironmentRecord(**data)
+
+
+@pytest.fixture
+def sample_environment_record():
+    return make_sample_environment_record()
 
 
 # -------------------------

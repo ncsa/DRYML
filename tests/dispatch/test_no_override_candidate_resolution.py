@@ -7,7 +7,7 @@ import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
-from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, inspect_current, resolve, use
+from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, resolve, use
 from dryml.operations import make_function_call_spec
 from dryml.worlds import LocalResourceInventory, WorldSpec, use as use_world
 
@@ -157,19 +157,21 @@ def test_dispatch_blocks_incomplete_environment_resolution_without_fallback_prob
 
 
 @pytest.mark.parametrize("policy", ("strict", "warn", "ignore"))
-def test_dispatch_blocks_probe_deadline_exhaustion_without_relaxed_fallback(monkeypatch, policy):
+def test_dispatch_blocks_probe_deadline_exhaustion_without_relaxed_fallback(monkeypatch, policy, sample_environment_record):
     import dryml.dispatch.requirements as requirements
     from dryml.environments.resolution import resolve as resolve_environments
 
     candidate = PythonExecutableSpec("/slow-candidate/python")
     clock_state = {"now": 0.0}
+    calls = []
 
     def delayed_probe(spec, *, timeout):
+        calls.append(spec)
         clock_state["now"] = 1.0
         return requirements.environments.EnvironmentProbeResult(
             spec,
             True,
-            record=replace(inspect_current(), tags=("resolved",)),
+            record=replace(sample_environment_record, tags=("resolved",)),
         )
 
     def resolve_with_short_deadline(requirement, **kwargs):
@@ -192,18 +194,20 @@ def test_dispatch_blocks_probe_deadline_exhaustion_without_relaxed_fallback(monk
     assert dispatch_resolution.environment_resolution is not None
     assert dispatch_resolution.environment_resolution.status == "incomplete"
     assert not dispatch_resolution.launchable
+    assert calls == [candidate]
 
 
 @pytest.mark.parametrize(("policy", "launchable"), (("strict", False), ("warn", True), ("ignore", True)))
-def test_dispatch_completed_resolver_no_match_obeys_requirement_policy(monkeypatch, policy, launchable):
+def test_dispatch_completed_resolver_no_match_obeys_requirement_policy(monkeypatch, policy, launchable, sample_environment_record):
     import dryml.dispatch.requirements as requirements
 
     candidate = PythonExecutableSpec("/incompatible/python")
+    calls = []
     monkeypatch.setattr(
         requirements.environments,
         "probe",
-        lambda spec, **_kwargs: requirements.environments.EnvironmentProbeResult(
-            spec, True, record=replace(inspect_current(), tags=())
+        lambda spec, **_kwargs: calls.append(spec) or requirements.environments.EnvironmentProbeResult(
+            spec, True, record=replace(sample_environment_record, tags=())
         ),
     )
 
@@ -216,12 +220,13 @@ def test_dispatch_completed_resolver_no_match_obeys_requirement_policy(monkeypat
     assert resolution.environment_resolution is not None
     assert resolution.environment_resolution.status == "no_match"
     assert resolution.launchable is launchable
+    assert calls == [candidate, CurrentEnvironmentSpec()]
 
 
-def test_attached_record_does_not_bypass_unsupported_environment_launch():
+def test_attached_record_does_not_bypass_unsupported_environment_launch(sample_environment_record):
     explanation = Dispatcher().explain(
         make_function_call_spec("operator:add", args=[1, 2]),
-        environment={"spec": ContainerEnvironmentSpec("example/image").to_data(), "record": inspect_current().to_data()},
+        environment={"spec": ContainerEnvironmentSpec("example/image").to_data(), "record": sample_environment_record.to_data()},
         requirement_policy="ignore",
     )
 
@@ -263,11 +268,11 @@ def test_explanation_formats_total_resolver_counts_not_bounded_trace_length():
     assert "environment_probes=11" in str(reported)
 
 
-def test_dispatch_reuses_truncated_current_resolver_evidence(monkeypatch):
+def test_dispatch_reuses_truncated_current_resolver_evidence(monkeypatch, sample_environment_record):
     import dryml.dispatch.requirements as requirements
 
     candidates = tuple(PythonExecutableSpec(f"/candidate-{index}") for index in range(31))
-    record = replace(inspect_current(), tags=())
+    record = replace(sample_environment_record, tags=())
     resolver_result = resolve(
         EnvironmentRequirement(tags=("resolved",)),
         candidates=candidates,
@@ -419,20 +424,30 @@ def test_dispatcher_rejects_retained_distinct_iterators_over_a_shared_cursor():
         Dispatcher(environment_candidates=SharedCursorCandidates())
 
 
-def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeypatch):
+def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeypatch, sample_environment_record):
     import dryml.dispatch.requirements as requirements
+    from dryml.code.analysis import CodeAnalysisResult
+    from dryml.code.probe import CodeProbeResult
 
     candidate = PythonExecutableSpec("/resolved/python")
     calls = []
-    record = replace(inspect_current(), tags=("resolved",))
+    code_probe_calls = []
+    record = replace(sample_environment_record, tags=("resolved",))
+    normalized = normalize_user_operation(resolver_target, allow_pickle=True)
 
     def probe(spec, **_kwargs):
         calls.append(spec)
         return requirements.environments.EnvironmentProbeResult(spec, True, record=record)
 
+    def code_probe(target, **_kwargs):
+        code_probe_calls.append(target)
+        result = CodeProbeResult(True, CodeAnalysisResult(target), record)
+        return CodeProbeResult.from_data(result.to_data())
+
     monkeypatch.setattr(requirements.environments, "probe", probe)
+    monkeypatch.setattr(requirements, "probe_target", code_probe)
     resolution = resolve_dispatch_plan(
-        normalize_user_operation(resolver_target, allow_pickle=True),
+        normalized,
         environment_candidates=(candidate,),
         requirement_policy="strict",
     )
@@ -440,6 +455,8 @@ def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeyp
     assert resolution.environment_selection.source == "resolver"
     assert resolution.environment_record == record
     assert calls == [candidate]
+    assert code_probe_calls == [normalized.code_target]
+    assert resolution.environment_resolution.probe_count == 1
     metadata = resolution.metadata()
     assert metadata["dryml.environment_resolution"]["selected"]["executable"] == "/resolved/python"
     assert metadata["dryml.environment_probe"] is not None
@@ -459,7 +476,16 @@ def test_annotation_default_world_is_not_replaced_by_synthesis(monkeypatch):
     assert resolution.world_check.status == "incompatible"
 
 
-def test_incompatible_environment_default_and_current_do_not_start_resolver_search():
+def test_incompatible_environment_default_and_current_do_not_start_resolver_search(monkeypatch, sample_environment_record):
+    import dryml.dispatch.requirements as requirements
+
+    calls = []
+    monkeypatch.setattr(
+        requirements.environments,
+        "probe",
+        lambda spec, **_kwargs: calls.append(spec) or requirements.environments.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
+
     def candidates():
         raise AssertionError("resolver must not inspect candidates")
         yield PythonExecutableSpec("/unreachable/python")
@@ -480,6 +506,7 @@ def test_incompatible_environment_default_and_current_do_not_start_resolver_sear
     assert default.environment_resolution is None
     assert current.environment_selection.source == "current"
     assert current.environment_resolution is None
+    assert calls == [CurrentEnvironmentSpec(), CurrentEnvironmentSpec()]
 
 
 def test_incompatible_current_world_is_not_replaced_by_synthesis(monkeypatch):
@@ -499,13 +526,19 @@ def test_incompatible_current_world_is_not_replaced_by_synthesis(monkeypatch):
     assert resolution.world_check.status == "incompatible"
 
 
-def test_incompatible_explicit_candidates_do_not_start_lower_precedence_search(monkeypatch):
+def test_incompatible_explicit_candidates_do_not_start_lower_precedence_search(monkeypatch, sample_environment_record):
     import dryml.dispatch.requirements as requirements
 
     def candidates():
         raise AssertionError("resolver must not inspect candidates")
         yield PythonExecutableSpec("/unreachable/python")
 
+    environment_probe_calls = []
+    monkeypatch.setattr(
+        requirements.environments,
+        "probe",
+        lambda spec, **_kwargs: environment_probe_calls.append(spec) or requirements.environments.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
     monkeypatch.setattr(requirements.worlds, "synthesize", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("synthesis must not run")))
     environment = resolve_dispatch_plan(
         normalize_user_operation(incompatible_current_environment_target, allow_pickle=True),
@@ -524,3 +557,4 @@ def test_incompatible_explicit_candidates_do_not_start_lower_precedence_search(m
     assert environment.environment_resolution is None
     assert world.world_selection.source == "explicit"
     assert world.world_synthesis is None
+    assert environment_probe_calls == [CurrentEnvironmentSpec()]

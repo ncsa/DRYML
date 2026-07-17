@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import dryml.environments as envs
 
 
@@ -64,7 +66,15 @@ def test_registry_rejects_invalid_entries_without_mutating_indexes():
     assert registry.list() == ()
 
 
-def test_registry_probe_and_find_compatible():
+def test_registry_probe_and_find_compatible(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append(spec) or envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
     registry = envs.EnvironmentRegistry()
     registry.register("current", envs.CurrentEnvironmentSpec(), tags=("current",))
     result = registry.probe_registered("current")
@@ -75,18 +85,28 @@ def test_registry_probe_and_find_compatible():
     missing, missing_report = registry.find_compatible(envs.EnvironmentRequirement(tags=("missing",)))
     assert missing is None
     assert not missing_report.ok
+    assert calls == [envs.CurrentEnvironmentSpec(), envs.CurrentEnvironmentSpec()]
 
 
-def test_registry_check_requirement_and_no_match_report():
+def test_registry_check_requirement_and_no_match_report(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append(spec) or envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
     registry = envs.EnvironmentRegistry()
     registry.register("current", envs.CurrentEnvironmentSpec())
     report = registry.check_requirement("current", envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",)))
     assert report.ok
     no_match = registry.no_match_report(envs.EnvironmentRequirement(requirements=("torch",)))
     assert no_match.issues[0].code == "registry_no_match"
+    assert calls == [envs.CurrentEnvironmentSpec()]
 
 
-def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch):
+def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch, sample_environment_record):
     import dryml.environments.registry as registry_module
 
     registry = envs.EnvironmentRegistry()
@@ -96,7 +116,7 @@ def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch):
     monkeypatch.setattr(
         registry_module,
         "probe",
-        lambda spec, *, timeout: calls.append((spec, timeout)) or envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current()),
+        lambda spec, *, timeout: calls.append((spec, timeout)) or envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
     )
 
     entry, report = registry.find_compatible(envs.EnvironmentRequirement(), max_candidates=1)
@@ -106,7 +126,7 @@ def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch):
     assert len(calls) == 1
 
 
-def test_registry_find_compatible_preserves_default_full_search_and_tag_prefilter(monkeypatch):
+def test_registry_find_compatible_preserves_default_full_search_and_tag_prefilter(monkeypatch, sample_environment_record):
     import dryml.environments.registry as registry_module
 
     registry = envs.EnvironmentRegistry()
@@ -117,7 +137,7 @@ def test_registry_find_compatible_preserves_default_full_search_and_tag_prefilte
     def fake_probe(spec, *, timeout):
         calls.append(spec.executable)
         if spec.executable.endswith("-8"):
-            return envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current())
+            return envs.EnvironmentProbeResult(spec, True, record=sample_environment_record)
         return envs.EnvironmentProbeResult(spec, False)
 
     monkeypatch.setattr(registry_module, "probe", fake_probe)
@@ -133,7 +153,7 @@ def test_registry_find_compatible_preserves_default_full_search_and_tag_prefilte
     monkeypatch.setattr(
         registry_module,
         "probe",
-        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current()),
+        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=("wanted",))),
     )
     entry, _ = tagged.find_compatible(envs.EnvironmentRequirement(tags=("wanted",)))
 
@@ -162,7 +182,7 @@ def test_bounded_registry_search_prefilters_known_requirement_hints(monkeypatch)
     assert calls == ["/candidate"]
 
 
-def test_bounded_registry_search_does_not_let_prefilters_hide_a_candidate(monkeypatch):
+def test_bounded_registry_search_does_not_let_prefilters_hide_a_candidate(monkeypatch, sample_environment_record):
     import dryml.environments.registry as registry_module
 
     registry = envs.EnvironmentRegistry()
@@ -172,7 +192,7 @@ def test_bounded_registry_search_does_not_let_prefilters_hide_a_candidate(monkey
     monkeypatch.setattr(
         registry_module,
         "probe",
-        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=envs.inspect_current()),
+        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
     )
 
     entry, report = registry.find_compatible(

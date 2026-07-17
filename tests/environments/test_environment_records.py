@@ -6,28 +6,7 @@ import pytest
 
 import dryml.environments as envs
 from dryml.environments import introspection
-
-
-def sample_record(**kwargs):
-    data = {
-        "python": envs.PythonRecord("3.11.8", "CPython", executable="/usr/bin/python"),
-        "platform": envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
-        "distributions": {
-            "DryML": envs.PackageRecord("DryML", "0.3.0"),
-            "torch": envs.PackageRecord("torch", "2.5.1"),
-        },
-        "dryml": envs.DrymlRuntimeRecord(
-            version="0.3.0-dev",
-            execution_protocol="1",
-            schema_versions={"environment_record": 1},
-            features=("dryml.environments.v1", "custom.capability"),
-        ),
-        "kind": "venv",
-        "tags": ("dev", "torch"),
-        "details": {"virtual_env": "/tmp/venv"},
-    }
-    data.update(kwargs)
-    return envs.EnvironmentRecord(**data)
+from fixtures import make_sample_environment_record as sample_record
 
 
 def test_environment_record_roundtrip_and_id_stability():

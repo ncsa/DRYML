@@ -252,7 +252,10 @@ def test_probe_rejects_non_string_record_primitives(tmp_path):
     assert result.report.issues[0].code == "probe_failed"
 
 
-def test_probe_worker_json_schema(capsys):
+def test_probe_worker_json_schema(monkeypatch, capsys, sample_environment_record):
+    from dryml.environments import probe_worker
+
+    monkeypatch.setattr(probe_worker, "inspect_current", lambda: sample_environment_record)
     assert probe_worker_main(["--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["kind"] == "dryml.environment_probe_result"
@@ -363,12 +366,12 @@ def test_conda_probe_uses_pythonpath_policy(monkeypatch):
     assert captured["env"]["PYTHONPATH"] == "/only"
 
 
-def test_current_environment_probe_uses_bounded_worker_path(monkeypatch):
+def test_current_environment_probe_uses_bounded_worker_path(monkeypatch, sample_environment_record):
     import importlib
 
     probe_module = importlib.import_module("dryml.environments.probe")
     observed = []
-    expected = envs.EnvironmentProbeResult(envs.CurrentEnvironmentSpec(), True, record=envs.inspect_current())
+    expected = envs.EnvironmentProbeResult(envs.CurrentEnvironmentSpec(), True, record=sample_environment_record)
     monkeypatch.setattr(probe_module, "_probe_command", lambda spec, command, *, timeout, env=None: observed.append((spec, command, timeout)) or expected)
 
     result = envs.probe(envs.CurrentEnvironmentSpec(), timeout=0.25)
