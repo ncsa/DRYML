@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -61,14 +61,19 @@ def pytest_configure(config):
     config._dryml_timing_records = []
     config._dryml_timing_started_at = time.monotonic()
     config._dryml_collection_finished_at = None
+    config._dryml_collected_count = 0
+    config._dryml_selected_count = 0
 
 
 def pytest_collection_finish(session):
     """Record collection completion without changing test selection."""
     session.config._dryml_collection_finished_at = time.monotonic()
+    session.config._dryml_selected_count = len(session.items)
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
+    config._dryml_collected_count = len(items)
     baseline = getattr(config, "_dryml_tier_baseline", {})
     for item in items:
         category = category_for_nodeid(item.nodeid)
@@ -112,20 +117,20 @@ def pytest_runtest_makereport(item, call):
             "teardown_seconds": None,
             "total_seconds": None,
             "outcome": None,
+            "phase_outcomes": {"setup": None, "call": None, "teardown": None},
             # Retained for the profile updater's established input schema.
             "duration_seconds": None,
         }
         records.append(record)
     if report.when in {"setup", "call", "teardown"}:
         record[f"{report.when}_seconds"] = float(report.duration)
+        record["phase_outcomes"][report.when] = _report_outcome(report)
     if report.when == "call":
-        record["outcome"] = report.outcome
         record["duration_seconds"] = float(report.duration)
-    elif report.outcome == "skipped" and record["outcome"] is None:
-        record["outcome"] = "skipped"
-    phase_values = (record["setup_seconds"], record["call_seconds"], record["teardown_seconds"])
-    if any(value is not None for value in phase_values):
-        record["total_seconds"] = sum(value or 0.0 for value in phase_values)
+    record["outcome"] = _final_outcome(record["phase_outcomes"])
+    if report.when == "teardown":
+        phase_values = (record["setup_seconds"], record["call_seconds"], record["teardown_seconds"])
+        record["total_seconds"] = sum(value for value in phase_values if value is not None)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -143,6 +148,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
                 None if started_at is None or collection_finished_at is None
                 else collection_finished_at - started_at
             ),
+            "counts": _timing_counts(config, records),
             "records": sorted(records, key=lambda item: item["nodeid"]),
         }
         output_path = Path(timing_output)
@@ -230,16 +236,55 @@ def _validated_tier(value: str) -> str:
     return tier
 
 
+def _report_outcome(report) -> str:
+    """Return a stable outcome for one pytest phase report."""
+    was_xfail = bool(getattr(report, "wasxfail", False))
+    if report.failed:
+        return "failed"
+    if report.skipped:
+        return "xfailed" if was_xfail else "skipped"
+    if report.passed:
+        return "xpassed" if was_xfail else "passed"
+    return str(report.outcome)
+
+
+def _final_outcome(phase_outcomes: dict[str, str | None]) -> str | None:
+    """Resolve one node outcome without hiding setup or teardown failures."""
+    outcomes = tuple(outcome for outcome in phase_outcomes.values() if outcome is not None)
+    for outcome in ("failed", "xpassed", "xfailed", "skipped"):
+        if outcome in outcomes:
+            return outcome
+    return "passed" if "passed" in outcomes else None
+
+
+def _timing_counts(config, records: list[dict[str, Any]]) -> dict[str, Any]:
+    collected = int(getattr(config, "_dryml_collected_count", 0))
+    selected = int(getattr(config, "_dryml_selected_count", 0))
+    outcomes = Counter(record["outcome"] for record in records if record["outcome"] is not None)
+    return {
+        "collected": collected,
+        "selected": selected,
+        "executed": len(records),
+        "deselected": max(0, collected - selected),
+        "outcomes": dict(sorted(outcomes.items())),
+    }
+
+
 def _write_timing_summary(terminalreporter, records: list[dict[str, Any]]) -> None:
     by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         by_category[record["category"]].append(record)
     terminalreporter.write_sep("-", "DRYML timing summary")
     for category in sorted(by_category):
-        total = sum(record["duration_seconds"] for record in by_category[category])
+        durations = [
+            record["duration_seconds"] for record in by_category[category]
+            if record["duration_seconds"] is not None
+        ]
+        total = sum(durations)
         count = len(by_category[category])
         terminalreporter.write_line(f"{category}: {count} tests, {total:.2f}s total")
-    slowest = sorted(records, key=lambda item: item["duration_seconds"], reverse=True)[:10]
+    timed_records = [record for record in records if record["duration_seconds"] is not None]
+    slowest = sorted(timed_records, key=lambda item: item["duration_seconds"], reverse=True)[:10]
     if slowest:
         terminalreporter.write_line("slowest tests:")
         for record in slowest:

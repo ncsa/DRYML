@@ -14,8 +14,24 @@ Capture a non-mutating external measurement artifact:
 
 `measure` requires a fresh directory outside the repository. It preserves the
 tier manifest and writes versioned `run.json`, `nodes.json`, per-phase timing
-JSON, and bounded stdout/stderr logs. It is distinct from `profile`, which
-updates `tests/test_tiers.json` after timing unknown nodes.
+JSON and JUnit XML, and redacted stdout/stderr logs bounded to 1 MiB per stream.
+The result records explicit success, invalidated, incomplete, or failure status;
+unsupported modes fail at argument validation. Use `--invalidate-reason TEXT`
+when host pressure or another reference condition makes an otherwise completed
+sample incomparable. It is distinct from `profile`, which updates
+`tests/test_tiers.json` after timing unknown nodes.
+
+`full` measurement enables combined coverage by default. CI and other callers
+that need the same complete behavioral selection without coverage use:
+
+```bash
+./tests.sh measure --output-dir /tmp/dryml-measure-full --no-coverage full
+```
+
+Heavy measurement phases preserve the same context-bootstrap behavior as the
+canonical heavy and full commands. On platforms without standard-library peak
+child-memory support, the machine-readable field is explicitly unavailable
+rather than reported as zero.
 
 Run the fastest smoke bucket:
 

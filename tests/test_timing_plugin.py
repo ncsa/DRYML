@@ -138,3 +138,68 @@ def test_unknown_only_no_tests_collected_exit_is_success():
     timing_plugin.pytest_sessionfinish(session, pytest.ExitCode.NO_TESTS_COLLECTED)
 
     assert session.exitstatus == pytest.ExitCode.OK
+
+
+@pytest.mark.parametrize(
+    ("report", "expected"),
+    [
+        ({"outcome": "passed", "passed": True, "failed": False, "skipped": False}, "passed"),
+        ({"outcome": "failed", "passed": False, "failed": True, "skipped": False}, "failed"),
+        ({"outcome": "skipped", "passed": False, "failed": False, "skipped": True}, "skipped"),
+        (
+            {
+                "outcome": "skipped", "passed": False, "failed": False,
+                "skipped": True, "wasxfail": "expected",
+            },
+            "xfailed",
+        ),
+        (
+            {
+                "outcome": "passed", "passed": True, "failed": False,
+                "skipped": False, "wasxfail": "expected",
+            },
+            "xpassed",
+        ),
+    ],
+)
+def test_report_outcome_distinguishes_pytest_states(report, expected):
+    assert timing_plugin._report_outcome(SimpleNamespace(**report)) == expected
+
+
+def test_final_outcome_does_not_hide_setup_or_teardown_failure():
+    assert timing_plugin._final_outcome({
+        "setup": "failed", "call": None, "teardown": "passed",
+    }) == "failed"
+    assert timing_plugin._final_outcome({
+        "setup": "passed", "call": "passed", "teardown": "failed",
+    }) == "failed"
+
+
+def test_timing_counts_include_selection_deselection_and_outcomes():
+    config = SimpleNamespace(_dryml_collected_count=5, _dryml_selected_count=3)
+    records = [{"outcome": "passed"}, {"outcome": "xfailed"}, {"outcome": "skipped"}]
+
+    assert timing_plugin._timing_counts(config, records) == {
+        "collected": 5,
+        "selected": 3,
+        "executed": 3,
+        "deselected": 2,
+        "outcomes": {"passed": 1, "skipped": 1, "xfailed": 1},
+    }
+
+
+def test_timing_summary_handles_nodes_without_call_duration():
+    lines = []
+    reporter = SimpleNamespace(
+        write_sep=lambda *_args: None,
+        write_line=lines.append,
+    )
+    records = [{
+        "category": "core",
+        "duration_seconds": None,
+        "nodeid": "tests/core/test_example.py::test_skipped_in_setup",
+    }]
+
+    timing_plugin._write_timing_summary(reporter, records)
+
+    assert lines == ["core: 1 tests, 0.00s total"]
