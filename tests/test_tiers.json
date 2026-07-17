@@ -2475,6 +2475,7 @@
     "tests/runtime/test_runtime_spec.py::test_runtime_spec_canonical_id_stability": "smoke",
     "tests/runtime/test_runtime_spec.py::test_runtime_spec_id_changes_with_semantic_content_and_rejects_bad_payload": "smoke",
     "tests/runtime/test_runtime_spec.py::test_runtime_spec_rejects_non_mapping_framework_config": "smoke",
+    "tests/test_dispatch_code_performance.py::test_failed_scenario_cleans_temporary_store": "smoke",
     "tests/test_dispatch_code_performance.py::test_managed_probe_records_launch_and_unavailable_child_stages": "medium",
     "tests/test_dispatch_code_performance.py::test_pure_benchmark_emits_bounded_versioned_json_and_operation_counts": "medium",
     "tests/test_dispatch_code_performance.py::test_pure_sample_count_rejects_non_positive_or_unbounded_values[ 1]": "smoke",

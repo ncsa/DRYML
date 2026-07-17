@@ -28,6 +28,8 @@ def test_sample_defaults_and_maxima_are_explicit():
     assert benchmark.MANAGED_DEFAULT == 5
     assert benchmark.MANAGED_MAX == 100
     assert benchmark.positive_sample_count("100", maximum=100, name="managed samples") == 100
+    with pytest.raises(ValueError):
+        benchmark.positive_sample_count("101", maximum=100, name="managed samples")
 
 
 def test_scenario_registry_is_fixed_unique_and_covers_required_families():
@@ -82,3 +84,39 @@ def test_unknown_scenario_fails_closed():
             mode="pure", pure_samples=1, managed_samples=1,
             scenario_names=("missing",),
         )
+
+
+def test_failed_scenario_cleans_temporary_store(tmp_path, monkeypatch):
+    created = []
+    original = benchmark.tempfile.TemporaryDirectory
+
+    class RecordingTemporaryDirectory:
+        def __init__(self, *args, **kwargs):
+            self.inner = original(dir=tmp_path, *args, **kwargs)
+
+        def __enter__(self):
+            path = self.inner.__enter__()
+            created.append(benchmark.Path(path))
+            return path
+
+        def __exit__(self, *exc_info):
+            return self.inner.__exit__(*exc_info)
+
+    def fail(_context):
+        raise RuntimeError("synthetic benchmark failure")
+
+    monkeypatch.setattr(benchmark.tempfile, "TemporaryDirectory", RecordingTemporaryDirectory)
+    monkeypatch.setattr(
+        benchmark,
+        "scenarios",
+        lambda: (benchmark.Scenario("failure", "warm_in_process", fail),),
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic benchmark failure"):
+        benchmark.run_benchmark(
+            mode="pure", pure_samples=1, managed_samples=1,
+            scenario_names=("failure",),
+        )
+
+    assert len(created) == 1
+    assert not created[0].exists()

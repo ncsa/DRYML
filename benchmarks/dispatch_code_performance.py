@@ -377,11 +377,15 @@ def _worker_observation(context: BenchmarkContext) -> Observation:
     started = time.perf_counter()
     future = context.dispatcher.submit(plan)
     handshake_seconds = time.perf_counter() - started
+    work_dir = Path(future.work_dir)
     started = time.perf_counter()
     response = future.result(timeout=30.0)
     completion_seconds = time.perf_counter() - started
     if response.status != "ok":
         raise RuntimeError(f"worker benchmark failed with status {response.status}")
+    cleanup = "complete" if not work_dir.exists() else "incomplete"
+    if cleanup != "complete":
+        raise RuntimeError("worker benchmark did not clean its temporary work directory")
     return Observation(
         metrics={"status": response.status},
         operations={"worker_launches": 1, "managed_process_launches": 1},
@@ -389,6 +393,7 @@ def _worker_observation(context: BenchmarkContext) -> Observation:
             "submit_to_handshake": {"available": True, "seconds": handshake_seconds},
             "handshake_to_completion": {"available": True, "seconds": completion_seconds},
         },
+        cleanup=cleanup,
     )
 
 
