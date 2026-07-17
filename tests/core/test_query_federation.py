@@ -1102,7 +1102,7 @@ def test_exists_stops_after_first_verified_cdef(tmp_path, monkeypatch):
 def test_sqlite_federated_terminals_bound_verification_and_cdef_fetches(tmp_path, monkeypatch):
     store_dir = tmp_path / "store"
     config = SQLiteQueryIndexConfig(journal_mode="delete")
-    publishing_repo = Repo(stores=DirStore(store_dir, query_index=config))
+    publishing_repo = Repo(stores=DirStore(store_dir, query_index="memory"))
     definitions = []
     object_count = 270  # Cross the 256-row terminal page boundary.
     try:
