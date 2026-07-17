@@ -77,6 +77,9 @@ jobs:
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/dryml-measure/coverage.xml
+          disable_search: true
+          fail_ci_if_error: true
           verbose: true
 
   windows-tests:

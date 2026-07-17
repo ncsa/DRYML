@@ -125,6 +125,7 @@ def run_phase(
             command.append("--cov-append")
     else:
         command.append("--no-cov")
+    command.append(f"--basetemp={output_dir / 'pytest-temp'}")
     command.extend(["-m", markexpr, *files])
     command.extend([
         "--dryml-timing-output", str(timing_path),
@@ -134,7 +135,11 @@ def run_phase(
     ])
     started = time.monotonic()
     environment = os.environ.copy()
-    for variable in ("PYTEST_ADDOPTS", "PYTEST_DEBUG", "PYTEST_PLUGINS"):
+    for variable in (
+        "PYTEST_ADDOPTS", "PYTEST_DEBUG", "PYTEST_PLUGINS",
+        "COVERAGE_CORE", "COVERAGE_DEBUG", "COVERAGE_DEBUG_FILE",
+        "COVERAGE_FILE", "COVERAGE_PROCESS_START", "COVERAGE_RCFILE",
+    ):
         environment.pop(variable, None)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     coverage_core = _coverage_core(coverage=coverage, append_coverage=append_coverage)
@@ -586,7 +591,7 @@ def _validate_pytest_args(arguments: list[str]) -> None:
             "-c", "--config-file", "-m", "--pyargs", "--collect-only", "--co", "-o",
         } or option.startswith(
             _FORBIDDEN_PYTEST_OPTION_PREFIXES
-        ):
+        ) or argument.startswith(("-c", "-o", "-p", "--override")):
             raise ValueError(f"pytest argument is not safe for measurement: {option}")
         if argument == "--" or argument.startswith("@"):
             raise ValueError("pytest test paths are not supported by measurement")

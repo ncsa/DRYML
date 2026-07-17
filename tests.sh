@@ -141,7 +141,12 @@ elif [[ "$1" == "profile" ]]; then
     run_profile "$@"
 elif [[ "$1" == "measure" ]]; then
     shift
-    python ./tests/tools/measure_suite.py "$@"
+    (
+        unset PYTEST_ADDOPTS PYTEST_DEBUG PYTEST_PLUGINS
+        unset COVERAGE_CORE COVERAGE_DEBUG COVERAGE_DEBUG_FILE COVERAGE_FILE
+        unset COVERAGE_PROCESS_START COVERAGE_RCFILE
+        python ./tests/tools/measure_suite.py "$@"
+    )
 elif [[ "$1" == -* ]]; then
     run_full "$@"
 else

@@ -190,6 +190,26 @@ def test_measurement_rejects_test_paths_and_runner_output_overrides(tmp_path, ar
     assert not output_dir.exists()
 
 
+def test_measurement_rejects_config_and_plugin_bypasses(tmp_path):
+    arguments = [
+        ["--override-ini=log_file=README.md"],
+        ["--override-i=addopts=--log-file=README.md"],
+        ["--override-ini", "log_file=README.md"],
+        ["-p", "unsafe_plugin"],
+        ["-p=unsafe_plugin"],
+        ["-punsafe_plugin"],
+        ["-olog_file=README.md"],
+        ["-c/tmp/pytest.ini"],
+    ]
+
+    for index, pytest_args in enumerate(arguments):
+        output_dir = tmp_path / f"measurement-{index}"
+        with pytest.raises(SystemExit) as error:
+            measure_suite.measure(["--output-dir", str(output_dir), "smoke", *pytest_args])
+        assert error.value.code == 2
+        assert not output_dir.exists()
+
+
 def test_coverage_report_metadata_omits_caller_destinations():
     arguments = ["--cov-report=xml:/private/result.xml", "--cov-report", "html:/private/html"]
 
@@ -226,6 +246,11 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_ADDOPTS", "--log-file=README.md")
     monkeypatch.setenv("PYTEST_DEBUG", "1")
     monkeypatch.setenv("PYTEST_PLUGINS", "unsafe_plugin")
+    for variable in (
+        "COVERAGE_CORE", "COVERAGE_DEBUG", "COVERAGE_DEBUG_FILE",
+        "COVERAGE_FILE", "COVERAGE_PROCESS_START", "COVERAGE_RCFILE",
+    ):
+        monkeypatch.setenv(variable, "README.md")
 
     class FakeProcess:
         stdout = io.BytesIO(b"")
@@ -258,7 +283,11 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
     assert observed["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert all(
         name not in observed["environment"]
-        for name in ("PYTEST_ADDOPTS", "PYTEST_DEBUG", "PYTEST_PLUGINS")
+        for name in (
+            "PYTEST_ADDOPTS", "PYTEST_DEBUG", "PYTEST_PLUGINS",
+            "COVERAGE_DEBUG", "COVERAGE_DEBUG_FILE", "COVERAGE_PROCESS_START",
+            "COVERAGE_RCFILE",
+        )
     )
     assert observed["command"][:8] == [
         measure_suite.sys.executable,
@@ -270,6 +299,7 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
         "addopts=",
         "--cov=dryml",
     ]
+    assert f"--basetemp={tmp_path / 'pytest-temp'}" in observed["command"]
     assert result["coverage"] == {
         "enabled": True,
         "append": False,
@@ -389,6 +419,9 @@ def test_ci_workflow_uses_one_measurement_and_bounded_artifacts_per_job():
     assert workflow.count("retention-days: 14") == 2
     assert "measure --output-dir" in workflow
     assert "matrix.python-version == '3.12'" in workflow
+    assert "files: ${{ runner.temp }}/dryml-measure/coverage.xml" in workflow
+    assert "disable_search: true" in workflow
+    assert "fail_ci_if_error: true" in workflow
 
 
 def test_full_runner_defers_coverage_reports_until_after_append():
@@ -410,3 +443,11 @@ def test_runner_does_not_publish_inert_bootstrap_contract():
     runner = (measure_suite.ROOT / "tests.sh").read_text()
 
     assert "DRYML_TEST_BOOTSTRAP_CONTEXTS" not in runner
+
+
+def test_measure_entrypoint_clears_inherited_configuration_before_python_startup():
+    runner = (measure_suite.ROOT / "tests.sh").read_text()
+
+    assert "unset PYTEST_ADDOPTS PYTEST_DEBUG PYTEST_PLUGINS" in runner
+    assert "unset COVERAGE_CORE COVERAGE_DEBUG COVERAGE_DEBUG_FILE COVERAGE_FILE" in runner
+    assert "unset COVERAGE_PROCESS_START COVERAGE_RCFILE" in runner
