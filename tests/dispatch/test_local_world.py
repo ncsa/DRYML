@@ -210,12 +210,12 @@ def test_world_worker_key_validation_and_collision_resistant_label():
     assert left.label() != right.label()
 
 
-def test_plan_world_persists_all_specs_before_launch(tmp_path, target_module):
+def test_plan_world_persists_all_specs_before_launch(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
-    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    op = attach_operation_id(make_function_call_spec("operator:add", args=[1, 2]))
 
-    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    plan = Dispatcher(store=store).plan_world(op, world=world, inventory=_inventory())
 
     assert store.records.read_spec(plan.operation_spec["id"], family="operation")["id"] == plan.operation_spec["id"]
     assert store.records.read_spec(plan.dispatch_spec["id"], family="dispatch")["id"] == plan.dispatch_spec["id"]
@@ -224,27 +224,26 @@ def test_plan_world_persists_all_specs_before_launch(tmp_path, target_module):
     assert store.records.read_spec(plan.world_allocation_spec["id"], family="world_allocation")["id"] == plan.world_allocation_spec["id"]
 
 
-def test_plan_world_metadata_summarizes_assigned_memory_and_accelerators(tmp_path, target_module):
+def test_plan_world_metadata_summarizes_assigned_memory_and_accelerators(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1, "memory": "1GiB", "accelerators": {"gpu": 1}}}}}
-    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    op = attach_operation_id(make_function_call_spec("operator:add", args=[1, 2]))
 
-    plan = Dispatcher(store=store).plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
+    plan = Dispatcher(store=store).plan_world(op, world=world, inventory=_inventory())
 
     worker = plan.dispatch_spec["payload"]["metadata"]["dryml.world_allocation"]["workers"][0]
     assert worker["memory"] == 1024**3
     assert dict(worker["accelerators"]) == {"gpu": (0,)}
 
 
-def test_plan_world_metadata_records_explicit_oversubscription(tmp_path, target_module):
+def test_plan_world_metadata_records_explicit_oversubscription(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
-    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    op = attach_operation_id(make_function_call_spec("operator:add", args=[1, 2]))
 
     plan = Dispatcher(store=store).plan_world(
         op,
         world=world,
-        environment=_env(target_module),
         inventory=LocalResourceInventory((0,)),
         oversubscribe=True,
     )
