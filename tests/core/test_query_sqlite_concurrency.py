@@ -419,6 +419,25 @@ def test_preflight_retries_busy_schema_validation(tmp_path, monkeypatch):
     assert _stored_root_count(path) == 1
 
 
+def test_ready_validation_lease_survives_all_owner_closes(tmp_path, monkeypatch):
+    path = tmp_path / "index.sqlite"
+    idx = _index(path)
+    idx.initialize_empty()
+    other = type(idx._connections)(idx.config)
+    other.connection(readonly=True)
+    original_validate = sqlite_index_module.validate_schema
+
+    def close_owners_during_validation(con, **kwargs):
+        assert idx._connections.active_lease_count(readonly=True) == 1
+        idx._connections.close_current()
+        other.close_current()
+        original_validate(con, **kwargs)
+
+    monkeypatch.setattr(sqlite_index_module, "validate_schema", close_owners_during_validation)
+
+    idx._ensure_ready()
+
+
 def test_busy_retry_exhaustion_reports_query_index_busy(tmp_path):
     path = tmp_path / "index.sqlite"
     ready = tmp_path / "writer-ready"

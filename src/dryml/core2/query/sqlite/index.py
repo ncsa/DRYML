@@ -549,12 +549,15 @@ class SQLiteStoreQueryIndex:
         if not self.path.exists():
             self.initialize_empty()
             return
-        con = self._connections.connection(readonly=True)
-        try:
-            validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
-        except QueryIndexDirty:
+        dirty_error = None
+        with self._connections.lease(readonly=True) as con:
+            try:
+                validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
+            except QueryIndexDirty as error:
+                dirty_error = error
+        if dirty_error is not None:
             if self.store is None or not hasattr(self.store, "hydrate_index"):
-                raise
+                raise dirty_error
             self.rebuild()
 
     def _ensure_schema_in_transaction(self, con) -> None:

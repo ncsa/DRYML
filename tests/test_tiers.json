@@ -1090,6 +1090,7 @@
     "tests/core/test_query_sqlite_concurrency.py::test_preflight_retries_busy_schema_validation": "smoke",
     "tests/core/test_query_sqlite_concurrency.py::test_process_termination_before_commit_rolls_back_partial_rows": "smoke",
     "tests/core/test_query_sqlite_concurrency.py::test_read_transaction_keeps_snapshot_until_next_read_view": "smoke",
+    "tests/core/test_query_sqlite_concurrency.py::test_ready_validation_lease_survives_all_owner_closes": "smoke",
     "tests/core/test_query_sqlite_concurrency.py::test_save_plan_does_not_register_index_before_object_publication": "smoke",
     "tests/core/test_query_sqlite_concurrency.py::test_spawned_worker_opens_process_local_connection": "medium",
     "tests/core/test_query_sqlite_concurrency.py::test_uncommitted_write_is_invisible_until_commit": "smoke",
