@@ -284,10 +284,21 @@ def test_sdist_and_wheel_content_and_bounds(release_artifacts):
     assert "LICENSE" in relative_sdist
     assert not any(path.startswith("src/dryml/graph/") for path in relative_sdist)
 
-    tracked_modules = {
-        path for path in tracked
-        if path.startswith("src/dryml/") and path.endswith(".py")
+    package_dirs = {
+        Path(path).parent
+        for path in tracked
+        if path.startswith("src/dryml/") and path.endswith("/__init__.py")
     }
+    tracked_modules = set()
+    for path in tracked:
+        module = Path(path)
+        if not path.startswith("src/dryml/") or module.suffix != ".py":
+            continue
+        parent = module.parent
+        while parent != Path("src") and parent in package_dirs:
+            parent = parent.parent
+        if parent == Path("src"):
+            tracked_modules.add(path)
     assert tracked_modules <= relative_sdist_files
     expected_wheel_modules = {
         path.removeprefix("src/") for path in tracked_modules
