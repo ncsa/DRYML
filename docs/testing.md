@@ -31,7 +31,9 @@ Ordinary bounded pytest options continue to pass through, but measurement
 rejects positional test paths, marker replacement, coverage-policy overrides,
 and arguments that can replace runner-owned output files. Coverage report types
 remain pass-through requests, with any destination rewritten under the fresh
-output directory.
+output directory. Inherited pytest option/plugin/debug injection, alternate
+configuration files, repository `addopts`, and pytest argument files are also
+disabled for deterministic confinement.
 
 `full` measurement enables combined coverage by default. CI and other callers
 that need the same complete behavioral selection without coverage use:

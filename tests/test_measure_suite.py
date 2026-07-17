@@ -174,6 +174,9 @@ def test_coverage_reports_are_deferred_until_the_final_phase():
         "--cov=dryml.other",
         "--basetemp=/tmp/pytest",
         "--rootdir=/tmp/other",
+        "--config-file=/tmp/pytest.ini",
+        "-c=/tmp/pytest.ini",
+        "@/tmp/pytest-args.txt",
         "-m=other_marker",
     ],
 )
@@ -220,6 +223,9 @@ def test_coverage_core_is_explicit_and_phase_appropriate():
 
 def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
     observed = {}
+    monkeypatch.setenv("PYTEST_ADDOPTS", "--log-file=README.md")
+    monkeypatch.setenv("PYTEST_DEBUG", "1")
+    monkeypatch.setenv("PYTEST_PLUGINS", "unsafe_plugin")
 
     class FakeProcess:
         stdout = io.BytesIO(b"")
@@ -250,8 +256,19 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
     assert observed["environment"]["COVERAGE_CORE"] == "sysmon"
     assert observed["environment"]["COVERAGE_FILE"] == str(tmp_path / ".coverage")
     assert observed["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
-    assert observed["command"][:6] == [
-        measure_suite.sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--cov=dryml",
+    assert all(
+        name not in observed["environment"]
+        for name in ("PYTEST_ADDOPTS", "PYTEST_DEBUG", "PYTEST_PLUGINS")
+    )
+    assert observed["command"][:8] == [
+        measure_suite.sys.executable,
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-o",
+        "addopts=",
+        "--cov=dryml",
     ]
     assert result["coverage"] == {
         "enabled": True,

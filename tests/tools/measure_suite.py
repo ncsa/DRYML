@@ -116,7 +116,9 @@ def run_phase(
     timing_path = output_dir / f"timing-{phase}.json"
     junit_path = output_dir / f"junit-{phase}.xml"
     files = selected_files(tiers)
-    command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"]
+    command = [
+        sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-o", "addopts=",
+    ]
     if coverage:
         command.append("--cov=dryml")
         if append_coverage:
@@ -132,6 +134,8 @@ def run_phase(
     ])
     started = time.monotonic()
     environment = os.environ.copy()
+    for variable in ("PYTEST_ADDOPTS", "PYTEST_DEBUG", "PYTEST_PLUGINS"):
+        environment.pop(variable, None)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     coverage_core = _coverage_core(coverage=coverage, append_coverage=append_coverage)
     if coverage_core is not None:
@@ -578,11 +582,13 @@ def _validate_pytest_args(arguments: list[str]) -> None:
             if value.split(":", 1)[0] not in _COVERAGE_REPORT_TYPES:
                 raise ValueError("unsupported coverage report type")
             continue
-        if option in {"-m", "--pyargs", "--collect-only", "--co", "-o"} or option.startswith(
+        if option in {
+            "-c", "--config-file", "-m", "--pyargs", "--collect-only", "--co", "-o",
+        } or option.startswith(
             _FORBIDDEN_PYTEST_OPTION_PREFIXES
         ):
             raise ValueError(f"pytest argument is not safe for measurement: {option}")
-        if argument == "--":
+        if argument == "--" or argument.startswith("@"):
             raise ValueError("pytest test paths are not supported by measurement")
         if argument.startswith("-"):
             consume_value = "=" not in argument and option in _PYTEST_OPTIONS_WITH_VALUES
