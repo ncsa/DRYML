@@ -149,8 +149,9 @@ def test_coverage_reports_are_deferred_until_the_final_phase():
     ) == arguments
 
 
-def test_heavy_phase_enables_context_bootstrap(tmp_path, monkeypatch):
+def test_heavy_phase_does_not_publish_inert_bootstrap_contract(tmp_path, monkeypatch):
     observed = {}
+    monkeypatch.delenv("DRYML_TEST_BOOTSTRAP_CONTEXTS", raising=False)
 
     class FakeProcess:
         stdout = io.BytesIO(b"")
@@ -177,7 +178,7 @@ def test_heavy_phase_enables_context_bootstrap(tmp_path, monkeypatch):
         pytest_args=[],
     )
 
-    assert observed["environment"][measure_suite.BOOTSTRAP_ENV] == "1"
+    assert "DRYML_TEST_BOOTSTRAP_CONTEXTS" not in observed["environment"]
     assert "--no-cov" in observed["command"]
     assert result["selection"]["selected_files"] == ["tests/x.py"]
 
@@ -243,3 +244,9 @@ def test_full_runner_defers_coverage_reports_until_after_append():
     assert "coverage_stripped_args" in medium_command
     assert "--cov-append" in heavy_command
     assert "stripped_args" in heavy_command
+
+
+def test_runner_does_not_publish_inert_bootstrap_contract():
+    runner = (measure_suite.ROOT / "tests.sh").read_text()
+
+    assert "DRYML_TEST_BOOTSTRAP_CONTEXTS" not in runner

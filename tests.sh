@@ -46,7 +46,7 @@ run_tier() {
         exit 2
     fi
     if [ "$tier_name" == "heavy" ]; then
-        DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov -m "$markexpr" "${selected[@]}" "$@"
+        pytest --no-cov -m "$markexpr" "${selected[@]}" "$@"
     else
         pytest --no-cov -m "$markexpr" "${selected[@]}" "$@"
     fi
@@ -92,7 +92,7 @@ run_full() {
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
     pytest --cov=dryml --cov-report= -m "speed_smoke or speed_medium" "${medium_selected[@]}" "${coverage_stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --cov=dryml --cov-append -m "speed_heavy" "${heavy_selected[@]}" "${stripped_args[@]}"
+    pytest --cov=dryml --cov-append -m "speed_heavy" "${heavy_selected[@]}" "${stripped_args[@]}"
 }
 
 run_profile() {
@@ -118,7 +118,7 @@ run_profile() {
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
     pytest --no-cov -m "speed_smoke or speed_medium" "${medium_selected[@]}" --dryml-timing-output "$medium_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
-    DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest --no-cov -m "speed_heavy" "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
+    pytest --no-cov -m "speed_heavy" "${heavy_selected[@]}" --dryml-timing-output "$heavy_output" --dryml-timing-summary "${unknown_args[@]}" "${stripped_args[@]}"
     python ./tests/tools/test_buckets.py update "$medium_output" "$heavy_output"
     python ./tests/tools/test_buckets.py summary --all-files
 }

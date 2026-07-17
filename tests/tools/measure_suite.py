@@ -30,7 +30,6 @@ PARENT_ROOT = ROOT.parent
 LOG_LIMIT_BYTES = 1024 * 1024
 VALID_MODES = ("smoke", "medium", "heavy", "full")
 DEPENDENCY_PACKAGES = ("pytest", "pytest-cov", "numpy", "dill", "packaging")
-BOOTSTRAP_ENV = "DRYML_TEST_BOOTSTRAP_CONTEXTS"
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)([\"']?\b(?:token|password|passwd|secret|api[_-]?key|authorization)\b[\"']?)"
     r"(\s*[:=]\s*)([^\s,;]+)"
@@ -99,14 +98,11 @@ def run_phase(
         f"--junitxml={junit_path}",
         *pytest_args,
     ])
-    environment = os.environ.copy()
-    if phase == "heavy":
-        environment[BOOTSTRAP_ENV] = "1"
     started = time.monotonic()
     process = subprocess.Popen(
         command,
         cwd=ROOT,
-        env=environment,
+        env=os.environ.copy(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )

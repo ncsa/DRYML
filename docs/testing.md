@@ -28,10 +28,8 @@ that need the same complete behavioral selection without coverage use:
 ./tests.sh measure --output-dir /tmp/dryml-measure-full --no-coverage full
 ```
 
-Heavy measurement phases preserve the same context-bootstrap behavior as the
-canonical heavy and full commands. On platforms without standard-library peak
-child-memory support, the machine-readable field is explicitly unavailable
-rather than reported as zero.
+On platforms without standard-library peak-child-memory support, the
+machine-readable field is explicitly unavailable rather than reported as zero.
 
 Run the fastest smoke bucket:
 
@@ -143,15 +141,3 @@ When adding tests:
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
 
 If a new file is not listed in `path_tiers`, it inherits its category tier.
-
-## Context Bootstrap
-
-Historically, test startup initialized JAX, Torch, and TensorFlow contexts for every run. That made even focused core tests pay framework import cost and could perturb concurrency tests.
-
-Context bootstrap is now opt-in:
-
-```bash
-DRYML_TEST_BOOTSTRAP_CONTEXTS=1 pytest ...
-```
-
-`./tests.sh heavy`, `./tests.sh full`, and `./tests.sh profile` enable this only for the heavy phase. Smoke and medium runs leave global contexts uninitialized unless an individual test initializes what it needs.
