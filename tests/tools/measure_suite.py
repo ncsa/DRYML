@@ -32,6 +32,36 @@ PARENT_ROOT = ROOT.parent
 LOG_LIMIT_BYTES = 1024 * 1024
 VALID_MODES = ("smoke", "medium", "heavy", "full")
 DEPENDENCY_PACKAGES = ("pytest", "pytest-cov", "numpy", "dill", "packaging")
+_COVERAGE_REPORT_DESTINATIONS = {
+    "annotate": "coverage-annotate",
+    "html": "htmlcov",
+    "json": "coverage.json",
+    "lcov": "coverage.lcov",
+    "markdown": "coverage.md",
+    "markdown-append": "coverage.md",
+    "xml": "coverage.xml",
+}
+_COVERAGE_REPORT_TYPES = {"", "term", "term-missing", *_COVERAGE_REPORT_DESTINATIONS}
+_FORBIDDEN_PYTEST_OPTION_PREFIXES = (
+    "--basetemp",
+    "--cache",
+    "--cov",
+    "--debug",
+    "--dryml-timing-",
+    "--html",
+    "--json-report",
+    "--junit",
+    "--log-file",
+    "--output",
+    "--report-log",
+    "--result-log",
+    "--rootdir",
+)
+_PYTEST_OPTIONS_WITH_VALUES = {
+    "-k", "--capture", "--color", "--deselect", "--durations",
+    "--durations-min", "--ignore", "--ignore-glob", "--log-level",
+    "--maxfail", "--show-capture", "--tb", "--verbosity",
+}
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)([\"']?\b(?:token|password|passwd|secret|api[_-]?key|authorization)\b[\"']?)"
     r"(\s*[:=]\s*)([^\s,;]+)"
@@ -86,7 +116,7 @@ def run_phase(
     timing_path = output_dir / f"timing-{phase}.json"
     junit_path = output_dir / f"junit-{phase}.xml"
     files = selected_files(tiers)
-    command = [sys.executable, "-m", "pytest"]
+    command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"]
     if coverage:
         command.append("--cov=dryml")
         if append_coverage:
@@ -102,9 +132,11 @@ def run_phase(
     ])
     started = time.monotonic()
     environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     coverage_core = _coverage_core(coverage=coverage, append_coverage=append_coverage)
     if coverage_core is not None:
         environment["COVERAGE_CORE"] = coverage_core
+        environment["COVERAGE_FILE"] = str(output_dir / ".coverage")
     process = subprocess.Popen(
         command,
         cwd=ROOT,
@@ -167,6 +199,7 @@ def measure(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         output_dir = fresh_output_dir(args.output_dir)
+        _validate_pytest_args(args.pytest_args)
     except ValueError as error:
         parser.error(str(error))
     output_dir.mkdir(mode=0o700, parents=True)
@@ -184,6 +217,7 @@ def measure(argv: list[str] | None = None) -> int:
             phase_pytest_args = _phase_pytest_args(
                 args.pytest_args,
                 defer_coverage_reports=coverage and len(phase_specs) > 1 and not append,
+                output_dir=output_dir,
             )
             result = run_phase(
                 output_dir=output_dir,
@@ -453,16 +487,27 @@ def _git_output(root: Path, *arguments: str) -> str | None:
         return None
 
 
+def _git_repository_identity(root: Path) -> tuple[str, bool] | None:
+    top_level = _git_output(root, "rev-parse", "--show-toplevel")
+    resolved_top = os.path.normcase(str(Path(top_level).resolve())) if top_level is not None else None
+    if resolved_top != os.path.normcase(str(root.resolve())):
+        return None
+    commit = _git_output(root, "rev-parse", "HEAD")
+    status = _git_output(root, "status", "--porcelain=v1", "--untracked-files=no")
+    if commit is None or status is None:
+        return None
+    return commit, status == ""
+
+
 def _candidate_identity() -> dict[str, Any]:
-    nested_status = _git_output(ROOT, "status", "--porcelain=v1", "--untracked-files=no")
-    parent_status = _git_output(PARENT_ROOT, "status", "--porcelain=v1", "--untracked-files=no")
-    parent_commit = _git_output(PARENT_ROOT, "rev-parse", "HEAD")
+    nested = _git_repository_identity(ROOT)
+    parent = _git_repository_identity(PARENT_ROOT)
     return {
-        "nested_commit": _git_output(ROOT, "rev-parse", "HEAD"),
-        "parent_commit": parent_commit,
-        "parent_repository_available": parent_commit is not None,
-        "nested_tracked_clean": nested_status == "" if nested_status is not None else None,
-        "parent_tracked_clean": parent_status == "" if parent_status is not None else None,
+        "nested_commit": nested[0] if nested is not None else None,
+        "parent_commit": parent[0] if parent is not None else None,
+        "parent_repository_available": parent is not None,
+        "nested_tracked_clean": nested[1] if nested is not None else None,
+        "parent_tracked_clean": parent[1] if parent is not None else None,
     }
 
 
@@ -480,26 +525,79 @@ def _coverage_reports(arguments: list[str]) -> list[str]:
     reports = []
     for index, argument in enumerate(arguments):
         if argument.startswith("--cov-report="):
-            reports.append(argument.split("=", 1)[1])
+            reports.append(argument.split("=", 1)[1].split(":", 1)[0])
         elif argument == "--cov-report" and index + 1 < len(arguments):
-            reports.append(arguments[index + 1])
+            reports.append(arguments[index + 1].split(":", 1)[0])
     return reports
 
 
-def _phase_pytest_args(arguments: list[str], *, defer_coverage_reports: bool) -> list[str]:
-    if not defer_coverage_reports:
-        return list(arguments)
-    filtered = []
+def _phase_pytest_args(
+    arguments: list[str], *, defer_coverage_reports: bool, output_dir: Path,
+) -> list[str]:
+    filtered: list[str] = []
     skip_value = False
-    for argument in arguments:
+    for index, argument in enumerate(arguments):
         if skip_value:
             skip_value = False
             continue
         if argument == "--cov-report":
+            value = arguments[index + 1]
             skip_value = True
-        elif not argument.startswith("--cov-report="):
+        elif argument.startswith("--cov-report="):
+            value = argument.split("=", 1)[1]
+        else:
             filtered.append(argument)
-    return [*filtered, "--cov-report="]
+            continue
+        if not defer_coverage_reports:
+            filtered.append(f"--cov-report={_external_coverage_report(value, output_dir)}")
+    return [*filtered, "--cov-report="] if defer_coverage_reports else filtered
+
+
+def _external_coverage_report(value: str, output_dir: Path) -> str:
+    report_type = value.split(":", 1)[0]
+    if report_type in {"", "term", "term-missing"}:
+        return value
+    return f"{report_type}:{output_dir / _COVERAGE_REPORT_DESTINATIONS[report_type]}"
+
+
+def _validate_pytest_args(arguments: list[str]) -> None:
+    consume_value = False
+    for index, argument in enumerate(arguments):
+        if consume_value:
+            consume_value = False
+            continue
+        option = argument.split("=", 1)[0]
+        if option == "--cov-report":
+            if "=" in argument:
+                value = argument.split("=", 1)[1]
+            elif index + 1 < len(arguments):
+                value = arguments[index + 1]
+                consume_value = True
+            else:
+                raise ValueError("--cov-report requires a value")
+            if value.split(":", 1)[0] not in _COVERAGE_REPORT_TYPES:
+                raise ValueError("unsupported coverage report type")
+            continue
+        if option in {"-m", "--pyargs", "--collect-only", "--co", "-o"} or option.startswith(
+            _FORBIDDEN_PYTEST_OPTION_PREFIXES
+        ):
+            raise ValueError(f"pytest argument is not safe for measurement: {option}")
+        if argument == "--":
+            raise ValueError("pytest test paths are not supported by measurement")
+        if argument.startswith("-"):
+            consume_value = "=" not in argument and option in _PYTEST_OPTIONS_WITH_VALUES
+            continue
+        path_text = argument.split("::", 1)[0]
+        candidate = Path(path_text)
+        if (
+            candidate.is_absolute()
+            or "/" in argument
+            or "\\" in argument
+            or "::" in argument
+            or path_text.endswith(".py")
+            or (ROOT / candidate).exists()
+        ):
+            raise ValueError("pytest test paths are not supported by measurement")
 
 
 if __name__ == "__main__":

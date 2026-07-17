@@ -7,6 +7,7 @@ import argparse
 import functools
 import json
 import math
+import os
 import platform
 import statistics
 import subprocess
@@ -470,6 +471,12 @@ def _measure_scenario(scenario: Scenario, context: BenchmarkContext, samples: in
 
 def _git_sha(path: Path) -> str | None:
     try:
+        top_level = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], cwd=path, text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        resolved_top = os.path.normcase(str(Path(top_level).resolve()))
+        if resolved_top != os.path.normcase(str(path.resolve())):
+            return None
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=path, text=True, stderr=subprocess.DEVNULL,
         ).strip()

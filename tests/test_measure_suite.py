@@ -149,13 +149,50 @@ def test_full_no_coverage_preserves_both_behavioral_phases():
 
 def test_coverage_reports_are_deferred_until_the_final_phase():
     arguments = ["-q", "--cov-report=xml", "--cov-report", "html"]
+    output_dir = measure_suite.ROOT.parent / "external-measurement"
 
     assert measure_suite._phase_pytest_args(
-        arguments, defer_coverage_reports=True,
+        arguments, defer_coverage_reports=True, output_dir=output_dir,
     ) == ["-q", "--cov-report="]
     assert measure_suite._phase_pytest_args(
-        arguments, defer_coverage_reports=False,
-    ) == arguments
+        arguments, defer_coverage_reports=False, output_dir=output_dir,
+    ) == [
+        "-q",
+        f"--cov-report=xml:{output_dir / 'coverage.xml'}",
+        f"--cov-report=html:{output_dir / 'htmlcov'}",
+    ]
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "tests/untracked",
+        "tests/x.py::test_x",
+        "--junitxml=tests/test_tiers.json",
+        "--dryml-timing-output=/tmp/other.json",
+        "--debug=tests/test_tiers.json",
+        "--cov=dryml.other",
+        "--basetemp=/tmp/pytest",
+        "--rootdir=/tmp/other",
+        "-m=other_marker",
+    ],
+)
+def test_measurement_rejects_test_paths_and_runner_output_overrides(tmp_path, argument):
+    output_dir = tmp_path / "measurement"
+
+    with pytest.raises(SystemExit) as error:
+        measure_suite.measure(["--output-dir", str(output_dir), "smoke", argument])
+
+    assert error.value.code == 2
+    assert not output_dir.exists()
+
+
+def test_coverage_report_metadata_omits_caller_destinations():
+    arguments = ["--cov-report=xml:/private/result.xml", "--cov-report", "html:/private/html"]
+
+    measure_suite._validate_pytest_args(arguments)
+
+    assert measure_suite._coverage_reports(arguments) == ["xml", "html"]
 
 
 def test_coverage_core_is_explicit_and_phase_appropriate():
@@ -191,7 +228,8 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
         def wait(self):
             return 0
 
-    def fake_popen(_command, **kwargs):
+    def fake_popen(command, **kwargs):
+        observed["command"] = command
         observed["environment"] = kwargs["env"]
         return FakeProcess()
 
@@ -210,6 +248,11 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
     )
 
     assert observed["environment"]["COVERAGE_CORE"] == "sysmon"
+    assert observed["environment"]["COVERAGE_FILE"] == str(tmp_path / ".coverage")
+    assert observed["environment"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert observed["command"][:6] == [
+        measure_suite.sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "--cov=dryml",
+    ]
     assert result["coverage"] == {
         "enabled": True,
         "append": False,
@@ -259,6 +302,36 @@ def test_memory_is_explicitly_unavailable_without_resource(monkeypatch):
         "available": False,
         "reason": "unsupported_platform",
     }
+
+
+def test_git_identity_rejects_an_unrelated_enclosing_repository(tmp_path, monkeypatch):
+    expected_root = tmp_path / "standalone-source"
+    expected_root.mkdir()
+
+    def fake_git_output(_root, *arguments):
+        if arguments == ("rev-parse", "--show-toplevel"):
+            return str(tmp_path)
+        raise AssertionError("identity lookup must stop after the root mismatch")
+
+    monkeypatch.setattr(measure_suite, "_git_output", fake_git_output)
+
+    assert measure_suite._git_repository_identity(expected_root) is None
+
+
+def test_git_identity_accepts_only_the_exact_repository_root(tmp_path, monkeypatch):
+    expected_root = tmp_path / "repository"
+    expected_root.mkdir()
+
+    def fake_git_output(_root, *arguments):
+        return {
+            ("rev-parse", "--show-toplevel"): str(expected_root),
+            ("rev-parse", "HEAD"): "candidate-sha",
+            ("status", "--porcelain=v1", "--untracked-files=no"): "",
+        }[arguments]
+
+    monkeypatch.setattr(measure_suite, "_git_output", fake_git_output)
+
+    assert measure_suite._git_repository_identity(expected_root) == ("candidate-sha", True)
 
 
 def test_logs_and_commands_redact_credentials_and_private_paths(tmp_path):

@@ -15,6 +15,8 @@ Capture a non-mutating external measurement artifact:
 `measure` requires a fresh directory outside the repository. It preserves the
 tier manifest and writes versioned `run.json`, `nodes.json`, per-phase timing
 JSON and JUnit XML, and redacted stdout/stderr logs bounded to 1 MiB per stream.
+Coverage state and requested file reports are also confined to that directory;
+measurement disables repository-local pytest cache and bytecode writes.
 The result records explicit success, invalidated, incomplete, or failure status;
 unsupported modes fail at argument validation. Use `--invalidate-reason TEXT`
 when host pressure or another reference condition makes an otherwise completed
@@ -25,6 +27,11 @@ When DRYML runs inside its coordination workspace, artifacts also record the
 parent commit and tracked-clean state. Standalone checkouts, including normal
 GitHub Actions jobs, report the parent repository as unavailable rather than
 misclassifying an otherwise complete measurement.
+Ordinary bounded pytest options continue to pass through, but measurement
+rejects positional test paths, marker replacement, coverage-policy overrides,
+and arguments that can replace runner-owned output files. Coverage report types
+remain pass-through requests, with any destination rewritten under the fresh
+output directory.
 
 `full` measurement enables combined coverage by default. CI and other callers
 that need the same complete behavioral selection without coverage use:

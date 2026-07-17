@@ -86,6 +86,20 @@ def test_unknown_scenario_fails_closed():
         )
 
 
+def test_candidate_sha_rejects_an_unrelated_enclosing_repository(tmp_path, monkeypatch):
+    expected_root = tmp_path / "standalone-source"
+    expected_root.mkdir()
+
+    def fake_check_output(command, **_kwargs):
+        if command[-1] == "--show-toplevel":
+            return str(tmp_path)
+        raise AssertionError("identity lookup must stop after the root mismatch")
+
+    monkeypatch.setattr(benchmark.subprocess, "check_output", fake_check_output)
+
+    assert benchmark._git_sha(expected_root) is None
+
+
 def test_failed_scenario_cleans_temporary_store(tmp_path, monkeypatch):
     created = []
     original = benchmark.tempfile.TemporaryDirectory
