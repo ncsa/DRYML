@@ -149,6 +149,65 @@ def test_coverage_reports_are_deferred_until_the_final_phase():
     ) == arguments
 
 
+def test_coverage_core_is_explicit_and_phase_appropriate():
+    assert measure_suite._coverage_core(
+        coverage=False, append_coverage=False, version_info=(3, 12),
+        coverage_version="7.13.5",
+    ) is None
+    assert measure_suite._coverage_core(
+        coverage=True, append_coverage=False, version_info=(3, 11),
+        coverage_version="7.13.5",
+    ) == "ctrace"
+    assert measure_suite._coverage_core(
+        coverage=True, append_coverage=False, version_info=(3, 12),
+        coverage_version="7.13.5",
+    ) == "sysmon"
+    assert measure_suite._coverage_core(
+        coverage=True, append_coverage=True, version_info=(3, 12),
+        coverage_version="7.13.5",
+    ) == "ctrace"
+    assert measure_suite._coverage_core(
+        coverage=True, append_coverage=False, version_info=(3, 12),
+        coverage_version="7.3.4",
+    ) == "ctrace"
+
+
+def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
+    observed = {}
+
+    class FakeProcess:
+        stdout = io.BytesIO(b"")
+        stderr = io.BytesIO(b"")
+
+        def wait(self):
+            return 0
+
+    def fake_popen(_command, **kwargs):
+        observed["environment"] = kwargs["env"]
+        return FakeProcess()
+
+    monkeypatch.setattr(measure_suite, "selected_files", lambda _tiers: ["tests/x.py"])
+    monkeypatch.setattr(measure_suite, "_coverage_core", lambda **_kwargs: "sysmon")
+    monkeypatch.setattr(measure_suite.subprocess, "Popen", fake_popen)
+
+    result = measure_suite.run_phase(
+        output_dir=tmp_path,
+        phase="medium",
+        tiers=["smoke", "medium"],
+        markexpr="speed_smoke or speed_medium",
+        coverage=True,
+        append_coverage=False,
+        pytest_args=[],
+    )
+
+    assert observed["environment"]["COVERAGE_CORE"] == "sysmon"
+    assert result["coverage"] == {
+        "enabled": True,
+        "append": False,
+        "core": "sysmon",
+    }
+
+
 def test_heavy_phase_does_not_publish_inert_bootstrap_contract(tmp_path, monkeypatch):
     observed = {}
     monkeypatch.delenv("DRYML_TEST_BOOTSTRAP_CONTEXTS", raising=False)
@@ -242,8 +301,10 @@ def test_full_runner_defers_coverage_reports_until_after_append():
     )
     assert "--cov-report=" in medium_command
     assert "coverage_stripped_args" in medium_command
+    assert 'COVERAGE_CORE="$medium_coverage_core"' in medium_command
     assert "--cov-append" in heavy_command
     assert "stripped_args" in heavy_command
+    assert "COVERAGE_CORE=ctrace" in heavy_command
 
 
 def test_runner_does_not_publish_inert_bootstrap_contract():

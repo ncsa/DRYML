@@ -91,8 +91,12 @@ run_full() {
     strip_coverage_reports "${stripped_args[@]}"
     mapfile -t medium_selected < <(python ./tests/tools/test_buckets.py select smoke medium)
     mapfile -t heavy_selected < <(python ./tests/tools/test_buckets.py select heavy)
-    pytest --cov=dryml --cov-report= -m "speed_smoke or speed_medium" "${medium_selected[@]}" "${coverage_stripped_args[@]}"
-    pytest --cov=dryml --cov-append -m "speed_heavy" "${heavy_selected[@]}" "${stripped_args[@]}"
+    medium_coverage_core="ctrace"
+    if python -c 'import sys; from importlib.metadata import version; from packaging.version import Version; raise SystemExit(sys.version_info < (3, 12) or Version(version("coverage")) < Version("7.4"))'; then
+        medium_coverage_core="sysmon"
+    fi
+    COVERAGE_CORE="$medium_coverage_core" pytest --cov=dryml --cov-report= -m "speed_smoke or speed_medium" "${medium_selected[@]}" "${coverage_stripped_args[@]}"
+    COVERAGE_CORE=ctrace pytest --cov=dryml --cov-append -m "speed_heavy" "${heavy_selected[@]}" "${stripped_args[@]}"
 }
 
 run_profile() {

@@ -19,6 +19,8 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from packaging.version import Version
+
 try:
     import resource
 except ImportError:  # pragma: no cover - exercised on Windows CI
@@ -99,10 +101,14 @@ def run_phase(
         *pytest_args,
     ])
     started = time.monotonic()
+    environment = os.environ.copy()
+    coverage_core = _coverage_core(coverage=coverage, append_coverage=append_coverage)
+    if coverage_core is not None:
+        environment["COVERAGE_CORE"] = coverage_core
     process = subprocess.Popen(
         command,
         cwd=ROOT,
-        env=os.environ.copy(),
+        env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -122,7 +128,11 @@ def run_phase(
         "command": _sanitize_command(command, output_dir),
         "returncode": returncode,
         "wall_seconds": time.monotonic() - started,
-        "coverage": {"enabled": coverage, "append": append_coverage},
+        "coverage": {
+            "enabled": coverage,
+            "append": append_coverage,
+            "core": coverage_core,
+        },
         "selection": {
             "tiers": tiers,
             "marker_expression": markexpr,
@@ -293,6 +303,26 @@ def _phase_specs(mode: str, coverage: bool):
         "heavy": (["heavy"], "speed_heavy"),
     }[mode]
     return ((mode, tiers, markexpr, coverage, False),)
+
+
+def _coverage_core(
+    *, coverage: bool, append_coverage: bool, version_info=None,
+    coverage_version: str | None = None,
+) -> str | None:
+    """Select the deterministic coverage core for one isolated phase."""
+    if not coverage:
+        return None
+    if version_info is None:
+        version_info = sys.version_info
+    if coverage_version is None:
+        coverage_version = metadata.version("coverage")
+    if (
+        not append_coverage
+        and version_info >= (3, 12)
+        and Version(coverage_version) >= Version("7.4")
+    ):
+        return "sysmon"
+    return "ctrace"
 
 
 def _load_timing(path: Path, phase: str) -> dict[str, Any]:

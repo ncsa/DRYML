@@ -58,6 +58,12 @@ Run the full suite with coverage:
 The default `./tests.sh` behavior remains a full run with coverage. Internally, full runs execute smoke/medium files first and heavy files second. This avoids collecting heavyweight framework tests during the fast/mid part of the run while still producing combined coverage through `pytest-cov` append mode.
 Requested XML, HTML, or other coverage reports are generated only by the heavy
 phase after the combined coverage data is complete.
+On Python 3.12 and newer with Coverage.py 7.4 or newer, the smoke/medium phase
+uses Coverage.py's `sysmon` core for lower tracing overhead. The heavy append
+phase uses `ctrace`; older Python or Coverage.py versions use `ctrace` for both
+phases. Measurement artifacts record the core selected for each phase. Both
+cores contribute ordinary line data to the same combined coverage target and
+reports.
 
 ## Speed Tiers
 
