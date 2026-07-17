@@ -10,6 +10,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -111,6 +112,7 @@ def selected_files(tiers: list[str]) -> list[str]:
 def run_phase(
     *, output_dir: Path, phase: str, tiers: list[str], markexpr: str,
     coverage: bool, append_coverage: bool, pytest_args: list[str],
+    pytest_temp_dir: Path,
 ) -> dict[str, Any]:
     """Run one selected pytest phase and write bounded phase logs."""
     timing_path = output_dir / f"timing-{phase}.json"
@@ -125,7 +127,7 @@ def run_phase(
             command.append("--cov-append")
     else:
         command.append("--no-cov")
-    command.append(f"--basetemp={output_dir / 'pytest-temp'}")
+    command.append(f"--basetemp={pytest_temp_dir}")
     command.extend(["-m", markexpr, *files])
     command.extend([
         "--dryml-timing-output", str(timing_path),
@@ -166,7 +168,10 @@ def run_phase(
         _write_sanitized_log(output_dir / f"{phase}.{stream}.log", capture.buffer, output_dir)
     return {
         "phase": phase,
-        "command": _sanitize_command(command, output_dir),
+        "command": _sanitize_command([
+            "--basetemp=<pytest-temp>" if arg.startswith("--basetemp=") else arg
+            for arg in command
+        ], output_dir),
         "returncode": returncode,
         "wall_seconds": time.monotonic() - started,
         "coverage": {
@@ -222,24 +227,29 @@ def measure(argv: list[str] | None = None) -> int:
     memory_before = _peak_child_memory()
     host_before = _host_snapshot()
     try:
-        for phase, tiers, markexpr, coverage, append in phase_specs:
-            phase_pytest_args = _phase_pytest_args(
-                args.pytest_args,
-                defer_coverage_reports=coverage and len(phase_specs) > 1 and not append,
-                output_dir=output_dir,
-            )
-            result = run_phase(
-                output_dir=output_dir,
-                phase=phase,
-                tiers=tiers,
-                markexpr=markexpr,
-                coverage=coverage,
-                append_coverage=append,
-                pytest_args=phase_pytest_args,
-            )
-            phases.append(result)
-            if result["returncode"]:
-                break
+        with tempfile.TemporaryDirectory(
+            prefix=f".{output_dir.name}-pytest-", dir=output_dir.parent,
+        ) as temp_dir:
+            pytest_temp_dir = Path(temp_dir)
+            for phase, tiers, markexpr, coverage, append in phase_specs:
+                phase_pytest_args = _phase_pytest_args(
+                    args.pytest_args,
+                    defer_coverage_reports=coverage and len(phase_specs) > 1 and not append,
+                    output_dir=output_dir,
+                )
+                result = run_phase(
+                    output_dir=output_dir,
+                    phase=phase,
+                    tiers=tiers,
+                    markexpr=markexpr,
+                    coverage=coverage,
+                    append_coverage=append,
+                    pytest_args=phase_pytest_args,
+                    pytest_temp_dir=pytest_temp_dir,
+                )
+                phases.append(result)
+                if result["returncode"]:
+                    break
     except Exception as error:  # Preserve diagnostics and partial artifacts.
         run_error = _sanitize_text(f"{type(error).__name__}: {error}", output_dir)[:2000]
 

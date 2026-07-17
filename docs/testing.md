@@ -34,8 +34,10 @@ remain pass-through requests, with any destination rewritten under the fresh
 output directory. Inherited pytest option/plugin/debug injection, alternate
 configuration files and overrides, direct plugin loading, repository `addopts`,
 pytest argument files, and inherited coverage configuration/debug paths are also
-disabled for deterministic confinement. Pytest's temporary root is runner-owned
-inside the fresh output directory.
+disabled for deterministic confinement. Pytest's temporary root is a
+runner-owned sibling of the output directory that is removed before publishable
+measurement artifacts are finalized; test Stores, products, and raw worker
+payloads are therefore excluded from the artifact directory.
 
 `full` measurement enables combined coverage by default. CI and other callers
 that need the same complete behavioral selection without coverage use:

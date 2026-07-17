@@ -37,9 +37,15 @@ def test_fresh_output_dir_rejects_repository_and_existing_paths(tmp_path):
 
 def test_measure_writes_versioned_non_mutating_artifacts(tmp_path, monkeypatch):
     output_dir = tmp_path / "measurement"
+    pytest_temp_dirs = []
 
     def fake_run_phase(**kwargs):
         phase = kwargs["phase"]
+        pytest_temp_dir = kwargs["pytest_temp_dir"]
+        pytest_temp_dirs.append(pytest_temp_dir)
+        payload = pytest_temp_dir / "store" / "objects"
+        payload.mkdir(parents=True)
+        (payload / "def.pkl").write_bytes(b"test payload")
         write_phase_artifacts(kwargs["output_dir"], phase)
         return {
             "phase": phase,
@@ -71,6 +77,9 @@ def test_measure_writes_versioned_non_mutating_artifacts(tmp_path, monkeypatch):
     assert run["counts"]["outcomes"] == {"passed": 1}
     assert nodes["records"] == [{"nodeid": "tests/x.py::test_x"}]
     assert ET.parse(output_dir / "junit.xml").getroot().attrib["tests"] == "1"
+    assert pytest_temp_dirs and all(not path.exists() for path in pytest_temp_dirs)
+    assert not list(output_dir.rglob("*.pkl"))
+    assert not (output_dir / "pytest-temp").exists()
 
 
 def test_measure_fails_before_overwriting_existing_output(tmp_path):
@@ -276,6 +285,7 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
         coverage=True,
         append_coverage=False,
         pytest_args=[],
+        pytest_temp_dir=tmp_path.parent / "pytest-temp",
     )
 
     assert observed["environment"]["COVERAGE_CORE"] == "sysmon"
@@ -299,7 +309,8 @@ def test_run_phase_sets_and_records_coverage_core(tmp_path, monkeypatch):
         "addopts=",
         "--cov=dryml",
     ]
-    assert f"--basetemp={tmp_path / 'pytest-temp'}" in observed["command"]
+    assert f"--basetemp={tmp_path.parent / 'pytest-temp'}" in observed["command"]
+    assert "--basetemp=<pytest-temp>" in result["command"]
     assert result["coverage"] == {
         "enabled": True,
         "append": False,
@@ -334,6 +345,7 @@ def test_heavy_phase_does_not_publish_inert_bootstrap_contract(tmp_path, monkeyp
         coverage=False,
         append_coverage=False,
         pytest_args=[],
+        pytest_temp_dir=tmp_path.parent / "pytest-temp",
     )
 
     assert "DRYML_TEST_BOOTSTRAP_CONTEXTS" not in observed["environment"]
