@@ -1079,32 +1079,6 @@ def test_mixed_memory_and_sqlite_nested_query_merges_sources(tmp_path):
     assert owner_dirs[memory_owner.definition] == (memory_store.base_dir,)
 
 
-def test_sqlite_federated_exists_stops_before_full_verification(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    repo = Repo(stores=store)
-    leaves = []
-    for idx in range(270):
-        leaf = FederationLeaf(name=f"leaf-{idx}", repo=repo)
-        leaves.append(leaf)
-        repo.save_object(leaf)
-
-    verified = 0
-    original = DefinitionQuery._verify_cdefs
-
-    def spy_verify(self, cdefs, *, stats):
-        nonlocal verified
-        verified += len(cdefs)
-        return original(self, cdefs, stats=stats)
-
-    monkeypatch.setattr(DefinitionQuery, "_verify_cdefs", spy_verify)
-
-    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().exists()
-    assert verified == 1
-    verified = 0
-    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).known().exists()
-    assert verified == 1
-
-
 def test_exists_stops_after_first_verified_cdef(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -1125,81 +1099,98 @@ def test_exists_stops_after_first_verified_cdef(tmp_path, monkeypatch):
     assert verified == 1
 
 
-def test_sqlite_exists_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    repo = Repo(stores=store)
-    leaves = []
-    for idx in range(270):
-        leaf = FederationLeaf(name=f"leaf-{idx}", repo=repo)
-        leaves.append(leaf)
-        repo.save_object(leaf)
+def test_sqlite_federated_terminals_bound_verification_and_cdef_fetches(tmp_path, monkeypatch):
+    store_dir = tmp_path / "store"
+    config = SQLiteQueryIndexConfig(journal_mode="delete")
+    publishing_repo = Repo(stores=DirStore(store_dir, query_index=config))
+    definitions = []
+    object_count = 270  # Cross the 256-row terminal page boundary.
+    try:
+        for idx in range(object_count):
+            leaf = FederationLeaf(name=f"leaf-{idx}", repo=publishing_repo)
+            definitions.append(leaf.definition)
+            publishing_repo.save_object(leaf)
+    finally:
+        publishing_repo.close(flush=False, save=False)
 
-    fetched = []
-    original = SQLiteQueryIndexReadView.cdefs_by_id
+    selector = Definition(FederationLeaf, SKIP_ARGS)
+    original_verify = DefinitionQuery._verify_cdefs
+    for domain in ("stored", "known"):
+        with monkeypatch.context() as subpatch:
+            verified = 0
 
-    def spy_cdefs_by_id(self, ids):
-        result = original(self, ids)
-        fetched.append(len(result))
-        return result
+            def spy_verify(self, cdefs, *, stats):
+                nonlocal verified
+                verified += len(cdefs)
+                return original_verify(self, cdefs, stats=stats)
 
-    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+            subpatch.setattr(DefinitionQuery, "_verify_cdefs", spy_verify)
+            repo = Repo(stores=DirStore(store_dir, query_index=config))
+            try:
+                assert getattr(repo.query(selector), domain)().exists()
+                assert verified == 1
+            finally:
+                repo.close(flush=False, save=False)
 
-    assert repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().exists()
+    original_fetch = SQLiteQueryIndexReadView.cdefs_by_id
+    with monkeypatch.context() as subpatch:
+        fetched = []
 
-    assert fetched == [1]
+        def spy_cdefs_by_id(self, ids):
+            result = original_fetch(self, ids)
+            fetched.append(len(result))
+            return result
 
+        subpatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+        repo = Repo(stores=DirStore(store_dir, query_index=config))
+        try:
+            assert repo.query(selector).stored().exists()
+            assert fetched == [1]
+        finally:
+            repo.close(flush=False, save=False)
 
-def test_sqlite_one_does_not_fetch_all_cdef_batches(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    repo = Repo(stores=store)
-    for idx in range(270):
-        repo.save_object(FederationLeaf(name=f"leaf-{idx}", repo=repo))
+    with monkeypatch.context() as subpatch:
+        fetched = []
 
-    fetched = []
-    original = SQLiteQueryIndexReadView.cdefs_by_id
+        def spy_cdefs_by_id(self, ids):
+            result = original_fetch(self, ids)
+            fetched.append(len(result))
+            return result
 
-    def spy_cdefs_by_id(self, ids):
-        result = original(self, ids)
-        fetched.append(len(result))
-        return result
+        subpatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+        repo = Repo(stores=DirStore(store_dir, query_index=config))
+        try:
+            with pytest.raises(QueryCardinalityError):
+                repo.query(selector).stored().one()
+            assert fetched == [2]
+        finally:
+            repo.close(flush=False, save=False)
 
-    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
-
-    with pytest.raises(QueryCardinalityError):
-        repo.query(Definition(FederationLeaf, SKIP_ARGS)).stored().one()
-
-    assert fetched == [2]
-
-
-def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatch):
-    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    repo = Repo(stores=store)
-    leaves = []
-    for idx in range(270):
-        leaf = FederationLeaf(name=f"leaf-{idx}", repo=repo)
-        leaves.append(leaf)
-        repo.save_object(leaf)
-
-    fetched = []
-    original = SQLiteQueryIndexReadView.cdefs_by_id
-
-    def spy_cdefs_by_id(self, ids):
-        result = original(self, ids)
-        fetched.append(len(result))
-        return result
-
-    monkeypatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
-
-    last = sorted((leaf.definition for leaf in leaves), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))[-1]
+    last = sorted(definitions, key=lambda cdef: (cdef.stable_hash(), repr(cdef)))[-1]
     target_name = last.kwargs["name"]
     from dryml.core2 import Satisfies
 
-    selector = Definition(FederationLeaf, SKIP_ARGS, name=Satisfies(lambda value: value == target_name, name="target-name"))
+    last_selector = Definition(
+        FederationLeaf,
+        SKIP_ARGS,
+        name=Satisfies(lambda value: value == target_name, name="target-name"),
+    )
+    with monkeypatch.context() as subpatch:
+        fetched = []
 
-    assert repo.query(selector).stored().exists()
+        def spy_cdefs_by_id(self, ids):
+            result = original_fetch(self, ids)
+            fetched.append(len(result))
+            return result
 
-    assert fetched == [1] * 270
-    assert sum(fetched) == 270
+        subpatch.setattr(SQLiteQueryIndexReadView, "cdefs_by_id", spy_cdefs_by_id)
+        repo = Repo(stores=DirStore(store_dir, query_index=config))
+        try:
+            assert repo.query(last_selector).stored().exists()
+            assert fetched == [1] * object_count
+            assert sum(fetched) == object_count
+        finally:
+            repo.close(flush=False, save=False)
 
 
 def test_federated_query_one_and_one_or_none_stop_after_two(tmp_path, monkeypatch):

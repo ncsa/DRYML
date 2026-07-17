@@ -20,14 +20,11 @@ class _DoneProcess:
         return 0
 
 
-def test_handshake_success_and_missing_store_failure(tmp_path, target_module):
+def test_missing_store_fails_handshake(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     env = PythonExecutableSpec(sys.executable, pythonpath_policy="explicit", extra_pythonpath=(str(target_module.parent),)).to_data()
     op = attach_operation_id(make_function_call_spec("dispatch_target:add", args=[1, 2]))
     dispatcher = Dispatcher(store=store)
-    ok = dispatcher.run(op, environment=env)
-    assert ok.status == "ok"
-
     plan = dispatcher.plan(op, environment=env)
     bad_envelope = dataclasses.replace(plan.envelope, store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path / "missing")),))
     bad_plan = dataclasses.replace(plan, envelope=bad_envelope)

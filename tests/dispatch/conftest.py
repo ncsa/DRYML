@@ -95,6 +95,9 @@ def target_module(tmp_path):
             def ref_value(ref):
                 return ref
 
+            def argument_values(box, ref, literal):
+                return [box.value, ref, literal]
+
             def make_box(value):
                 return Box(value)
 

@@ -263,6 +263,9 @@ def test_run_world_two_roles_returns_runtime_and_env_facts(tmp_path, target_modu
     assert {key.role for key in result.workers} == {"data", "trainer"}
     assert result.primary is not None
     assert result.world_allocation_id and result.world_allocation_id.startswith("worldalloc-v1-")
+    assert store.records.read_spec(result.world_allocation_id, family="world_allocation")["id"] == result.world_allocation_id
+    assert len(result.execution_record_ids) == 2
+    assert result.execution_record_ids == tuple(worker.execution_record_id for worker in result.workers.values())
     for key, worker_result in result.workers.items():
         facts = worker_result.result_canonical
         assert facts["mode"] == "worker"
@@ -278,24 +281,15 @@ def test_run_world_two_roles_returns_runtime_and_env_facts(tmp_path, target_modu
         assert facts["env_world_allocation_id"] == result.world_allocation_id
         assert facts["is_no_allocation"] is False
         assert facts["import_mode"] == "worker"
-
-
-def test_world_handshake_reports_allocation_facts(tmp_path, target_module):
-    store = DirStore(tmp_path / "store", query_index="none")
-    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
-    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
-    dispatcher = Dispatcher(store=store)
-    plan = dispatcher.plan_world(op, world=world, environment=_env(target_module), inventory=_inventory())
-    future = dispatcher.submit_world(plan)
-
-    handshakes = future.wait_for_handshakes(timeout=5)
-    future.cancel(reason="test")
-
-    for key, handshake in handshakes.items():
-        assert handshake is not None
-        assert handshake.worker_key == key.to_json()
-        assert handshake.world_id == plan.world_spec["id"]
-        assert handshake.world_allocation_id == plan.world_allocation_spec["id"]
+        assert worker_result.execution_record_id is not None
+        record = store.records.read_record(worker_result.execution_record_id)
+        assert record["payload"]["world_allocation_id"] == result.world_allocation_id
+        assert record["payload"]["worker_key"] == key.to_json()
+        assert record["metadata"]["role"] == key.role
+        assert record["metadata"]["replica"] == key.replica
+        assert record["metadata"]["rank"] == key.rank
+        assert record["metadata"]["local_rank"] == key.local_rank
+        assert record["payload"]["logs"]
 
 
 def test_handshake_allocation_mismatch_reports_failed_not_cancelled(tmp_path, target_module):
@@ -381,18 +375,6 @@ def test_handshake_timeout_reports_timeout_not_cancelled(tmp_path, target_module
     assert result.cancellation is None
     assert all(worker.status == "timeout" for worker in result.workers.values())
     assert any(item.get("reason") == "handshake_timeout" for item in result.diagnostics)
-
-
-def test_run_world_replicated_role(tmp_path, target_module):
-    store = DirStore(tmp_path / "store", query_index="none")
-    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
-    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
-
-    result = Dispatcher(store=store).run_world(op, world=world, environment=_env(target_module), inventory=_inventory(), timeout=10)
-
-    assert result.status == "ok"
-    assert sorted(key.replica for key in result.workers) == [0, 1]
-    assert all(worker.result_canonical["role"] == "worker" for worker in result.workers.values())
 
 
 def test_one_worker_failure_cancels_sibling(tmp_path, target_module):
@@ -667,31 +649,31 @@ def test_keyboard_interrupt_cancels_world_workers(tmp_path, target_module, monke
     assert future.done()
 
 
-def test_world_provenance_records_actual_allocation(tmp_path, target_module):
-    store = DirStore(tmp_path / "store", query_index="none")
-    world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
-    op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
-
-    result = Dispatcher(store=store).run_world(op, world=world, environment=_env(target_module), inventory=_inventory(), timeout=10)
-
-    assert store.records.read_spec(result.world_allocation_id, family="world_allocation")["id"] == result.world_allocation_id
-    assert len(result.execution_record_ids) == 2
-    for record_id in result.execution_record_ids:
-        record = store.records.read_record(record_id)
-        assert record["payload"]["world_allocation_id"] == result.world_allocation_id
-        assert record["metadata"]["role"] == "worker"
-        assert "rank" in record["metadata"]
-        assert record["payload"]["logs"]
-
-
 def test_record_policy_none_suppresses_world_provenance(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 2, "process": {"resources": {"cpus": 1}}}}
     op = attach_operation_id(make_function_call_spec("dispatch_target:allocation_facts"))
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan_world(
+        op,
+        world=world,
+        environment=_env(target_module),
+        inventory=_inventory(),
+        record_policy="none",
+    )
+    future = dispatcher.submit_world(plan)
 
-    result = Dispatcher(store=store).run_world(op, world=world, environment=_env(target_module), inventory=_inventory(), record_policy="none", timeout=10)
+    handshakes = future.wait_for_handshakes(timeout=5)
+    result = future.result(timeout=10)
 
+    for key, handshake in handshakes.items():
+        assert handshake is not None
+        assert handshake.worker_key == key.to_json()
+        assert handshake.world_id == plan.world_spec["id"]
+        assert handshake.world_allocation_id == plan.world_allocation_spec["id"]
     assert result.status == "ok"
+    assert sorted(key.replica for key in result.workers) == [0, 1]
+    assert all(worker.result_canonical["role"] == "worker" for worker in result.workers.values())
     assert result.execution_record_ids == ()
     assert store.records.find_execution_records() == ()
 

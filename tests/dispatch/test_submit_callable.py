@@ -30,6 +30,9 @@ def test_plan_submit_and_run_importable_function_without_pickle(tmp_path, target
     assert planned.envelope.launch["call_transport"] == "import_ref"
 
     future = submit(mod.add, store=store, args=(3, 5), environment=_env(target_module))
+    handshake = future.wait_for_handshake(timeout=10)
+    assert handshake is not None
+    assert handshake.status == "ok"
     assert future.result(timeout=10).status == "ok"
 
     result = run(mod.add, store=store, args=(6, 7), environment=_env(target_module))

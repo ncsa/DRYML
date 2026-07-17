@@ -29,6 +29,8 @@ def test_live_callable_resolution_preserves_all_namespace_requirements_and_sourc
     assert data["runtime_default"]["device_visibility"] == {"policy": "assigned"}
     assert data["source_traces"]
     assert json.loads(json.dumps(resolution.to_data()))["requirement_policy"] == "ignore"
+    assert resolution.code_analysis is not None
+    assert resolution.code_analysis.facts
 
 
 def test_definition_method_resolution_uses_authoritative_class_method_collection():
@@ -75,10 +77,3 @@ def test_explicit_method_operation_recovers_stored_definition_requirements(tmp_p
     assert normalized.definition_target is not None
     assert normalized.subject_class.__name__ == "Target"
     assert resolution.requirements.environment_requirement.requirements == ("stored-class>=1", "stored-method>=1")
-
-
-def test_live_target_always_includes_code_analysis_facts():
-    resolution = resolve_dispatch_plan(normalize_user_operation(annotated_target, allow_pickle=True), requirement_policy="ignore")
-
-    assert resolution.code_analysis is not None
-    assert resolution.code_analysis.facts

@@ -1,9 +1,12 @@
 import sys
 
+import dryml
+
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
+from dryml.records import ExecutionRecord
 
 
 def _env(target_module):
@@ -13,10 +16,17 @@ def _env(target_module):
 def test_success_and_failure_execution_records_query(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     dispatcher = Dispatcher(store=store)
-    ok = attach_operation_id(make_function_call_spec("dispatch_target:add", args=[2, 3]))
+    ok = attach_operation_id(make_function_call_spec("dispatch_target:noisy_add", args=[2, 3], metadata={"owner": "user"}))
     fail = attach_operation_id(make_function_call_spec("dispatch_target:fail"))
 
-    ok_result = dispatcher.run(ok, environment=_env(target_module))
+    plan = dispatcher.plan(ok, environment=_env(target_module))
+    assert plan.envelope.operation_spec["payload"] == ok["payload"]
+    assert plan.envelope.operation_spec["metadata"]["owner"] == "user"
+    assert plan.envelope.operation_spec["metadata"]["dryml.dispatch.transport"] == "operation_spec"
+
+    capture = dryml.reporting.CaptureReporter()
+    with dryml.config(reporting={"level": "details", "reporter": capture}):
+        ok_result = dispatcher.run(ok, environment=_env(target_module))
 
     assert ok_result.status == "ok"
     assert ok_result.result_canonical == 5
@@ -24,6 +34,17 @@ def test_success_and_failure_execution_records_query(tmp_path, target_module):
     assert store.records.read_spec(ok_result.dispatch_id, family="dispatch")["id"] == ok_result.dispatch_id
     assert store.records.read_spec(ok_result.recipe_id, family="execution_recipe")["id"] == ok_result.recipe_id
     assert store.records.read_spec(ok_result.operation_id, family="operation")["id"] == ok_result.operation_id
+
+    record = ExecutionRecord.from_envelope(store.records.read_record(ok_result.execution_record_id))
+    stdout = store.records.resolve_storage_ref(record.logs[0].storage, record_id=ok_result.execution_record_id)
+    stderr = store.records.resolve_storage_ref(record.logs[1].storage, record_id=ok_result.execution_record_id)
+    assert "hello stdout" in stdout.read_text(encoding="utf-8")
+    assert "hello stderr" in stderr.read_text(encoding="utf-8")
+
+    names = [event.name for event in capture.events]
+    assert "dryml.dispatch.plan.start" in names
+    assert "dryml.dispatch.worker.launch" in names
+    assert "dryml.dispatch.complete" in names
 
     fail_result = dispatcher.run(fail, environment=_env(target_module))
 

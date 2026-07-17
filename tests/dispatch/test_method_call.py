@@ -36,12 +36,14 @@ def test_function_call_cdef_materialize_ref_and_literal(tmp_path, target_module)
     repo.save(box, store=store, record_policy="descriptive")
     cdef_id = format_cdef_id(box.definition.stable_hash())
 
+    arguments = attach_operation_id(
+        make_function_call_spec(
+            "dispatch_target:argument_values",
+            args=[cdef_id, f"ref({cdef_id})", {"$literal": cdef_id}],
+        )
+    )
 
-    materialize = attach_operation_id(make_function_call_spec("dispatch_target:box_value", args=[cdef_id]))
-    ref = attach_operation_id(make_function_call_spec("dispatch_target:ref_value", args=[f"ref({cdef_id})"]))
-    literal = attach_operation_id(make_function_call_spec("dispatch_target:ref_value", args=[{"$literal": cdef_id}]))
-
-    dispatcher = Dispatcher(store=store)
-    assert dispatcher.run(materialize, environment=_env(target_module)).result_canonical == 9
-    assert dispatcher.run(ref, environment=_env(target_module)).result_canonical == cdef_id
-    assert dispatcher.run(literal, environment=_env(target_module)).result_canonical == cdef_id
+    result = Dispatcher(store=store).run(arguments, environment=_env(target_module))
+    assert result.result_canonical[0] == 9
+    assert result.result_canonical[1] == cdef_id
+    assert result.result_canonical[2] == cdef_id

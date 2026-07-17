@@ -1,33 +1,11 @@
 from __future__ import annotations
 
-import sys
-
 import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
-from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec, make_method_call_spec
-
-
-def _env(target_module):
-    return PythonExecutableSpec(sys.executable, pythonpath_policy="explicit", extra_pythonpath=(str(target_module.parent),)).to_data()
-
-
-def test_explicit_function_call_operation_spec_remains_compatible(tmp_path, target_module):
-    store = DirStore(tmp_path / "store", query_index="none")
-    op = attach_operation_id(make_function_call_spec("dispatch_target:add", args=[2, 3], metadata={"owner": "user"}))
-
-    plan = Dispatcher(store=store).plan(op, environment=_env(target_module))
-
-    assert plan.envelope.operation_spec["payload"] == op["payload"]
-    assert plan.envelope.operation_spec["metadata"]["owner"] == "user"
-    assert plan.envelope.operation_spec["metadata"]["dryml.dispatch.transport"] == "operation_spec"
-
-    result = Dispatcher(store=store).run(op, environment=_env(target_module))
-    assert result.status == "ok"
-    assert result.result_canonical == 5
 
 
 def test_explicit_operation_spec_preserves_user_metadata_but_replaces_reserved_keys(tmp_path):
