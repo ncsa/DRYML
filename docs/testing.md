@@ -141,3 +141,26 @@ When adding tests:
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
 
 If a new file is not listed in `path_tiers`, it inherits its category tier.
+
+## Dispatch And Code Benchmark
+
+The deterministic dispatch/code-analysis benchmark emits one bounded versioned
+JSON object. Its default mode runs only in-process scenarios with one warm-up
+and 20 measured samples:
+
+```bash
+python benchmarks/dispatch_code_performance.py --mode pure
+```
+
+Managed probe and worker scenarios are explicit because they launch bounded
+child processes and inspect the current Python environment:
+
+```bash
+python benchmarks/dispatch_code_performance.py --mode managed
+```
+
+Use `--pure-samples` up to 1,000, `--managed-samples` up to 100, and repeated
+`--scenario NAME` selectors for focused measurements. The benchmark uses
+temporary Stores, tracked standard-library targets, and fake resource inventory;
+it does not use a network, GPU, downloads, credentials, datasets, or model
+training.
