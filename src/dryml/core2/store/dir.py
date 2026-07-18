@@ -28,6 +28,21 @@ class DirStore(Store):
         self.set_main_def(self.read_main_def())
 
     @property
+    def store_capabilities(self) -> frozenset[str]:
+        """Advertise local managed control, locking, and activation support."""
+
+        return super().store_capabilities | frozenset({
+            "managed-control-v1",
+            "managed-locking-v1",
+            "managed-activation-v1",
+        })
+
+    def managed_control_root(self) -> str:
+        """Return this DirStore's versioned live managed-control root."""
+
+        return os.path.join(self.dryml_dir, "managed-v1")
+
+    @property
     def dryml_dir(self) -> str:
         return os.path.join(self.base_dir, ".dryml")
 

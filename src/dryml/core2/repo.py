@@ -167,6 +167,30 @@ class Repo:
             self.stores.append(store)
         self._query_index.refresh_bindings()
 
+    def store_candidates(self, target=None, *, capability: str | None = None) -> tuple[Store, ...]:
+        """Return deduplicated Stores eligible for an optional capability.
+
+        An explicit object-to-Store binding narrows the result to that Store.
+        Otherwise repository order is preserved only as presentation order; a
+        higher layer that requires one authority must reject multiple results.
+        """
+
+        bound = None
+        if target is not None:
+            cdef = self._object_target_cdef(target)
+            bound = self.obj_default_store.get(cdef)
+        candidates = (bound,) if bound is not None else tuple(self.stores)
+        result = []
+        seen = set()
+        for candidate in candidates:
+            if capability is not None and not candidate.supports_store_capability(capability):
+                continue
+            key = candidate.catalog_key()
+            if key not in seen:
+                seen.add(key)
+                result.append(candidate)
+        return tuple(result)
+
     def _ensure_store(self, store):
         if store is None:
             return None

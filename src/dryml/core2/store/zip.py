@@ -38,6 +38,11 @@ class ZipStore(Store):
         # if an existing main def is present, cache it
         self.set_main_def(self.read_main_def())
 
+    def managed_control_root(self) -> str:
+        """Reject live managed mutation for archive-backed Stores."""
+
+        raise NotImplementedError("ZipStore does not support live managed control")
+
     @property
     def base_dir(self) -> str:
         """Base directory"""
@@ -169,6 +174,11 @@ class ZipExportStore(Store):
         self.src_dir = os.fspath(src_dir)
         self.include_paths = set(include_paths)
         self._main_def: ConcreteDefinition | None = None
+
+    def managed_control_root(self) -> str:
+        """Reject live managed mutation for export-only Stores."""
+
+        raise NotImplementedError("ZipExportStore does not support live managed control")
 
     @property
     def base_dir(self) -> str:

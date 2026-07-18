@@ -9,6 +9,26 @@ from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileRepo
 
 class Store(ABC):
     @property
+    def store_capabilities(self) -> frozenset[str]:
+        """Return explicit optional Store capabilities.
+
+        Optional higher layers must check these names before using Store-owned
+        sidecars. The base Store supports no managed live-write capabilities.
+        """
+
+        return frozenset()
+
+    def supports_store_capability(self, capability: str) -> bool:
+        """Return whether this Store explicitly advertises *capability*."""
+
+        return capability in self.store_capabilities
+
+    def managed_control_root(self) -> str:
+        """Return the Store-local managed control root when supported."""
+
+        raise NotImplementedError("Store does not support live managed control")
+
+    @property
     def base_dir(self) -> str:
         """Base directory"""
         ...

@@ -1,0 +1,791 @@
+"""Authoritative DirStore-local managed operation control and activation."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import threading
+import uuid
+from dataclasses import replace
+from functools import wraps
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+from dryml.core2.repo import Repo, get_default_repo, make_store
+from dryml.core2.store.store import Store
+from dryml.formats.canonical import canonical_json_bytes, canonical_json_load_bytes
+from dryml.formats.errors import CanonicalJSONError
+
+from .errors import (
+    AmbiguousManagedStoreError,
+    ManagedInputValidationRequiredError,
+    ManagedLeaseConflictError,
+    ManagedRerunRequiredError,
+    ManagedStateError,
+    ManagedStoreUnsupportedError,
+    ManagedTakeoverRequiredError,
+    StaleManagedLeaseError,
+    StaleManagedResultError,
+)
+from .locking import PlatformFileLock, process_is_alive
+from .state import (
+    ActivationEvent,
+    GenerationControl,
+    MAX_DIAGNOSTICS,
+    NamespaceState,
+    OperationDecision,
+    OperationKey,
+    RealizationState,
+    validate_declaration_fingerprint,
+)
+
+
+MANAGED_CAPABILITIES = frozenset({
+    "managed-control-v1",
+    "managed-locking-v1",
+    "managed-activation-v1",
+})
+
+
+def resolve_managed_store(
+    repo: Repo | Store | None = None,
+    *,
+    store: Store | str | os.PathLike[str] | None = None,
+    target: Any | None = None,
+) -> Store:
+    """Resolve one writable managed Store without relying on Store order.
+
+    Explicit Store selection wins. Otherwise an explicit or active default Repo
+    may provide an object binding or exactly one managed-capable Store. Multiple
+    candidates fail closed so operation state cannot split across authorities.
+    """
+
+    if isinstance(repo, Store):
+        if store is not None and make_store(store).catalog_key() != repo.catalog_key():
+            raise AmbiguousManagedStoreError("repo Store and explicit Store select different authorities")
+        store = repo
+        repo = None
+    if store is not None:
+        selected = make_store(store)
+        _require_managed_capabilities(selected)
+        return selected
+    selected_repo = repo if repo is not None else get_default_repo()
+    if not isinstance(selected_repo, Repo):
+        raise TypeError("repo must be a Repo, Store, or None")
+    candidates = selected_repo.store_candidates(target, capability="managed-control-v1")
+    candidates = tuple(candidate for candidate in candidates if _has_managed_capabilities(candidate))
+    if not candidates:
+        raise AmbiguousManagedStoreError("no managed-capable Store is available")
+    if len(candidates) != 1:
+        raise AmbiguousManagedStoreError(
+            "multiple managed-capable Stores are available; select one explicitly"
+        )
+    return candidates[0]
+
+
+class ManagedOperationStore:
+    """Facade over one Store's versioned managed operation namespace."""
+
+    def __init__(self, store: Store):
+        if not isinstance(store, Store):
+            store = make_store(store)
+        _require_managed_capabilities(store)
+        self.store = store
+        self.root = Path(store.managed_control_root())
+
+    @classmethod
+    def resolve(
+        cls,
+        repo: Repo | Store | None = None,
+        *,
+        store: Store | str | os.PathLike[str] | None = None,
+        target: Any | None = None,
+    ) -> "ManagedOperationStore":
+        """Resolve a context and return its managed control facade."""
+
+        return cls(resolve_managed_store(repo, store=store, target=target))
+
+    def operation(self, key: OperationKey, declaration_fingerprint: str) -> "OperationControl":
+        """Return direct control for one operation declaration generation."""
+
+        if not isinstance(key, OperationKey):
+            raise TypeError("key must be an OperationKey")
+        validate_declaration_fingerprint(declaration_fingerprint)
+        return OperationControl(self, key, declaration_fingerprint)
+
+    def generations(self, key: OperationKey) -> tuple[str, ...]:
+        """Return declaration generations in durable introduction order."""
+
+        namespace = self._read_namespace(key, missing_ok=True)
+        return () if namespace is None else namespace.generations
+
+    def history(self, key: OperationKey) -> tuple[RealizationState, ...]:
+        """Return retained realizations across every declaration generation."""
+
+        result = []
+        for fingerprint in self.generations(key):
+            result.extend(self.operation(key, fingerprint).history())
+        return tuple(result)
+
+    def _operation_dir(self, key: OperationKey) -> Path:
+        digest = key.producer_cdef_id.rsplit("-", 1)[1]
+        return self.root / "operations" / digest[:2] / digest / key.method
+
+    def _namespace_path(self, key: OperationKey) -> Path:
+        return self._operation_dir(key) / "namespace.json"
+
+    def _read_namespace(self, key: OperationKey, *, missing_ok: bool = False) -> NamespaceState | None:
+        path = self._namespace_path(key)
+        if missing_ok and not path.exists():
+            return None
+        state = NamespaceState.from_json(_read_json(path, "operation namespace"))
+        if state.key != key:
+            raise ManagedStateError("operation namespace identity does not match its direct path")
+        return state
+
+
+class OperationControl:
+    """Direct lookup and lifecycle control for one declaration generation."""
+
+    def __init__(self, managed_store: ManagedOperationStore, key: OperationKey, fingerprint: str):
+        self.managed_store = managed_store
+        self.key = key
+        self.declaration_fingerprint = fingerprint
+
+    @property
+    def operation_dir(self) -> Path:
+        return self.managed_store._operation_dir(self.key)
+
+    @property
+    def generation_dir(self) -> Path:
+        return self.operation_dir / "generations" / self.declaration_fingerprint
+
+    @property
+    def control_path(self) -> Path:
+        return self.generation_dir / "control.json"
+
+    @property
+    def active_pointer_path(self) -> Path:
+        return self.generation_dir / "active.json"
+
+    @property
+    def _lock_path(self) -> Path:
+        return self.operation_dir / "owner.lock"
+
+    @property
+    def _owner_path(self) -> Path:
+        return self.operation_dir / "owner.json"
+
+    @property
+    def _realizations_dir(self) -> Path:
+        return self.generation_dir / "realizations"
+
+    @property
+    def _activations_dir(self) -> Path:
+        return self.generation_dir / "activations"
+
+    def acquire(self, *, advance_declaration: bool = False, takeover: bool = False) -> "OperationLease":
+        """Acquire lifetime ownership and advance the monotonic fence.
+
+        ``takeover`` never breaks a live OS lock. It only authorizes recovery
+        after an operator has made the lock available while its prior PID still
+        appears live, for example after cooperative lock handoff.
+        """
+
+        lock = PlatformFileLock(self._lock_path)
+        try:
+            lock.acquire()
+        except ManagedLeaseConflictError as exc:
+            if takeover:
+                raise ManagedLeaseConflictError(
+                    "managed operation is already owned; stop the current owner before explicit takeover"
+                ) from exc
+            raise
+        try:
+            namespace = self.managed_store._read_namespace(self.key, missing_ok=True)
+            if namespace is None:
+                namespace = NamespaceState(
+                    key=self.key,
+                    current_declaration_fingerprint=self.declaration_fingerprint,
+                    generations=(self.declaration_fingerprint,),
+                    fence_epoch=0,
+                )
+            elif namespace.current_declaration_fingerprint != self.declaration_fingerprint:
+                if not advance_declaration:
+                    raise ManagedStateError(
+                        "declaration fingerprint is not the current declaration generation"
+                    )
+                generations = namespace.generations
+                if self.declaration_fingerprint in generations:
+                    raise ManagedStateError(
+                        "an older declaration generation cannot become current again"
+                    )
+                generations = (*generations, self.declaration_fingerprint)
+                namespace = replace(
+                    namespace,
+                    current_declaration_fingerprint=self.declaration_fingerprint,
+                    generations=generations,
+                )
+
+            owner = self._read_owner(missing_ok=True)
+            if owner is not None and owner["status"] == "owned" and process_is_alive(owner["pid"]):
+                if not takeover:
+                    raise ManagedTakeoverRequiredError(
+                        "released ownership still names a live process; explicit operator takeover is required"
+                    )
+
+            epoch = namespace.fence_epoch + 1
+            namespace = replace(namespace, fence_epoch=epoch)
+            _write_json(self.managed_store._namespace_path(self.key), namespace.to_json())
+            control = self._read_control(missing_ok=True)
+            if control is None:
+                control = GenerationControl(self.declaration_fingerprint, epoch)
+            control = self._reconcile_control(replace(control, fence_epoch=epoch))
+            _write_json(self.control_path, control.to_json())
+            _write_json(
+                self._owner_path,
+                {
+                    "schema_version": 1,
+                    "status": "owned",
+                    "epoch": epoch,
+                    "pid": os.getpid(),
+                    "heartbeat": 0,
+                },
+            )
+            return OperationLease(self, lock, epoch)
+        except Exception:
+            lock.release()
+            raise
+
+    def status(self) -> dict[str, Any]:
+        """Return current bounded control plus direct active selection."""
+
+        control = self._read_control()
+        active = self.active(missing_ok=True)
+        return {"control": control, "active": active}
+
+    def history(self) -> tuple[RealizationState, ...]:
+        """Return all retained realizations for this declaration generation."""
+
+        if not self._realizations_dir.exists():
+            return ()
+        states = []
+        for path in self._realizations_dir.iterdir():
+            if path.suffix != ".json":
+                continue
+            state = RealizationState.from_json(_read_json(path, "realization state"))
+            if state.declaration_fingerprint != self.declaration_fingerprint:
+                raise ManagedStateError("realization declaration does not match its generation")
+            if path.stem != state.realization_id:
+                raise ManagedStateError("realization ID does not match its direct path")
+            states.append(state)
+        return tuple(sorted(states, key=lambda item: item.sequence))
+
+    def active(self, *, missing_ok: bool = False) -> RealizationState | None:
+        """Resolve the direct active pointer and validate its immutable event."""
+
+        if not self.active_pointer_path.exists():
+            if missing_ok:
+                return None
+            raise ManagedStateError("operation generation has no active realization")
+        event = ActivationEvent.from_json(_read_json(self.active_pointer_path, "active pointer"))
+        event_path = self._activation_path(event)
+        if not event_path.exists():
+            raise ManagedStateError("active pointer references a missing activation event")
+        authoritative = ActivationEvent.from_json(_read_json(event_path, "activation event"))
+        if authoritative != event:
+            raise ManagedStateError("active pointer does not match its activation event")
+        state = self._read_realization(event.realization_id)
+        if state.status != "completed":
+            raise ManagedStateError("active realization is not completed")
+        return state
+
+    def rebuild_active_pointer(self, *, takeover: bool = False) -> RealizationState:
+        """Rebuild the derived pointer while holding a fresh fenced lease."""
+
+        with self.acquire(takeover=takeover) as lease:
+            return lease.rebuild_active_pointer()
+
+    def _rebuild_active_pointer(self) -> RealizationState:
+        """Rebuild the derived direct pointer from immutable activation events."""
+
+        events = self._activation_events()
+        if not events:
+            raise ManagedStateError("operation generation has no activation events")
+        event = max(events, key=lambda item: item.sequence)
+        state = self._read_realization(event.realization_id)
+        if state.status != "completed":
+            raise ManagedStateError("latest activation event selects a non-completed realization")
+        _write_json(self.active_pointer_path, event.to_json())
+        return state
+
+    def _read_control(self, *, missing_ok: bool = False) -> GenerationControl | None:
+        if missing_ok and not self.control_path.exists():
+            return None
+        control = GenerationControl.from_json(_read_json(self.control_path, "generation control"))
+        if control.declaration_fingerprint != self.declaration_fingerprint:
+            raise ManagedStateError("generation control declaration fingerprint mismatch")
+        return control
+
+    def _read_realization(self, realization_id: str) -> RealizationState:
+        path = self._realization_path(realization_id)
+        state = RealizationState.from_json(_read_json(path, "realization state"))
+        if state.realization_id != realization_id:
+            raise ManagedStateError("realization ID does not match requested identity")
+        if state.declaration_fingerprint != self.declaration_fingerprint:
+            raise ManagedStateError("realization belongs to a different declaration generation")
+        return state
+
+    def _write_realization(self, state: RealizationState) -> None:
+        _write_json(self._realization_path(state.realization_id), state.to_json())
+
+    def _realization_path(self, realization_id: str) -> Path:
+        return self._realizations_dir / f"{realization_id}.json"
+
+    def _reconcile_control(self, control: GenerationControl) -> GenerationControl:
+        """Recover one unambiguous retained pending realization after interruption."""
+
+        pending = None
+        if control.pending_realization_id is not None:
+            pending = self._read_realization(control.pending_realization_id)
+            if pending.status in {"completed", "abandoned"}:
+                pending = None
+        incomplete = [
+            item
+            for item in self.history()
+            if item.status in {"running", "interrupted", "failed"} and (
+                pending is None or item.realization_id != pending.realization_id
+            )
+        ]
+        if incomplete:
+            if pending is not None or len(incomplete) != 1:
+                raise ManagedStateError(
+                    "operation generation has ambiguous retained pending realizations"
+                )
+            pending = incomplete[0]
+        return replace(
+            control,
+            pending_realization_id=None if pending is None else pending.realization_id,
+            current_attempt_id=None if pending is None else pending.current_attempt_id,
+            checkpoint_head=None if pending is None else pending.checkpoint_head,
+            diagnostics=() if pending is None else pending.diagnostics,
+        )
+
+    def _activation_path(self, event: ActivationEvent) -> Path:
+        return self._activations_dir / f"{event.sequence:020d}-{event.activation_id}.json"
+
+    def _activation_events(self) -> tuple[ActivationEvent, ...]:
+        if not self._activations_dir.exists():
+            return ()
+        events = []
+        seen_sequences = set()
+        for path in self._activations_dir.iterdir():
+            if path.suffix != ".json":
+                continue
+            event = ActivationEvent.from_json(_read_json(path, "activation event"))
+            if event.declaration_fingerprint != self.declaration_fingerprint:
+                raise ManagedStateError("activation event belongs to a different generation")
+            if path != self._activation_path(event):
+                raise ManagedStateError("activation event identity does not match its path")
+            if event.sequence in seen_sequences:
+                raise ManagedStateError("activation history contains duplicate sequence numbers")
+            seen_sequences.add(event.sequence)
+            events.append(event)
+        return tuple(sorted(events, key=lambda item: item.sequence))
+
+    def _read_owner(self, *, missing_ok: bool = False) -> dict[str, Any] | None:
+        if missing_ok and not self._owner_path.exists():
+            return None
+        data = _read_json(self._owner_path, "owner diagnostics")
+        fields = {"schema_version", "status", "epoch", "pid", "heartbeat"}
+        if set(data) != fields or data.get("schema_version") != 1:
+            raise ManagedStateError("owner diagnostics schema is malformed")
+        if data.get("status") not in {"owned", "released"}:
+            raise ManagedStateError("owner diagnostics status is malformed")
+        if type(data.get("epoch")) is not int or data["epoch"] < 1:
+            raise ManagedStateError("owner diagnostics epoch is malformed")
+        if type(data.get("pid")) is not int or data["pid"] < 1:
+            raise ManagedStateError("owner diagnostics pid is malformed")
+        if type(data.get("heartbeat")) is not int or data["heartbeat"] < 0:
+            raise ManagedStateError("owner diagnostics heartbeat is malformed")
+        return data
+
+
+def _serialized_mutation(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._mutation_lock:
+            result = method(self, *args, **kwargs)
+            self._heartbeat()
+            return result
+
+    return guarded
+
+
+class OperationLease:
+    """Sole Store control writer while its platform lock remains held."""
+
+    def __init__(self, operation: OperationControl, lock: PlatformFileLock, epoch: int):
+        self.operation = operation
+        self._lock = lock
+        self.epoch = epoch
+        self._released = False
+        self._owner_pid = os.getpid()
+        self._heartbeat_count = 0
+        self._mutation_lock = threading.RLock()
+
+    def __enter__(self) -> "OperationLease":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.release()
+
+    def release(self) -> None:
+        """Publish released diagnostics and relinquish OS ownership."""
+
+        with self._mutation_lock:
+            if self._released:
+                return
+            try:
+                self._assert_current()
+                _write_json(
+                    self.operation._owner_path,
+                    {
+                        "schema_version": 1,
+                        "status": "released",
+                        "epoch": self.epoch,
+                        "pid": self._owner_pid,
+                        "heartbeat": self._heartbeat_count,
+                    },
+                )
+            finally:
+                self._released = True
+                self._lock.release()
+
+    @_serialized_mutation
+    def prepare(
+        self,
+        *,
+        resumable: bool,
+        rerun: bool = False,
+        active_inputs_valid: bool | Callable[[RealizationState], bool] | None = None,
+        realization_id: str | None = None,
+    ) -> OperationDecision:
+        """Model normal resume/reuse precedence or start an explicit rerun.
+
+        ``active_inputs_valid`` is the U2 hook for U4's concurrency-stable input
+        resolution. Reuse fails closed unless that later layer supplies ``True``.
+        """
+
+        self._assert_current()
+        if not isinstance(resumable, bool) or not isinstance(rerun, bool):
+            raise TypeError("resumable and rerun must be bool values")
+        control = self.operation._read_control()
+        assert control is not None
+        pending = None
+        if control.pending_realization_id is not None:
+            pending = self.operation._read_realization(control.pending_realization_id)
+        if pending is not None and not rerun and realization_id is not None:
+            if realization_id != pending.realization_id:
+                raise ManagedStateError(
+                    "normal resume cannot select a different realization ID"
+                )
+        if (pending is None or rerun) and realization_id is not None:
+            if self.operation._realization_path(realization_id).exists():
+                raise ManagedStateError("realization ID already exists in retained history")
+        if pending is not None and not rerun:
+            if not pending.resumable:
+                raise ManagedRerunRequiredError(
+                    "pending realization is not resumable; explicit rerun is required"
+                )
+            attempt_id = _new_id("attempt")
+            pending = replace(
+                pending,
+                status="running",
+                attempt_ids=(*pending.attempt_ids, attempt_id),
+                current_attempt_id=attempt_id,
+            )
+            self.operation._write_realization(pending)
+            self._write_control_for(pending)
+            return OperationDecision("resume", pending)
+        if pending is not None:
+            abandoned = replace(pending, status="abandoned", current_attempt_id=None)
+            self.operation._write_realization(abandoned)
+
+        active = self.operation.active(missing_ok=True)
+        if pending is None and active is not None and not rerun:
+            validation = active_inputs_valid
+            if callable(validation):
+                validation = validation(active)
+            if validation is None:
+                raise ManagedInputValidationRequiredError(
+                    "completed reuse requires a concurrency-stable input validation result"
+                )
+            if validation is not True:
+                raise StaleManagedResultError(
+                    "active result inputs are stale; explicit rerun is required"
+                )
+            return OperationDecision("reuse", active)
+
+        realization_id = realization_id or _new_id("realization")
+        attempt_id = _new_id("attempt")
+        sequence = max((item.sequence for item in self.operation.history()), default=0) + 1
+        state = RealizationState(
+            realization_id=realization_id,
+            declaration_fingerprint=self.operation.declaration_fingerprint,
+            status="running",
+            resumable=resumable,
+            attempt_ids=(attempt_id,),
+            current_attempt_id=attempt_id,
+            sequence=sequence,
+        )
+        self.operation._write_realization(state)
+        self._write_control_for(state)
+        action = "rerun" if rerun else "start"
+        return OperationDecision(action, state)
+
+    @_serialized_mutation
+    def interrupt(
+        self,
+        realization_id: str,
+        *,
+        checkpoint_head: str | None = None,
+        diagnostic: str | None = None,
+    ) -> RealizationState:
+        """Mark current work interrupted while retaining it for resume/rerun."""
+
+        return self._mark_incomplete(
+            realization_id,
+            "interrupted",
+            checkpoint_head=checkpoint_head,
+            diagnostic=diagnostic,
+        )
+
+    @_serialized_mutation
+    def fail(
+        self,
+        realization_id: str,
+        *,
+        checkpoint_head: str | None = None,
+        diagnostic: str | None = None,
+    ) -> RealizationState:
+        """Mark current work failed while preserving prior active selection."""
+
+        return self._mark_incomplete(
+            realization_id,
+            "failed",
+            checkpoint_head=checkpoint_head,
+            diagnostic=diagnostic,
+        )
+
+    @_serialized_mutation
+    def complete(self, realization_id: str) -> RealizationState:
+        """Mark required work complete without changing active selection."""
+
+        self._assert_current()
+        control, state = self._require_pending(realization_id)
+        state = replace(state, status="completed", current_attempt_id=None)
+        self.operation._write_realization(state)
+        control = replace(
+            control,
+            pending_realization_id=None,
+            current_attempt_id=None,
+            checkpoint_head=state.checkpoint_head,
+        )
+        _write_json(self.operation.control_path, control.to_json())
+        return state
+
+    @_serialized_mutation
+    def activate(self, realization_id: str) -> RealizationState:
+        """Append an immutable activation event, then update the pointer last."""
+
+        self._assert_current()
+        state = self.operation._read_realization(realization_id)
+        if state.status != "completed":
+            raise ManagedStateError("only completed realizations may become active")
+        previous = self.operation.active(missing_ok=True)
+        events = self.operation._activation_events()
+        event = ActivationEvent(
+            activation_id=_new_id("activation"),
+            declaration_fingerprint=self.operation.declaration_fingerprint,
+            sequence=max((item.sequence for item in events), default=0) + 1,
+            realization_id=realization_id,
+            previous_realization_id=None if previous is None else previous.realization_id,
+            fence_epoch=self.epoch,
+        )
+        _write_json(self.operation._activation_path(event), event.to_json(), immutable=True)
+        self._assert_current()
+        _write_json(self.operation.active_pointer_path, event.to_json())
+        return state
+
+    @_serialized_mutation
+    def rebuild_active_pointer(self) -> RealizationState:
+        """Rebuild the derived pointer under this lease's fence."""
+
+        self._assert_current()
+        return self.operation._rebuild_active_pointer()
+
+    def _mark_incomplete(
+        self,
+        realization_id: str,
+        status: str,
+        *,
+        checkpoint_head: str | None,
+        diagnostic: str | None,
+    ) -> RealizationState:
+        self._assert_current()
+        _control, state = self._require_pending(realization_id)
+        diagnostics = state.diagnostics
+        if diagnostic is not None:
+            diagnostics = (*diagnostics, diagnostic)[-MAX_DIAGNOSTICS:]
+        state = replace(
+            state,
+            status=status,
+            current_attempt_id=None,
+            checkpoint_head=checkpoint_head or state.checkpoint_head,
+            diagnostics=diagnostics,
+        )
+        self.operation._write_realization(state)
+        self._write_control_for(state)
+        return state
+
+    def _require_pending(self, realization_id: str) -> tuple[GenerationControl, RealizationState]:
+        control = self.operation._read_control()
+        assert control is not None
+        if control.pending_realization_id != realization_id:
+            raise ManagedStateError("realization is not the current pending realization")
+        return control, self.operation._read_realization(realization_id)
+
+    def _write_control_for(self, state: RealizationState) -> None:
+        control = self.operation._read_control()
+        assert control is not None
+        control = replace(
+            control,
+            fence_epoch=self.epoch,
+            pending_realization_id=state.realization_id,
+            current_attempt_id=state.current_attempt_id,
+            checkpoint_head=state.checkpoint_head,
+            diagnostics=state.diagnostics,
+        )
+        _write_json(self.operation.control_path, control.to_json())
+
+    def _assert_current(self) -> NamespaceState:
+        if self._released or not self._lock.held:
+            raise StaleManagedLeaseError("managed lease is closed or no longer owns its OS lock")
+        if os.getpid() != self._owner_pid:
+            raise StaleManagedLeaseError(
+                "managed lease mutation is restricted to the acquiring coordinator process"
+            )
+        namespace = self.operation.managed_store._read_namespace(self.operation.key)
+        assert namespace is not None
+        if namespace.fence_epoch != self.epoch:
+            raise StaleManagedLeaseError("managed lease fence has been superseded")
+        if namespace.current_declaration_fingerprint != self.operation.declaration_fingerprint:
+            raise StaleManagedLeaseError("managed lease declaration generation is no longer current")
+        return namespace
+
+    def _heartbeat(self) -> None:
+        self._assert_current()
+        self._heartbeat_count += 1
+        try:
+            _write_json(
+                self.operation._owner_path,
+                {
+                    "schema_version": 1,
+                    "status": "owned",
+                    "epoch": self.epoch,
+                    "pid": self._owner_pid,
+                    "heartbeat": self._heartbeat_count,
+                },
+            )
+        except ManagedStateError:
+            # Diagnostics never override an already durable control mutation.
+            pass
+
+
+def _new_id(kind: str) -> str:
+    return f"{kind}-v1-{uuid.uuid4().hex}"
+
+
+def _has_managed_capabilities(store: Store) -> bool:
+    return all(store.supports_store_capability(name) for name in MANAGED_CAPABILITIES)
+
+
+def _require_managed_capabilities(store: Store) -> None:
+    if not _has_managed_capabilities(store):
+        raise ManagedStoreUnsupportedError(
+            "live managed operation control requires a capable local DirStore"
+        )
+
+
+def _write_json(path: Path, data: Mapping[str, Any], *, immutable: bool = False) -> None:
+    payload = canonical_json_bytes(data)
+    temp_path = None
+    try:
+        _mkdir_durable(path.parent)
+        if immutable and path.exists():
+            if path.read_bytes() == payload:
+                return
+            raise ManagedStateError(
+                "immutable managed state already exists with different bytes"
+            )
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as tmp:
+            tmp.write(payload)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            temp_path = Path(tmp.name)
+        os.replace(temp_path, path)
+        _fsync_directory(path.parent)
+    except ManagedStateError:
+        raise
+    except OSError as exc:
+        raise ManagedStateError(f"managed state could not be durably written: {exc}") from exc
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _read_json(path: Path, name: str) -> dict[str, Any]:
+    try:
+        data = canonical_json_load_bytes(path.read_bytes())
+    except (OSError, CanonicalJSONError) as exc:
+        raise ManagedStateError(f"{name} could not be read: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ManagedStateError(f"{name} JSON root must be an object")
+    return data
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _mkdir_durable(path: Path) -> None:
+    missing = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(exist_ok=True)
+        _fsync_directory(directory.parent)
+
+
+__all__ = [
+    "MANAGED_CAPABILITIES",
+    "ManagedOperationStore",
+    "OperationControl",
+    "OperationLease",
+    "resolve_managed_store",
+]
