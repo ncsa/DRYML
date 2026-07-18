@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Callable
@@ -12,8 +13,7 @@ from typing import Any, Callable
 from dryml import worlds
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
 from dryml import runtime
-from dryml.runtime import RuntimeAllocationView, RuntimeMode
-from dryml.runtime.specs import RuntimeContextSpec
+from dryml.runtime import RuntimeAllocationView
 
 from .errors import DispatchPlanningError
 from .normalize import is_definition_or_cdef, normalize_user_operation
@@ -22,7 +22,7 @@ from .protocol import DispatchResult, ExecutionEnvelope
 from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, parse_analysis_policy, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
-from .stores import require_supported_plan, select_marshal_plan
+from .stores import require_supported_plan, same_host_dir_store, select_marshal_plan
 
 _UNSET = object()
 
@@ -44,6 +44,7 @@ class DispatchPlan:
     envelope: ExecutionEnvelope
     store: Any
     resolution: DispatchPlanningResolution | None = None
+    extension: Any | None = None
 
 
 class Dispatcher:
@@ -103,6 +104,8 @@ class Dispatcher:
         allow_pickle: bool = False,
         args: tuple[Any, ...] = (),
         kwargs: Mapping[str, Any] | None = None,
+        callbacks: Any = (),
+        rerun: bool = False,
     ) -> DispatchPlan:
         """Build a requirement-checked dispatch plan and launch-only envelope.
 
@@ -127,6 +130,9 @@ class Dispatcher:
             allow_pickle: Permit a non-importable callable transport.
             args: Positional arguments for Python-shaped calls.
             kwargs: Keyword arguments for Python-shaped calls.
+            callbacks: Invocation-local callbacks for a bound managed method.
+            rerun: Explicit managed rerun selection. It is excluded from the
+                operation identity.
 
         Returns:
             A launchable local-subprocess plan with actual assigned resources.
@@ -143,6 +149,17 @@ class Dispatcher:
             if is_definition_or_cdef(operation):
                 normalize_user_operation(operation, method_name, args=args, kwargs=kwargs)
             raise DispatchPlanningError("Dispatcher.plan requires a store for local subprocess marshalling")
+        extension = _make_dispatch_extension(
+            operation,
+            args=args,
+            kwargs=kwargs,
+            callbacks=callbacks,
+            rerun=rerun,
+        )
+        if extension is not None and not same_host_dir_store(target_store):
+            raise DispatchPlanningError(
+                "writable managed dispatch requires a same-host DirStore"
+            )
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
         _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
@@ -306,7 +323,15 @@ class Dispatcher:
             except BaseException:
                 _cleanup_launch(launch)
                 raise
-        return DispatchPlan(dispatch, recipe, envelope, target_store, resolution)
+        result = DispatchPlan(
+            dispatch,
+            recipe,
+            envelope,
+            target_store,
+            resolution,
+            extension,
+        )
+        return extension.decorate_plan(result) if extension is not None else result
 
     def submit(
         self,
@@ -329,6 +354,8 @@ class Dispatcher:
         """
 
         plan = operation if isinstance(operation, DispatchPlan) else self.plan(operation, method_name, **kwargs)
+        if plan.extension is not None:
+            return plan.extension.submit(plan, self.backend)
         return self.backend.submit(plan)
 
     def plan_world(
@@ -392,6 +419,10 @@ class Dispatcher:
         from .local_world import LOCAL_WORLD_BACKEND_IDENTITY, LocalWorldPlan, WorkerLaunchPlan, allocate_local_world
 
         _report("dryml.dispatch.world.plan.start", "Building local world dispatch plan")
+        if _dispatch_extension_enabled(operation):
+            raise DispatchPlanningError(
+                "managed operations support one single local subprocess only; local-world execution is unsupported"
+            )
         target_store = store or self.store
         if target_store is None:
             if is_definition_or_cdef(operation):
@@ -899,6 +930,35 @@ def _cleanup_launch(launch: Mapping[str, Any]) -> None:
 
     for path in launch.get("cleanup_paths") or ():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _dispatch_extension_enabled(operation: Any) -> bool:
+    return inspect.getattr_static(
+        type(operation), "__dryml_dispatch_extension__", False
+    ) is True
+
+
+def _make_dispatch_extension(
+    operation: Any,
+    *,
+    args: Any,
+    kwargs: Any,
+    callbacks: Any,
+    rerun: Any,
+):
+    if not _dispatch_extension_enabled(operation):
+        if callbacks not in ((), None) or rerun is not False:
+            raise DispatchPlanningError(
+                "callbacks and rerun are valid only for bound managed methods"
+            )
+        return None
+    factory = object.__getattribute__(operation, "__dryml_make_dispatch_extension__")
+    return factory(
+        args=() if args is None else args,
+        kwargs={} if kwargs is None else kwargs,
+        callbacks=callbacks,
+        rerun=rerun,
+    )
 
 
 def allocation_from_json(data: Mapping[str, Any] | None) -> RuntimeAllocationView:

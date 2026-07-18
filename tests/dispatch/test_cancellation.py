@@ -1,10 +1,13 @@
 import os
+import importlib
+import sys
 
 import pytest
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, DispatchTimeout
 from dryml.environments import CurrentEnvironmentSpec
+from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
 
 
@@ -57,3 +60,46 @@ def test_timeout_records_timeout(tmp_path):
         future.result(timeout=0.1)
     assert store.records.find_execution_records(status="timeout")
     assert store.records.find_execution_records(status="cancelled") == ()
+
+
+def _managed_plan(tmp_path, target_module):
+    store = DirStore(tmp_path / "managed-store", query_index="none")
+    environment = PythonExecutableSpec(
+        sys.executable,
+        pythonpath_policy="explicit",
+        extra_pythonpath=(str(target_module.parent),),
+    ).to_data()
+    box = importlib.import_module("dispatch_target").ManagedBox()
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(
+        box.compute,
+        kwargs={"sleep": 60.0},
+        environment=environment,
+    )
+    return dispatcher, plan, store, box
+
+
+def test_managed_worker_cancellation_preserves_incomplete_provenance(tmp_path, target_module):
+    dispatcher, plan, store, box = _managed_plan(tmp_path, target_module)
+    future = dispatcher.submit(plan)
+
+    assert future.cancel(grace=0.1, reason="test") is True
+    response = future.result(timeout=5)
+
+    assert response.status == "cancelled"
+    assert response.managed_result["status"] == "cancelled"
+    assert box.compute.status(store=store).status == "interrupted"
+    assert store.records.find_execution_records(status="cancelled")
+
+
+def test_managed_timeout_preserves_timeout_and_incomplete_state(tmp_path, target_module):
+    dispatcher, plan, store, box = _managed_plan(tmp_path, target_module)
+    future = dispatcher.submit(plan)
+
+    with pytest.raises(DispatchTimeout):
+        future.result(timeout=0.1)
+
+    assert future.worker_response.status == "timeout"
+    assert future.worker_response.managed_result["status"] == "timeout"
+    assert box.compute.status(store=store).status == "failed"
+    assert store.records.find_execution_records(status="timeout")

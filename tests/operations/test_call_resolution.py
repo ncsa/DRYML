@@ -36,6 +36,20 @@ def test_method_subject_and_callbacks_are_resolved():
     assert call.args == (("ref", cdef("b")),)
 
 
+def test_method_call_identity_has_no_launch_context():
+    plain = make_method_call_spec(cdef(), "compute", args=[1], kwargs={"value": "x"})
+    launched = dict(plain)
+    launch = {
+        "store": "/tmp/store",
+        "realization_id": "realization-v1-" + "a" * 32,
+        "fence_epoch": 1,
+    }
+
+    assert resolve_call_arguments(plain) == resolve_call_arguments(launched)
+    assert "launch" not in launched
+    assert launch["fence_epoch"] == 1
+
+
 def test_resolution_rejects_malformed_escapes_and_refs():
     with pytest.raises(OperationResolutionError):
         resolve_call_arguments({"schema": "dryml.operation.v1", "schema_version": 1, "kind": "function_call", "payload": {"function": "pkg.mod:run", "args": [{"$literal": "x", "extra": True}], "kwargs": {}}})

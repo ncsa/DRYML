@@ -342,6 +342,7 @@ class WorkerResponse:
     diagnostics: tuple[Mapping[str, Any], ...] = ()
     error: Mapping[str, Any] | None = None
     cancellation: Mapping[str, Any] | None = None
+    managed_result: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.status not in RESPONSE_STATUSES:
@@ -353,6 +354,10 @@ class WorkerResponse:
             raise WorkerProtocolError("worker response error must be a mapping", context={"type": type(self.error).__name__})
         if self.cancellation is not None and not isinstance(self.cancellation, Mapping):
             raise WorkerProtocolError("worker response cancellation must be a mapping", context={"type": type(self.cancellation).__name__})
+        if self.managed_result is not None:
+            if not isinstance(self.managed_result, Mapping):
+                raise WorkerProtocolError("worker response managed_result must be a mapping", context={"type": type(self.managed_result).__name__})
+            object.__setattr__(self, "managed_result", _validate_managed_result(self.managed_result))
         _validate_response_context(self)
 
     @classmethod
@@ -376,6 +381,7 @@ class WorkerResponse:
             "diagnostics",
             "error",
             "cancellation",
+            "managed_result",
         }
         if unknown:
             raise WorkerProtocolError("worker response contains unknown fields", context={"fields": sorted(unknown)})
@@ -394,6 +400,7 @@ class WorkerResponse:
             diagnostics=tuple(data.get("diagnostics") or ()),
             error=data.get("error"),
             cancellation=data.get("cancellation"),
+            managed_result=data.get("managed_result"),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -414,6 +421,7 @@ class WorkerResponse:
             "diagnostics": list(self.diagnostics),
             "error": self.error,
             "cancellation": self.cancellation,
+            "managed_result": self.managed_result,
         }
         return _json_ready({key: value for key, value in data.items() if value not in (None, (), [])}, "worker response")
 
@@ -436,6 +444,7 @@ class DispatchResult:
     diagnostics: tuple[Mapping[str, Any], ...] = ()
     error: Mapping[str, Any] | None = None
     cancellation: Mapping[str, Any] | None = None
+    managed_result: Mapping[str, Any] | None = None
 
     @classmethod
     def from_worker_response(cls, response: WorkerResponse) -> "DispatchResult":
@@ -456,6 +465,7 @@ class DispatchResult:
             diagnostics=response.diagnostics,
             error=response.error,
             cancellation=response.cancellation,
+            managed_result=response.managed_result,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -477,6 +487,7 @@ class DispatchResult:
                 "diagnostics": list(self.diagnostics),
                 "error": self.error,
                 "cancellation": self.cancellation,
+                "managed_result": self.managed_result,
             },
             "dispatch result",
         )
@@ -555,6 +566,26 @@ def _validate_response_context(response: WorkerResponse) -> None:
         raise WorkerProtocolError("cancellation is only valid on cancelled worker responses")
     if response.status in {"failed", "timeout", "unsupported"} and response.error is None and not response.diagnostics:
         raise WorkerProtocolError("failed, timeout, and unsupported worker responses require error or diagnostics", context={"status": response.status})
+
+
+def _validate_managed_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    data = _json_ready(dict(value), "managed_result")
+    if data.get("schema") != "dryml.managed.operation_result.v1" or data.get("schema_version") != 1:
+        raise WorkerProtocolError("worker response managed_result schema is unsupported")
+    if data.get("status") not in {"ok", "failed", "interrupted", "cancelled", "timeout"}:
+        raise WorkerProtocolError("worker response managed_result status is unsupported")
+    effects = data.get("effects")
+    if effects is not None and (not isinstance(effects, Mapping) or len(effects) > 256):
+        raise WorkerProtocolError("worker response managed_result effects are malformed")
+    representations = data.get("representations")
+    if representations is not None and (
+        not isinstance(representations, list) or len(representations) > 256
+    ):
+        raise WorkerProtocolError("worker response managed_result representations are malformed")
+    checkpoint = data.get("checkpoint_head")
+    if checkpoint is not None and not isinstance(checkpoint, str):
+        raise WorkerProtocolError("worker response managed_result checkpoint is malformed")
+    return data
 
 
 def _validate_coordination(coordination: Any, allocation_view: Mapping[str, Any]) -> None:

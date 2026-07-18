@@ -1,5 +1,7 @@
 import dataclasses
+import importlib
 import sys
+from pathlib import Path
 
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, LocalSubprocessFuture, WorkerResponse, WorkerStoreRef
@@ -44,6 +46,30 @@ def test_unsupported_feature_handshake_is_authoritative(tmp_path, target_module)
 
     assert response.status == "unsupported"
     assert response.error["type"] == "WorkerHandshakeError"
+
+
+def test_managed_feature_rejection_precedes_control_mutation(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    environment = PythonExecutableSpec(
+        sys.executable,
+        pythonpath_policy="explicit",
+        extra_pythonpath=(str(target_module.parent),),
+    ).to_data()
+    box = importlib.import_module("dispatch_target").ManagedBox()
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(box.compute, environment=environment)
+    bad_envelope = dataclasses.replace(
+        plan.envelope,
+        handshake={"min_protocol": 1, "required_features": ["managed.operation.v2"]},
+    )
+
+    response = dispatcher.submit(
+        dataclasses.replace(plan, envelope=bad_envelope)
+    ).result(timeout=10)
+
+    assert response.status == "unsupported"
+    assert response.error["type"] == "WorkerHandshakeError"
+    assert not Path(store.managed_control_root()).exists()
 
 
 def test_ok_response_without_ok_handshake_is_rejected(tmp_path, target_module):

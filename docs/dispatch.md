@@ -77,6 +77,35 @@ result = dispatcher.run(operation)
 
 `FunctionRef`/import-path function calls and method calls are the preferred portable path. `PickledCallable` exists only as an explicit same-Python convenience and is marked non-portable in the recipe constraints.
 
+### Managed methods
+
+A bound `dryml.managed` method can use the same single-worker API:
+
+```python
+result = dryml.dispatch.run(
+    artifact.compute,
+    store=store,
+    args=("numpy",),
+    callbacks=(progress_callback,),
+)
+```
+
+Normalization produces the ordinary method-call `OperationSpec`; Store paths,
+realization and attempt IDs, fence epochs, callback policy, and event/control
+channels remain launch-only data and do not affect the operation ID. Managed
+dispatch requires a writable same-host `DirStore` and one local subprocess.
+`plan_world()`/`run_world()` and writable ZipStore execution reject before
+managed operation state is created.
+
+Managed workers advertise `managed.operation.v1` during the existing v1 worker
+handshake. The coordinator does not acquire the managed operation lock or create
+an attempt until that handshake succeeds. It then retains the lifetime OS lock,
+runs callbacks, applies bounded event/checkpoint intents, writes control state,
+publishes typed output/execution/realization records, and activates the result.
+The worker writes only through its fence-isolated attempt workspace APIs and
+returns structured effects; this correctness boundary is not a sandbox against
+trusted user code.
+
 ## Requirement-Aware Planning
 
 `plan`, `submit`, and `run` normalize an operation once, collect its static
@@ -359,7 +388,7 @@ Python path policies are:
 
 ## Results, Logs, And Records
 
-`DispatchResult` returns compact fields: status, operation/dispatch/recipe IDs, execution record ID, canonical literal or CDef result refs, operation-produced record IDs, stdout/stderr refs, diagnostics, error, and cancellation. `WorkerResponse` enforces the same basic status context as execution records: ok responses do not carry errors, failed/timeout/unsupported responses include error details or diagnostics, and cancelled responses include cancellation facts. `execution_record_id` is provenance and is kept separate from `produced_record_ids`, which are reserved for records produced by the operation itself.
+`DispatchResult` returns compact fields: status, operation/dispatch/recipe IDs, execution record ID, canonical literal or CDef result refs, operation-produced record IDs, stdout/stderr refs, diagnostics, error, cancellation, and an optional structured `managed_result`. `WorkerResponse` enforces the same basic status context as execution records: ok responses do not carry errors, failed/timeout/unsupported responses include error details or diagnostics, and cancelled responses include cancellation facts. `execution_record_id` is provenance and is kept separate from `produced_record_ids`, which are reserved for records produced by the operation itself. A failed managed worker response retains its bounded checkpoint/effect carrier for coordinator classification; only the coordinator may turn successful effects into published records and activation.
 
 When provenance is enabled, operation, dispatch, and execution-recipe specs are written beside the execution record so provenance refs are store-resolvable. `ExecutionRecord` sidecars are emitted for success, user-code failure, timeout, cancellation, and parent-side protocol failures when metadata permits. stdout/stderr products use self product refs such as `products/<execution-record-id>/stdout.txt` and `stderr.txt`.
 

@@ -58,6 +58,26 @@ def test_non_importable_callable_public_api_pickle_policy(tmp_path):
     assert lambda_result.result_canonical == 10
 
 
+def test_submit_accepts_bound_managed_method_without_pickle(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    box = importlib.import_module("dispatch_target").ManagedBox()
+
+    future = submit(
+        box.compute,
+        store=store,
+        args=("public-submit",),
+        environment=_env(target_module),
+    )
+    handshake = future.wait_for_handshake(timeout=10)
+    result = future.result(timeout=10)
+
+    assert handshake is not None
+    assert handshake.status == "ok"
+    assert result.status == "ok", result.error
+    assert result.managed_result["status"] == "ok"
+    assert result.managed_result["action"] == "start"
+
+
 def test_dispatcher_submit_accepts_operation_and_forwards_environment_world(tmp_path, target_module):
     mod = importlib.import_module("dispatch_target")
     store = DirStore(tmp_path / "store", query_index="none")

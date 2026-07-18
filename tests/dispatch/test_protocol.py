@@ -49,6 +49,33 @@ def test_protocol_models_round_trip(tmp_path):
     assert handshake.protocol_version == 1
 
 
+def test_managed_worker_result_round_trip_is_structured(tmp_path):
+    managed_result = {
+        "schema": "dryml.managed.operation_result.v1",
+        "schema_version": 1,
+        "status": "ok",
+        "effects": {},
+        "checkpoint_head": None,
+    }
+
+    response = WorkerResponse.from_json(
+        WorkerResponse(
+            status="ok",
+            operation_id=_envelope(tmp_path).operation_id,
+            managed_result=managed_result,
+        ).to_json()
+    )
+
+    assert response.managed_result == managed_result
+    with pytest.raises(Exception, match="managed_result"):
+        WorkerResponse.from_json({"status": "ok", "managed_result": "not-a-mapping"})
+    with pytest.raises(Exception, match="schema"):
+        WorkerResponse(
+            status="ok",
+            managed_result={"schema": "wrong", "schema_version": 1, "status": "ok"},
+        )
+
+
 def test_planning_metadata_v2_carriers_remain_compatible(tmp_path):
     planning_v2 = {
         "dryml.dispatch.planning_version": 2,

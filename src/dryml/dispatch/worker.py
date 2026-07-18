@@ -31,6 +31,7 @@ FEATURES = (
     "store.dir",
     "runtime.worker",
     "records.execution",
+    "managed.operation.v1",
 )
 
 
@@ -66,7 +67,17 @@ def main(argv: list[str] | None = None) -> int:
         if barrier_response is not None:
             write_json_file(ns.response, barrier_response.to_json())
             return 1
-        response = _execute(envelope, repo, stores[0] if stores else None)
+        managed_ticket = None
+        if envelope.launch.get("managed") is not None:
+            from dryml.managed.dispatch import wait_for_managed_ticket
+
+            managed_ticket = wait_for_managed_ticket(envelope.launch)
+        response = _execute(
+            envelope,
+            repo,
+            stores[0] if stores else None,
+            managed_ticket=managed_ticket,
+        )
         write_json_file(ns.response, response.to_json())
         return 0 if response.status == "ok" else 1
     except Exception as exc:
@@ -148,12 +159,59 @@ def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mappin
     )
 
 
-def _execute(envelope: ExecutionEnvelope, repo: Repo, store: Any) -> WorkerResponse:
+def _execute(
+    envelope: ExecutionEnvelope,
+    repo: Repo,
+    store: Any,
+    *,
+    managed_ticket: Mapping[str, Any] | None = None,
+) -> WorkerResponse:
     allocation = allocation_from_json(envelope.allocation_view)
     runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec or {"mode": "worker", "device_visibility": {"policy": "assigned"}})
     try:
         with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, env=allocation.env, restore_environ=False):
             _report("dryml.dispatch.worker.execute", "Running operation in worker", operation_id=envelope.operation_id)
+            if managed_ticket is not None:
+                from dryml.managed.dispatch import execute_managed_operation
+
+                execution = execute_managed_operation(
+                    dict(envelope.operation_spec),
+                    repo=repo,
+                    store=store,
+                    ticket=managed_ticket,
+                )
+                if execution.status == "ok":
+                    return WorkerResponse(
+                        status="ok",
+                        operation_id=envelope.operation_id,
+                        dispatch_id=envelope.dispatch_spec.get("id"),
+                        recipe_id=envelope.execution_recipe.get("id"),
+                        result_canonical={
+                            "early_completed": bool(
+                                execution.managed_result.get("early_completed", False)
+                            )
+                        },
+                        managed_result=execution.managed_result,
+                    )
+                error = None
+                if execution.error is not None:
+                    error = {
+                        "type": type(execution.error).__name__,
+                        "message": str(execution.error),
+                        "traceback": "".join(
+                            traceback.format_exception(execution.error)
+                        ),
+                    }
+                return WorkerResponse(
+                    status=execution.status,
+                    operation_id=envelope.operation_id,
+                    dispatch_id=envelope.dispatch_spec.get("id"),
+                    recipe_id=envelope.execution_recipe.get("id"),
+                    error=error if execution.status != "cancelled" else None,
+                    cancellation=execution.cancellation,
+                    diagnostics=({"message": "managed worker execution did not complete"},),
+                    managed_result=execution.managed_result,
+                )
             result, consumed_cdefs = execute_operation(dict(envelope.operation_spec), repo=repo, envelope_launch=dict(envelope.launch))
             canonical, produced_cdefs = canonicalize_result(result, repo=repo, store=store, record_policy=envelope.record_policy)
         record_id = _write_worker_record(envelope, store, "ok", consumed_cdef_ids=consumed_cdefs, produced_cdef_ids=produced_cdefs)

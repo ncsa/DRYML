@@ -29,7 +29,10 @@ def target_module(tmp_path):
             import sys
             import time
 
+            import dryml
             from dryml.core2.object import Pickleable
+            from dryml.managed import ManagedOutput, OperationResult, current_operation_context, managed
+            from dryml.records import make_representation_spec
             from dryml.runtime import BOOTSTRAP_MARKER_ENV, active_runtime, active_runtime_mode, import_configured_framework
 
             IMPORT_RUNTIME_MODE = active_runtime_mode().value
@@ -41,6 +44,76 @@ def target_module(tmp_path):
 
                 def plus(self, amount):
                     return self.value + amount
+
+            MANAGED_REPRESENTATION = make_representation_spec(
+                "dispatch.managed.bytes",
+                version="1",
+                storage_kinds=("product-dir",),
+            )
+
+            class ManagedBox(Pickleable):
+                @managed(
+                    outputs=(ManagedOutput("result", primary=True, kind="data"),),
+                    resumable=True,
+                    checkpoint_schema="dispatch-checkpoint-v1",
+                )
+                @dryml.env.req(python=">=3")
+                @dryml.world.req(cpus={"exact": 1})
+                def compute(
+                    self,
+                    value="value",
+                    fail=False,
+                    sleep=0.0,
+                    hard_exit=False,
+                ):
+                    context = current_operation_context()
+                    runtime = active_runtime()
+                    context.progress(
+                        1,
+                        total=2,
+                        message=runtime.mode.value,
+                        metrics={"rank": runtime.allocation.rank},
+                    )
+                    if sleep:
+                        time.sleep(sleep)
+
+                    def checkpoint():
+                        context.write_checkpoint("cursor.txt", (b"1",))
+
+                    context.safe_point(checkpoint=checkpoint)
+                    if hard_exit:
+                        os._exit(17)
+                    payload = f"{value}:{runtime.mode.value}:{runtime.allocation.rank}".encode()
+                    context.write_output(
+                        "result",
+                        "value.bin",
+                        (payload,),
+                        representation=MANAGED_REPRESENTATION,
+                    )
+                    if fail:
+                        raise RuntimeError("managed worker failure")
+                    context.progress(2, total=2, message="complete")
+                    return OperationResult()
+
+            class ManagedConsumer(Pickleable):
+                def __init__(self, source):
+                    super().__init__()
+                    self.source = source
+
+                def __dryml_managed_inputs__(self, method, args, kwargs):
+                    return (self.source,)
+
+                @managed(
+                    outputs=(ManagedOutput("result", primary=True, kind="data"),),
+                )
+                def compute(self):
+                    context = current_operation_context()
+                    context.write_output(
+                        "result",
+                        "value.bin",
+                        (b"consumed",),
+                        representation=MANAGED_REPRESENTATION,
+                    )
 
             def add(x, y):
                 return x + y

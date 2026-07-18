@@ -22,6 +22,7 @@ from typing import Any, Callable
 from dryml.code import CodeTargetSpec, target_from_callable, target_from_definition_method
 from dryml.core2.definition import ConcreteDefinition, Definition
 from dryml.core2.object import Object
+from dryml.core2.methods import bound_method_parts
 from dryml.core2.repo import Repo
 from dryml.core2.symbol import resolve_symbol
 from dryml.core2.utils.general import pickle_load
@@ -191,6 +192,28 @@ def normalize_user_operation(
         trace_cdefs = {}
         trace_positions = ()
     norm_method = _validate_optional_method_name(method_name)
+
+    bound_parts = bound_method_parts(operation)
+    if bound_parts is not None and inspect.getattr_static(
+        type(operation), "__dryml_dispatch_extension__", False
+    ) is True:
+        if norm_method is not None:
+            raise DispatchPlanningError(
+                "method_name must not accompany a bound managed method"
+            )
+        receiver, func = bound_parts
+        if not isinstance(receiver, Object):
+            raise DispatchPlanningError(
+                "managed dispatch requires a bound DRYML Object method"
+            )
+        return normalize_object_method_operation(
+            receiver,
+            func.__name__,
+            store=store,
+            args=norm_args,
+            kwargs=norm_kwargs,
+            persist=False if trace_enabled else persist_object,
+        )
 
     # Trace-enabled method targets are unsupported, but a stored CDef/Object
     # still needs the ordinary non-mutating method-call carrier so dispatch can

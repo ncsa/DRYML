@@ -318,6 +318,56 @@ class OperationContext:
                 )
         return records
 
+    def apply_worker_event(self, event: OperationEvent) -> None:
+        """Apply one validated worker intent through coordinator authority."""
+
+        if not isinstance(event, OperationEvent):
+            raise TypeError("worker event must be an OperationEvent")
+        if event.progress_snapshot is not None:
+            self.lease.update_progress(self.realization_id, event.progress_snapshot)
+        self._publish(event)
+
+    def register_output_effect(self, effect: OutputEffect) -> None:
+        """Register validated worker output metadata without publishing it."""
+
+        if not isinstance(effect, OutputEffect):
+            raise TypeError("worker output effect must be an OutputEffect")
+        declaration = self.outputs.get(effect.slot)
+        if declaration is None:
+            raise ManagedOutputError(
+                f"operation wrote undeclared output slot {effect.slot!r}"
+            )
+        expected_kind = "stored_state" if declaration.kind == "object" else declaration.kind
+        if effect.record_kind != expected_kind:
+            raise ManagedOutputError(
+                f"output slot {effect.slot!r} changed its declared record kind"
+            )
+        prior = self._effects.get(effect.slot)
+        if prior is not None and prior != effect:
+            raise ManagedOutputError(
+                f"output slot {effect.slot!r} changed representation or ownership"
+            )
+        self._effects[effect.slot] = effect
+
+    def commit_worker_checkpoint(
+        self,
+        checkpoint_schema: str,
+        *,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Commit worker-staged bytes and advance the coordinator-owned head."""
+
+        if checkpoint_schema != self.checkpoint_schema:
+            raise ManagedOutputError(
+                "worker checkpoint schema does not match operation capability"
+            )
+        committed = self.writer.commit_checkpoint(
+            checkpoint_schema,
+            metadata=metadata,
+        )
+        self._last_checkpoint = committed.checkpoint_id
+        return committed.checkpoint_id
+
     def validate_result(self, value: Any) -> OperationResult:
         """Normalize completion and require explicit valid early completion."""
 

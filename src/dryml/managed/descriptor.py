@@ -24,6 +24,7 @@ class BoundManagedMethod:
     """Callable binding of a managed descriptor to one producer Object."""
 
     __dryml_bound_method__ = True
+    __dryml_dispatch_extension__ = True
 
     def __init__(self, descriptor: "ManagedMethod", owner: Any):
         self._descriptor = descriptor
@@ -116,6 +117,26 @@ class BoundManagedMethod:
         from .runtime import should_use_managed_runtime
 
         return should_use_managed_runtime(self, {})
+
+    def __dryml_make_dispatch_extension__(
+        self,
+        *,
+        args,
+        kwargs,
+        callbacks=(),
+        rerun=False,
+    ):
+        """Build invocation-local managed dispatch policy outside call identity."""
+
+        from .dispatch import ManagedDispatchRequest
+
+        return ManagedDispatchRequest(
+            self,
+            tuple(args),
+            dict(kwargs or {}),
+            callbacks=callbacks,
+            rerun=rerun,
+        )
 
 
 class ManagedMethod:
