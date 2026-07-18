@@ -45,18 +45,20 @@ def _write_notebook(path: Path, document: object) -> Path:
     return path
 
 
-def test_canonical_notebook_registry_orders_objects_data_runtime_and_models():
+def test_canonical_notebook_registry_orders_objects_data_runtime_models_and_definition_variants():
     assert [item.path.as_posix() for item in CANONICAL_NOTEBOOKS] == [
         "examples/notebooks/objects_definitions_and_repos.ipynb",
         "examples/notebooks/datasets_and_transforms.ipynb",
         "examples/notebooks/local_defaults_and_plain_mode.ipynb",
         "examples/notebooks/models_experiments_and_metrics.ipynb",
+        "examples/notebooks/definition_driven_experiments.ipynb",
     ]
-    assert [item.extras for item in CANONICAL_NOTEBOOKS] == [(), (), (), ("sklearn",)]
+    assert [item.extras for item in CANONICAL_NOTEBOOKS] == [(), (), (), ("sklearn",), ("sklearn",)]
     assert [item.allowed_optional_imports for item in CANONICAL_NOTEBOOKS] == [
         frozenset(),
         frozenset(),
         frozenset(),
+        frozenset({"sklearn"}),
         frozenset({"sklearn"}),
     ]
 
@@ -119,6 +121,44 @@ def test_runtime_notebook_teaches_current_execution_distinctions():
         )
         if token in executable_source
     }
+
+
+def test_definition_variants_notebook_teaches_identity_materialization_and_structural_query():
+    item = next(
+        item
+        for item in CANONICAL_NOTEBOOKS
+        if item.path.name == "definition_driven_experiments.ipynb"
+    )
+    document = validate_notebook(repository_path(item.path))
+    all_source = "\n".join(
+        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+        for cell in document["cells"]
+    )
+    executable_source = "\n".join(
+        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+        for cell in document["cells"]
+        if cell["cell_type"] == "code"
+    )
+
+    required_executable = {
+        "Definition(ArrayDataset",
+        "RandomForestRegressor",
+        ".concretize()",
+        ".stable_hash()",
+        ".stored().defs()",
+        "SKIP_ARGS",
+        "TemporaryDirectory",
+        "cache='none'",
+        "instance='new'",
+        "mean_squared_error",
+        "random_state",
+        "with_arg",
+        "with_kwarg",
+    }
+    missing = {token for token in required_executable if token not in executable_source}
+    assert not missing, f"definition variants notebook is missing teaching elements: {sorted(missing)}"
+    assert "generated IDs" in all_source
+    assert "fresh instances are a materialization choice" in all_source.lower()
 
 
 def test_invalid_json_reports_notebook_path(tmp_path):

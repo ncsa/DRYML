@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,34 @@ def test_objects_notebook_executes_twice_in_independent_processes(tmp_path):
     assert all(result.unexpected_writes == () for result in results)
     assert all(result.repository_on_pythonpath is False for result in results)
     assert all("Traceback" not in result.stdout + result.stderr for result in results)
+
+
+def test_definition_variants_summary_is_stable_across_independent_processes(tmp_path):
+    item = next(
+        item
+        for item in CANONICAL_NOTEBOOKS
+        if item.path.name == "definition_driven_experiments.ipynb"
+    )
+    results = [
+        execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
+        for index in range(2)
+    ]
+
+    marker = "DEFINITION_VARIANT_SUMMARY="
+    summaries = []
+    for result in results:
+        lines = [line for line in result.stdout.splitlines() if line.startswith(marker)]
+        assert len(lines) == 1
+        summaries.append(json.loads(lines[0][len(marker):]))
+
+    assert summaries[0] == summaries[1]
+    assert len(summaries[0]) == 2
+    assert [item["identity"] for item in summaries[0]] == sorted(
+        item["identity"] for item in summaries[0]
+    )
+    assert len({item["identity"] for item in summaries[0]}) == 2
+    assert {item["random_state"] for item in summaries[0]} == {11, 29}
+    assert all(math.isfinite(item["mse"]) for item in summaries[0])
 
 
 def test_network_guard_blocks_socket_access_with_cell_diagnostic(tmp_path):
