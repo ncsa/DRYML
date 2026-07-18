@@ -44,6 +44,7 @@ MANAGED_CAPABILITIES = frozenset({
     "managed-control-v1",
     "managed-locking-v1",
     "managed-activation-v1",
+    "managed-durable-products-v1",
 })
 
 
@@ -183,6 +184,12 @@ class OperationControl:
     @property
     def _activations_dir(self) -> Path:
         return self.generation_dir / "activations"
+
+    @property
+    def attempts_dir(self) -> Path:
+        """Return the retained fence-isolated attempt workspace root."""
+
+        return self.generation_dir / "attempts"
 
     def acquire(self, *, advance_declaration: bool = False, takeover: bool = False) -> "OperationLease":
         """Acquire lifetime ownership and advance the monotonic fence.
@@ -579,12 +586,52 @@ class OperationLease:
         )
 
     @_serialized_mutation
-    def complete(self, realization_id: str) -> RealizationState:
-        """Mark required work complete without changing active selection."""
+    def checkpoint(self, realization_id: str, checkpoint_head: str) -> RealizationState:
+        """Commit an immutable framework-owned checkpoint head under the fence."""
 
         self._assert_current()
+        _control, state = self._require_pending(realization_id)
+        if state.status != "running":
+            raise ManagedStateError("checkpoint publication requires running work")
+        state = replace(state, checkpoint_head=checkpoint_head)
+        self.operation._write_realization(state)
+        self._write_control_for(state)
+        return state
+
+    @_serialized_mutation
+    def complete(
+        self,
+        realization_id: str,
+        *,
+        realization_record_id: str,
+    ) -> RealizationState:
+        """Mark verified required work complete without changing activation."""
+
+        if realization_record_id is None:
+            raise ManagedStateError("completion requires an immutable realization record")
+        return self._complete_state(realization_id, realization_record_id)
+
+    @_serialized_mutation
+    def _complete_control_only(self, realization_id: str) -> RealizationState:
+        """Complete U2 control-state fixtures without asserting U3 publication."""
+
+        return self._complete_state(realization_id, None)
+
+    def _complete_state(
+        self,
+        realization_id: str,
+        realization_record_id: str | None,
+    ) -> RealizationState:
+        self._assert_current()
         control, state = self._require_pending(realization_id)
-        state = replace(state, status="completed", current_attempt_id=None)
+        if realization_record_id is not None:
+            self._validate_realization_record(realization_id, realization_record_id)
+        state = replace(
+            state,
+            status="completed",
+            current_attempt_id=None,
+            realization_record_id=realization_record_id,
+        )
         self.operation._write_realization(state)
         control = replace(
             control,
@@ -599,10 +646,28 @@ class OperationLease:
     def activate(self, realization_id: str) -> RealizationState:
         """Append an immutable activation event, then update the pointer last."""
 
+        return self._activate_state(realization_id, require_record=True)
+
+    @_serialized_mutation
+    def _activate_control_only(self, realization_id: str) -> RealizationState:
+        """Activate U2 control-state fixtures without asserting U3 publication."""
+
+        return self._activate_state(realization_id, require_record=False)
+
+    def _activate_state(
+        self,
+        realization_id: str,
+        *,
+        require_record: bool,
+    ) -> RealizationState:
         self._assert_current()
         state = self.operation._read_realization(realization_id)
         if state.status != "completed":
             raise ManagedStateError("only completed realizations may become active")
+        if require_record and state.realization_record_id is None:
+            raise ManagedStateError("activation requires an immutable realization record")
+        if state.realization_record_id is not None:
+            self._validate_realization_record(realization_id, state.realization_record_id)
         previous = self.operation.active(missing_ok=True)
         events = self.operation._activation_events()
         event = ActivationEvent(
@@ -612,6 +677,7 @@ class OperationLease:
             realization_id=realization_id,
             previous_realization_id=None if previous is None else previous.realization_id,
             fence_epoch=self.epoch,
+            realization_record_id=state.realization_record_id,
         )
         _write_json(self.operation._activation_path(event), event.to_json(), immutable=True)
         self._assert_current()
@@ -668,6 +734,68 @@ class OperationLease:
             diagnostics=state.diagnostics,
         )
         _write_json(self.operation.control_path, control.to_json())
+
+    def assert_current(self) -> None:
+        """Fail unless this lease still owns the current fence and OS lock."""
+
+        self._assert_current()
+
+    def _validate_realization_record(
+        self, realization_id: str, realization_record_id: str
+    ) -> None:
+        from dryml.records import (
+            DataRecord,
+            ExecutionRecord,
+            RealizationRecord,
+            StoredStateRecord,
+            require_product_integrity,
+        )
+
+        record_io = self.operation.managed_store.store.records
+        envelope = record_io.read_record(realization_record_id)
+        realization = RealizationRecord.from_envelope(envelope)
+        if realization.realization_id != realization_id:
+            raise ManagedStateError("realization record binds a different realization")
+        if realization.producer_cdef_id != self.operation.key.producer_cdef_id:
+            raise ManagedStateError("realization record binds a different producer")
+        if realization.method != self.operation.key.method:
+            raise ManagedStateError("realization record binds a different method")
+        if realization.declaration_fingerprint != self.operation.declaration_fingerprint:
+            raise ManagedStateError("realization record binds a different declaration")
+        for output in realization.outputs:
+            record_io.read_spec(output.representation_id, family="representation")
+            output_envelope = record_io.read_record(output.record_id)
+            if output.record_kind == "data":
+                typed_output = DataRecord.from_envelope(output_envelope)
+            elif output.record_kind == "stored_state":
+                typed_output = StoredStateRecord.from_envelope(output_envelope)
+            else:
+                raise ManagedStateError("managed realization output kind is unsupported")
+            ownership = (
+                typed_output.realization_id,
+                typed_output.output_slot,
+                typed_output.representation_id,
+            )
+            expected = (realization_id, output.slot, output.representation_id)
+            if ownership != expected:
+                raise ManagedStateError("managed output ownership does not match realization")
+            require_product_integrity(record_io, output_envelope)
+        execution = ExecutionRecord.from_envelope(
+            record_io.read_record(realization.execution_record_id)
+        )
+        if execution.realization_id != realization_id:
+            raise ManagedStateError("execution record binds a different realization")
+        output_ids = {output.record_id for output in realization.outputs}
+        if set(execution.produced_record_ids) != output_ids:
+            raise ManagedStateError("execution produced lineage does not match realization outputs")
+        try:
+            execution_consumed = tuple(link.to_resolved() for link in execution.consumed_records)
+        except Exception as exc:
+            raise ManagedStateError("execution consumed lineage is not exact") from exc
+        if execution_consumed != realization.consumed_records:
+            raise ManagedStateError("execution consumed lineage does not match realization")
+        for consumed in realization.consumed_records:
+            record_io.read_record(consumed.record_id)
 
     def _assert_current(self) -> NamespaceState:
         if self._released or not self._lock.held:

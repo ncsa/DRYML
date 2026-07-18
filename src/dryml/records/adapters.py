@@ -359,10 +359,12 @@ def _build_target_record(source: TypedRecord, source_record_id: str, representat
             state_role=source.state_role,
             manifest=manifest.to_json(),
             derived_from=(source_record_id,),
+            realization_id=source.realization_id,
+            output_slot=source.output_slot,
             extra={key: value for key, value in extra.items() if key != "derived_from"},
         )
     if isinstance(source, DataRecord):
-        return DataRecord(representation_id=representation_id, storage=storage, subject_cdef_id=source.subject_cdef_id, operation_id=source.operation_id, data_role=source.data_role, manifest=manifest.to_json(), derived_from=(source_record_id,), extra=extra)
+        return DataRecord(representation_id=representation_id, storage=storage, subject_cdef_id=source.subject_cdef_id, operation_id=source.operation_id, data_role=source.data_role, manifest=manifest.to_json(), derived_from=(source_record_id,), realization_id=source.realization_id, output_slot=source.output_slot, extra=extra)
     if isinstance(source, ProgramRecord):
         return ProgramRecord(representation_id=representation_id, storage=storage, operation_id=source.operation_id, target=source.target, entrypoints=source.entrypoints, provider=source.provider, toolchain=source.toolchain, manifest=manifest.to_json(), derived_from=(source_record_id,), extra=extra)
     raise RecordValidationError("adapter source record kind is not supported")

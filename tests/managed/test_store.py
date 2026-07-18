@@ -63,8 +63,8 @@ def test_declaration_rollover_keeps_old_generation_history_across_reopen(tmp_pat
     old = managed.operation(KEY, FP1)
     with old.acquire() as lease:
         first = lease.prepare(resumable=True)
-        lease.complete(first.realization.realization_id)
-        lease.activate(first.realization.realization_id)
+        lease._complete_control_only(first.realization.realization_id)
+        lease._activate_control_only(first.realization.realization_id)
 
     current = managed.operation(KEY, FP2)
     with pytest.raises(ManagedStateError, match="declaration fingerprint"):

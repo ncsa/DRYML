@@ -22,10 +22,16 @@ def _cdef():
     return format_cdef_id("a" * 64)
 
 
-def _seed(repo_store):
+def _seed(repo_store, *, realization_id=None, output_slot=None):
     raw = make_representation_spec("fake.raw_state", storage_kinds=("product-dir",))
     repo_store.records.write_spec(raw, family="representation")
-    source = StoredStateRecord(_cdef(), raw["id"], (StorageRef.self_product(role="source-state"),))
+    source = StoredStateRecord(
+        _cdef(),
+        raw["id"],
+        (StorageRef.self_product(role="source-state"),),
+        realization_id=realization_id,
+        output_slot=output_slot,
+    )
     ref = repo_store.records.write_record(source.to_envelope())
     root = repo_store.records.product_root(ref.record_id, create=True)
     root.joinpath("state.txt").write_text("raw", encoding="utf-8")
@@ -102,6 +108,41 @@ def test_missing_runner_returns_unsupported(tmp_path):
     registry.register(AdapterDescriptor("fake.normalize", RepresentationRequirement(kind="fake.raw_state"), RepresentationRequirement(kind="fake.normalized_state")))
     plan = resolve_state_record(repo, _cdef(), RepresentationRequirement(kind="fake.normalized_state"), adapters=registry).adapter_plan
     assert run_adapter_plan(plan, repo=repo, store=store, registry=registry).status == "unsupported"
+
+
+def test_adapter_target_preserves_managed_realization_ownership(tmp_path):
+    store = DirStore(tmp_path / "store")
+    realization_id = "realization-v1-" + "1" * 32
+    _seed(store, realization_id=realization_id, output_slot="result")
+    repo = Repo(stores=[store])
+    registry = AdapterRegistry()
+
+    def runner(context):
+        context.session.write_text("adapted.txt", "adapted")
+        return {}
+
+    registry.register(
+        AdapterDescriptor(
+            "fake.normalize",
+            RepresentationRequirement(kind="fake.raw_state"),
+            RepresentationRequirement(kind="fake.normalized_state"),
+        ),
+        runner=runner,
+    )
+    plan = resolve_state_record(
+        repo,
+        _cdef(),
+        RepresentationRequirement(kind="fake.normalized_state"),
+        adapters=registry,
+    ).adapter_plan
+
+    result = run_adapter_plan(plan, repo=repo, store=store, registry=registry)
+    target = StoredStateRecord.from_envelope(
+        store.records.read_record(result.target_records[-1].record_id)
+    )
+
+    assert target.realization_id == realization_id
+    assert target.output_slot == "result"
 
 
 def test_adapter_descriptors_from_report_rejects_string_sequences():

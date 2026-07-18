@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import contextmanager
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Literal
@@ -108,14 +109,27 @@ class RecordStoreIO:
                 attached = attach_record_id(ExecutionRecord.from_envelope(record).to_envelope())
             except RecordValidationError as exc:
                 raise RecordValidationError("invalid execution record", context={"record_id": record.get("id"), **exc.context}) from exc
+        elif record.get("kind") == "realization":
+            from .realizations import RealizationRecord
+
+            try:
+                attached = attach_record_id(RealizationRecord.from_envelope(record).to_envelope())
+            except RecordValidationError as exc:
+                raise RecordValidationError(
+                    "invalid realization record",
+                    context={"record_id": record.get("id"), **exc.context},
+                ) from exc
         else:
             attached = attach_record_id(record)
             validate_record(attached)
         record_id = attached["id"]
         path = self._record_path(record_id)
-        changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
-        if changed:
-            self._mark_ref_index_dirty_if_tracking()
+        self._write_authoritative_json(
+            path,
+            attached,
+            overwrite=overwrite,
+            error_cls=RecordIOError,
+        )
         if attached.get("kind") == "execution":
             _report_execution_write(attached)
         return LocatedRecordRef(store_ref=self._store_ref(), record_id=record_id)
@@ -167,9 +181,12 @@ class RecordStoreIO:
         if resolved_family is None:
             raise SpecValidationError("spec family is required for unknown spec ID prefix", context={"spec_id": spec_id})
         path = self._spec_path(spec_id, resolved_family)
-        changed = self._write_json(path, attached, overwrite=overwrite, error_cls=RecordIOError)
-        if changed:
-            self._mark_ref_index_dirty_if_tracking()
+        self._write_authoritative_json(
+            path,
+            attached,
+            overwrite=overwrite,
+            error_cls=RecordIOError,
+        )
         return LocatedSpecRef(store_ref=self._store_ref(), spec_id=spec_id, kind=resolved_family)
 
     def read_spec(self, spec_id: str, *, family: str | None = None) -> dict[str, Any]:
@@ -241,6 +258,10 @@ class RecordStoreIO:
         target_record_id: str | None = None,
         derived_from: str | None = None,
         storage_kind: str | None = None,
+        realization_id: str | None = None,
+        output_slot: str | None = None,
+        producer_cdef_id: str | None = None,
+        method: str | None = None,
     ) -> tuple[LocatedRecordRef, ...]:
         """Scan authoritative record JSON and return records matching payload filters."""
 
@@ -262,6 +283,14 @@ class RecordStoreIO:
             if source_record_id is not None and payload.get("source_record_id") != source_record_id:
                 continue
             if target_record_id is not None and payload.get("target_record_id") != target_record_id:
+                continue
+            if realization_id is not None and payload.get("realization_id") != realization_id:
+                continue
+            if output_slot is not None and payload.get("output_slot") != output_slot:
+                continue
+            if producer_cdef_id is not None and payload.get("producer_cdef_id") != producer_cdef_id:
+                continue
+            if method is not None and payload.get("method") != method:
                 continue
             if derived_from is not None:
                 derived_values = payload.get("derived_from") or ()
@@ -382,14 +411,19 @@ class RecordStoreIO:
 
         self.indexes_dir.mkdir(parents=True, exist_ok=True)
         tmp_path = self.ref_index_dirty_path.with_suffix(self.ref_index_dirty_path.suffix + ".tmp")
-        tmp_path.write_text("dirty\n", encoding="utf-8")
+        with tmp_path.open("wb") as handle:
+            handle.write(b"dirty\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(tmp_path, self.ref_index_dirty_path)
+        _fsync_directory(self.indexes_dir)
 
     def clear_ref_index_dirty(self) -> None:
         """Clear the optional record reference index dirty marker if present."""
 
         try:
             self.ref_index_dirty_path.unlink()
+            _fsync_directory(self.indexes_dir)
         except FileNotFoundError:
             pass
 
@@ -403,20 +437,24 @@ class RecordStoreIO:
 
         from .index import RecordRefIndexRebuildReport, build_record_ref_index
 
-        index, records_scanned, specs_scanned = build_record_ref_index(self)
-        payload = canonical_json_bytes(index.to_json())
-        changed = not self.ref_index_path.exists() or self.ref_index_path.read_bytes() != payload
         self.indexes_dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile("wb", dir=self.indexes_dir, prefix=f".{self.ref_index_path.name}.", delete=False) as tmp:
-                tmp.write(payload)
-                tmp_path = Path(tmp.name)
-            os.replace(tmp_path, self.ref_index_path)
-        finally:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink()
-        self.clear_ref_index_dirty()
+        with self._ref_index_mutation_lock():
+            index, records_scanned, specs_scanned = build_record_ref_index(self)
+            payload = canonical_json_bytes(index.to_json())
+            changed = not self.ref_index_path.exists() or self.ref_index_path.read_bytes() != payload
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile("wb", dir=self.indexes_dir, prefix=f".{self.ref_index_path.name}.", delete=False) as tmp:
+                    tmp.write(payload)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    tmp_path = Path(tmp.name)
+                os.replace(tmp_path, self.ref_index_path)
+                _fsync_directory(self.indexes_dir)
+            finally:
+                if tmp_path is not None and tmp_path.exists():
+                    tmp_path.unlink()
+            self.clear_ref_index_dirty()
         return RecordRefIndexRebuildReport(
             store_ref=self._store_ref(),
             changed=changed,
@@ -524,6 +562,72 @@ class RecordStoreIO:
         if self.ref_index_path.exists() or self.indexes_dir.exists():
             self.mark_ref_index_dirty()
 
+    def _write_authoritative_json(
+        self,
+        path: Path,
+        data: Mapping[str, Any],
+        *,
+        overwrite: bool,
+        error_cls: type[RecordIOError],
+    ) -> bool:
+        with self._ref_index_mutation_lock():
+            tracking = self.ref_index_path.exists() or self.indexes_dir.exists()
+            payload = canonical_json_bytes(data)
+            if path.exists():
+                existing = path.read_bytes()
+                if existing == payload:
+                    return False
+                if not overwrite:
+                    raise error_cls("sidecar already exists with different canonical bytes")
+            if not tracking:
+                return self._write_json(path, data, overwrite=overwrite, error_cls=error_cls)
+            # The marker is durable before authoritative bytes can become visible.
+            self.mark_ref_index_dirty()
+            return self._write_json(path, data, overwrite=overwrite, error_cls=error_cls)
+
+    @contextmanager
+    def _ref_index_mutation_lock(self):
+        """Serialize source publication with derived reference-index rebuilds."""
+
+        self.records_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.records_dir / ".ref-index-v1.lock"
+        handle = lock_path.open("a+b", buffering=0)
+        try:
+            if os.name == "posix":
+                try:
+                    import fcntl
+                except ImportError as exc:
+                    raise RecordIOError("record index coordination requires fcntl") from exc
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            elif os.name == "nt":
+                try:
+                    import msvcrt
+                except ImportError as exc:
+                    raise RecordIOError("record index coordination requires msvcrt") from exc
+                handle.seek(0)
+                if not handle.read(1):
+                    handle.write(b"\0")
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                raise RecordIOError(
+                    f"record index coordination is unsupported on platform {os.name!r}"
+                )
+            yield
+        finally:
+            try:
+                if os.name == "posix":
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                elif os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                handle.close()
+
     def _ref_index_for_query(self, *, refresh: bool | Literal["auto"]):
         from .index import RecordRefIndexDirty, RecordRefIndexMissing, RecordRefIndexValidationError
 
@@ -558,8 +662,11 @@ class RecordStoreIO:
         try:
             with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as tmp:
                 tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
                 tmp_path = Path(tmp.name)
             os.replace(tmp_path, path)
+            _fsync_directory(path.parent)
             return True
         finally:
             if tmp_path is not None and tmp_path.exists():
@@ -629,6 +736,16 @@ def _report_execution_write(record: Mapping[str, Any]) -> None:
         )
     except Exception:
         pass
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 __all__ = ["RecordStoreIO"]

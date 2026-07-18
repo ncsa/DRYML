@@ -18,6 +18,7 @@ from .errors import RecordValidationError
 from .records import make_record, validate_record
 from .refs import LocatedRecordRef
 from .storage import StorageRef
+from .realizations import ResolvedRecord, validate_output_slot, validate_realization_id
 
 
 EXECUTION_STATUSES = frozenset({"ok", "failed", "cancelled", "timeout", "unsupported", "skipped", "degraded"})
@@ -47,6 +48,12 @@ class ExecutionRecordLink:
     representation_id: str | None = None
     subject_cdef_id: str | None = None
     required: bool = True
+    producer_cdef_id: str | None = None
+    method: str | None = None
+    declaration_fingerprint: str | None = None
+    activation_generation: int | None = None
+    realization_id: str | None = None
+    output_slot: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -59,6 +66,35 @@ class ExecutionRecordLink:
             _validate_cdef_id(self.subject_cdef_id, "subject_cdef_id")
         if not isinstance(self.required, bool):
             raise RecordValidationError("execution record link required must be boolean", context={"type": type(self.required).__name__})
+        exact_fields = (
+            self.producer_cdef_id,
+            self.method,
+            self.declaration_fingerprint,
+            self.activation_generation,
+        )
+        if any(value is not None for value in exact_fields):
+            if any(value is None for value in (*exact_fields, self.realization_id, self.output_slot)):
+                raise RecordValidationError(
+                    "exact consumed vector requires producer, method, declaration, activation, realization, output slot, and record"
+                )
+            ResolvedRecord(
+                producer_cdef_id=self.producer_cdef_id,
+                method=self.method,
+                declaration_fingerprint=self.declaration_fingerprint,
+                activation_generation=self.activation_generation,
+                realization_id=self.realization_id,
+                output_slot=self.output_slot,
+                record_id=self.record_id,
+            )
+        else:
+            if self.realization_id is not None:
+                validate_realization_id(self.realization_id)
+            if self.output_slot is not None:
+                validate_output_slot(self.output_slot)
+            if (self.realization_id is None) != (self.output_slot is None):
+                raise RecordValidationError(
+                    "execution produced-record ownership requires realization_id and output_slot together"
+                )
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
 
     @classmethod
@@ -69,7 +105,20 @@ class ExecutionRecordLink:
             return cls(record_id=value, required=default_required)
         if not isinstance(value, Mapping):
             raise RecordValidationError("execution record link must be a mapping", context={"type": type(value).__name__})
-        unknown = set(value) - {"record_id", "role", "representation_id", "subject_cdef_id", "required", "metadata"}
+        unknown = set(value) - {
+            "record_id",
+            "role",
+            "representation_id",
+            "subject_cdef_id",
+            "required",
+            "producer_cdef_id",
+            "method",
+            "declaration_fingerprint",
+            "activation_generation",
+            "realization_id",
+            "output_slot",
+            "metadata",
+        }
         if unknown:
             raise RecordValidationError("execution record link contains unknown fields", context={"fields": sorted(unknown)})
         if "record_id" not in value:
@@ -80,6 +129,12 @@ class ExecutionRecordLink:
             representation_id=value.get("representation_id"),
             subject_cdef_id=value.get("subject_cdef_id"),
             required=value.get("required", default_required),
+            producer_cdef_id=value.get("producer_cdef_id"),
+            method=value.get("method"),
+            declaration_fingerprint=value.get("declaration_fingerprint"),
+            activation_generation=value.get("activation_generation"),
+            realization_id=value.get("realization_id"),
+            output_slot=value.get("output_slot"),
             metadata=value.get("metadata") or {},
         )
 
@@ -90,9 +145,62 @@ class ExecutionRecordLink:
         _put_optional(data, "role", self.role)
         _put_optional(data, "representation_id", self.representation_id)
         _put_optional(data, "subject_cdef_id", self.subject_cdef_id)
+        for field_name in (
+            "producer_cdef_id",
+            "method",
+            "declaration_fingerprint",
+            "activation_generation",
+            "realization_id",
+            "output_slot",
+        ):
+            _put_optional(data, field_name, getattr(self, field_name))
         if self.metadata:
             data["metadata"] = json_ready(self.metadata)
         return data
+
+    @classmethod
+    def from_resolved(
+        cls,
+        resolved: ResolvedRecord,
+        *,
+        role: str | None = None,
+        representation_id: str | None = None,
+        subject_cdef_id: str | None = None,
+        required: bool = True,
+    ) -> "ExecutionRecordLink":
+        """Create an execution link from one exact consumed vector."""
+
+        if not isinstance(resolved, ResolvedRecord):
+            raise TypeError("resolved must be a ResolvedRecord")
+        return cls(
+            record_id=resolved.record_id,
+            role=role,
+            representation_id=representation_id,
+            subject_cdef_id=subject_cdef_id,
+            required=required,
+            producer_cdef_id=resolved.producer_cdef_id,
+            method=resolved.method,
+            declaration_fingerprint=resolved.declaration_fingerprint,
+            activation_generation=resolved.activation_generation,
+            realization_id=resolved.realization_id,
+            output_slot=resolved.output_slot,
+        )
+
+    def to_resolved(self) -> ResolvedRecord:
+        """Return the exact consumed vector or reject a non-exact link."""
+
+        try:
+            return ResolvedRecord(
+                producer_cdef_id=self.producer_cdef_id,
+                method=self.method,
+                declaration_fingerprint=self.declaration_fingerprint,
+                activation_generation=self.activation_generation,
+                realization_id=self.realization_id,
+                output_slot=self.output_slot,
+                record_id=self.record_id,
+            )
+        except RecordValidationError as exc:
+            raise RecordValidationError("execution link is not an exact consumed vector") from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +348,7 @@ class ExecutionRecord:
     world_id: str | None = None
     world_allocation_id: str | None = None
     runtime_id: str | None = None
+    realization_id: str | None = None
     started_at: str | None = None
     ended_at: str | None = None
     duration_ms: int | float | None = None
@@ -276,6 +385,7 @@ class ExecutionRecord:
             "world_id",
             "world_allocation_id",
             "runtime_id",
+            "realization_id",
             "started_at",
             "ended_at",
             "duration_ms",
@@ -304,6 +414,8 @@ class ExecutionRecord:
             value = getattr(self, field_name)
             if value is not None:
                 _validate_id(value, prefixes, field_name)
+        if self.realization_id is not None:
+            validate_realization_id(self.realization_id)
         for field_name in ("started_at", "ended_at"):
             value = getattr(self, field_name)
             if value is not None:
@@ -363,6 +475,7 @@ class ExecutionRecord:
             world_id=payload.get("world_id"),
             world_allocation_id=payload.get("world_allocation_id"),
             runtime_id=payload.get("runtime_id"),
+            realization_id=payload.get("realization_id"),
             started_at=payload.get("started_at"),
             ended_at=payload.get("ended_at"),
             duration_ms=payload.get("duration_ms"),
@@ -390,6 +503,7 @@ class ExecutionRecord:
         payload.update({"execution_kind": self.execution_kind, "operation_id": self.operation_id, "backend": json_ready(self.backend), "status": self.status})
         for field_name in _COMMON_ID_FIELDS:
             _put_optional(payload, field_name, getattr(self, field_name))
+        _put_optional(payload, "realization_id", self.realization_id)
         for field_name in ("started_at", "ended_at", "duration_ms"):
             _put_optional(payload, field_name, getattr(self, field_name))
         for field_name in ("input_cdef_ids", "output_cdef_ids", "consumed_cdef_ids", "produced_cdef_ids", "probe_report_ids", "adapter_record_ids", "program_record_ids"):

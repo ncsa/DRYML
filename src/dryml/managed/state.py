@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.refs import format_cdef_id, parse_cdef_id
+from dryml.formats.errors import ContentIDError
+from dryml.formats.ids import parse_content_id
 
 from .declarations import ManagedMethodDeclaration
 from .errors import ManagedStateError
@@ -106,6 +108,7 @@ class RealizationState:
     sequence: int = 1
     checkpoint_head: str | None = None
     diagnostics: tuple[str, ...] = ()
+    realization_record_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_match(self.realization_id, _REALIZATION_RE, "realization_id")
@@ -139,6 +142,7 @@ class RealizationState:
             raise ManagedStateError("diagnostics must be non-empty strings of at most 512 characters")
         object.__setattr__(self, "attempt_ids", attempts)
         object.__setattr__(self, "diagnostics", diagnostics)
+        _validate_optional_record_id(self.realization_record_id, "realization_record_id")
 
     def to_json(self) -> dict[str, Any]:
         """Return the strict versioned JSON representation."""
@@ -154,6 +158,7 @@ class RealizationState:
             "sequence": self.sequence,
             "checkpoint_head": self.checkpoint_head,
             "diagnostics": list(self.diagnostics),
+            "realization_record_id": self.realization_record_id,
         }
 
     @classmethod
@@ -173,6 +178,7 @@ class RealizationState:
                 "sequence",
                 "checkpoint_head",
                 "diagnostics",
+                "realization_record_id",
             },
             "realization state",
         )
@@ -188,6 +194,7 @@ class RealizationState:
                 sequence=data["sequence"],
                 checkpoint_head=data["checkpoint_head"],
                 diagnostics=_string_tuple(data["diagnostics"], "diagnostics"),
+                realization_record_id=data["realization_record_id"],
             )
         except KeyError as exc:
             raise ManagedStateError(f"realization state is missing {exc.args[0]!r}") from exc
@@ -323,6 +330,7 @@ class ActivationEvent:
     realization_id: str
     previous_realization_id: str | None
     fence_epoch: int
+    realization_record_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_match(self.activation_id, _ACTIVATION_RE, "activation_id")
@@ -334,6 +342,7 @@ class ActivationEvent:
             raise ManagedStateError("activation sequence must be a positive integer")
         if type(self.fence_epoch) is not int or self.fence_epoch < 1:
             raise ManagedStateError("activation fence_epoch must be a positive integer")
+        _validate_optional_record_id(self.realization_record_id, "realization_record_id")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -344,6 +353,7 @@ class ActivationEvent:
             "realization_id": self.realization_id,
             "previous_realization_id": self.previous_realization_id,
             "fence_epoch": self.fence_epoch,
+            "realization_record_id": self.realization_record_id,
         }
 
     @classmethod
@@ -356,6 +366,7 @@ class ActivationEvent:
             "realization_id",
             "previous_realization_id",
             "fence_epoch",
+            "realization_record_id",
         }
         data = _strict_mapping(value, fields, "activation event")
         _require_schema(data, "activation event")
@@ -413,6 +424,17 @@ def _validate_optional_token(value: Any, field_name: str) -> None:
     if value is None:
         return
     if not isinstance(value, str) or not value or len(value) > 256 or "/" in value or "\\" in value:
+        raise ManagedStateError(f"invalid {field_name}")
+
+
+def _validate_optional_record_id(value: Any, field_name: str) -> None:
+    if value is None:
+        return
+    try:
+        parts = parse_content_id(value)
+    except ContentIDError as exc:
+        raise ManagedStateError(f"invalid {field_name}") from exc
+    if parts.prefix != "record" or parts.schema_version != 1:
         raise ManagedStateError(f"invalid {field_name}")
 
 

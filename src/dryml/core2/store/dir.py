@@ -35,6 +35,7 @@ class DirStore(Store):
             "managed-control-v1",
             "managed-locking-v1",
             "managed-activation-v1",
+            "managed-durable-products-v1",
         })
 
     def managed_control_root(self) -> str:

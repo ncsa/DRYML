@@ -26,8 +26,8 @@ def _complete_and_activate(operation):
     with operation.acquire() as lease:
         decision = lease.prepare(resumable=True)
         realization_id = decision.realization.realization_id
-        lease.complete(realization_id)
-        lease.activate(realization_id)
+        lease._complete_control_only(realization_id)
+        lease._activate_control_only(realization_id)
     return realization_id
 
 
@@ -150,10 +150,10 @@ def test_activation_is_pointer_last_supports_rollback_and_rebuild(tmp_path):
     with operation.acquire() as lease:
         second = lease.prepare(resumable=False, rerun=True)
         second_id = second.realization.realization_id
-        lease.complete(second_id)
-        lease.activate(second_id)
+        lease._complete_control_only(second_id)
+        lease._activate_control_only(second_id)
         assert operation.active().realization_id == second_id
-        lease.activate(first_id)
+        lease._activate_control_only(first_id)
 
     assert operation.active().realization_id == first_id
     operation.active_pointer_path.unlink()

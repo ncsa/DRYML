@@ -32,6 +32,12 @@ records/
 products/
     <record-id>/
         derived product bytes
+.dryml/managed-v1/
+    operations/.../generations/.../attempts/
+        <fence>-<attempt-id>/
+            outputs/
+            checkpoints/
+            finalization-intent.json
 ```
 
 `records/indexes/` is optional and rebuildable. Deleting it does not affect `read_record()`, `read_spec()`, or listing, because JSON files are the source of truth.
@@ -138,7 +144,7 @@ Records use the generic `dryml.formats` envelope shape:
 
 The record ID is computed from `schema`, `schema_version`, `kind`, and `payload`. It excludes `id`, `metadata`, file path, store locator, mtimes, and index contents. If a timestamp, backend version, or environment fact should affect identity, put it in `payload`, not `metadata`.
 
-Record envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload`. Sprint 1 record kinds are a closed set: `stored_state`, `data`, `execution`, `adapter`, `program`, `probe_report`, `compatibility_report`, and `lowering_report`.
+Record envelopes accept only these top-level keys: `schema`, `schema_version`, `id`, `kind`, `payload`, and `metadata`. Semantic fields must live under `payload`. Record kinds are a closed set: `stored_state`, `data`, `execution`, `adapter`, `program`, `probe_report`, `compatibility_report`, `lowering_report`, and `realization`.
 
 ## Spec Envelopes
 
@@ -206,7 +212,7 @@ records/indexes/ref-index-v1.json
 
 The index is derived data. It contains source records/specs plus scanner mentions and can be deleted and rebuilt from authoritative JSON sidecars. It is canonical JSON and does not use SQLite. A valid index whose stored `store_ref` no longer matches the current store is treated as stale: `refresh="auto"` rebuilds it, while `refresh=False` raises a validation error.
 
-When `write_record()` or `write_spec()` changes canonical bytes after an index exists, `RecordStoreIO` writes `records/indexes/ref-index-v1.dirty`. Idempotent writes of identical bytes do not mark the index dirty.
+When `write_record()` or `write_spec()` changes canonical bytes after an index exists, `RecordStoreIO` writes `records/indexes/ref-index-v1.dirty` before publishing authoritative bytes. Record/spec publication and index rebuild use a Store-local OS lock, so an overlapping rebuild cannot clear a new dirty marker or omit a completed write. Idempotent writes of identical bytes do not mark the index dirty.
 
 Query helpers include:
 
@@ -256,7 +262,11 @@ Explicit cross-record product refs still include `record_id` and continue to res
 
 ## Typed Records And Representations
 
-The generic JSON envelope remains authoritative. `StoredStateRecord`, `DataRecord`, `ProgramRecord`, and `AdapterRecord` are ergonomic wrappers that validate payload shape and round-trip through `make_record(...)`. Existing descriptive save records parse as `StoredStateRecord`; their object bytes remain under `objects/` and are not moved.
+The generic JSON envelope remains authoritative. `StoredStateRecord`, `DataRecord`, `ProgramRecord`, `AdapterRecord`, and `RealizationRecord` are ergonomic wrappers that validate payload shape and round-trip through `make_record(...)`. Existing descriptive save records parse as `StoredStateRecord`; their object bytes remain under `objects/` and are not moved.
+
+Managed `DataRecord` and `StoredStateRecord` outputs add `realization_id` and `output_slot` as a required pair. Existing records may omit both. The pair associates a physical record with one independent realization and one declared output while allowing another representation of that same output to retain the same ownership.
+
+`RealizationRecord` is immutable completion authority. It binds a preallocated `realization-v1-<32-hex>` ID to the producer CDef, method, declaration fingerprint, attempt IDs, required typed output records, primary representation, exact consumed vector, execution record, completed attempt, and completion fence. A recomputation receives another realization ID; an adapter-derived representation retains the source realization ID and output slot.
 
 `RepresentationSpec` wraps the existing `family="representation"` spec envelope. `RepresentationRequirement` supports conservative deterministic checks by exact representation ID, kind, version, parameter equality, required trait subset, and storage-kind subset. Unknown provider/framework semantics do not imply compatibility.
 
@@ -286,6 +296,14 @@ with ProductWriteSession(store.records) as session:
 ```
 
 Manifest paths are relative POSIX paths and include byte size plus SHA-256 digest. Product bytes do not affect CDef identity; they only affect record identity if their manifest is placed in the record payload.
+
+`DurableProductWriter` is the managed-operation path for large and resumable products. It streams bytes directly into fence-isolated attempt workspaces, hashes each chunk while writing, retains short writes and prior checkpoints, and never destructively overwrites a completed product. Checkpoints are opaque operation-owned file sets committed under immutable `checkpoint-v1` heads; the framework owns only their durable lifecycle and head reference.
+
+Live durable writing requires the explicit `managed-durable-products-v1` Store capability. `DirStore` advertises it together with managed control, locking, and activation; read-only Zip Stores do not advertise live managed writing.
+
+Managed completion uses a compact `dryml.product.root.v1` manifest in each output record. It authenticates `.dryml-product-manifest-v1.json`, whose detailed entries contain the exact payload file set, sizes, and digests. `require_product_integrity(...)` rejects missing files, extra files, size drift, digest drift, malformed detail manifests, and compact-summary mismatches.
+
+Finalization writes an immutable intent before adoption. Recovery may idempotently adopt verified orphan products and records from that intent. Publication order is products, all required output records, execution record, realization record, completed control state, and optional activation last. Any failure before activation leaves the previous active realization unchanged and retains partial or orphan work for explicit recovery.
 
 ## Adapter Lineage
 
@@ -320,6 +338,8 @@ Consumed and produced records use structured links:
   "metadata": {}
 }
 ```
+
+Managed consumed links additionally carry the complete concurrency-stable vector: `producer_cdef_id`, `method`, `declaration_fingerprint`, `activation_generation`, `realization_id`, `output_slot`, and `record_id`. Partial vectors are invalid. Managed produced links carry `realization_id` and `output_slot`; the enclosing execution record also carries its own `realization_id`.
 
 Log refs use `StorageRef` data. Self product-dir refs avoid placing an execution record's own ID in its payload before the ID exists:
 

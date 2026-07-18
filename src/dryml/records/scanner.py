@@ -24,6 +24,7 @@ _CDefSemantics = Literal["materialize", "reference"]
 _TYPED_KEYS: dict[str, tuple[str, str, bool, tuple[str, ...] | None]] = {
     "subject_cdef_id": ("cdef", "subject", False, None),
     "owner_cdef_id": ("cdef", "owner", False, None),
+    "producer_cdef_id": ("cdef", "producer", False, None),
     "input_cdef_ids": ("cdef", "input", True, None),
     "output_cdef_ids": ("cdef", "output", True, None),
     "consumed_cdef_ids": ("cdef", "consumed", True, None),
@@ -33,7 +34,9 @@ _TYPED_KEYS: dict[str, tuple[str, str, bool, tuple[str, ...] | None]] = {
     "dispatch_id": ("content_id", "dispatch", False, ("dispatch",)),
     "recipe_id": ("content_id", "recipe", False, ("recipe",)),
     "execution_record_id": ("content_id", "execution_record", False, ("record",)),
+    "realization_record_id": ("content_id", "realization_record", False, ("record",)),
     "representation_id": ("content_id", "representation", False, ("repr",)),
+    "primary_representation_id": ("content_id", "primary_representation", False, ("repr",)),
     "source_representation_id": ("content_id", "source_representation", False, ("repr",)),
     "target_representation_id": ("content_id", "target_representation", False, ("repr",)),
     "environment_id": ("content_id", "environment", False, ("envrec", "env")),

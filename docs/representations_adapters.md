@@ -31,6 +31,8 @@ Minimum fake kinds used by tests are `dryml.object_state`, `fake.raw_state`, `fa
 
 `AdapterRecord` preserves source/target lineage for representation conversion. It records `source_record_id`, `source_representation_id`, `target_record_id`, `target_representation_id`, `produced_records`, and `derived_from`.
 
+When a `DataRecord` or `StoredStateRecord` source has managed ownership, the adapter target preserves its `realization_id` and `output_slot`. This identifies conversion as another representation of the same realization; an independent recomputation must use a different realization ID.
+
 ## Resolution
 
 Resolution scans authoritative JSON and does not require `records/indexes/`:

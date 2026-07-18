@@ -15,6 +15,7 @@ RECORD_KINDS = frozenset(
         "probe_report",
         "compatibility_report",
         "lowering_report",
+        "realization",
     }
 )
 

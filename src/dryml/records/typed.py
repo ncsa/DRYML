@@ -15,6 +15,11 @@ from .errors import RecordValidationError, StorageRefError
 from .records import make_record, validate_record
 from .storage import StorageRef
 from .execution import ExecutionRecord
+from .realizations import (
+    RealizationRecord,
+    validate_output_slot,
+    validate_realization_id,
+)
 
 
 _COMMON_IDS = {
@@ -45,6 +50,8 @@ class StoredStateRecord:
     state_role: str | None = None
     manifest: Mapping[str, Any] | None = None
     derived_from: tuple[str, ...] = ()
+    realization_id: str | None = None
+    output_slot: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
 
@@ -65,6 +72,8 @@ class StoredStateRecord:
             "state_role",
             "manifest",
             "derived_from",
+            "realization_id",
+            "output_slot",
         }
     )
 
@@ -79,6 +88,7 @@ class StoredStateRecord:
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
         object.__setattr__(self, "extra", _freeze_mapping(self.extra, "extra"))
         object.__setattr__(self, "manifest", None if self.manifest is None else _freeze_mapping(self.manifest, "manifest"))
+        _validate_managed_ownership(self.realization_id, self.output_slot)
 
     @classmethod
     def from_envelope(cls, record: Mapping[str, Any]) -> "StoredStateRecord":
@@ -102,6 +112,8 @@ class StoredStateRecord:
             state_role=payload.get("state_role"),
             manifest=payload.get("manifest"),
             derived_from=_json_sequence(payload, "derived_from"),
+            realization_id=payload.get("realization_id"),
+            output_slot=payload.get("output_slot"),
             metadata=record.get("metadata") or {},
             extra=extra,
         )
@@ -130,6 +142,8 @@ class StoredStateRecord:
             payload["manifest"] = json_ready(self.manifest)
         if self.derived_from:
             payload["derived_from"] = list(self.derived_from)
+        _put_optional(payload, "realization_id", self.realization_id)
+        _put_optional(payload, "output_slot", self.output_slot)
         return payload
 
     def to_envelope(self) -> dict[str, Any]:
@@ -150,11 +164,13 @@ class DataRecord:
     manifest: Mapping[str, Any] | None = None
     preview: Mapping[str, Any] | None = None
     derived_from: tuple[str, ...] = ()
+    realization_id: str | None = None
+    output_slot: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     kind: ClassVar[str] = "data"
-    _known_payload_keys: ClassVar[frozenset[str]] = frozenset({"subject_cdef_id", "operation_id", "representation_id", "storage", "data_role", "manifest", "preview", "derived_from"})
+    _known_payload_keys: ClassVar[frozenset[str]] = frozenset({"subject_cdef_id", "operation_id", "representation_id", "storage", "data_role", "manifest", "preview", "derived_from", "realization_id", "output_slot"})
 
     def __post_init__(self) -> None:
         if self.subject_cdef_id is not None:
@@ -168,6 +184,7 @@ class DataRecord:
         object.__setattr__(self, "extra", _freeze_mapping(self.extra, "extra"))
         object.__setattr__(self, "manifest", None if self.manifest is None else _freeze_mapping(self.manifest, "manifest"))
         object.__setattr__(self, "preview", None if self.preview is None else _freeze_mapping(self.preview, "preview"))
+        _validate_managed_ownership(self.realization_id, self.output_slot)
 
     @classmethod
     def from_envelope(cls, record: Mapping[str, Any]) -> "DataRecord":
@@ -185,6 +202,8 @@ class DataRecord:
             manifest=payload.get("manifest"),
             preview=payload.get("preview"),
             derived_from=_json_sequence(payload, "derived_from"),
+            realization_id=payload.get("realization_id"),
+            output_slot=payload.get("output_slot"),
             metadata=record.get("metadata") or {},
             extra=extra,
         )
@@ -203,6 +222,8 @@ class DataRecord:
             payload["preview"] = json_ready(self.preview)
         if self.derived_from:
             payload["derived_from"] = list(self.derived_from)
+        _put_optional(payload, "realization_id", self.realization_id)
+        _put_optional(payload, "output_slot", self.output_slot)
         return payload
 
     def to_envelope(self) -> dict[str, Any]:
@@ -380,7 +401,7 @@ class AdapterRecord:
         return make_record(kind=self.kind, payload=self.to_payload(), metadata=self.metadata)
 
 
-TypedRecord = StoredStateRecord | DataRecord | ProgramRecord | AdapterRecord | ExecutionRecord
+TypedRecord = StoredStateRecord | DataRecord | ProgramRecord | AdapterRecord | ExecutionRecord | RealizationRecord
 
 
 def typed_record_from_envelope(record: Mapping[str, Any]) -> TypedRecord:
@@ -398,6 +419,8 @@ def typed_record_from_envelope(record: Mapping[str, Any]) -> TypedRecord:
         return AdapterRecord.from_envelope(record)
     if kind == ExecutionRecord.kind:
         return ExecutionRecord.from_envelope(record)
+    if kind == RealizationRecord.kind:
+        return RealizationRecord.from_envelope(record)
     raise RecordValidationError("record kind has no typed wrapper", context={"kind": kind})
 
 
@@ -481,11 +504,22 @@ def _put_optional(payload: dict[str, Any], key: str, value: Any) -> None:
         payload[key] = value
 
 
+def _validate_managed_ownership(realization_id: str | None, output_slot: str | None) -> None:
+    if (realization_id is None) != (output_slot is None):
+        raise RecordValidationError(
+            "managed output ownership requires realization_id and output_slot together"
+        )
+    if realization_id is not None:
+        validate_realization_id(realization_id)
+        validate_output_slot(output_slot)
+
+
 __all__ = [
     "AdapterRecord",
     "DataRecord",
     "ExecutionRecord",
     "ProgramRecord",
+    "RealizationRecord",
     "StoredStateRecord",
     "TypedRecord",
     "typed_record_from_envelope",
