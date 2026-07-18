@@ -13,7 +13,8 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
+import threading
+import time
 from typing import Any, Mapping
 
 
@@ -62,6 +63,8 @@ _OBSOLETE_IMPORTS = (
 _OBSOLETE_NAMES = frozenset({"ComputeContext", "ObjectDef", "Trainable"})
 _MAGIC_LINE = re.compile(r"^\s*%")
 _SHELL_LINE = re.compile(r"^\s*!")
+_MAX_CAPTURE_BYTES = 8_000
+_TRUNCATION_MARKER = "\n... output truncated ..."
 
 
 class NotebookValidationError(ValueError):
@@ -78,17 +81,32 @@ class NotebookSpec:
 
     path: Path
     extras: tuple[str, ...] = ()
+    python_max_exclusive: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
+        """Validate declared extras and the optional Python upper bound."""
+
         unknown = set(self.extras) - set(_EXTRA_OPTIONAL_IMPORTS)
         if unknown:
             raise ValueError(f"unknown notebook extras: {', '.join(sorted(unknown))}")
+        bound = self.python_max_exclusive
+        if bound is not None:
+            if not isinstance(bound, tuple) or len(bound) != 2:
+                raise ValueError("python_max_exclusive must be a major/minor tuple")
+            if any(not isinstance(value, int) for value in bound):
+                raise ValueError("python_max_exclusive must be a major/minor tuple")
 
     @property
     def allowed_optional_imports(self) -> frozenset[str]:
         """Return optional import roots implied by the declared DRYML extras."""
 
         return frozenset().union(*(_EXTRA_OPTIONAL_IMPORTS[extra] for extra in self.extras))
+
+    @property
+    def supports_current_python(self) -> bool:
+        """Return whether the running Python satisfies this notebook's upper bound."""
+
+        return self.python_max_exclusive is None or sys.version_info[:2] < self.python_max_exclusive
 
 
 @dataclass(frozen=True)
@@ -114,14 +132,17 @@ CANONICAL_NOTEBOOKS = (
     NotebookSpec(
         Path("examples/notebooks/models_experiments_and_metrics.ipynb"),
         extras=("sklearn",),
+        python_max_exclusive=(3, 14),
     ),
     NotebookSpec(
         Path("examples/notebooks/definition_driven_experiments.ipynb"),
         extras=("sklearn",),
+        python_max_exclusive=(3, 14),
     ),
     NotebookSpec(
         Path("examples/notebooks/local_hyperparameter_search.ipynb"),
         extras=("sklearn",),
+        python_max_exclusive=(3, 14),
     ),
 )
 
@@ -170,19 +191,29 @@ def _is_absolute_path(value: str) -> bool:
 
 
 class _ExecutablePolicy(ast.NodeVisitor):
+    """Reject executable notebook syntax outside the canonical policy."""
+
     def __init__(self, path: Path, cell: int):
+        """Record the notebook path and one-based cell number."""
+
         self.path = path
         self.cell = cell
 
     def fail(self, message: str) -> None:
+        """Raise a cell-aware validation error with *message*."""
+
         raise _error(self.path, message, self.cell)
 
     def visit_Import(self, node: ast.Import) -> None:
+        """Reject forbidden modules in an import statement."""
+
         for alias in node.names:
             self._check_import(alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Reject forbidden modules and obsolete top-level DRYML names."""
+
         module = node.module or ""
         self._check_import(module)
         if module == "dryml":
@@ -192,6 +223,8 @@ class _ExecutablePolicy(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _check_import(self, module: str) -> None:
+        """Reject one forbidden network or obsolete module path."""
+
         for forbidden in _NETWORK_IMPORTS:
             if module == forbidden or module.startswith(f"{forbidden}."):
                 self.fail(f"network module '{module}' is forbidden")
@@ -200,6 +233,8 @@ class _ExecutablePolicy(ast.NodeVisitor):
                 self.fail(f"obsolete import '{forbidden}' is forbidden")
 
     def visit_Constant(self, node: ast.Constant) -> None:
+        """Reject absolute paths and literal network URLs."""
+
         if isinstance(node.value, str):
             if _is_absolute_path(node.value):
                 self.fail("absolute path is forbidden")
@@ -208,11 +243,15 @@ class _ExecutablePolicy(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
+        """Reject direct use of obsolete API names."""
+
         if node.id in _OBSOLETE_NAMES:
             self.fail(f"obsolete API '{node.id}' is forbidden")
         self.generic_visit(node)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
+        """Reject obsolete qualified names and generated identity access."""
+
         name = _attribute_name(node)
         if node.attr == "dry_id":
             self.fail("obsolete API 'dry_id' is forbidden")
@@ -221,6 +260,8 @@ class _ExecutablePolicy(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        """Reject shell, IPython, and common network calls."""
+
         name = _attribute_name(node.func)
         if name == "get_ipython" or (name and name.startswith("get_ipython.")):
             self.fail("IPython execution is forbidden")
@@ -323,6 +364,54 @@ def validate_notebook(path: Path) -> dict[str, Any]:
     return document
 
 
+_WORKER_SITECUSTOMIZE = r'''
+import atexit
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+
+audit_value = os.environ.get('DRYML_NOTEBOOK_AUDIT_DIR')
+optional_value = os.environ.get('DRYML_NOTEBOOK_OPTIONAL_IMPORTS')
+if audit_value and optional_value:
+    audit_directory = Path(audit_value)
+    audit_directory.mkdir(parents=True, exist_ok=True)
+    optional_roots = frozenset(json.loads(optional_value))
+    record_path = audit_directory / f'worker-{os.getpid()}.json'
+
+    def _write_audit_record():
+        """Atomically record this worker's identity and optional imports."""
+        record = {
+            'optional_imports': sorted(
+                {name.split('.', 1)[0] for name in sys.modules} & optional_roots
+            ),
+            'pid': os.getpid(),
+            'process_group': os.getpgrp() if os.name == 'posix' else None,
+        }
+        temporary = record_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(record, sort_keys=True), encoding='utf-8')
+        os.replace(temporary, record_path)
+
+    def _network_disabled(*args, **kwargs):
+        """Reject network access in an audited dispatch worker."""
+        raise RuntimeError('network access is disabled')
+
+    class _OfflineSocket(socket.socket):
+        """Socket replacement that rejects construction before I/O."""
+
+        def __init__(self, *args, **kwargs):
+            """Reject socket construction regardless of its arguments."""
+            _network_disabled()
+
+    _write_audit_record()
+    atexit.register(_write_audit_record)
+    socket.socket = _OfflineSocket
+    socket.create_connection = _network_disabled
+    socket.getaddrinfo = _network_disabled
+'''
+
+
 _CHILD_RUNNER = r'''
 import json
 import linecache
@@ -336,6 +425,8 @@ notebook_path = Path(sys.argv[1])
 report_path = Path(sys.argv[2])
 optional_roots = frozenset(json.loads(sys.argv[3]))
 repository = Path(sys.argv[4]).resolve()
+audit_bootstrap = Path(sys.argv[5])
+audit_directory = Path(sys.argv[6])
 document = json.loads(notebook_path.read_text(encoding='utf-8'))
 first_code_cell = next(
     (index for index, cell in enumerate(document['cells'], start=1) if cell['cell_type'] == 'code'),
@@ -361,15 +452,44 @@ pythonpath_entries = [entry for entry in os.environ.get('PYTHONPATH', '').split(
 repository_on_pythonpath = any(Path(entry).resolve() == repository for entry in pythonpath_entries)
 
 def _network_disabled(*args, **kwargs):
+    """Reject network access in the notebook interpreter."""
     raise RuntimeError('network access is disabled')
 
 class _OfflineSocket(socket.socket):
+    """Socket replacement that rejects construction before I/O."""
+
     def __init__(self, *args, **kwargs):
+        """Reject socket construction regardless of its arguments."""
         _network_disabled()
 
 socket.socket = _OfflineSocket
 socket.create_connection = _network_disabled
 socket.getaddrinfo = _network_disabled
+
+def _audited_worker_builder(builder):
+    """Wrap one dispatch command builder with worker audit bootstrap state."""
+    def build(environment_spec):
+        """Return the original command with an injected sitecustomize path."""
+        command, child_environment = builder(environment_spec)
+        pythonpath = child_environment.get('PYTHONPATH')
+        paths = [str(audit_bootstrap)]
+        if pythonpath:
+            paths.extend(pythonpath.split(os.pathsep))
+        child_environment['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(paths))
+        child_environment['DRYML_NOTEBOOK_AUDIT_DIR'] = str(audit_directory)
+        child_environment['DRYML_NOTEBOOK_OPTIONAL_IMPORTS'] = json.dumps(sorted(optional_roots))
+        return command, child_environment
+    return build
+
+import dryml.dispatch.backends as dispatch_backends
+import dryml.dispatch.local_world as dispatch_local_world
+
+dispatch_backends.build_worker_command = _audited_worker_builder(
+    dispatch_backends.build_worker_command
+)
+dispatch_local_world.build_worker_command = _audited_worker_builder(
+    dispatch_local_world.build_worker_command
+)
 
 module_name = '_dryml_tutorial_notebook'
 module = types.ModuleType(module_name)
@@ -439,6 +559,7 @@ report = {
     'linecache_restored': linecache_restored,
     'optional_imports': sorted(optional_imports),
     'repository_on_pythonpath': repository_on_pythonpath,
+    'status': 'finished',
 }
 report_path.write_text(json.dumps(report, sort_keys=True), encoding='utf-8')
 clean = all((state_restored, working_directory_restored, module_table_restored, linecache_restored))
@@ -450,12 +571,17 @@ def _tree_snapshot(root: Path, ignored: frozenset[Path]) -> dict[str, tuple[Any,
     snapshot: dict[str, tuple[Any, ...]] = {}
     for directory, names, filenames in os.walk(root, topdown=True, followlinks=False):
         current = Path(directory)
+        names[:] = [
+            name
+            for name in names
+            if not any((current / name).relative_to(root).is_relative_to(item) for item in ignored)
+        ]
         names.sort()
         filenames.sort()
         for name in names + filenames:
             path = current / name
             relative = path.relative_to(root)
-            if relative in ignored:
+            if any(relative.is_relative_to(item) for item in ignored):
                 continue
             key = relative.as_posix()
             if path.is_symlink():
@@ -476,13 +602,22 @@ def _changed_paths(before: Mapping[str, tuple[Any, ...]], after: Mapping[str, tu
     return tuple(sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key)))
 
 
-def _bounded_output(stream: Any) -> str:
-    limit = 8_000
-    stream.seek(0)
-    value = stream.read(limit + 1)
-    if len(value) <= limit:
-        return value
-    return f"{value[:limit]}\n... output truncated ..."
+def _drain_output(stream: Any, captured: bytearray, truncated: threading.Event) -> None:
+    """Drain one child stream while retaining only the configured byte prefix."""
+
+    for chunk in iter(lambda: stream.read(64 * 1024), b""):
+        remaining = _MAX_CAPTURE_BYTES - len(captured)
+        if remaining > 0:
+            captured.extend(chunk[:remaining])
+        if len(chunk) > remaining:
+            truncated.set()
+
+
+def _captured_output(captured: bytearray, truncated: threading.Event) -> str:
+    """Decode retained child output and append a stable truncation marker."""
+
+    value = bytes(captured).decode("utf-8", errors="replace")
+    return f"{value}{_TRUNCATION_MARKER}" if truncated.is_set() else value
 
 
 def _read_report(path: Path) -> dict[str, Any] | None:
@@ -491,6 +626,100 @@ def _read_report(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _worker_records(audit_directory: Path) -> tuple[dict[str, Any], ...]:
+    """Return complete worker audit records, ignoring partial writes."""
+
+    records = []
+    for path in sorted(audit_directory.glob("worker-*.json")):
+        record = _read_report(path)
+        if record is not None and isinstance(record.get("pid"), int):
+            records.append(record)
+    return tuple(records)
+
+
+def _process_exists(pid: int) -> bool:
+    """Return whether *pid* still names a process visible to this user."""
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _taskkill_process_tree(pid: int) -> None:
+    """Ask Windows to terminate *pid* and its descendant process tree."""
+
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _kill_registered_worker(record: Mapping[str, Any]) -> None:
+    """Kill one audited dispatch worker and its ordinary descendants."""
+
+    pid = record.get("pid")
+    if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return
+    if os.name == "posix":
+        process_group = record.get("process_group")
+        try:
+            if isinstance(process_group, int) and process_group > 0 and process_group != os.getpgrp():
+                os.killpg(process_group, signal.SIGKILL)
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif os.name == "nt":  # pragma: no cover - exercised by native Windows CI.
+        _taskkill_process_tree(pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def _kill_notebook_process(process: subprocess.Popen[bytes]) -> None:
+    """Kill the notebook leader and its platform-owned process tree."""
+
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif os.name == "nt":  # pragma: no cover - exercised by native Windows CI.
+        _taskkill_process_tree(process.pid)
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+
+
+def _terminate_audited_workers(audit_directory: Path, *, settle: float) -> tuple[int, ...]:
+    """Kill registered worker groups and return PIDs still alive at deadline."""
+
+    deadline = time.monotonic() + settle
+    while True:
+        records = _worker_records(audit_directory)
+        for record in records:
+            if _process_exists(record["pid"]):
+                _kill_registered_worker(record)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    return tuple(
+        sorted(record["pid"] for record in _worker_records(audit_directory) if _process_exists(record["pid"]))
+    )
 
 
 def execute_notebook(
@@ -517,13 +746,26 @@ def execute_notebook(
     notebook_root = root / "notebook-tree"
     execution_cwd = root / "work"
     home = root / "home"
+    temporary_root = root / "tmp"
+    harness_root = root / ".harness"
+    audit_bootstrap = harness_root / "bootstrap"
+    audit_directory = harness_root / "workers"
     report_path = root / "child-report.json"
-    for directory in (notebook_root, execution_cwd, home):
+    for directory in (
+        notebook_root,
+        execution_cwd,
+        home,
+        temporary_root,
+        harness_root,
+        audit_bootstrap,
+        audit_directory,
+    ):
         directory.mkdir()
+    (audit_bootstrap / "sitecustomize.py").write_text(_WORKER_SITECUSTOMIZE, encoding="utf-8")
     copied_notebook = notebook_root / path.name
     shutil.copy2(path, copied_notebook)
 
-    ignored = frozenset({report_path.relative_to(root)})
+    ignored = frozenset({report_path.relative_to(root), harness_root.relative_to(root)})
     before = _tree_snapshot(root, ignored)
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
@@ -535,6 +777,9 @@ def execute_notebook(
         {
             "HOME": str(home),
             "PYTHONDONTWRITEBYTECODE": "1",
+            "TEMP": str(temporary_root),
+            "TMP": str(temporary_root),
+            "TMPDIR": str(temporary_root),
             "XDG_CACHE_HOME": str(home / ".cache"),
             "XDG_CONFIG_HOME": str(home / ".config"),
             "XDG_DATA_HOME": str(home / ".local" / "share"),
@@ -548,34 +793,52 @@ def execute_notebook(
         str(report_path),
         json.dumps(sorted(_OPTIONAL_IMPORTS)),
         str(_REPOSITORY),
+        str(audit_bootstrap),
+        str(audit_directory),
     ]
-    with (
-        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file,
-        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file,
-    ):
-        process = subprocess.Popen(
-            command,
-            cwd=execution_cwd,
-            env=environment,
-            text=True,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            start_new_session=True,
-        )
-        try:
-            process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-            report = _read_report(report_path)
-            cell = report.get("error_cell") if report else None
-            location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
-            raise NotebookExecutionError(f"{location}: execution timed out after {timeout:g}s") from exc
-        stdout = _bounded_output(stdout_file)
-        stderr = _bounded_output(stderr_file)
+    process = subprocess.Popen(
+        command,
+        cwd=execution_cwd,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=(os.name == "posix"),
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    stdout_truncated = threading.Event()
+    stderr_truncated = threading.Event()
+    drainers = (
+        threading.Thread(target=_drain_output, args=(process.stdout, stdout_buffer, stdout_truncated)),
+        threading.Thread(target=_drain_output, args=(process.stderr, stderr_buffer, stderr_truncated)),
+    )
+    for drainer in drainers:
+        drainer.start()
+    timeout_error = None
+    leaked_workers: tuple[int, ...] = ()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_audited_workers(audit_directory, settle=0)
+        _kill_notebook_process(process)
+        process.wait()
+        leaked_workers = _terminate_audited_workers(audit_directory, settle=1.0)
+        timeout_error = exc
+    finally:
+        for drainer in drainers:
+            drainer.join()
+    stdout = _captured_output(stdout_buffer, stdout_truncated)
+    stderr = _captured_output(stderr_buffer, stderr_truncated)
+    if timeout_error is not None:
+        report = _read_report(report_path)
+        cell = report.get("error_cell") if report else None
+        location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
+        leak_detail = f"; worker cleanup failed for PIDs {', '.join(map(str, leaked_workers))}" if leaked_workers else ""
+        raise NotebookExecutionError(
+            f"{location}: execution timed out after {timeout:g}s{leak_detail}"
+        ) from timeout_error
 
     after = _tree_snapshot(root, ignored)
     unexpected_writes = _changed_paths(before, after)
@@ -590,6 +853,19 @@ def execute_notebook(
         raise NotebookExecutionError(
             f"{path}: cell {report.get('error_cell')}: {detail}; child exited with status {process.returncode}"
         )
+    cleanup_fields = (
+        "state_restored",
+        "working_directory_restored",
+        "module_table_restored",
+        "linecache_restored",
+    )
+    failed_cleanup = (
+        tuple(name for name in cleanup_fields if report.get(name) is not True)
+        if report and report.get("status") == "finished"
+        else ()
+    )
+    if failed_cleanup:
+        raise NotebookExecutionError(f"{path}: child cleanup failed: {', '.join(failed_cleanup)}")
     if process.returncode != 0 or report is None:
         cell = report.get("error_cell") if report else None
         location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
@@ -597,16 +873,13 @@ def execute_notebook(
             f"{location}: child exited with status {process.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         )
 
-    cleanup_fields = (
-        "state_restored",
-        "working_directory_restored",
-        "module_table_restored",
-        "linecache_restored",
-    )
-    failed_cleanup = tuple(name for name in cleanup_fields if report.get(name) is not True)
-    if failed_cleanup:
-        raise NotebookExecutionError(f"{path}: child cleanup failed: {', '.join(failed_cleanup)}")
-    optional_imports = frozenset(report.get("optional_imports", ()))
+    worker_optional_imports = {
+        name
+        for record in _worker_records(audit_directory)
+        for name in record.get("optional_imports", ())
+        if isinstance(name, str)
+    }
+    optional_imports = frozenset(report.get("optional_imports", ())) | worker_optional_imports
     undeclared = optional_imports - spec.allowed_optional_imports
     if undeclared:
         raise NotebookExecutionError(f"{path}: undeclared optional imports: {', '.join(sorted(undeclared))}")

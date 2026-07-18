@@ -9,6 +9,7 @@ import pytest
 from notebook_helpers import (
     CANONICAL_NOTEBOOKS,
     NotebookExecutionError,
+    _process_exists,
     execute_notebook,
     repository_path,
 )
@@ -18,6 +19,7 @@ _DETERMINISM_NOTEBOOKS = {
     "local_hyperparameter_search.ipynb",
     "objects_definitions_and_repos.ipynb",
 }
+_SKLEARN_SPEC = next(item for item in CANONICAL_NOTEBOOKS if item.extras == ("sklearn",))
 
 
 def _write_notebook(path: Path, source: str) -> Path:
@@ -50,12 +52,18 @@ def _assert_clean_result(result, item):
     assert result.repository_on_pythonpath is False
 
 
+def _require_supported_python(item):
+    if not item.supports_current_python:
+        pytest.skip(f"{item.path.name} requires Python below {item.python_max_exclusive}")
+
+
 @pytest.mark.parametrize(
     "item",
     [item for item in CANONICAL_NOTEBOOKS if item.path.name not in _DETERMINISM_NOTEBOOKS],
     ids=lambda item: item.path.stem,
 )
 def test_canonical_notebook_executes_offline_and_cleans_process_state(tmp_path, item):
+    _require_supported_python(item)
     result = execute_notebook(repository_path(item.path), item, tmp_path)
 
     _assert_clean_result(result, item)
@@ -81,6 +89,7 @@ def test_definition_variants_summary_is_stable_across_independent_processes(tmp_
         for item in CANONICAL_NOTEBOOKS
         if item.path.name == "definition_driven_experiments.ipynb"
     )
+    _require_supported_python(item)
     results = [
         execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
         for index in range(2)
@@ -111,6 +120,7 @@ def test_local_search_summary_is_stable_across_independent_processes(tmp_path):
         for item in CANONICAL_NOTEBOOKS
         if item.path.name == "local_hyperparameter_search.ipynb"
     )
+    _require_supported_python(item)
     results = [
         execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
         for index in range(2)
@@ -144,6 +154,37 @@ def test_network_guard_blocks_socket_access_with_cell_diagnostic(tmp_path):
         execute_notebook(notebook, work_root=tmp_path / "run", validate=False)
 
 
+def test_network_guard_reaches_dispatch_workers(tmp_path):
+    notebook = _write_notebook(
+        tmp_path / "worker-network.ipynb",
+        """import sys
+from tempfile import TemporaryDirectory
+from dryml.core2.store.dir import DirStore
+from dryml.dispatch import Dispatcher
+from dryml.environments import PythonExecutableSpec
+from dryml.operations import make_function_call_spec
+
+with TemporaryDirectory() as directory:
+    store = DirStore(directory, query_index='none')
+    try:
+        result = Dispatcher(store=store).run(
+            make_function_call_spec('socket:getaddrinfo', args=['localhost', 80]),
+            environment=PythonExecutableSpec(executable=sys.executable, pythonpath_policy='none'),
+        )
+        if result.status != 'ok':
+            raise RuntimeError(result.error['message'])
+    finally:
+        store.close()
+""",
+    )
+
+    with pytest.raises(
+        NotebookExecutionError,
+        match=r"worker-network\.ipynb: cell 1: network access is disabled",
+    ):
+        execute_notebook(notebook, work_root=tmp_path / "run")
+
+
 def test_child_failure_reports_notebook_cell_and_exception(tmp_path):
     notebook = _write_notebook(tmp_path / "failure.ipynb", "raise RuntimeError('fixture failed')")
 
@@ -159,6 +200,41 @@ def test_timeout_is_hard_and_names_notebook(tmp_path):
 
     with pytest.raises(NotebookExecutionError, match=r"slow\.ipynb: cell 1: execution timed out after"):
         execute_notebook(notebook, work_root=tmp_path / "run", timeout=0.2)
+
+
+def test_timeout_reaps_independently_sessioned_dispatch_worker(tmp_path):
+    notebook = _write_notebook(
+        tmp_path / "worker-timeout.ipynb",
+        """import sys
+from tempfile import TemporaryDirectory
+from dryml.core2.store.dir import DirStore
+from dryml.dispatch import Dispatcher
+from dryml.environments import PythonExecutableSpec
+from dryml.operations import make_function_call_spec
+
+with TemporaryDirectory() as directory:
+    store = DirStore(directory, query_index='none')
+    try:
+        Dispatcher(store=store).run(
+            make_function_call_spec('time:sleep', args=[30]),
+            environment=PythonExecutableSpec(executable=sys.executable, pythonpath_policy='none'),
+        )
+    finally:
+        store.close()
+""",
+    )
+    run_root = tmp_path / "run"
+
+    with pytest.raises(NotebookExecutionError, match=r"worker-timeout\.ipynb: cell 1: execution timed out"):
+        execute_notebook(notebook, work_root=run_root, timeout=5.0)
+
+    records = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in (run_root / ".harness" / "workers").glob("worker-*.json")
+    ]
+    assert records
+    for record in records:
+        assert not _process_exists(record["pid"])
 
 
 def test_abrupt_child_exit_reports_active_cell(tmp_path):
@@ -185,8 +261,38 @@ def test_undeclared_optional_import_is_rejected(tmp_path):
         execute_notebook(notebook, work_root=tmp_path / "run")
 
 
+@pytest.mark.skipif(not _SKLEARN_SPEC.supports_current_python, reason="DRYML's sklearn extra excludes this Python")
+def test_undeclared_optional_import_in_dispatch_worker_is_rejected(tmp_path):
+    notebook = _write_notebook(
+        tmp_path / "worker-optional.ipynb",
+        """import sys
+from tempfile import TemporaryDirectory
+from dryml.core2.store.dir import DirStore
+from dryml.dispatch import Dispatcher
+from dryml.environments import PythonExecutableSpec
+from dryml.operations import make_function_call_spec
+
+with TemporaryDirectory() as directory:
+    store = DirStore(directory, query_index='none')
+    try:
+        Dispatcher(store=store).run(
+            make_function_call_spec('sklearn.linear_model:LinearRegression'),
+            environment=PythonExecutableSpec(executable=sys.executable, pythonpath_policy='none'),
+        )
+    finally:
+        store.close()
+""",
+    )
+
+    with pytest.raises(
+        NotebookExecutionError,
+        match=r"worker-optional\.ipynb: undeclared optional imports: sklearn",
+    ):
+        execute_notebook(notebook, work_root=tmp_path / "run")
+
+
 def test_child_output_is_bounded_before_returning_to_parent(tmp_path):
-    notebook = _write_notebook(tmp_path / "output.ipynb", "print('x' * 9000)")
+    notebook = _write_notebook(tmp_path / "output.ipynb", "print('x' * 1000000)")
 
     result = execute_notebook(notebook, work_root=tmp_path / "run")
 
@@ -211,3 +317,26 @@ except RuntimeError:
     assert result.working_directory_restored
     assert result.module_table_restored
     assert result.linecache_restored
+
+
+def test_child_cleanup_failure_names_leaked_state(tmp_path):
+    notebook = _write_notebook(
+        tmp_path / "state-leak.ipynb",
+        """import dryml
+from dryml.environments import CurrentEnvironmentSpec
+dryml.environments.set_current(CurrentEnvironmentSpec())
+""",
+    )
+
+    with pytest.raises(NotebookExecutionError, match=r"state-leak\.ipynb: child cleanup failed: state_restored"):
+        execute_notebook(notebook, work_root=tmp_path / "run")
+
+
+def test_unreleased_temporary_directory_is_audited(tmp_path):
+    notebook = _write_notebook(
+        tmp_path / "temporary-leak.ipynb",
+        "import tempfile\ntempfile.mkdtemp(prefix='tutorial-leak-')",
+    )
+
+    with pytest.raises(NotebookExecutionError, match=r"temporary-leak\.ipynb: unexpected writes: tmp/"):
+        execute_notebook(notebook, work_root=tmp_path / "run")

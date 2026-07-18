@@ -15,10 +15,11 @@ Use notebooks from the same DRYML version as the installed package. In a
 repository checkout, use the notebooks under `examples/notebooks/`. In an
 extracted source distribution, use the included notebooks from that matching
 sdist. For an individual download, take the notebook from the exact matching
-release tag or sdist and install that same DRYML version. A notebook-capable
-Python 3.10+ environment is required. The first three lessons need the base
-installation; the final three need the `sklearn` extra, installed as
-`dryml[sklearn]`.
+release tag or sdist and install that same DRYML version. The first three
+lessons need a notebook-capable Python 3.10+ environment and the base
+installation. The final three currently require Python 3.10-3.13 and the
+`sklearn` extra, installed as `dryml[sklearn]`; that extra is not installed on
+Python 3.14.
 
 Each notebook is standalone: it uses installed public APIs, does not import
 sibling support modules or inject a repository path, runs offline, and creates

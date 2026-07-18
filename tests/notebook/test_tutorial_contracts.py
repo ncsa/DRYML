@@ -77,6 +77,14 @@ def test_canonical_notebook_registry_has_final_tutorial_order():
         ("sklearn",),
         ("sklearn",),
     ]
+    assert [item.python_max_exclusive for item in CANONICAL_NOTEBOOKS] == [
+        None,
+        None,
+        None,
+        (3, 14),
+        (3, 14),
+        (3, 14),
+    ]
     assert [item.allowed_optional_imports for item in CANONICAL_NOTEBOOKS] == [
         frozenset(),
         frozenset(),
@@ -94,11 +102,16 @@ def test_declared_extras_determine_allowed_optional_imports():
 
     with pytest.raises(ValueError, match="unknown notebook extras: undeclared"):
         NotebookSpec(Path("bad.ipynb"), extras=("undeclared",))
+    with pytest.raises(ValueError, match="python_max_exclusive must be a major/minor tuple"):
+        NotebookSpec(Path("bad.ipynb"), python_max_exclusive=(3,))
 
 
 @pytest.mark.parametrize("item", CANONICAL_NOTEBOOKS, ids=lambda item: item.path.stem)
 def test_canonical_notebooks_satisfy_static_contract(item):
-    validate_notebook(repository_path(item.path))
+    document = validate_notebook(repository_path(item.path))
+    all_source, _ = _notebook_sources(document)
+    if item.extras == ("sklearn",):
+        assert "Python 3.10-3.13" in all_source
 
 
 def test_runtime_notebook_teaches_current_execution_distinctions():
