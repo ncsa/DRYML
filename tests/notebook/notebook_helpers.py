@@ -107,6 +107,7 @@ class NotebookExecutionResult:
 
 
 CANONICAL_NOTEBOOKS = (
+    NotebookSpec(Path("examples/notebooks/objects_definitions_and_repos.ipynb")),
     NotebookSpec(Path("examples/notebooks/local_defaults_and_plain_mode.ipynb")),
 )
 

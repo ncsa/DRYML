@@ -46,6 +46,21 @@ def test_canonical_notebook_executes_offline_and_cleans_process_state(tmp_path, 
     assert result.repository_on_pythonpath is False
 
 
+def test_objects_notebook_executes_twice_in_independent_processes(tmp_path):
+    item = CANONICAL_NOTEBOOKS[0]
+
+    results = [
+        execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
+        for index in range(2)
+    ]
+
+    assert results[0] == results[1]
+    assert all(result.returncode == 0 for result in results)
+    assert all(result.unexpected_writes == () for result in results)
+    assert all(result.repository_on_pythonpath is False for result in results)
+    assert all("Traceback" not in result.stdout + result.stderr for result in results)
+
+
 def test_network_guard_blocks_socket_access_with_cell_diagnostic(tmp_path):
     notebook = _write_notebook(
         tmp_path / "network.ipynb",
