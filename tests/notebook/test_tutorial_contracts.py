@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -45,19 +46,28 @@ def _write_notebook(path: Path, document: object) -> Path:
     return path
 
 
-def test_canonical_notebook_registry_orders_objects_data_runtime_models_and_definition_variants():
+def test_canonical_notebook_registry_has_final_tutorial_order():
     assert [item.path.as_posix() for item in CANONICAL_NOTEBOOKS] == [
         "examples/notebooks/objects_definitions_and_repos.ipynb",
         "examples/notebooks/datasets_and_transforms.ipynb",
         "examples/notebooks/local_defaults_and_plain_mode.ipynb",
         "examples/notebooks/models_experiments_and_metrics.ipynb",
         "examples/notebooks/definition_driven_experiments.ipynb",
+        "examples/notebooks/local_hyperparameter_search.ipynb",
     ]
-    assert [item.extras for item in CANONICAL_NOTEBOOKS] == [(), (), (), ("sklearn",), ("sklearn",)]
+    assert [item.extras for item in CANONICAL_NOTEBOOKS] == [
+        (),
+        (),
+        (),
+        ("sklearn",),
+        ("sklearn",),
+        ("sklearn",),
+    ]
     assert [item.allowed_optional_imports for item in CANONICAL_NOTEBOOKS] == [
         frozenset(),
         frozenset(),
         frozenset(),
+        frozenset({"sklearn"}),
         frozenset({"sklearn"}),
         frozenset({"sklearn"}),
     ]
@@ -159,6 +169,50 @@ def test_definition_variants_notebook_teaches_identity_materialization_and_struc
     assert not missing, f"definition variants notebook is missing teaching elements: {sorted(missing)}"
     assert "generated IDs" in all_source
     assert "fresh instances are a materialization choice" in all_source.lower()
+
+
+def test_local_search_notebook_teaches_bounded_deterministic_public_api_workflow():
+    item = next(
+        item
+        for item in CANONICAL_NOTEBOOKS
+        if item.path.name == "local_hyperparameter_search.ipynb"
+    )
+    document = validate_notebook(repository_path(item.path))
+    all_source = "\n".join(
+        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+        for cell in document["cells"]
+    )
+    executable_source = "\n".join(
+        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+        for cell in document["cells"]
+        if cell["cell_type"] == "code"
+    )
+
+    required_executable = {
+        ".as_space()",
+        ".grid()",
+        ".sample(random.Random(FIXED_SEED))",
+        ".support_selector()",
+        "Definition(ArrayDataset",
+        "DirStore",
+        "Repo",
+        "experiment.train()",
+        "mean_squared_error",
+        "np.isfinite",
+        "range(cap + 1)",
+        "save_object",
+        "stable_cdef_key",
+    }
+    missing = {token for token in required_executable if token not in executable_source}
+    assert not missing, f"local search notebook is missing teaching elements: {sorted(missing)}"
+    assert "cap bounds candidate execution and publication" in all_source.lower()
+    assert "arbitrary-range preflight" in all_source.lower()
+    assert re.search(r"\bray\b", all_source, flags=re.IGNORECASE) is None
+    assert not {
+        token
+        for token in ("checkpoint", "sys.path", "PYTHONPATH", "tutorials/")
+        if token.lower() in all_source.lower()
+    }
 
 
 def test_invalid_json_reports_notebook_path(tmp_path):

@@ -90,6 +90,33 @@ def test_definition_variants_summary_is_stable_across_independent_processes(tmp_
     assert all(math.isfinite(item["mse"]) for item in summaries[0])
 
 
+def test_local_search_summary_is_stable_across_independent_processes(tmp_path):
+    item = next(
+        item
+        for item in CANONICAL_NOTEBOOKS
+        if item.path.name == "local_hyperparameter_search.ipynb"
+    )
+    results = [
+        execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
+        for index in range(2)
+    ]
+
+    marker = "LOCAL_SEARCH_SUMMARY="
+    summaries = []
+    for result in results:
+        lines = [line for line in result.stdout.splitlines() if line.startswith(marker)]
+        assert len(lines) == 1
+        summaries.append(json.loads(lines[0][len(marker):]))
+
+    assert summaries[0] == summaries[1]
+    assert summaries[0]["candidate_count"] == 4
+    assert summaries[0]["execution_order"] == sorted(summaries[0]["execution_order"])
+    assert len(set(summaries[0]["execution_order"])) == 4
+    assert summaries[0]["best_identity"] in summaries[0]["execution_order"]
+    assert summaries[0]["sample_identity"] in summaries[0]["execution_order"]
+    assert all(math.isfinite(metric) for metric in summaries[0]["metrics"])
+
+
 def test_network_guard_blocks_socket_access_with_cell_diagnostic(tmp_path):
     notebook = _write_notebook(
         tmp_path / "network.ipynb",

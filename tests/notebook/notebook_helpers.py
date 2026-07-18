@@ -118,6 +118,10 @@ CANONICAL_NOTEBOOKS = (
         Path("examples/notebooks/definition_driven_experiments.ipynb"),
         extras=("sklearn",),
     ),
+    NotebookSpec(
+        Path("examples/notebooks/local_hyperparameter_search.ipynb"),
+        extras=("sklearn",),
+    ),
 )
 
 
