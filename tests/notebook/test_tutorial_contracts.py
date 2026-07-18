@@ -69,6 +69,52 @@ def test_canonical_notebooks_satisfy_static_contract(item):
     validate_notebook(repository_path(item.path))
 
 
+def test_runtime_notebook_teaches_current_execution_distinctions():
+    item = next(
+        item
+        for item in CANONICAL_NOTEBOOKS
+        if item.path.name == "local_defaults_and_plain_mode.ipynb"
+    )
+    document = validate_notebook(repository_path(item.path))
+    all_source = "\n".join(
+        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+        for cell in document["cells"]
+    )
+    executable_source = "\n".join(
+        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+        for cell in document["cells"]
+        if cell["cell_type"] == "code"
+    )
+
+    required_executable = {
+        "DispatchPlanningError",
+        "DirStore",
+        "PythonExecutableSpec",
+        "TemporaryDirectory",
+        "active_runtime().allocation",
+        "diagnostic_count",
+        "dryml.dispatch.run",
+        "operator.add",
+        "result.result_canonical",
+        "result.status",
+    }
+    missing = {token for token in required_executable if token not in executable_source}
+    assert not missing, f"runtime notebook is missing executable teaching elements: {sorted(missing)}"
+    assert "allow_pickle=True" in all_source
+    assert "same-Python" in all_source
+    assert not {
+        token
+        for token in (
+            "dryml.context",
+            "dryml.execute",
+            "requirement_policy='ignore'",
+            'requirement_policy="ignore"',
+            "runtime.disabled",
+        )
+        if token in executable_source
+    }
+
+
 def test_invalid_json_reports_notebook_path(tmp_path):
     notebook = tmp_path / "invalid.ipynb"
     notebook.write_text("{not json", encoding="utf-8")
