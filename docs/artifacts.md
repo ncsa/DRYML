@@ -40,7 +40,40 @@ These types are intended for storing and aggregating scalar-like computed values
 
 ## Cached Datasets
 
-`CachedDataset` represents a dataset artifact. It can be used when a transformed or generated dataset should be materialized and reused rather than recomputed each time.
+`CachedDataset` is a normal lightweight `Dataset` whose completed bytes are a
+managed, record-backed realization. Its definition stores the source as a
+non-materializing `RefCDef` plus element spec, cardinality, and order metadata;
+loading the definition or reading a completed cache does not construct the
+source.
+
+The first realization must choose the NumPy sequence representation explicitly:
+
+```python
+cached = CachedDataset(source)
+cached.compute(
+    store=store,
+    representation="numpy-sequence",
+    shard_rows=1024,
+    shard_bytes=64 * 1024 * 1024,
+)
+```
+
+Normal iteration resolves only the compatible active `DataRecord` in the
+default repository scope. `cached.view(repo=repo)` and
+`cached.view(store=store)` pin iteration to one authority. Missing or incomplete
+results raise; iteration never computes the source implicitly. A rerun keeps the
+old active realization readable until the new result completes and activates.
+
+NumPy sequence products contain bounded `.npz` shards and one compact
+`index.json`; files scale with shards rather than rows. Reads verify the
+record-owned product manifest and the sequence index/shard sizes and digests.
+CachedDataset never treats a source prefix as a completed result.
+
+Exact resume is capability-based over the complete Dataset pipeline. Indexed
+sources have durable row cursors, and stateful stages must checkpoint all state
+(for example, shuffle RNG and buffer contents). Replay-only or unknown stages
+may run but cannot claim exact continuation; an interrupted pending realization
+then requires explicit rerun.
 
 ## Basic Pattern
 
@@ -54,7 +87,9 @@ class MyArtifact(Artifact):
         return None
 ```
 
-The artifact's definition identifies what the artifact represents. The saved state stores the computed payload.
+The artifact's definition identifies what the artifact represents. Managed
+artifact payloads such as CachedDataset realizations are Store-owned records and
+products rather than ordinary Object state.
 
 ## Repos And Locations
 
@@ -67,7 +102,8 @@ This keeps artifact identity in the DRYML object graph while allowing payloads t
 - Do not store large computed payloads in constructor arguments.
 - Keep `compute()` deterministic when possible.
 - Store enough definition metadata to know what the artifact represents.
-- Store computed values as state, not identity.
+- Keep computed values out of definition identity; managed values belong in
+  records and products rather than ordinary Object state.
 - Use `exists()` as a convenience check, not as a complete validation of correctness.
 
 ## Related Docs

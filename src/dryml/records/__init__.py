@@ -107,6 +107,7 @@ from .products import (
     RealizationPublicationResult,
     commit_product_record,
     stage_product_file,
+    require_checkpoint_integrity,
     require_product_integrity,
     validate_product_availability,
 )
@@ -262,6 +263,7 @@ __all__ = [
     "stored_state_record_for_save_action",
     "stage_product_file",
     "require_product_integrity",
+    "require_checkpoint_integrity",
     "typed_record_from_envelope",
     "validate_record",
     "validate_product_availability",

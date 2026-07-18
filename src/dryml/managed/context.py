@@ -136,6 +136,12 @@ class OperationContext:
         return self.coordinator.diagnostics
 
     @property
+    def store(self):
+        """Return the selected Store authority for this invocation."""
+
+        return self.lease.operation.managed_store.store
+
+    @property
     def checkpoint_head(self) -> str | None:
         """Return the latest compatible committed checkpoint ID."""
 

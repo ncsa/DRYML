@@ -309,6 +309,13 @@ Live durable writing requires the explicit `managed-durable-products-v1` Store c
 
 Managed completion uses a compact `dryml.product.root.v1` manifest in each output record. It authenticates `.dryml-product-manifest-v1.json`, whose detailed entries contain the exact payload file set, sizes, and digests. `require_product_integrity(...)` rejects missing files, extra files, size drift, digest drift, malformed detail manifests, and compact-summary mismatches.
 
+CachedDataset realization outputs are managed `DataRecord` values using the
+`dryml.numpy_sequence` representation. Their product root contains
+`index.json`, bounded `shards/*.npz`, and the normal detailed product manifest.
+The sequence index is representation metadata, not Object state. Iteration
+first verifies the record product manifest, then validates contiguous shard row
+ranges and each indexed size/digest before yielding data.
+
 Finalization writes an immutable intent before adoption. Recovery may idempotently adopt verified orphan products and records from that intent. Publication order is products, all required output records, execution record, realization record, completed control state, and optional activation last. Any failure before activation leaves the previous active realization unchanged and retains partial or orphan work for explicit recovery.
 
 ## Adapter Lineage

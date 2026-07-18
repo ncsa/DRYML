@@ -3,6 +3,14 @@ from dryml.data.source import ArrayDataset, GeneratorDataset, NpyFileDataset, TF
 from dryml.data.combine import Chain, Zip
 from dryml.data.methods import ArgMax, Cast, Flatten, Pipe, Project, Scale, Select
 from dryml.data.structural import Batch, Repeat, Shuffle, Skip, Take, Unbatch
+from dryml.data.resume import (
+    DatasetResumeCapability,
+    ResumableDatasetIterator,
+    ResumeMode,
+    dataset_definition_metadata,
+    dataset_resume_capability,
+    open_resumable_dataset,
+)
 from dryml.data.util import (
     Collect,
     collect_xy,
@@ -34,6 +42,12 @@ __all__ = [
     "Skip",
     "Shuffle",
     "Repeat",
+    "DatasetResumeCapability",
+    "ResumableDatasetIterator",
+    "ResumeMode",
+    "dataset_definition_metadata",
+    "dataset_resume_capability",
+    "open_resumable_dataset",
     "iter_xy",
     "collect_xy",
     "collate_xy",

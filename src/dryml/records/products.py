@@ -389,6 +389,12 @@ def require_product_integrity(record_io: Any, record: Mapping[str, Any]) -> None
         )
 
 
+def require_checkpoint_integrity(root: str | Path, checkpoint_id: str) -> None:
+    """Raise unless an immutable managed checkpoint verifies exactly."""
+
+    _validate_checkpoint_root(Path(root), checkpoint_id)
+
+
 class DurableProductWriter:
     """Fence-checked streaming writer for retained managed attempt workspaces.
 
@@ -495,6 +501,57 @@ class DurableProductWriter:
             if root.exists():
                 paths.extend(path for path in root.rglob("*") if path.is_file() and path.name != PRODUCT_MANIFEST_FILE)
         return tuple(sorted(paths))
+
+    def retain_output_file(self, slot: str, path: str) -> Path:
+        """Link one checkpoint-authenticated prior output into this attempt.
+
+        Managed implementations use this only after validating their own
+        checkpoint metadata against the retained bytes. A same-filesystem hard
+        link avoids a second payload copy; the streaming fallback remains
+        bounded for filesystems that do not support links.
+        """
+
+        from .realizations import validate_output_slot
+
+        validate_output_slot(slot, "slot")
+        _validate_product_path(path)
+        target = self.workspace / "outputs" / slot / path
+        if target.exists():
+            return target
+        candidates = []
+        for workspace in self._realization_workspaces():
+            candidate = workspace / "outputs" / slot / path
+            if candidate.is_file() and candidate != target:
+                candidates.append(candidate)
+        if not candidates:
+            raise RecordIOError(
+                "retained output file is missing",
+                context={"slot": slot, "path": path},
+            )
+        if len(candidates) > 1:
+            first = ProductManifestEntry(path, candidates[0].stat().st_size, _sha256(candidates[0]))
+            if any(
+                ProductManifestEntry(path, item.stat().st_size, _sha256(item)) != first
+                for item in candidates[1:]
+            ):
+                raise RecordIOError(
+                    "retained output file resolves to conflicting bytes",
+                    context={"slot": slot, "path": path},
+                )
+        self.lease.assert_current()
+        self._mkdir(target.parent)
+        try:
+            os.link(candidates[0], target)
+        except OSError:
+            temp = target.parent / f".{target.name}.retain-{uuid.uuid4().hex}"
+            with candidates[0].open("rb") as source, temp.open("xb") as destination:
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+                destination.flush()
+                os.fsync(destination.fileno())
+            self.lease.assert_current()
+            os.replace(temp, target)
+        _fsync_directory(target.parent)
+        return target
 
     def finalize(
         self,
@@ -1037,5 +1094,6 @@ __all__ = [
     "commit_product_record",
     "stage_product_file",
     "require_product_integrity",
+    "require_checkpoint_integrity",
     "validate_product_availability",
 ]

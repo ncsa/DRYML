@@ -21,6 +21,12 @@ spec = make_representation_spec(
 
 Minimum fake kinds used by tests are `dryml.object_state`, `fake.raw_state`, `fake.normalized_state`, `fake.data.table`, and `fake.program.ir`.
 
+`dryml.numpy_sequence` is the lightweight managed CachedDataset representation.
+It stores backend-neutral dense NumPy leaves in bounded row/byte `.npz` shards,
+supports nested dict/list/tuple tensor trees, and uses one compact `index.json`
+for row ranges, tree metadata, sizes, and digests. It does not use one file per
+element and does not import optional dataframe or framework backends.
+
 ## Typed Records
 
 `StoredStateRecord` points at loadable object state. Descriptive saves still store bytes under `objects/`; wrappers only validate the record sidecar.

@@ -168,6 +168,22 @@ class ManagedDispatchRequest:
             and namespace.current_declaration_fingerprint != fingerprint
         )
         operation = managed_store.operation(key, fingerprint)
+        validator = getattr(producer, "__dryml_managed_validate_invocation__", None)
+        if validator is not None:
+            control = operation._read_control(missing_ok=True)
+            validator(
+                descriptor.method_name,
+                self.args,
+                dict(self.kwargs),
+                store=selected,
+                operation=operation,
+                has_active=operation.active(missing_ok=True) is not None,
+                has_pending=(
+                    control is not None
+                    and control.pending_realization_id is not None
+                ),
+                rerun=self.rerun,
+            )
         if not advance:
             control = operation._read_control(missing_ok=True)
             pending_id = None if control is None else control.pending_realization_id

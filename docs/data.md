@@ -16,6 +16,11 @@ Important expectations:
 - `len(dataset)` should return cardinality when known.
 - `peek()` returns one element without permanently consuming the dataset.
 
+`CachedDataset` follows the same contract after a completed compatible
+realization is active. Before that point, iteration and `peek()` raise rather
+than implicitly computing dependencies. Use `cached.view(repo=...)` or
+`cached.view(store=...)` when ambient repository selection would be ambiguous.
+
 ## Source Datasets
 
 Common source dataset classes:
@@ -113,6 +118,20 @@ pair_spec = (
     TensorSpec("int64", shape=()),
 )
 ```
+
+CachedDataset copies this lightweight element spec, source cardinality, and
+source-order declaration into its own definition while retaining the source as
+a non-materializing definition reference. Empty sources therefore require
+declared metadata but can produce a valid empty cache.
+
+## Resume Capability
+
+`dataset_resume_capability(dataset_or_definition)` inspects a pipeline without
+constructing it and reports `exact`, `replay`, or `none`. Exact continuation
+requires a durable source cursor and a checkpoint/restore contract for every
+stateful stage. `open_resumable_dataset(...)` is the corresponding exact cursor
+protocol used during cache computation. Replay is diagnostic only and is never
+silently substituted for exact resume.
 
 ## Common Pitfalls
 

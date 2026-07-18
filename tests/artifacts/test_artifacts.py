@@ -1,12 +1,11 @@
 import numpy as np
 import pytest
 
-from dryml.artifacts import Accuracy, CachedDataset, Scalar, ScalarAvg
-from dryml.core2 import ConfigRef, Repo
-from dryml.core2.repo import default_repo
+from dryml.artifacts import Accuracy, Scalar, ScalarAvg
+from dryml.core2 import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.core2.tensor_spec import TensorSpec
-from dryml.data import ArgMax, ArrayDataset, Map, NpyFileDataset, Pipe, Project, Select
+from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import Model
 
 
@@ -105,35 +104,3 @@ def test_accuracy_compute_without_store_caches_value():
 
     assert accuracy.compute(repo=Repo()) == pytest.approx(0.75)
     assert accuracy.value == pytest.approx(0.75)
-
-
-def test_cached_dataset_writes_npy_files_for_npy_file_dataset(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo(stores=store)
-    source = ArrayDataset(np.array([[1, 2], [3, 4]], dtype=np.int32))
-    cached = CachedDataset(source)
-
-    repo.save_object(cached)
-    cached.compute(repo=repo)
-
-    files = sorted(p.name for p in tmp_path.glob("store/objects/*/*/*.npy"))
-    assert files == ["00000000.npy", "00000001.npy"]
-
-    repo.set_config("cache.root", repo.location(cached))
-    ds = NpyFileDataset(ConfigRef("cache.root"), repo=repo)
-    assert [item.tolist() for item in ds] == [[1, 2], [3, 4]]
-
-
-def test_cached_dataset_supports_default_repo_location_flow(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo()
-    source = ArrayDataset(np.array([[5, 6]], dtype=np.int32))
-    cached = CachedDataset(source)
-
-    with default_repo(repo):
-        cached.save(store=store)
-        cached.compute()
-        repo.set_config("cache.root", cached.location)
-        ds = NpyFileDataset(ConfigRef("cache.root"))
-
-    assert [item.tolist() for item in ds] == [[5, 6]]
