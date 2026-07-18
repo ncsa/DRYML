@@ -20,8 +20,13 @@ dispatch, world, and code-analysis work:
   checks, `dispatch.explain(...)`, local subprocess/local-world boundaries, and
   explicit opt-in bounded dispatch tracing;
 - retirement of the unsupported tracked `dryml.graph` prototype package; and
-- the [migration guide](migration/legacy_context_execute_removal.md) and four
-  [runnable examples](table_of_content.md#focused-runnable-workflows).
+- the [migration guide](migration/legacy_context_execute_removal.md), three
+  [focused runnable scripts](table_of_content.md#focused-runnable-workflows),
+  and the ordered [six-notebook tutorial set](table_of_content.md#tutorials).
+
+The source distribution includes exactly those six authored tutorial notebooks
+alongside the three focused scripts. Wheels continue to exclude `examples/`,
+`docs/`, and `tests/`.
 
 The accepted Sprint 11 release candidate completed the maintained local suite in
 428.900 seconds with 2,523 smoke/medium passes, 143 heavy passes, and one

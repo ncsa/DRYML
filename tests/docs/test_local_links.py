@@ -10,6 +10,7 @@ from pathlib import Path
 CHANGED_DOCUMENTS = (
     "README.md",
     "docs/table_of_content.md",
+    "docs/models.md",
     "docs/annotations.md",
     "docs/dispatch.md",
     "docs/environments.md",
@@ -25,6 +26,14 @@ CHANGED_DOCUMENTS = (
     "docs/records.md",
     "docs/reporting.md",
     "docs/representations_adapters.md",
+)
+TUTORIAL_NOTEBOOKS = (
+    "examples/notebooks/objects_definitions_and_repos.ipynb",
+    "examples/notebooks/datasets_and_transforms.ipynb",
+    "examples/notebooks/local_defaults_and_plain_mode.ipynb",
+    "examples/notebooks/models_experiments_and_metrics.ipynb",
+    "examples/notebooks/definition_driven_experiments.ipynb",
+    "examples/notebooks/local_hyperparameter_search.ipynb",
 )
 LINK_RE = re.compile(r"!?\[[^]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$", re.MULTILINE)
@@ -72,3 +81,21 @@ def test_changed_markdown_links_are_local_and_resolve():
             )
             if separator:
                 assert fragment in _anchors(resolved), f"{relative}: missing anchor {fragment!r} in {target!r}"
+
+
+def test_tutorial_notebooks_are_linked_in_canonical_order_and_tracked():
+    """Keep the documentation index and release-facing paths in lockstep."""
+
+    repository = Path(__file__).resolve().parents[2]
+    document = repository / "docs/table_of_content.md"
+    tutorial_links = tuple(
+        (document.parent / match.group(1)).resolve().relative_to(repository).as_posix()
+        for match in LINK_RE.finditer(document.read_text(encoding="utf-8"))
+        if match.group(1).startswith("../examples/notebooks/")
+    )
+    tracked = set(subprocess.check_output(
+        ["git", "ls-files"], cwd=repository, text=True,
+    ).splitlines())
+
+    assert tutorial_links == TUTORIAL_NOTEBOOKS
+    assert set(TUTORIAL_NOTEBOOKS) <= tracked

@@ -8,9 +8,20 @@
 
 DRYML provides `Definition` a new graph-based object identity model enabling users to describe complex composite objects using simple components. A `Definition` is a kind of 'super' factory object,  you specify the class you want to create followed by its args, then kwargs just like you would pass its constructor. However, `Definition` can be arbitrarily nested allowing the user to describe these composite objects.
 
-`Definition` forms the starting point though, using `.concretize()`, a `Definition` object can be 'resolved' into a `ConcreteDefinition` where all default args are filled in, and unique ids are populated. `ConcreteDefinition` uniquely identifies a specific object, is immutable and hashable. `ConcreteDefinition` can also be used as a recipe to build its `Object` using `.build()`. `ConcreteDefinition` itself is lightweight and is easy to serialize and pass around.
+`Definition` forms the starting point. Using `.concretize()`, a `Definition`
+can be resolved into a `ConcreteDefinition` where defaults and nested
+definitions are fully resolved. A `ConcreteDefinition` is the immutable,
+hashable, canonical construction identity for an object; it is not populated
+with a generated unique ID. It can also be used as a recipe to build its
+`Object` using `.build()`, and is lightweight enough to serialize and pass
+around.
 
-When DRYML serializes an `Object` to disk, it uses a `Repo` and one or more backing `Store`s. Stores can contain any number of other `Object`s. A `Definition` can be turned into a `Selector` with the `.as_selector()` method. `Selector`s form a graph query language enabling you to pick a particular `Object` out of the store. Thus ends the difficult task of creating unique names for all of your trained models! refer to them with their unique identity! `Definition`s and hence `Selector`s can also be under-specified and can be made to match multiple different objects. This enables you to quickly grab a particular class of `Object` from your `Store`s.
+When DRYML serializes an `Object` to disk, it uses a `Repo` and one or more
+backing `Store`s. Stores can contain any number of `Object`s. A `Definition`
+can be turned into a `Selector` with `.as_selector()`. `Selector`s form a graph
+query language for finding stored objects by exact or under-specified
+construction identity, without inventing names for every trained model.
+Runtime state such as fitted weights remains separate from that identity.
 
 `Definition`s can also be passed `Par`s which can define a distribution over possible values. Then `Definition`'s `.as_space()` method produces a `SearchSpace` object. `SearchSpace`'s `.sample()` method produces a `Definition` which is sampled from the defined space. `SearchSpace`'s `.support_selector()` method produces a `Selector` which matches any `ConcreteDefinition` that is producable by the `SearchSpace`. That's extremely useful for finding models in your `Store`s for a particular hyperparameter experiment!
 
@@ -95,7 +106,7 @@ with dryml.environments.use(dryml.environments.CurrentEnvironmentSpec()):
 For trusted inline local work, `with dryml.runtime.plain():` uses an inline
 allocation with enforcement off. It is not worker isolation or a dispatch
 replacement. See [world/runtime](docs/world_runtime.md) and the
-[notebook example](examples/notebooks/local_defaults_and_plain_mode.ipynb).
+[ordered tutorial sequence](docs/table_of_content.md#tutorials).
 
 ### 8. Analyze code without invoking it
 
@@ -119,11 +130,12 @@ Both Python-shaped dispatch forms normalize to the canonical `OperationSpec` IR.
 Use [operations](docs/operations.md) only when you deliberately need to construct
 that advanced IR yourself.
 
-Runnable lightweight workflows are available for
+Start the maintained notebooks from the
+[tutorial entry point](docs/table_of_content.md#tutorials). Additional
+lightweight scripts cover
 [requirements/explain](examples/requirements/requirements_and_explain.py),
-[Python-shaped dispatch](examples/dispatch/python_shaped_dispatch.py),
-[notebook defaults/plain mode](examples/notebooks/local_defaults_and_plain_mode.ipynb),
-and [static/dynamic analysis](examples/code_analysis/static_and_dynamic_analysis.py).
+[Python-shaped dispatch](examples/dispatch/python_shaped_dispatch.py), and
+[static/dynamic analysis](examples/code_analysis/static_and_dynamic_analysis.py).
 Migration from removed context/execute APIs is covered by the
 [migration guide](docs/migration/legacy_context_execute_removal.md).
 

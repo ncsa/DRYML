@@ -4,6 +4,41 @@ Status: current.
 
 This documentation is the user-facing guide to DRYML. It complements API docstrings by explaining concepts, workflows, and common usage patterns.
 
+## Tutorials
+
+This is the canonical tutorial sequence for both new DRYML learners and people
+migrating from the legacy context, `Trainable`, or generated-ID APIs. Follow it
+in order for the complete progression, or open any lesson independently after
+meeting that lesson's prerequisites.
+
+Use notebooks from the same DRYML version as the installed package. In a
+repository checkout, use the notebooks under `examples/notebooks/`. In an
+extracted source distribution, use the included notebooks from that matching
+sdist. For an individual download, take the notebook from the exact matching
+release tag or sdist and install that same DRYML version. A notebook-capable
+Python 3.10+ environment is required. The first three lessons need the base
+installation; the final three need the `sklearn` extra, installed as
+`dryml[sklearn]`.
+
+Each notebook is standalone: it uses installed public APIs, does not import
+sibling support modules or inject a repository path, runs offline, and creates
+any Store state only in temporary directories. The first lesson's initial
+successful workflow saves mutable object state to a Store, closes and reopens
+it, then verifies exact and alias loads restore that state.
+
+1. [Objects, definitions, and repositories](../examples/notebooks/objects_definitions_and_repos.ipynb) (`base`): construction identity, mutable state, Store save/load, aliases, and query domains.
+2. [Datasets and transforms](../examples/notebooks/datasets_and_transforms.ipynb) (`base`): re-iterable sources, tensor specs, method nodes, and structural transforms.
+3. [Local defaults and plain mode](../examples/notebooks/local_defaults_and_plain_mode.ipynb) (`base`): environments, worlds, runtime allocation, trusted inline work, and worker dispatch.
+4. [Models, experiments, and metrics](../examples/notebooks/models_experiments_and_metrics.ipynb) (`sklearn`): the maintained sklearn model, training, experiment, metric, and persistence path.
+5. [Definition-driven experiments](../examples/notebooks/definition_driven_experiments.ipynb) (`sklearn`): immutable experiment variants and reproducible construction identity.
+6. [Local hyperparameter search](../examples/notebooks/local_hyperparameter_search.ipynb) (`sklearn`): finite search spaces, bounded execution, deterministic selection, and temporary publication.
+
+The sklearn lessons establish the current backend workflow. Continue with the
+maintained TensorFlow and Torch APIs through the
+[Models API backend progression](models.md#backend-progression); those backends
+have their own extras and runtime requirements and are not prerequisites for
+this sequence.
+
 ## Recommended Reading Order
 
 1. [Create or open a Store](repos.md)
@@ -73,5 +108,4 @@ Use this rule when adding features:
 
 - [Requirements and explain](../examples/requirements/requirements_and_explain.py)
 - [Python-shaped dispatch](../examples/dispatch/python_shaped_dispatch.py)
-- [Notebook defaults and plain mode](../examples/notebooks/local_defaults_and_plain_mode.ipynb)
 - [Static and dynamic analysis](../examples/code_analysis/static_and_dynamic_analysis.py)

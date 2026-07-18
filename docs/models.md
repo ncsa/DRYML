@@ -87,6 +87,23 @@ Examples include:
 
 Backend wrappers should keep external runtime state in object state and keep stable configuration in definitions.
 
+## Backend Progression
+
+Start with the maintained
+[sklearn models tutorial](../examples/notebooks/models_experiments_and_metrics.ipynb),
+which uses `RegressionModel`, `BasicTraining`, `Experiment`, and explicit metric
+evaluation on small local arrays. The next two tutorials reuse that same
+current model/experiment contract for definition variants and bounded local
+search.
+
+For backend-specific progression, use the public APIs exported by
+[`dryml.models.tf`](../src/dryml/models/tf/__init__.py), including `Model`,
+`Sequential`, and `BasicTraining`, or
+[`dryml.models.torch`](../src/dryml/models/torch/__init__.py), including
+`Model`, `Sequential`, `Optimizer`, and `Training`. Install the matching `tf`
+or `torch` extra and follow that backend's runtime requirements. These are
+maintained backend paths, not legacy compute-context or `Trainable` APIs.
+
 ## Train State
 
 `TrainState` records coarse training lifecycle state. Use it to distinguish untrained, trained, and related phases where supported by the training API.
@@ -116,11 +133,12 @@ Exact constructor signatures vary by model and experiment class. Prefer backend-
 - Do not put trained weights in definitions.
 - Keep backend handles out of stable identity unless they are intentionally part of configuration.
 - Make input/output specs explicit when automatic inference is ambiguous.
-- Use contexts when backend execution requires specific resources.
+- Declare resource requirements through worlds, then run backend work through an active runtime allocation or dispatch worker.
 
 ## Related Docs
 
 - [Tensor Specs](tensor_specs.md)
 - [Data API](data.md)
-- [Contexts](context.md)
+- [Worlds and Runtime](world_runtime.md)
+- [Dispatch](dispatch.md)
 - [Artifacts API](artifacts.md)

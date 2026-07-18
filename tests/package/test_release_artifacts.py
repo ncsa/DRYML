@@ -23,7 +23,12 @@ EXAMPLES = {
     "examples/requirements/requirements_and_explain.py",
     "examples/dispatch/python_shaped_dispatch.py",
     "examples/code_analysis/static_and_dynamic_analysis.py",
+    "examples/notebooks/objects_definitions_and_repos.ipynb",
+    "examples/notebooks/datasets_and_transforms.ipynb",
     "examples/notebooks/local_defaults_and_plain_mode.ipynb",
+    "examples/notebooks/models_experiments_and_metrics.ipynb",
+    "examples/notebooks/definition_driven_experiments.ipynb",
+    "examples/notebooks/local_hyperparameter_search.ipynb",
 }
 EXTRAS = {
     "test": {("pytest", "", 'extra == "test"'), ("pytest-cov", "", 'extra == "test"'), ("flake8", "", 'extra == "test"')},
@@ -35,19 +40,22 @@ EXTRAS = {
     "ray": {("ray", "", 'python_version < "3.14" and extra == "ray"')},
 }
 FORBIDDEN_PARTS = {
-    ".git", ".hg", ".mypy_cache", ".pytest_cache", ".ruff_cache",
-    ".svn", "__pycache__", "htmlcov", "pytest-temp",
+    ".cache", ".git", ".hg", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".svn", "__pycache__", "cache", "caches", "checkpoint", "checkpoints",
+    "htmlcov", "pytest-temp", "ray_results", "tuning", "tuning-results",
+    "tuning_results",
 }
 FORBIDDEN_ROOTS = (
     "build/", "dist/", "objects/", "products/", "records/", "stores/",
 )
 FORBIDDEN_SUFFIXES = {
-    ".db", ".dill", ".dry", ".pickle", ".pkl", ".pyc", ".pyo",
-    ".sqlite", ".sqlite3",
+    ".cache", ".checkpoint", ".ckpt", ".db", ".dill", ".dry", ".pickle",
+    ".pkl", ".pyc", ".pyo", ".sqlite", ".sqlite3",
 }
 FORBIDDEN_NAMES = {
     ".coverage", "ci-metadata.json", "coverage.xml",
-    "credentials", "credentials.json", "secrets.json",
+    "credentials", "credentials.json", "secrets.json", "timing.json",
+    "timings.json",
 }
 REQUIRED_CANDIDATE_FILES = {"MANIFEST.in", "tests/package/test_release_artifacts.py"}
 
@@ -148,11 +156,51 @@ def _extract_tar(archive_path: Path, destination: Path) -> None:
 def _assert_no_forbidden_payload(paths, *, forbidden_roots=()) -> None:
     for path in paths:
         relative = Path(path)
+        parts = {part.casefold() for part in relative.parts}
+        name = relative.name.casefold()
         assert not path.startswith((*FORBIDDEN_ROOTS, *forbidden_roots)), relative
-        assert not FORBIDDEN_PARTS.intersection(relative.parts), relative
+        assert not FORBIDDEN_PARTS.intersection(parts), relative
         assert relative.suffix.lower() not in FORBIDDEN_SUFFIXES, relative
-        assert relative.name.casefold() not in FORBIDDEN_NAMES, relative
-        assert not relative.name.startswith(("timing-", ".test-timings-")), relative
+        assert name not in FORBIDDEN_NAMES, relative
+        assert not name.startswith(("timing-", ".test-timings-")), relative
+
+
+def test_manifest_uses_exact_example_allowlist():
+    repository = Path(__file__).resolve().parents[2]
+    lines = {
+        line.strip()
+        for line in (repository / "MANIFEST.in").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    included_examples = {
+        line.removeprefix("include ")
+        for line in lines
+        if line.startswith("include examples/")
+    }
+
+    assert included_examples == EXAMPLES
+    assert not any(
+        line.startswith(("include tutorials/", "recursive-include examples", "recursive-include tutorials"))
+        for line in lines
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "examples/notebooks/state.dry",
+        "examples/notebooks/state.dill",
+        "examples/notebooks/state.pickle",
+        "examples/notebooks/state.db",
+        "examples/notebooks/checkpoint/model.ckpt",
+        "examples/notebooks/tuning/results.json",
+        "examples/notebooks/cache/results.json",
+        "examples/notebooks/timing.json",
+    ),
+)
+def test_generated_tutorial_payloads_are_forbidden(path):
+    with pytest.raises(AssertionError):
+        _assert_no_forbidden_payload((path,))
 
 
 @pytest.fixture(scope="module")
