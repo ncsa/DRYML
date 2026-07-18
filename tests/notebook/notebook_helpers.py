@@ -110,6 +110,10 @@ CANONICAL_NOTEBOOKS = (
     NotebookSpec(Path("examples/notebooks/objects_definitions_and_repos.ipynb")),
     NotebookSpec(Path("examples/notebooks/datasets_and_transforms.ipynb")),
     NotebookSpec(Path("examples/notebooks/local_defaults_and_plain_mode.ipynb")),
+    NotebookSpec(
+        Path("examples/notebooks/models_experiments_and_metrics.ipynb"),
+        extras=("sklearn",),
+    ),
 )
 
 

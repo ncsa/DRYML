@@ -41,7 +41,7 @@ def test_canonical_notebook_executes_offline_and_cleans_process_state(tmp_path, 
     assert result.working_directory_restored
     assert result.module_table_restored
     assert result.linecache_restored
-    assert result.optional_imports == frozenset()
+    assert result.optional_imports == item.allowed_optional_imports
     assert result.unexpected_writes == ()
     assert result.repository_on_pythonpath is False
 

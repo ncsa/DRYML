@@ -45,14 +45,20 @@ def _write_notebook(path: Path, document: object) -> Path:
     return path
 
 
-def test_canonical_notebook_registry_orders_core_lessons_before_runtime():
+def test_canonical_notebook_registry_orders_objects_data_runtime_and_models():
     assert [item.path.as_posix() for item in CANONICAL_NOTEBOOKS] == [
         "examples/notebooks/objects_definitions_and_repos.ipynb",
         "examples/notebooks/datasets_and_transforms.ipynb",
         "examples/notebooks/local_defaults_and_plain_mode.ipynb",
+        "examples/notebooks/models_experiments_and_metrics.ipynb",
     ]
-    assert all(item.extras == () for item in CANONICAL_NOTEBOOKS)
-    assert all(item.allowed_optional_imports == frozenset() for item in CANONICAL_NOTEBOOKS)
+    assert [item.extras for item in CANONICAL_NOTEBOOKS] == [(), (), (), ("sklearn",)]
+    assert [item.allowed_optional_imports for item in CANONICAL_NOTEBOOKS] == [
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset({"sklearn"}),
+    ]
 
 
 def test_declared_extras_determine_allowed_optional_imports():
