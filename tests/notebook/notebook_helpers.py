@@ -374,13 +374,14 @@ import sys
 
 audit_value = os.environ.get('DRYML_NOTEBOOK_AUDIT_DIR')
 optional_value = os.environ.get('DRYML_NOTEBOOK_OPTIONAL_IMPORTS')
-if audit_value and optional_value:
+worker_token = os.environ.get('DRYML_NOTEBOOK_WORKER_TOKEN')
+if audit_value and optional_value and worker_token:
     audit_directory = Path(audit_value)
     audit_directory.mkdir(parents=True, exist_ok=True)
     optional_roots = frozenset(json.loads(optional_value))
-    record_path = audit_directory / f'worker-{os.getpid()}.json'
+    record_path = audit_directory / f'worker-{worker_token}.json'
 
-    def _write_audit_record():
+    def _write_audit_record(status):
         """Atomically record this worker's identity and optional imports."""
         record = {
             'optional_imports': sorted(
@@ -388,8 +389,10 @@ if audit_value and optional_value:
             ),
             'pid': os.getpid(),
             'process_group': os.getpgrp() if os.name == 'posix' else None,
+            'status': status,
+            'token': worker_token,
         }
-        temporary = record_path.with_suffix('.tmp')
+        temporary = record_path.with_name(f'{record_path.name}.{os.getpid()}.tmp')
         temporary.write_text(json.dumps(record, sort_keys=True), encoding='utf-8')
         os.replace(temporary, record_path)
 
@@ -404,8 +407,8 @@ if audit_value and optional_value:
             """Reject socket construction regardless of its arguments."""
             _network_disabled()
 
-    _write_audit_record()
-    atexit.register(_write_audit_record)
+    _write_audit_record('started')
+    atexit.register(_write_audit_record, 'finished')
     socket.socket = _OfflineSocket
     socket.create_connection = _network_disabled
     socket.getaddrinfo = _network_disabled
@@ -417,7 +420,10 @@ import json
 import linecache
 import os
 from pathlib import Path
+import secrets
+import signal
 import socket
+import subprocess
 import sys
 import types
 
@@ -475,11 +481,103 @@ def _audited_worker_builder(builder):
         paths = [str(audit_bootstrap)]
         if pythonpath:
             paths.extend(pythonpath.split(os.pathsep))
-        child_environment['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(paths))
-        child_environment['DRYML_NOTEBOOK_AUDIT_DIR'] = str(audit_directory)
-        child_environment['DRYML_NOTEBOOK_OPTIONAL_IMPORTS'] = json.dumps(sorted(optional_roots))
-        return command, child_environment
+        protected = {
+            'PYTHONPATH': os.pathsep.join(dict.fromkeys(paths)),
+            'DRYML_NOTEBOOK_AUDIT_DIR': str(audit_directory),
+            'DRYML_NOTEBOOK_OPTIONAL_IMPORTS': json.dumps(sorted(optional_roots)),
+        }
+        return command, _AuditedEnvironment(child_environment, protected)
     return build
+
+class _AuditedEnvironment(dict):
+    """Worker environment that retains harness variables across allocation updates."""
+
+    def __init__(self, values, protected):
+        """Initialize from resolved values and protected harness overrides."""
+        self._protected = dict(protected)
+        super().__init__(values)
+        self._restore_protected()
+
+    def update(self, *args, **kwargs):
+        """Apply updates without permitting protected keys to drift."""
+        super().update(*args, **kwargs)
+        self._restore_protected()
+
+    def _restore_protected(self):
+        """Remove case-insensitive aliases before restoring canonical keys."""
+        canonical = {key.casefold(): key for key in self._protected}
+        for key in tuple(self):
+            protected_key = canonical.get(key.casefold())
+            if protected_key is not None and key != protected_key:
+                super().__delitem__(key)
+        super().update(self._protected)
+
+def _register_worker_launch(process, worker_token):
+    """Record a worker PID before its Python bootstrap can run."""
+    record_path = audit_directory / f'worker-launch-{worker_token}.json'
+    record = {
+        'optional_imports': [],
+        'pid': process.pid,
+        'process_group': process.pid if os.name == 'posix' else None,
+        'status': 'launched',
+        'token': worker_token,
+    }
+    temporary = record_path.with_name(f'{record_path.name}.{os.getpid()}.tmp')
+    temporary.write_text(json.dumps(record, sort_keys=True), encoding='utf-8')
+    os.replace(temporary, record_path)
+
+def _terminate_unregistered_worker(process, module):
+    """Reap a worker when launch registration fails after Popen succeeds."""
+    if os.name == 'posix':
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif os.name == 'nt':
+        try:
+            module.run(
+                ['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                check=False,
+                stdout=module.DEVNULL,
+                stderr=module.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, module.TimeoutExpired):
+            pass
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except module.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+class _AuditedSubprocess:
+    """Subprocess module proxy that registers dispatch workers at launch."""
+
+    def __init__(self, module):
+        """Retain the real subprocess module for delegated operations."""
+        self._module = module
+
+    def __getattr__(self, name):
+        """Delegate constants, exceptions, and helpers to subprocess."""
+        return getattr(self._module, name)
+
+    def Popen(self, *args, **kwargs):
+        """Launch a process and atomically register its PID and group."""
+        worker_token = secrets.token_hex(16)
+        environment = dict(kwargs.get('env') or os.environ)
+        environment['DRYML_NOTEBOOK_WORKER_TOKEN'] = worker_token
+        kwargs['env'] = environment
+        process = self._module.Popen(*args, **kwargs)
+        try:
+            _register_worker_launch(process, worker_token)
+        except BaseException:
+            _terminate_unregistered_worker(process, self._module)
+            raise
+        return process
 
 import dryml.dispatch.backends as dispatch_backends
 import dryml.dispatch.local_world as dispatch_local_world
@@ -490,6 +588,9 @@ dispatch_backends.build_worker_command = _audited_worker_builder(
 dispatch_local_world.build_worker_command = _audited_worker_builder(
     dispatch_local_world.build_worker_command
 )
+audited_subprocess = _AuditedSubprocess(subprocess)
+dispatch_backends.subprocess = audited_subprocess
+dispatch_local_world.subprocess = audited_subprocess
 
 module_name = '_dryml_tutorial_notebook'
 module = types.ModuleType(module_name)
@@ -866,16 +967,34 @@ def execute_notebook(
     )
     if failed_cleanup:
         raise NotebookExecutionError(f"{path}: child cleanup failed: {', '.join(failed_cleanup)}")
-    if process.returncode != 0 or report is None:
+    if process.returncode != 0 or report is None or report.get("status") != "finished":
         cell = report.get("error_cell") if report else None
         location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
         raise NotebookExecutionError(
             f"{location}: child exited with status {process.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
         )
 
+    worker_records = _worker_records(audit_directory)
+    launch_records = {
+        record["token"]: record
+        for record in worker_records
+        if record.get("status") == "launched" and isinstance(record.get("token"), str)
+    }
+    finished_tokens = {
+        record["token"]
+        for record in worker_records
+        if record.get("status") == "finished" and isinstance(record.get("token"), str)
+    }
+    incomplete_tokens = set(launch_records) - finished_tokens
+    if incomplete_tokens:
+        incomplete_workers = sorted(launch_records[token]["pid"] for token in incomplete_tokens)
+        raise NotebookExecutionError(
+            f"{path}: worker audit incomplete for launch PIDs {', '.join(map(str, incomplete_workers))}"
+        )
     worker_optional_imports = {
         name
-        for record in _worker_records(audit_directory)
+        for record in worker_records
+        if record.get("status") == "finished"
         for name in record.get("optional_imports", ())
         if isinstance(name, str)
     }

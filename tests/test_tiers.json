@@ -2222,6 +2222,7 @@
     "tests/notebook/test_tutorial_execution.py::test_undeclared_optional_import_is_rejected": "medium",
     "tests/notebook/test_tutorial_execution.py::test_unexpected_write_is_rejected": "medium",
     "tests/notebook/test_tutorial_execution.py::test_unreleased_temporary_directory_is_audited": "medium",
+    "tests/notebook/test_tutorial_execution.py::test_zero_exit_without_final_report_is_rejected": "medium",
     "tests/operations/test_call_resolution.py::test_function_call_resolution_defaults_and_literals": "smoke",
     "tests/operations/test_call_resolution.py::test_method_subject_and_callbacks_are_resolved": "smoke",
     "tests/operations/test_call_resolution.py::test_resolution_rejects_malformed_escapes_and_refs": "smoke",

@@ -163,13 +163,18 @@ from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import make_function_call_spec
+from dryml.worlds import LocalResourceInventory
 
 with TemporaryDirectory() as directory:
     store = DirStore(directory, query_index='none')
     try:
+        world = {'roles': {'main': {'replicas': 1, 'process': {'env': {'pythonpath': ''}}}}}
         result = Dispatcher(store=store).run(
             make_function_call_spec('socket:getaddrinfo', args=['localhost', 80]),
             environment=PythonExecutableSpec(executable=sys.executable, pythonpath_policy='none'),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy='ignore',
         )
         if result.status != 'ok':
             raise RuntimeError(result.error['message'])
@@ -244,6 +249,13 @@ def test_abrupt_child_exit_reports_active_cell(tmp_path):
         execute_notebook(notebook, work_root=tmp_path / "run")
 
 
+def test_zero_exit_without_final_report_is_rejected(tmp_path):
+    notebook = _write_notebook(tmp_path / "zero-exit.ipynb", "import os\nos._exit(0)")
+
+    with pytest.raises(NotebookExecutionError, match=r"zero-exit\.ipynb: cell 1: child exited with status 0"):
+        execute_notebook(notebook, work_root=tmp_path / "run")
+
+
 def test_unexpected_write_is_rejected(tmp_path):
     notebook = _write_notebook(
         tmp_path / "write.ipynb",
@@ -271,13 +283,18 @@ from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import make_function_call_spec
+from dryml.worlds import LocalResourceInventory
 
 with TemporaryDirectory() as directory:
     store = DirStore(directory, query_index='none')
     try:
-        Dispatcher(store=store).run(
+        world = {'roles': {'main': {'replicas': 1, 'process': {'env': {'pythonpath': ''}}}}}
+        Dispatcher(store=store).run_world(
             make_function_call_spec('sklearn.linear_model:LinearRegression'),
             environment=PythonExecutableSpec(executable=sys.executable, pythonpath_policy='none'),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            timeout=10,
         )
     finally:
         store.close()
