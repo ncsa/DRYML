@@ -2166,6 +2166,8 @@
     "tests/notebook/test_local_defaults.py::test_notebook_context_defaults_are_selected_and_restored_without_allocation": "smoke",
     "tests/notebook/test_local_defaults.py::test_notebook_explain_does_not_import_framework_modules": "medium",
     "tests/notebook/test_local_defaults.py::test_notebook_registry_explain_is_explicit_repeatable_and_allocation_free": "smoke",
+    "tests/notebook/test_tutorial_contracts.py::test_canonical_notebooks_satisfy_static_contract[local_defaults_and_plain_mode]": "smoke",
+    "tests/notebook/test_tutorial_execution.py::test_canonical_notebook_executes_offline_and_cleans_process_state[local_defaults_and_plain_mode]": "medium",
     "tests/operations/test_call_resolution.py::test_function_call_resolution_defaults_and_literals": "smoke",
     "tests/operations/test_call_resolution.py::test_method_subject_and_callbacks_are_resolved": "smoke",
     "tests/operations/test_call_resolution.py::test_resolution_rejects_malformed_escapes_and_refs": "smoke",
@@ -2710,7 +2712,9 @@
     "tests/environments/test_environment_serialization.py": "smoke",
     "tests/environments/test_environment_specs.py": "smoke",
     "tests/environments/test_import_safety.py": "medium",
-    "tests/environments/test_requirement_fragments.py": "smoke"
+    "tests/environments/test_requirement_fragments.py": "smoke",
+    "tests/notebook/test_tutorial_contracts.py": "smoke",
+    "tests/notebook/test_tutorial_execution.py": "medium"
   },
   "thresholds": {
     "medium_seconds": 2.0,
