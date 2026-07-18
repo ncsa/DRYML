@@ -28,6 +28,7 @@ from .errors import (
     StaleManagedResultError,
 )
 from .locking import PlatformFileLock, process_is_alive
+from .events import ProgressSnapshot
 from .state import (
     ActivationEvent,
     GenerationControl,
@@ -307,6 +308,22 @@ class OperationControl:
             raise ManagedStateError("active realization is not completed")
         return state
 
+    def active_event(self, *, missing_ok: bool = False) -> ActivationEvent | None:
+        """Return the validated immutable event behind the active pointer."""
+
+        if not self.active_pointer_path.exists():
+            if missing_ok:
+                return None
+            raise ManagedStateError("operation generation has no active realization")
+        event = ActivationEvent.from_json(_read_json(self.active_pointer_path, "active pointer"))
+        event_path = self._activation_path(event)
+        if not event_path.exists():
+            raise ManagedStateError("active pointer references a missing activation event")
+        authoritative = ActivationEvent.from_json(_read_json(event_path, "activation event"))
+        if authoritative != event:
+            raise ManagedStateError("active pointer does not match its activation event")
+        return event
+
     def rebuild_active_pointer(self, *, takeover: bool = False) -> RealizationState:
         """Rebuild the derived pointer while holding a fresh fenced lease."""
 
@@ -558,6 +575,7 @@ class OperationLease:
         *,
         checkpoint_head: str | None = None,
         diagnostic: str | None = None,
+        resumable: bool | None = None,
     ) -> RealizationState:
         """Mark current work interrupted while retaining it for resume/rerun."""
 
@@ -566,6 +584,7 @@ class OperationLease:
             "interrupted",
             checkpoint_head=checkpoint_head,
             diagnostic=diagnostic,
+            resumable=resumable,
         )
 
     @_serialized_mutation
@@ -575,6 +594,7 @@ class OperationLease:
         *,
         checkpoint_head: str | None = None,
         diagnostic: str | None = None,
+        resumable: bool | None = None,
     ) -> RealizationState:
         """Mark current work failed while preserving prior active selection."""
 
@@ -583,6 +603,7 @@ class OperationLease:
             "failed",
             checkpoint_head=checkpoint_head,
             diagnostic=diagnostic,
+            resumable=resumable,
         )
 
     @_serialized_mutation
@@ -597,6 +618,22 @@ class OperationLease:
         self.operation._write_realization(state)
         self._write_control_for(state)
         return state
+
+    @_serialized_mutation
+    def update_progress(
+        self,
+        realization_id: str,
+        progress: ProgressSnapshot,
+    ) -> None:
+        """Replace the generation's single bounded progress snapshot."""
+
+        self._assert_current()
+        control, state = self._require_pending(realization_id)
+        if state.status != "running":
+            raise ManagedStateError("progress publication requires running work")
+        if not isinstance(progress, ProgressSnapshot):
+            raise TypeError("progress must be a ProgressSnapshot")
+        _write_json(self.operation.control_path, replace(control, progress=progress).to_json())
 
     @_serialized_mutation
     def complete(
@@ -698,6 +735,7 @@ class OperationLease:
         *,
         checkpoint_head: str | None,
         diagnostic: str | None,
+        resumable: bool | None,
     ) -> RealizationState:
         self._assert_current()
         _control, state = self._require_pending(realization_id)
@@ -710,6 +748,7 @@ class OperationLease:
             current_attempt_id=None,
             checkpoint_head=checkpoint_head or state.checkpoint_head,
             diagnostics=diagnostics,
+            resumable=state.resumable if resumable is None else resumable,
         )
         self.operation._write_realization(state)
         self._write_control_for(state)
@@ -732,6 +771,7 @@ class OperationLease:
             current_attempt_id=state.current_attempt_id,
             checkpoint_head=state.checkpoint_head,
             diagnostics=state.diagnostics,
+            progress=None if len(state.attempt_ids) == 1 and state.status == "running" else control.progress,
         )
         _write_json(self.operation.control_path, control.to_json())
 

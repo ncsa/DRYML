@@ -41,9 +41,18 @@ class BoundManagedMethod:
         self.result = self.outputs[declarations.primary.slot]
 
     def __call__(self, *args, **kwargs):
-        """Invoke the underlying method with its normal Python call semantics."""
+        """Invoke directly in definition-only mode or through the local runtime."""
 
-        return self.__func__(self.__self__, *args, **kwargs)
+        from .runtime import invoke_managed, should_use_managed_runtime
+
+        if not should_use_managed_runtime(self, kwargs):
+            return self.__func__(self.__self__, *args, **kwargs)
+        runtime = {
+            name: kwargs.pop(name)
+            for name in ("repo", "store", "callbacks", "rerun")
+            if name in kwargs
+        }
+        return invoke_managed(self, *args, **runtime, **kwargs)
 
     def output(self, slot: str) -> ManagedOutputRef:
         """Return the stable logical reference for a declared output slot."""
@@ -53,16 +62,60 @@ class BoundManagedMethod:
         except KeyError as exc:
             raise UnknownOutputError(slot) from exc
 
-    def status(self):
-        """Return lifecycle status once a managed runtime is installed.
+    def status(self, *, repo=None, store=None):
+        """Return Store-backed lifecycle status without creating state."""
 
-        U1 deliberately provides declarations and logical references only.
-        Realization-backed status is added by the managed runtime layer.
-        """
+        from .runtime import managed_status
 
-        raise ManagedLifecycleUnavailableError(
-            f"Managed lifecycle status is unavailable for {self._descriptor.method_name!r}."
-        )
+        if repo is None and store is None and not self._runtime_available():
+            raise ManagedLifecycleUnavailableError(
+                f"Managed lifecycle status is unavailable for {self._descriptor.method_name!r}."
+            )
+        return managed_status(self, repo=repo, store=store)
+
+    def progress(self, *, repo=None, store=None):
+        """Return the current bounded Store-backed progress snapshot."""
+
+        from .runtime import managed_status
+
+        return managed_status(self, repo=repo, store=store).progress
+
+    def results(self, *, repo=None, store=None):
+        """Return exact active output record references by declared slot."""
+
+        from .runtime import managed_results
+
+        return managed_results(self, repo=repo, store=store)
+
+    def history(self, *, repo=None, store=None):
+        """Return retained current-declaration realization history."""
+
+        from .runtime import managed_history
+
+        return managed_history(self, repo=repo, store=store)
+
+    def resume(self, *args, **kwargs):
+        """Invoke with ordinary pending-resume precedence."""
+
+        return self(*args, **kwargs)
+
+    def rerun(self, *args, **kwargs):
+        """Explicitly abandon pending work or supersede completed work."""
+
+        kwargs["rerun"] = True
+        return self(*args, **kwargs)
+
+    def activate(self, realization_id: str, *, repo=None, store=None):
+        """Explicitly select a compatible completed historical realization."""
+
+        from .runtime import managed_activate
+
+        return managed_activate(self, realization_id, repo=repo, store=store)
+
+    def _runtime_available(self) -> bool:
+        from .runtime import should_use_managed_runtime
+
+        return should_use_managed_runtime(self, {})
 
 
 class ManagedMethod:

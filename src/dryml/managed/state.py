@@ -14,6 +14,7 @@ from dryml.formats.ids import parse_content_id
 
 from .declarations import ManagedMethodDeclaration
 from .errors import ManagedStateError
+from .events import ProgressSnapshot
 
 
 CONTROL_SCHEMA_VERSION = 1
@@ -264,6 +265,7 @@ class GenerationControl:
     current_attempt_id: str | None = None
     checkpoint_head: str | None = None
     diagnostics: tuple[str, ...] = ()
+    progress: ProgressSnapshot | None = None
 
     def __post_init__(self) -> None:
         validate_declaration_fingerprint(self.declaration_fingerprint)
@@ -282,6 +284,8 @@ class GenerationControl:
         if any(not isinstance(item, str) or not item or len(item) > 512 for item in diagnostics):
             raise ManagedStateError("diagnostics must be non-empty strings of at most 512 characters")
         object.__setattr__(self, "diagnostics", diagnostics)
+        if self.progress is not None and not isinstance(self.progress, ProgressSnapshot):
+            raise ManagedStateError("generation progress must be a ProgressSnapshot")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -292,6 +296,7 @@ class GenerationControl:
             "current_attempt_id": self.current_attempt_id,
             "checkpoint_head": self.checkpoint_head,
             "diagnostics": list(self.diagnostics),
+            "progress": None if self.progress is None else self.progress.to_json(),
         }
 
     @classmethod
@@ -304,6 +309,7 @@ class GenerationControl:
             "current_attempt_id",
             "checkpoint_head",
             "diagnostics",
+            "progress",
         }
         data = _strict_mapping(value, fields, "generation control")
         _require_schema(data, "generation control")
@@ -315,6 +321,7 @@ class GenerationControl:
                 current_attempt_id=data["current_attempt_id"],
                 checkpoint_head=data["checkpoint_head"],
                 diagnostics=_string_tuple(data["diagnostics"], "diagnostics"),
+                progress=ProgressSnapshot.from_json(data["progress"]),
             )
         except KeyError as exc:
             raise ManagedStateError(f"generation control is missing {exc.args[0]!r}") from exc

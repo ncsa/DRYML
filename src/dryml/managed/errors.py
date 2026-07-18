@@ -69,8 +69,34 @@ class StaleManagedResultError(ManagedError, RuntimeError):
     """A completed result no longer matches the current logical inputs."""
 
 
+class ManagedCapabilityError(ManagedError, RuntimeError):
+    """A requested lifecycle guarantee is unsupported before execution."""
+
+
+class ConcurrentManagedActivationError(ManagedError, RuntimeError):
+    """Logical inputs did not produce one bounded stable active vector."""
+
+
+class MissingManagedOutputError(ManagedError, LookupError):
+    """A required logical output has no complete active record."""
+
+
+class ManagedInterruptedError(ManagedError, RuntimeError):
+    """Managed execution stopped incompletely at an operation safe point."""
+
+
+class ManagedOutputError(ManagedError, RuntimeError):
+    """Managed execution did not produce its exact declared output effects."""
+
+
+class CallbackFailure(ManagedError, RuntimeError):
+    """A strict runtime callback failed and stopped managed execution."""
+
+
 __all__ = [
     "AmbiguousManagedStoreError",
+    "CallbackFailure",
+    "ConcurrentManagedActivationError",
     "DuplicateOutputError",
     "InvalidSubjectPathError",
     "ManagedDeclarationError",
@@ -78,10 +104,14 @@ __all__ = [
     "ManagedLifecycleUnavailableError",
     "ManagedInputValidationRequiredError",
     "ManagedLeaseConflictError",
+    "ManagedCapabilityError",
+    "ManagedInterruptedError",
     "ManagedRerunRequiredError",
+    "ManagedOutputError",
     "ManagedStateError",
     "ManagedStoreUnsupportedError",
     "ManagedTakeoverRequiredError",
+    "MissingManagedOutputError",
     "PrimaryOutputError",
     "StaleManagedLeaseError",
     "StaleManagedResultError",
