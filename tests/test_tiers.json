@@ -11,6 +11,7 @@
     "execute": "medium",
     "formats": "smoke",
     "jax": "heavy",
+    "managed": "smoke",
     "models": "heavy",
     "multi_framework": "heavy",
     "records": "smoke",

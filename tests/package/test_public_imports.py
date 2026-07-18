@@ -18,6 +18,7 @@ EXPECTED_DRYML_ALL = (
     "env",
     "environments",
     "formats",
+    "managed",
     "operations",
     "providers",
     "reporting",
@@ -55,6 +56,8 @@ EXPECTED_DRYML_ALL = (
     "definition_mode",
     "selector_mode",
     "space_mode",
+    "save_definition",
+    "load_definition",
 )
 
 EXPECTED_CODE_ALL = (

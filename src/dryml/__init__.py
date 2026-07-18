@@ -10,6 +10,7 @@ _SUBMODULE_EXPORTS = {
     "env": "dryml.env",
     "environments": "dryml.environments",
     "formats": "dryml.formats",
+    "managed": "dryml.managed",
     "operations": "dryml.operations",
     "providers": "dryml.providers",
     "reporting": "dryml.reporting",
@@ -50,6 +51,8 @@ _CORE2_EXPORTS = {
     "definition_mode",
     "selector_mode",
     "space_mode",
+    "save_definition",
+    "load_definition",
 }
 
 
@@ -76,6 +79,7 @@ __all__ = [
     "env",
     "environments",
     "formats",
+    "managed",
     "operations",
     "providers",
     "reporting",
@@ -113,4 +117,6 @@ __all__ = [
     "definition_mode",
     "selector_mode",
     "space_mode",
+    "save_definition",
+    "load_definition",
 ]

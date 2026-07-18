@@ -5,6 +5,8 @@ import sys
 import types
 
 import dryml.code as code
+from dryml.core2 import Object
+from dryml.managed import ManagedOutput, managed
 
 
 class CallableInstance:
@@ -49,6 +51,12 @@ class BoundMethodBase:
 
 class BoundMethodChild(BoundMethodBase):
     pass
+
+
+class ManagedTarget(Object):
+    @managed(outputs=(ManagedOutput("result", primary=True),))
+    def compute(self, value=1):
+        return value
 
 
 def test_import_path_target_resolves(requirement_targets):
@@ -194,3 +202,17 @@ def test_direct_analysis_of_bound_method_preserves_owner_metadata():
 
     assert fact.data["is_bound_method"] is True
     assert fact.data["owner_qualname"] == "BoundMethodChild"
+
+
+def test_managed_descriptor_target_normalization_does_not_bind_descriptor():
+    target = code.target_from_class_attribute(ManagedTarget, "compute")
+    definition_target = code.target_from_definition_method("subject", ManagedTarget, "compute")
+    direct_target = code.normalize_target(ManagedTarget.compute)
+
+    assert target.raw_descriptor is ManagedTarget.__dict__["compute"]
+    assert definition_target.raw_descriptor is ManagedTarget.__dict__["compute"]
+    assert target.obj is ManagedTarget.__dict__["compute"].__func__
+    assert definition_target.obj is ManagedTarget.__dict__["compute"].__func__
+    assert target.spec.kind == "unbound_method"
+    assert direct_target.obj is ManagedTarget.__dict__["compute"].__func__
+    assert direct_target.raw_descriptor is ManagedTarget.__dict__["compute"]

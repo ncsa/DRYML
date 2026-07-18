@@ -6,7 +6,7 @@ from dryml.core2.params import AnyValue, Choice, Exact, IntRange, Missing, Par, 
 from dryml.core2.quoted import QuotedDef, SelectorSpec
 from dryml.core2.search_space import SearchSpace
 from dryml.core2.selector import Selector, selector
-from dryml.core2.repo import Repo, load_alias, load_object, save_object
+from dryml.core2.repo import Repo, load_alias, load_definition, load_object, save_definition, save_object
 from dryml.core2.dtype import dtype, DType
 from dryml.core2.tensor_spec import (
     SpecHint,
@@ -52,6 +52,8 @@ __all__ = [
     "load_object",
     "load_alias",
     "save_object",
+    "save_definition",
+    "load_definition",
     "Object",
     "Serializable",
     "UniqueID",

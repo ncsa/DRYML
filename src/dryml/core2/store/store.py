@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Iterable
 import os
 
-from ..utils.general import pickle_load
+from ..utils.general import pickle_load, pickle_save
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
 
 class Store(ABC):
@@ -82,6 +82,20 @@ class Store(ABC):
             if not isinstance(revision, str):
                 raise ValueError("revision must be a string or None at the Store.")
         obj.save_state_to_dir(obj_dir, revision=revision)
+
+    def save_definition(self, cdef: "ConcreteDefinition") -> None:
+        """Persist an Object definition without constructing or saving its state."""
+
+        from ..definition import ConcreteDefinition
+
+        if not isinstance(cdef, ConcreteDefinition):
+            raise TypeError("Store.save_definition requires a ConcreteDefinition.")
+        obj_dir = self.object_dir(cdef)
+        os.makedirs(obj_dir, exist_ok=True)
+        existing = self.read_definition(cdef)
+        if existing is not None and existing != cdef:
+            raise ValueError("Stored definition does not match its stable-hash location.")
+        pickle_save(cdef, self._def_file(cdef))
 
     def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
         """

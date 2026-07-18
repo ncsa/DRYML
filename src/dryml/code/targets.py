@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from dryml.core2.methods import bound_method_parts, descriptor_function
+
 from .facts import DiagnosticFact, json_compatible
 
 
@@ -127,8 +129,21 @@ def normalize_target(
     if method_name is not None:
         cls = target if _is_class(target) else type(target) if target is not None else None
         return target_from_definition_method(subject_ref, cls, method_name)
-    if type(target) is types.MethodType:
+    if bound_method_parts(target) is not None:
         return target_from_method(target, metadata=metadata)
+    unwrapped_descriptor = descriptor_function(target)
+    if unwrapped_descriptor is not target and type(unwrapped_descriptor) is types.FunctionType:
+        normalized = target_from_callable(unwrapped_descriptor, metadata=metadata)
+        return CodeTarget(
+            spec=normalized.spec,
+            obj=unwrapped_descriptor,
+            owner=normalized.owner,
+            attribute_name=getattr(unwrapped_descriptor, "__name__", None),
+            raw_descriptor=target,
+            unwrapped=unwrapped_descriptor,
+            metadata=normalized.metadata,
+            diagnostics=normalized.diagnostics,
+        )
     if _is_class(target):
         if type(target) is not type:
             return CodeTarget(
@@ -217,7 +232,7 @@ def target_from_import_path(
 def target_from_callable(func: Callable[..., Any], *, metadata: Mapping[str, Any] | None = None) -> CodeTarget:
     """Create a target from a live callable without invoking it."""
 
-    if type(func) is types.MethodType:
+    if bound_method_parts(func) is not None:
         return target_from_method(func, metadata=metadata)
     if _is_class(func):
         if type(func) is not type:
@@ -253,8 +268,10 @@ def target_from_callable(func: Callable[..., Any], *, metadata: Mapping[str, Any
 def target_from_method(method: Callable[..., Any], *, metadata: Mapping[str, Any] | None = None) -> CodeTarget:
     """Create a target from a live bound method."""
 
-    func = object.__getattribute__(method, "__func__")
-    receiver = object.__getattribute__(method, "__self__")
+    parts = bound_method_parts(method)
+    if parts is None:
+        raise TypeError("target_from_method requires a bound method-like target.")
+    receiver, func = parts
     receiver_is_class = _is_class(receiver)
     owner = receiver if receiver_is_class else type(receiver)
     method_name = object.__getattribute__(func, "__name__")
@@ -472,11 +489,7 @@ def _object_import_path(obj: Any) -> str | None:
 
 
 def _unwrap_descriptor(obj: Any) -> Any:
-    if type(obj) in {staticmethod, classmethod}:
-        return object.__getattribute__(obj, "__func__")
-    if type(obj) is types.MethodType:
-        return object.__getattribute__(obj, "__func__")
-    return obj
+    return descriptor_function(obj)
 
 
 def _object_module(obj: Any) -> str | None:

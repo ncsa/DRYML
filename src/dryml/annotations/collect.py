@@ -9,6 +9,7 @@ from typing import Any
 
 from .decorators import FRAGMENT_ATTR
 from .model import AnnotationFragment
+from dryml.core2.methods import bound_method_parts, descriptor_function
 
 
 def fragments_for(target: Any, *, namespace: str | None = None, kind: str | None = None, include_inherited: bool = True) -> tuple[AnnotationFragment, ...]:
@@ -27,13 +28,13 @@ def fragments_for(target: Any, *, namespace: str | None = None, kind: str | None
 
     if isinstance(target, type):
         fragments = fragments_for_class(target, namespace=namespace, kind=kind) if include_inherited else own_fragments(target)
-    elif inspect.ismethod(target):
+    elif bound_method_parts(target) is not None:
         method_target = _method_target_from_bound_method(target)
         if include_inherited and method_target is not None:
             owner, method_name = method_target
             fragments = fragments_for_method(owner, method_name, namespace=namespace, kind=kind)
         else:
-            fragments = own_fragments(getattr(target, "__func__", target))
+            fragments = own_fragments(descriptor_function(target))
     elif inspect.isfunction(target):
         owner = _owner_class_for_function(target)
         if include_inherited and owner is not None and getattr(target, "__name__", None):
@@ -41,7 +42,18 @@ def fragments_for(target: Any, *, namespace: str | None = None, kind: str | None
         else:
             fragments = own_fragments(target)
     else:
-        fragments = own_fragments(target)
+        unwrapped = descriptor_function(target)
+        if unwrapped is not target:
+            owner = _owner_class_for_function(unwrapped)
+            method_name = getattr(unwrapped, "__name__", None)
+            if include_inherited and owner is not None and method_name:
+                fragments = fragments_for_method(owner, method_name)
+            else:
+                fragments = _dedupe_fragments_preserve_order(
+                    (*own_fragments(target), *own_fragments(unwrapped))
+                )
+        else:
+            fragments = own_fragments(target)
     return _filter_fragments(fragments, namespace=namespace, kind=kind)
 
 
@@ -232,12 +244,9 @@ def _descriptor_fragment_targets(raw_attr: Any) -> tuple[Any, ...]:
     """Return raw descriptor/function candidates that may carry fragments."""
 
     targets = [raw_attr]
-    if isinstance(raw_attr, (classmethod, staticmethod)):
-        targets.append(raw_attr.__func__)
-    else:
-        unwrapped = getattr(raw_attr, "__func__", raw_attr)
-        if unwrapped is not raw_attr:
-            targets.append(unwrapped)
+    unwrapped = descriptor_function(raw_attr)
+    if unwrapped is not raw_attr:
+        targets.append(unwrapped)
     return _dedupe_targets_preserve_order(targets)
 
 
@@ -258,13 +267,14 @@ def _get_static_method_attribute(cls: type, method_name: str) -> Any:
 
 
 def _method_target_from_bound_method(target: Any) -> tuple[type, str] | None:
-    if not inspect.ismethod(target):
+    parts = bound_method_parts(target)
+    if parts is None:
         return None
-    owner_obj = getattr(target, "__self__", None)
+    owner_obj, func = parts
     if owner_obj is None:
         return None
     cls = owner_obj if isinstance(owner_obj, type) else type(owner_obj)
-    method_name = getattr(target, "__name__", None) or getattr(getattr(target, "__func__", None), "__name__", None)
+    method_name = getattr(func, "__name__", None)
     if not isinstance(method_name, str):
         return None
     return cls, method_name

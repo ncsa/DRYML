@@ -487,6 +487,79 @@ class Repo:
             self.set_alias(save_options.alias, obj, store=store, save_live=False)
         return True
 
+    def save_definition(
+            self,
+            value: Object | Definition | ConcreteDefinition,
+            *,
+            main: bool = False,
+            store=None,
+            alias: str | None = None) -> ConcreteDefinition:
+        """Persist a complete definition closure without materializing Objects.
+
+        Both materializing and ``RefCDef`` edges are traversed because a shared
+        recipe needs every referenced logical definition. Only ``def.pkl`` files
+        are written; Object state, records, realizations, and representations are
+        deliberately excluded.
+
+        Args:
+            value: Root Object, Definition, or ConcreteDefinition.
+            main: Whether the root becomes the Store's main definition.
+            store: Optional destination Store or Store location.
+            alias: Optional repository alias for the root.
+
+        Returns:
+            The exact root ConcreteDefinition.
+        """
+
+        store = self._ensure_store(store) or self.default_store
+        if store is None:
+            raise RepoSaveError("No store available to save definition!")
+        root = self._object_target_cdef(value)
+        from .cdef_graph import ConcreteDefinitionGraph
+
+        graph = ConcreteDefinitionGraph.for_query_index(root)
+        saved_roots = set()
+        for node in graph.nodes():
+            store.save_definition(node.definition)
+            saved_roots.add(node.definition)
+            self.light_index.add(node.definition)
+            self._query_catalog.register_stored_root(node.definition, store)
+        self._query_catalog.register_graph(graph)
+        self._query_index.register_saved_graph(graph, {store: saved_roots})
+        if main:
+            self.set_main_def(root, store=store)
+        if alias is not None:
+            self.set_alias(alias, root, store=store, save_live=False)
+        return root
+
+    def load_definition(
+            self,
+            value: Object | Definition | ConcreteDefinition | str | None = None,
+            *,
+            store=None) -> ConcreteDefinition:
+        """Read an exact stored definition without materializing its Object."""
+
+        if isinstance(value, str):
+            expected = self.get_alias(value)
+        elif value is None:
+            expected = self.main_def
+            if expected is None:
+                raise RepoLoadError("Repository has no main definition.")
+        else:
+            expected = self._object_target_cdef(value)
+
+        selected = self._ensure_store(store)
+        if selected is None:
+            selected = self._first_store_with(expected)
+        if selected is None:
+            raise RepoLoadError("Definition is not present in any selected Store.")
+        loaded = selected.read_definition(expected)
+        if loaded is None:
+            raise RepoLoadError("Definition is missing from the selected Store.")
+        if not isinstance(loaded, ConcreteDefinition) or loaded != expected:
+            raise RepoLoadError("Stored definition does not match the requested identity.")
+        return loaded
+
     def save(
             self,
             obj: Object | None = None,
@@ -1252,6 +1325,25 @@ def save_object(
             record_options=record_options,
         )
         sub_repo.save_object(obj, options=save_options)
+
+
+def save_definition(value, repo=None, *, main=False, store=None, alias=None):
+    """Persist a definition closure without materializing referenced Objects."""
+
+    with manage_repo(repo=repo) as sub_repo:
+        return sub_repo.save_definition(
+            value,
+            main=main or ((repo is not sub_repo) and isinstance(value, Object)),
+            store=store,
+            alias=alias,
+        )
+
+
+def load_definition(value=None, repo=None, *, store=None):
+    """Read a stored ConcreteDefinition without constructing its Object."""
+
+    with manage_repo(repo=repo) as sub_repo:
+        return sub_repo.load_definition(value, store=store)
 
 
 def load_alias(alias: str, repo=None, **kwargs):
