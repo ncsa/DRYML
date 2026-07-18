@@ -45,9 +45,10 @@ def _write_notebook(path: Path, document: object) -> Path:
     return path
 
 
-def test_canonical_notebook_registry_starts_with_objects_before_runtime():
+def test_canonical_notebook_registry_orders_core_lessons_before_runtime():
     assert [item.path.as_posix() for item in CANONICAL_NOTEBOOKS] == [
         "examples/notebooks/objects_definitions_and_repos.ipynb",
+        "examples/notebooks/datasets_and_transforms.ipynb",
         "examples/notebooks/local_defaults_and_plain_mode.ipynb",
     ]
     assert all(item.extras == () for item in CANONICAL_NOTEBOOKS)
