@@ -13,6 +13,12 @@ from notebook_helpers import (
     repository_path,
 )
 
+_DETERMINISM_NOTEBOOKS = {
+    "definition_driven_experiments.ipynb",
+    "local_hyperparameter_search.ipynb",
+    "objects_definitions_and_repos.ipynb",
+}
+
 
 def _write_notebook(path: Path, source: str) -> Path:
     document = {
@@ -33,10 +39,7 @@ def _write_notebook(path: Path, source: str) -> Path:
     return path
 
 
-@pytest.mark.parametrize("item", CANONICAL_NOTEBOOKS, ids=lambda item: item.path.stem)
-def test_canonical_notebook_executes_offline_and_cleans_process_state(tmp_path, item):
-    result = execute_notebook(repository_path(item.path), item, tmp_path)
-
+def _assert_clean_result(result, item):
     assert result.returncode == 0
     assert result.state_restored
     assert result.working_directory_restored
@@ -45,6 +48,17 @@ def test_canonical_notebook_executes_offline_and_cleans_process_state(tmp_path, 
     assert result.optional_imports == item.allowed_optional_imports
     assert result.unexpected_writes == ()
     assert result.repository_on_pythonpath is False
+
+
+@pytest.mark.parametrize(
+    "item",
+    [item for item in CANONICAL_NOTEBOOKS if item.path.name not in _DETERMINISM_NOTEBOOKS],
+    ids=lambda item: item.path.stem,
+)
+def test_canonical_notebook_executes_offline_and_cleans_process_state(tmp_path, item):
+    result = execute_notebook(repository_path(item.path), item, tmp_path)
+
+    _assert_clean_result(result, item)
 
 
 def test_objects_notebook_executes_twice_in_independent_processes(tmp_path):
@@ -56,9 +70,8 @@ def test_objects_notebook_executes_twice_in_independent_processes(tmp_path):
     ]
 
     assert results[0] == results[1]
-    assert all(result.returncode == 0 for result in results)
-    assert all(result.unexpected_writes == () for result in results)
-    assert all(result.repository_on_pythonpath is False for result in results)
+    for result in results:
+        _assert_clean_result(result, item)
     assert all("Traceback" not in result.stdout + result.stderr for result in results)
 
 
@@ -72,6 +85,8 @@ def test_definition_variants_summary_is_stable_across_independent_processes(tmp_
         execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
         for index in range(2)
     ]
+    for result in results:
+        _assert_clean_result(result, item)
 
     marker = "DEFINITION_VARIANT_SUMMARY="
     summaries = []
@@ -100,6 +115,8 @@ def test_local_search_summary_is_stable_across_independent_processes(tmp_path):
         execute_notebook(repository_path(item.path), item, tmp_path / f"run-{index}")
         for index in range(2)
     ]
+    for result in results:
+        _assert_clean_result(result, item)
 
     marker = "LOCAL_SEARCH_SUMMARY="
     summaries = []
@@ -166,6 +183,15 @@ def test_undeclared_optional_import_is_rejected(tmp_path):
 
     with pytest.raises(NotebookExecutionError, match=r"optional\.ipynb: undeclared optional imports: sklearn"):
         execute_notebook(notebook, work_root=tmp_path / "run")
+
+
+def test_child_output_is_bounded_before_returning_to_parent(tmp_path):
+    notebook = _write_notebook(tmp_path / "output.ipynb", "print('x' * 9000)")
+
+    result = execute_notebook(notebook, work_root=tmp_path / "run")
+
+    assert result.stdout == f"{'x' * 8000}\n... output truncated ..."
+    assert result.stderr == ""
 
 
 def test_child_runner_cleans_module_linecache_and_working_directory_after_handled_failure(tmp_path):

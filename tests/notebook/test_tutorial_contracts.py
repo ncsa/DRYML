@@ -46,6 +46,20 @@ def _write_notebook(path: Path, document: object) -> Path:
     return path
 
 
+def _notebook_sources(document):
+    cells = [
+        (
+            cell["cell_type"],
+            cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"]),
+        )
+        for cell in document["cells"]
+    ]
+    return (
+        "\n".join(source for _, source in cells),
+        "\n".join(source for cell_type, source in cells if cell_type == "code"),
+    )
+
+
 def test_canonical_notebook_registry_has_final_tutorial_order():
     assert [item.path.as_posix() for item in CANONICAL_NOTEBOOKS] == [
         "examples/notebooks/objects_definitions_and_repos.ipynb",
@@ -94,15 +108,7 @@ def test_runtime_notebook_teaches_current_execution_distinctions():
         if item.path.name == "local_defaults_and_plain_mode.ipynb"
     )
     document = validate_notebook(repository_path(item.path))
-    all_source = "\n".join(
-        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
-        for cell in document["cells"]
-    )
-    executable_source = "\n".join(
-        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
-        for cell in document["cells"]
-        if cell["cell_type"] == "code"
-    )
+    all_source, executable_source = _notebook_sources(document)
 
     required_executable = {
         "DispatchPlanningError",
@@ -140,15 +146,7 @@ def test_definition_variants_notebook_teaches_identity_materialization_and_struc
         if item.path.name == "definition_driven_experiments.ipynb"
     )
     document = validate_notebook(repository_path(item.path))
-    all_source = "\n".join(
-        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
-        for cell in document["cells"]
-    )
-    executable_source = "\n".join(
-        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
-        for cell in document["cells"]
-        if cell["cell_type"] == "code"
-    )
+    all_source, executable_source = _notebook_sources(document)
 
     required_executable = {
         "Definition(ArrayDataset",
@@ -178,15 +176,7 @@ def test_local_search_notebook_teaches_bounded_deterministic_public_api_workflow
         if item.path.name == "local_hyperparameter_search.ipynb"
     )
     document = validate_notebook(repository_path(item.path))
-    all_source = "\n".join(
-        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
-        for cell in document["cells"]
-    )
-    executable_source = "\n".join(
-        cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
-        for cell in document["cells"]
-        if cell["cell_type"] == "code"
-    )
+    all_source, executable_source = _notebook_sources(document)
 
     required_executable = {
         ".as_space()",
@@ -199,7 +189,7 @@ def test_local_search_notebook_teaches_bounded_deterministic_public_api_workflow
         "experiment.train()",
         "mean_squared_error",
         "np.isfinite",
-        "range(cap + 1)",
+        "islice(space.grid(), cap + 1)",
         "save_object",
         "stable_cdef_key",
     }

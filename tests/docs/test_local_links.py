@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import re
 import subprocess
 from pathlib import Path
@@ -54,16 +55,18 @@ def _anchors(document: Path) -> set[str]:
     return {_anchor(match.group(1)) for match in HEADING_RE.finditer(document.read_text(encoding="utf-8"))}
 
 
+@lru_cache(maxsize=1)
+def _tracked_files(repository: Path) -> frozenset[str]:
+    return frozenset(subprocess.check_output(
+        ["git", "ls-files"], cwd=repository, text=True,
+    ).splitlines())
+
+
 def test_changed_markdown_links_are_local_and_resolve():
     """Check bounded docs and images without crawling external URLs."""
 
     repository = Path(__file__).resolve().parents[2]
-    tracked = {
-        line
-        for line in subprocess.check_output(
-            ["git", "ls-files"], cwd=repository, text=True,
-        ).splitlines()
-    }
+    tracked = _tracked_files(repository)
     for relative in CHANGED_DOCUMENTS:
         assert relative in tracked, f"documentation input is not tracked: {relative}"
         document = repository / relative
@@ -93,9 +96,7 @@ def test_tutorial_notebooks_are_linked_in_canonical_order_and_tracked():
         for match in LINK_RE.finditer(document.read_text(encoding="utf-8"))
         if match.group(1).startswith("../examples/notebooks/")
     )
-    tracked = set(subprocess.check_output(
-        ["git", "ls-files"], cwd=repository, text=True,
-    ).splitlines())
+    tracked = _tracked_files(repository)
 
     assert tutorial_links == TUTORIAL_NOTEBOOKS
     assert set(TUTORIAL_NOTEBOOKS) <= tracked

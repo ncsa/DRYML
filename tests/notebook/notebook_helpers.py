@@ -7,12 +7,13 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from typing import Any, Mapping
 
 
@@ -165,10 +166,7 @@ def _attribute_name(node: ast.AST) -> str | None:
 
 
 def _is_absolute_path(value: str) -> bool:
-    if value.startswith("/"):
-        return True
-    windows = PureWindowsPath(value)
-    return bool(windows.drive and windows.root)
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
 
 
 class _ExecutablePolicy(ast.NodeVisitor):
@@ -465,8 +463,12 @@ def _tree_snapshot(root: Path, ignored: frozenset[Path]) -> dict[str, tuple[Any,
             elif path.is_dir():
                 snapshot[key] = ("directory",)
             else:
-                data = path.read_bytes()
-                snapshot[key] = ("file", len(data), hashlib.sha256(data).hexdigest())
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    size = os.fstat(stream.fileno()).st_size
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                snapshot[key] = ("file", size, digest.hexdigest())
     return snapshot
 
 
@@ -474,11 +476,21 @@ def _changed_paths(before: Mapping[str, tuple[Any, ...]], after: Mapping[str, tu
     return tuple(sorted(key for key in set(before) | set(after) if before.get(key) != after.get(key)))
 
 
-def _bounded_output(value: str) -> str:
+def _bounded_output(stream: Any) -> str:
     limit = 8_000
+    stream.seek(0)
+    value = stream.read(limit + 1)
     if len(value) <= limit:
         return value
     return f"{value[:limit]}\n... output truncated ..."
+
+
+def _read_report(path: Path) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def execute_notebook(
@@ -537,45 +549,37 @@ def execute_notebook(
         json.dumps(sorted(_OPTIONAL_IMPORTS)),
         str(_REPOSITORY),
     ]
-    process = subprocess.Popen(
-        command,
-        cwd=execution_cwd,
-        env=environment,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
+    with (
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file,
+        tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stderr_file,
+    ):
+        process = subprocess.Popen(
+            command,
+            cwd=execution_cwd,
+            env=environment,
+            text=True,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
-        cell = None
-        if report_path.is_file():
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
             try:
-                cell = json.loads(report_path.read_text(encoding="utf-8")).get("error_cell")
-            except (AttributeError, OSError, UnicodeError, json.JSONDecodeError):
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
-        location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
-        raise NotebookExecutionError(f"{location}: execution timed out after {timeout:g}s") from exc
+            process.wait()
+            report = _read_report(report_path)
+            cell = report.get("error_cell") if report else None
+            location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
+            raise NotebookExecutionError(f"{location}: execution timed out after {timeout:g}s") from exc
+        stdout = _bounded_output(stdout_file)
+        stderr = _bounded_output(stderr_file)
 
     after = _tree_snapshot(root, ignored)
     unexpected_writes = _changed_paths(before, after)
-    report: dict[str, Any] | None = None
-    if report_path.is_file():
-        try:
-            loaded = json.loads(report_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                report = loaded
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            report = None
-
-    stdout = _bounded_output(stdout)
-    stderr = _bounded_output(stderr)
+    report = _read_report(report_path)
     if report and report.get("error"):
         error = report["error"]
         message = str(error.get("message", "child execution failed"))
