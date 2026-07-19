@@ -37,10 +37,18 @@ def test_fail_soft_callback_records_bounded_diagnostics_and_continues():
     assert coordinator.poll() is ControlRequest.NONE
     assert len(coordinator.diagnostics) == 4
     assert all(
-        item == "callback RuntimeError: execution_failed"
+        item == "callback RuntimeError: observer failed"
         for item in coordinator.diagnostics
     )
-    assert "observer failed" not in str(coordinator.diagnostics)
+
+    oversized = CallbackCoordinator((
+        ManagedCallback(
+            lambda event: (_ for _ in ()).throw(RuntimeError("x" * 1_000)),
+            fail_soft=True,
+        ),
+    ))
+    oversized.publish(OperationEvent(1, "progress"))
+    assert len(oversized.diagnostics[0]) == 512
 
 
 def test_strict_callback_failure_requests_checkpoint_then_failure():
@@ -51,7 +59,7 @@ def test_strict_callback_failure_requests_checkpoint_then_failure():
     coordinator.publish(OperationEvent(1, "progress"))
 
     assert coordinator.poll() is ControlRequest.FAIL
-    with pytest.raises(CallbackFailure, match="RuntimeError") as raised:
+    with pytest.raises(CallbackFailure, match="RuntimeError: strict failed") as raised:
         coordinator.raise_failure()
     assert isinstance(raised.value.__cause__, RuntimeError)
     assert str(raised.value.__cause__) == "strict failed"
@@ -77,4 +85,6 @@ def test_callback_may_not_return_an_undeclared_control():
     coordinator.publish(OperationEvent(1, "progress"))
 
     assert coordinator.poll() is ControlRequest.NONE
-    assert coordinator.diagnostics[-1] == "callback ValueError: execution_failed"
+    assert coordinator.diagnostics[-1] == (
+        "callback ValueError: callback returned undeclared control interrupt"
+    )

@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import IntEnum
 
-from dryml.records.execution import persistence_safe_execution_error
+from dryml.records.execution import transient_execution_error
 
 from .errors import CallbackFailure, ManagedCapabilityError
 from .events import OperationEvent
@@ -125,8 +125,7 @@ class CallbackCoordinator:
                 if request > self._control:
                     self._control = request
             except Exception as exc:
-                failure = persistence_safe_execution_error(exc)
-                diagnostic = f"callback {failure['type']}: {failure['metadata']['code']}"
+                diagnostic = _transient_callback_diagnostic(exc)
                 self._append_diagnostic(diagnostic)
                 if not callback.fail_soft:
                     self._failure = exc
@@ -147,14 +146,18 @@ class CallbackCoordinator:
         """Raise the retained strict callback failure, if any."""
 
         if self._failure is not None:
-            failure = persistence_safe_execution_error(self._failure)
             raise CallbackFailure(
-                f"callback {failure['type']}: {failure['metadata']['code']}"
+                _transient_callback_diagnostic(self._failure)
             ) from self._failure
 
     def _append_diagnostic(self, diagnostic: str) -> None:
         self._diagnostics.append(diagnostic)
         del self._diagnostics[:-self.max_diagnostics]
+
+
+def _transient_callback_diagnostic(error: BaseException) -> str:
+    failure = transient_execution_error(error)
+    return f"callback {failure['type']}: {failure['message']}"[:512]
 
 
 __all__ = [

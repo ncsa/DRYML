@@ -352,14 +352,25 @@ def test_fail_soft_observer_continues_and_records_bounded_diagnostics(tmp_path):
         lambda event: (_ for _ in ()).throw(RuntimeError(secret)),
         fail_soft=True,
     )
+    operation = FakeOperation().compute
 
-    result = FakeOperation().compute(store=store, callbacks=(callback,))
+    result = operation(store=store, callbacks=(callback,))
 
     assert result.action == "start"
     assert len(result.diagnostics) <= 32
     assert result.diagnostics
-    assert all(item == "callback RuntimeError: execution_failed" for item in result.diagnostics)
-    assert secret not in str(result.diagnostics)
+    assert all(item == f"callback RuntimeError: {secret}" for item in result.diagnostics)
+    durable_data = (
+        *store.records.iter_records(),
+        *store.records.iter_specs(),
+        *(item.to_json() for item in operation.history(store=store)),
+    )
+    assert secret not in str(durable_data)
+    assert all(
+        secret.encode() not in path.read_bytes()
+        for path in Path(store.managed_control_root()).rglob("*")
+        if path.is_file()
+    )
 
 
 @pytest.mark.parametrize("point,resumable", [("before", False), ("after", True)])
