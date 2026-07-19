@@ -429,7 +429,8 @@ def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeyp
     from dryml.code.analysis import CodeAnalysisResult
     from dryml.code.probe import CodeProbeResult
 
-    candidate = PythonExecutableSpec("/resolved/python")
+    resolver_secret = "RESOLVER_PRIVATE_ENV_SENTINEL"
+    candidate = PythonExecutableSpec("/resolved/python", env={"TOKEN": resolver_secret})
     calls = []
     code_probe_calls = []
     record = replace(sample_environment_record, tags=("resolved",))
@@ -458,8 +459,14 @@ def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeyp
     assert calls == [candidate]
     assert code_probe_calls == [normalized.code_target]
     assert resolution.environment_resolution.probe_count == 1
+    public_resolution = resolution.environment_resolution.to_data()
+    assert public_resolution["selected"]["id"] == candidate.id
+    assert public_resolution["selected"]["executable"] == "/resolved/python"
+    assert resolver_secret not in str(public_resolution)
     metadata = resolution.metadata()
     assert metadata["dryml.environment_resolution"]["selected"]["executable"] == {"__dryml_redacted__": "launch_only"}
+    assert candidate.id not in str(metadata)
+    assert resolver_secret not in str(metadata)
     assert metadata["dryml.environment_probe"] is not None
 
 

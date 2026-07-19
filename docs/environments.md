@@ -195,10 +195,11 @@ and `total_timeout` bound DRYML's own search work; a finite total timeout also
 bounds a built-in probe when no per-probe timeout is supplied. Injected probe
 runners and arbitrary candidate iterators are cooperative callbacks, so callers
 requiring a hard deadline must provide a timeout-enforcing subprocess runner and
-bounded candidates. Resolver reports redact environment overrides, executable
-and environment locators, and extra Python paths with explicit launch-only
-markers and bound
-diagnostic metadata before serialization. Current-environment resolver probes use
+bounded candidates. Resolver reports remove environment override maps, preserve
+canonical candidate IDs and bounded locator text for public diagnostics, cap
+extra Python paths at 16 entries, and bound diagnostic metadata before
+serialization. Durable dispatch specs and records apply their stronger
+launch-only projection separately. Current-environment resolver probes use
 the bounded probe worker path rather than synchronous local introspection.
 Probe cleanup terminates the probe process group, but cannot reliably terminate
 an untrusted descendant that deliberately escapes that group; use an external

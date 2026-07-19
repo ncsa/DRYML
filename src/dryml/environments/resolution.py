@@ -588,19 +588,15 @@ def _identity(spec: EnvironmentSpec) -> str:
 
 
 def _spec_summary(spec: EnvironmentSpec) -> dict[str, Any]:
-    """Return redacted candidate metadata without launch-only locators."""
+    """Return bounded candidate metadata without environment overrides."""
 
     data = spec.to_data()
-    redacted = []
-    for key in ("executable", "prefix", "name", "conda_executable", "extra_pythonpath", "image", "runtime", "env"):
-        if key in data and data[key] not in (None, {}, [], ()):
-            data[key] = {"__dryml_redacted__": "launch_only"}
-            redacted.append(key)
-    data["persistence_projection"] = {
-        "schema": "dryml.dispatch.persistence_projection.v1",
-        "redacted": bool(redacted),
-        "redacted_fields": redacted,
-    }
+    data.pop("env", None)
+    # Keep a safe canonical identifier so public diagnostics can distinguish
+    # candidates that differ only in their redacted environment overrides.
+    data["id"] = spec.id
+    if "extra_pythonpath" in data:
+        data["extra_pythonpath"] = list(data["extra_pythonpath"][:16])
     return _bounded_data(data)
 
 

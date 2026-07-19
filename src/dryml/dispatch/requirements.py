@@ -39,7 +39,18 @@ from dryml.operations import resolve_call_arguments
 
 from .errors import DispatchPlanningError
 from .normalize import NormalizedDispatchTarget
-from .provenance import PERSISTENCE_PROJECTION_SCHEMA, project_allocation_summary, project_environment_config, project_inventory_summary, project_requirement_provenance, project_runtime_config, project_world_spec, project_world_synthesis, redaction_marker
+from .provenance import (
+    PERSISTENCE_PROJECTION_SCHEMA,
+    project_allocation_summary,
+    project_environment_config,
+    project_environment_resolution,
+    project_inventory_summary,
+    project_requirement_provenance,
+    project_runtime_config,
+    project_world_spec,
+    project_world_synthesis,
+    redaction_marker,
+)
 
 
 PLANNING_METADATA_VERSION = 4
@@ -619,7 +630,9 @@ class DispatchPlanningResolution:
             "dryml.environment_selection": _persisted_selection_data(self.environment_selection),
             "dryml.environment_probe": _environment_record_summary(self.environment_record),
             "dryml.environment_check": _persisted_check_data(self.environment_check),
-            "dryml.environment_resolution": data["environment_resolution"],
+            "dryml.environment_resolution": project_environment_resolution(
+                data["environment_resolution"]
+            ),
             "dryml.world_selection": _persisted_selection_data(
                 self.world_selection,
                 selected_candidate=self.canonical_world_spec,

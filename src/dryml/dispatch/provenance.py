@@ -44,6 +44,86 @@ def project_environment_config(value: Mapping[str, Any] | None) -> dict[str, Any
     return result
 
 
+def project_environment_resolution(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Project a public resolver report for durable dispatch metadata."""
+
+    if value is None:
+        return None
+    safe_fields = (
+        "status",
+        "requirement",
+        "selected_source",
+        "selected_record",
+        "selected_probe",
+        "attempt_count",
+        "probe_count",
+        "probe_duration_s",
+        "fallback_probe",
+        "diagnostics",
+        "policy",
+    )
+    known = {*safe_fields, "selected", "selected_name", "attempts"}
+    result = {
+        key: value[key]
+        for key in safe_fields
+        if key in value
+    }
+    redacted = []
+    selected = value.get("selected")
+    if isinstance(selected, Mapping):
+        result["selected"] = project_environment_config(selected)
+        redacted.append("selected")
+    elif "selected" in value:
+        result["selected"] = selected
+    if value.get("selected_name") is not None:
+        result["selected_name"] = redaction_marker()
+        redacted.append("selected_name")
+    elif "selected_name" in value:
+        result["selected_name"] = None
+
+    attempts = []
+    for index, attempt in enumerate(value.get("attempts") or ()):
+        if not isinstance(attempt, Mapping):
+            attempts.append({"attempt": redaction_marker()})
+            redacted.append(f"attempts.{index}")
+            continue
+        attempt_safe_fields = (
+            "source",
+            "status",
+            "probe",
+            "probe_duration_s",
+            "compatibility",
+            "diagnostics",
+        )
+        attempt_known = {*attempt_safe_fields, "name", "spec"}
+        projected = {
+            key: attempt[key]
+            for key in attempt_safe_fields
+            if key in attempt
+        }
+        if attempt.get("name") is not None:
+            projected["name"] = redaction_marker()
+            redacted.append(f"attempts.{index}.name")
+        elif "name" in attempt:
+            projected["name"] = None
+        if isinstance(attempt.get("spec"), Mapping):
+            projected["spec"] = project_environment_config(attempt["spec"])
+            redacted.append(f"attempts.{index}.spec")
+        elif "spec" in attempt:
+            projected["spec"] = redaction_marker()
+            redacted.append(f"attempts.{index}.spec")
+        if set(attempt) - attempt_known:
+            projected["unrecognized_fields"] = redaction_marker()
+            redacted.append(f"attempts.{index}.unrecognized_fields")
+        attempts.append(projected)
+    result["attempts"] = attempts
+    if set(value) - known:
+        result["unrecognized_fields"] = redaction_marker()
+        redacted.append("unrecognized_fields")
+    result["persistence_projection"] = _projection_info(redacted)
+    return result
+
+
 def project_runtime_config(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Project runtime configuration while retaining stable worker policy facts."""
 
@@ -381,6 +461,7 @@ def _resource_count(value: Any) -> int | None:
 __all__ = [
     "PERSISTENCE_PROJECTION_SCHEMA",
     "project_environment_config",
+    "project_environment_resolution",
     "project_allocation_summary",
     "project_inventory_summary",
     "project_requirement_provenance",
