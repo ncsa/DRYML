@@ -248,13 +248,29 @@ def write_numpy_sequence_stream(
 def iter_numpy_sequence(root: str | Path) -> Iterator[Any]:
     """Yield rows lazily after validating the compact index and every shard."""
 
+    for tree, shard, arrays in iter_numpy_sequence_partitions(root):
+        for offset in range(shard.stop - shard.start):
+            leaves = tuple(array[offset] for array in arrays)
+            yield _rebuild_element(tree, iter(leaves))
+
+
+def read_numpy_sequence_index(root: str | Path) -> NumpySequenceIndex:
+    """Read and validate only the compact NumPy sequence index."""
+
     product_root = Path(root)
     try:
-        index = NumpySequenceIndex.from_bytes((product_root / "index.json").read_bytes())
+        return NumpySequenceIndex.from_bytes((product_root / "index.json").read_bytes())
     except NumpySequenceCorruptError:
         raise
     except Exception as exc:
         raise NumpySequenceCorruptError("sequence index is missing or unreadable") from exc
+
+
+def iter_numpy_sequence_partitions(root: str | Path):
+    """Yield one validated decoded shard at a time for streaming adapters."""
+
+    product_root = Path(root)
+    index = read_numpy_sequence_index(product_root)
     for shard in index.shards:
         path = product_root / shard.path
         try:
@@ -264,9 +280,7 @@ def iter_numpy_sequence(root: str | Path) -> Iterator[Any]:
         if len(payload) != shard.size or hashlib.sha256(payload).hexdigest() != shard.sha256:
             raise NumpySequenceCorruptError(f"sequence shard {shard.path!r} failed integrity validation")
         arrays = _decode_shard(payload, index.tree, shard.stop - shard.start)
-        for offset in range(shard.stop - shard.start):
-            leaves = tuple(array[offset] for array in arrays)
-            yield _rebuild_element(index.tree, iter(leaves))
+        yield index.tree, shard, arrays
 
 
 def _flatten_element(value: Any) -> tuple[Mapping[str, Any], tuple[np.ndarray, ...]]:
@@ -439,6 +453,8 @@ __all__ = [
     "NumpySequenceIndex",
     "NumpySequenceShard",
     "iter_numpy_sequence",
+    "iter_numpy_sequence_partitions",
+    "read_numpy_sequence_index",
     "write_numpy_sequence",
     "write_numpy_sequence_stream",
 ]

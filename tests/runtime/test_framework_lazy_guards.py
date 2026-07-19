@@ -12,7 +12,8 @@ def test_importing_tf_dataset_package_does_not_import_tensorflow(monkeypatch):
 
     module = importlib.import_module("dryml.data.tf")
 
-    assert module.__all__ == []
+    assert module.__all__ == ["TensorFlowCacheView"]
+    assert module.TensorFlowCacheView.__module__ == "dryml.data.tf.cache"
     assert not hasattr(module, "TFDataset")
     assert "tensorflow" not in sys.modules
 
@@ -21,7 +22,6 @@ def test_importing_tf_utils_does_not_import_tensorflow(monkeypatch):
     monkeypatch.delitem(sys.modules, "tensorflow", raising=False)
 
     module = importlib.import_module("dryml.models.tf.utils")
-
 
     assert "tensorflow" not in sys.modules
     with pytest.raises(FrameworkImportSafetyError):
@@ -34,7 +34,8 @@ def test_importing_torch_dataset_package_does_not_import_torch(monkeypatch):
 
     module = importlib.import_module("dryml.data.torch")
 
-    assert module.__all__ == []
+    assert module.__all__ == ["TorchCacheView"]
+    assert module.TorchCacheView.__module__ == "dryml.data.torch.cache"
     assert "torch" not in sys.modules
     assert not hasattr(module, "TorchDataset")
     assert not hasattr(module, "TorchIterableDatasetWrapper")

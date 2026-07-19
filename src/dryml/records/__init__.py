@@ -29,7 +29,9 @@ from .adapters import (
     AdapterExecutionResult,
     AdapterPlan,
     AdapterRegistry,
+    AdapterSearchLimits,
     AdapterStep,
+    AdapterUnsupportedError,
     adapter_descriptors_from_report,
     find_adapter_path,
     run_adapter_plan,
@@ -129,6 +131,7 @@ from .representations import (
     validate_representation_spec,
 )
 from .resolution import (
+    DataResolutionResult,
     LocatedTypedRecord,
     RecordResolutionIssue,
     RecordResolutionReport,
@@ -138,6 +141,7 @@ from .resolution import (
     find_compatible_state_record,
     find_stored_state_records,
     resolve_state_record,
+    resolve_data_record,
 )
 from .storage import StorageRef
 from .store import RecordStoreIO
@@ -165,8 +169,11 @@ __all__ = [
     "AdapterPlan",
     "AdapterRecord",
     "AdapterRegistry",
+    "AdapterSearchLimits",
     "AdapterStep",
+    "AdapterUnsupportedError",
     "DataRecord",
+    "DataResolutionResult",
     "CheckpointCommit",
     "DurableProductWriter",
     "EXECUTION_KINDS",
@@ -249,6 +256,7 @@ __all__ = [
     "policy_includes_products",
     "representation_satisfies",
     "resolve_state_record",
+    "resolve_data_record",
     "record_payload_for_id",
     "record_export_include_paths",
     "run_adapter_plan",

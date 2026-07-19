@@ -20,6 +20,10 @@ Important expectations:
 realization is active. Before that point, iteration and `peek()` raise rather
 than implicitly computing dependencies. Use `cached.view(repo=...)` or
 `cached.view(store=...)` when ambient repository selection would be ambiguous.
+Use `cached.tensorflow_view(...)` or `cached.torch_view(...)` for explicit lazy
+framework tensor views over a completed NumPy or Parquet representation. View
+construction and `support()` do not import the optional framework; iteration
+does.
 
 ## Source Datasets
 

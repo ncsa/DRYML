@@ -5,4 +5,7 @@ Legacy ``TorchDataset`` wrappers have been removed. Use
 ``dryml.data`` transforms for batching, mapping, shuffling, and conversion.
 """
 
-__all__ = []
+from .cache import TorchCacheView
+
+
+__all__ = ["TorchCacheView"]

@@ -16,6 +16,11 @@ from dryml.artifacts.representations.numpy_sequence import (
     iter_numpy_sequence,
     write_numpy_sequence_stream,
 )
+from dryml.artifacts.representations.parquet import (
+    PARQUET_KIND,
+    PARQUET_REPRESENTATION,
+    numpy_to_parquet_adapter_registry,
+)
 from dryml.core2 import RefCDef, Repo
 from dryml.core2.cardinality import Cardinality
 from dryml.core2.definition import ConcreteDefinition
@@ -37,9 +42,16 @@ from dryml.managed import (
     managed,
 )
 from dryml.records import (
+    AdapterExecutionResult,
+    AdapterSearchLimits,
     DataRecord,
+    LocatedTypedRecord,
+    RecordResolutionIssue,
+    RepresentationRequirement,
     RecordValidationError,
     RepresentationSpec,
+    resolve_data_record,
+    run_adapter_plan,
     require_checkpoint_integrity,
     require_product_integrity,
 )
@@ -143,6 +155,108 @@ class CachedDataset(Artifact, Dataset):
         consumers such as training. It never computes or materializes ``src``.
         """
 
+        located, record, root, representation, _selected = self._active_output_record(
+            repo=repo, store=store
+        )
+        if representation.kind != NUMPY_SEQUENCE_KIND:
+            raise RuntimeError("active cache has no supported NumPy sequence representation")
+        return located, record, root
+
+    def request_representation(
+        self,
+        representation,
+        *,
+        repo=None,
+        store=None,
+        adapters=None,
+        limits: AdapterSearchLimits | None = None,
+    ) -> AdapterExecutionResult:
+        """Reuse or derive one representation of the exact active realization.
+
+        The request never invokes ``compute`` and never changes active
+        realization selection. Adapter failures are returned structurally.
+        """
+
+        requirement = _representation_requirement(representation)
+        located, record, _root, _spec, selected = self._active_output_record(
+            repo=repo, store=store
+        )
+        selected_repo = Repo(selected)
+        registry = adapters if adapters is not None else numpy_to_parquet_adapter_registry()
+        resolution = resolve_data_record(
+            selected_repo,
+            LocatedTypedRecord(located, record),
+            requirement,
+            adapters=registry,
+            limits=limits,
+        )
+        if resolution.status == "ok" and resolution.selected is not None:
+            try:
+                require_product_integrity(
+                    selected.records,
+                    selected.records.read_record(resolution.selected.ref.record_id),
+                )
+            except Exception as exc:
+                return AdapterExecutionResult(
+                    "failed",
+                    issues=(RecordResolutionIssue("product_integrity_failed", str(exc)),),
+                )
+            return AdapterExecutionResult("ok", target_records=(resolution.selected.ref,))
+        if resolution.status != "requires_adapter":
+            return AdapterExecutionResult(
+                resolution.status if resolution.status in {"not_found", "unsupported", "failed"} else "failed",
+                issues=resolution.report.issues,
+            )
+        return run_adapter_plan(
+            resolution.adapter_plan,
+            repo=selected_repo,
+            store=selected,
+            registry=registry,
+        )
+
+    def representation_record(self, representation, *, repo=None, store=None, adapters=None, limits=None):
+        """Return one validated representation record and product root."""
+
+        result = self.request_representation(
+            representation,
+            repo=repo,
+            store=store,
+            adapters=adapters,
+            limits=limits,
+        )
+        if result.status != "ok" or not result.target_records:
+            message = result.issues[0].message if result.issues else "representation request failed"
+            raise RuntimeError(message)
+        from dryml.managed.store import resolve_managed_store
+
+        selected = resolve_managed_store(repo, store=store, target=self)
+        located = result.target_records[-1]
+        envelope = selected.records.read_record(located.record_id)
+        record = DataRecord.from_envelope(envelope)
+        require_product_integrity(selected.records, envelope)
+        if len(record.storage) != 1 or record.storage[0].kind != "product-dir":
+            raise RecordValidationError("cache representation DataRecord storage is malformed")
+        root = selected.records.resolve_storage_ref(record.storage[0], record_id=located.record_id)
+        spec = RepresentationSpec(
+            selected.records.read_spec(record.representation_id, family="representation")
+        )
+        return located, record, root, spec
+
+    def tensorflow_view(self, repo=None, *, store=None, representation="numpy-sequence"):
+        """Return a dependency-lazy TensorFlow iterable over a resolved cache."""
+
+        from dryml.data.tf.cache import TensorFlowCacheView
+
+        return TensorFlowCacheView(self, repo=repo, store=store, representation=representation)
+
+    def torch_view(self, repo=None, *, store=None, representation="numpy-sequence"):
+        """Return a dependency-lazy PyTorch iterable over a resolved cache."""
+
+        from dryml.data.torch.cache import TorchCacheView
+
+        return TorchCacheView(self, repo=repo, store=store, representation=representation)
+
+    def _active_output_record(self, repo=None, *, store=None):
         results = self.compute.results(repo=repo, store=store)
         located = results.get("data")
         if located is None:
@@ -154,12 +268,9 @@ class CachedDataset(Artifact, Dataset):
         record = DataRecord.from_envelope(envelope)
         if record.output_slot != "data" or record.realization_id is None:
             raise RecordValidationError("active cache DataRecord has invalid managed ownership")
-        representation = selected.records.read_spec(
-            record.representation_id,
-            family="representation",
-        )
-        if representation.get("kind") != NUMPY_SEQUENCE_KIND:
-            raise RuntimeError("active cache has no supported NumPy sequence representation")
+        representation = RepresentationSpec(selected.records.read_spec(
+            record.representation_id, family="representation"
+        ))
         require_product_integrity(selected.records, envelope)
         if len(record.storage) != 1 or record.storage[0].kind != "product-dir":
             raise RecordValidationError("active cache DataRecord storage is malformed")
@@ -167,7 +278,7 @@ class CachedDataset(Artifact, Dataset):
             record.storage[0],
             record_id=located.record_id,
         )
-        return located, record, root
+        return located, record, root, representation, selected
 
     def __dryml_managed_preflight__(self, method, args, kwargs):
         if method != "compute":
@@ -381,6 +492,27 @@ def _normalize_representation(value):
     raise ManagedCapabilityError(
         "CachedDataset currently supports only the explicit 'numpy-sequence' representation"
     )
+
+
+def _representation_requirement(value):
+    if isinstance(value, RepresentationRequirement):
+        return value
+    if isinstance(value, RepresentationSpec):
+        if value.kind not in {NUMPY_SEQUENCE_KIND, PARQUET_KIND}:
+            raise ManagedCapabilityError("CachedDataset representation is unsupported")
+        return RepresentationRequirement(kind=value.kind, representation_id=value.id)
+    if isinstance(value, str):
+        if value in {"numpy", "numpy-sequence", NUMPY_SEQUENCE_KIND, NUMPY_SEQUENCE_REPRESENTATION.id}:
+            return RepresentationRequirement(
+                kind=NUMPY_SEQUENCE_KIND,
+                representation_id=NUMPY_SEQUENCE_REPRESENTATION.id,
+            )
+        if value in {"parquet", PARQUET_KIND, PARQUET_REPRESENTATION.id}:
+            return RepresentationRequirement(
+                kind=PARQUET_KIND,
+                representation_id=PARQUET_REPRESENTATION.id,
+            )
+    raise ManagedCapabilityError("CachedDataset representation is unsupported")
 
 
 def _invocation_representation(args, kwargs):

@@ -6,6 +6,12 @@ from dryml.artifacts.representations import (
     NumpySequenceCorruptError,
     NumpySequenceIndex,
     NumpySequenceShard,
+    PARQUET_KIND,
+    PARQUET_REPRESENTATION,
+    ParquetCompatibilityError,
+    ParquetCorruptError,
+    ParquetIndex,
+    ParquetPartition,
 )
 from dryml.artifacts.scalar import Accuracy, Scalar, ScalarAgg, ScalarAvg
 
@@ -22,4 +28,10 @@ __all__ = [
     "NumpySequenceCorruptError",
     "NumpySequenceIndex",
     "NumpySequenceShard",
+    "PARQUET_KIND",
+    "PARQUET_REPRESENTATION",
+    "ParquetCompatibilityError",
+    "ParquetCorruptError",
+    "ParquetIndex",
+    "ParquetPartition",
 ]

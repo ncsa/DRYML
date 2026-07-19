@@ -69,6 +69,25 @@ NumPy sequence products contain bounded `.npz` shards and one compact
 record-owned product manifest and the sequence index/shard sizes and digests.
 CachedDataset never treats a source prefix as a completed result.
 
+A completed NumPy cache can derive a Parquet representation without rerunning
+its source:
+
+```python
+result = cached.request_representation("parquet", store=store)
+if result.status != "ok":
+    print(result.issues)
+```
+
+The request is restricted to the active realization. Existing forms are reused;
+adapter absence, optional-dependency absence, and adapter failure are structured
+outcomes and leave active selection unchanged. Parquet supports flat scalar or
+one-dimensional fixed-shape rows and requires the optional `parquet` extra.
+
+`cached.tensorflow_view(...)` and `cached.torch_view(...)` return lightweight
+iterables over NumPy or Parquet records. Their `support()` method reports a
+missing optional framework without importing it, and the framework is imported
+only when the view is iterated.
+
 Exact resume is capability-based over the complete Dataset pipeline. Indexed
 sources have durable row cursors, and stateful stages must checkpoint all state
 (for example, shuffle RNG and buffer contents). Replay-only or unknown stages

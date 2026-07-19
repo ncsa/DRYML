@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -13,8 +13,7 @@ from dryml import reporting
 from .errors import RecordValidationError, SpecNotFoundError
 from .refs import LocatedRecordRef
 from .representations import RepresentationRequirement, RepresentationSpec, representation_satisfies
-from .storage import StorageRef
-from .typed import AdapterRecord, DataRecord, ProgramRecord, StoredStateRecord, TypedRecord, typed_record_from_envelope
+from .typed import DataRecord, StoredStateRecord, TypedRecord
 
 
 ResolutionStatus = Literal["ok", "requires_adapter", "not_found", "ambiguous", "unsupported", "failed"]
@@ -96,6 +95,19 @@ class StateResolutionRequest:
 @dataclass(frozen=True, slots=True)
 class StateResolutionResult:
     """Result for selecting or adapting a stored-state record."""
+
+    status: ResolutionStatus
+    selected: LocatedTypedRecord | None = None
+    selected_representation: RepresentationSpec | None = None
+    adapter_source: LocatedTypedRecord | None = None
+    adapter_source_representation: RepresentationSpec | None = None
+    adapter_plan: Any = None
+    report: RecordResolutionReport = RecordResolutionReport("not_found")
+
+
+@dataclass(frozen=True, slots=True)
+class DataResolutionResult:
+    """Result for resolving representations of one exact managed data output."""
 
     status: ResolutionStatus
     selected: LocatedTypedRecord | None = None
@@ -203,6 +215,99 @@ def resolve_state_record(
     return StateResolutionResult(plan.status, report=report)
 
 
+def resolve_data_record(
+    repo: Any,
+    source: LocatedTypedRecord,
+    requirement: RepresentationRequirement | Mapping[str, Any] | None = None,
+    *,
+    adapters: Any = None,
+    limits: Any = None,
+) -> DataResolutionResult:
+    """Resolve another representation of one exact managed realization output.
+
+    Candidate discovery is restricted to the source record's ``realization_id``
+    and ``output_slot``. It never searches another realization or invokes the
+    producer operation.
+    """
+
+    if not isinstance(source, LocatedTypedRecord) or not isinstance(source.record, DataRecord):
+        raise RecordValidationError("managed data resolution requires a located DataRecord")
+    if source.record.realization_id is None or source.record.output_slot is None:
+        raise RecordValidationError("managed data resolution requires realization ownership")
+    req = requirement if isinstance(requirement, RepresentationRequirement) else RepresentationRequirement.from_json(requirement)
+    issues: list[RecordResolutionIssue] = []
+    candidates = _managed_data_candidates(repo, source, issues=issues)
+    compatible = [
+        candidate
+        for candidate in candidates
+        if representation_satisfies(candidate.representation, req).compatible
+    ]
+    if compatible:
+        selected = min(
+            compatible,
+            key=lambda candidate: (
+                0 if candidate.located.ref.record_id == source.ref.record_id else 1,
+                candidate.store_index,
+                candidate.located.ref.record_id,
+            ),
+        )
+        return DataResolutionResult(
+            "ok",
+            selected=selected.located,
+            selected_representation=selected.representation,
+            report=RecordResolutionReport("ok", tuple(issues), len(candidates)),
+        )
+    if adapters is None:
+        return DataResolutionResult(
+            "unsupported",
+            report=RecordResolutionReport(
+                "unsupported",
+                (RecordResolutionIssue("unsupported", "no representation of the active realization satisfies the request"), *issues),
+                len(candidates),
+            ),
+        )
+    from .adapters import find_adapter_path
+
+    adapter_source = next(
+        candidate
+        for candidate in candidates
+        if candidate.located.ref == source.ref
+    )
+    plan = find_adapter_path(
+        (adapter_source,), req, registry=adapters, limits=limits
+    )
+    if plan.status == "ok":
+        if not plan.steps:
+            return DataResolutionResult(
+                "ok",
+                selected=plan.source_record,
+                selected_representation=plan.source_representation,
+                adapter_plan=plan,
+                report=RecordResolutionReport("ok", tuple(issues), len(candidates)),
+            )
+        return DataResolutionResult(
+            "requires_adapter",
+            adapter_source=plan.source_record,
+            adapter_source_representation=plan.source_representation,
+            adapter_plan=plan,
+            report=RecordResolutionReport(
+                "requires_adapter",
+                tuple(issues),
+                len(candidates),
+                len(plan.steps),
+            ),
+        )
+    return DataResolutionResult(
+        plan.status,
+        report=RecordResolutionReport(
+            plan.status,
+            (*plan.issues, *issues),
+            len(candidates),
+            len(plan.steps),
+        ),
+    )
+
+
 def _state_candidates(repo: Any, cdef_id: str, *, issues: list[RecordResolutionIssue] | None = None) -> tuple[RepresentationCandidate, ...]:
     candidates: list[RepresentationCandidate] = []
     for store_index, store in enumerate(_stores(repo)):
@@ -232,6 +337,44 @@ def _state_candidates(repo: Any, cdef_id: str, *, issues: list[RecordResolutionI
     return tuple(candidates)
 
 
+def _managed_data_candidates(
+    repo: Any,
+    source: LocatedTypedRecord,
+    *,
+    issues: list[RecordResolutionIssue],
+) -> tuple[RepresentationCandidate, ...]:
+    candidates: list[RepresentationCandidate] = []
+    source_record = source.record
+    assert isinstance(source_record, DataRecord)
+    for store_index, store in enumerate(_stores(repo)):
+        refs = store.records.find_records(
+            kind="data",
+            realization_id=source_record.realization_id,
+            output_slot=source_record.output_slot,
+        )
+        for ref in refs:
+            record = DataRecord.from_envelope(store.records.read_record(ref.record_id))
+            located = LocatedTypedRecord(ref, record)
+            try:
+                spec = RepresentationSpec(
+                    store.records.read_spec(record.representation_id, family="representation")
+                )
+            except Exception as exc:
+                issues.append(
+                    RecordResolutionIssue(
+                        "invalid_representation_spec",
+                        str(exc),
+                        record_id=ref.record_id,
+                        representation_id=record.representation_id,
+                    )
+                )
+                continue
+            candidates.append(RepresentationCandidate(located, spec, store_index))
+    if not any(item.located.ref == source.ref for item in candidates):
+        raise RecordValidationError("active managed data source is not present in the selected Store")
+    return tuple(candidates)
+
+
 def _read_representation(repo: Any, representation_id: str) -> dict[str, Any]:
     for store in _stores(repo):
         if store.records.has_spec(representation_id, family="representation"):
@@ -254,6 +397,7 @@ def _stores(repo: Any) -> tuple[Any, ...]:
 
 
 __all__ = [
+    "DataResolutionResult",
     "LocatedTypedRecord",
     "RecordResolutionIssue",
     "RecordResolutionReport",
@@ -263,4 +407,5 @@ __all__ = [
     "find_compatible_state_record",
     "find_stored_state_records",
     "resolve_state_record",
+    "resolve_data_record",
 ]

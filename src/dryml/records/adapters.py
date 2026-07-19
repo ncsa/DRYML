@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import heapq
+import itertools
+import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -10,8 +13,8 @@ from typing import Any, Literal
 from dryml import reporting
 from dryml.formats import CanonicalJSONError, deep_freeze_json, json_ready
 
-from .errors import RecordIOError, RecordValidationError, SpecValidationError
-from .products import ProductManifest, ProductWriteSession
+from .errors import RecordValidationError, SpecValidationError
+from .products import ProductManifest, ProductWriteSession, require_product_integrity
 from .refs import LocatedRecordRef
 from .representations import RepresentationRequirement, RepresentationSpec, make_representation_spec, representation_satisfies
 from .resolution import LocatedTypedRecord, RecordResolutionIssue, RepresentationCandidate
@@ -35,6 +38,8 @@ class AdapterDescriptor:
     provider_version: str | None = None
     operation: Mapping[str, Any] | None = None
     cost: float = 1.0
+    streaming: bool = False
+    materializes_source: bool = True
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -48,8 +53,10 @@ class AdapterDescriptor:
             object.__setattr__(self, "source", RepresentationRequirement.from_json(self.source))
         if not isinstance(self.target, RepresentationRequirement):
             object.__setattr__(self, "target", RepresentationRequirement.from_json(self.target))
-        if self.cost < 0:
+        if not _is_nonnegative_finite_number(self.cost):
             raise RecordValidationError("adapter descriptor cost must be non-negative")
+        if not isinstance(self.streaming, bool) or not isinstance(self.materializes_source, bool):
+            raise RecordValidationError("adapter streaming flags must be boolean")
         object.__setattr__(self, "operation", None if self.operation is None else _freeze_mapping(self.operation, "operation"))
         object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, "metadata"))
 
@@ -71,6 +78,8 @@ class AdapterDescriptor:
             "provider_version": self.provider_version,
             "operation": None if self.operation is None else json_ready(self.operation),
             "cost": self.cost,
+            "streaming": self.streaming,
+            "materializes_source": self.materializes_source,
             "metadata": json_ready(self.metadata),
         }
 
@@ -80,7 +89,7 @@ class AdapterDescriptor:
 
         if not isinstance(data, Mapping):
             raise RecordValidationError("adapter descriptor must be a mapping", context={"type": type(data).__name__})
-        unknown = set(data) - {"name", "version", "source", "target", "provider_name", "provider_version", "operation", "cost", "metadata"}
+        unknown = set(data) - {"name", "version", "source", "target", "provider_name", "provider_version", "operation", "cost", "streaming", "materializes_source", "metadata"}
         if unknown:
             raise RecordValidationError("adapter descriptor has unknown fields", context={"fields": sorted(unknown)})
         return cls(
@@ -92,6 +101,8 @@ class AdapterDescriptor:
             provider_version=data.get("provider_version"),
             operation=data.get("operation"),
             cost=float(data.get("cost", 1.0)),
+            streaming=data.get("streaming", False),
+            materializes_source=data.get("materializes_source", True),
             metadata=data.get("metadata") or {},
         )
 
@@ -116,6 +127,32 @@ class AdapterPlan:
     status: PlanStatus = "ok"
     issues: tuple[RecordResolutionIssue, ...] = ()
     total_cost: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class AdapterSearchLimits:
+    """Hard bounds for deterministic adapter path resolution."""
+
+    max_steps: int = 4
+    max_expansions: int = 128
+    max_total_cost: float = 1_000_000.0
+    max_materialize_bytes: int = 256 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for name in ("max_steps", "max_expansions", "max_materialize_bytes"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 1:
+                raise RecordValidationError(f"adapter search {name} must be a positive integer")
+        if not _is_nonnegative_finite_number(self.max_total_cost):
+            raise RecordValidationError("adapter search max_total_cost must be non-negative")
+
+
+class AdapterUnsupportedError(RuntimeError):
+    """Structured unsupported outcome raised by an executable adapter."""
+
+    def __init__(self, message: str, *, code: str = "unsupported"):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,10 +225,12 @@ def find_adapter_path(
     *,
     registry: AdapterRegistry | None = None,
     descriptors: Iterable[AdapterDescriptor | Mapping[str, Any]] | None = None,
+    limits: AdapterSearchLimits | None = None,
 ) -> AdapterPlan:
-    """Find a deterministic zero-, one-, or multi-step fake adapter path."""
+    """Find the bounded deterministic best-cost adapter path."""
 
     req = target if isinstance(target, RepresentationRequirement) else RepresentationRequirement.from_json(target)
+    bounds = limits or AdapterSearchLimits()
     descs = _descriptors_from(registry, descriptors)
     candidates = tuple(_coerce_candidate(source) for source in sources)
     reporting.step("dryml.records.adapter.plan", "Planning adapter path", data={"sources": len(candidates), "descriptors": len(descs)})
@@ -202,26 +241,61 @@ def find_adapter_path(
         selected = sorted(zero, key=lambda candidate: (candidate.store_index, candidate.located.ref.record_id))[0]
         return AdapterPlan(selected.located, selected.representation, req, steps=(), total_cost=0.0)
 
-    plans: list[AdapterPlan] = []
+    serial = itertools.count()
+    queue: list[tuple[Any, ...]] = []
+    best: dict[tuple[str, str], float] = {}
+    materializing_rejected = False
     for candidate in candidates:
-        queue: list[tuple[RepresentationRequirement, tuple[AdapterStep, ...], float, frozenset[tuple[str, str | None, str | None]]]] = [
-            (_requirement_from_spec(candidate.representation), (), 0.0, frozenset())
-        ]
-        while queue:
-            current, steps, cost, used = queue.pop(0)
-            for descriptor in descs:
-                if descriptor.key in used or not _requirement_satisfies(current, descriptor.source):
-                    continue
-                step = AdapterStep(descriptor, current, descriptor.target)
-                next_steps = steps + (step,)
-                next_cost = cost + descriptor.cost
-                if _requirement_satisfies(descriptor.target, req):
-                    plans.append(AdapterPlan(candidate.located, candidate.representation, req, next_steps, total_cost=next_cost))
-                    continue
-                queue.append((descriptor.target, next_steps, next_cost, used | {descriptor.key}))
-    if not plans:
-        return AdapterPlan(None, None, req, status="unsupported", issues=(RecordResolutionIssue("unsupported", "no adapter path satisfies target requirement"),))
-    selected = sorted(plans, key=_plan_sort_key)[0]
+        current = _requirement_from_spec(candidate.representation)
+        heapq.heappush(queue, (0.0, 0, (), candidate.store_index, candidate.located.ref.record_id, next(serial), candidate, current, ()))
+    expansions = 0
+    search_bound_reached = False
+    selected = None
+    while queue:
+        cost, _length, _sort, _store_index, _record_id, _serial, candidate, current, steps = heapq.heappop(queue)
+        state_key = (candidate.located.ref.record_id, _requirement_key(current))
+        if cost > best.get(state_key, float("inf")):
+            continue
+        best[state_key] = cost
+        if steps and _requirement_satisfies(current, req):
+            selected = AdapterPlan(candidate.located, candidate.representation, req, steps, total_cost=cost)
+            break
+        if len(steps) >= bounds.max_steps:
+            search_bound_reached = True
+            continue
+        if expansions >= bounds.max_expansions:
+            search_bound_reached = True
+            break
+        expansions += 1
+        source_bytes = _record_product_bytes(candidate.located.record)
+        for descriptor in descs:
+            if not _requirement_satisfies(current, descriptor.source):
+                continue
+            if descriptor.materializes_source and source_bytes > bounds.max_materialize_bytes:
+                materializing_rejected = True
+                continue
+            next_cost = cost + descriptor.cost
+            if next_cost > bounds.max_total_cost:
+                continue
+            step = AdapterStep(descriptor, current, descriptor.target)
+            next_steps = steps + (step,)
+            next_key = (candidate.located.ref.record_id, _requirement_key(descriptor.target))
+            if next_cost >= best.get(next_key, float("inf")):
+                continue
+            best[next_key] = next_cost
+            sort_key = tuple(_descriptor_sort_key(item.descriptor) for item in next_steps)
+            heapq.heappush(queue, (next_cost, len(next_steps), sort_key, candidate.store_index, candidate.located.ref.record_id, next(serial), candidate, descriptor.target, next_steps))
+    if selected is None:
+        if materializing_rejected:
+            issue = RecordResolutionIssue("materializing_adapter_rejected", "adapter would materialize a product larger than the configured bound")
+        elif search_bound_reached:
+            issue = RecordResolutionIssue(
+                "search_bound_exceeded",
+                "adapter search exceeded a configured path or expansion bound",
+            )
+        else:
+            issue = RecordResolutionIssue("unsupported", "no adapter path satisfies target requirement")
+        return AdapterPlan(None, None, req, status="unsupported", issues=(issue,))
     reporting.detail("dryml.records.adapter.plan", "Selected adapter path", data={"steps": [step.descriptor.name for step in selected.steps], "total_cost": selected.total_cost})
     return selected
 
@@ -248,6 +322,10 @@ def run_adapter_plan(plan: AdapterPlan, *, repo: Any, store: Any, registry: Adap
         reporting.step("dryml.records.adapter.run", "Running adapter step", data={"adapter": step.descriptor.name})
         try:
             source_store = _store_for_located(repo, current_record.ref) or store
+            source_envelope = source_store.records.read_record(
+                current_record.ref.record_id
+            )
+            require_product_integrity(source_store.records, source_envelope)
             if hasattr(current_record.record, "storage"):
                 for storage_ref in current_record.record.storage:
                     source_store.records.resolve_storage_ref(storage_ref, record_id=current_record.ref.record_id)
@@ -275,6 +353,8 @@ def run_adapter_plan(plan: AdapterPlan, *, repo: Any, store: Any, registry: Adap
             adapters.append(adapter_ref)
             current_record = LocatedTypedRecord(target_result.located, target_record)
             current_repr = target_repr
+        except AdapterUnsupportedError as exc:
+            return AdapterExecutionResult("unsupported", tuple(targets), tuple(adapters), (RecordResolutionIssue(exc.code, str(exc)),))
         except Exception as exc:
             return AdapterExecutionResult("failed", tuple(targets), tuple(adapters), (RecordResolutionIssue("adapter_failed", str(exc)),))
     return AdapterExecutionResult("ok", tuple(targets), tuple(adapters))
@@ -331,8 +411,18 @@ def _requirement_from_spec(spec: RepresentationSpec) -> RepresentationRequiremen
 
 
 def _ensure_target_representation(store: Any, requirement: RepresentationRequirement) -> RepresentationSpec:
-    if requirement.representation_id is not None and store.records.has_spec(requirement.representation_id, family="representation"):
-        return RepresentationSpec(store.records.read_spec(requirement.representation_id, family="representation"))
+    if requirement.representation_id is not None:
+        if not store.records.has_spec(
+            requirement.representation_id, family="representation"
+        ):
+            raise SpecValidationError(
+                "exact adapter target representation spec is missing"
+            )
+        return RepresentationSpec(
+            store.records.read_spec(
+                requirement.representation_id, family="representation"
+            )
+        )
     if requirement.kind is None:
         raise SpecValidationError("adapter target requirement needs kind or existing representation_id")
     spec = make_representation_spec(
@@ -419,6 +509,31 @@ def _plan_sort_key(plan: AdapterPlan) -> tuple[Any, ...]:
     return (plan.total_cost, len(plan.steps), tuple(_descriptor_sort_key(step.descriptor) for step in plan.steps), plan.source_record.ref.record_id if plan.source_record else "")
 
 
+def _requirement_key(requirement: RepresentationRequirement) -> str:
+    import json
+
+    return json.dumps(requirement.to_json(), sort_keys=True, separators=(",", ":"))
+
+
+def _record_product_bytes(record: TypedRecord) -> int:
+    manifest = getattr(record, "manifest", None)
+    if not isinstance(manifest, Mapping):
+        return 0
+    total_size = manifest.get("total_size")
+    if type(total_size) is int and total_size >= 0:
+        return total_size
+    entries = manifest.get("entries")
+    if not isinstance(entries, (list, tuple)):
+        return 0
+    return sum(item.get("size", 0) for item in entries if isinstance(item, Mapping) and type(item.get("size")) is int)
+
+
+def _is_nonnegative_finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
 def _freeze_mapping(value: Mapping[str, Any], path: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise RecordValidationError("adapter descriptor field must be a mapping", context={"path": path, "type": type(value).__name__})
@@ -436,7 +551,9 @@ __all__ = [
     "AdapterExecutionResult",
     "AdapterPlan",
     "AdapterRegistry",
+    "AdapterSearchLimits",
     "AdapterStep",
+    "AdapterUnsupportedError",
     "adapter_descriptors_from_report",
     "find_adapter_path",
     "run_adapter_plan",

@@ -27,6 +27,13 @@ supports nested dict/list/tuple tensor trees, and uses one compact `index.json`
 for row ranges, tree metadata, sizes, and digests. It does not use one file per
 element and does not import optional dataframe or framework backends.
 
+`dryml.parquet` is the optional columnar CachedDataset representation. It stores
+scalar or one-dimensional, fixed-shape NumPy rows as ordered Parquet partitions
+plus a compact `index.json`. Nested tensor trees, ragged rows, object arrays,
+and row shapes above one dimension are rejected as non-tabular. PyArrow is
+available through the `parquet` extra and is imported only when Parquet bytes
+are read or written.
+
 ## Typed Records
 
 `StoredStateRecord` points at loadable object state. Descriptive saves still store bytes under `objects/`; wrappers only validate the record sidecar.
@@ -56,6 +63,12 @@ result = resolve_state_record(
 
 An existing compatible stored-state record is selected before planning adapters. `status="ok"` means `selected` is directly loadable and satisfies the requested representation. If an adapter path is available but has not run yet, resolution returns `status="requires_adapter"` with `adapter_plan` and `adapter_source`; `selected` remains empty so callers do not mistake the source record for the target representation. Normal `not_found`, `unsupported`, and missing or invalid representation-spec outcomes are reported structurally.
 
+Managed data resolution starts from the exact active output record and considers
+only records with the same `realization_id` and `output_slot`. Adapter search is
+best-cost and bounded by `AdapterSearchLimits`; adapters declare whether they
+stream or materialize their source, and materializing paths are rejected when a
+product exceeds the configured bound.
+
 ## Fake Adapter Example
 
 The local adapter runner is a temporary fake/test hook, not dispatch v2. It runs in-process and requires a registered callback:
@@ -83,6 +96,11 @@ registry.register(
 
 Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records; durable failure provenance is not implemented.
 
+`CachedDataset.request_representation("parquet", ...)` uses the built-in
+streaming NumPy-sequence-to-Parquet adapter. It reuses an existing compatible
+form first, preserves managed ownership in the derived `DataRecord`, writes an
+`AdapterRecord`, and never reruns or changes activation of the producer.
+
 The local adapter runner does not implement real Torch, TensorFlow, JAX,
 DeepSpeed, Conda-worker, subprocess-dispatch, cancellation, or worker-handshake
 execution. Dispatch does not consume adapter plans or emit `ExecutionRecord`
@@ -103,4 +121,5 @@ Resolve them with the containing record ID. Product bytes do not affect CDef ide
 `ExecutionRecord` is optional provenance and is not required for load/adapt. The
 shipped object-based `dryml.artifacts` API is distinct from store-owned
 `DataRecord` products; `DataRecord` does not implement or select Artifacts.
-Framework-specific adapters and compiler/JIT lowering are deferred.
+TensorFlow and PyTorch cache views are explicit lazy consumers rather than
+persisted representation adapters. Compiler/JIT lowering remains deferred.

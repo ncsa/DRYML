@@ -31,7 +31,8 @@ EXAMPLES = {
     "examples/notebooks/local_hyperparameter_search.ipynb",
 }
 EXTRAS = {
-    "test": {("pytest", "", 'extra == "test"'), ("pytest-cov", "", 'extra == "test"'), ("flake8", "", 'extra == "test"')},
+    "test": {("pytest", "", 'extra == "test"'), ("pytest-cov", "", 'extra == "test"'), ("flake8", "", 'extra == "test"'), ("pyarrow", "", 'python_version < "3.14" and extra == "test"')},
+    "parquet": {("pyarrow", "", 'python_version < "3.14" and extra == "parquet"')},
     "tf": {("tensorflow", "", 'python_version < "3.14" and extra == "tf"')},
     "jax": {("jax", "<0.6,>=0.5", 'python_version < "3.14" and extra == "jax"'), ("jaxlib", "<0.6,>=0.5", 'python_version < "3.14" and extra == "jax"')},
     "torch": {("torch", ">=2.8.0", 'python_version < "3.14" and extra == "torch"')},
