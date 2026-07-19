@@ -53,14 +53,24 @@ class RecordPolicyOptions:
     ``include_products=None`` means use the selected policy default: currently
     only ``all`` includes existing product directories by default. Indexes are
     derived data and are omitted unless callers request rebuilding after writes.
+    ``destination_collision='adopt-identical'`` makes retries idempotent while
+    still rejecting a content-addressed destination with different bytes.
     """
 
     include_products: bool | None = None
     rebuild_index: bool = False
     overwrite_sidecars: bool = False
+    destination_collision: Literal["error", "adopt-identical"] = "adopt-identical"
     representation_kind: str = _DEFAULT_REPRESENTATION_KIND
     representation_payload: Mapping[str, Any] | None = None
     record_metadata: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.destination_collision not in {"error", "adopt-identical"}:
+            raise RecordPolicyError(
+                "invalid destination collision policy",
+                context={"value": self.destination_collision},
+            )
 
 
 @dataclass(frozen=True, slots=True)

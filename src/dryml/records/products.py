@@ -960,6 +960,19 @@ def _trees_match(first: Path, second: Path) -> bool:
     return first_manifest == second_manifest
 
 
+def _fsync_tree(root: Path) -> None:
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        with path.open("rb") as handle:
+            os.fsync(handle.fileno())
+    for path in sorted(
+        (item for item in root.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        _fsync_directory(path)
+    _fsync_directory(root)
+
+
 def _load_json_file(path: Path, name: str) -> dict[str, Any]:
     try:
         data = canonical_json_load_bytes(path.read_bytes())

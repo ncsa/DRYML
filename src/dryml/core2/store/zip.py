@@ -7,6 +7,7 @@ import glob
 import tempfile
 import os
 import pickle
+import shutil
 
 from .store import Store
 from ..utils.general import pickle_save, pickle_load
@@ -23,6 +24,8 @@ def is_binary_file_like(value) -> bool:
 
 
 class ZipStore(Store):
+    file_like_commit_is_atomic = False
+
     def __init__(self, zip_dest: str | Path | IOBase):
         self.zip_dest = zip_dest
         self._tmp = tempfile.TemporaryDirectory()
@@ -88,24 +91,14 @@ class ZipStore(Store):
     def commit(self) -> None:
         self.write_main_def()
 
-        # write base_dir back into zip_dest
-        if is_binary_file_like(self.zip_dest):
-            buf = self.zip_dest
-            buf.seek(0)
-            buf.truncate(0)
-            zf_ctx = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
-        else:
-            zf_ctx = zipfile.ZipFile(os.fspath(self.zip_dest), "w", zipfile.ZIP_DEFLATED)
-
-        with zf_ctx as zf:
+        def write_archive(zf):
             for root, _, files in os.walk(self.base_dir):
                 for name in files:
                     full = os.path.join(root, name)
                     rel = os.path.relpath(full, self.base_dir)
                     zf.write(full, rel)
 
-        if is_binary_file_like(self.zip_dest):
-            self.zip_dest.seek(0)
+        _commit_zip_destination(self.zip_dest, write_archive)
 
     def close(self) -> None:
         self._tmp.cleanup()
@@ -157,6 +150,8 @@ class ZipExportStore(Store):
     - It just zips a subset of paths from `src_dir` into `zip_dest`.
     - Optionally embeds a `main_def` as def.pkl at the root of the zip.
     """
+
+    file_like_commit_is_atomic = False
 
     def __init__(self, zip_dest, src_dir: str, include_paths: set[str]):
         """
@@ -237,39 +232,41 @@ class ZipExportStore(Store):
         - If _main_def is set, write it as def.pkl at the root of the zip.
         - Then write all include_paths (files or directories) from src_dir.
         """
-        if is_binary_file_like(self.zip_dest):
-            buf = self.zip_dest
-            buf.seek(0)
-            buf.truncate(0)
-            zf_ctx = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
-        else:
-            zf_ctx = zipfile.ZipFile(os.fspath(self.zip_dest),
-                                     "w", zipfile.ZIP_DEFLATED)
+        files = self._included_files()
 
-        with zf_ctx as zf:
+        def write_archive(zf):
             # Optional main def at root
             if self._main_def is not None:
                 data = pickle.dumps(self._main_def)
                 zf.writestr("def.pkl", data)
 
-            # Stream included paths from src_dir
-            for rel in self.include_paths:
-                full = os.path.join(self.src_dir, rel)
-                if os.path.isdir(full):
-                    for root, _, files in os.walk(full):
-                        for name in files:
-                            ffull = os.path.join(root, name)
-                            frel = os.path.relpath(ffull, self.src_dir)
-                            zf.write(ffull, frel)
-                elif os.path.isfile(full):
-                    zf.write(full, rel)
-                else:
-                    # Missing path: silently skip or raise, your choice.
-                    # raise FileNotFoundError(full)
-                    pass
+            for rel, full in files:
+                zf.write(full, rel)
 
-        if is_binary_file_like(self.zip_dest):
-            self.zip_dest.seek(0)
+        _commit_zip_destination(self.zip_dest, write_archive)
+
+    def _included_files(self) -> tuple[tuple[str, str], ...]:
+        """Validate every requested path before returning exact archive files."""
+
+        source = Path(self.src_dir).resolve()
+        files = {}
+        for requested in sorted(self.include_paths):
+            rel_path = Path(requested)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                raise ValueError(f"zip include path must stay within source: {requested!r}")
+            full = (source / rel_path).resolve()
+            if full != source and source not in full.parents:
+                raise ValueError(f"zip include path escapes source: {requested!r}")
+            if not full.exists():
+                raise FileNotFoundError(f"missing zip include path: {requested}")
+            if full.is_dir():
+                for path in sorted(item for item in full.rglob("*") if item.is_file()):
+                    files[path.relative_to(source).as_posix()] = os.fspath(path)
+            elif full.is_file():
+                files[full.relative_to(source).as_posix()] = os.fspath(full)
+            else:
+                raise ValueError(f"zip include path is not a regular file or directory: {requested!r}")
+        return tuple(sorted(files.items()))
 
     def close(self) -> None:
         # Nothing to clean up (no temp dir).
@@ -277,3 +274,59 @@ class ZipExportStore(Store):
 
     def __repr__(self) -> str:
         return f"{type(self)}(base_dir: {self.src_dir} dest: {self.zip_dest})"
+
+
+def _commit_zip_destination(zip_dest, write_archive) -> None:
+    """Build a complete archive before publishing it to its destination.
+
+    Filesystem paths use same-directory atomic replacement. Generic file-like
+    destinations cannot provide an atomic replacement primitive; they are only
+    mutated after archive construction succeeds, but a failure while copying the
+    completed archive into the caller-owned object can still leave partial data.
+    """
+
+    file_like = is_binary_file_like(zip_dest)
+    if file_like:
+        parent = None
+    else:
+        destination = Path(os.fspath(zip_dest))
+        parent = destination.parent
+        if not parent.exists():
+            raise FileNotFoundError(f"zip destination parent does not exist: {parent}")
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w+b",
+            dir=None if parent is None else parent,
+            prefix=".dryml-zip-",
+            delete=False,
+        ) as temp:
+            temp_path = Path(temp.name)
+        with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            write_archive(zf)
+        with temp_path.open("rb") as handle:
+            os.fsync(handle.fileno())
+        if file_like:
+            with temp_path.open("rb") as source:
+                zip_dest.seek(0)
+                zip_dest.truncate(0)
+                shutil.copyfileobj(source, zip_dest, length=1024 * 1024)
+            flush = getattr(zip_dest, "flush", None)
+            if callable(flush):
+                flush()
+            zip_dest.seek(0)
+        else:
+            os.replace(temp_path, destination)
+            temp_path = None
+            if os.name == "posix":
+                descriptor = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass

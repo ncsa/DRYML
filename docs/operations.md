@@ -104,6 +104,64 @@ Dispatch metadata wraps operation IDs without changing operation identity. `Disp
 
 Local `dryml.managed` execution also records the existing method-call `OperationSpec`; managed Store selection, leases, realization IDs, callback policy, progress, checkpoints, and output effects do not alter that spec identity. Dispatch transport for managed operations is a separate layer and is not implied by the local runtime.
 
+## Managed Sharing And Retention
+
+Managed recipes and completed results use separate explicit workflows:
+
+```python
+from dryml.managed import export_recipe, transfer_realizations
+
+export_recipe(operation.definition, collaborator_store, main=True)
+transfer_realizations(source_store, collaborator_store, operation.compute.result)
+```
+
+`export_recipe()` writes only the complete definition closure, including
+non-materializing `RefCDef` targets. It does not construct producer Objects or
+copy Object state, records, products, or managed control. The recipient can
+materialize the recipe and compute its own realization.
+
+`transfer_realizations()` validates and copies an exact completed realization,
+its typed output/execution/realization records, product manifests and bytes,
+committed checkpoint when present, representation specs, producer definitions,
+and recursively consumed exact-result dependencies. The default transfers the
+source active snapshot and activates it only when the destination has no active
+selection and its current declaration is compatible. Use `history="all"` for
+all completed realizations across retained declaration generations, or
+`activate="inactive"` to retain imported results without selecting one. Retry
+adopts only byte-identical content; missing paths and conflicting content IDs
+fail closed. Source owners, leases, diagnostics, partial work, and fence epochs
+are not transferred. Committed checkpoint content is retained when the immutable
+realization record references it; other partial attempt work is not transferred.
+Compatible exact consumed dependencies also receive sanitized active pointers
+when absent so normal managed reuse can resolve the transferred input vector.
+Existing destination selections are never overwritten.
+For all-history transfer, every historical consumed activation is validated,
+but destination selection follows only the source-active root's exact dependency
+chain; conflicting historical dependencies remain retained and inactive.
+
+Retained realization history is never deleted automatically. Cleanup is a
+separate dry-run and execution workflow:
+
+```python
+from dryml.managed import execute_cleanup, plan_cleanup
+
+plan = plan_cleanup(
+    store,
+    operation.compute.result,
+    realization_ids=(old_realization_id,),
+)
+execute_cleanup(store, plan)
+```
+
+The dry run refuses active or running state, a leased operation, committed
+checkpoint references, and records referenced or consumed outside the selected
+closure. Execution revalidates protection under Store-local locks, persists an
+immutable exact deletion intent, and can be continued after interruption with
+`resume_cleanup(store, plan.cleanup_id)`. A retry deletes only paths named by
+that intent; it never expands the deletion set from a later scan. Resume still
+rechecks live activation, lease, checkpoint, and authoritative record/spec
+references, including when an earlier attempt already removed selected files.
+
 For `pickle_small`, canonical operation arguments retain the one internal
 `{"$literal": "dryml.pickled_callable.sha256:..."}` identity marker. Dispatch
 validates its exact suffix and `identity_arg_count`, strips it only from the

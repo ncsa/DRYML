@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,7 +24,12 @@ from .policy import (
     normalize_record_policy,
     policy_includes_products,
 )
-from .products import validate_product_availability
+from .products import (
+    _fsync_directory,
+    _fsync_tree,
+    _trees_match,
+    validate_product_availability,
+)
 from .refs import LocatedRecordRef, LocatedSpecRef, RecordRef, SpecRef
 from .scanner import ReferenceMention, scan_record_refs, scan_spec_refs
 from .specs import spec_dir_name, spec_family_for_id
@@ -208,7 +213,12 @@ def copy_record_closure(
             if issues:
                 raise RecordExportError("source record has unavailable products", context={"record_id": record_id, "issues": [issue.to_json() for issue in issues]})
         for record_id in plan.products:
-            if _copy_product_root(source_io, dest_io, record_id, overwrite=resolved_options.overwrite_sidecars):
+            if _copy_product_root(
+                source_io,
+                dest_io,
+                record_id,
+                collision=resolved_options.destination_collision,
+            ):
                 products_copied.append(record_id)
             else:
                 warnings.append(f"missing product root for {record_id}")
@@ -343,26 +353,49 @@ def _existing_product_record_ids(source_io: Any, record_ids: Iterable[str]) -> t
     return tuple(record_id for record_id in sorted(record_ids) if source_io.product_root(record_id).exists())
 
 
-def _copy_product_root(source_io: Any, dest_io: Any, record_id: str, *, overwrite: bool) -> bool:
+def _copy_product_root(
+    source_io: Any,
+    dest_io: Any,
+    record_id: str,
+    *,
+    collision: str,
+) -> bool:
     source = source_io.product_root(record_id)
     if not source.exists():
         return False
     dest = dest_io.product_root(record_id)
     if dest.exists():
-        if not overwrite:
-            raise RecordExportError("destination product root already exists", context={"record_id": record_id})
-        shutil.rmtree(dest)
+        identical = _trees_match(source, dest)
+        if collision == "adopt-identical" and identical:
+            return True
+        message = (
+            "destination product root already exists with different bytes"
+            if not identical
+            else "destination product root already exists"
+        )
+        raise RecordExportError(message, context={"record_id": record_id})
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.parent / f".copying-{record_id}"
-    if tmp.exists():
-        shutil.rmtree(tmp)
+    import uuid
+
+    tmp = dest.parent / f".copying-{record_id}-{uuid.uuid4().hex}"
     try:
         if source.is_dir():
             shutil.copytree(source, tmp)
         else:
             tmp.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, tmp / Path(source).name)
-        tmp.replace(dest)
+        _fsync_tree(tmp)
+        try:
+            tmp.replace(dest)
+        except OSError:
+            if dest.exists() and collision == "adopt-identical" and _trees_match(source, dest):
+                shutil.rmtree(tmp, ignore_errors=True)
+            else:
+                raise RecordExportError(
+                    "destination product root appeared during copy",
+                    context={"record_id": record_id},
+                )
+        _fsync_directory(dest.parent)
     except Exception:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)

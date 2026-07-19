@@ -3,8 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterable
 import os
+import tempfile
 
-from ..utils.general import pickle_load, pickle_save
+from ..utils.general import pickle_load
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
 
 class Store(ABC):
@@ -115,7 +116,41 @@ class Store(ABC):
         existing = self.read_definition(cdef)
         if existing is not None and existing != cdef:
             raise ValueError("Stored definition does not match its stable-hash location.")
-        pickle_save(cdef, self._def_file(cdef))
+        if existing == cdef:
+            return
+        from ..utils.general import pickler
+
+        path = self._def_file(cdef)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb", dir=obj_dir, prefix=".def.pkl.", delete=False
+            ) as handle:
+                handle.write(pickler(cdef))
+                handle.flush()
+                os.fsync(handle.fileno())
+                temp_path = handle.name
+            os.replace(temp_path, path)
+            if os.name == "posix":
+                directories = dict.fromkeys(
+                    (
+                        obj_dir,
+                        os.path.dirname(obj_dir),
+                        os.fspath(self.object_root_dir),
+                    )
+                )
+                for directory in directories:
+                    descriptor = os.open(
+                        directory,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+        finally:
+            if temp_path is not None and os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
         """

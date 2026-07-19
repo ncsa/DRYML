@@ -89,6 +89,10 @@ class ManagedOutputError(ManagedError, RuntimeError):
     """Managed execution did not produce its exact declared output effects."""
 
 
+class ManagedCleanupRefusedError(ManagedError, RuntimeError):
+    """Explicit cleanup selected active, leased, or referenced state."""
+
+
 class CallbackFailure(ManagedError, RuntimeError):
     """A strict runtime callback failed and stopped managed execution."""
 
@@ -105,6 +109,7 @@ __all__ = [
     "ManagedInputValidationRequiredError",
     "ManagedLeaseConflictError",
     "ManagedCapabilityError",
+    "ManagedCleanupRefusedError",
     "ManagedInterruptedError",
     "ManagedRerunRequiredError",
     "ManagedOutputError",

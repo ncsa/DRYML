@@ -280,3 +280,29 @@ def test_typed_record_closure_and_self_product_export(tmp_path):
     copied = dest_io.read_record(target_state.record_id)
     assert dest_io.resolve_storage_ref(copied["payload"]["storage"][0], record_id=target_state.record_id).joinpath("state.txt").read_text(encoding="utf-8") == "target"
     assert target_state.record_id in report.products_copied
+
+
+def test_copy_record_closure_idempotently_adopts_identical_product(tmp_path):
+    source, seed, *_ = _seed_store(tmp_path)
+    source_io = RecordStoreIO(source)
+    product = source_io.resolve_storage_ref(
+        StorageRef.product_dir(seed.record_id, path="artifact"), create=True
+    )
+    product.joinpath("data.txt").write_text("same", encoding="utf-8")
+    destination = DirStore(tmp_path / "destination")
+
+    first = copy_record_closure(
+        source,
+        destination,
+        seed_records=(seed.record_id,),
+        options=RecordPolicyOptions(include_products=True),
+    )
+    second = copy_record_closure(
+        source,
+        destination,
+        seed_records=(seed.record_id,),
+        options=RecordPolicyOptions(include_products=True),
+    )
+
+    assert first.products_copied == (seed.record_id,)
+    assert second.products_copied == (seed.record_id,)
