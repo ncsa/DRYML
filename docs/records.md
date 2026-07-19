@@ -414,9 +414,10 @@ Representative payloads:
 ```
 
 Dispatch and managed runtimes project exception failures to this bounded form
-before writing responses, diagnostics, execution records, or managed control
-state. Exception messages and tracebacks remain transient and are not durable
-failure provenance.
+before writing diagnostics, execution records, managed control state, Store
+specs, or exported closures. Transient worker and coordinator results may return
+the exception message to the authorized caller, but do not include tracebacks;
+those transport details are projected again before any durable write.
 
 ```json
 {"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "cancelled", "cancellation": {"requested": true, "method": "SIGTERM", "escalated": false}}

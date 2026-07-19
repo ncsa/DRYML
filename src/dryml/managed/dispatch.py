@@ -30,7 +30,7 @@ from dryml.records import (
     validate_realization_id,
     write_execution_record,
 )
-from dryml.records.execution import persistence_safe_execution_error
+from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
 
 from .callbacks import CallbackCoordinator, ControlRequest, preflight_callbacks
 from .context import OperationContext, OperationResult, OutputEffect, _OperationInterrupted
@@ -491,7 +491,7 @@ class _ManagedCoordinatorSession:
                 failed = replace(
                     response,
                     status="failed",
-                    error=persistence_safe_execution_error(exc),
+                    error=transient_execution_error(exc),
                     diagnostics=(*response.diagnostics, {"message": "managed coordinator finalization failed"}),
                 )
                 return self._finish_incomplete(failed, status="failed")
@@ -643,14 +643,14 @@ class ManagedDispatchFuture:
                     operation_id=self.session.plan.envelope.operation_id,
                     dispatch_id=self.session.plan.dispatch_spec.get("id"),
                     recipe_id=self.session.plan.execution_recipe.get("id"),
-                    error=persistence_safe_execution_error(exc),
+                    error=transient_execution_error(exc),
                     diagnostics=({"message": "managed coordinator event loop failed"},),
                 )
             elif response.status == "cancelled":
                 response = replace(
                     response,
                     status="failed",
-                    error=persistence_safe_execution_error(exc),
+                    error=transient_execution_error(exc),
                     cancellation=None,
                 )
             self.worker_response = self.session._finish_incomplete(

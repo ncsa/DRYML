@@ -250,14 +250,17 @@ def test_worker_failure_retains_structured_effects_and_prior_active(tmp_path, ta
     assert failed.status == "failed"
     assert failed.error == {
         "type": "RuntimeError",
-        "metadata": {"code": "execution_failed"},
+        "message": secret,
     }
     assert failed.managed_result["status"] == "failed"
     assert failed.managed_result["effects"]["result"]["slot"] == "result"
     failure_record = ExecutionRecord.from_envelope(
         store.records.read_record(failed.execution_record_id)
     )
-    assert failure_record.error.to_json() == failed.error
+    assert failure_record.error.to_json() == {
+        "type": "RuntimeError",
+        "metadata": {"code": "execution_failed"},
+    }
     assert secret not in str(failure_record.to_envelope())
     assert box.compute.history(store=store)[-1].diagnostics == (
         "RuntimeError: execution_failed",
@@ -300,12 +303,15 @@ def test_activation_event_failure_keeps_verified_rerun_inactive_and_old_active(
     assert failed.status == "failed"
     assert failed.error == {
         "type": "RuntimeError",
-        "metadata": {"code": "execution_failed"},
+        "message": secret,
     }
     failure_record = ExecutionRecord.from_envelope(
         store.records.read_record(failed.execution_record_id)
     )
-    assert failure_record.error.to_json() == failed.error
+    assert failure_record.error.to_json() == {
+        "type": "RuntimeError",
+        "metadata": {"code": "execution_failed"},
+    }
     assert secret not in str(failure_record.to_envelope())
     assert box.compute.results(store=store)["result"].record_id == first.produced_record_ids[0]
     history = box.compute.history(store=store)

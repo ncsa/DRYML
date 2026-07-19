@@ -307,6 +307,13 @@ def persistence_safe_execution_error(
     }
 
 
+def transient_execution_error(error: BaseException) -> dict[str, Any]:
+    """Return caller-facing failure details that must not cross persistence boundaries."""
+
+    projected = persistence_safe_execution_error(error)
+    return {"type": projected["type"], "message": str(error)}
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionCancellationInfo:
     """Normalized cancellation facts for cancelled executions."""

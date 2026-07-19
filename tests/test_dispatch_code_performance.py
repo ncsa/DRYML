@@ -58,8 +58,8 @@ def test_pure_benchmark_emits_bounded_versioned_json_and_operation_counts():
     assert scenarios["dispatch.function_plan_no_probe"]["samples"][0]["operations"].get("environment_probe_calls", 0) == 0
     assert scenarios["trace.repeated_16"]["samples"][0]["metrics"]["observed_calls"] == 16
     assert scenarios["world.plan_four_workers"]["samples"][0]["metrics"]["workers"] == 4
-    assert scenarios["world.plan_one_worker"]["samples"][0]["operations"]["planning_metadata_snapshots"] == 3
-    assert scenarios["world.plan_four_workers"]["samples"][0]["operations"]["planning_metadata_snapshots"] == 6
+    assert scenarios["world.plan_one_worker"]["samples"][0]["operations"]["planning_metadata_snapshots"] == 1
+    assert scenarios["world.plan_four_workers"]["samples"][0]["operations"]["planning_metadata_snapshots"] == 1
     assert str(benchmark.ROOT) not in encoded
     assert str(benchmark.FIXTURE_DIR) not in encoded
 

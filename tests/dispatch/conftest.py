@@ -179,6 +179,9 @@ def target_module(tmp_path):
                 print("before failure")
                 raise ValueError(message)
 
+            def fail_secret():
+                raise ValueError("dispatch-secret-sentinel-91e6")
+
             def sleep_forever():
                 signal.signal(signal.SIGINT, lambda signum, frame: time.sleep(10))
                 while True:

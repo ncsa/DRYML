@@ -6,7 +6,7 @@ from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
-from dryml.records import ExecutionRecord
+from dryml.records import ExecutionRecord, copy_record_closure
 
 
 def _env(target_module):
@@ -18,7 +18,7 @@ def test_success_and_failure_execution_records_query(tmp_path, target_module):
     dispatcher = Dispatcher(store=store)
     secret = "dispatch-secret-sentinel-91e6"
     ok = attach_operation_id(make_function_call_spec("dispatch_target:noisy_add", args=[2, 3], metadata={"owner": "user"}))
-    fail = attach_operation_id(make_function_call_spec("dispatch_target:fail", args=[secret]))
+    fail = attach_operation_id(make_function_call_spec("dispatch_target:fail_secret"))
 
     plan = dispatcher.plan(ok, environment=_env(target_module))
     assert plan.envelope.operation_spec["payload"] == ok["payload"]
@@ -53,12 +53,29 @@ def test_success_and_failure_execution_records_query(tmp_path, target_module):
     assert fail_result.execution_record_id
     assert fail_result.error == {
         "type": "ValueError",
-        "metadata": {"code": "execution_failed"},
+        "message": secret,
     }
     failure_record_data = store.records.read_record(fail_result.execution_record_id)
     failure_record = ExecutionRecord.from_envelope(failure_record_data)
-    assert failure_record.error.to_json() == fail_result.error
-    assert secret not in str(failure_record_data)
+    assert failure_record.error.to_json() == {
+        "type": "ValueError",
+        "metadata": {"code": "execution_failed"},
+    }
+    source_durable = (*store.records.iter_records(), *store.records.iter_specs())
+    assert secret not in str(source_durable)
+
+    exported = DirStore(tmp_path / "exported", query_index="none")
+    copy_record_closure(
+        store,
+        exported,
+        seed_records=[fail_result.execution_record_id],
+        policy="descriptive",
+    )
+    exported_durable = (
+        *exported.records.iter_records(),
+        *exported.records.iter_specs(),
+    )
+    assert secret not in str(exported_durable)
     assert store.records.find_execution_records(operation_id=ok["id"], status="ok")[0].record_id == ok_result.execution_record_id
     assert store.records.find_execution_records(operation_id=fail["id"], status="failed")[0].record_id == fail_result.execution_record_id
 

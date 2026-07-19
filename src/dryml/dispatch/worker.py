@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from dryml.core2.repo import Repo
 from dryml.records import ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, StorageRef, write_execution_record
-from dryml.records.execution import persistence_safe_execution_error
+from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
 from dryml.runtime import RuntimeMode, activate
 from dryml.runtime.specs import RuntimeContextSpec
 
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                 write_json_file(ns.handshake, handshake.to_json())
                 response = _failure_response(envelope, exc, store=(locals().get("stores") or [None])[0])
             else:
-                response = WorkerResponse(status="failed", error=persistence_safe_execution_error(exc), diagnostics=({"message": "worker failed before envelope validation"},))
+                response = WorkerResponse(status="failed", error=transient_execution_error(exc), diagnostics=({"message": "worker failed before envelope validation"},))
             write_json_file(ns.response, response.to_json())
         except Exception as response_exc:
             print(
@@ -200,7 +200,7 @@ def _execute(
                     )
                 error = None
                 if execution.error is not None:
-                    error = persistence_safe_execution_error(execution.error)
+                    error = transient_execution_error(execution.error)
                 return WorkerResponse(
                     status=execution.status,
                     operation_id=envelope.operation_id,
@@ -231,7 +231,7 @@ def _execute(
 
 
 def _failure_response(envelope: ExecutionEnvelope, exc: BaseException, *, store: Any) -> WorkerResponse:
-    error = persistence_safe_execution_error(exc)
+    error = transient_execution_error(exc)
     record_id = _write_worker_record(envelope, store, "failed", error=error, diagnostics=({"message": "worker execution failed"},))
     return WorkerResponse(
         status="failed",
@@ -265,7 +265,9 @@ def _write_worker_record(envelope: ExecutionEnvelope, store: Any, status: str, *
         consumed_cdef_ids=consumed_cdef_ids,
         produced_cdef_ids=produced_cdef_ids,
         logs=logs,
-        error=ExecutionErrorInfo.from_json(error) if error else None,
+        error=ExecutionErrorInfo.from_json(
+            persistence_safe_execution_error(error)
+        ) if error else None,
         cancellation=cancellation,
         diagnostics=diagnostics,
         metadata=_execution_metadata(envelope),

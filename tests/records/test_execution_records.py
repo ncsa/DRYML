@@ -29,7 +29,10 @@ from dryml.records import (
     typed_record_from_envelope,
     unsupported_compiler_execution_record,
 )
-from dryml.records.execution import persistence_safe_execution_error
+from dryml.records.execution import (
+    persistence_safe_execution_error,
+    transient_execution_error,
+)
 
 
 def _id(prefix, char="a"):
@@ -72,6 +75,7 @@ def test_persistence_safe_execution_error_excludes_exception_text():
 
     projected = persistence_safe_execution_error(RuntimeError(secret))
     bounded = persistence_safe_execution_error(oversized_error)
+    transient = transient_execution_error(oversized_error)
 
     assert projected == {
         "type": "RuntimeError",
@@ -84,6 +88,8 @@ def test_persistence_safe_execution_error_excludes_exception_text():
     }
     assert secret not in str(bounded)
     assert oversized_name not in str(bounded)
+    assert transient == {"type": "Error", "message": secret}
+    assert oversized_name not in str(transient)
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", "timeout", "unsupported", "skipped", "degraded"])

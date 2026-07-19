@@ -187,7 +187,12 @@ Use `--pure-samples` up to 1,000, `--managed-samples` up to 100, and repeated
 `--scenario NAME` selectors for focused measurements. The benchmark uses
 temporary Stores, tracked standard-library targets, and fake resource inventory;
 it does not use a network, GPU, downloads, credentials, datasets, or model
-training.
+training. Successful world-planning samples take one bounded planning-metadata
+snapshot after allocation and reuse it for the dispatch spec, execution recipe,
+and every worker envelope. The `planning_metadata_snapshots` count therefore
+remains one as worker count grows; persisted operation, dispatch, recipe, world,
+and allocation specs are separate publication work rather than additional
+metadata projections.
 
 ## Managed Operation Performance Benchmark
 

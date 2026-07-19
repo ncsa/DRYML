@@ -12,6 +12,7 @@ from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHandshakeResponse, write_json_file
 from dryml.dispatch.worker import _wait_for_start_barrier
 from dryml.environments import PythonExecutableSpec
+from dryml.formats import json_ready
 from dryml.operations import attach_operation_id, make_function_call_spec
 from dryml.worlds import WorldSpec
 
@@ -217,6 +218,13 @@ def test_plan_world_persists_all_specs_before_launch(tmp_path):
 
     plan = Dispatcher(store=store).plan_world(op, world=world, inventory=_inventory())
 
+    planning_metadata = plan.dispatch_spec["payload"]["metadata"]
+    assert plan.execution_recipe["payload"]["annotation_report"] == planning_metadata
+    assert all(
+        worker.envelope.to_json()["reporting"]["planning"]
+        == json_ready(planning_metadata)
+        for worker in plan.worker_plans
+    )
     assert store.records.read_spec(plan.operation_spec["id"], family="operation")["id"] == plan.operation_spec["id"]
     assert store.records.read_spec(plan.dispatch_spec["id"], family="dispatch")["id"] == plan.dispatch_spec["id"]
     assert store.records.read_spec(plan.execution_recipe["id"], family="execution_recipe")["id"] == plan.execution_recipe["id"]
