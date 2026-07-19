@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 
 from dryml.core2 import Repo
+from dryml.core2.store.dir import DirStore
 from dryml.core2.tensor_spec import TensorSpec
+from dryml.artifacts import CachedDataset
 from dryml.data import ArrayDataset
 from dryml.models import Experiment
 from dryml.models.sklearn import BasicTraining, RegressionModel
@@ -36,18 +38,23 @@ def test_basic_sklearn_training_updates_model_and_experiment_state():
     np.testing.assert_allclose(model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]), atol=1e-6)
 
 
-def test_experiment_save_load_restores_train_state_and_model(tmp_path):
+def test_managed_experiment_reopens_definition_and_hydrates_trained_model(tmp_path):
+    store = DirStore(tmp_path / "store")
     model = RegressionModel(linear_model.LinearRegression)
-    exp = Experiment(model, BasicTraining(), train_data=_train_data())
-    exp.train()
+    cached = CachedDataset(_train_data())
+    cached.compute(store=store, representation="numpy-sequence")
+    exp = Experiment(model, BasicTraining(), train_data=cached)
+    result = exp.train(store=store)
 
-    repo = Repo(stores=tmp_path)
-    repo.save_object(exp, alias="exp")
-    repo.close(flush=True)
+    Repo(store).save_definition(exp.definition)
+    reopened_store = DirStore(store.base_dir)
+    loaded = Repo(reopened_store).load(exp.definition, restore_state=False)
+    trained = loaded.trained_model(store=reopened_store)
 
-    loaded = Repo(stores=tmp_path).load_alias("exp")
-
-    assert loaded.state.epoch == 1
-    assert loaded.state.step == 3
-    assert loaded.state.phase == "trained"
-    np.testing.assert_allclose(loaded.model(np.array([[3.0, 13.0]], dtype=np.float32)), np.array([4.0]), atol=1e-6)
+    assert result.action == "start"
+    assert loaded.train.status(store=reopened_store).status == "completed"
+    np.testing.assert_allclose(
+        trained(np.array([[3.0, 13.0]], dtype=np.float32)),
+        np.array([4.0]),
+        atol=1e-6,
+    )

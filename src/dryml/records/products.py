@@ -740,7 +740,13 @@ class DurableProductWriter:
         execution_envelope = dict(execution_envelope)
         execution_envelope["payload"] = execution_payload
         execution = ExecutionRecord.from_envelope(execution_envelope)
-        exact_consumed = tuple(link.to_resolved() for link in execution.consumed_records)
+        exact_consumed = tuple(
+            link.to_resolved()
+            for link in execution.consumed_records
+            if link.producer_cdef_id is not None
+        )
+        for link in execution.consumed_records:
+            self.record_io.read_record(link.record_id)
         attached_execution = attach_record_id(execution.to_envelope())
         state = self.lease.operation._read_realization(self.realization_id)
         if state.current_attempt_id != self.attempt_id:

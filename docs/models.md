@@ -11,6 +11,8 @@ Important public types:
 - `Model`
 - `AutoEncoder`
 - `TrainFunction`
+- `TrainCapability`
+- `TrainResumeMode`
 - `TrainState`
 - `Experiment`
 
@@ -55,13 +57,13 @@ Calling the autoencoder applies encoder then decoder. Output-spec inference foll
 
 ## Training Functions
 
-`TrainFunction` represents training behavior as a DRYML method. Backend-specific training functions implement the details for TensorFlow, PyTorch, sklearn, or other systems.
+`TrainFunction` represents training behavior as a DRYML method. Backend-specific training functions implement the details for TensorFlow, PyTorch, sklearn, or other systems. Its definition also supplies the deterministic output declaration used by `Experiment.train`.
 
-Training functions should update model state and training metadata while keeping stable construction identity separate from runtime results.
+Training functions are non-resumable by default. A trainer that can checkpoint every mutable component may advertise `TrainCapability.exact(...)` and call `TrainFunction.checkpoint(...)` at managed safe points. Unsupported or partially checkpointed pipelines must remain non-resumable and require an explicit rerun after interruption.
 
 ## Experiments
 
-`Experiment` is a serializable object intended to group model, data, training configuration, and results.
+`Experiment` is a logical recipe containing non-materializing model, trainer, train, validation, and test-data edges. Managed training requires completed `CachedDataset` inputs; it resolves their exact active records once and never computes their sources. Completed NumPy-sequence and Parquet records are iterated directly without implicit adaptation.
 
 A typical experiment graph might include:
 
@@ -72,7 +74,22 @@ A typical experiment graph might include:
 - metrics
 - artifacts
 
-Because this graph is made of DRYML objects, it can be saved, queried, loaded, and reused.
+Because this graph is made of DRYML objects, it can be saved, queried, loaded, and reused. Trained weights are immutable `StoredStateRecord` products owned and selected by the Experiment's `train` realization, not mutable Experiment state. `experiment.trained_model(store=...)` verifies that product and hydrates a fresh uncached model instance.
+
+An Experiment normally snapshots the selected Store's ordinary model directory before training. The snapshot manifest participates in record identity, so changed initial bytes make an existing train result stale. Fine-tuning selects prior state explicitly without embedding a Store-owned record in identity:
+
+```python
+fine_tune = Experiment(
+    model,
+    train_fn,
+    train_data=completed_cache,
+    model_state=prior_experiment.train.result,
+)
+fine_tune.train(store=store)
+model_for_inference = fine_tune.trained_model(store=store)
+```
+
+Pending exact-capability work retains its original cache and model-state bindings across resume even if a producer's active realization changes. A normal call reuses a completed train result only while current logical inputs and the current ordinary-state snapshot still match; otherwise use `experiment.train.rerun(...)` explicitly.
 
 ## Backend Wrappers
 
@@ -106,24 +123,19 @@ maintained backend paths, not legacy compute-context or `Trainable` APIs.
 
 ## Train State
 
-`TrainState` records coarse training lifecycle state. Use it to distinguish untrained, trained, and related phases where supported by the training API.
+`TrainState` remains a concrete compatibility view for direct in-memory trainers and is included in generic trainer checkpoints. Managed lifecycle status and result authority come from `experiment.train.status(...)`, `results(...)`, and realization history.
 
 ## Common Pattern
 
 ```python
-from dryml.core2 import Repo
-
-repo = Repo()
-
-# model, dataset, and trainer are DRYML objects.
+# model and trainer are DRYML objects; train_cache is a completed CachedDataset.
 experiment = Experiment(
     model=model,
-    train_data=train_dataset,
+    train_data=train_cache,
     train_fn=train_fn,
-    repo=repo,
 )
-
-repo.save_object(experiment)
+experiment.train(store=store)
+trained = experiment.trained_model(store=store)
 ```
 
 Exact constructor signatures vary by model and experiment class. Prefer backend-specific docs and docstrings for detailed parameters.

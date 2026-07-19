@@ -407,10 +407,18 @@ def _validate_exact_realization(
             raise ManagedStateError("execution record binds a different realization")
         if set(execution.produced_record_ids) != output_ids:
             raise ManagedStateError("execution produced lineage is inconsistent")
-        if tuple(link.to_resolved() for link in execution.consumed_records) != realization.consumed_records:
+        if tuple(
+            link.to_resolved()
+            for link in execution.consumed_records
+            if link.producer_cdef_id is not None
+        ) != realization.consumed_records:
             raise ManagedStateError("execution consumed lineage is not exact")
         for consumed in realization.consumed_records:
             store.records.read_record(consumed.record_id)
+        for consumed in execution.consumed_records:
+            envelope = store.records.read_record(consumed.record_id)
+            if consumed.producer_cdef_id is None:
+                require_product_integrity(store.records, envelope)
         return realization
     except ManagedStateError:
         raise
@@ -422,11 +430,14 @@ def _node_record_ids(store: Store, node: _TransferNode) -> tuple[str, ...]:
     realization = RealizationRecord.from_envelope(
         store.records.read_record(node.realization_record_id)
     )
+    execution = ExecutionRecord.from_envelope(
+        store.records.read_record(realization.execution_record_id)
+    )
     return (
         node.realization_record_id,
         realization.execution_record_id,
         *(output.record_id for output in realization.outputs),
-        *(consumed.record_id for consumed in realization.consumed_records),
+        *(consumed.record_id for consumed in execution.consumed_records),
     )
 
 

@@ -494,6 +494,8 @@ class OperationLease:
         rerun: bool = False,
         active_inputs_valid: bool | Callable[[RealizationState], bool] | None = None,
         realization_id: str | None = None,
+        consumed_records: tuple[Any, ...] = (),
+        consumed_record_links: tuple[Any, ...] = (),
     ) -> OperationDecision:
         """Model normal resume/reuse precedence or start an explicit rerun.
 
@@ -562,6 +564,8 @@ class OperationLease:
             attempt_ids=(attempt_id,),
             current_attempt_id=attempt_id,
             sequence=sequence,
+            consumed_records=tuple(consumed_records),
+            consumed_record_links=tuple(consumed_record_links),
         )
         self.operation._write_realization(state)
         self._write_control_for(state)
@@ -829,12 +833,18 @@ class OperationLease:
         if set(execution.produced_record_ids) != output_ids:
             raise ManagedStateError("execution produced lineage does not match realization outputs")
         try:
-            execution_consumed = tuple(link.to_resolved() for link in execution.consumed_records)
+            execution_consumed = tuple(
+                link.to_resolved()
+                for link in execution.consumed_records
+                if link.producer_cdef_id is not None
+            )
         except Exception as exc:
             raise ManagedStateError("execution consumed lineage is not exact") from exc
         if execution_consumed != realization.consumed_records:
             raise ManagedStateError("execution consumed lineage does not match realization")
         for consumed in realization.consumed_records:
+            record_io.read_record(consumed.record_id)
+        for consumed in execution.consumed_records:
             record_io.read_record(consumed.record_id)
 
     def _assert_current(self) -> NamespaceState:

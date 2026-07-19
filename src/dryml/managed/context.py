@@ -106,6 +106,8 @@ class OperationContext:
         checkpoint_schema: str | None,
         early_completion: bool,
         is_resume: bool,
+        consumed_records: tuple[Any, ...] = (),
+        consumed_record_links: tuple[Any, ...] = (),
         max_events: int = 32,
     ):
         self.producer = producer
@@ -117,6 +119,8 @@ class OperationContext:
         self.checkpoint_schema = checkpoint_schema
         self.early_completion = early_completion
         self.is_resume = is_resume
+        self.consumed_records = tuple(consumed_records)
+        self.consumed_record_links = tuple(consumed_record_links)
         self.writer = DurableProductWriter(
             lease.operation.managed_store.store.records,
             lease,

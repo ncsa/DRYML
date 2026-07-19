@@ -14,6 +14,7 @@ from dryml.records import (
     ExecutionRecordLink,
     LocatedRecordRef,
     RealizationRecord,
+    require_product_integrity,
 )
 
 from .callbacks import CallbackCoordinator, preflight_callbacks
@@ -109,7 +110,6 @@ def invoke_managed(
         early_completion=capabilities.early_completion,
     )
     input_refs = _managed_inputs(producer, descriptor.method_name, args, kwargs)
-    preflight_inputs = resolve_inputs(input_refs, store=selected) if input_refs else ()
     operation_spec = attach_operation_id(
         make_method_call_spec(
             OperationKey.from_producer(producer, descriptor.method_name).producer_cdef_id,
@@ -140,18 +140,64 @@ def invoke_managed(
             has_pending=control is not None and control.pending_realization_id is not None,
             rerun=rerun,
         )
+    control = None if advance else operation._read_control(missing_ok=True)
+    pending_id = None if control is None else control.pending_realization_id
     if not advance:
-        control = operation._read_control(missing_ok=True)
-        pending_id = None if control is None else control.pending_realization_id
         pending_cannot_resume = pending_id is not None and not rerun
         pending_cannot_resume = pending_cannot_resume and not capabilities.resumable
         if pending_cannot_resume:
             raise ManagedRerunRequiredError(
                 "pending realization cannot resume under the current whole-pipeline capabilities; explicit rerun is required"
             )
+    pending_state = (
+        operation._read_realization(pending_id)
+        if pending_id is not None and not rerun
+        else None
+    )
+    if pending_state is not None:
+        _validate_bound_inputs(
+            input_refs,
+            pending_state.consumed_records,
+            pending_state.consumed_record_links,
+            selected,
+        )
+        preflight_inputs = pending_state.consumed_records
+        preflight_record_inputs = pending_state.consumed_record_links
+    else:
+        preflight_inputs = resolve_inputs(input_refs, store=selected) if input_refs else ()
+        preflight_record_inputs = ()
+    _validate_managed_inputs(
+        producer,
+        descriptor.method_name,
+        args,
+        kwargs,
+        store=selected,
+        consumed=preflight_inputs,
+        record_inputs=preflight_record_inputs,
+    )
 
     with operation.acquire(advance_declaration=advance) as lease:
-        consumed = resolve_inputs(input_refs, store=selected) if input_refs else ()
+        current_control = operation._read_control(missing_ok=True)
+        current_pending_id = None if current_control is None else current_control.pending_realization_id
+        if current_pending_id is not None and not rerun:
+            current_pending = operation._read_realization(current_pending_id)
+            consumed = current_pending.consumed_records
+            record_inputs = current_pending.consumed_record_links
+            _validate_bound_inputs(input_refs, consumed, record_inputs, selected)
+        else:
+            consumed = resolve_inputs(input_refs, store=selected) if input_refs else ()
+            record_inputs = _managed_record_inputs(
+                producer, descriptor.method_name, args, kwargs, store=selected
+            )
+        _validate_managed_inputs(
+            producer,
+            descriptor.method_name,
+            args,
+            kwargs,
+            store=selected,
+            consumed=consumed,
+            record_inputs=record_inputs,
+        )
         if preflight_inputs and consumed != preflight_inputs:
             # Both vectors were individually stable. The under-lease vector is
             # the execution-time authority and is recorded exactly.
@@ -163,12 +209,21 @@ def invoke_managed(
             realization = RealizationRecord.from_envelope(
                 selected.records.read_record(active.realization_record_id)
             )
-            return realization.consumed_records == consumed
+            execution = ExecutionRecord.from_envelope(
+                selected.records.read_record(realization.execution_record_id)
+            )
+            direct = tuple(
+                link for link in execution.consumed_records
+                if link.producer_cdef_id is None
+            )
+            return realization.consumed_records == consumed and direct == record_inputs
 
         decision = lease.prepare(
             resumable=capabilities.resumable,
             rerun=rerun,
             active_inputs_valid=active_inputs_valid,
+            consumed_records=tuple(consumed),
+            consumed_record_links=tuple(record_inputs),
         )
         if decision.action == "reuse":
             return _invocation_from_state(selected, decision.action, decision.realization)
@@ -185,6 +240,8 @@ def invoke_managed(
             checkpoint_schema=capabilities.checkpoint_schema,
             early_completion=capabilities.early_completion,
             is_resume=decision.action == "resume",
+            consumed_records=tuple(consumed),
+            consumed_record_links=tuple(record_inputs),
         )
         context.publish_terminal("started")
         token = context.activate()
@@ -201,7 +258,7 @@ def invoke_managed(
                 realization_id=decision.realization.realization_id,
                 consumed_records=tuple(
                     ExecutionRecordLink.from_resolved(item) for item in consumed
-                ),
+                ) + tuple(record_inputs),
             )
             publication = context.writer.finalize(
                 output_records,
@@ -362,6 +419,63 @@ def _managed_inputs(producer, method, args, kwargs) -> tuple[ManagedOutputRef, .
     if any(not isinstance(ref, ManagedOutputRef) for ref in refs):
         raise TypeError("managed input provider must return only ManagedOutputRef values")
     return refs
+
+
+def _managed_record_inputs(producer, method, args, kwargs, *, store) -> tuple[ExecutionRecordLink, ...]:
+    provider = getattr(producer, "__dryml_managed_record_inputs__", None)
+    if provider is None:
+        return ()
+    values = tuple(provider(method, args, dict(kwargs), store=store))
+    links = []
+    for value in values:
+        if not isinstance(value, ExecutionRecordLink):
+            raise TypeError("managed record input provider must return ExecutionRecordLink values")
+        if value.producer_cdef_id is not None:
+            raise TypeError("managed direct record inputs cannot claim logical-output resolution")
+        envelope = store.records.read_record(value.record_id)
+        require_product_integrity(store.records, envelope)
+        links.append(value)
+    return tuple(links)
+
+
+def _validate_bound_inputs(input_refs, consumed, record_inputs, store) -> None:
+    if len(input_refs) != len(consumed):
+        raise ManagedCapabilityError("pending realization input contract no longer matches")
+    for ref, resolved in zip(input_refs, consumed):
+        key = OperationKey.from_producer(ref.producer, ref.method)
+        if (
+            resolved.producer_cdef_id != key.producer_cdef_id
+            or resolved.method != ref.method
+            or resolved.output_slot != ref.slot
+        ):
+            raise ManagedCapabilityError("pending realization input binding is incompatible")
+        require_product_integrity(store.records, store.records.read_record(resolved.record_id))
+    for link in record_inputs:
+        require_product_integrity(store.records, store.records.read_record(link.record_id))
+
+
+def _validate_managed_inputs(
+    producer,
+    method,
+    args,
+    kwargs,
+    *,
+    store,
+    consumed,
+    record_inputs,
+) -> None:
+    """Run an optional producer check over exact resolved input records."""
+
+    validator = getattr(producer, "__dryml_managed_validate_inputs__", None)
+    if validator is not None:
+        validator(
+            method,
+            args,
+            dict(kwargs),
+            store=store,
+            consumed_records=tuple(consumed),
+            consumed_record_links=tuple(record_inputs),
+        )
 
 
 def _walk_refs(value, *, _seen=None):

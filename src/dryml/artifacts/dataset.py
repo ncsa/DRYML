@@ -19,6 +19,7 @@ from dryml.artifacts.representations.numpy_sequence import (
 from dryml.artifacts.representations.parquet import (
     PARQUET_KIND,
     PARQUET_REPRESENTATION,
+    iter_parquet_sequence,
     numpy_to_parquet_adapter_registry,
 )
 from dryml.core2 import RefCDef, Repo
@@ -147,6 +148,19 @@ class CachedDataset(Artifact, Dataset):
         """Return an iterable pinned to one explicit repository authority."""
 
         return CachedDatasetView(self, repo=repo, store=store)
+
+    def view_record(self, record_id: str, repo=None, *, store=None) -> "CachedDatasetRecordView":
+        """Return an iterable pinned to one exact completed cache record.
+
+        This is used by managed consumers after concurrency-stable logical
+        resolution. It never follows a later active pointer or computes source
+        data.
+        """
+
+        view = CachedDatasetRecordView(self, record_id)
+        view.repo = repo
+        view.store = store
+        return view
 
     def active_record(self, repo=None, *, store=None):
         """Return the exact validated active ``DataRecord`` and product root.
@@ -279,6 +293,27 @@ class CachedDataset(Artifact, Dataset):
             record_id=located.record_id,
         )
         return located, record, root, representation, selected
+
+    def _output_record_by_id(self, record_id, repo=None, *, store=None):
+        from dryml.managed.store import resolve_managed_store
+
+        selected = resolve_managed_store(repo, store=store, target=self)
+        envelope = selected.records.read_record(record_id)
+        record = DataRecord.from_envelope(envelope)
+        if record.realization_id is None or record.output_slot != "data":
+            raise RecordValidationError("pinned cache DataRecord has invalid managed ownership")
+        if record.subject_cdef_id != format_cdef_id(self.definition.stable_hash()):
+            raise RecordValidationError("pinned cache DataRecord belongs to another CachedDataset")
+        representation = RepresentationSpec(
+            selected.records.read_spec(record.representation_id, family="representation")
+        )
+        if representation.kind not in {NUMPY_SEQUENCE_KIND, PARQUET_KIND}:
+            raise ManagedCapabilityError("pinned cache representation is unsupported")
+        require_product_integrity(selected.records, envelope)
+        if len(record.storage) != 1 or record.storage[0].kind != "product-dir":
+            raise RecordValidationError("pinned cache DataRecord storage is malformed")
+        root = selected.records.resolve_storage_ref(record.storage[0], record_id=record_id)
+        return root, representation
 
     def __dryml_managed_preflight__(self, method, args, kwargs):
         if method != "compute":
@@ -477,6 +512,33 @@ class CachedDatasetView:
             store=self.store,
         )
         yield from iter_numpy_sequence(root)
+
+
+class CachedDatasetRecordView(Dataset):
+    """Invocation-local Dataset pinned to one immutable cache record."""
+
+    def __init__(self, dataset: CachedDataset, record_id: str):
+        self.dataset = dataset
+        self.record_id = record_id
+        self.repo = None
+        self.store = None
+        super().__init__(spec=dataset.spec)
+
+    def __len__(self):
+        return self.dataset.__len__()
+
+    def __iter__(self):
+        root, representation = self.dataset._output_record_by_id(
+            self.record_id,
+            repo=self.repo,
+            store=self.store,
+        )
+        iterator = (
+            iter_numpy_sequence
+            if representation.kind == NUMPY_SEQUENCE_KIND
+            else iter_parquet_sequence
+        )
+        yield from iterator(root)
 
 
 def _normalize_representation(value):

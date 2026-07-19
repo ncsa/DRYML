@@ -11,6 +11,7 @@ from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.refs import format_cdef_id, parse_cdef_id
 from dryml.formats.errors import ContentIDError
 from dryml.formats.ids import parse_content_id
+from dryml.records import ExecutionRecordLink, ResolvedRecord
 
 from .declarations import ManagedMethodDeclaration
 from .errors import ManagedStateError
@@ -110,6 +111,8 @@ class RealizationState:
     checkpoint_head: str | None = None
     diagnostics: tuple[str, ...] = ()
     realization_record_id: str | None = None
+    consumed_records: tuple[ResolvedRecord | Mapping[str, Any], ...] = ()
+    consumed_record_links: tuple[ExecutionRecordLink | Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         _require_match(self.realization_id, _REALIZATION_RE, "realization_id")
@@ -144,6 +147,19 @@ class RealizationState:
         object.__setattr__(self, "attempt_ids", attempts)
         object.__setattr__(self, "diagnostics", diagnostics)
         _validate_optional_record_id(self.realization_record_id, "realization_record_id")
+        consumed = tuple(
+            item if isinstance(item, ResolvedRecord) else ResolvedRecord.from_json(item)
+            for item in self.consumed_records
+        )
+        direct = tuple(
+            item if isinstance(item, ExecutionRecordLink)
+            else ExecutionRecordLink.from_json(item, default_required=True)
+            for item in self.consumed_record_links
+        )
+        if any(item.producer_cdef_id is not None for item in direct):
+            raise ManagedStateError("direct control inputs cannot claim logical resolution")
+        object.__setattr__(self, "consumed_records", consumed)
+        object.__setattr__(self, "consumed_record_links", direct)
 
     def to_json(self) -> dict[str, Any]:
         """Return the strict versioned JSON representation."""
@@ -160,12 +176,17 @@ class RealizationState:
             "checkpoint_head": self.checkpoint_head,
             "diagnostics": list(self.diagnostics),
             "realization_record_id": self.realization_record_id,
+            "consumed_records": [item.to_json() for item in self.consumed_records],
+            "consumed_record_links": [item.to_json() for item in self.consumed_record_links],
         }
 
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> "RealizationState":
         """Validate and decode one realization control document."""
 
+        value = dict(value)
+        value.setdefault("consumed_records", [])
+        value.setdefault("consumed_record_links", [])
         data = _strict_mapping(
             value,
             {
@@ -180,6 +201,8 @@ class RealizationState:
                 "checkpoint_head",
                 "diagnostics",
                 "realization_record_id",
+                "consumed_records",
+                "consumed_record_links",
             },
             "realization state",
         )
@@ -196,6 +219,8 @@ class RealizationState:
                 checkpoint_head=data["checkpoint_head"],
                 diagnostics=_string_tuple(data["diagnostics"], "diagnostics"),
                 realization_record_id=data["realization_record_id"],
+                consumed_records=tuple(data["consumed_records"]),
+                consumed_record_links=tuple(data["consumed_record_links"]),
             )
         except KeyError as exc:
             raise ManagedStateError(f"realization state is missing {exc.args[0]!r}") from exc

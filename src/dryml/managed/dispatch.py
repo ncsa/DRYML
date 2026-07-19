@@ -23,6 +23,7 @@ from dryml.records import (
     ExecutionRecord,
     ExecutionRecordLink,
     RealizationRecord,
+    ResolvedRecord,
     RepresentationSpec,
     StorageRef,
     attach_spec_id,
@@ -46,7 +47,10 @@ from .runtime import (
     _effective_capabilities,
     _invocation_from_state,
     _managed_inputs,
+    _managed_record_inputs,
     _operation_preflight,
+    _validate_bound_inputs,
+    _validate_managed_inputs,
 )
 from .resolution import resolve_inputs
 from .state import OperationKey, declaration_fingerprint
@@ -153,8 +157,6 @@ class ManagedDispatchRequest:
         selected = plan.store
         producer = self.bound.__self__
         descriptor = self.bound._descriptor
-        if self.input_refs:
-            resolve_inputs(self.input_refs, store=selected)
         key = OperationKey.from_producer(producer, descriptor.method_name)
         fingerprint = declaration_fingerprint(
             descriptor.method_name,
@@ -191,9 +193,61 @@ class ManagedDispatchRequest:
                 raise ManagedRerunRequiredError(
                     "pending realization cannot resume under the current whole-pipeline capabilities; explicit rerun is required"
                 )
+        else:
+            pending_id = None
+        if pending_id is not None and not self.rerun:
+            pending = operation._read_realization(pending_id)
+            _validate_bound_inputs(
+                self.input_refs,
+                pending.consumed_records,
+                pending.consumed_record_links,
+                selected,
+            )
+            preflight_inputs = pending.consumed_records
+            preflight_record_inputs = pending.consumed_record_links
+        else:
+            preflight_inputs = (
+                resolve_inputs(self.input_refs, store=selected)
+                if self.input_refs
+                else ()
+            )
+            preflight_record_inputs = ()
+        _validate_managed_inputs(
+            producer,
+            descriptor.method_name,
+            self.args,
+            self.kwargs,
+            store=selected,
+            consumed=preflight_inputs,
+            record_inputs=preflight_record_inputs,
+        )
         lease = operation.acquire(advance_declaration=advance)
         try:
-            consumed = resolve_inputs(self.input_refs, store=selected) if self.input_refs else ()
+            current_control = operation._read_control(missing_ok=True)
+            current_pending_id = None if current_control is None else current_control.pending_realization_id
+            if current_pending_id is not None and not self.rerun:
+                current_pending = operation._read_realization(current_pending_id)
+                consumed = current_pending.consumed_records
+                record_inputs = current_pending.consumed_record_links
+                _validate_bound_inputs(self.input_refs, consumed, record_inputs, selected)
+            else:
+                consumed = resolve_inputs(self.input_refs, store=selected) if self.input_refs else ()
+                record_inputs = _managed_record_inputs(
+                    producer,
+                    descriptor.method_name,
+                    self.args,
+                    self.kwargs,
+                    store=selected,
+                )
+            _validate_managed_inputs(
+                producer,
+                descriptor.method_name,
+                self.args,
+                self.kwargs,
+                store=selected,
+                consumed=consumed,
+                record_inputs=record_inputs,
+            )
 
             def active_inputs_valid(active):
                 if active.realization_record_id is None:
@@ -201,12 +255,21 @@ class ManagedDispatchRequest:
                 realization = RealizationRecord.from_envelope(
                     selected.records.read_record(active.realization_record_id)
                 )
-                return realization.consumed_records == consumed
+                execution = ExecutionRecord.from_envelope(
+                    selected.records.read_record(realization.execution_record_id)
+                )
+                direct = tuple(
+                    link for link in execution.consumed_records
+                    if link.producer_cdef_id is None
+                )
+                return realization.consumed_records == consumed and direct == record_inputs
 
             decision = lease.prepare(
                 resumable=self.capabilities.resumable,
                 rerun=self.rerun,
                 active_inputs_valid=active_inputs_valid,
+                consumed_records=tuple(consumed),
+                consumed_record_links=tuple(record_inputs),
             )
             if decision.action == "reuse":
                 result = _invocation_from_state(selected, decision.action, decision.realization)
@@ -223,6 +286,8 @@ class ManagedDispatchRequest:
                 checkpoint_schema=self.capabilities.checkpoint_schema,
                 early_completion=self.capabilities.early_completion,
                 is_resume=decision.action == "resume",
+                consumed_records=tuple(consumed),
+                consumed_record_links=tuple(record_inputs),
             )
             return _ManagedCoordinatorSession(
                 plan=plan,
@@ -231,6 +296,7 @@ class ManagedDispatchRequest:
                 decision=decision,
                 context=context,
                 consumed=tuple(consumed),
+                record_inputs=tuple(record_inputs),
             )
         except BaseException:
             lease.release()
@@ -245,6 +311,7 @@ class _ManagedCoordinatorSession:
     decision: Any
     context: OperationContext
     consumed: tuple[Any, ...]
+    record_inputs: tuple[Any, ...]
     last_sequence: int = 0
     finished: bool = False
     ticket_data: dict[str, Any] | None = None
@@ -275,6 +342,8 @@ class _ManagedCoordinatorSession:
             "checkpoint_path": None if checkpoint_path is None else str(checkpoint_path.resolve()),
             "early_completion": self.request.capabilities.early_completion,
             "is_resume": self.decision.action == "resume",
+            "consumed_records": [item.to_json() for item in self.consumed],
+            "consumed_record_links": [item.to_json() for item in self.record_inputs],
             "coordinator_pid": os.getpid(),
             "control_timeout": 300.0,
         }
@@ -377,7 +446,7 @@ class _ManagedCoordinatorSession:
                     realization_id=self.decision.realization.realization_id,
                     consumed_records=tuple(
                         ExecutionRecordLink.from_resolved(item) for item in self.consumed
-                    ),
+                    ) + tuple(self.record_inputs),
                     logs=_execution_logs(),
                 )
                 publication = self.context.writer.finalize(
@@ -662,6 +731,7 @@ def validate_managed_ticket(value: Any) -> dict[str, Any]:
         "realization_id", "attempt_id", "fence_epoch", "workspace",
         "event_path", "control_path", "checkpoint_schema", "checkpoint_path",
         "early_completion", "is_resume", "coordinator_pid", "control_timeout",
+        "consumed_records", "consumed_record_links",
     }
     if not isinstance(value, Mapping) or set(value) != fields:
         raise ManagedOutputError("managed write ticket fields are malformed")
@@ -691,6 +761,22 @@ def validate_managed_ticket(value: Any) -> dict[str, Any]:
         raise ManagedOutputError("managed write ticket coordinator PID is malformed")
     if type(data["early_completion"]) is not bool or type(data["is_resume"]) is not bool:
         raise ManagedOutputError("managed write ticket capabilities are malformed")
+    try:
+        data["consumed_records"] = tuple(
+            item if isinstance(item, ResolvedRecord) else ResolvedRecord.from_json(item)
+            for item in data["consumed_records"]
+        )
+        data["consumed_record_links"] = tuple(
+            item if isinstance(item, ExecutionRecordLink)
+            else ExecutionRecordLink.from_json(item, default_required=True)
+            for item in data["consumed_record_links"]
+        )
+    except Exception as exc:
+        raise ManagedOutputError(
+            f"managed write ticket consumed inputs are malformed: {exc}"
+        ) from exc
+    if any(item.producer_cdef_id is not None for item in data["consumed_record_links"]):
+        raise ManagedOutputError("managed direct record inputs cannot claim logical resolution")
     if data["checkpoint_schema"] is not None and (
         not isinstance(data["checkpoint_schema"], str)
         or not data["checkpoint_schema"]
@@ -787,6 +873,8 @@ class _WorkerOperationContext:
         self.checkpoint_schema = ticket["checkpoint_schema"]
         self.early_completion = ticket["early_completion"]
         self.is_resume = ticket["is_resume"]
+        self.consumed_records = ticket["consumed_records"]
+        self.consumed_record_links = ticket["consumed_record_links"]
         self.workspace = Path(ticket["workspace"])
         if not self.workspace.is_dir():
             raise ManagedOutputError("managed attempt workspace is missing")
