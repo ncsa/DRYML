@@ -104,6 +104,21 @@ Dispatch metadata wraps operation IDs without changing operation identity. `Disp
 
 Local `dryml.managed` execution also records the existing method-call `OperationSpec`; managed Store selection, leases, realization IDs, callback policy, progress, checkpoints, and output effects do not alter that spec identity. Dispatch transport for managed operations is a separate layer and is not implied by the local runtime.
 
+## Managed Method Lifecycle
+
+Bound managed `compute` and `train` methods remain callable and expose one
+shared surface: `status()`, `progress()`, `result`, `outputs`, `results()`,
+`resume()`, `rerun()`, `history()`, and `activate()`. A normal call starts,
+resumes, or reuses according to pending work and exact consumed-input validity.
+`rerun()` is the only call that creates an independent outcome after completion
+or abandons incompatible pending work. Failed and interrupted reruns retain the
+old active result.
+
+Declarations, logical output refs, method-call `OperationSpec`, realization
+records, and physical representations remain separate. The full authority,
+fencing, recovery, schema, and Store contract is in
+[ADR 0009](adr/0009-managed-operation-lifecycle.md).
+
 ## Managed Sharing And Retention
 
 Managed recipes and completed results use separate explicit workflows:

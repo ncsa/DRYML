@@ -65,7 +65,10 @@ Concrete definitions are stable identities. They are used to:
 - compare exact object definitions
 - rebuild runtime objects later
 
-A concrete definition is not the same thing as runtime state. For example, trained weights, cached datasets, and generated artifacts should be stored as object state or artifact payloads, not as constructor identity.
+A concrete definition is not the same thing as runtime state. Ordinary mutable
+state may use an Object directory. Managed trained weights, cached datasets, and
+computed metrics instead use Store-owned typed records and products selected by
+their producing operation; they are never constructor identity.
 
 ## Object Graphs
 
@@ -121,6 +124,11 @@ Good saved-state fields:
 - cached outputs
 - generated metric values
 - external resource snapshots
+
+Managed results add a third physical category. A `ManagedOutputRef` is still
+logical graph identity, while a Store resolves it to one exact active
+realization and typed output record at execution time. Loading the parent
+definition does not load those bytes or materialize the referenced producer.
 
 ## Common Pitfalls
 

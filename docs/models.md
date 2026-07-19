@@ -129,6 +129,16 @@ model_for_inference = fine_tune.trained_model(store=store)
 
 Pending exact-capability work retains its original cache and model-state bindings across resume even if a producer's active realization changes. A normal call reuses a completed train result only while current logical inputs and the current ordinary-state snapshot still match; otherwise use `experiment.train.rerun(...)` explicitly.
 
+## Managed Evaluation
+
+`CategoricalAccuracy` and `ConfusionMatrix` consume
+`experiment.train.result` plus a completed `CachedDataset.compute.result`. Metric
+execution resolves those outputs as one stable vector and hydrates the exact
+trained `StoredStateRecord` into a fresh uncached model. It never mutates or
+reuses the Repo's model instance. Missing training/cache outputs fail before a
+metric attempt and are not computed implicitly. See
+[Artifacts API](artifacts.md#classification-metrics).
+
 ## Backend Wrappers
 
 Backend wrappers adapt external model objects to DRYML semantics.

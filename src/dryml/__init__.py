@@ -11,6 +11,7 @@ _SUBMODULE_EXPORTS = {
     "environments": "dryml.environments",
     "formats": "dryml.formats",
     "managed": "dryml.managed",
+    "metrics": "dryml.metrics",
     "operations": "dryml.operations",
     "providers": "dryml.providers",
     "reporting": "dryml.reporting",
@@ -71,6 +72,7 @@ def __getattr__(name):
         return value
     raise AttributeError(f"module 'dryml' has no attribute {name!r}")
 
+
 __all__ = [
     "annotations",
     "core2",
@@ -80,6 +82,7 @@ __all__ = [
     "environments",
     "formats",
     "managed",
+    "metrics",
     "operations",
     "providers",
     "reporting",

@@ -13,11 +13,10 @@ from dryml.artifacts.representations import (
     ParquetIndex,
     ParquetPartition,
 )
-from dryml.artifacts.scalar import Accuracy, Scalar, ScalarAgg, ScalarAvg
+from dryml.artifacts.scalar import Scalar, ScalarAgg, ScalarAvg
 
 
 __all__ = [
-    "Accuracy",
     "Artifact",
     "Scalar",
     "ScalarAgg",

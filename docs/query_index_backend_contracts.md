@@ -4,6 +4,13 @@ Status: draft.
 
 DRYML query indexes are acceleration metadata for `Repo.query(...)`. Backends must preserve exact `ConcreteDefinition` semantics and must not expose backend-local IDs outside a read view.
 
+Managed operations do not extend this authority. A query index may index the
+normal CDef/Ref structure of producers and `ManagedOutputRef` Objects, but it
+must not choose operation generations, active realizations, typed output
+records, or representations. Those reads use direct managed control and record
+paths. Rebuilding or deleting the query index cannot change managed activation
+or exact consumed lineage.
+
 ## Components
 
 `RepoQueryIndex` federates query sources:

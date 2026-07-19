@@ -128,6 +128,13 @@ source-order declaration into its own definition while retaining the source as
 a non-materializing definition reference. Empty sources therefore require
 declared metadata but can produce a valid empty cache.
 
+A completed cache is also a logical input to Experiment training and managed
+classification metrics. Consumers resolve `cached.compute.result` once, record
+that exact managed input vector, and iterate the pinned immutable `DataRecord`.
+They never call `compute` on a missing dependency. A later cache activation
+makes a completed consumer stale for reuse but does not make its previously
+consumed record unreadable.
+
 ## Resume Capability
 
 `dataset_resume_capability(dataset_or_definition)` inspects a pipeline without

@@ -121,6 +121,37 @@ def test_adapter_failure_and_no_path_leave_active_unchanged(tmp_path):
     assert CountingArrayDataset.builds == 0
 
 
+def test_adapter_runner_type_error_is_not_masked_by_legacy_signature_retry(tmp_path):
+    store, cached, invocation = _completed_cache(tmp_path)
+    failing = AdapterRegistry()
+    calls = []
+
+    def fail(context, optional=None):
+        calls.append(context)
+        raise TypeError("runner implementation type error")
+
+    failing.register(
+        AdapterDescriptor(
+            "test.type-error",
+            RepresentationRequirement(kind=NUMPY_SEQUENCE_KIND),
+            RepresentationRequirement(
+                kind=PARQUET_KIND,
+                representation_id=PARQUET_REPRESENTATION.id,
+            ),
+            streaming=True,
+            materializes_source=False,
+        ),
+        runner=fail,
+    )
+
+    result = cached.request_representation("parquet", store=store, adapters=failing)
+
+    assert result.status == "failed"
+    assert result.issues[0].message == "runner implementation type error"
+    assert len(calls) == 1
+    assert cached.compute.results(store=store)["data"] == invocation.outputs["data"]
+
+
 def test_huge_products_reject_materializing_adapter_but_allow_streaming(tmp_path):
     store, cached, _invocation = _completed_cache(tmp_path)
     materializing = AdapterRegistry()

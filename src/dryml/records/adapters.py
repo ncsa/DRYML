@@ -463,11 +463,26 @@ def _build_target_record(source: TypedRecord, source_record_id: str, representat
 def _call_runner(runner: AdapterRunner, context: AdapterExecutionContext) -> Mapping[str, Any] | None:
     try:
         sig = inspect.signature(runner)
-        if len(sig.parameters) == 1:
-            return runner(context)
     except (TypeError, ValueError):
-        pass
-    return runner(context=context, session=context.session, source_record=context.source_record, step=context.step)
+        sig = None
+    legacy_kwargs = {
+        "context": context,
+        "session": context.session,
+        "source_record": context.source_record,
+        "step": context.step,
+    }
+    if sig is not None:
+        for args, kwargs in (
+            ((context,), {}),
+            ((), {"context": context}),
+            ((), legacy_kwargs),
+        ):
+            try:
+                sig.bind(*args, **kwargs)
+            except TypeError:
+                continue
+            return runner(*args, **kwargs)
+    return runner(**legacy_kwargs)
 
 
 def _json_sequence(value: Any, field_name: str) -> Any:

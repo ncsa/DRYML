@@ -19,6 +19,15 @@ dispatch, world, and code-analysis work:
 - Python-shaped function and CDef-method dispatch, requirement-aware candidate
   checks, `dispatch.explain(...)`, local subprocess/local-world boundaries, and
   explicit opt-in bounded dispatch tracing;
+- one managed `compute`/`train` lifecycle with fenced DirStore writers, durable
+  checkpoints, active/history selection, stale-input detection, exact lineage,
+  explicit transfer, and protected cleanup;
+- lightweight sharded CachedDataset realizations, NumPy/Parquet conversion, lazy
+  TensorFlow/Torch views, and managed TensorFlow/Torch/sklearn training
+  capability contracts;
+- record-backed `CategoricalAccuracy` and `ConfusionMatrix` Artifacts with stable
+  labels, true-row/predicted-column orientation, lightweight reload, and no
+  implicit dependency computation;
 - retirement of the unsupported tracked `dryml.graph` prototype package; and
 - the [migration guide](migration/legacy_context_execute_removal.md), three
   [focused runnable scripts](table_of_content.md#focused-runnable-workflows),
@@ -47,6 +56,14 @@ Dispatch planning and launch currently do not honor process-local
 planning and launch requirements. This unsupported behavior is retained as the
 sole strict expected failure and does not affect trusted inline
 `runtime.disabled()` or `runtime.plain()` scopes.
+
+The draft `dryml.artifacts.Accuracy` API and object-directory Artifact payload
+contract are removed without compatibility aliases or migration. Use
+`dryml.metrics.CategoricalAccuracy` with logical trained-model and completed
+cache output refs. `Scalar` remains immediate definition data; Store-backed
+`ScalarAgg`/`ScalarAvg.compute` results now use managed `DataRecord` products.
+See [ADR 0009](adr/0009-managed-operation-lifecycle.md) for stable identity,
+authority, recovery, Store, format, and export contracts.
 
 ## SQLite Query Index Sprint
 

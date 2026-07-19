@@ -1,21 +1,12 @@
 import numpy as np
 import pytest
 
-from dryml.artifacts import Accuracy, Scalar, ScalarAvg
+import dryml.artifacts
+from dryml.artifacts import Scalar, ScalarAvg
 from dryml.core2 import Repo
 from dryml.core2.store.dir import DirStore
-from dryml.core2.tensor_spec import TensorSpec
-from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
-from dryml.models import Model
-
-
-class ParityClassifier(Model):
-    def __init__(self):
-        self.output_spec = TensorSpec("float32", shape=(2,), backend="numpy")
-
-    def __call__(self, x):
-        labels = np.asarray(x, dtype=np.int64) % 2
-        return np.eye(2, dtype=np.float32)[labels]
+from dryml.data import ArrayDataset
+from dryml.records import DataRecord
 
 
 def test_scalar_artifact_compute_value_and_reload(tmp_path):
@@ -35,72 +26,39 @@ def test_scalar_artifact_compute_value_and_reload(tmp_path):
 
 def test_scalar_avg_computes_dataset_mean(tmp_path):
     store = DirStore(tmp_path / "store")
-    repo = Repo(stores=store)
     ds = ArrayDataset(np.array([1.0, 2.0, 3.0], dtype=np.float32))
     avg = ScalarAvg(ds)
 
-    repo.save_object(avg)
+    result = avg.compute(store=store)
 
-    assert avg.compute(repo=repo) == pytest.approx(2.0)
-    assert avg.value == pytest.approx(2.0)
+    assert result.action == "start"
+    assert avg.read(store=store) == pytest.approx(2.0)
+    record = DataRecord.from_envelope(
+        store.records.read_record(result.outputs["value"].record_id)
+    )
+    assert record.output_slot == "value"
 
 
-def test_scalar_avg_compute_without_store_caches_value():
-    repo = Repo()
+def test_scalar_avg_compute_without_store_remains_direct():
     ds = ArrayDataset(np.array([1.0, 2.0, 3.0], dtype=np.float32))
     avg = ScalarAvg(ds)
 
-    assert avg.compute(repo=repo) == pytest.approx(2.0)
+    assert avg.compute() == pytest.approx(2.0)
     assert avg.value == pytest.approx(2.0)
 
 
-def test_scalar_avg_compute_before_save_persists_cached_value(tmp_path):
+def test_scalar_avg_reload_reads_managed_value_without_object_state(tmp_path):
     store = DirStore(tmp_path / "store")
-    repo = Repo(stores=store)
     ds = ArrayDataset(np.array([1.0, 2.0, 3.0], dtype=np.float32))
     avg = ScalarAvg(ds)
 
-    assert avg.compute(repo=repo) == pytest.approx(2.0)
-    repo.save_object(avg)
+    avg.compute(store=store)
+    Repo(store).save_definition(avg.definition)
 
     repo2 = Repo(stores=DirStore(store.base_dir))
-    loaded = repo2.load_object(avg.definition)
-    assert loaded.value == pytest.approx(2.0)
+    loaded = repo2.load(avg.definition, restore_state=False)
+    assert loaded.read(store=repo2.stores[0]) == pytest.approx(2.0)
 
 
-def test_accuracy_computes_projected_argmax_pipeline(tmp_path):
-    store = DirStore(tmp_path / "store")
-    repo = Repo(stores=store)
-    x = np.array([0, 1, 2, 3], dtype=np.int64)
-    y = np.array([0, 1, 0, 0], dtype=np.int64)
-    ds = ArrayDataset((x, y))
-    predictions = Map(
-        ds,
-        Project(
-            Pipe(Select(0), ParityClassifier(), ArgMax()),
-            Select(1),
-        ),
-    )
-    accuracy = Accuracy(predictions, path_x=0, path_y=1)
-
-    repo.save_object(accuracy)
-
-    assert accuracy.compute(repo=repo) == pytest.approx(0.75)
-    assert accuracy.value == pytest.approx(0.75)
-
-
-def test_accuracy_compute_without_store_caches_value():
-    x = np.array([0, 1, 2, 3], dtype=np.int64)
-    y = np.array([0, 1, 0, 0], dtype=np.int64)
-    ds = ArrayDataset((x, y))
-    predictions = Map(
-        ds,
-        Project(
-            Pipe(Select(0), ParityClassifier(), ArgMax()),
-            Select(1),
-        ),
-    )
-    accuracy = Accuracy(predictions, path_x=0, path_y=1)
-
-    assert accuracy.compute(repo=Repo()) == pytest.approx(0.75)
-    assert accuracy.value == pytest.approx(0.75)
+def test_draft_accuracy_artifact_is_not_public():
+    assert not hasattr(dryml.artifacts, "Accuracy")

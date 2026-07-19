@@ -1,19 +1,21 @@
 # Artifacts API
 
-Status: draft.
+Status: current.
 
-Artifacts are repo-backed computed payloads. They are useful for values that are derived from other objects, expensive to recompute, or useful to persist independently from model definitions.
+Artifacts are lightweight Object identities for computed results. Managed
+Artifact bytes belong to Store-owned typed records and products, not to the
+Artifact's object directory.
 
 ## Artifact Base Class
 
-`Artifact` extends `Serializable` and provides a common base for computed values.
+`Artifact` extends `Serializable` and provides a logical base for computed values.
 
 Important methods:
 
-- `compute()`: produce or update the artifact payload.
-- `exists()`: check whether the artifact appears to have persisted state.
+- managed `compute()`: start, resume, reuse, or explicitly rerun a realization.
+- `exists(repo=..., store=...)`: check for a completed active managed result.
 
-Artifacts can use repo/store locations to save computed payloads.
+`exists()` is a convenience over managed status, not a filesystem-presence test.
 
 ## Why Artifacts Exist
 
@@ -29,14 +31,57 @@ Examples:
 
 ## Scalar Artifacts
 
-Initial scalar artifact types include:
+Scalar artifact types include:
 
 - `Scalar`
 - `ScalarAgg`
 - `ScalarAvg`
-- `Accuracy`
 
-These types are intended for storing and aggregating scalar-like computed values.
+`Scalar` is immediate definition data and has no second persistence lifecycle.
+`ScalarAgg` and `ScalarAvg` preserve direct definition-only evaluation, but a
+Store-backed `compute` publishes a managed scalar `DataRecord`; use `read(...)`
+to read its active value. The draft `Accuracy` class is removed without an alias
+or payload migration.
+
+## Classification Metrics
+
+Classification metrics consume logical outputs, not hydrated inputs:
+
+```python
+from dryml.metrics import CategoricalAccuracy, ConfusionMatrix
+
+accuracy = CategoricalAccuracy(
+    experiment.train.result,
+    test_cache.compute.result,
+    labels=(0, 1, 2),
+)
+confusion = ConfusionMatrix(
+    experiment.train.result,
+    test_cache.compute.result,
+    labels=(0, 1, 2),
+)
+
+accuracy.compute(store=store)
+confusion.compute(store=store)
+print(accuracy.value(store=store))
+print(confusion.matrix(store=store))
+```
+
+Computation resolves the model and cache as one exact stable input vector,
+hydrates a fresh model only for execution, and iterates only the pinned completed
+cache record. Missing or incomplete inputs fail without dependency computation.
+Loading a definition or reading a completed result does not materialize either
+input or import TensorFlow, Torch, or PyArrow.
+
+Sparse integer or string labels and unambiguous one-hot labels/predictions are
+supported. Sparse values may be scalars or have one singleton trailing
+dimension; floating singleton values remain score-like and are not treated as
+sparse labels. Labels must be declared in stable order. For confusion matrices,
+rows are true labels and columns are predicted labels in that order. Empty input,
+unknown labels, out-of-range vector widths, malformed one-hot values, and tied
+predictions fail without publishing or replacing an active result. Changed
+model/cache activation makes a completed metric stale until
+`metric.compute.rerun(...)` is explicit.
 
 ## Cached Datasets
 
@@ -107,14 +152,14 @@ class MyArtifact(Artifact):
 ```
 
 The artifact's definition identifies what the artifact represents. Managed
-artifact payloads such as CachedDataset realizations are Store-owned records and
-products rather than ordinary Object state.
+artifact payloads are Store-owned records and products rather than ordinary
+Object state. See [ADR 0009](adr/0009-managed-operation-lifecycle.md).
 
-## Repos And Locations
+## Repos And Stores
 
-Artifacts use repo-backed locations. The artifact can ask the current or provided repo where its state should live.
-
-This keeps artifact identity in the DRYML object graph while allowing payloads to be stored in the selected repo/store.
+Managed calls accept an explicit Repo or Store and otherwise use one unambiguous
+active default. Definitions do not retain a Store. Multiple competing Store
+results fail explicitly instead of using Repo order.
 
 ## Common Pitfalls
 
@@ -123,7 +168,8 @@ This keeps artifact identity in the DRYML object graph while allowing payloads t
 - Store enough definition metadata to know what the artifact represents.
 - Keep computed values out of definition identity; managed values belong in
   records and products rather than ordinary Object state.
-- Use `exists()` as a convenience check, not as a complete validation of correctness.
+- Use `exists()` as a convenience check; result readers still verify records,
+  representation metadata, manifests, and bytes.
 
 ## Related Docs
 

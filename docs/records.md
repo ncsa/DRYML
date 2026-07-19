@@ -266,6 +266,14 @@ The generic JSON envelope remains authoritative. `StoredStateRecord`, `DataRecor
 
 Managed `DataRecord` and `StoredStateRecord` outputs add `realization_id` and `output_slot` as a required pair. Existing records may omit both. The pair associates a physical record with one independent realization and one declared output while allowing another representation of that same output to retain the same ownership.
 
+Managed classification metrics publish `DataRecord` products. Categorical
+accuracy uses the `dryml.metric.categorical_accuracy` representation; confusion
+matrices use `dryml.metric.confusion_matrix`. Representation parameters include
+the stable declared labels, and confusion metadata fixes rows to true labels and
+columns to predicted labels. The product's versioned JSON contains the same
+metadata and counts. Result readers require exact ownership, representation,
+manifest, and payload agreement.
+
 `RealizationRecord` is immutable completion authority. It binds a preallocated `realization-v1-<32-hex>` ID to the producer CDef, method, declaration fingerprint, attempt IDs, required typed output records, primary representation, exact consumed vector, execution record, completed attempt, and completion fence. A recomputation receives another realization ID; an adapter-derived representation retains the source realization ID and output slot.
 
 `RepresentationSpec` wraps the existing `family="representation"` spec envelope. `RepresentationRequirement` supports conservative deterministic checks by exact representation ID, kind, version, parameter equality, required trait subset, and storage-kind subset. Unknown provider/framework semantics do not imply compatibility.
@@ -304,6 +312,12 @@ Local managed implementations obtain their invocation-scoped `OperationContext` 
 Whole-pipeline capability checks happen before the operation namespace or attempt is created. An optional `__dryml_managed_preflight__(method, args, kwargs)` provider may return `OperationPreflight` to narrow declaration-level resume, checkpoint-schema, and early-completion capabilities. An optional `__dryml_managed_inputs__(method, args, kwargs)` provider declares ordered logical `ManagedOutputRef` inputs. Their active vectors are double-collected from one Store and persisted exactly; missing outputs never trigger producer computation.
 
 Invocation callbacks are not persistent identity. `ManagedCallback` declares whether observer failures are strict or fail-soft and which checkpoint, graceful-stop, or interrupt controls it may return. Controls coalesce at operation safe points. Strict callback failure is resumable only after a compatible checkpoint commits; fail-soft failures contribute only bounded diagnostics. Generation control stores one replaceable bounded progress snapshot rather than an event log.
+
+Completed-result reuse compares the current stable input resolution with the
+exact consumed vector in `RealizationRecord` and `ExecutionRecord`. A mismatch is
+reported as stale and requires explicit rerun. Direct active result access and
+historical activation remain available; staleness does not rewrite lineage or
+delete bytes.
 
 Live durable writing requires the explicit `managed-durable-products-v1` Store capability. `DirStore` advertises it together with managed control, locking, and activation; read-only Zip Stores do not advertise live managed writing.
 

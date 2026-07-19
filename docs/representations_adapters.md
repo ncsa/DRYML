@@ -34,6 +34,12 @@ and row shapes above one dimension are rejected as non-tabular. PyArrow is
 available through the `parquet` extra and is imported only when Parquet bytes
 are read or written.
 
+Managed metric JSON uses `dryml.metric.categorical_accuracy` and
+`dryml.metric.confusion_matrix`. Stable label order is a representation
+parameter. Confusion matrices additionally declare `rows="true"` and
+`columns="predicted"`; orientation is therefore validated metadata rather than
+a display convention.
+
 ## Typed Records
 
 `StoredStateRecord` points at loadable object state. Descriptive saves still store bytes under `objects/`; wrappers only validate the record sidecar.
@@ -95,6 +101,8 @@ registry.register(
 `run_adapter_plan(...)` resolves source storage, gives the runner a `ProductWriteSession`, writes target products under `products/<target-record-id>/`, writes the target state/data/program record with a self product-dir ref, writes an `AdapterRecord`, and returns located refs.
 
 Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records; durable failure provenance is not implemented.
+An exception raised inside a one-context runner is reported directly and is not
+retried through the legacy keyword-call shape.
 
 `CachedDataset.request_representation("parquet", ...)` uses the built-in
 streaming NumPy-sequence-to-Parquet adapter. It reuses an existing compatible

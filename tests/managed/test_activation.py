@@ -66,7 +66,7 @@ def test_acquisition_recovers_one_orphaned_resumable_realization(tmp_path, monke
     lease = operation.acquire()
     original = lease._write_control_for
 
-    def fail_after_realization_write(state):
+    def fail_after_realization_write(state, *, reset_progress=False):
         raise OSError("simulated control write interruption")
 
     monkeypatch.setattr(lease, "_write_control_for", fail_after_realization_write)

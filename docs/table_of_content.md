@@ -71,6 +71,7 @@ this sequence.
 - [Migration from legacy context/execute APIs](migration/legacy_context_execute_removal.md)
 - [Release Notes](release_notes.md)
 - [Testing Workflow](testing.md)
+- [ADR 0009: Managed Operation Lifecycle](adr/0009-managed-operation-lifecycle.md)
 
 ## Core Concepts
 
@@ -91,6 +92,8 @@ this sequence.
 - A `TensorSpec` describes tensor-like values independently from a specific ML backend.
 - Current environment/world values are context-local planning defaults; runtime allocation is process-local actual state.
 - `Dataset`, `Model`, and `Artifact` are higher-level APIs built on the core object/repo system.
+- Managed `compute` and `train` keep logical Object identity separate from
+  Store-owned control, realizations, typed records, and representations.
 - Store-owned query indexes accelerate stored and nested queries without changing object identity.
 - Tests are grouped by feature category and automatically bucketed into smoke, medium, and heavy speed tiers.
 

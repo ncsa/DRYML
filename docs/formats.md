@@ -73,6 +73,20 @@ annotation-v1-<sha256>
 blob-v1-<sha256>
 ```
 
+Managed lifecycle identities additionally use strict purpose-specific forms:
+
+```text
+realization-v1-<32-lowercase-hex>
+attempt-v1-<32-lowercase-hex>
+checkpoint-v1-<sha256>
+managed-declaration-v1-<sha256>
+```
+
+These identify lifecycle entities and are validated by `dryml.managed` or
+`dryml.records`; they are not interchangeable generic envelope IDs. Managed
+control, activation, realization, checkpoint, metric-result, and cleanup JSON
+each carries its own schema and version. Unknown versions fail closed.
+
 Use a literal escape when a value looks like a reserved reference but must remain ordinary JSON data:
 
 ```json

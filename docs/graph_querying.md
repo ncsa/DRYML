@@ -1562,3 +1562,12 @@ The performance principle is simple:
 Graph-query code uses `Ref` / `EdgeKind.REF` for non-materializing edges.
 
 Use `Selector(Definition(...))` for semantic query matching. `Definition.__eq__` is structural equality, not selector matching. Use `QuotedDef` or `SelectorSpec` when a selector/expression is stored as constructor data and must not emit `definition_edges` rows.
+
+## Managed Definitions Versus Results
+
+`Repo.query(...)` discovers logical producer, `ManagedOutputRef`, CachedDataset,
+Experiment, and metric CDefs through their normal structural edges. It does not
+select active realizations, history, output records, or representations. Use the
+bound managed method and record/representation APIs for those Store-owned
+physical facts. Query-index order, timestamps, and record enumeration are never
+fallback active-selection rules.

@@ -1,19 +1,10 @@
 from __future__ import annotations
 
-import os
-
 from dryml.core2 import Serializable
 
 
 class Artifact(Serializable):
-    """Base class for repo-backed computed payloads."""
-
-    def _location(self, repo=None, *, store=None, require_exists: bool = False) -> str:
-        from dryml.core2.repo import get_default_repo
-
-        if repo is None:
-            repo = get_default_repo()
-        return repo.location(self, store=store, require_exists=require_exists)
+    """Logical Object base for managed, record-backed computed results."""
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
         pass
@@ -24,9 +15,15 @@ class Artifact(Serializable):
     def compute(self):
         raise NotImplementedError
 
-    def exists(self) -> bool:
+    def exists(self, repo=None, *, store=None) -> bool:
+        """Return whether this Artifact has a completed active managed result."""
+
+        operation = self.compute
+        status = getattr(operation, "status", None)
+        if status is None:
+            return False
         try:
-            return os.path.exists(self._location())
+            return status(repo=repo, store=store).active_realization_id is not None
         except RuntimeError:
             return False
 

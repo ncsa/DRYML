@@ -188,3 +188,20 @@ Use `--pure-samples` up to 1,000, `--managed-samples` up to 100, and repeated
 temporary Stores, tracked standard-library targets, and fake resource inventory;
 it does not use a network, GPU, downloads, credentials, datasets, or model
 training.
+
+## Managed Operation Performance Benchmark
+
+`benchmarks/managed_operation_performance.py` emits one bounded versioned JSON
+document for structural managed-operation contracts:
+
+```bash
+python benchmarks/managed_operation_performance.py
+```
+
+Shard measurements run in fresh subprocesses and report rows, payload bytes,
+configured buffer bytes, shard/file/manifest counts, index bytes, and peak RSS.
+Other scenarios report active-lookup realization reads and history/record scans,
+bounded event retention, adapter source/target/intermediate bytes and record
+lineage, exact-export closure counts, and temporary bytes remaining after
+completion. Tests assert operation-count and scaling invariants, not latency
+thresholds tied to one machine.

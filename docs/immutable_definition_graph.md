@@ -30,6 +30,12 @@ space = model.as_space()
 sample = space.sample()
 support = space.support_selector()
 
-artifact = Definition(Accuracy, model=sample.ref(), data=Ref(dataset_cdef))
-selector = Selector(Definition(Accuracy, model=support.root.ref()))
+experiment = Definition(Experiment, model=sample.ref(), train_data=Ref(dataset_cdef))
+selector = Selector(Definition(Experiment, model=support.root.ref()))
 ```
+
+Managed output refs extend this graph without changing canonical node kinds.
+They are ordinary lightweight Object definitions with a `Ref` edge to the
+producer plus method and slot values. Physical realization and record IDs never
+enter the graph, so definition recipes remain portable across Stores while each
+execution records the exact Store-local input vector it consumed.

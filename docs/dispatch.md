@@ -106,6 +106,12 @@ The worker writes only through its fence-isolated attempt workspace APIs and
 returns structured effects; this correctness boundary is not a sandbox against
 trusted user code.
 
+CachedDataset, Experiment, scalar-aggregate, and classification-metric managed
+calls all use this same bridge when dispatched. Dispatch does not change their
+declarations, logical input refs, output record kinds, reuse/staleness rules, or
+publication order. Optional backend imports occur only in the selected worker
+execution path, not while normalizing a lightweight metric or cache definition.
+
 ## Requirement-Aware Planning
 
 `plan`, `submit`, and `run` normalize an operation once, collect its static

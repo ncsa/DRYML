@@ -23,6 +23,7 @@ Repos manage DRYML object graphs. Stores own persisted object state. Most user w
 - read and write definitions
 - provide full hydration when needed
 - optionally own a persistent query index
+- advertise and enforce managed read/write/lock/activation capabilities
 
 ## Basic Save And Load
 
@@ -59,6 +60,12 @@ repo = Repo(stores=store)
 
 A directory store uses stable definition hashes to organize object state under its object directory. It may also maintain a `.dryml/` sidecar directory for query-index metadata.
 
+`DirStore` is the v1 live writable managed Store. Managed control and attempts
+live under `.dryml/managed-v1/`; immutable records and products remain under
+their record-owned sidecars. `ZipStore` can read a verified exact-result
+snapshot, while Zip Stores cannot start, resume, rerun, lease, activate, or
+clean live work.
+
 ## Save Semantics
 
 Important save entry points:
@@ -87,6 +94,11 @@ Important load entry points:
 - `repo.find(...)` provides a higher-level query-and-load path.
 
 Use exact loading when you already have a concrete definition. Use query APIs when you want to discover matching stored objects.
+
+Managed operations first resolve exactly one Store from an explicit argument,
+an unambiguous binding, or one active default. Repo Store order never chooses
+between competing active realizations. Definition loading is independent of
+realization loading: a logical Object can load when no result exists locally.
 
 ## Query Domains
 
