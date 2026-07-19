@@ -29,6 +29,7 @@ from dryml.records import (
     typed_record_from_envelope,
     unsupported_compiler_execution_record,
 )
+from dryml.records.execution import persistence_safe_execution_error
 
 
 def _id(prefix, char="a"):
@@ -62,6 +63,27 @@ def test_execution_record_round_trips_and_dispatches_typed_wrapper():
     assert wrapped.consumed_record_ids == (_id("record", "c"),)
     assert wrapped.produced_record_ids == (_id("record", "p"),)
     assert isinstance(typed_record_from_envelope(envelope), ExecutionRecord)
+
+
+def test_persistence_safe_execution_error_excludes_exception_text():
+    secret = "projection-secret-sentinel-f632"
+    oversized_name = "SecretSentinel" + ("X" * 128)
+    oversized_error = type(oversized_name, (RuntimeError,), {})(secret)
+
+    projected = persistence_safe_execution_error(RuntimeError(secret))
+    bounded = persistence_safe_execution_error(oversized_error)
+
+    assert projected == {
+        "type": "RuntimeError",
+        "metadata": {"code": "execution_failed"},
+    }
+    assert secret not in str(projected)
+    assert bounded == {
+        "type": "Error",
+        "metadata": {"code": "execution_failed"},
+    }
+    assert secret not in str(bounded)
+    assert oversized_name not in str(bounded)
 
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", "timeout", "unsupported", "skipped", "degraded"])

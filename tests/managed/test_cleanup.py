@@ -199,6 +199,32 @@ def test_cleanup_deletes_inactive_completed_records_and_products_only_explicitly
     assert not store.records.product_root(inactive.outputs["result"].record_id).exists()
 
 
+@pytest.mark.parametrize("terminal_method", ["fail", "interrupt"])
+def test_cleanup_retires_pending_control_before_deleting_realization(
+    tmp_path, terminal_method
+):
+    store = DirStore(tmp_path / "store")
+    producer = CleanupProducer()
+    operation = _operation(store, producer)
+    with operation.acquire() as lease:
+        pending = lease.prepare(resumable=True)
+        getattr(lease, terminal_method)(pending.realization.realization_id)
+
+    plan = plan_cleanup(
+        store,
+        producer.compute.result,
+        realization_ids=(pending.realization.realization_id,),
+    )
+    report = execute_cleanup(store, plan)
+    repeated = resume_cleanup(store, plan.cleanup_id)
+
+    assert report == repeated
+    assert producer.compute.status(store=store).status == "not_started"
+    started = producer.compute(store=store)
+    assert started.action == "start"
+    assert started.realization_id != pending.realization.realization_id
+
+
 def test_cleanup_resume_refuses_realization_activated_after_partial_deletion(
     tmp_path, monkeypatch
 ):

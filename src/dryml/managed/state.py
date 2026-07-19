@@ -291,6 +291,9 @@ class GenerationControl:
     checkpoint_head: str | None = None
     diagnostics: tuple[str, ...] = ()
     progress: ProgressSnapshot | None = None
+    next_realization_sequence: int | None = 1
+    latest_realization_id: str | None = None
+    reserved_realization_id: str | None = None
 
     def __post_init__(self) -> None:
         validate_declaration_fingerprint(self.declaration_fingerprint)
@@ -311,6 +314,36 @@ class GenerationControl:
         object.__setattr__(self, "diagnostics", diagnostics)
         if self.progress is not None and not isinstance(self.progress, ProgressSnapshot):
             raise ManagedStateError("generation progress must be a ProgressSnapshot")
+        if self.next_realization_sequence is not None and (
+            type(self.next_realization_sequence) is not int
+            or self.next_realization_sequence < 1
+        ):
+            raise ManagedStateError(
+                "next realization sequence must be a positive integer"
+            )
+        if self.next_realization_sequence is None and (
+            self.latest_realization_id is not None
+            or self.reserved_realization_id is not None
+        ):
+            raise ManagedStateError(
+                "legacy generation control cannot contain realization sequence markers"
+            )
+        if self.latest_realization_id is not None:
+            _require_match(
+                self.latest_realization_id,
+                _REALIZATION_RE,
+                "latest_realization_id",
+            )
+        if self.reserved_realization_id is not None:
+            _require_match(
+                self.reserved_realization_id,
+                _REALIZATION_RE,
+                "reserved_realization_id",
+            )
+            if self.reserved_realization_id == self.latest_realization_id:
+                raise ManagedStateError(
+                    "reserved realization must differ from the latest realization"
+                )
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -322,10 +355,30 @@ class GenerationControl:
             "checkpoint_head": self.checkpoint_head,
             "diagnostics": list(self.diagnostics),
             "progress": None if self.progress is None else self.progress.to_json(),
+            "next_realization_sequence": self.next_realization_sequence,
+            "latest_realization_id": self.latest_realization_id,
+            "reserved_realization_id": self.reserved_realization_id,
         }
 
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> "GenerationControl":
+        value = dict(value)
+        sequence_fields = {
+            "next_realization_sequence",
+            "latest_realization_id",
+            "reserved_realization_id",
+        }
+        present_sequence_fields = sequence_fields.intersection(value)
+        if present_sequence_fields and present_sequence_fields != sequence_fields:
+            raise ManagedStateError(
+                "generation control realization sequence markers are incomplete"
+            )
+        if not present_sequence_fields:
+            value.update({
+                "next_realization_sequence": None,
+                "latest_realization_id": None,
+                "reserved_realization_id": None,
+            })
         fields = {
             "schema_version",
             "declaration_fingerprint",
@@ -335,6 +388,7 @@ class GenerationControl:
             "checkpoint_head",
             "diagnostics",
             "progress",
+            *sequence_fields,
         }
         data = _strict_mapping(value, fields, "generation control")
         _require_schema(data, "generation control")
@@ -347,6 +401,9 @@ class GenerationControl:
                 checkpoint_head=data["checkpoint_head"],
                 diagnostics=_string_tuple(data["diagnostics"], "diagnostics"),
                 progress=ProgressSnapshot.from_json(data["progress"]),
+                next_realization_sequence=data["next_realization_sequence"],
+                latest_realization_id=data["latest_realization_id"],
+                reserved_realization_id=data["reserved_realization_id"],
             )
         except KeyError as exc:
             raise ManagedStateError(f"generation control is missing {exc.args[0]!r}") from exc

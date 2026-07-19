@@ -16,6 +16,7 @@ from dryml.records import (
     RealizationRecord,
     require_product_integrity,
 )
+from dryml.records.execution import persistence_safe_execution_error
 
 from .callbacks import CallbackCoordinator, preflight_callbacks
 from .context import (
@@ -290,7 +291,8 @@ def invoke_managed(
             ) from exc
         except Exception as exc:
             checkpoint = context.checkpoint_head
-            diagnostic = f"{type(exc).__name__}: {str(exc)[:384]}"
+            failure = persistence_safe_execution_error(exc)
+            diagnostic = f"{failure['type']}: {failure['metadata']['code']}"
             lease.fail(
                 decision.realization.realization_id,
                 checkpoint_head=checkpoint,
@@ -311,7 +313,9 @@ def managed_status(
 ) -> ManagedStatus:
     """Read current status without creating operation state."""
 
-    selected, operation = _bound_operation(bound, repo=repo, store=store)
+    selected, operation = _bound_operation(
+        bound, repo=repo, store=store, writable=False
+    )
     del selected
     control = operation._read_control(missing_ok=True)
     if control is None:
@@ -335,14 +339,18 @@ def managed_status(
 def managed_history(bound: BoundManagedMethod, *, repo=None, store=None) -> tuple[RealizationState, ...]:
     """Return retained current-generation realization history."""
 
-    _selected, operation = _bound_operation(bound, repo=repo, store=store)
+    _selected, operation = _bound_operation(
+        bound, repo=repo, store=store, writable=False
+    )
     return operation.history() if operation.control_path.exists() else ()
 
 
 def managed_results(bound: BoundManagedMethod, *, repo=None, store=None) -> Mapping[str, LocatedRecordRef]:
     """Return exact active output record refs without computing dependencies."""
 
-    selected, operation = _bound_operation(bound, repo=repo, store=store)
+    selected, operation = _bound_operation(
+        bound, repo=repo, store=store, writable=False
+    )
     active = operation.active(missing_ok=True)
     if active is None or active.realization_record_id is None:
         return MappingProxyType({})
@@ -363,16 +371,20 @@ def managed_activate(
         return lease.activate(realization_id)
 
 
-def _bound_operation(bound: BoundManagedMethod, *, repo=None, store=None):
+def _bound_operation(
+    bound: BoundManagedMethod, *, repo=None, store=None, writable: bool = True
+):
     producer = bound.__self__
-    selected = resolve_managed_store(repo, store=store, target=producer)
+    selected = resolve_managed_store(
+        repo, store=store, target=producer, writable=writable
+    )
     key = OperationKey.from_producer(producer, bound._descriptor.method_name)
     fingerprint = declaration_fingerprint(
         bound._descriptor.method_name,
         bound._descriptor.declaration,
         producer=producer,
     )
-    managed_store = ManagedOperationStore(selected)
+    managed_store = ManagedOperationStore(selected, writable=writable)
     namespace = managed_store._read_namespace(key, missing_ok=True)
     operation = managed_store.operation(key, fingerprint)
     if namespace is None or namespace.current_declaration_fingerprint != fingerprint:

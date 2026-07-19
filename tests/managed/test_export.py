@@ -1,21 +1,40 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from dryml.core2 import Object, RefCDef, Repo
 from dryml.core2.store.dir import DirStore
+from dryml.core2.store.zip import ZipExportStore, ZipStore
 from dryml.managed import (
+    ManagedOperationStore,
     ManagedOutput,
+    ManagedStoreUnsupportedError,
     MissingManagedOutputError,
+    OperationKey,
     StaleManagedResultError,
+    declaration_fingerprint,
     export_recipe,
+    plan_cleanup,
     resolve_output,
     transfer_realizations,
     managed,
 )
-from dryml.records import RealizationRecord, require_checkpoint_integrity
+from dryml.records import (
+    AdapterDescriptor,
+    AdapterRecord,
+    AdapterRegistry,
+    DataRecord,
+    LocatedRecordRef,
+    LocatedTypedRecord,
+    RealizationRecord,
+    RepresentationRequirement,
+    require_checkpoint_integrity,
+    resolve_data_record,
+    run_adapter_plan,
+)
 
 
 class CountingSource(Object):
@@ -69,6 +88,11 @@ class Consumer(Object):
         current_operation_context().write_output(
             "result", "value.bin", (b"consumed",), representation=representation
         )
+
+
+class SharedProducerConsumer(Consumer):
+    def __dryml_managed_inputs__(self, method, args, kwargs):
+        return (self.source, self.source, self.source)
 
 
 class CheckpointProducer(Object):
@@ -144,6 +168,121 @@ def test_exact_active_transfer_recurses_consumed_lineage_and_reopens(tmp_path):
     ) == b"exact"
     assert not tuple(Path(reopened.managed_control_root()).glob("**/attempts/*"))
     assert not tuple(Path(reopened.managed_control_root()).glob("**/owner.json"))
+
+
+def test_exact_transfer_preserves_adapter_representation_after_reopen(tmp_path):
+    source = DirStore(tmp_path / "source")
+    destination_path = tmp_path / "destination"
+    producer = CountingSource("adapter-source")
+    completed = producer.compute(store=source)
+    source_record_id = completed.outputs["result"].record_id
+    source_record = DataRecord.from_envelope(
+        source.records.read_record(source_record_id)
+    )
+    source_ref = LocatedRecordRef(source.records._store_ref(), source_record_id)
+    registry = AdapterRegistry()
+    adapter_runs = []
+
+    def convert(context):
+        adapter_runs.append(context)
+        context.session.write_bytes("value.bin", b"converted")
+        return {}
+
+    registry.register(
+        AdapterDescriptor(
+            "test.convert-exact-transfer",
+            RepresentationRequirement(kind="u8.bytes"),
+            RepresentationRequirement(kind="u8.converted-bytes"),
+        ),
+        runner=convert,
+    )
+    resolution = resolve_data_record(
+        Repo(stores=[source]),
+        LocatedTypedRecord(source_ref, source_record),
+        RepresentationRequirement(kind="u8.converted-bytes"),
+        adapters=registry,
+    )
+    converted = run_adapter_plan(
+        resolution.adapter_plan,
+        repo=Repo(stores=[source]),
+        store=source,
+        registry=registry,
+    )
+    target_ref = converted.target_records[-1]
+    adapter_ref = converted.adapter_records[-1]
+    target = DataRecord.from_envelope(
+        source.records.read_record(target_ref.record_id)
+    )
+    CountingSource.runs = 0
+
+    report = transfer_realizations(
+        source,
+        DirStore(destination_path),
+        producer.compute.result,
+    )
+
+    reopened = DirStore(destination_path)
+    reopened_source = DataRecord.from_envelope(
+        reopened.records.read_record(source_record_id)
+    )
+    selected = resolve_data_record(
+        Repo(stores=[reopened]),
+        LocatedTypedRecord(
+            LocatedRecordRef(reopened.records._store_ref(), source_record_id),
+            reopened_source,
+        ),
+        RepresentationRequirement(representation_id=target.representation_id),
+    )
+    imported_adapter = AdapterRecord.from_envelope(
+        reopened.records.read_record(adapter_ref.record_id)
+    )
+
+    assert selected.status == "ok"
+    assert selected.selected.ref.record_id == target_ref.record_id
+    assert imported_adapter.target_record_id == target_ref.record_id
+    assert target_ref.record_id in report.records
+    assert adapter_ref.record_id in report.records
+    assert target_ref.record_id in report.products
+    assert ("representation", target.representation_id) in report.specs
+    assert _product_bytes(reopened, target_ref.record_id) == b"converted"
+    assert len(adapter_runs) == 1
+    assert CountingSource.runs == 0
+
+
+def test_exact_transfer_parses_shared_producer_activation_history_once(
+    tmp_path, monkeypatch
+):
+    from dryml.managed.store import OperationControl
+
+    source = DirStore(tmp_path / "source")
+    producer = CountingSource("shared-producer")
+    producer.compute(store=source)
+    consumer = SharedProducerConsumer(producer.compute.result)
+    consumer.compute(store=source)
+    source_root = Path(source.managed_control_root())
+    activation_scans = []
+    original = OperationControl._activation_events
+
+    def counted(operation):
+        if operation.managed_store.root == source_root:
+            activation_scans.append(
+                (
+                    operation.key.producer_cdef_id,
+                    operation.key.method,
+                    operation.declaration_fingerprint,
+                )
+            )
+        return original(operation)
+
+    monkeypatch.setattr(OperationControl, "_activation_events", counted)
+
+    transfer_realizations(
+        source,
+        DirStore(tmp_path / "destination"),
+        consumer.compute.result,
+    )
+
+    assert len(activation_scans) == 1
 
 
 def test_exact_transfer_normal_reuse_resolves_transferred_consumed_vector(
@@ -318,3 +457,58 @@ def test_completed_transfer_preserves_exact_checkpoint_payload(tmp_path):
     )
     assert len(matches) == 1
     require_checkpoint_integrity(matches[0], realization.checkpoint_head)
+
+
+def test_completed_zip_snapshot_supports_reads_and_rejects_lifecycle_mutation(
+    tmp_path,
+):
+    source = DirStore(tmp_path / "source")
+    snapshot_source = DirStore(tmp_path / "snapshot-source")
+    producer = CountingSource("zip-snapshot")
+    completed = producer.compute(store=source)
+    transfer_realizations(source, snapshot_source, producer.compute.result)
+    archive = BytesIO()
+    ZipExportStore(
+        archive,
+        snapshot_source.base_dir,
+        include_paths={"objects", "records", "products", ".dryml/managed-v1"},
+    ).commit()
+    snapshot = ZipStore(archive)
+    try:
+        assert producer.compute.status(store=snapshot).status == "completed"
+        assert [
+            state.realization_id
+            for state in producer.compute.history(store=snapshot)
+        ] == [completed.realization_id]
+        assert (
+            producer.compute.results(store=snapshot)["result"].record_id
+            == completed.outputs["result"].record_id
+        )
+        assert (
+            resolve_output(producer.compute.result, store=snapshot).record_id
+            == completed.outputs["result"].record_id
+        )
+
+        key = OperationKey.from_producer(producer, "compute")
+        fingerprint = declaration_fingerprint(
+            "compute", producer.compute._descriptor.declaration, producer=producer
+        )
+        operation = ManagedOperationStore(snapshot, writable=False).operation(
+            key, fingerprint
+        )
+        with pytest.raises(ManagedStoreUnsupportedError, match="snapshot Stores"):
+            operation.acquire()
+        with pytest.raises(ManagedStoreUnsupportedError, match="DirStore"):
+            producer.compute(store=snapshot)
+        with pytest.raises(ManagedStoreUnsupportedError, match="DirStore"):
+            producer.compute.rerun(store=snapshot)
+        with pytest.raises(ManagedStoreUnsupportedError, match="DirStore"):
+            producer.compute.activate(completed.realization_id, store=snapshot)
+        with pytest.raises(ManagedStoreUnsupportedError, match="DirStore"):
+            plan_cleanup(
+                snapshot,
+                producer.compute.result,
+                realization_ids=(completed.realization_id,),
+            )
+    finally:
+        snapshot.close()

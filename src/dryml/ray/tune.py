@@ -1,331 +1,41 @@
-import os
-import pathlib
-import dryml
-from dryml.models import TrainSpec
-from dryml.models import Trainable
-from dryml.data import Dataset
-from dryml import Repo
-import pickle
-import uuid
+"""Import-safe namespace for the retired Ray Tune adapters.
 
+The Tune 1 and Tune 2 adapters depended on the removed ``Trainable`` and
+``TrainSpec`` APIs and have no supported equivalent. Use ``dryml.SearchSpace``
+with ``dryml.models.Experiment`` for bounded local search.
+"""
 
-class Tune2ObjectSaver(object):
-    def __init__(
-            self, model: Trainable = None,
-            train_state: TrainSpec = None,
-            repo: Repo = None,
-            test_ds: Dataset = None,
-            world_requirements=None,
-            tmp_checkpoint_dir='/tmp',
-            metrics={}):
-        if model is None:
-            raise ValueError("Must pass a model.")
-        self.model = model
 
-        if train_state is None:
-            raise ValueError("Must pass a train state.")
-        self.train_state = train_state
+_UNSUPPORTED_MESSAGE = (
+    "the legacy dryml.ray.tune adapters are no longer supported; use "
+    "dryml.SearchSpace with dryml.models.Experiment for bounded local search"
+)
 
-        if repo is None:
-            raise ValueError("Must pass a repo.")
-        self.repo = repo
 
-        if test_ds is None:
-            raise ValueError("Must pass test data for metrics")
-        self.test_ds = test_ds
+class _UnsupportedTuneAdapter:
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError(_UNSUPPORTED_MESSAGE)
 
-        self.world_requirements = world_requirements
 
-        self.metrics = metrics
-        self.tmp_checkpoint_dir = tmp_checkpoint_dir
+class Tune1ObjectSaver(_UnsupportedTuneAdapter):
+    """Retired Ray Tune 1 checkpoint adapter."""
 
-    def __call__(self):
-        from ray.air import session
-        from ray.air.checkpoint import Checkpoint
 
-        # Extract current step from dryml training process
-        # step = self.train_state.global_step()
+class Tune1Trainer(_UnsupportedTuneAdapter):
+    """Retired Ray Tune 1 trainer adapter."""
 
-        temp_checkpoint_dir = os.path.join(
-            self.tmp_checkpoint_dir,
-            str(uuid.uuid4()))
-        pathlib.Path(temp_checkpoint_dir).mkdir(exist_ok=False)
-        # d = tempfile.TemporaryDirectory()
-        # checkpoint_dir = d.name
-        # Get checkpoint directory
-        # with checkpoint.as_directory() as checkpoint_dir:
 
-        # Create checkpoint dir
-        #    if not os.path.exists(checkpoint_dir):
-        #       # Create the checkpoint directory if needed
-        #       pathlib.Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+class Tune2ObjectSaver(_UnsupportedTuneAdapter):
+    """Retired Ray Tune 2 checkpoint adapter."""
 
-        # Save model to checkpoint
-        self.model.save_self(f"{temp_checkpoint_dir}/model.dry")
-        self.train_state.save(f"{temp_checkpoint_dir}/train_state.pkl")
-        with open(f"{temp_checkpoint_dir}/world_requirements.pkl", 'wb') as f:
-            f.write(pickle.dumps(self.world_requirements))
 
-        checkpoint = Checkpoint.from_directory(path=temp_checkpoint_dir)
+class Tune2Trainer(_UnsupportedTuneAdapter):
+    """Retired Ray Tune 2 trainer adapter."""
 
-        # Compute test set metrics
-        metric_values = {}
-        for metric_name in self.metrics:
-            metric = self.metrics[metric_name]
-            value = metric(self.model, self.test_ds)
-            metric_values[metric_name] = value
-        # Save model's dry_id
-        metric_values['dry_id'] = self.model.dry_id
 
-        # Report results
-        session.report(metrics=metric_values, checkpoint=checkpoint)
-
-
-class Tune2Trainer(object):
-    def __init__(
-            self,
-            name=None,
-            prep_method=None,
-            metrics={}):
-        self._name = name
-        self.prep_method = prep_method
-        self.metrics = metrics
-
-    def __call__(self, config, checkpoint_dir=None):
-        from ray.air import session
-
-        prep_dict = self.prep_method()
-        # Create repo
-        repo = prep_dict['repo']()
-        model_gen = prep_dict['model']
-        data_gen = prep_dict['data']
-
-        # Load or initialize training
-        loaded_checkpoint = session.get_checkpoint()
-        if loaded_checkpoint:
-            with loaded_checkpoint.as_directory() as checkpoint_dir:
-                # Load existing train state
-                train_state = TrainSpec.load(
-                    os.path.join(checkpoint_dir, "train_state.pkl"))
-
-                # Load object from checkpoint
-                model = dryml.load_object(
-                    os.path.join(checkpoint_dir, "model.dry"),
-                    repo=repo)
-
-                # Retrieve requested world/resource requirements.
-                world_filepath = os.path.join(checkpoint_dir, "world_requirements.pkl")
-                if os.path.exists(world_filepath):
-                    with open(world_filepath, 'rb') as f:
-                        world_requirements = pickle.loads(f.read())
-                else:
-                    world_requirements = None
-
-        else:
-            # Initialize train spec
-            train_state = TrainSpec()
-
-            # Create build_obj function
-            model_dict = model_gen(config, repo=repo)
-
-            model = model_dict['model']
-            if 'world_requirements' in model_dict:
-                world_requirements = model_dict['world_requirements']
-            else:
-                world_requirements = None
-
-        if 'data_world' in prep_dict:
-            data_world_requirements = prep_dict['data_world']()
-            world_requirements = tuple(req for req in (world_requirements, data_world_requirements) if req is not None)
-
-        # Start data pipelines
-        data_dict = data_gen()
-        train_ds = data_dict['train']
-        test_ds = data_dict['test']
-
-        # create train saver callable
-        obj_saver = Tune2ObjectSaver(
-            model=model,
-            train_state=train_state,
-            repo=repo,
-            test_ds=test_ds,
-            world_requirements=world_requirements,
-            metrics=self.metrics,)
-        callbacks = [obj_saver]
-
-        # Prepare model for training
-        model.prep_train()
-
-        # Start training
-        model.train(
-            train_ds,
-            train_spec=train_state,
-            train_callbacks=callbacks)
-
-        # Save trained model to repo
-        repo.add_object(model)
-        repo.save()
-
-        # Save metric data
-        final_metrics = {}
-        for metric_name in self.metrics:
-            metric = self.metrics[metric_name]
-            metric_val = metric(model, test_ds)
-            final_metrics[metric_name] = metric_val
-        final_metrics.update(dry_id=model.dry_id, done=True)
-
-        # Report metrics
-        session.report(metrics=final_metrics)
-
-
-class Tune1ObjectSaver(object):
-    def __init__(
-            self, model: Trainable = None,
-            train_state: TrainSpec = None,
-            repo: Repo = None,
-            test_ds: Dataset = None,
-            world_requirements=None,
-            metrics={}):
-        if model is None:
-            raise ValueError("Must pass a model.")
-        self.model = model
-
-        if train_state is None:
-            raise ValueError("Must pass a train state.")
-        self.train_state = train_state
-
-        if repo is None:
-            raise ValueError("Must pass a repo.")
-        self.repo = repo
-
-        if test_ds is None:
-            raise ValueError("Must pass test data for metrics")
-        self.test_ds = test_ds
-
-        self.world_requirements = world_requirements
-
-        self.metrics = metrics
-
-    def __call__(self):
-        from ray import tune
-
-        # Extract current step from dryml training process
-        step = self.train_state.global_step()
-
-        with tune.checkpoint_dir(step=step) as checkpoint_dir:
-            if not os.path.exists(checkpoint_dir):
-                # Create the checkpoint directory if needed
-                pathlib.Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
-
-            # Save model to checkpoint
-            self.model.save_self(f"{checkpoint_dir}/model.dry")
-            self.train_state.save(f"{checkpoint_dir}/train_state.pkl")
-            with open(f"{checkpoint_dir}/world_requirements.pkl", 'wb') as f:
-                f.write(pickle.dumps(self.world_requirements))
-
-        # Compute test set metrics
-        metric_values = {}
-        for metric_name in self.metrics:
-            metric = self.metrics[metric_name]
-            value = metric(self.model, self.test_ds)
-            metric_values[metric_name] = value
-        # Save model's dry_id
-        metric_values['dry_id'] = self.model.dry_id
-
-        # Report results
-        tune.report(**metric_values)
-
-
-class Tune1Trainer(object):
-    def __init__(
-            self,
-            name=None,
-            prep_method=None,
-            metrics={}):
-        self._name = name
-        self.prep_method = prep_method
-        self.metrics = metrics
-
-    def __call__(self, config, checkpoint_dir=None):
-        from ray import tune
-
-        prep_dict = self.prep_method()
-        # Create repo
-        repo = prep_dict['repo']()
-        model_gen = prep_dict['model']
-        data_gen = prep_dict['data']
-
-        # Load or initialize training
-        if checkpoint_dir:
-            # Load existing train state
-            train_state = TrainSpec.load(
-                os.path.join(checkpoint_dir, "train_state.pkl"))
-
-            # Load object from checkpoint
-            model = dryml.load_object(
-                os.path.join(checkpoint_dir, "model.dry"),
-                repo=repo)
-
-            # Retrieve requested world/resource requirements.
-            world_filepath = os.path.join(checkpoint_dir, "world_requirements.pkl")
-            if os.path.exists(world_filepath):
-                with open(world_filepath, 'rb') as f:
-                    world_requirements = pickle.loads(f.read())
-            else:
-                world_requirements = None
-
-        else:
-            # Initialize train spec
-            train_state = TrainSpec()
-
-            # Create build_obj function
-            model_dict = model_gen(config, repo=repo)
-
-            model = model_dict['model']
-            if 'world_requirements' in model_dict:
-                world_requirements = model_dict['world_requirements']
-            else:
-                world_requirements = None
-
-        if 'data_world' in prep_dict:
-            data_world_requirements = prep_dict['data_world']()
-            world_requirements = tuple(req for req in (world_requirements, data_world_requirements) if req is not None)
-
-        # Start data pipelines
-        data_dict = data_gen()
-        train_ds = data_dict['train']
-        test_ds = data_dict['test']
-
-        # create train saver callable
-        obj_saver = Tune1ObjectSaver(
-            model=model,
-            train_state=train_state,
-            repo=repo,
-            test_ds=test_ds,
-            world_requirements=world_requirements,
-            metrics=self.metrics,)
-        callbacks = [obj_saver]
-
-        # Prepare model for training
-        model.prep_train()
-
-        # Start training
-        model.train(
-            train_ds,
-            train_spec=train_state,
-            train_callbacks=callbacks)
-
-        # Save trained model to repo
-        repo.add_object(model)
-        repo.save()
-
-        # Save metric data
-        final_metrics = {}
-        for metric_name in self.metrics:
-            metric = self.metrics[metric_name]
-            metric_val = metric(model, test_ds)
-            final_metrics[metric_name] = metric_val
-        final_metrics.update(dry_id=model.dry_id, done=True)
-
-        # Report metrics
-        tune.report(**final_metrics)
+__all__ = [
+    "Tune1ObjectSaver",
+    "Tune1Trainer",
+    "Tune2ObjectSaver",
+    "Tune2Trainer",
+]

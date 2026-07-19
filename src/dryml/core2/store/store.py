@@ -14,7 +14,8 @@ class Store(ABC):
         """Return explicit optional Store capabilities.
 
         Optional higher layers must check these names before using Store-owned
-        sidecars. The base Store supports no managed live-write capabilities.
+        sidecars. The base Store supports no managed snapshot or live-write
+        capabilities.
         """
 
         return frozenset()
@@ -28,6 +29,11 @@ class Store(ABC):
         """Return the Store-local managed control root when supported."""
 
         raise NotImplementedError("Store does not support live managed control")
+
+    def managed_snapshot_root(self) -> str:
+        """Return the Store-local read-only managed snapshot root when supported."""
+
+        raise NotImplementedError("Store does not support managed snapshot reads")
 
     @property
     def base_dir(self) -> str:

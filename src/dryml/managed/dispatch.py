@@ -7,7 +7,6 @@ import os
 import tempfile
 import threading
 import time
-import traceback
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -31,6 +30,7 @@ from dryml.records import (
     validate_realization_id,
     write_execution_record,
 )
+from dryml.records.execution import persistence_safe_execution_error
 
 from .callbacks import CallbackCoordinator, ControlRequest, preflight_callbacks
 from .context import OperationContext, OperationResult, OutputEffect, _OperationInterrupted
@@ -486,7 +486,7 @@ class _ManagedCoordinatorSession:
                 failed = replace(
                     response,
                     status="failed",
-                    error={"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()},
+                    error=persistence_safe_execution_error(exc),
                     diagnostics=(*response.diagnostics, {"message": "managed coordinator finalization failed"}),
                 )
                 return self._finish_incomplete(failed, status="failed")
@@ -499,7 +499,8 @@ class _ManagedCoordinatorSession:
         checkpoint = self.context.checkpoint_head
         diagnostic = None
         if response.error:
-            diagnostic = f"{response.error.get('type', 'Error')}: {str(response.error.get('message', ''))[:384]}"
+            failure = persistence_safe_execution_error(response.error)
+            diagnostic = f"{failure['type']}: {failure['metadata']['code']}"
         elif response.cancellation:
             diagnostic = f"cancelled: {str(response.cancellation.get('reason', 'requested'))[:384]}"
         try:
@@ -637,14 +638,14 @@ class ManagedDispatchFuture:
                     operation_id=self.session.plan.envelope.operation_id,
                     dispatch_id=self.session.plan.dispatch_spec.get("id"),
                     recipe_id=self.session.plan.execution_recipe.get("id"),
-                    error={"type": type(exc).__name__, "message": str(exc)},
+                    error=persistence_safe_execution_error(exc),
                     diagnostics=({"message": "managed coordinator event loop failed"},),
                 )
             elif response.status == "cancelled":
                 response = replace(
                     response,
                     status="failed",
-                    error={"type": type(exc).__name__, "message": str(exc)},
+                    error=persistence_safe_execution_error(exc),
                     cancellation=None,
                 )
             self.worker_response = self.session._finish_incomplete(
@@ -1198,7 +1199,9 @@ def _write_incomplete_execution(plan, response, realization_id):
         recipe_id=plan.execution_recipe.get("id"),
         realization_id=realization_id,
         logs=_execution_logs(),
-        error=ExecutionErrorInfo.from_json(response.error) if response.error else None,
+        error=ExecutionErrorInfo.from_json(
+            persistence_safe_execution_error(response.error)
+        ) if response.error else None,
         cancellation=ExecutionCancellationInfo.from_json(response.cancellation) if response.cancellation else None,
         diagnostics=response.diagnostics,
     )

@@ -16,8 +16,9 @@ def _env(target_module):
 def test_success_and_failure_execution_records_query(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     dispatcher = Dispatcher(store=store)
+    secret = "dispatch-secret-sentinel-91e6"
     ok = attach_operation_id(make_function_call_spec("dispatch_target:noisy_add", args=[2, 3], metadata={"owner": "user"}))
-    fail = attach_operation_id(make_function_call_spec("dispatch_target:fail"))
+    fail = attach_operation_id(make_function_call_spec("dispatch_target:fail", args=[secret]))
 
     plan = dispatcher.plan(ok, environment=_env(target_module))
     assert plan.envelope.operation_spec["payload"] == ok["payload"]
@@ -50,7 +51,14 @@ def test_success_and_failure_execution_records_query(tmp_path, target_module):
 
     assert fail_result.status == "failed"
     assert fail_result.execution_record_id
-    assert fail_result.error["type"] == "ValueError"
+    assert fail_result.error == {
+        "type": "ValueError",
+        "metadata": {"code": "execution_failed"},
+    }
+    failure_record_data = store.records.read_record(fail_result.execution_record_id)
+    failure_record = ExecutionRecord.from_envelope(failure_record_data)
+    assert failure_record.error.to_json() == fail_result.error
+    assert secret not in str(failure_record_data)
     assert store.records.find_execution_records(operation_id=ok["id"], status="ok")[0].record_id == ok_result.execution_record_id
     assert store.records.find_execution_records(operation_id=fail["id"], status="failed")[0].record_id == fail_result.execution_record_id
 

@@ -7,11 +7,11 @@ import os
 import platform
 import sys
 import time
-import traceback
 from typing import Any, Mapping
 
 from dryml.core2.repo import Repo
 from dryml.records import ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, StorageRef, write_execution_record
+from dryml.records.execution import persistence_safe_execution_error
 from dryml.runtime import RuntimeMode, activate
 from dryml.runtime.specs import RuntimeContextSpec
 
@@ -84,14 +84,18 @@ def main(argv: list[str] | None = None) -> int:
         try:
             envelope = locals().get("envelope")
             if isinstance(envelope, ExecutionEnvelope):
-                handshake = _handshake(envelope, status="failed", diagnostics=({"message": str(exc), "type": type(exc).__name__},))
+                error = persistence_safe_execution_error(exc)
+                handshake = _handshake(envelope, status="failed", diagnostics=({"message": "worker initialization failed", "error_type": error["type"], "code": error["metadata"]["code"]},))
                 write_json_file(ns.handshake, handshake.to_json())
                 response = _failure_response(envelope, exc, store=(locals().get("stores") or [None])[0])
             else:
-                response = WorkerResponse(status="failed", error={"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}, diagnostics=({"message": "worker failed before envelope validation"},))
+                response = WorkerResponse(status="failed", error=persistence_safe_execution_error(exc), diagnostics=({"message": "worker failed before envelope validation"},))
             write_json_file(ns.response, response.to_json())
-        except Exception:
-            traceback.print_exc()
+        except Exception as response_exc:
+            print(
+                f"worker failure response could not be written: {type(response_exc).__name__}",
+                file=sys.stderr,
+            )
         return 1
 
 
@@ -104,7 +108,8 @@ def _open_and_validate_stores(envelope: ExecutionEnvelope):
             statuses[ref.label] = validate_worker_store_access(ref)
             stores.append(open_worker_store(ref))
         except Exception as exc:
-            diagnostics.append({"message": str(exc), "type": type(exc).__name__, "context": getattr(exc, "context", {})})
+            error = persistence_safe_execution_error(exc)
+            diagnostics.append({"message": "worker Store validation failed", "error_type": error["type"], "code": error["metadata"]["code"]})
     request = WorkerHandshakeRequest.from_json(envelope.handshake)
     missing = sorted(set(request.required_features) - set(FEATURES))
     if request.min_protocol > DISPATCH_WORKER_PROTOCOL_VERSION:
@@ -195,13 +200,7 @@ def _execute(
                     )
                 error = None
                 if execution.error is not None:
-                    error = {
-                        "type": type(execution.error).__name__,
-                        "message": str(execution.error),
-                        "traceback": "".join(
-                            traceback.format_exception(execution.error)
-                        ),
-                    }
+                    error = persistence_safe_execution_error(execution.error)
                 return WorkerResponse(
                     status=execution.status,
                     operation_id=envelope.operation_id,
@@ -232,7 +231,7 @@ def _execute(
 
 
 def _failure_response(envelope: ExecutionEnvelope, exc: BaseException, *, store: Any) -> WorkerResponse:
-    error = {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}
+    error = persistence_safe_execution_error(exc)
     record_id = _write_worker_record(envelope, store, "failed", error=error, diagnostics=({"message": "worker execution failed"},))
     return WorkerResponse(
         status="failed",

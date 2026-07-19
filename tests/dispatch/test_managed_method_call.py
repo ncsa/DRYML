@@ -18,6 +18,7 @@ from dryml.environments import PythonExecutableSpec
 from dryml.managed import ControlRequest, ManagedCallback
 from dryml.managed.store import OperationLease
 from dryml.operations import attach_operation_id, make_method_call_spec
+from dryml.records import ExecutionRecord
 
 
 def _env(target_module):
@@ -191,6 +192,7 @@ def test_callback_interrupt_crosses_safe_point_and_preserves_checkpoint(tmp_path
 def test_worker_failure_retains_structured_effects_and_prior_active(tmp_path, target_module):
     store = DirStore(tmp_path / "store", query_index="none")
     box = _managed_box()
+    secret = "managed-worker-secret-sentinel-b15c"
     first = Dispatcher(store=store).run(
         box.compute,
         args=("old",),
@@ -201,16 +203,27 @@ def test_worker_failure_retains_structured_effects_and_prior_active(tmp_path, ta
     failed = Dispatcher(store=store).run(
         box.compute,
         args=("new",),
-        kwargs={"fail": True},
+        kwargs={"fail": secret},
         rerun=True,
         environment=_env(target_module),
         timeout=10,
     )
 
     assert failed.status == "failed"
-    assert failed.error["type"] == "RuntimeError"
+    assert failed.error == {
+        "type": "RuntimeError",
+        "metadata": {"code": "execution_failed"},
+    }
     assert failed.managed_result["status"] == "failed"
     assert failed.managed_result["effects"]["result"]["slot"] == "result"
+    failure_record = ExecutionRecord.from_envelope(
+        store.records.read_record(failed.execution_record_id)
+    )
+    assert failure_record.error.to_json() == failed.error
+    assert secret not in str(failure_record.to_envelope())
+    assert box.compute.history(store=store)[-1].diagnostics == (
+        "RuntimeError: execution_failed",
+    )
     assert box.compute.results(store=store)["result"].record_id == first.produced_record_ids[0]
 
 
@@ -219,6 +232,7 @@ def test_activation_failure_keeps_verified_rerun_inactive_and_old_active(
 ):
     store = DirStore(tmp_path / "store", query_index="none")
     box = _managed_box()
+    secret = "managed-finalization-secret-sentinel-640a"
     first = Dispatcher(store=store).run(
         box.compute,
         environment=_env(target_module),
@@ -226,7 +240,7 @@ def test_activation_failure_keeps_verified_rerun_inactive_and_old_active(
     )
 
     def fail_activation(self, realization_id):
-        raise RuntimeError("activation failed")
+        raise RuntimeError(secret)
 
     monkeypatch.setattr(OperationLease, "activate", fail_activation)
     failed = Dispatcher(store=store).run(
@@ -237,7 +251,15 @@ def test_activation_failure_keeps_verified_rerun_inactive_and_old_active(
     )
 
     assert failed.status == "failed"
-    assert failed.error["type"] == "RuntimeError"
+    assert failed.error == {
+        "type": "RuntimeError",
+        "metadata": {"code": "execution_failed"},
+    }
+    failure_record = ExecutionRecord.from_envelope(
+        store.records.read_record(failed.execution_record_id)
+    )
+    assert failure_record.error.to_json() == failed.error
+    assert secret not in str(failure_record.to_envelope())
     assert box.compute.results(store=store)["result"].record_id == first.produced_record_ids[0]
     history = box.compute.history(store=store)
     assert [item.status for item in history] == ["completed", "completed"]

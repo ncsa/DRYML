@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import IntEnum
+
+from dryml.records.execution import persistence_safe_execution_error
+
 from .errors import CallbackFailure, ManagedCapabilityError
 from .events import OperationEvent
 
@@ -97,7 +100,7 @@ class CallbackCoordinator:
         self.max_diagnostics = max_diagnostics
         self._control = ControlRequest.NONE
         self._diagnostics: list[str] = []
-        self._failure: str | None = None
+        self._failure: BaseException | None = None
 
     @property
     def diagnostics(self) -> tuple[str, ...]:
@@ -122,10 +125,11 @@ class CallbackCoordinator:
                 if request > self._control:
                     self._control = request
             except Exception as exc:
-                diagnostic = f"callback {type(exc).__name__}: {str(exc)[:384]}"
+                failure = persistence_safe_execution_error(exc)
+                diagnostic = f"callback {failure['type']}: {failure['metadata']['code']}"
                 self._append_diagnostic(diagnostic)
                 if not callback.fail_soft:
-                    self._failure = diagnostic
+                    self._failure = exc
                     self._control = ControlRequest.FAIL
 
     def poll(self) -> ControlRequest:
@@ -143,7 +147,10 @@ class CallbackCoordinator:
         """Raise the retained strict callback failure, if any."""
 
         if self._failure is not None:
-            raise CallbackFailure(self._failure)
+            failure = persistence_safe_execution_error(self._failure)
+            raise CallbackFailure(
+                f"callback {failure['type']}: {failure['metadata']['code']}"
+            ) from self._failure
 
     def _append_diagnostic(self, diagnostic: str) -> None:
         self._diagnostics.append(diagnostic)

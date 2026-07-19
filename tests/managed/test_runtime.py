@@ -57,6 +57,8 @@ class FakeOperation(Object):
             checkpoint()
             context.commit_checkpoint()
             raise RuntimeError("failed after checkpoint")
+        if fail is not None:
+            raise RuntimeError(str(fail))
         early = control is ControlRequest.GRACEFUL_STOP
         context.write_output(
             "result",
@@ -308,8 +310,9 @@ def test_missing_logical_input_fails_preflight_without_consumer_mutation(tmp_pat
 
 def test_fail_soft_observer_continues_and_records_bounded_diagnostics(tmp_path):
     store = DirStore(tmp_path / "store")
+    secret = "managed-callback-secret-sentinel-a97d"
     callback = ManagedCallback(
-        lambda event: (_ for _ in ()).throw(RuntimeError("observer")),
+        lambda event: (_ for _ in ()).throw(RuntimeError(secret)),
         fail_soft=True,
     )
 
@@ -318,6 +321,8 @@ def test_fail_soft_observer_continues_and_records_bounded_diagnostics(tmp_path):
     assert result.action == "start"
     assert len(result.diagnostics) <= 32
     assert result.diagnostics
+    assert all(item == "callback RuntimeError: execution_failed" for item in result.diagnostics)
+    assert secret not in str(result.diagnostics)
 
 
 @pytest.mark.parametrize("point,resumable", [("before", False), ("after", True)])
@@ -332,6 +337,19 @@ def test_operation_failure_is_resumable_only_after_compatible_checkpoint(tmp_pat
     else:
         with pytest.raises(ManagedRerunRequiredError):
             operation(store=store)
+
+
+def test_operation_failure_keeps_exception_message_transient(tmp_path):
+    store = DirStore(tmp_path / "store")
+    operation = FakeOperation().compute
+    secret = "managed-local-secret-sentinel-73b4"
+
+    with pytest.raises(RuntimeError, match=secret):
+        operation(store=store, fail=secret)
+
+    failed = operation.history(store=store)[0]
+    assert failed.diagnostics == ("RuntimeError: execution_failed",)
+    assert secret not in str(failed.to_json())
 
 
 def test_missing_required_output_fails_without_activation(tmp_path):

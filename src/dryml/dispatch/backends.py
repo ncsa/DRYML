@@ -15,6 +15,7 @@ from typing import Any, Mapping
 
 from dryml.environments import CondaEnvironmentSpec, CurrentEnvironmentSpec, PythonExecutableSpec, spec_from_data
 from dryml.records import ExecutionCancellationInfo, ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, ProductWriteSession, StorageRef, write_execution_record
+from dryml.records.execution import persistence_safe_execution_error
 
 from .errors import DispatchCancelled, DispatchLaunchError, DispatchTimeout, WorkerProtocolError
 from .protocol import WorkerHandshakeResponse, WorkerResponse, read_json_file, save_envelope, write_json_file
@@ -214,9 +215,12 @@ class LocalSubprocessFuture:
                 return
             self._response = response
         except Exception as exc:
-            self._response = self._parent_failure_response("failed", error={"type": type(exc).__name__, "message": str(exc), "exit_code": self.process.returncode})
+            self._response = self._parent_failure_response(
+                "failed", error=persistence_safe_execution_error(exc)
+            )
 
     def _parent_failure_response(self, status: str, *, error: Mapping[str, Any] | None = None, cancellation: Mapping[str, Any] | None = None) -> WorkerResponse:
+        error = persistence_safe_execution_error(error) if error else None
         diagnostics = [{"message": "parent-side dispatch failure", "returncode": self.process.returncode}]
         try:
             record_id = _write_execution_record(

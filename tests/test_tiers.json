@@ -2237,6 +2237,7 @@
     "tests/operations/test_operation_spec.py::test_operation_spec_writes_under_operation_family_and_is_not_object": "smoke",
     "tests/package/test_graph_retirement.py::test_clean_tracked_distribution_excludes_graph_prototype": "heavy",
     "tests/package/test_public_imports.py::test_explicit_code_import_has_public_all_and_no_dispatch_coupling": "medium",
+    "tests/package/test_public_imports.py::test_retired_ray_tune_plugin_import_is_lightweight": "smoke",
     "tests/package/test_public_imports.py::test_top_level_public_all_is_frozen_and_code_remains_explicit": "smoke",
     "tests/package/test_release_artifacts.py::test_artifact_metadata_and_optional_extras_are_exact": "smoke",
     "tests/package/test_release_artifacts.py::test_generated_tutorial_payloads_are_forbidden[examples/notebooks/cache/results.json]": "smoke",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +239,36 @@ def execute_cleanup(
                             "cleanup plan is stale; run a new dry-run"
                         )
                     _write_json(intent_path, plan.to_json(), immutable=True)
+                control = operation._read_control()
+                assert control is not None
+                control_updates = {}
+                if control.pending_realization_id in plan.realization_ids:
+                    control_updates.update(
+                        pending_realization_id=None,
+                        current_attempt_id=None,
+                        checkpoint_head=None,
+                        diagnostics=(),
+                        progress=None,
+                    )
+                if control.latest_realization_id in plan.realization_ids:
+                    retained = tuple(
+                        state
+                        for state in operation.history()
+                        if state.realization_id not in plan.realization_ids
+                    )
+                    latest = max(
+                        retained,
+                        key=lambda state: (state.sequence, state.realization_id),
+                        default=None,
+                    )
+                    control_updates["latest_realization_id"] = (
+                        None if latest is None else latest.realization_id
+                    )
+                if control_updates:
+                    _write_json(
+                        operation.control_path,
+                        replace(control, **control_updates).to_json(),
+                    )
                 selected.records.mark_ref_index_dirty()
                 for relative_path in plan.paths:
                     _delete_declared_path(selected.records.base_dir, relative_path)

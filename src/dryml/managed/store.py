@@ -41,7 +41,9 @@ from .state import (
 )
 
 
+MANAGED_SNAPSHOT_CAPABILITY = "managed-snapshot-v1"
 MANAGED_CAPABILITIES = frozenset({
+    MANAGED_SNAPSHOT_CAPABILITY,
     "managed-control-v1",
     "managed-locking-v1",
     "managed-activation-v1",
@@ -54,13 +56,19 @@ def resolve_managed_store(
     *,
     store: Store | str | os.PathLike[str] | None = None,
     target: Any | None = None,
+    writable: bool = True,
 ) -> Store:
-    """Resolve one writable managed Store without relying on Store order.
+    """Resolve one managed Store without relying on Store order.
 
     Explicit Store selection wins. Otherwise an explicit or active default Repo
-    may provide an object binding or exactly one managed-capable Store. Multiple
-    candidates fail closed so operation state cannot split across authorities.
+    may provide an object binding or exactly one suitable Store. ``writable``
+    requires the complete live lifecycle contract; read-only selection accepts
+    verified managed snapshot Stores. Multiple candidates fail closed so state
+    cannot split across authorities.
     """
+
+    if not isinstance(writable, bool):
+        raise TypeError("writable must be a bool")
 
     if isinstance(repo, Store):
         if store is not None and make_store(store).catalog_key() != repo.catalog_key():
@@ -69,15 +77,24 @@ def resolve_managed_store(
         repo = None
     if store is not None:
         selected = make_store(store)
-        _require_managed_capabilities(selected)
+        if writable:
+            _require_managed_capabilities(selected)
+        else:
+            _require_managed_snapshot_capability(selected)
         return selected
     selected_repo = repo if repo is not None else get_default_repo()
     if not isinstance(selected_repo, Repo):
         raise TypeError("repo must be a Repo, Store, or None")
-    candidates = selected_repo.store_candidates(target, capability="managed-control-v1")
-    candidates = tuple(candidate for candidate in candidates if _has_managed_capabilities(candidate))
+    capability = "managed-control-v1" if writable else MANAGED_SNAPSHOT_CAPABILITY
+    candidates = selected_repo.store_candidates(target, capability=capability)
+    if writable:
+        candidates = tuple(candidate for candidate in candidates if _has_managed_capabilities(candidate))
     if not candidates:
-        raise AmbiguousManagedStoreError("no managed-capable Store is available")
+        if writable:
+            raise AmbiguousManagedStoreError("no managed-capable Store is available")
+        raise AmbiguousManagedStoreError(
+            "no managed snapshot-capable Store is available"
+        )
     if len(candidates) != 1:
         raise AmbiguousManagedStoreError(
             "multiple managed-capable Stores are available; select one explicitly"
@@ -88,12 +105,20 @@ def resolve_managed_store(
 class ManagedOperationStore:
     """Facade over one Store's versioned managed operation namespace."""
 
-    def __init__(self, store: Store):
+    def __init__(self, store: Store, *, writable: bool = True):
         if not isinstance(store, Store):
             store = make_store(store)
-        _require_managed_capabilities(store)
+        if not isinstance(writable, bool):
+            raise TypeError("writable must be a bool")
+        if writable:
+            _require_managed_capabilities(store)
+        else:
+            _require_managed_snapshot_capability(store)
         self.store = store
-        self.root = Path(store.managed_control_root())
+        self.writable = writable
+        self._snapshot_only = not _has_managed_capabilities(store)
+        root = store.managed_control_root() if writable else store.managed_snapshot_root()
+        self.root = Path(root)
 
     @classmethod
     def resolve(
@@ -102,10 +127,24 @@ class ManagedOperationStore:
         *,
         store: Store | str | os.PathLike[str] | None = None,
         target: Any | None = None,
+        writable: bool = True,
     ) -> "ManagedOperationStore":
         """Resolve a context and return its managed control facade."""
 
-        return cls(resolve_managed_store(repo, store=store, target=target))
+        return cls(
+            resolve_managed_store(
+                repo, store=store, target=target, writable=writable
+            ),
+            writable=writable,
+        )
+
+    def _require_writable(self) -> None:
+        """Reject lifecycle mutation through a read-only snapshot facade."""
+
+        if not self.writable:
+            raise ManagedStoreUnsupportedError(
+                "managed snapshot Stores do not support live lifecycle mutation"
+            )
 
     def operation(self, key: OperationKey, declaration_fingerprint: str) -> "OperationControl":
         """Return direct control for one operation declaration generation."""
@@ -200,6 +239,7 @@ class OperationControl:
         appears live, for example after cooperative lock handoff.
         """
 
+        self.managed_store._require_writable()
         lock = PlatformFileLock(self._lock_path)
         try:
             lock.acquire()
@@ -286,6 +326,12 @@ class OperationControl:
                 raise ManagedStateError("realization declaration does not match its generation")
             if path.stem != state.realization_id:
                 raise ManagedStateError("realization ID does not match its direct path")
+            if self.managed_store._snapshot_only and (
+                state.status != "completed" or state.realization_record_id is None
+            ):
+                raise ManagedStateError(
+                    "managed snapshot contains an incomplete realization"
+                )
             states.append(state)
         return tuple(sorted(states, key=lambda item: item.sequence))
 
@@ -349,6 +395,14 @@ class OperationControl:
         control = GenerationControl.from_json(_read_json(self.control_path, "generation control"))
         if control.declaration_fingerprint != self.declaration_fingerprint:
             raise ManagedStateError("generation control declaration fingerprint mismatch")
+        if self.managed_store._snapshot_only and (
+            control.pending_realization_id is not None
+            or control.current_attempt_id is not None
+            or control.reserved_realization_id is not None
+        ):
+            raise ManagedStateError(
+                "managed snapshot contains live or incomplete control state"
+            )
         return control
 
     def _read_realization(self, realization_id: str) -> RealizationState:
@@ -358,6 +412,12 @@ class OperationControl:
             raise ManagedStateError("realization ID does not match requested identity")
         if state.declaration_fingerprint != self.declaration_fingerprint:
             raise ManagedStateError("realization belongs to a different declaration generation")
+        if self.managed_store._snapshot_only and (
+            state.status != "completed" or state.realization_record_id is None
+        ):
+            raise ManagedStateError(
+                "managed snapshot contains an incomplete realization"
+            )
         return state
 
     def _write_realization(self, state: RealizationState) -> None:
@@ -367,32 +427,76 @@ class OperationControl:
         return self._realizations_dir / f"{realization_id}.json"
 
     def _reconcile_control(self, control: GenerationControl) -> GenerationControl:
-        """Recover one unambiguous retained pending realization after interruption."""
+        """Recover bounded current state and migrate legacy sequence metadata."""
 
         pending = None
         if control.pending_realization_id is not None:
             pending = self._read_realization(control.pending_realization_id)
             if pending.status in {"completed", "abandoned"}:
                 pending = None
-        incomplete = [
-            item
-            for item in self.history()
-            if item.status in {"running", "interrupted", "failed"} and (
-                pending is None or item.realization_id != pending.realization_id
-            )
-        ]
-        if incomplete:
-            if pending is not None or len(incomplete) != 1:
-                raise ManagedStateError(
-                    "operation generation has ambiguous retained pending realizations"
+        next_sequence = control.next_realization_sequence
+        latest_realization_id = control.latest_realization_id
+        reserved_realization_id = control.reserved_realization_id
+        if next_sequence is None:
+            history = self.history()
+            incomplete = [
+                item
+                for item in history
+                if item.status in {"running", "interrupted", "failed"} and (
+                    pending is None
+                    or item.realization_id != pending.realization_id
                 )
-            pending = incomplete[0]
+            ]
+            if incomplete:
+                if pending is not None or len(incomplete) != 1:
+                    raise ManagedStateError(
+                        "operation generation has ambiguous retained pending realizations"
+                    )
+                pending = incomplete[0]
+            latest = max(
+                history,
+                key=lambda item: (item.sequence, item.realization_id),
+                default=None,
+            )
+            next_sequence = 1 if latest is None else latest.sequence + 1
+            latest_realization_id = (
+                None if latest is None else latest.realization_id
+            )
+        else:
+            if latest_realization_id is not None:
+                latest = self._read_realization(latest_realization_id)
+                if latest.sequence >= next_sequence:
+                    raise ManagedStateError(
+                        "latest realization is inconsistent with the next sequence"
+                    )
+            if reserved_realization_id is not None:
+                if pending is not None:
+                    raise ManagedStateError(
+                        "generation control has both pending and reserved realizations"
+                    )
+                reservation_path = self._realization_path(reserved_realization_id)
+                if reservation_path.exists():
+                    reserved = self._read_realization(reserved_realization_id)
+                    if reserved.sequence != next_sequence - 1:
+                        raise ManagedStateError(
+                            "reserved realization sequence does not match its allocation"
+                        )
+                    if reserved.status not in {"running", "interrupted", "failed"}:
+                        raise ManagedStateError(
+                            "reserved realization has an invalid recovery status"
+                        )
+                    pending = reserved
+                    latest_realization_id = reserved.realization_id
+                reserved_realization_id = None
         return replace(
             control,
             pending_realization_id=None if pending is None else pending.realization_id,
             current_attempt_id=None if pending is None else pending.current_attempt_id,
             checkpoint_head=None if pending is None else pending.checkpoint_head,
             diagnostics=() if pending is None else pending.diagnostics,
+            next_realization_sequence=next_sequence,
+            latest_realization_id=latest_realization_id,
+            reserved_realization_id=reserved_realization_id,
         )
 
     def _activation_path(self, event: ActivationEvent) -> Path:
@@ -439,6 +543,7 @@ def _serialized_mutation(method):
     @wraps(method)
     def guarded(self, *args, **kwargs):
         with self._mutation_lock:
+            self._assert_no_unreconciled_reservation()
             result = method(self, *args, **kwargs)
             self._heartbeat()
             return result
@@ -555,7 +660,19 @@ class OperationLease:
 
         realization_id = realization_id or _new_id("realization")
         attempt_id = _new_id("attempt")
-        sequence = max((item.sequence for item in self.operation.history()), default=0) + 1
+        if control.next_realization_sequence is None:
+            raise ManagedStateError(
+                "generation control sequence metadata was not reconciled"
+            )
+        sequence = control.next_realization_sequence
+        reservation = replace(
+            control,
+            pending_realization_id=None,
+            current_attempt_id=None,
+            next_realization_sequence=sequence + 1,
+            reserved_realization_id=realization_id,
+        )
+        _write_json(self.operation.control_path, reservation.to_json())
         state = RealizationState(
             realization_id=realization_id,
             declaration_fingerprint=self.operation.declaration_fingerprint,
@@ -567,6 +684,9 @@ class OperationLease:
             consumed_records=tuple(consumed_records),
             consumed_record_links=tuple(consumed_record_links),
         )
+        # A write failure may occur after atomic replacement but before the
+        # parent directory fsync. Keep the reservation so reacquisition can
+        # distinguish an absent publication from an exact recoverable one.
         self.operation._write_realization(state)
         self._write_control_for(state, reset_progress=True)
         action = "rerun" if rerun else "start"
@@ -773,6 +893,19 @@ class OperationLease:
     ) -> None:
         control = self.operation._read_control()
         assert control is not None
+        latest_realization_id = state.realization_id
+        if (
+            control.latest_realization_id is not None
+            and control.latest_realization_id != state.realization_id
+        ):
+            latest = self.operation._read_realization(
+                control.latest_realization_id
+            )
+            if (latest.sequence, latest.realization_id) > (
+                state.sequence,
+                state.realization_id,
+            ):
+                latest_realization_id = latest.realization_id
         control = replace(
             control,
             fence_epoch=self.epoch,
@@ -781,6 +914,8 @@ class OperationLease:
             checkpoint_head=state.checkpoint_head,
             diagnostics=state.diagnostics,
             progress=None if reset_progress else control.progress,
+            latest_realization_id=latest_realization_id,
+            reserved_realization_id=None,
         )
         _write_json(self.operation.control_path, control.to_json())
 
@@ -867,6 +1002,16 @@ class OperationLease:
             raise StaleManagedLeaseError("managed lease declaration generation is no longer current")
         return namespace
 
+    def _assert_no_unreconciled_reservation(self) -> None:
+        self._assert_current()
+        control = self.operation._read_control()
+        assert control is not None
+        if control.reserved_realization_id is not None:
+            raise ManagedStateError(
+                "managed lease has an unreconciled realization reservation; "
+                "release and reacquire it before mutation"
+            )
+
     def _heartbeat(self) -> None:
         self._assert_current()
         self._heartbeat_count += 1
@@ -898,6 +1043,13 @@ def _require_managed_capabilities(store: Store) -> None:
     if not _has_managed_capabilities(store):
         raise ManagedStoreUnsupportedError(
             "live managed operation control requires a capable local DirStore"
+        )
+
+
+def _require_managed_snapshot_capability(store: Store) -> None:
+    if not store.supports_store_capability(MANAGED_SNAPSHOT_CAPABILITY):
+        raise ManagedStoreUnsupportedError(
+            "managed operation reads require a managed snapshot-capable Store"
         )
 
 
@@ -967,6 +1119,7 @@ def _mkdir_durable(path: Path) -> None:
 
 __all__ = [
     "MANAGED_CAPABILITIES",
+    "MANAGED_SNAPSHOT_CAPABILITY",
     "ManagedOperationStore",
     "OperationControl",
     "OperationLease",

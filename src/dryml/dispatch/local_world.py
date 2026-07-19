@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from dryml.records.execution import persistence_safe_execution_error
 from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldSpec, attach_world_allocation_id, attach_world_id, local_inventory, make_world_allocation_spec, make_world_spec, validate_world_spec
 
 from .backends import LocalSubprocessFuture, build_worker_command
@@ -444,11 +445,9 @@ class LocalWorldFuture:
             if key is not None:
                 item["worker"] = key.to_json()
             if error is not None:
-                item["error_type"] = type(error).__name__
-                item["error_message"] = str(error)
-                context = getattr(error, "context", None)
-                if context:
-                    item["error_context"] = dict(context)
+                failure = persistence_safe_execution_error(error)
+                item["error_type"] = failure["type"]
+                item["code"] = failure["metadata"]["code"]
             items.append(item)
         self._control_diagnostics = tuple(items)
 

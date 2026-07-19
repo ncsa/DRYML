@@ -47,6 +47,17 @@ class ZipStore(Store):
         raise NotImplementedError("ZipStore does not support live managed control")
 
     @property
+    def store_capabilities(self) -> frozenset[str]:
+        """Advertise read-only access to transferred managed snapshots."""
+
+        return super().store_capabilities | frozenset({"managed-snapshot-v1"})
+
+    def managed_snapshot_root(self) -> str:
+        """Return the extracted read-only managed snapshot root."""
+
+        return os.path.join(self.base_dir, ".dryml", "managed-v1")
+
+    @property
     def base_dir(self) -> str:
         """Base directory"""
         return self._base_dir

@@ -19,6 +19,7 @@ EXPECTED_DRYML_ALL = (
     "environments",
     "formats",
     "managed",
+    "metrics",
     "operations",
     "providers",
     "reporting",
@@ -146,4 +147,23 @@ def test_explicit_code_import_has_public_all_and_no_dispatch_coupling():
         "assert 'dryml.dispatch' not in sys.modules; "
         f"assert not {{name.split('.', 1)[0] for name in sys.modules}} "
         f"& {HEAVY_FRAMEWORK_TOP_LEVEL_MODULES!r}"
+    )
+
+
+def test_retired_ray_tune_plugin_import_is_lightweight():
+    """The shipped package exports its plugin without importing Ray."""
+
+    _run_fresh_python(
+        "import sys\n"
+        "import dryml.ray as ray_plugin\n"
+        "assert tuple(ray_plugin.__all__) == ('tune',)\n"
+        "from dryml.ray import *\n"
+        "assert tune is ray_plugin.tune\n"
+        "assert 'ray' not in sys.modules\n"
+        "try:\n"
+        "    tune.Tune2Trainer()\n"
+        "except NotImplementedError as exc:\n"
+        "    assert 'dryml.SearchSpace' in str(exc)\n"
+        "else:\n"
+        "    raise AssertionError('retired Ray Tune adapter was constructible')\n"
     )

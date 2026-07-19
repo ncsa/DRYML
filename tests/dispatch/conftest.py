@@ -91,7 +91,8 @@ def target_module(tmp_path):
                         representation=MANAGED_REPRESENTATION,
                     )
                     if fail:
-                        raise RuntimeError("managed worker failure")
+                        message = fail if isinstance(fail, str) else "managed worker failure"
+                        raise RuntimeError(message)
                     context.progress(2, total=2, message="complete")
                     return OperationResult()
 
@@ -174,9 +175,9 @@ def target_module(tmp_path):
             def make_box(value):
                 return Box(value)
 
-            def fail():
+            def fail(message="expected dispatch failure"):
                 print("before failure")
-                raise ValueError("expected dispatch failure")
+                raise ValueError(message)
 
             def sleep_forever():
                 signal.signal(signal.SIGINT, lambda signum, frame: time.sleep(10))

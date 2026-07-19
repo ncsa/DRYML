@@ -40,7 +40,7 @@ def resolve_inputs(
         raise TypeError("managed inputs must be ManagedOutputRef values")
     if type(max_attempts) is not int or max_attempts < 1 or max_attempts > 16:
         raise ValueError("max_attempts must be between 1 and 16")
-    selected = resolve_managed_store(repo, store=store)
+    selected = resolve_managed_store(repo, store=store, writable=False)
     for _attempt in range(max_attempts):
         first = _collect_input_vector(refs, selected)
         second = _collect_input_vector(refs, selected)
@@ -94,7 +94,7 @@ def _collect_output(ref: ManagedOutputRef, store: Store) -> ResolvedRecord:
         descriptor.declaration,
         producer=producer,
     )
-    managed_store = ManagedOperationStore(store)
+    managed_store = ManagedOperationStore(store, writable=False)
     namespace = managed_store._read_namespace(key, missing_ok=True)
     if namespace is None:
         raise MissingManagedOutputError("managed output has no active realization")

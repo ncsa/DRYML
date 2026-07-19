@@ -136,7 +136,8 @@ copy Object state, records, products, or managed control. The recipient can
 materialize the recipe and compute its own realization.
 
 `transfer_realizations()` validates and copies an exact completed realization,
-its typed output/execution/realization records, product manifests and bytes,
+its canonical and adapter-derived same-realization output representations,
+adapter lineage, execution/realization records, product manifests and bytes,
 committed checkpoint when present, representation specs, producer definitions,
 and recursively consumed exact-result dependencies. The default transfers the
 source active snapshot and activates it only when the destination has no active

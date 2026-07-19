@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from dryml.core2.store.dir import DirStore
@@ -76,11 +79,198 @@ def test_acquisition_recovers_one_orphaned_resumable_realization(tmp_path, monke
     monkeypatch.setattr(lease, "_write_control_for", original)
     lease.release()
 
+    def fail_history_scan():
+        raise AssertionError("sequence-aware recovery must not scan retained history")
+
+    monkeypatch.setattr(operation, "history", fail_history_scan)
+
     with operation.acquire() as recovered:
         decision = recovered.prepare(resumable=True)
 
     assert decision.action == "resume"
     assert decision.realization.realization_id == orphan_id
+
+
+def test_rerun_sequence_uses_bounded_control_after_scaling_and_reopen(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "store"
+    operation = _operation(path)
+    for expected_sequence in range(1, 33):
+        with operation.acquire() as lease:
+            decision = lease.prepare(
+                resumable=False, rerun=expected_sequence > 1
+            )
+            assert decision.realization.sequence == expected_sequence
+            lease._complete_control_only(decision.realization.realization_id)
+            lease._activate_control_only(decision.realization.realization_id)
+
+    reopened = _operation(path)
+
+    def fail_history_scan():
+        raise AssertionError("rerun startup must not scan retained history")
+
+    monkeypatch.setattr(reopened, "history", fail_history_scan)
+    with reopened.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+
+    assert rerun.realization.sequence == 33
+
+
+def test_missing_reserved_realization_recovers_without_history_scan(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "store"
+    operation = _operation(path)
+    lease = operation.acquire()
+    original = operation._write_realization
+
+    def interrupt_before_realization_write(state):
+        raise KeyboardInterrupt("simulated process interruption")
+
+    monkeypatch.setattr(
+        operation, "_write_realization", interrupt_before_realization_write
+    )
+    with pytest.raises(KeyboardInterrupt, match="simulated"):
+        lease.prepare(resumable=True)
+    monkeypatch.setattr(operation, "_write_realization", original)
+    lease.release()
+
+    reopened = _operation(path)
+
+    def fail_history_scan():
+        raise AssertionError("reservation recovery must not scan retained history")
+
+    monkeypatch.setattr(reopened, "history", fail_history_scan)
+    with reopened.acquire() as recovered:
+        decision = recovered.prepare(resumable=True)
+
+    assert decision.action == "start"
+    assert decision.realization.sequence == 2
+
+
+@pytest.mark.parametrize("mismatched", [False, True])
+def test_realization_directory_fsync_failure_preserves_recovery_reservation(
+    tmp_path, monkeypatch, mismatched
+):
+    import dryml.managed.store as store_module
+
+    path = tmp_path / "store"
+    operation = _operation(path)
+    lease = operation.acquire()
+    original_fsync_directory = store_module._fsync_directory
+    injected = False
+
+    def fail_realization_directory_fsync(directory):
+        nonlocal injected
+        if Path(directory) == operation._realizations_dir and not injected:
+            injected = True
+            raise OSError("simulated realization directory fsync failure")
+        return original_fsync_directory(directory)
+
+    monkeypatch.setattr(
+        store_module, "_fsync_directory", fail_realization_directory_fsync
+    )
+    with pytest.raises(ManagedStateError, match="durably written"):
+        lease.prepare(resumable=True)
+
+    control = operation._read_control()
+    reserved_id = control.reserved_realization_id
+    assert reserved_id is not None
+    realization_path = operation._realization_path(reserved_id)
+    assert realization_path.exists()
+    with pytest.raises(ManagedStateError, match="unreconciled"):
+        lease.prepare(resumable=True)
+
+    monkeypatch.setattr(
+        store_module, "_fsync_directory", original_fsync_directory
+    )
+    lease.release()
+
+    if mismatched:
+        payload = json.loads(realization_path.read_text())
+        payload["sequence"] += 1
+        realization_path.write_text(json.dumps(payload))
+        with pytest.raises(ManagedStateError, match="reserved realization sequence"):
+            operation.acquire()
+        assert operation._read_control().reserved_realization_id == reserved_id
+        return
+
+    def fail_history_scan():
+        raise AssertionError("reservation recovery must not scan retained history")
+
+    monkeypatch.setattr(operation, "history", fail_history_scan)
+    with operation.acquire() as recovered:
+        decision = recovered.prepare(resumable=True)
+
+    assert decision.action == "resume"
+    assert decision.realization.realization_id == reserved_id
+
+
+def test_legacy_control_scans_once_then_persists_sequence_cursor(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "store"
+    operation = _operation(path)
+    _complete_and_activate(operation)
+    control = json.loads(operation.control_path.read_text())
+    for field in (
+        "next_realization_sequence",
+        "latest_realization_id",
+        "reserved_realization_id",
+    ):
+        control.pop(field)
+    operation.control_path.write_text(json.dumps(control))
+
+    reopened = _operation(path)
+    original_history = reopened.history
+    scans = 0
+
+    def count_history_scan():
+        nonlocal scans
+        scans += 1
+        return original_history()
+
+    monkeypatch.setattr(reopened, "history", count_history_scan)
+    with reopened.acquire():
+        pass
+
+    assert scans == 1
+    assert reopened._read_control().next_realization_sequence == 2
+
+    migrated = _operation(path)
+    monkeypatch.setattr(
+        migrated,
+        "history",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("migrated control must not rescan retained history")
+        ),
+    )
+    with migrated.acquire():
+        pass
+
+
+@pytest.mark.parametrize("value", [0, True, "2"])
+def test_malformed_realization_sequence_cursor_fails_closed(tmp_path, value):
+    operation = _operation(tmp_path / "store")
+    _complete_and_activate(operation)
+    control = json.loads(operation.control_path.read_text())
+    control["next_realization_sequence"] = value
+    operation.control_path.write_text(json.dumps(control))
+
+    with pytest.raises(ManagedStateError, match="next realization sequence"):
+        operation.acquire()
+
+
+def test_incomplete_realization_sequence_markers_fail_closed(tmp_path):
+    operation = _operation(tmp_path / "store")
+    _complete_and_activate(operation)
+    control = json.loads(operation.control_path.read_text())
+    control.pop("reserved_realization_id")
+    operation.control_path.write_text(json.dumps(control))
+
+    with pytest.raises(ManagedStateError, match="sequence markers are incomplete"):
+        operation.acquire()
 
 
 def test_explicit_realization_id_cannot_overwrite_retained_history(tmp_path):

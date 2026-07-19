@@ -23,6 +23,7 @@ from .realizations import ResolvedRecord, validate_output_slot, validate_realiza
 
 EXECUTION_STATUSES = frozenset({"ok", "failed", "cancelled", "timeout", "unsupported", "skipped", "degraded"})
 EXECUTION_KINDS = frozenset({"python", "probe", "adapter", "compiler", "lowering", "internal", "unknown"})
+PERSISTENCE_SAFE_FAILURE_CODE = "execution_failed"
 _RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 _COMMON_ID_FIELDS = {
@@ -285,6 +286,25 @@ class ExecutionErrorInfo:
         if self.metadata:
             data["metadata"] = json_ready(self.metadata)
         return data
+
+
+def persistence_safe_execution_error(
+    error: BaseException | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a failure without persisting exception-controlled text."""
+
+    candidate = type(error).__name__ if isinstance(error, BaseException) else error.get("type")
+    error_type = (
+        candidate
+        if isinstance(candidate, str)
+        and len(candidate) <= 128
+        and candidate.isidentifier()
+        else "Error"
+    )
+    return {
+        "type": error_type,
+        "metadata": {"code": PERSISTENCE_SAFE_FAILURE_CODE},
+    }
 
 
 @dataclass(frozen=True, slots=True)

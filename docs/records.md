@@ -311,7 +311,7 @@ Local managed implementations obtain their invocation-scoped `OperationContext` 
 
 Whole-pipeline capability checks happen before the operation namespace or attempt is created. An optional `__dryml_managed_preflight__(method, args, kwargs)` provider may return `OperationPreflight` to narrow declaration-level resume, checkpoint-schema, and early-completion capabilities. An optional `__dryml_managed_inputs__(method, args, kwargs)` provider declares ordered logical `ManagedOutputRef` inputs. Their active vectors are double-collected from one Store and persisted exactly; missing outputs never trigger producer computation.
 
-Invocation callbacks are not persistent identity. `ManagedCallback` declares whether observer failures are strict or fail-soft and which checkpoint, graceful-stop, or interrupt controls it may return. Controls coalesce at operation safe points. Strict callback failure is resumable only after a compatible checkpoint commits; fail-soft failures contribute only bounded diagnostics. Generation control stores one replaceable bounded progress snapshot rather than an event log.
+Invocation callbacks are not persistent identity. `ManagedCallback` declares whether observer failures are strict or fail-soft and which checkpoint, graceful-stop, or interrupt controls it may return. Controls coalesce at operation safe points. Strict callback failure is resumable only after a compatible checkpoint commits; fail-soft failures contribute only bounded diagnostics. Generation control stores one replaceable bounded progress snapshot rather than an event log. It also stores the next realization sequence and one bounded publication reservation, allowing normal reopen and rerun without scanning retained history; controls written before these fields are introduced perform one recovery scan and persist the cursor. An uncertain realization write retains its reservation until reacquisition adopts an exact published state or confirms that no state exists; mismatched reserved state fails closed.
 
 Completed-result reuse compares the current stable input resolution with the
 exact consumed vector in `RealizationRecord` and `ExecutionRecord`. A mismatch is
@@ -319,7 +319,11 @@ reported as stale and requires explicit rerun. Direct active result access and
 historical activation remain available; staleness does not rewrite lineage or
 delete bytes.
 
-Live durable writing requires the explicit `managed-durable-products-v1` Store capability. `DirStore` advertises it together with managed control, locking, and activation; read-only Zip Stores do not advertise live managed writing.
+Read-only lifecycle inspection requires `managed-snapshot-v1`. Live durable
+writing additionally requires the explicit `managed-durable-products-v1`
+Store capability. `DirStore` advertises snapshot reads together with managed
+control, locking, activation, and durable products; `ZipStore` advertises only
+snapshot reads and cannot perform live managed mutation.
 
 Managed completion uses a compact `dryml.product.root.v1` manifest in each output record. It authenticates `.dryml-product-manifest-v1.json`, whose detailed entries contain the exact payload file set, sizes, and digests. `require_product_integrity(...)` rejects missing files, extra files, size drift, digest drift, malformed detail manifests, and compact-summary mismatches.
 
@@ -405,8 +409,13 @@ Representative payloads:
 ```
 
 ```json
-{"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "failed", "error": {"type": "ValueError", "message": "bad input"}}
+{"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "failed", "error": {"type": "ValueError", "metadata": {"code": "execution_failed"}}}
 ```
+
+Dispatch and managed runtimes project exception failures to this bounded form
+before writing responses, diagnostics, execution records, or managed control
+state. Exception messages and tracebacks remain transient and are not durable
+failure provenance.
 
 ```json
 {"execution_kind": "python", "operation_id": "op-v1-...", "backend": {"name": "dryml.fake"}, "status": "cancelled", "cancellation": {"requested": true, "method": "SIGTERM", "escalated": false}}

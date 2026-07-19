@@ -36,7 +36,11 @@ def test_fail_soft_callback_records_bounded_diagnostics_and_continues():
 
     assert coordinator.poll() is ControlRequest.NONE
     assert len(coordinator.diagnostics) == 4
-    assert all("RuntimeError" in item for item in coordinator.diagnostics)
+    assert all(
+        item == "callback RuntimeError: execution_failed"
+        for item in coordinator.diagnostics
+    )
+    assert "observer failed" not in str(coordinator.diagnostics)
 
 
 def test_strict_callback_failure_requests_checkpoint_then_failure():
@@ -47,8 +51,10 @@ def test_strict_callback_failure_requests_checkpoint_then_failure():
     coordinator.publish(OperationEvent(1, "progress"))
 
     assert coordinator.poll() is ControlRequest.FAIL
-    with pytest.raises(CallbackFailure, match="RuntimeError"):
+    with pytest.raises(CallbackFailure, match="RuntimeError") as raised:
         coordinator.raise_failure()
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert str(raised.value.__cause__) == "strict failed"
 
 
 def test_callback_guarantees_are_rejected_during_preflight():
@@ -71,4 +77,4 @@ def test_callback_may_not_return_an_undeclared_control():
     coordinator.publish(OperationEvent(1, "progress"))
 
     assert coordinator.poll() is ControlRequest.NONE
-    assert "undeclared" in coordinator.diagnostics[-1]
+    assert coordinator.diagnostics[-1] == "callback ValueError: execution_failed"

@@ -62,9 +62,11 @@ A directory store uses stable definition hashes to organize object state under i
 
 `DirStore` is the v1 live writable managed Store. Managed control and attempts
 live under `.dryml/managed-v1/`; immutable records and products remain under
-their record-owned sidecars. `ZipStore` can read a verified exact-result
-snapshot, while Zip Stores cannot start, resume, rerun, lease, activate, or
-clean live work.
+their record-owned sidecars. `DirStore` and `ZipStore` advertise
+`managed-snapshot-v1` for read-only lifecycle inspection; only `DirStore`
+advertises the complete live-write capability set. `ZipStore` can read a
+verified exact-result snapshot, while Zip Stores cannot start, resume, rerun,
+lease, activate, or clean live work.
 
 ## Save Semantics
 

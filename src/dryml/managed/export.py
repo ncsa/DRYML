@@ -18,6 +18,7 @@ from dryml.core2.store.store import Store
 from dryml.core2.utils.general import pickle_load
 from dryml.formats.refs import format_cdef_id, parse_cdef_id
 from dryml.records import (
+    AdapterRecord,
     DataRecord,
     ExecutionRecord,
     RealizationRecord,
@@ -139,7 +140,7 @@ def transfer_realizations(
         raise TypeError("target must be a ManagedOutputRef")
     source = make_store(source_store)
     destination = make_store(destination_store)
-    source_managed = ManagedOperationStore(source)
+    source_managed = ManagedOperationStore(source, writable=False)
     key = OperationKey.from_producer(target.producer, target.method)
     namespace = source_managed._read_namespace(key, missing_ok=True)
     if namespace is None:
@@ -265,6 +266,9 @@ def _build_exact_closure(
         for state in root_states
     )
     nodes: dict[tuple[str, str, str], _TransferNode] = {}
+    activation_events: dict[
+        tuple[str, str, str], dict[int, ActivationEvent]
+    ] = {}
     while queue:
         key, state, selected_activation_event = queue.popleft()
         node_key = (
@@ -315,19 +319,27 @@ def _build_exact_closure(
             consumed_operation = managed.operation(
                 consumed_key, consumed.declaration_fingerprint
             )
-            events = tuple(
-                event
-                for event in consumed_operation._activation_events()
-                if event.sequence == consumed.activation_generation
+            operation_generation = (
+                consumed.producer_cdef_id,
+                consumed.method,
+                consumed.declaration_fingerprint,
             )
-            if len(events) != 1 or events[0].realization_id != consumed.realization_id:
+            events_by_sequence = activation_events.get(operation_generation)
+            if events_by_sequence is None:
+                events_by_sequence = {
+                    event.sequence: event
+                    for event in consumed_operation._activation_events()
+                }
+                activation_events[operation_generation] = events_by_sequence
+            event = events_by_sequence.get(consumed.activation_generation)
+            if event is None or event.realization_id != consumed.realization_id:
                 raise ManagedStateError(
                     "exact consumed lineage has no matching activation event"
                 )
             consumed_state = consumed_operation._read_realization(
                 consumed.realization_id
             )
-            if events[0].realization_record_id != consumed_state.realization_record_id:
+            if event.realization_record_id != consumed_state.realization_record_id:
                 raise ManagedStateError(
                     "exact consumed activation binds a different realization record"
                 )
@@ -346,7 +358,7 @@ def _build_exact_closure(
                 (
                     consumed_key,
                     consumed_state,
-                    events[0] if selected_activation_event is not None else None,
+                    event if selected_activation_event is not None else None,
                 )
             )
     return tuple(
@@ -433,12 +445,127 @@ def _node_record_ids(store: Store, node: _TransferNode) -> tuple[str, ...]:
     execution = ExecutionRecord.from_envelope(
         store.records.read_record(realization.execution_record_id)
     )
-    return (
+    record_ids = {
         node.realization_record_id,
         realization.execution_record_id,
-        *(output.record_id for output in realization.outputs),
         *(consumed.record_id for consumed in execution.consumed_records),
-    )
+    }
+    for output in realization.outputs:
+        record_ids.update(
+            _output_representation_record_ids(store, realization.realization_id, output)
+        )
+    return tuple(sorted(record_ids))
+
+
+def _output_representation_record_ids(
+    store: Store,
+    realization_id: str,
+    output: Any,
+) -> tuple[str, ...]:
+    """Validate and return all representations and adapter lineage for one output."""
+
+    try:
+        candidates: dict[str, DataRecord | StoredStateRecord] = {}
+        record_ids: set[str] = set()
+        for ref in store.records.find_records(
+            kind=output.record_kind,
+            realization_id=realization_id,
+            output_slot=output.slot,
+        ):
+            envelope = store.records.read_record(ref.record_id)
+            typed = (
+                DataRecord.from_envelope(envelope)
+                if output.record_kind == "data"
+                else StoredStateRecord.from_envelope(envelope)
+            )
+            if (typed.realization_id, typed.output_slot) != (
+                realization_id,
+                output.slot,
+            ):
+                raise ManagedStateError(
+                    "derived output representation ownership is inconsistent"
+                )
+            store.records.read_spec(
+                typed.representation_id, family="representation"
+            )
+            require_product_integrity(store.records, envelope)
+            candidates[ref.record_id] = typed
+            record_ids.add(ref.record_id)
+            record_ids.update(typed.derived_from)
+
+        if output.record_id not in candidates:
+            raise ManagedStateError(
+                "exact realization output is absent from its representation set"
+            )
+        if candidates[output.record_id].representation_id != output.representation_id:
+            raise ManagedStateError(
+                "exact realization output representation is inconsistent"
+            )
+
+        derived_ids = set(candidates) - {output.record_id}
+        if not derived_ids:
+            return tuple(sorted(record_ids))
+
+        adapters_by_target: dict[str, list[AdapterRecord]] = {
+            record_id: [] for record_id in derived_ids
+        }
+        for ref in store.records.find_records(kind="adapter"):
+            envelope = store.records.read_record(ref.record_id)
+            payload = envelope.get("payload") or {}
+            target_id = payload.get("target_record_id")
+            if target_id not in derived_ids:
+                continue
+            adapter = AdapterRecord.from_envelope(envelope)
+            source = candidates.get(adapter.source_record_id)
+            target = candidates[target_id]
+            if source is None:
+                raise ManagedStateError(
+                    "adapter-derived output leaves its exact realization slot"
+                )
+            if adapter.status != "ok":
+                raise ManagedStateError(
+                    "adapter-derived output has non-successful lineage"
+                )
+            if adapter.source_record_id not in target.derived_from:
+                raise ManagedStateError(
+                    "adapter source is absent from derived output lineage"
+                )
+            if (
+                adapter.source_representation_id != source.representation_id
+                or adapter.target_representation_id != target.representation_id
+            ):
+                raise ManagedStateError(
+                    "adapter representation lineage is inconsistent"
+                )
+            adapters_by_target[target_id].append(adapter)
+            record_ids.add(ref.record_id)
+            record_ids.update(adapter.derived_from)
+            record_ids.update(adapter.produced_records)
+
+        reachable = {output.record_id}
+        remaining = set(derived_ids)
+        while remaining:
+            newly_reachable = {
+                target_id
+                for target_id in remaining
+                if any(
+                    adapter.source_record_id in reachable
+                    for adapter in adapters_by_target[target_id]
+                )
+            }
+            if not newly_reachable:
+                raise ManagedStateError(
+                    "derived output representation has no exact adapter lineage"
+                )
+            reachable.update(newly_reachable)
+            remaining.difference_update(newly_reachable)
+        return tuple(sorted(record_ids))
+    except ManagedStateError:
+        raise
+    except Exception as exc:
+        raise ManagedStateError(
+            "exact derived representation integrity validation failed"
+        ) from exc
 
 
 def _copy_checkpoint_closure(
@@ -450,7 +577,7 @@ def _copy_checkpoint_closure(
     for node in nodes:
         if node.state.checkpoint_head is None:
             continue
-        source_operation = ManagedOperationStore(source).operation(
+        source_operation = ManagedOperationStore(source, writable=False).operation(
             node.key, node.declaration_fingerprint
         )
         source_root = _checkpoint_source(source_operation, node.state)
@@ -608,6 +735,34 @@ def _install_control_closure(
                     operation._realization_path(sanitized.realization_id),
                     sanitized.to_json(),
                     immutable=True,
+                )
+            for fingerprint in sorted(fingerprints):
+                operation = managed.operation(key, fingerprint)
+                history = operation.history()
+                latest = max(
+                    history,
+                    key=lambda state: (state.sequence, state.realization_id),
+                    default=None,
+                )
+                control = operation._read_control()
+                history_next_sequence = (
+                    1 if latest is None else latest.sequence + 1
+                )
+                next_sequence = control.next_realization_sequence
+                if next_sequence is None:
+                    next_sequence = history_next_sequence
+                else:
+                    next_sequence = max(next_sequence, history_next_sequence)
+                _write_json(
+                    operation.control_path,
+                    replace(
+                        control,
+                        next_realization_sequence=next_sequence,
+                        latest_realization_id=(
+                            None if latest is None else latest.realization_id
+                        ),
+                        reserved_realization_id=None,
+                    ).to_json(),
                 )
 
     activation_nodes = tuple(
