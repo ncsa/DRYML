@@ -52,14 +52,18 @@ def _coordinator_process(store_path, module_path):
         sys.path.remove(module_path)
 
 
-def _read_output(store, result):
+def _output_path(store, result):
     record_id = result.managed_result["outputs"]["result"]["record_id"]
     record = store.records.read_record(record_id)
     root = store.records.resolve_storage_ref(
         record["payload"]["storage"][0],
         record_id=record_id,
     )
-    return root.joinpath("value.bin").read_bytes()
+    return root.joinpath("value.bin")
+
+
+def _read_output(store, result):
+    return _output_path(store, result).read_bytes()
 
 
 def test_managed_plan_uses_ordinary_method_identity_and_launch_only_ticket(tmp_path, target_module):
@@ -116,6 +120,41 @@ def test_managed_worker_context_effects_callbacks_and_publication_round_trip(tmp
     assert "safe_point" in events
     assert "completed" in events
     assert box.compute.status(store=store).status == "completed"
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_dispatched_reuse_rejects_invalid_active_output_without_mutating_active_state(
+    tmp_path, target_module, damage
+):
+    store = DirStore(tmp_path / damage, query_index="none")
+    box = _managed_box()
+    completed = Dispatcher(store=store).run(
+        box.compute,
+        environment=_env(target_module),
+        timeout=10,
+    )
+    output_path = _output_path(store, completed)
+    before_status = box.compute.status(store=store)
+    before_history = box.compute.history(store=store)
+
+    if damage == "missing":
+        output_path.unlink()
+    else:
+        output_path.write_bytes(b"corrupt")
+
+    with pytest.raises(Exception, match="integrity"):
+        Dispatcher(store=store).run(
+            box.compute,
+            environment=_env(target_module),
+            timeout=10,
+        )
+
+    assert box.compute.status(store=store) == before_status
+    assert box.compute.history(store=store) == before_history
+    assert (
+        box.compute.results(store=store)["result"].record_id
+        == completed.produced_record_ids[0]
+    )
 
 
 def test_managed_submit_services_worker_without_waiting_in_result(tmp_path, target_module):

@@ -272,7 +272,12 @@ class ManagedDispatchRequest:
                 consumed_record_links=tuple(record_inputs),
             )
             if decision.action == "reuse":
-                result = _invocation_from_state(selected, decision.action, decision.realization)
+                result = _invocation_from_state(
+                    selected,
+                    decision.action,
+                    decision.realization,
+                    lease=lease,
+                )
                 lease.release()
                 return result
             coordinator = CallbackCoordinator(self.callbacks)

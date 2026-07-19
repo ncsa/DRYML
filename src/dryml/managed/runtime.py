@@ -227,7 +227,12 @@ def invoke_managed(
             consumed_record_links=tuple(record_inputs),
         )
         if decision.action == "reuse":
-            return _invocation_from_state(selected, decision.action, decision.realization)
+            return _invocation_from_state(
+                selected,
+                decision.action,
+                decision.realization,
+                lease=lease,
+            )
 
         selected.records.write_spec(operation_spec, family="operation")
         coordinator = CallbackCoordinator(normalized_callbacks)
@@ -300,6 +305,16 @@ def invoke_managed(
                 resumable=checkpoint is not None,
             )
             context.publish_terminal("failed")
+            raise
+        except BaseException:
+            checkpoint = context.checkpoint_head
+            lease.interrupt(
+                decision.realization.realization_id,
+                checkpoint_head=checkpoint,
+                diagnostic="operation interrupted by process control",
+                resumable=checkpoint is not None,
+            )
+            _publish_terminal_best_effort(context, "interrupted")
             raise
         finally:
             OperationContext.deactivate(token)
@@ -508,9 +523,20 @@ def _walk_refs(value, *, _seen=None):
             yield from _walk_refs(item, _seen=seen)
 
 
-def _invocation_from_state(selected, action, state):
+def _publish_terminal_best_effort(context, kind):
+    try:
+        context.publish_terminal(kind)
+    except BaseException:
+        pass
+
+
+def _invocation_from_state(selected, action, state, *, lease):
     if state.realization_record_id is None:
         raise ManagedOutputError("completed realization has no immutable realization record")
+    lease._validate_realization_record(
+        state.realization_id,
+        state.realization_record_id,
+    )
     realization = RealizationRecord.from_envelope(
         selected.records.read_record(state.realization_record_id)
     )

@@ -51,12 +51,18 @@ class FakeOperation(Object):
             context.write_checkpoint("cursor.txt", (b"1",))
 
         control = context.safe_point(checkpoint=checkpoint)
+        if fail == "interrupt-before":
+            raise KeyboardInterrupt("managed-interrupt-secret-sentinel-41c8")
         if fail == "before":
             raise RuntimeError("failed before checkpoint")
         if fail == "after":
             checkpoint()
             context.commit_checkpoint()
             raise RuntimeError("failed after checkpoint")
+        if fail == "interrupt-after":
+            checkpoint()
+            context.commit_checkpoint()
+            raise KeyboardInterrupt("managed-interrupt-secret-sentinel-41c8")
         if fail is not None:
             raise RuntimeError(str(fail))
         early = control is ControlRequest.GRACEFUL_STOP
@@ -117,9 +123,15 @@ class MissingOutput(Object):
         return None
 
 
-def _read_result(store, invocation):
+def _result_path(store, invocation):
     record = store.records.read_record(invocation.outputs["result"].record_id)
-    return store.records.resolve_storage_ref(record["payload"]["storage"][0], record_id=record["id"]).joinpath("value.bin").read_bytes()
+    return store.records.resolve_storage_ref(
+        record["payload"]["storage"][0], record_id=record["id"]
+    ).joinpath("value.bin")
+
+
+def _read_result(store, invocation):
+    return _result_path(store, invocation).read_bytes()
 
 
 def test_ambiguous_default_repo_does_not_bypass_managed_runtime(tmp_path):
@@ -148,6 +160,30 @@ def test_complete_reuse_status_progress_results_and_history_have_lifecycle_parit
     assert operation.progress(store=store).current == 2
     assert operation.results(store=store)["result"].record_id == completed.outputs["result"].record_id
     assert [item.realization_id for item in operation.history(store=store)] == [completed.realization_id]
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_reuse_rejects_invalid_active_output_without_mutating_active_state(
+    tmp_path, damage
+):
+    store = DirStore(tmp_path / damage)
+    operation = FakeOperation().compute
+    completed = operation(store=store)
+    output_path = _result_path(store, completed)
+    before_status = operation.status(store=store)
+    before_history = operation.history(store=store)
+
+    if damage == "missing":
+        output_path.unlink()
+    else:
+        output_path.write_bytes(b"corrupt")
+
+    with pytest.raises(Exception, match="integrity"):
+        operation(store=store)
+
+    assert operation.status(store=store) == before_status
+    assert operation.history(store=store) == before_history
+    assert operation.results(store=store) == completed.outputs
 
 
 def test_changed_logical_input_is_stale_until_explicit_rerun(tmp_path):
@@ -350,6 +386,42 @@ def test_operation_failure_keeps_exception_message_transient(tmp_path):
     failed = operation.history(store=store)[0]
     assert failed.diagnostics == ("RuntimeError: execution_failed",)
     assert secret not in str(failed.to_json())
+
+
+@pytest.mark.parametrize(
+    "point,resumable",
+    [("interrupt-before", False), ("interrupt-after", True)],
+)
+def test_keyboard_interrupt_is_resumable_only_after_compatible_checkpoint(
+    tmp_path, point, resumable
+):
+    store = DirStore(tmp_path / point)
+    operation = FakeOperation().compute
+    terminal_secret = "managed-terminal-secret-sentinel-1ed9"
+
+    def interrupt_terminal_publication(event):
+        if event.kind == "interrupted":
+            raise SystemExit(terminal_secret)
+
+    callback = ManagedCallback(interrupt_terminal_publication)
+    with pytest.raises(
+        KeyboardInterrupt, match="managed-interrupt-secret-sentinel-41c8"
+    ):
+        operation(store=store, callbacks=(callback,), fail=point)
+
+    interrupted = operation.history(store=store)[0]
+    assert interrupted.status == "interrupted"
+    assert interrupted.resumable is resumable
+    assert interrupted.diagnostics == ("operation interrupted by process control",)
+    assert "managed-interrupt-secret-sentinel-41c8" not in str(interrupted.to_json())
+    assert terminal_secret not in str(interrupted.to_json())
+    if resumable:
+        assert interrupted.checkpoint_head is not None
+        assert operation(store=store).action == "resume"
+    else:
+        assert interrupted.checkpoint_head is None
+        with pytest.raises(ManagedRerunRequiredError):
+            operation(store=store)
 
 
 def test_missing_required_output_fails_without_activation(tmp_path):
