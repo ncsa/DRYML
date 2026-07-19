@@ -513,9 +513,9 @@ class _ManagedCoordinatorSession:
                 self.decision.realization.realization_id
             )
             if state.status == "completed":
-                # Publication may have completed before pointer-last activation
-                # failed. Preserve that verified inactive realization rather
-                # than trying to rewrite it as incomplete.
+                # Publication may have completed before the authoritative
+                # activation event was written. Preserve that verified inactive
+                # realization rather than trying to rewrite it as incomplete.
                 pass
             elif status == "interrupted":
                 self.lease.interrupt(

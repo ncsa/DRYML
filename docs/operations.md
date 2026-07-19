@@ -112,7 +112,10 @@ shared surface: `status()`, `progress()`, `result`, `outputs`, `results()`,
 resumes, or reuses according to pending work and exact consumed-input validity.
 `rerun()` is the only call that creates an independent outcome after completion
 or abandons incompatible pending work. Failed and interrupted reruns retain the
-old active result.
+old active result. The immutable activation event is the promotion commit point;
+if its rebuildable direct-pointer write fails transiently, the coordinator
+reconciles that pointer under the same lease and returns the committed result.
+Failures before exact event publication preserve the prior active selection.
 
 Declarations, logical output refs, method-call `OperationSpec`, realization
 records, and physical representations remain separate. The full authority,

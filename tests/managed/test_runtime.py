@@ -15,6 +15,7 @@ from dryml.managed import (
     ManagedInterruptedError,
     ManagedOutput,
     ManagedRerunRequiredError,
+    ManagedStateError,
     OperationPreflight,
     OperationResult,
     StaleManagedResultError,
@@ -444,3 +445,73 @@ def test_failed_rerun_keeps_old_active_readable(tmp_path):
 
     assert operation.results(store=store)["result"].record_id == first.outputs["result"].record_id
     assert _read_result(store, first) == b"old"
+
+
+def test_activation_event_failure_keeps_completed_rerun_inactive(
+    tmp_path, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    store = DirStore(tmp_path / "store")
+    operation = FakeOperation().compute
+    first = operation(store=store, value=b"old")
+    original_write_json = store_module._write_json
+    injected = False
+
+    def fail_event_publication(path, data, *, immutable=False):
+        nonlocal injected
+        if Path(path).parent.name == "activations" and not injected:
+            injected = True
+            raise ManagedStateError("simulated activation event publication failure")
+        return original_write_json(path, data, immutable=immutable)
+
+    monkeypatch.setattr(store_module, "_write_json", fail_event_publication)
+    with pytest.raises(ManagedStateError, match="event publication failure"):
+        operation.rerun(store=store, value=b"new")
+
+    assert (
+        operation.results(store=store)["result"].record_id
+        == first.outputs["result"].record_id
+    )
+    assert [item.status for item in operation.history(store=store)] == [
+        "completed",
+        "completed",
+    ]
+
+
+def test_post_commit_activation_event_read_failure_returns_committed_rerun(
+    tmp_path, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    store = DirStore(tmp_path / "store")
+    operation = FakeOperation().compute
+    operation(store=store, value=b"old")
+    original_write_json = store_module._write_json
+    original_read_json = store_module._read_json
+    published_event = None
+    injected = False
+
+    def track_event_publication(path, data, *, immutable=False):
+        nonlocal published_event
+        result = original_write_json(path, data, immutable=immutable)
+        if Path(path).parent.name == "activations":
+            published_event = Path(path)
+        return result
+
+    def fail_first_event_read(path, name):
+        nonlocal injected
+        if published_event == Path(path) and not injected:
+            injected = True
+            raise OSError("simulated post-commit activation event read failure")
+        return original_read_json(path, name)
+
+    monkeypatch.setattr(store_module, "_write_json", track_event_publication)
+    monkeypatch.setattr(store_module, "_read_json", fail_first_event_read)
+    result = operation.rerun(store=store, value=b"new")
+
+    assert injected
+    assert (
+        operation.results(store=store)["result"].record_id
+        == result.outputs["result"].record_id
+    )

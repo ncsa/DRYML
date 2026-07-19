@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import dryml
 import pytest
 
@@ -6,7 +9,9 @@ from dryml.core2.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
     AdapterDescriptor,
+    AdapterRecord,
     AdapterRegistry,
+    ProductWriteSession,
     RecordValidationError,
     RepresentationRequirement,
     StorageRef,
@@ -143,6 +148,164 @@ def test_adapter_target_preserves_managed_realization_ownership(tmp_path):
 
     assert target.realization_id == realization_id
     assert target.output_slot == "result"
+
+
+def test_adapter_retry_completes_lineage_first_interrupted_publication(
+    tmp_path, monkeypatch
+):
+    store = DirStore(tmp_path / "store")
+    realization_id = "realization-v1-" + "2" * 32
+    _seed(store, realization_id=realization_id, output_slot="result")
+    repo = Repo(stores=[store])
+    registry = AdapterRegistry()
+
+    def runner(context):
+        context.session.write_text("normalized.txt", "normalized")
+        return {}
+
+    registry.register(
+        AdapterDescriptor(
+            "fake.normalize",
+            RepresentationRequirement(kind="fake.raw_state"),
+            RepresentationRequirement(kind="fake.normalized_state"),
+        ),
+        runner=runner,
+    )
+    plan = resolve_state_record(
+        repo,
+        _cdef(),
+        RepresentationRequirement(kind="fake.normalized_state"),
+        adapters=registry,
+    ).adapter_plan
+    original_commit = ProductWriteSession.commit_record
+    injected = False
+
+    def fail_once(session, record, *, overwrite=None):
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise RuntimeError("injected target publication failure")
+        return original_commit(session, record, overwrite=overwrite)
+
+    monkeypatch.setattr(ProductWriteSession, "commit_record", fail_once)
+
+    failed = run_adapter_plan(plan, repo=repo, store=store, registry=registry)
+    adapter_refs = store.records.find_records(kind=AdapterRecord.kind)
+    adapter = AdapterRecord.from_envelope(
+        store.records.read_record(adapter_refs[0].record_id)
+    )
+
+    assert failed.status == "failed"
+    assert len(adapter_refs) == 1
+    assert not store.records.has_record(adapter.target_record_id)
+
+    retried = run_adapter_plan(plan, repo=repo, store=store, registry=registry)
+
+    assert retried.status == "ok"
+    assert retried.target_records[0].record_id == adapter.target_record_id
+    assert retried.adapter_records[0] == adapter_refs[0]
+    target = StoredStateRecord.from_envelope(
+        store.records.read_record(retried.target_records[0].record_id)
+    )
+    assert (target.realization_id, target.output_slot) == (realization_id, "result")
+
+
+def test_resolution_rejects_orphan_target_and_retry_restores_lineage(tmp_path):
+    store = DirStore(tmp_path / "store")
+    _seed(store)
+    repo = Repo(stores=[store])
+    registry = AdapterRegistry()
+
+    def runner(context):
+        context.session.write_text("normalized.txt", "normalized")
+        return {}
+
+    registry.register(
+        AdapterDescriptor(
+            "fake.normalize",
+            RepresentationRequirement(kind="fake.raw_state"),
+            RepresentationRequirement(kind="fake.normalized_state"),
+        ),
+        runner=runner,
+    )
+    initial = resolve_state_record(
+        repo,
+        _cdef(),
+        RepresentationRequirement(kind="fake.normalized_state"),
+        adapters=registry,
+    )
+    converted = run_adapter_plan(
+        initial.adapter_plan, repo=repo, store=store, registry=registry
+    )
+    store.records._record_path(converted.adapter_records[0].record_id).unlink()
+
+    orphaned = resolve_state_record(
+        repo,
+        _cdef(),
+        RepresentationRequirement(kind="fake.normalized_state"),
+        adapters=registry,
+    )
+
+    assert orphaned.status == "requires_adapter"
+    assert any(
+        issue.code == "missing_adapter_lineage" for issue in orphaned.report.issues
+    )
+
+    retried = run_adapter_plan(
+        orphaned.adapter_plan, repo=repo, store=store, registry=registry
+    )
+
+    assert retried.status == "ok"
+    assert retried.target_records == converted.target_records
+    assert len(store.records.find_records(kind=AdapterRecord.kind)) == 1
+
+
+def test_concurrent_identical_adapter_publication_is_idempotent(tmp_path):
+    store = DirStore(tmp_path / "store")
+    realization_id = "realization-v1-" + "3" * 32
+    _seed(store, realization_id=realization_id, output_slot="result")
+    repo = Repo(stores=[store])
+    registry = AdapterRegistry()
+    runners_ready = threading.Barrier(2)
+
+    def runner(context):
+        context.session.write_text("normalized.txt", "normalized")
+        runners_ready.wait(timeout=5)
+        return {}
+
+    registry.register(
+        AdapterDescriptor(
+            "fake.normalize",
+            RepresentationRequirement(kind="fake.raw_state"),
+            RepresentationRequirement(kind="fake.normalized_state"),
+        ),
+        runner=runner,
+    )
+    plan = resolve_state_record(
+        repo,
+        _cdef(),
+        RepresentationRequirement(kind="fake.normalized_state"),
+        adapters=registry,
+    ).adapter_plan
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda _index: run_adapter_plan(
+                    plan, repo=repo, store=store, registry=registry
+                ),
+                range(2),
+            )
+        )
+
+    assert {result.status for result in results} == {"ok"}
+    assert len({result.target_records[0].record_id for result in results}) == 1
+    assert len({result.adapter_records[0].record_id for result in results}) == 1
+    assert len(store.records.find_records(kind=AdapterRecord.kind)) == 1
+    target = StoredStateRecord.from_envelope(
+        store.records.read_record(results[0].target_records[0].record_id)
+    )
+    assert (target.realization_id, target.output_slot) == (realization_id, "result")
 
 
 def test_adapter_descriptors_from_report_rejects_string_sequences():

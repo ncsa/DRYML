@@ -116,8 +116,8 @@ class LocalWorldPlan:
         dispatch_spec: Canonical dispatch intent.
         execution_recipe: Local-world backend recipe.
         operation_spec: Canonical operation executed by each worker.
-        world_spec: Requested world kept distinct from allocation.
-        world_allocation_spec: Concrete local resource assignment.
+        world_spec: Persistence-safe requested-world provenance projection.
+        world_allocation_spec: Persistence-safe allocation provenance projection.
         worker_plans: Ordered worker-specific launch plans.
         store: Shared local store used by workers.
         group_work_dir: Optional backend-owned group directory.
@@ -448,6 +448,8 @@ class LocalWorldFuture:
                 failure = persistence_safe_execution_error(error)
                 item["error_type"] = failure["type"]
                 item["code"] = failure["metadata"]["code"]
+                if isinstance(error, DispatchPlanningError):
+                    item["error_message"] = str(error)
             items.append(item)
         self._control_diagnostics = tuple(items)
 
@@ -539,13 +541,13 @@ def _validate_local_world_backend(world: WorldSpec) -> None:
     if kind not in {"local", "local_world"}:
         raise DispatchPlanningError(
             "local-world dispatch supports only local or local_world backends",
-            context={"backend": dict(world.backend), "kind": kind},
+            context={"kind": kind},
         )
     parameters = world.backend.get("parameters", {})
     if not isinstance(parameters, Mapping) or parameters:
         raise DispatchPlanningError(
             "local-world dispatch cannot enact requested backend parameters",
-            context={"backend": dict(world.backend)},
+            context={"kind": kind, "parameters": {"__dryml_redacted__": "launch_only"}},
         )
 
 

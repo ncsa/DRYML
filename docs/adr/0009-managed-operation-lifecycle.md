@@ -90,10 +90,19 @@ write only within fence-isolated attempt workspaces and return bounded intents.
 Publication is pointer-last: verify output products, write typed output and
 execution records, write `RealizationRecord`, mark completion, append the
 activation event, then atomically replace the active pointer. A stale fence
-cannot mutate or activate state. A crash before activation leaves the prior
-active selection unchanged. Recovery may adopt only immutable bytes justified
-by a durable finalization intent and exact manifest validation; it never deletes
-partial or authoritative data automatically.
+cannot mutate or activate state. Exact publication of the immutable activation
+event is the selection commit point. A failure before that event exists leaves
+the prior active selection unchanged. Once the exact event exists, the
+coordinator validates it and reconciles pointer publication under the same
+fence; it does not report the realization as a failed rerun that a later pointer
+rebuild would activate. Post-replace durability errors are retried
+idempotently. Transient validation-read failures cannot reclassify an exact
+durably written event or pointer as a failed rerun, while a successfully read
+mismatch still fails closed. An activation whose commit status cannot be
+established is reported as indeterminate and requires explicit reconciliation.
+Recovery may adopt only immutable bytes justified by a durable
+finalization intent and exact manifest validation; it never deletes partial or
+authoritative data automatically.
 
 ## Store Capabilities
 

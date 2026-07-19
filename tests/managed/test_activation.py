@@ -8,6 +8,7 @@ import pytest
 from dryml.core2.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import (
+    ManagedActivationIndeterminateError,
     ManagedInputValidationRequiredError,
     ManagedOperationStore,
     ManagedRerunRequiredError,
@@ -353,3 +354,220 @@ def test_activation_is_pointer_last_supports_rollback_and_rebuild(tmp_path):
     reopened = _operation(tmp_path / "store")
     assert [item.realization_id for item in reopened.history()] == [first_id, second_id]
     assert reopened.active().realization_id == first_id
+
+
+def test_activation_event_failure_before_publication_preserves_old_active(
+    tmp_path, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    operation = _operation(tmp_path / "store")
+    first_id = _complete_and_activate(operation)
+    original_write_json = store_module._write_json
+    injected = False
+
+    def fail_event_publication(path, data, *, immutable=False):
+        nonlocal injected
+        if Path(path).parent == operation._activations_dir and not injected:
+            injected = True
+            raise ManagedStateError("simulated activation event publication failure")
+        return original_write_json(path, data, immutable=immutable)
+
+    monkeypatch.setattr(store_module, "_write_json", fail_event_publication)
+    with operation.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+        rerun_id = rerun.realization.realization_id
+        lease._complete_control_only(rerun_id)
+        with pytest.raises(ManagedStateError, match="event publication failure"):
+            lease._activate_control_only(rerun_id)
+
+    assert operation.active().realization_id == first_id
+    assert operation.rebuild_active_pointer().realization_id == first_id
+
+
+@pytest.mark.parametrize("boundary", ["event", "pointer"])
+def test_activation_reconciles_post_replace_directory_fsync_failure(
+    tmp_path, monkeypatch, boundary
+):
+    import dryml.managed.store as store_module
+
+    operation = _operation(tmp_path / boundary)
+    _complete_and_activate(operation)
+    original_fsync_directory = store_module._fsync_directory
+    target = (
+        operation._activations_dir
+        if boundary == "event"
+        else operation.generation_dir
+    )
+    injected = False
+
+    def fail_once_after_replace(directory):
+        nonlocal injected
+        if Path(directory) == target and not injected:
+            injected = True
+            raise OSError(f"simulated {boundary} directory fsync failure")
+        return original_fsync_directory(directory)
+
+    with operation.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+        rerun_id = rerun.realization.realization_id
+        lease._complete_control_only(rerun_id)
+        monkeypatch.setattr(
+            store_module, "_fsync_directory", fail_once_after_replace
+        )
+        activated = lease._activate_control_only(rerun_id)
+
+    assert injected
+    assert activated.realization_id == rerun_id
+    assert operation.active().realization_id == rerun_id
+    assert len(operation._activation_events()) == 2
+    assert operation._activation_events()[-1] == operation.active_event()
+
+
+def test_pointer_publication_failure_retries_authoritative_event(
+    tmp_path, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    operation = _operation(tmp_path / "store")
+    _complete_and_activate(operation)
+    original_write_json = store_module._write_json
+    injected = False
+
+    def fail_first_pointer_write(path, data, *, immutable=False):
+        nonlocal injected
+        if Path(path) == operation.active_pointer_path and not injected:
+            injected = True
+            raise ManagedStateError("simulated pointer publication failure")
+        return original_write_json(path, data, immutable=immutable)
+
+    monkeypatch.setattr(store_module, "_write_json", fail_first_pointer_write)
+    with operation.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+        rerun_id = rerun.realization.realization_id
+        lease._complete_control_only(rerun_id)
+        activated = lease._activate_control_only(rerun_id)
+
+    assert injected
+    assert activated.realization_id == rerun_id
+    assert operation.active().realization_id == rerun_id
+    assert len(operation._activation_events()) == 2
+    assert operation._activation_events()[-1] == operation.active_event()
+
+
+@pytest.mark.parametrize("boundary", ["event", "pointer"])
+def test_transient_post_commit_validation_read_is_retried(
+    tmp_path, monkeypatch, boundary
+):
+    import dryml.managed.store as store_module
+
+    operation = _operation(tmp_path / boundary)
+    _complete_and_activate(operation)
+    original_write_json = store_module._write_json
+    original_read_json = store_module._read_json
+    published_path = None
+    injected = False
+
+    def track_publication(path, data, *, immutable=False):
+        nonlocal published_path
+        result = original_write_json(path, data, immutable=immutable)
+        path = Path(path)
+        if boundary == "event" and path.parent == operation._activations_dir:
+            published_path = path
+        elif boundary == "pointer" and path == operation.active_pointer_path:
+            published_path = path
+        return result
+
+    def fail_first_post_commit_read(path, name):
+        nonlocal injected
+        if (
+            published_path is not None
+            and Path(path) == published_path
+            and not injected
+        ):
+            injected = True
+            raise OSError(f"simulated {boundary} validation read failure")
+        return original_read_json(path, name)
+
+    monkeypatch.setattr(store_module, "_write_json", track_publication)
+    monkeypatch.setattr(store_module, "_read_json", fail_first_post_commit_read)
+    with operation.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+        rerun_id = rerun.realization.realization_id
+        lease._complete_control_only(rerun_id)
+        activated = lease._activate_control_only(rerun_id)
+
+    assert injected
+    assert activated.realization_id == rerun_id
+    assert operation.active().realization_id == rerun_id
+
+
+def test_unreadable_event_after_uncertain_write_reports_indeterminate(
+    tmp_path, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    operation = _operation(tmp_path / "store")
+    first_id = _complete_and_activate(operation)
+    original_write_json = store_module._write_json
+    original_read_json = store_module._read_json
+    published_event = None
+
+    def publish_then_raise(path, data, *, immutable=False):
+        nonlocal published_event
+        result = original_write_json(path, data, immutable=immutable)
+        if Path(path).parent == operation._activations_dir:
+            published_event = Path(path)
+            raise OSError("simulated lost activation write acknowledgement")
+        return result
+
+    def fail_event_reads(path, name):
+        if published_event == Path(path):
+            raise OSError("simulated unavailable activation event")
+        return original_read_json(path, name)
+
+    monkeypatch.setattr(store_module, "_write_json", publish_then_raise)
+    monkeypatch.setattr(store_module, "_read_json", fail_event_reads)
+    with operation.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+        rerun_id = rerun.realization.realization_id
+        lease._complete_control_only(rerun_id)
+        with pytest.raises(
+            ManagedActivationIndeterminateError,
+            match="publication is indeterminate",
+        ):
+            lease._activate_control_only(rerun_id)
+
+    assert operation.active().realization_id == first_id
+    monkeypatch.setattr(store_module, "_write_json", original_write_json)
+    monkeypatch.setattr(store_module, "_read_json", original_read_json)
+    assert operation.rebuild_active_pointer().realization_id == rerun_id
+
+
+def test_mismatched_published_activation_event_fails_closed(tmp_path, monkeypatch):
+    import dryml.managed.store as store_module
+
+    operation = _operation(tmp_path / "store")
+    first_id = _complete_and_activate(operation)
+    original_write_json = store_module._write_json
+    injected = False
+
+    def publish_mismatched_event(path, data, *, immutable=False):
+        nonlocal injected
+        if Path(path).parent == operation._activations_dir and not injected:
+            injected = True
+            mismatched = dict(data)
+            mismatched["realization_id"] = first_id
+            original_write_json(path, mismatched, immutable=immutable)
+            raise ManagedStateError("simulated uncertain event publication")
+        return original_write_json(path, data, immutable=immutable)
+
+    monkeypatch.setattr(store_module, "_write_json", publish_mismatched_event)
+    with operation.acquire() as lease:
+        rerun = lease.prepare(resumable=False, rerun=True)
+        rerun_id = rerun.realization.realization_id
+        lease._complete_control_only(rerun_id)
+        with pytest.raises(ManagedStateError, match="does not match the proposed"):
+            lease._activate_control_only(rerun_id)
+
+    assert operation.active().realization_id == first_id

@@ -96,7 +96,10 @@ class ExecutionEnvelope:
     """Launch-only worker request data.
 
     Unlike DispatchSpec and ExecutionRecipe, this envelope may contain absolute
-    local paths and other non-identity launch details.
+    local paths, raw environment/runtime/world configuration, and other
+    non-identity launch details. ``launch`` may also carry separately named
+    projected world/allocation specs for provenance publication; raw launch
+    specs must not be written to the Store.
     """
 
     dispatch_spec: Mapping[str, Any]

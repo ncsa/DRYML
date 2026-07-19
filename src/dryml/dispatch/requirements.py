@@ -33,14 +33,16 @@ from dryml.environments.records import EnvironmentRecord
 from dryml.environments.specs import EnvironmentSpec, PythonExecutableSpec, spec_from_data
 from dryml.runtime import RuntimeEnforcement, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
+from dryml.worlds.errors import ResourceValidationError, WorldSpecValidationError
 from dryml.worlds.specs import WorldSpec
 from dryml.operations import resolve_call_arguments
 
 from .errors import DispatchPlanningError
 from .normalize import NormalizedDispatchTarget
+from .provenance import PERSISTENCE_PROJECTION_SCHEMA, project_allocation_summary, project_environment_config, project_inventory_summary, project_requirement_provenance, project_runtime_config, project_world_spec, project_world_synthesis, redaction_marker
 
 
-PLANNING_METADATA_VERSION = 3
+PLANNING_METADATA_VERSION = 4
 DEFAULT_PROBE_TIMEOUT_S = 30.0
 _TRACE_SCHEMA = "dryml.dispatch.dynamic_trace.v1"
 _TRACE_MAX_CALLS = 256
@@ -531,6 +533,8 @@ class DispatchPlanningResolution:
         inventory_summary: Bounded inventory used by synthesis or allocation.
         world_allocation_summary: Actual local allocation summary when planned.
         local_inventory: Internal reused inventory object; omitted from public data.
+        canonical_world_spec: Internal allocator-normalized requested world used
+            only for persistence projection; omitted from public data.
         dynamic_trace: Opt-in current-process trace evidence, never operation metadata.
     """
 
@@ -557,6 +561,7 @@ class DispatchPlanningResolution:
     inventory_summary: Mapping[str, Any] | None = None
     world_allocation_summary: Mapping[str, Any] | None = None
     local_inventory: worlds.LocalResourceInventory | None = None
+    canonical_world_spec: Mapping[str, Any] | None = None
     dynamic_trace: DynamicTraceProvenance | None = None
 
     def to_data(self) -> dict[str, Any]:
@@ -598,6 +603,9 @@ class DispatchPlanningResolution:
         """Return authoritative dispatch metadata for this resolution."""
 
         data = self.to_data()
+        persisted_requirements = _bounded_data(
+            project_requirement_provenance(self.requirements.to_data())
+        )
         return {
             "dryml.dispatch.planning_version": PLANNING_METADATA_VERSION,
             "dryml.code_analysis": _persisted_analysis_summary(self.code_analysis),
@@ -606,17 +614,23 @@ class DispatchPlanningResolution:
                 "bootstrap_probe": _persisted_probe_summary(self.bootstrap_code_probe),
                 "final_probe": _persisted_probe_summary(self.final_code_probe),
             },
-            "dryml.requirements": data["requirements"],
-            "dryml.requirement_sources": data["requirements"].get("source_traces", []),
+            "dryml.requirements": persisted_requirements,
+            "dryml.requirement_sources": persisted_requirements.get("source_traces", []),
             "dryml.environment_selection": _persisted_selection_data(self.environment_selection),
             "dryml.environment_probe": _environment_record_summary(self.environment_record),
             "dryml.environment_check": _persisted_check_data(self.environment_check),
             "dryml.environment_resolution": data["environment_resolution"],
-            "dryml.world_selection": _persisted_selection_data(self.world_selection),
-            "dryml.world_check": _persisted_check_data(self.world_check),
-            "dryml.world_synthesis": data["world_synthesis"],
-            "dryml.local_inventory": data["inventory_summary"],
-            "dryml.world_allocation": data["world_allocation_summary"],
+            "dryml.world_selection": _persisted_selection_data(
+                self.world_selection,
+                selected_candidate=self.canonical_world_spec,
+            ),
+            "dryml.world_check": _persisted_check_data(
+                self.world_check,
+                candidate=self.canonical_world_spec,
+            ),
+            "dryml.world_synthesis": project_world_synthesis(data["world_synthesis"]),
+            "dryml.local_inventory": project_inventory_summary(data["inventory_summary"]),
+            "dryml.world_allocation": project_allocation_summary(data["world_allocation_summary"]),
             "dryml.runtime_selection": _persisted_selection_data(self.runtime_selection),
             "dryml.runtime_check": _persisted_check_data(self.runtime_check),
             "dryml.requirement_policy": self.requirement_policy.value,
@@ -2626,11 +2640,27 @@ def _bounded_data(value, *, depth=0, budget=None):
     return str(value)[:_MAX_METADATA_STRING]
 
 
-def _persisted_candidate_data(candidate: Mapping[str, Any] | None) -> dict[str, Any] | None:
+def _persisted_candidate_data(candidate: Mapping[str, Any] | None, *, kind: str | None = None) -> dict[str, Any] | None:
     """Retain candidate identity/compatibility fields without arbitrary payloads."""
 
     if candidate is None:
         return None
+    if kind == "environment" or candidate.get("kind") in {"current", "python", "conda", "container"}:
+        return project_environment_config(candidate)
+    if kind == "runtime" or "mode" in candidate:
+        return project_runtime_config(candidate)
+    if kind == "world" or "roles" in candidate:
+        try:
+            return project_world_spec(candidate)["payload"]
+        except (ResourceValidationError, WorldSpecValidationError):
+            return {
+                "candidate": redaction_marker(),
+                "persistence_projection": {
+                    "schema": PERSISTENCE_PROJECTION_SCHEMA,
+                    "redacted": True,
+                    "redacted_fields": ["candidate"],
+                },
+            }
     return _bounded_data(_without_sensitive_candidate_fields(candidate))
 
 
@@ -2649,16 +2679,19 @@ def _without_sensitive_candidate_fields(value):
     return value
 
 
-def _persisted_selection_data(selection: CandidateSelection) -> dict[str, Any]:
+def _persisted_selection_data(selection: CandidateSelection, *, selected_candidate: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "kind": selection.kind,
-        "candidate": _persisted_candidate_data(selection.candidate),
+        "candidate": _persisted_candidate_data(selected_candidate or selection.candidate, kind=selection.kind),
         "source": selection.source,
         "considered": [
             {
                 "slot": item.slot,
                 "status": item.status,
-                "candidate": _persisted_candidate_data(item.candidate),
+                "candidate": _persisted_candidate_data(
+                    selected_candidate if item.status == "selected" and selected_candidate is not None else item.candidate,
+                    kind=selection.kind,
+                ),
             }
             for item in selection.considered
         ],
@@ -2669,13 +2702,13 @@ def _persisted_selection_data(selection: CandidateSelection) -> dict[str, Any]:
     }
 
 
-def _persisted_check_data(report: CandidateCheckReport) -> dict[str, Any]:
+def _persisted_check_data(report: CandidateCheckReport, *, candidate: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "kind": report.kind,
         "status": report.status,
         "compatible": report.compatible,
         "requirement": None if report.requirement is None else _bounded_data(report.requirement),
-        "candidate": _persisted_candidate_data(report.candidate),
+        "candidate": _persisted_candidate_data(candidate or report.candidate, kind=report.kind),
         "details": _bounded_data(_without_sensitive_candidate_fields(report.details)),
         "diagnostics": [
             _diagnostic_summary(item)

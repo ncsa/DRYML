@@ -25,7 +25,11 @@ the reproducible object-method path.
 
 ## Metadata
 
-`DispatchSpec` is request intent: operation ID plus policies and overrides that affect dispatch identity. `ExecutionRecipe` is resolved plan metadata: backend, environment/runtime choices, store strategy, input/output plan, and log plan. Both are canonical JSON specs, not DRYML Objects.
+`DispatchSpec` is durable request intent: operation ID plus policies and a
+persistence-safe projection of selected configuration. `ExecutionRecipe` is
+resolved plan metadata: backend, projected environment/runtime choices, store
+strategy, input/output plan, and log plan. Both are canonical JSON specs, not
+DRYML Objects.
 
 ```python
 import dryml.operations as ops
@@ -42,7 +46,23 @@ recipe = attach_recipe_id(
 )
 ```
 
-An `ExecutionEnvelope` is launch-time worker protocol data. It may include absolute same-host `DirStore` paths, work directories, and pickle file paths. Those fields are deliberately excluded from `DispatchSpec` and `ExecutionRecipe` identity.
+An `ExecutionEnvelope` is launch-time worker protocol data. It may include
+absolute same-host `DirStore` paths, work directories, pickle file paths, raw
+environment overrides, runtime/framework configuration, and per-process world
+environment. Those fields are deliberately excluded from durable spec identity.
+
+The durable projection uses schema
+`dryml.dispatch.persistence_projection.v1`. It preserves stable policy,
+environment kind, requested roles, allocation ranks, backend identity, and
+resource facts as non-sensitive kinds, counts, and capacities. It replaces
+launch locators, environment maps, arbitrary framework configuration, inventory
+metadata, backend parameters, host details, CPU/device identifiers, GPU UUIDs,
+and named-resource details with explicit
+`{"__dryml_redacted__": "launch_only"}` markers or deterministic ordinal slots.
+Changing only a redacted value does not change dispatch, projected world, or
+projected allocation identity. The projection is provenance, not a launchable
+configuration and not a secret hash. Requirement checks and worker launch always
+use the unprojected envelope values.
 
 ## Local Subprocess
 
@@ -298,8 +318,10 @@ returning that completed diagnostic trace carrier.
 
 ### Bounded planning provenance
 
-Planning metadata version 3 keeps the existing operation, dispatch, execution
-recipe, and worker-envelope v1 schemas. It adds
+Planning metadata version 4 keeps the existing operation, dispatch, execution
+recipe, and worker-envelope v1 schemas. It retains version 3's bounded analysis
+outcomes and adds the launch-only configuration projection described above.
+Version 3 added
 `dryml.dispatch.analysis_outcomes`, whose closed entries make code-probe,
 environment-probe, and dynamic-trace outcomes explicit. A skipped probe is
 `{"outcome": "not_required"}`; tracing that was not requested records
@@ -396,9 +418,25 @@ Python path policies are:
 
 `DispatchResult` returns compact fields: status, operation/dispatch/recipe IDs, execution record ID, canonical literal or CDef result refs, operation-produced record IDs, stdout/stderr refs, diagnostics, error, cancellation, and an optional structured `managed_result`. `WorkerResponse` enforces the same basic status context as execution records: ok responses do not carry errors, failed/timeout/unsupported responses include error details or diagnostics, and cancelled responses include cancellation facts. `execution_record_id` is provenance and is kept separate from `produced_record_ids`, which are reserved for records produced by the operation itself. A failed managed worker response retains its bounded checkpoint/effect carrier for coordinator classification; only the coordinator may turn successful effects into published records and activation.
 
-When provenance is enabled, operation, dispatch, and execution-recipe specs are written beside the execution record so provenance refs are store-resolvable. `ExecutionRecord` sidecars are emitted for success, user-code failure, timeout, cancellation, and parent-side protocol failures when metadata permits. stdout/stderr products use self product refs such as `products/<execution-record-id>/stdout.txt` and `stderr.txt`.
+When provenance is enabled, operation, dispatch, execution-recipe, projected
+world, and projected allocation specs are written beside the execution record so
+provenance refs are Store-resolvable without copying raw launch configuration.
+Execution records refer only to projected world/allocation IDs. Raw configuration
+remains in the transient worker envelope and is not copied into records, logs,
+diagnostics, Store specs, or managed export closure. `ExecutionRecord` sidecars
+are emitted for success, user-code failure, timeout, cancellation, and
+parent-side protocol failures when metadata permits. stdout/stderr products use
+self product refs such as `products/<execution-record-id>/stdout.txt` and
+`stderr.txt`.
 
-In local-world mode, `plan_world(...)` writes the requested `WorldSpec`, operation spec, dispatch spec, execution recipe, and actual `WorldAllocation` spec when provenance is enabled, before worker execution records reference them. Per-worker execution records are the provenance authority; each includes `world_id`, `world_allocation_id`, worker key payload data, and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured independently and copied into each worker execution record's product directory.
+In local-world mode, `plan_world(...)` writes projected requested-world and
+allocation specs, the operation spec, dispatch spec, and execution recipe when
+provenance is enabled, before worker execution records reference them. The raw
+requested world and concrete process environments remain launch-envelope data.
+Per-worker execution records are the provenance authority; each includes the
+projected `world_id`, projected `world_allocation_id`, worker key payload data,
+and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured
+independently and copied into each worker execution record's product directory.
 
 ## Cancellation
 

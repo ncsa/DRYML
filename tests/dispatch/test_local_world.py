@@ -224,6 +224,27 @@ def test_plan_world_persists_all_specs_before_launch(tmp_path):
     assert store.records.read_spec(plan.world_allocation_spec["id"], family="world_allocation")["id"] == plan.world_allocation_spec["id"]
 
 
+def test_repeated_projected_spec_publication_is_content_addressed(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="none")
+    op = attach_operation_id(make_function_call_spec("operator:add", args=[1, 2]))
+    dispatcher = Dispatcher(store=store)
+    default_cpu_world = {"worker": {"replicas": 1, "process": {}}}
+
+    first = dispatcher.plan_world(op, world=default_cpu_world, inventory=_inventory())
+    repeated = dispatcher.plan_world(op, world=default_cpu_world, inventory=_inventory())
+    explicit_cpu = dispatcher.plan_world(
+        op,
+        world={"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}},
+        inventory=_inventory(),
+    )
+
+    assert repeated.world_spec == first.world_spec
+    assert repeated.world_allocation_spec == first.world_allocation_spec
+    assert repeated.world_allocation_spec["id"] == first.world_allocation_spec["id"]
+    assert explicit_cpu.world_spec["id"] != first.world_spec["id"]
+    assert explicit_cpu.world_allocation_spec["id"] != first.world_allocation_spec["id"]
+
+
 def test_plan_world_metadata_summarizes_assigned_memory_and_accelerators(tmp_path):
     store = DirStore(tmp_path / "store", query_index="none")
     world = {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1, "memory": "1GiB", "accelerators": {"gpu": 1}}}}}
@@ -233,7 +254,8 @@ def test_plan_world_metadata_summarizes_assigned_memory_and_accelerators(tmp_pat
 
     worker = plan.dispatch_spec["payload"]["metadata"]["dryml.world_allocation"]["workers"][0]
     assert worker["memory"] == 1024**3
-    assert dict(worker["accelerators"]) == {"gpu": (0,)}
+    assert worker["cpu_count"] == 1
+    assert dict(worker["accelerator_counts"]) == {"gpu": 1}
 
 
 def test_plan_world_metadata_records_explicit_oversubscription(tmp_path):

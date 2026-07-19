@@ -454,11 +454,12 @@ def test_dispatch_reuses_selected_resolver_record_without_a_second_probe(monkeyp
 
     assert resolution.environment_selection.source == "resolver"
     assert resolution.environment_record == record
+    assert resolution.environment_resolution.selected == candidate
     assert calls == [candidate]
     assert code_probe_calls == [normalized.code_target]
     assert resolution.environment_resolution.probe_count == 1
     metadata = resolution.metadata()
-    assert metadata["dryml.environment_resolution"]["selected"]["executable"] == "/resolved/python"
+    assert metadata["dryml.environment_resolution"]["selected"]["executable"] == {"__dryml_redacted__": "launch_only"}
     assert metadata["dryml.environment_probe"] is not None
 
 

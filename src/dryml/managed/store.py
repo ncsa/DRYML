@@ -18,6 +18,7 @@ from dryml.formats.errors import CanonicalJSONError
 
 from .errors import (
     AmbiguousManagedStoreError,
+    ManagedActivationIndeterminateError,
     ManagedInputValidationRequiredError,
     ManagedLeaseConflictError,
     ManagedRerunRequiredError,
@@ -49,6 +50,11 @@ MANAGED_CAPABILITIES = frozenset({
     "managed-activation-v1",
     "managed-durable-products-v1",
 })
+_ACTIVATION_READ_ATTEMPTS = 3
+
+
+class _TransientManagedStateReadError(ManagedStateError):
+    """A managed-state read failed without proving persisted bytes invalid."""
 
 
 def resolve_managed_store(
@@ -521,6 +527,34 @@ class OperationControl:
             events.append(event)
         return tuple(sorted(events, key=lambda item: item.sequence))
 
+    def _require_exact_activation_event(self, expected: ActivationEvent) -> None:
+        """Fail unless ``expected`` is the latest immutable selection event."""
+
+        path = self._activation_path(expected)
+        authoritative = ActivationEvent.from_json(
+            _read_json(path, "activation event")
+        )
+        if authoritative != expected:
+            raise ManagedStateError(
+                "published activation event does not match the proposed activation"
+            )
+        events = self._activation_events()
+        if not events or events[-1] != expected:
+            raise ManagedStateError(
+                "published activation event is not the latest authoritative selection"
+            )
+
+    def _retry_activation_read(self, reader):
+        """Retry transient activation reads without swallowing exact mismatches."""
+
+        last_error = None
+        for _attempt in range(_ACTIVATION_READ_ATTEMPTS):
+            try:
+                return True, reader()
+            except (OSError, _TransientManagedStateReadError) as exc:
+                last_error = exc
+        return False, last_error
+
     def _read_owner(self, *, missing_ok: bool = False) -> dict[str, Any] | None:
         if missing_ok and not self._owner_path.exists():
             return None
@@ -805,7 +839,7 @@ class OperationLease:
 
     @_serialized_mutation
     def activate(self, realization_id: str) -> RealizationState:
-        """Append an immutable activation event, then update the pointer last."""
+        """Commit an immutable activation event and reconcile its pointer last."""
 
         return self._activate_state(realization_id, require_record=True)
 
@@ -840,9 +874,81 @@ class OperationLease:
             fence_epoch=self.epoch,
             realization_record_id=state.realization_record_id,
         )
-        _write_json(self.operation._activation_path(event), event.to_json(), immutable=True)
-        self._assert_current()
-        _write_json(self.operation.active_pointer_path, event.to_json())
+        event_path = self.operation._activation_path(event)
+        try:
+            _write_json(event_path, event.to_json(), immutable=True)
+        except BaseException:
+            if not event_path.exists():
+                raise
+            validated, read_error = self.operation._retry_activation_read(
+                lambda: self.operation._require_exact_activation_event(event)
+            )
+            if not validated:
+                raise ManagedActivationIndeterminateError(
+                    "activation event publication is indeterminate; rebuild the "
+                    "active pointer before retrying"
+                ) from read_error
+            try:
+                _fsync_directory(event_path.parent)
+            except OSError as reconciliation_error:
+                raise ManagedActivationIndeterminateError(
+                    "activation event durability is indeterminate; rebuild the "
+                    "active pointer before retrying"
+                ) from reconciliation_error
+        else:
+            # A successful immutable write proves the exact event is durable.
+            # Retry transient validation reads, but do not let their continued
+            # unavailability reclassify the known committed selection.
+            self.operation._retry_activation_read(
+                lambda: self.operation._require_exact_activation_event(event)
+            )
+
+        # The immutable event is the commit point. A pointer error after this
+        # point must be reconciled under the same fence, not reported as a
+        # failed rerun that a later rebuild would silently activate.
+        for attempt in range(2):
+            self._assert_current()
+            try:
+                _write_json(self.operation.active_pointer_path, event.to_json())
+            except BaseException as publication_error:
+                self.operation._retry_activation_read(
+                    lambda: self.operation._require_exact_activation_event(event)
+                )
+                pointer_read, pointer = self.operation._retry_activation_read(
+                    lambda: self.operation.active_event(missing_ok=True)
+                )
+                if pointer_read and pointer == event:
+                    try:
+                        _fsync_directory(self.operation.active_pointer_path.parent)
+                    except OSError as reconciliation_error:
+                        if attempt == 0:
+                            continue
+                        raise ManagedActivationIndeterminateError(
+                            "activation committed but active pointer durability is "
+                            "indeterminate; rebuild the pointer before retrying"
+                        ) from reconciliation_error
+                    break
+                if not pointer_read:
+                    if attempt == 0:
+                        continue
+                    raise ManagedActivationIndeterminateError(
+                        "activation committed but active pointer publication is "
+                        "indeterminate; rebuild the pointer before retrying"
+                    ) from pointer
+                if attempt == 0:
+                    continue
+                raise ManagedStateError(
+                    "active pointer could not be reconciled with the "
+                    "authoritative activation event"
+                ) from publication_error
+            pointer_read, pointer = self.operation._retry_activation_read(
+                self.operation.active_event
+            )
+            if pointer_read and pointer != event:
+                raise ManagedStateError(
+                    "active pointer does not match the authoritative activation event"
+                )
+            break
         return state
 
     @_serialized_mutation
@@ -1086,7 +1192,11 @@ def _write_json(path: Path, data: Mapping[str, Any], *, immutable: bool = False)
 def _read_json(path: Path, name: str) -> dict[str, Any]:
     try:
         data = canonical_json_load_bytes(path.read_bytes())
-    except (OSError, CanonicalJSONError) as exc:
+    except OSError as exc:
+        raise _TransientManagedStateReadError(
+            f"{name} could not be read: {exc}"
+        ) from exc
+    except CanonicalJSONError as exc:
         raise ManagedStateError(f"{name} could not be read: {exc}") from exc
     if not isinstance(data, dict):
         raise ManagedStateError(f"{name} JSON root must be an object")

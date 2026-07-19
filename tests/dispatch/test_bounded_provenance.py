@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,12 @@ from dryml.code.facts import CodeFact, DiagnosticFact
 from dryml.core2.repo import Repo
 from dryml.core2.store.dir import DirStore
 from dryml.dispatch import Dispatcher, ExecutionEnvelope
-from dryml.environments import CurrentEnvironmentSpec
+from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
+from dryml.formats import json_ready
+from dryml.operations import make_function_call_spec
 from dryml.records import ExecutionRecord
-from dryml.runtime import RuntimeContextSpec
+from dryml.runtime import RuntimeContextSpec, RuntimeMode
+from dryml.worlds import LocalResourceInventory
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures"
@@ -32,6 +36,20 @@ FORBIDDEN = (
     "RUNTIME_CANDIDATE_METADATA_SENTINEL",
     "RUNTIME_CANDIDATE_SECRET_SENTINEL",
 )
+
+LAUNCH_CONFIG_SENTINELS = (
+    "ENVIRONMENT_LAUNCH_SECRET_SENTINEL",
+    "ENVIRONMENT_PRIVATE_PATH_SENTINEL",
+    "WORLD_LAUNCH_SECRET_SENTINEL",
+    "WORLD_METADATA_SECRET_SENTINEL",
+    "RUNTIME_ENV_SECRET_SENTINEL",
+    "RUNTIME_FRAMEWORK_SECRET_SENTINEL",
+    "RUNTIME_METADATA_SECRET_SENTINEL",
+    "DEVICE_VISIBILITY_ID_SECRET_SENTINEL",
+    "ALLOCATION_ACCELERATOR_ID_SECRET_SENTINEL",
+)
+
+INVENTORY_METADATA_SENTINEL = "INVENTORY_METADATA_SECRET_SENTINEL"
 
 
 class _LiveSentinel:
@@ -117,7 +135,7 @@ def test_bounded_provenance_matrix(tmp_path, monkeypatch, target_kind):
     assert operation["metadata"]["dryml.dispatch.transport"] in {"import_path", "method_call"}
     assert operation["id"] == dispatch["payload"]["operation_id"] == recipe["payload"]["operation_id"]
     assert operation["payload"].get("method") == method_name
-    assert metadata["dryml.dispatch.planning_version"] == 3
+    assert metadata["dryml.dispatch.planning_version"] == 4
     assert metadata["dryml.requirements"]["world_requirement"]
     assert metadata["dryml.requirement_sources"]
     assert metadata["dryml.environment_selection"]["source"] == "explicit"
@@ -215,6 +233,117 @@ def test_bounded_provenance_matrix(tmp_path, monkeypatch, target_kind):
     serialized = json.dumps(carriers, sort_keys=True)
     assert not any(value in serialized for value in FORBIDDEN)
     assert not _contains_live_object(carriers)
+
+
+@pytest.mark.parametrize("local_world", (False, True))
+def test_launch_configuration_is_redacted_from_persistent_specs(tmp_path, local_world):
+    from dryml.dispatch.backends import _write_execution_record
+
+    def build(store_name, suffix):
+        store = DirStore(tmp_path / store_name, query_index="none")
+        private_pythonpath = tmp_path / f"{LAUNCH_CONFIG_SENTINELS[1]}-{suffix}"
+        private_pythonpath.mkdir()
+        environment = PythonExecutableSpec(
+            sys.executable,
+            env={"API_TOKEN": f"{LAUNCH_CONFIG_SENTINELS[0]}-{suffix}"},
+            pythonpath_policy="explicit",
+            extra_pythonpath=(str(private_pythonpath),),
+        ).to_data()
+        runtime = RuntimeContextSpec(
+            mode=RuntimeMode.WORKER,
+            device_visibility={
+                "policy": "assigned",
+                "accelerators": [f"{LAUNCH_CONFIG_SENTINELS[7]}-{suffix}"],
+            },
+            env={"SERVICE_TOKEN": f"{LAUNCH_CONFIG_SENTINELS[4]}-{suffix}"},
+            frameworks={"plain": {"credential": f"{LAUNCH_CONFIG_SENTINELS[5]}-{suffix}"}},
+            metadata={"credential": f"{LAUNCH_CONFIG_SENTINELS[6]}-{suffix}"},
+        ).to_data()
+        backend_kind = "local_world" if local_world else "local_subprocess"
+        world = {
+            "roles": {
+                "main": {
+                    "replicas": 1,
+                    "process": {
+                        "env": {
+                            "SERVICE_TOKEN": f"{LAUNCH_CONFIG_SENTINELS[2]}-{suffix}",
+                            "SECONDARY_TOKEN": f"{LAUNCH_CONFIG_SENTINELS[3]}-{suffix}",
+                        },
+                        "resources": {"accelerators": {"gpu": 1}},
+                    },
+                }
+            },
+            "backend": {"kind": backend_kind, "parameters": {}},
+        }
+        planner = Dispatcher(store=store)
+        kwargs = {
+            "environment": environment,
+            "runtime": runtime,
+            "world": world,
+            "inventory": LocalResourceInventory(
+                (0,),
+                accelerators={"gpu": (f"{LAUNCH_CONFIG_SENTINELS[8]}-{suffix}",)},
+                metadata={"private": f"{INVENTORY_METADATA_SENTINEL}-{suffix}"},
+            ),
+            "requirement_policy": "ignore",
+        }
+        operation = make_function_call_spec("operator:add", args=[1, 2])
+        planned = planner.plan_world(operation, **kwargs) if local_world else planner.plan(operation, **kwargs)
+        envelope = planned.worker_plans[0].envelope if local_world else planned.envelope
+        return store, planned, envelope
+
+    store, planned, envelope = build("first", "one")
+    _, comparison, _ = build("second", "two")
+
+    launch_only = json.dumps(
+        {
+            "environment": envelope.environment_spec,
+            "runtime": envelope.runtime_spec,
+            "allocation": envelope.allocation_view,
+            "world": envelope.launch["world_spec"],
+            "world_allocation": envelope.launch["world_allocation_spec"],
+        },
+        sort_keys=True,
+    )
+    if not all(value in launch_only for value in LAUNCH_CONFIG_SENTINELS):
+        pytest.fail("launch envelope did not retain all launch-only configuration")
+
+    provenance_specs = (
+        envelope.operation_spec,
+        planned.dispatch_spec,
+        planned.execution_recipe,
+        envelope.launch["provenance_world_spec"],
+        envelope.launch["provenance_world_allocation_spec"],
+        store.records.read_spec(planned.dispatch_spec["id"], family="dispatch"),
+        store.records.read_spec(planned.execution_recipe["id"], family="execution_recipe"),
+        store.records.read_spec(envelope.launch["world_id"], family="world"),
+        store.records.read_spec(envelope.launch["world_allocation_id"], family="world_allocation"),
+    )
+    serialized = json.dumps(json_ready(provenance_specs), sort_keys=True)
+    forbidden_persistence = (*LAUNCH_CONFIG_SENTINELS, INVENTORY_METADATA_SENTINEL)
+    if any(value in serialized for value in forbidden_persistence):
+        pytest.fail("persistent provenance retained launch-only configuration")
+    if "dryml.dispatch.persistence_projection.v1" not in serialized or "__dryml_redacted__" not in serialized:
+        pytest.fail("persistent provenance omitted explicit redaction markers")
+
+    record_id = _write_execution_record(
+        store,
+        envelope,
+        status="failed",
+        error={"type": "RuntimeError"},
+        diagnostics=({"message": "worker execution failed"},),
+    )
+    record_data = json.dumps(json_ready(store.records.read_record(record_id)), sort_keys=True)
+    if any(value in record_data for value in forbidden_persistence):
+        pytest.fail("execution record retained launch-only configuration")
+
+    if planned.dispatch_spec["id"] != comparison.dispatch_spec["id"]:
+        pytest.fail("launch-only secret values changed dispatch identity")
+    comparison_envelope = comparison.worker_plans[0].envelope if local_world else comparison.envelope
+    if envelope.launch["world_id"] != comparison_envelope.launch["world_id"]:
+        pytest.fail("launch-only secret values changed persisted world identity")
+    if envelope.launch["world_allocation_id"] != comparison_envelope.launch["world_allocation_id"]:
+        pytest.fail("launch-only secret values changed persisted allocation identity")
 
 
 def _contains_live_object(value):

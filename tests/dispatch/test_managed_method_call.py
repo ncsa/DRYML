@@ -16,7 +16,6 @@ from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.environments import PythonExecutableSpec
 from dryml.managed import ControlRequest, ManagedCallback
-from dryml.managed.store import OperationLease
 from dryml.operations import attach_operation_id, make_method_call_spec
 from dryml.records import ExecutionRecord
 
@@ -266,9 +265,11 @@ def test_worker_failure_retains_structured_effects_and_prior_active(tmp_path, ta
     assert box.compute.results(store=store)["result"].record_id == first.produced_record_ids[0]
 
 
-def test_activation_failure_keeps_verified_rerun_inactive_and_old_active(
+def test_activation_event_failure_keeps_verified_rerun_inactive_and_old_active(
     tmp_path, target_module, monkeypatch
 ):
+    import dryml.managed.store as store_module
+
     store = DirStore(tmp_path / "store", query_index="none")
     box = _managed_box()
     secret = "managed-finalization-secret-sentinel-640a"
@@ -278,10 +279,17 @@ def test_activation_failure_keeps_verified_rerun_inactive_and_old_active(
         timeout=10,
     )
 
-    def fail_activation(self, realization_id):
-        raise RuntimeError(secret)
+    original_write_json = store_module._write_json
+    injected = False
 
-    monkeypatch.setattr(OperationLease, "activate", fail_activation)
+    def fail_event_publication(path, data, *, immutable=False):
+        nonlocal injected
+        if Path(path).parent.name == "activations" and not injected:
+            injected = True
+            raise RuntimeError(secret)
+        return original_write_json(path, data, immutable=immutable)
+
+    monkeypatch.setattr(store_module, "_write_json", fail_event_publication)
     failed = Dispatcher(store=store).run(
         box.compute,
         rerun=True,
@@ -303,6 +311,97 @@ def test_activation_failure_keeps_verified_rerun_inactive_and_old_active(
     history = box.compute.history(store=store)
     assert [item.status for item in history] == ["completed", "completed"]
     assert history[1].realization_record_id is not None
+
+
+def test_dispatched_pointer_failure_recovers_committed_activation(
+    tmp_path, target_module, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    box = _managed_box()
+    Dispatcher(store=store).run(
+        box.compute,
+        args=("old",),
+        environment=_env(target_module),
+        timeout=10,
+    )
+    original_write_json = store_module._write_json
+    injected = False
+
+    def fail_first_pointer_write(path, data, *, immutable=False):
+        nonlocal injected
+        if Path(path).name == "active.json" and not injected:
+            injected = True
+            raise RuntimeError("simulated pointer publication failure")
+        return original_write_json(path, data, immutable=immutable)
+
+    monkeypatch.setattr(store_module, "_write_json", fail_first_pointer_write)
+    result = Dispatcher(store=store).run(
+        box.compute,
+        args=("new",),
+        rerun=True,
+        environment=_env(target_module),
+        timeout=10,
+    )
+
+    assert injected
+    assert result.status == "ok"
+    assert result.managed_result["status"] == "ok"
+    assert (
+        box.compute.results(store=store)["result"].record_id
+        == result.produced_record_ids[0]
+    )
+
+
+def test_dispatched_post_commit_pointer_read_failure_returns_success(
+    tmp_path, target_module, monkeypatch
+):
+    import dryml.managed.store as store_module
+
+    store = DirStore(tmp_path / "store", query_index="none")
+    box = _managed_box()
+    Dispatcher(store=store).run(
+        box.compute,
+        args=("old",),
+        environment=_env(target_module),
+        timeout=10,
+    )
+    original_write_json = store_module._write_json
+    original_read_json = store_module._read_json
+    pointer_published = False
+    injected = False
+
+    def track_pointer_publication(path, data, *, immutable=False):
+        nonlocal pointer_published
+        result = original_write_json(path, data, immutable=immutable)
+        if Path(path).name == "active.json":
+            pointer_published = True
+        return result
+
+    def fail_first_pointer_read(path, name):
+        nonlocal injected
+        if pointer_published and Path(path).name == "active.json" and not injected:
+            injected = True
+            raise OSError("simulated post-commit pointer read failure")
+        return original_read_json(path, name)
+
+    monkeypatch.setattr(store_module, "_write_json", track_pointer_publication)
+    monkeypatch.setattr(store_module, "_read_json", fail_first_pointer_read)
+    result = Dispatcher(store=store).run(
+        box.compute,
+        args=("new",),
+        rerun=True,
+        environment=_env(target_module),
+        timeout=10,
+    )
+
+    assert injected
+    assert result.status == "ok"
+    assert (
+        box.compute.results(store=store)["result"].record_id
+        == result.produced_record_ids[0]
+    )
 
 
 def test_worker_death_without_response_is_failed_and_cannot_activate(tmp_path, target_module):

@@ -462,10 +462,10 @@ def _persist_provenance_specs(store: Any, envelope: Any) -> None:
     record_io.write_spec(envelope.operation_spec, family="operation")
     record_io.write_spec(envelope.dispatch_spec, family="dispatch")
     record_io.write_spec(envelope.execution_recipe, family="execution_recipe")
-    if isinstance(envelope.launch.get("world_spec"), Mapping):
-        record_io.write_spec(envelope.launch["world_spec"], family="world")
-    if isinstance(envelope.launch.get("world_allocation_spec"), Mapping):
-        record_io.write_spec(envelope.launch["world_allocation_spec"], family="world_allocation")
+    if isinstance(envelope.launch.get("provenance_world_spec"), Mapping):
+        record_io.write_spec(envelope.launch["provenance_world_spec"], family="world")
+    if isinstance(envelope.launch.get("provenance_world_allocation_spec"), Mapping):
+        record_io.write_spec(envelope.launch["provenance_world_allocation_spec"], family="world_allocation")
 
 
 def _backend_identity(envelope: Any) -> Mapping[str, Any]:

@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -210,7 +211,9 @@ class ProductWriteSession:
 
     The record ID is computed after files are staged and a manifest is available.
     Staged files are then moved to ``products/<record-id>/`` and the record
-    sidecar is written only after the product root is in place.
+    sidecar is written only after the product root is in place. A complete
+    content-addressed root is retained if sidecar publication fails so an
+    identical retry can adopt it; temporary staging is still cleaned.
     """
 
     def __init__(self, record_io: Any, *, overwrite: bool = False):
@@ -264,7 +267,7 @@ class ProductWriteSession:
         return ProductManifest(tuple(entries))
 
     def commit_record(self, record: Mapping[str, Any], *, overwrite: bool | None = None) -> ProductWriteResult:
-        """Commit staged products and write the corresponding record sidecar."""
+        """Commit staged products or adopt an identical concurrent publication."""
 
         if self._closed:
             raise RecordIOError("product write session is closed")
@@ -273,24 +276,32 @@ class ProductWriteSession:
         validate_record(attached)
         record_id = attached["id"]
         target_root = self.record_io.product_root(record_id)
-        if target_root.exists():
-            if not use_overwrite:
-                raise RecordIOError("product root already exists", context={"record_id": record_id})
-            shutil.rmtree(target_root)
         target_root.parent.mkdir(parents=True, exist_ok=True)
         staged = self.staging_dir
-        moved = False
         try:
-            os.replace(staged, target_root)
-            moved = True
-            located = self.record_io.write_record(attached, overwrite=use_overwrite)
-            self._staging_dir = None
-            self._closed = True
-            return ProductWriteResult(located=located, manifest=_manifest_for_root(target_root), product_root=target_root)
-        except Exception:
-            if moved and target_root.exists():
-                shutil.rmtree(target_root, ignore_errors=True)
-            raise
+            with _product_publication_lock(self.record_io.products_dir):
+                if target_root.exists():
+                    if use_overwrite:
+                        shutil.rmtree(target_root)
+                    elif _trees_match(staged, target_root):
+                        located = self.record_io.write_record(attached)
+                        manifest = _manifest_for_root(target_root)
+                        shutil.rmtree(staged)
+                        self._staging_dir = None
+                        self._closed = True
+                        return ProductWriteResult(located=located, manifest=manifest, product_root=target_root)
+                    else:
+                        raise RecordIOError(
+                            "product root already exists with different bytes",
+                            context={"record_id": record_id},
+                        )
+                os.replace(staged, target_root)
+                # The complete content-addressed root is safe to retain if the
+                # sidecar write fails; a later identical writer can adopt it.
+                self._staging_dir = None
+                self._closed = True
+                located = self.record_io.write_record(attached, overwrite=use_overwrite)
+                return ProductWriteResult(located=located, manifest=_manifest_for_root(target_root), product_root=target_root)
         finally:
             if self._staging_dir is not None and self._staging_dir.exists():
                 shutil.rmtree(self._staging_dir, ignore_errors=True)
@@ -964,6 +975,52 @@ def _trees_match(first: Path, second: Path) -> bool:
     first_manifest = _manifest_for_root(first)
     second_manifest = _manifest_for_root(second)
     return first_manifest == second_manifest
+
+
+@contextmanager
+def _product_publication_lock(products_dir: Path):
+    """Serialize product-root adoption across local writers and process death."""
+
+    products_dir.mkdir(parents=True, exist_ok=True)
+    handle = (products_dir / ".publication-v1.lock").open("a+b", buffering=0)
+    locked = False
+    try:
+        if os.name == "posix":
+            try:
+                import fcntl
+            except ImportError as exc:
+                raise RecordIOError("product publication requires fcntl") from exc
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            locked = True
+        elif os.name == "nt":
+            try:
+                import msvcrt
+            except ImportError as exc:
+                raise RecordIOError("product publication requires msvcrt") from exc
+            handle.seek(0)
+            if not handle.read(1):
+                handle.write(b"\0")
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            locked = True
+        else:
+            raise RecordIOError(
+                f"product publication is unsupported on platform {os.name!r}"
+            )
+        yield
+    finally:
+        try:
+            if locked and os.name == "posix":
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            elif locked and os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            handle.close()
 
 
 def _fsync_tree(root: Path) -> None:

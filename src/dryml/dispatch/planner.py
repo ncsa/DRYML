@@ -18,6 +18,12 @@ from dryml.runtime import RuntimeAllocationView
 from .errors import DispatchPlanningError
 from .normalize import is_definition_or_cdef, normalize_user_operation
 from .operations import PickledCallable
+from .provenance import (
+    project_environment_config,
+    project_runtime_config,
+    project_world_allocation_spec,
+    project_world_spec,
+)
 from .protocol import DispatchResult, ExecutionEnvelope
 from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, parse_analysis_policy, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
@@ -208,7 +214,10 @@ class Dispatcher:
                     context={"dynamic_trace": resolution.dynamic_trace.to_data()},
                 )
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
-                raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
+                raise DispatchPlanningError(
+                    "PickledCallable dispatch is restricted to the same Python executable",
+                    context={"environment": project_environment_config(resolution.environment_selection.candidate)},
+                )
             if any(item.code == "dryml.dispatch.single_subprocess_world_unsupported" for item in resolution.diagnostics):
                 raise DispatchPlanningError("selected world requires multiple workers; use plan_world() or run_world()")
             allocation_failure = next((item for item in resolution.diagnostics if item.code in {"dryml.dispatch.local_allocation_failed", "dryml.dispatch.local_allocation_requirement_failed"}), None)
@@ -220,12 +229,15 @@ class Dispatcher:
                 )
             raise DispatchPlanningError(
                 "dispatch plan is not launchable; call dispatch.explain(...) for requirement diagnostics",
-                context={"planning": resolution.to_data()},
+                context={"planning": resolution.metadata()},
             )
         env_data = dict(resolution.environment_selection.candidate)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
             _cleanup_launch(launch)
-            raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
+            raise DispatchPlanningError(
+                "PickledCallable dispatch is restricted to the same Python executable",
+                context={"environment": project_environment_config(env_data)},
+            )
         runtime_data = dict(resolution.runtime_selection.candidate)
         world_data = dict(resolution.world_selection.candidate)
         try:
@@ -233,27 +245,38 @@ class Dispatcher:
 
             selected_inventory = effective_inventory or resolution.local_inventory
             allocation_world = _subprocess_allocation_world(world_data)
-            requested_world_spec = worlds.attach_world_id(worlds.make_world_spec(worlds.WorldSpec.from_data(world_data)))
+            launch_world_spec = worlds.attach_world_id(worlds.make_world_spec(worlds.WorldSpec.from_data(world_data)))
+            provenance_world_spec = project_world_spec(launch_world_spec)
             allocation_plan = allocate_local_world(
                 allocation_world,
                 inventory=selected_inventory,
                 allocation_backend_kind="local_subprocess",
-                requested_world_id=requested_world_spec["id"],
+                requested_world_id=provenance_world_spec["id"],
             )
             _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
+            launch_allocation_spec = allocation_plan.world_allocation_spec
+            provenance_allocation_spec = project_world_allocation_spec(
+                launch_allocation_spec,
+                world_id=provenance_world_spec["id"],
+            )
             key = allocation_plan.worker_keys[0]
-            allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_plan.world_allocation_spec["id"])
-            allocation_data = _allocation_to_json(allocation, world_id=requested_world_spec.get("id"))
+            allocation = allocation_plan.world_allocation.runtime_view(
+                key.role,
+                key.replica,
+                world_allocation_id=provenance_allocation_spec["id"],
+            )
+            allocation_data = _allocation_to_json(allocation, world_id=provenance_world_spec.get("id"))
             allocation_data["metadata"] = {
                 **allocation_data["metadata"],
                 "backend": "local_subprocess",
                 # The canonical world spec is persisted separately. Do not copy
                 # process.env values into execution metadata.
-                "requested_world_id": requested_world_spec["id"],
+                "requested_world_id": provenance_world_spec["id"],
                 "requested_world_backend": world_data.get("backend", {}).get("kind"),
             }
             resolution = replace(
                 resolution,
+                canonical_world_spec=launch_world_spec,
                 world_allocation_summary={
                     "backend": "local_subprocess",
                     "allocation_policy": "disjoint_local",
@@ -271,16 +294,17 @@ class Dispatcher:
             raise
         _report("dryml.dispatch.store.prepare", "Preparing shared DirStore marshalling", operation_id=op_spec.get("id"), data={"strategy": marshal.strategy})
         try:
+            planning_metadata = resolution.metadata()
             dispatch = attach_dispatch_id(
                 make_dispatch_spec(
                     operation_id=op_spec["id"],
                     operation=op_spec,
-                    environment={"policy": resolution.environment_selection.source, "spec": env_data},
-                    world={"policy": resolution.world_selection.source, "spec": world_data},
-                    runtime={"policy": "worker", "spec": runtime_data},
+                    environment={"policy": resolution.environment_selection.source, "spec": project_environment_config(env_data)},
+                    world={"policy": resolution.world_selection.source, "spec": provenance_world_spec["payload"]},
+                    runtime={"policy": "worker", "spec": project_runtime_config(runtime_data)},
                     records={"record_policy": record_policy, "provenance": record_policy != "none"},
                     execution={"backend": "local_subprocess"},
-                    metadata=resolution.metadata(),
+                    metadata=planning_metadata,
                 )
             )
             _report("dryml.dispatch.recipe.build", "Building execution recipe", operation_id=op_spec.get("id"), data={"dispatch_id": dispatch["id"]})
@@ -294,7 +318,7 @@ class Dispatcher:
                     store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
                     log_plan={"stdout": "capture", "stderr": "capture"},
                     constraints={"portable": launch.get("call_transport") != "pickle_small"},
-                    annotation_report=resolution.metadata(),
+                    annotation_report=planning_metadata,
                 )
             )
             envelope = ExecutionEnvelope(
@@ -307,8 +331,17 @@ class Dispatcher:
                 store_refs=marshal.store_refs,
                 transfer={"strategy": marshal.strategy},
                 record_policy=record_policy,
-                reporting={"planning": resolution.metadata()},
-                launch={**launch, "world_id": requested_world_spec["id"], "world_allocation_id": allocation_plan.world_allocation_spec["id"], "world_spec": requested_world_spec, "world_allocation_spec": allocation_plan.world_allocation_spec, "parent_persisted_specs": record_policy != "none"},
+                reporting={"planning": planning_metadata},
+                launch={
+                    **launch,
+                    "world_id": provenance_world_spec["id"],
+                    "world_allocation_id": provenance_allocation_spec["id"],
+                    "world_spec": launch_world_spec,
+                    "world_allocation_spec": launch_allocation_spec,
+                    "provenance_world_spec": provenance_world_spec,
+                    "provenance_world_allocation_spec": provenance_allocation_spec,
+                    "parent_persisted_specs": record_policy != "none",
+                },
             )
         except BaseException:
             _cleanup_launch(launch)
@@ -318,8 +351,8 @@ class Dispatcher:
                 target_store.records.write_spec(op_spec, family="operation")
                 target_store.records.write_spec(dispatch, family="dispatch")
                 target_store.records.write_spec(recipe, family="execution_recipe")
-                target_store.records.write_spec(requested_world_spec, family="world")
-                target_store.records.write_spec(allocation_plan.world_allocation_spec, family="world_allocation")
+                target_store.records.write_spec(provenance_world_spec, family="world")
+                target_store.records.write_spec(provenance_allocation_spec, family="world_allocation")
             except BaseException:
                 _cleanup_launch(launch)
                 raise
@@ -473,12 +506,21 @@ class Dispatcher:
                     context={"dynamic_trace": resolution.dynamic_trace.to_data()},
                 )
             if any(item.code == "dryml.dispatch.pickle_environment_restriction" for item in resolution.diagnostics):
-                raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": resolution.environment_selection.candidate})
-            raise DispatchPlanningError("dispatch world plan is not launchable; call dispatch.explain(...) for requirement diagnostics", context={"planning": resolution.to_data()})
+                raise DispatchPlanningError(
+                    "PickledCallable dispatch is restricted to the same Python executable",
+                    context={"environment": project_environment_config(resolution.environment_selection.candidate)},
+                )
+            raise DispatchPlanningError(
+                "dispatch world plan is not launchable; call dispatch.explain(...) for requirement diagnostics",
+                context={"planning": resolution.metadata()},
+            )
         env_data = dict(resolution.environment_selection.candidate)
         if launch.get("call_transport") == "pickle_small" and not _same_python_environment(env_data):
             _cleanup_launch(launch)
-            raise DispatchPlanningError("PickledCallable dispatch is restricted to the same Python executable", context={"environment": env_data})
+            raise DispatchPlanningError(
+                "PickledCallable dispatch is restricted to the same Python executable",
+                context={"environment": project_environment_config(env_data)},
+            )
         runtime_data = dict(resolution.runtime_selection.candidate)
         try:
             selected_inventory = effective_inventory or resolution.local_inventory
@@ -501,8 +543,13 @@ class Dispatcher:
         except BaseException:
             _cleanup_launch(launch)
             raise
-        world_spec = allocation_plan.world_spec
-        allocation_spec = allocation_plan.world_allocation_spec
+        launch_world_spec = allocation_plan.world_spec
+        launch_allocation_spec = allocation_plan.world_allocation_spec
+        world_spec = project_world_spec(launch_world_spec)
+        allocation_spec = project_world_allocation_spec(
+            launch_allocation_spec,
+            world_id=world_spec["id"],
+        )
         allocation_workers = []
         for key in allocation_plan.worker_keys:
             allocation = allocation_plan.world_allocation.runtime_view(
@@ -519,6 +566,7 @@ class Dispatcher:
             })
         resolution = replace(
             resolution,
+            canonical_world_spec=launch_world_spec,
                 world_allocation_summary={
                     "backend": "local_world",
                     "allocation_policy": "oversubscribed_local" if oversubscribe else "disjoint_local",
@@ -532,16 +580,17 @@ class Dispatcher:
             _cleanup_launch(launch)
             raise
         try:
+            planning_metadata = resolution.metadata()
             dispatch = attach_dispatch_id(
                 make_dispatch_spec(
                 operation_id=op_spec["id"],
                 operation=op_spec,
-                environment={"policy": resolution.environment_selection.source, "spec": env_data},
+                environment={"policy": resolution.environment_selection.source, "spec": project_environment_config(env_data)},
                 world={"policy": resolution.world_selection.source, "spec": world_spec},
-                runtime={"policy": "worker", "spec": runtime_data},
+                runtime={"policy": "worker", "spec": project_runtime_config(runtime_data)},
                 records={"record_policy": record_policy, "provenance": record_policy != "none"},
                 execution={"backend": "local_world"},
-                metadata=resolution.metadata(),
+                metadata=planning_metadata,
                 )
             )
             recipe = attach_recipe_id(
@@ -554,7 +603,7 @@ class Dispatcher:
                 store_plan={"strategy": marshal.strategy, "roles": [ref.role for ref in marshal.store_refs]},
                 log_plan={"stdout": "capture_per_worker", "stderr": "capture_per_worker"},
                 constraints={"portable": launch.get("call_transport") != "pickle_small", "local_only": True},
-                annotation_report=resolution.metadata(),
+                annotation_report=planning_metadata,
                 )
             )
         except BaseException:
@@ -565,7 +614,15 @@ class Dispatcher:
             for key in allocation_plan.worker_keys:
                 allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"])
                 launch_data = dict(launch)
-                launch_data.update({"world_id": world_spec.get("id"), "world_allocation_id": allocation_spec.get("id"), "world_spec": world_spec, "world_allocation_spec": allocation_spec, "parent_persisted_specs": record_policy != "none"})
+                launch_data.update({
+                    "world_id": world_spec.get("id"),
+                    "world_allocation_id": allocation_spec.get("id"),
+                    "world_spec": launch_world_spec,
+                    "world_allocation_spec": launch_allocation_spec,
+                    "provenance_world_spec": world_spec,
+                    "provenance_world_allocation_spec": allocation_spec,
+                    "parent_persisted_specs": record_policy != "none",
+                })
                 envelope = ExecutionEnvelope(
                     dispatch_spec=dispatch,
                     execution_recipe=recipe,
@@ -576,7 +633,7 @@ class Dispatcher:
                     store_refs=marshal.store_refs,
                     transfer={"strategy": marshal.strategy},
                     record_policy=record_policy,
-                    reporting={"planning": resolution.metadata()},
+                    reporting={"planning": planning_metadata},
                     launch=launch_data,
                 )
                 worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))

@@ -588,15 +588,19 @@ def _identity(spec: EnvironmentSpec) -> str:
 
 
 def _spec_summary(spec: EnvironmentSpec) -> dict[str, Any]:
-    """Return redacted candidate metadata with a safe canonical identifier."""
+    """Return redacted candidate metadata without launch-only locators."""
 
     data = spec.to_data()
-    data.pop("env", None)
-    # The content ID preserves distinct candidate identities without exposing
-    # environment override names or values in a public resolver trace.
-    data["id"] = spec.id
-    if "extra_pythonpath" in data:
-        data["extra_pythonpath"] = list(data["extra_pythonpath"][:16])
+    redacted = []
+    for key in ("executable", "prefix", "name", "conda_executable", "extra_pythonpath", "image", "runtime", "env"):
+        if key in data and data[key] not in (None, {}, [], ()):
+            data[key] = {"__dryml_redacted__": "launch_only"}
+            redacted.append(key)
+    data["persistence_projection"] = {
+        "schema": "dryml.dispatch.persistence_projection.v1",
+        "redacted": bool(redacted),
+        "redacted_fields": redacted,
+    }
     return _bounded_data(data)
 
 

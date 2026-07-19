@@ -298,22 +298,26 @@ def invoke_managed(
             checkpoint = context.checkpoint_head
             failure = persistence_safe_execution_error(exc)
             diagnostic = f"{failure['type']}: {failure['metadata']['code']}"
-            lease.fail(
-                decision.realization.realization_id,
-                checkpoint_head=checkpoint,
-                diagnostic=diagnostic,
-                resumable=checkpoint is not None,
-            )
+            state = operation._read_realization(decision.realization.realization_id)
+            if state.status != "completed":
+                lease.fail(
+                    decision.realization.realization_id,
+                    checkpoint_head=checkpoint,
+                    diagnostic=diagnostic,
+                    resumable=checkpoint is not None,
+                )
             context.publish_terminal("failed")
             raise
         except BaseException:
             checkpoint = context.checkpoint_head
-            lease.interrupt(
-                decision.realization.realization_id,
-                checkpoint_head=checkpoint,
-                diagnostic="operation interrupted by process control",
-                resumable=checkpoint is not None,
-            )
+            state = operation._read_realization(decision.realization.realization_id)
+            if state.status != "completed":
+                lease.interrupt(
+                    decision.realization.realization_id,
+                    checkpoint_head=checkpoint,
+                    diagnostic="operation interrupted by process control",
+                    resumable=checkpoint is not None,
+                )
             _publish_terminal_best_effort(context, "interrupted")
             raise
         finally:

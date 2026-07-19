@@ -15,6 +15,7 @@ from dryml.formats import CanonicalJSONError, deep_freeze_json, json_ready
 
 from .errors import RecordValidationError, SpecValidationError
 from .products import ProductManifest, ProductWriteSession, require_product_integrity
+from .records import attach_record_id
 from .refs import LocatedRecordRef
 from .representations import RepresentationRequirement, RepresentationSpec, make_representation_spec, representation_satisfies
 from .resolution import LocatedTypedRecord, RecordResolutionIssue, RepresentationCandidate
@@ -335,20 +336,22 @@ def run_adapter_plan(plan: AdapterPlan, *, repo: Any, store: Any, registry: Adap
                 manifest = session.manifest()
                 target_repr = _ensure_target_representation(store, step.target)
                 target_record = _build_target_record(current_record.record, current_record.ref.record_id, target_repr.id, manifest, runner_output or {})
+                target_envelope = attach_record_id(target_record.to_envelope())
+                target_record_id = target_envelope["id"]
+                adapter_record = AdapterRecord(
+                    adapter=_adapter_payload(step.descriptor),
+                    operation_id=(step.descriptor.operation or {}).get("operation_id") if step.descriptor.operation else None,
+                    source_record_id=current_record.ref.record_id,
+                    source_representation_id=current_repr.id,
+                    target_record_id=target_record_id,
+                    target_representation_id=target_repr.id,
+                    produced_records=(target_record_id,),
+                    derived_from=(current_record.ref.record_id,),
+                )
+                reporting.step("dryml.records.adapter.record", "Writing adapter lineage record", data={"source_record_id": current_record.ref.record_id, "target_record_id": target_record_id})
+                adapter_ref = store.records.write_record(adapter_record.to_envelope())
                 reporting.step("dryml.records.product.write", "Writing product record", data={"representation_id": target_repr.id})
-                target_result = session.commit_record(target_record.to_envelope())
-            adapter_record = AdapterRecord(
-                adapter=_adapter_payload(step.descriptor),
-                operation_id=(step.descriptor.operation or {}).get("operation_id") if step.descriptor.operation else None,
-                source_record_id=current_record.ref.record_id,
-                source_representation_id=current_repr.id,
-                target_record_id=target_result.located.record_id,
-                target_representation_id=target_repr.id,
-                produced_records=(target_result.located.record_id,),
-                derived_from=(current_record.ref.record_id,),
-            )
-            reporting.step("dryml.records.adapter.record", "Writing adapter lineage record", data={"source_record_id": current_record.ref.record_id, "target_record_id": target_result.located.record_id})
-            adapter_ref = store.records.write_record(adapter_record.to_envelope())
+                target_result = session.commit_record(target_envelope)
             targets.append(target_result.located)
             adapters.append(adapter_ref)
             current_record = LocatedTypedRecord(target_result.located, target_record)

@@ -11,9 +11,10 @@ from dryml.formats.refs import parse_cdef_id
 from dryml import reporting
 
 from .errors import RecordValidationError, SpecNotFoundError
+from .products import require_product_integrity
 from .refs import LocatedRecordRef
 from .representations import RepresentationRequirement, RepresentationSpec, representation_satisfies
-from .typed import DataRecord, StoredStateRecord, TypedRecord
+from .typed import AdapterRecord, DataRecord, StoredStateRecord, TypedRecord
 
 
 ResolutionStatus = Literal["ok", "requires_adapter", "not_found", "ambiguous", "unsupported", "failed"]
@@ -312,7 +313,8 @@ def _state_candidates(repo: Any, cdef_id: str, *, issues: list[RecordResolutionI
     candidates: list[RepresentationCandidate] = []
     for store_index, store in enumerate(_stores(repo)):
         for ref in store.records.find_records(kind="stored_state", subject_cdef_id=cdef_id):
-            located = LocatedTypedRecord(ref, StoredStateRecord.from_envelope(store.records.read_record(ref.record_id)))
+            envelope = store.records.read_record(ref.record_id)
+            located = LocatedTypedRecord(ref, StoredStateRecord.from_envelope(envelope))
             try:
                 spec = _read_representation(repo, located.record.representation_id)
             except SpecNotFoundError:
@@ -320,6 +322,17 @@ def _state_candidates(repo: Any, cdef_id: str, *, issues: list[RecordResolutionI
                     issues.append(RecordResolutionIssue(
                         "missing_representation_spec",
                         "stored_state record references a missing representation spec",
+                        record_id=ref.record_id,
+                        representation_id=located.record.representation_id,
+                    ))
+                continue
+            try:
+                require_product_integrity(store.records, envelope)
+            except Exception as exc:
+                if issues is not None:
+                    issues.append(RecordResolutionIssue(
+                        "product_integrity_failed",
+                        str(exc),
                         record_id=ref.record_id,
                         representation_id=located.record.representation_id,
                     ))
@@ -334,7 +347,11 @@ def _state_candidates(repo: Any, cdef_id: str, *, issues: list[RecordResolutionI
                         record_id=ref.record_id,
                         representation_id=located.record.representation_id,
                     ))
-    return tuple(candidates)
+    return _lineage_valid_candidates(
+        repo,
+        tuple(candidates),
+        issues if issues is not None else [],
+    )
 
 
 def _managed_data_candidates(
@@ -353,7 +370,8 @@ def _managed_data_candidates(
             output_slot=source_record.output_slot,
         )
         for ref in refs:
-            record = DataRecord.from_envelope(store.records.read_record(ref.record_id))
+            envelope = store.records.read_record(ref.record_id)
+            record = DataRecord.from_envelope(envelope)
             located = LocatedTypedRecord(ref, record)
             try:
                 spec = RepresentationSpec(
@@ -369,10 +387,105 @@ def _managed_data_candidates(
                     )
                 )
                 continue
+            try:
+                require_product_integrity(store.records, envelope)
+            except Exception as exc:
+                issues.append(
+                    RecordResolutionIssue(
+                        "product_integrity_failed",
+                        str(exc),
+                        record_id=ref.record_id,
+                        representation_id=record.representation_id,
+                    )
+                )
+                continue
             candidates.append(RepresentationCandidate(located, spec, store_index))
     if not any(item.located.ref == source.ref for item in candidates):
         raise RecordValidationError("active managed data source is not present in the selected Store")
-    return tuple(candidates)
+    source_roots = {
+        (candidate.store_index, candidate.located.ref.record_id)
+        for candidate in candidates
+        if candidate.located.ref == source.ref
+    }
+    return _lineage_valid_candidates(
+        repo,
+        tuple(candidates),
+        issues,
+        roots=source_roots,
+    )
+
+
+def _lineage_valid_candidates(
+    repo: Any,
+    candidates: tuple[RepresentationCandidate, ...],
+    issues: list[RecordResolutionIssue],
+    *,
+    roots: set[tuple[int, str]] | None = None,
+) -> tuple[RepresentationCandidate, ...]:
+    """Keep only roots and representations reachable through exact adapter lineage."""
+
+    by_key = {
+        (candidate.store_index, candidate.located.ref.record_id): candidate
+        for candidate in candidates
+    }
+    accepted = set(roots) if roots is not None else {
+        key for key, candidate in by_key.items() if not candidate.located.record.derived_from
+    }
+    adapters_by_target: dict[tuple[int, str], list[AdapterRecord]] = {
+        key: [] for key in by_key if key not in accepted
+    }
+    stores = _stores(repo)
+    for (store_index, target_id), adapters in adapters_by_target.items():
+        store = stores[store_index]
+        for ref in store.records.find_records(kind=AdapterRecord.kind, target_record_id=target_id):
+            try:
+                adapter = AdapterRecord.from_envelope(
+                    store.records.read_record(ref.record_id)
+                )
+            except Exception as exc:
+                issues.append(RecordResolutionIssue(
+                    "invalid_adapter_lineage",
+                    str(exc),
+                    record_id=target_id,
+                ))
+                continue
+            adapters.append(adapter)
+
+    remaining = set(adapters_by_target)
+    while remaining:
+        newly_reachable = set()
+        for target_key in remaining:
+            target = by_key[target_key]
+            for adapter in adapters_by_target[target_key]:
+                source_key = (target_key[0], adapter.source_record_id)
+                source = by_key.get(source_key)
+                if source_key not in accepted or source is None:
+                    continue
+                if adapter.status != "ok":
+                    continue
+                if adapter.source_record_id not in target.located.record.derived_from:
+                    continue
+                if (
+                    adapter.source_representation_id != source.representation.id
+                    or adapter.target_representation_id != target.representation.id
+                ):
+                    continue
+                newly_reachable.add(target_key)
+                break
+        if not newly_reachable:
+            break
+        accepted.update(newly_reachable)
+        remaining.difference_update(newly_reachable)
+
+    for store_index, record_id in sorted(remaining):
+        candidate = by_key[(store_index, record_id)]
+        issues.append(RecordResolutionIssue(
+            "missing_adapter_lineage",
+            "derived representation has no exact adapter lineage from an accepted source",
+            record_id=record_id,
+            representation_id=candidate.representation.id,
+        ))
+    return tuple(candidate for key, candidate in by_key.items() if key in accepted)
 
 
 def _read_representation(repo: Any, representation_id: str) -> dict[str, Any]:

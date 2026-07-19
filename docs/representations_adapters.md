@@ -98,9 +98,9 @@ registry.register(
 )
 ```
 
-`run_adapter_plan(...)` resolves source storage, gives the runner a `ProductWriteSession`, writes target products under `products/<target-record-id>/`, writes the target state/data/program record with a self product-dir ref, writes an `AdapterRecord`, and returns located refs.
+`run_adapter_plan(...)` resolves source storage, gives the runner a `ProductWriteSession`, derives the target and lineage identities, writes the `AdapterRecord` first, then publishes target products under `products/<target-record-id>/` and the target state/data/program record with a self product-dir ref. Resolution accepts a derived representation only when its products verify and exact successful adapter lineage reaches it from an accepted source. A retry can therefore complete a lineage-first interrupted conversion, while byte-identical concurrent publication adopts the same content-addressed target and lineage.
 
-Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records; durable failure provenance is not implemented.
+Failed local adapter attempts are returned as structured `AdapterExecutionResult` failures. They are not persisted as failed records; durable failure provenance is not implemented. Temporary staging is cleaned, while a complete content-addressed product root whose sidecar write failed is retained for an identical retry or explicit cleanup rather than deleted across a concurrent publisher.
 An exception raised inside a one-context runner is reported directly and is not
 retried through the legacy keyword-call shape.
 

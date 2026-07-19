@@ -37,6 +37,10 @@ class ManagedStateError(ManagedError, ValueError):
     """Managed control state is malformed, incompatible, or inconsistent."""
 
 
+class ManagedActivationIndeterminateError(ManagedError, RuntimeError):
+    """Activation may have committed and requires explicit reconciliation."""
+
+
 class ManagedStoreUnsupportedError(ManagedError, NotImplementedError):
     """A Store lacks a capability required by managed operation control."""
 
@@ -106,6 +110,7 @@ __all__ = [
     "ManagedDeclarationError",
     "ManagedError",
     "ManagedLifecycleUnavailableError",
+    "ManagedActivationIndeterminateError",
     "ManagedInputValidationRequiredError",
     "ManagedLeaseConflictError",
     "ManagedCapabilityError",

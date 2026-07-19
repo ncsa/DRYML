@@ -349,7 +349,8 @@ dispatch, and execution-recipe specs through `operation_id`, `dispatch_id`, and
 `recipe_id`. The record's bounded `backend` identity and `worker_key` identify
 the backend and local-world role/replica/rank assignment. Planning details are
 not duplicated into the record: the dispatch and recipe references lead to
-planning metadata version 3, including explicit no-probe/no-trace outcomes,
+planning metadata version 4, including explicit no-probe/no-trace outcomes and
+launch-only configuration redaction markers,
 bounded analysis identity/count summaries, requirements and source traces,
 candidate and compatibility reports, and effective enforcement policy/outcome.
 The underlying operation, dispatch, recipe, envelope, and record schemas remain
