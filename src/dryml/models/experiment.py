@@ -106,9 +106,12 @@ class Experiment(Serializable):
             None,
         )
         if pipeline_capability is not None:
+            pipeline_configuration = dict(self.capabilities)
+            if self.metrics and pipeline_configuration.get("metrics") is None:
+                pipeline_configuration["metrics"] = self.metrics
             capability = pipeline_capability(
                 self.train_fn_definition,
-                self.capabilities,
+                pipeline_configuration,
             )
         exact = capability.mode is TrainResumeMode.EXACT
         return OperationPreflight(

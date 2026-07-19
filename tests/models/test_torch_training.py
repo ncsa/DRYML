@@ -42,6 +42,51 @@ def test_torch_basic_training_updates_experiment_state():
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
 
 
+def test_torch_model_and_optimizer_state_round_trip(tmp_path):
+    from dryml.models.torch import Model, Optimizer
+
+    model = Model(torch.nn.Linear, 1, 1)
+    optimizer = Optimizer(
+        torch.optim.SGD,
+        target=model,
+        lr=0.05,
+        momentum=0.8,
+    )
+    optimizer.obj.zero_grad()
+    model.obj(torch.ones((1, 1))).sum().backward()
+    optimizer.obj.step()
+    model_path = tmp_path / "model"
+    optimizer_path = tmp_path / "optimizer"
+    model_path.mkdir()
+    optimizer_path.mkdir()
+    model.save_state_to_dir(str(model_path))
+    optimizer.save_state_to_dir(str(optimizer_path))
+
+    restored_model = Model(torch.nn.Linear, 1, 1)
+    restored_optimizer = Optimizer(
+        torch.optim.SGD,
+        target=restored_model,
+        lr=0.05,
+        momentum=0.8,
+    )
+    restored_model.restore_state_from_dir(str(model_path))
+    restored_optimizer.restore_state_from_dir(str(optimizer_path))
+
+    for actual, expected in zip(
+        restored_model.obj.state_dict().values(),
+        model.obj.state_dict().values(),
+    ):
+        torch.testing.assert_close(actual, expected)
+    actual_state = tuple(restored_optimizer.obj.state.values())
+    expected_state = tuple(optimizer.obj.state.values())
+    assert len(actual_state) == len(expected_state) == 2
+    for actual, expected in zip(actual_state, expected_state):
+        torch.testing.assert_close(
+            actual["momentum_buffer"],
+            expected["momentum_buffer"],
+        )
+
+
 def test_torch_sequential_accepts_constructor_tuple_shorthand():
     from dryml.models.torch import Sequential
 

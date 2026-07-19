@@ -80,6 +80,25 @@ but interrupted managed work requires an explicit rerun. Managed graceful stop
 is supported for an exact pipeline and completes the epoch prefix at the next
 safe boundary.
 
+PyTorch `Training` provides the same exact managed guarantee at completed epoch
+boundaries for its built-in single-process, unshuffled loop. A checkpoint
+contains the complete DRYML model state, optimizer state, DRYML epoch/step
+progress, target epoch, trainer/model identity, Torch version, and Python,
+NumPy, Torch CPU, and applicable CUDA RNG state. Resume hydrates a fresh model,
+rebinds a fresh optimizer to that model, restores all checkpointed state, and
+continues against the originally pinned cache record. Managed graceful stop is
+supported at an epoch boundary. Shuffle, trainer metrics, explicit stateful loss
+objects, custom training loops, Experiment-supplied optimizer/loss/metric state,
+and multi-rank managed publication are not exact-capable. DRYML does not expose
+worker/prefetch stages in this loop; a custom loop adding them remains
+non-resumable until it declares and implements their complete state contract.
+
+sklearn `BasicTraining` treats the estimator's blocking `fit()` call as opaque.
+It supports managed completion and completed-result reuse, but interruption has
+no checkpoint and a later normal call raises until the caller requests an
+explicit rerun. A future incremental trainer may advertise its own exact
+capability only when it can restore the estimator and every input cursor.
+
 ## Experiments
 
 `Experiment` is a logical recipe containing non-materializing model, trainer, train, validation, and test-data edges. Managed training requires completed `CachedDataset` inputs; it resolves their exact active records once and never computes their sources. Completed NumPy-sequence and Parquet records are iterated directly without implicit adaptation.

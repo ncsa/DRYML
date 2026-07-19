@@ -5,6 +5,7 @@ from __future__ import annotations
 import email.parser
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -35,7 +36,7 @@ EXTRAS = {
     "parquet": {("pyarrow", "", 'python_version < "3.14" and extra == "parquet"')},
     "tf": {("tensorflow", "", 'python_version < "3.14" and extra == "tf"')},
     "jax": {("jax", "<0.6,>=0.5", 'python_version < "3.14" and extra == "jax"'), ("jaxlib", "<0.6,>=0.5", 'python_version < "3.14" and extra == "jax"')},
-    "torch": {("torch", ">=2.8.0", 'python_version < "3.14" and extra == "torch"')},
+    "torch": {("torch", ">=2.7.0", 'python_version < "3.14" and extra == "torch"')},
     "sklearn": {("scikit-learn", "", 'python_version < "3.14" and extra == "sklearn"')},
     "xgboost": {("scikit-learn", "", 'python_version < "3.14" and extra == "xgboost"'), ("xgboost", "", 'python_version < "3.14" and extra == "xgboost"')},
     "ray": {("ray", "", 'python_version < "3.14" and extra == "ray"')},
@@ -202,6 +203,65 @@ def test_manifest_uses_exact_example_allowlist():
 def test_generated_tutorial_payloads_are_forbidden(path):
     with pytest.raises(AssertionError):
         _assert_no_forbidden_payload((path,))
+
+
+def test_torch_dependency_floor_matches_package_and_ci_configuration():
+    repository = Path(__file__).resolve().parents[2]
+    setup = (repository / "setup.cfg").read_text(encoding="utf-8")
+    workflow = (repository / ".github/workflows/tests.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "torch>=2.7.0" in setup
+    assert "torch>=2.8.0" not in setup
+    assert workflow.count('"torch>=2.7.0"') == 2
+    assert "torch>=2.8.0" not in workflow
+    assert EXTRAS["torch"] == {
+        ("torch", ">=2.7.0", 'python_version < "3.14" and extra == "torch"')
+    }
+
+
+def test_worktree_wheel_metadata_emits_torch_2_7_floor(tmp_path):
+    repository = Path(__file__).resolve().parents[2]
+    source = tmp_path / "source"
+    source.mkdir()
+    for relative in _tracked_files(repository):
+        origin = repository / relative
+        if not origin.is_file():
+            continue
+        destination = source / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(origin, destination)
+    guard = _network_guard(tmp_path)
+    dist = tmp_path / "dist"
+    dist.mkdir()
+
+    _run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--no-isolation",
+            "--wheel",
+            "--outdir",
+            str(dist),
+            str(source),
+        ],
+        cwd=tmp_path,
+        environment=_offline_environment(guard),
+    )
+
+    metadata = _metadata_from_wheel(next(dist.glob("*.whl")))
+    torch_requirements = {
+        (
+            requirement.name,
+            str(requirement.specifier),
+            str(requirement.marker or ""),
+        )
+        for requirement in map(Requirement, metadata.get_all("Requires-Dist"))
+        if 'extra == "torch"' in str(requirement.marker or "")
+    }
+    assert torch_requirements == EXTRAS["torch"]
 
 
 @pytest.fixture(scope="module")

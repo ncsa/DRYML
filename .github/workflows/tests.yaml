@@ -27,7 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r test_requirements.txt
           if python -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 14) else 1)'; then
-            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.8.0"
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.7.0"
           fi
 
       - name: Install DRYML
@@ -196,7 +196,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r test_requirements.txt
           if python -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 14) else 1)'; then
-            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.8.0"
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.7.0"
           fi
 
       - name: Install DRYML

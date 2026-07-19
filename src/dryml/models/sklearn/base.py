@@ -10,13 +10,15 @@ from dryml.core2.tensor_spec import (
 )
 from dryml.core2.utils.general import validate_class
 from dryml.data import collate_xy
+from dryml.managed import current_operation_context
 from dryml.models import Model as BaseModel
-from dryml.models import TrainFunction
+from dryml.models import TrainCapability, TrainFunction
 from dryml.models.utils import (
     advance_train_state,
     prepare_training_data,
     validate_num_examples,
 )
+
 
 class Wrapper(Pickleable):
     """Pickle-backed wrapper for sklearn-style Python objects."""
@@ -99,7 +101,17 @@ class RegressionModel(Model):
 
 
 class BasicTraining(TrainFunction):
-    """Fit an sklearn-style estimator from an Experiment's train_data."""
+    """Fit an sklearn-style estimator as an explicitly opaque operation.
+
+    Ordinary managed completion and reuse are supported, but one blocking
+    ``fit()`` call has no general exact checkpoint contract. Interruption keeps
+    the realization incomplete and requires an explicit rerun. Incremental
+    trainers may define a narrower exact capability in a separate subclass.
+    """
+
+    __dryml_train_capability__ = TrainCapability.none(
+        "opaque sklearn fit() has no exact checkpoint or continuation contract"
+    )
 
     def __init__(
         self,
@@ -144,6 +156,13 @@ class BasicTraining(TrainFunction):
             exp.model.prep_eval()
 
         advance_train_state(exp, epochs=1, steps=n)
+        try:
+            context = current_operation_context()
+        except RuntimeError:
+            context = None
+        if context is not None:
+            context.progress(1, total=1, message="sklearn fit completed")
+            context.safe_point()
         return result
 
 
