@@ -196,14 +196,16 @@ def test_local_search_notebook_teaches_bounded_deterministic_public_api_workflow
         ".grid()",
         ".sample(random.Random(FIXED_SEED))",
         ".support_selector()",
+        "CachedDataset",
         "Definition(ArrayDataset",
         "DirStore",
         "Repo",
-        "experiment.train()",
+        "experiment.train(store=store)",
+        "experiment.trained_model(store=store)",
         "mean_squared_error",
         "np.isfinite",
         "islice(space.grid(), cap + 1)",
-        "save_object",
+        "save_definition",
         "stable_cdef_key",
     }
     missing = {token for token in required_executable if token not in executable_source}
