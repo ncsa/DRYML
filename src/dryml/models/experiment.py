@@ -16,6 +16,7 @@ from dryml.managed import (
     ManagedMethod,
     ManagedOutputRef,
     OperationPreflight,
+    OperationResult,
     current_operation_context,
     managed,
     resolve_managed_store,
@@ -99,6 +100,16 @@ class Experiment(Serializable):
         if not issubclass(trainer_cls, TrainFunction):
             raise TypeError("Experiment train_fn must be a TrainFunction")
         capability = trainer_cls.resume_capability(self.train_fn_definition)
+        pipeline_capability = getattr(
+            trainer_cls,
+            "managed_pipeline_capability",
+            None,
+        )
+        if pipeline_capability is not None:
+            capability = pipeline_capability(
+                self.train_fn_definition,
+                self.capabilities,
+            )
         exact = capability.mode is TrainResumeMode.EXACT
         return OperationPreflight(
             resumable=exact,
@@ -254,7 +265,7 @@ class Experiment(Serializable):
                 runtime_exp, context.checkpoint_path
             )
         runtime_exp.state.phase = TrainState.training
-        trainer(runtime_exp)
+        training_result = trainer(runtime_exp)
         if runtime_exp.state.phase == TrainState.training:
             runtime_exp.state.phase = TrainState.trained
 
@@ -268,6 +279,7 @@ class Experiment(Serializable):
                     "TrainFunction declared optional outputs without publish_outputs()"
                 )
             publisher(runtime_exp, context, remaining)
+        return training_result if isinstance(training_result, OperationResult) else None
 
     def trained_model(self, repo=None, *, store=None):
         """Hydrate the active train primary output into a fresh model instance."""

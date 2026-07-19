@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
+import inspect
+import json
 import os
+import pickle
+import tempfile
+from pathlib import Path
 
 from dryml.core2.object import Serializable
 from dryml.core2.repo import get_default_repo
@@ -8,9 +14,17 @@ from dryml.core2.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, ma
 from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
 from dryml.core2.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
+from dryml.managed import (
+    ControlRequest,
+    ManagedCapabilityError,
+    OperationResult,
+    current_operation_context,
+)
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction
+from dryml.models import TrainCapability, TrainResumeMode
 from dryml.models.progress import TrainingProgress, metric_value
+from dryml.models.train_spec import TRAIN_CHECKPOINT_SCHEMA, TrainState
 from dryml.models.utils import advance_train_state, finite_dataset_len, prepare_training_data, validate_num_examples
 from dryml.tf.tensor_spec import as_tensor_spec as tf_as_tensor_spec
 from dryml.tf.tensor_spec import output_signature as tf_output_signature
@@ -20,6 +34,26 @@ def _tensorflow():
     from dryml.runtime import import_configured_framework
 
     return import_configured_framework("tensorflow")
+
+
+def _save_tf_checkpoint(tf, checkpoint, checkpoint_dir):
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    return checkpoint.write(os.path.join(checkpoint_dir, "ckpt"))
+
+
+def _latest_tf_checkpoint(tf, checkpoint_dir):
+    latest = tf.train.latest_checkpoint(checkpoint_dir)
+    if latest is not None:
+        return latest
+    prefix = os.path.join(checkpoint_dir, "ckpt")
+    return prefix if os.path.isfile(f"{prefix}.index") else None
+
+
+def _definition_arguments(cls, definition):
+    signature = inspect.signature(cls.__init__)
+    bound = signature.bind_partial(None, *definition.args, **dict(definition.kwargs))
+    bound.apply_defaults()
+    return {name: value for name, value in bound.arguments.items() if name != "self"}
 
 
 def _unwrap_backend_obj(obj):
@@ -154,14 +188,13 @@ class Wrapper(Serializable):
         except ValueError:
             return
 
-        manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=1)
-        manager.save()
+        _save_tf_checkpoint(tf, checkpoint, ckpt_dir)
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
         tf = _tensorflow()
 
         ckpt_dir = revision_path("object", "ckpt", src_dir, revision=revision)
-        latest = tf.train.latest_checkpoint(ckpt_dir)
+        latest = _latest_tf_checkpoint(tf, ckpt_dir)
         if latest is None:
             return
         self._pending_restore_path = latest
@@ -189,18 +222,17 @@ class Optimizer(Wrapper):
 
         ckpt_dir = revision_path("optimizer", "ckpt", dest_dir, revision=revision)
         os.makedirs(ckpt_dir, exist_ok=True)
-        manager = tf.train.CheckpointManager(
+        _save_tf_checkpoint(
+            tf,
             tf.train.Checkpoint(optimizer=self.obj),
             ckpt_dir,
-            max_to_keep=1,
         )
-        manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
         tf = _tensorflow()
 
         ckpt_dir = revision_path("optimizer", "ckpt", src_dir, revision=revision)
-        latest = tf.train.latest_checkpoint(ckpt_dir)
+        latest = _latest_tf_checkpoint(tf, ckpt_dir)
         if latest is None:
             return
         self._pending_restore_path = latest
@@ -306,18 +338,17 @@ class Model(BaseModel, Serializable):
 
         ckpt_dir = revision_path("model", "ckpt", dest_dir, revision=revision)
         os.makedirs(ckpt_dir, exist_ok=True)
-        manager = tf.train.CheckpointManager(
+        _save_tf_checkpoint(
+            tf,
             tf.train.Checkpoint(model=self.obj),
             ckpt_dir,
-            max_to_keep=1,
         )
-        manager.save()
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
         tf = _tensorflow()
 
         ckpt_dir = revision_path("model", "ckpt", src_dir, revision=revision)
-        latest = tf.train.latest_checkpoint(ckpt_dir)
+        latest = _latest_tf_checkpoint(tf, ckpt_dir)
         if latest is None:
             return
         self._pending_restore_path = latest
@@ -337,7 +368,68 @@ class TrainFunction(BaseTrainFunction):
 
 
 class BasicTraining(TrainFunction):
-    """Fit a Keras model from an Experiment's supervised train_data."""
+    """Fit a Keras model from an Experiment's supervised train data.
+
+    Managed execution is exactly resumable at completed epoch boundaries when
+    the input pipeline uses the built-in full-dataset iteration. TensorFlow
+    model variables, optimizer slots/iterations, and DRYML progress are stored
+    in one immutable managed checkpoint. Custom callbacks, shuffle, positional
+    fit arguments, and custom fit keyword arguments remain available in direct
+    mode but conservatively disable managed resume.
+    """
+
+    @classmethod
+    def resume_capability(cls, definition=None):
+        """Report exact epoch-boundary capability for a compatible definition."""
+
+        if definition is None:
+            return TrainCapability.none("TensorFlow trainer definition is required")
+        if (
+            cls.__call__ is not BasicTraining.__call__
+            or cls._callbacks is not BasicTraining._callbacks
+        ):
+            return TrainCapability.none(
+                "custom TensorFlow training loops or callbacks have no exact checkpoint contract"
+            )
+        if importlib.util.find_spec("tensorflow") is None:
+            return TrainCapability.none("TensorFlow is unavailable in the selected environment")
+        config = _definition_arguments(cls, definition)
+        unsupported = []
+        if config["shuffle"]:
+            unsupported.append("shuffle cursor/RNG")
+        if config["callbacks"]:
+            unsupported.append("trainer-defined callback state")
+        if config["fit_args"]:
+            unsupported.append("positional Keras fit configuration")
+        if config["fit_kwargs"]:
+            unsupported.append("custom Keras fit pipeline state")
+        if unsupported:
+            return TrainCapability.none(
+                "TensorFlow epoch-boundary resume cannot checkpoint "
+                + ", ".join(unsupported)
+            )
+        return TrainCapability.exact(
+            "TensorFlow model, optimizer, progress, and full-epoch input boundary are checkpointed",
+            early_completion=True,
+        )
+
+    @classmethod
+    def managed_pipeline_capability(cls, definition, capabilities):
+        """Narrow resume when the complete Experiment has no optimizer."""
+
+        capability = cls.resume_capability(definition)
+        if capability.mode is not TrainResumeMode.EXACT:
+            return capability
+        config = _definition_arguments(cls, definition)
+        compile_kwargs = dict(config["compile_kwargs"] or {})
+        optimizer = config["optimizer"]
+        if optimizer is None:
+            optimizer = compile_kwargs.get("optimizer", capabilities.get("optimizer"))
+        if optimizer is None:
+            return TrainCapability.none(
+                "managed TensorFlow training has no configured optimizer to checkpoint"
+            )
+        return capability
 
     def __init__(
         self,
@@ -390,6 +482,11 @@ class BasicTraining(TrainFunction):
     def __call__(self, exp):
         tf = _tensorflow()
 
+        try:
+            context = current_operation_context()
+        except RuntimeError:
+            context = None
+
         train_data = self._prepare_data(exp.train_data, for_training=True)
         train_xy = self._xy_data(train_data)
 
@@ -410,6 +507,12 @@ class BasicTraining(TrainFunction):
         exp.model.prep_train()
         if hasattr(exp.model, "restore_pending"):
             exp.model.restore_pending()
+        backend_model = _unwrap_backend_obj(training_model)
+        optimizer = getattr(backend_model, "optimizer", None)
+        if context is not None and optimizer is None:
+            raise ManagedCapabilityError(
+                "managed TensorFlow training requires a compiled optimizer"
+            )
         fit_kwargs = dict(self.fit_kwargs)
         fit_kwargs.setdefault("verbose", self.verbose)
         # DRYML shuffles before converting to tf.data.Dataset; Keras ignores
@@ -438,21 +541,72 @@ class BasicTraining(TrainFunction):
             if fit_kwargs.get("validation_steps") is not None:
                 ds_val = ds_val.repeat()
 
+        initial_epoch = exp.state.epoch
+        resume = exp.resume_payload if context is not None else None
+        target_epoch = (
+            resume["descriptor"]["target_epoch"]
+            if resume is not None
+            else initial_epoch + self.epochs
+        )
+        restore_status = None
+        if resume is not None:
+            restore_status = self._restore_backend_checkpoint(
+                tf,
+                backend_model,
+                optimizer,
+                resume,
+            )
+
+        steps_per_epoch = fit_kwargs.get("steps_per_epoch")
+        early_completed = {"value": False}
+
+        def checkpoint():
+            return self._checkpoint_training(
+                tf,
+                exp,
+                backend_model,
+                optimizer,
+                target_epoch=target_epoch,
+            )
+
+        callbacks.append(
+            self._progress_callback(
+                tf,
+                exp,
+                context=context,
+                target_epoch=target_epoch,
+                steps_per_epoch=steps_per_epoch,
+                checkpoint=checkpoint,
+                early_completed=early_completed,
+            )
+        )
+
         try:
             history = training_model.fit(
                 ds_train,
                 *self.fit_args,
                 validation_data=ds_val,
-                initial_epoch=exp.state.epoch,
-                epochs=exp.state.epoch + self.epochs,
+                initial_epoch=initial_epoch,
+                epochs=target_epoch,
                 callbacks=callbacks or None,
                 **fit_kwargs,
             )
         finally:
             exp.model.prep_eval()
 
-        steps_per_epoch = fit_kwargs.get("steps_per_epoch")
-        advance_train_state(exp, epochs=self.epochs, steps=(int(steps_per_epoch) if steps_per_epoch is not None else 0) * self.epochs)
+        if context is not None and exp.state.epoch == initial_epoch:
+            context.progress(
+                initial_epoch,
+                total=target_epoch,
+                message="TensorFlow training epochs",
+            )
+            control = self._managed_safe_point(context, checkpoint)
+            if control is ControlRequest.GRACEFUL_STOP:
+                early_completed["value"] = True
+        if restore_status is not None:
+            restore_status.assert_existing_objects_matched()
+        if context is not None:
+            return OperationResult(early_completed=early_completed["value"])
         return history
 
     def _capability(self, exp, name, default=None):
@@ -487,6 +641,9 @@ class BasicTraining(TrainFunction):
 
     def _training_model(self, tf, model, x_spec):
         if hasattr(model, "compile") and hasattr(model, "fit"):
+            backend_model = _unwrap_backend_obj(model)
+            if not getattr(backend_model, "built", False):
+                model(_keras_inputs_from_spec(tf, x_spec))
             return model
 
         inputs = _keras_inputs_from_spec(tf, x_spec)
@@ -517,9 +674,173 @@ class BasicTraining(TrainFunction):
     def _callbacks(self, tf):
         return [callback.obj if hasattr(callback, "obj") else callback for callback in self.callbacks]
 
+    def restore_checkpoint(self, exp, checkpoint_root):
+        """Validate a TensorFlow checkpoint and restore its DRYML progress."""
+
+        tf = _tensorflow()
+        root = Path(checkpoint_root)
+        try:
+            descriptor = json.loads(
+                (root / "tensorflow-train.json").read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            raise RuntimeError("TensorFlow training checkpoint descriptor is unreadable") from exc
+        required = {
+            "schema",
+            "schema_version",
+            "model_cdef_id",
+            "trainer_cdef_id",
+            "tensorflow_version",
+            "checkpoint_prefix",
+            "completed_epoch",
+            "completed_step",
+            "target_epoch",
+        }
+        if not isinstance(descriptor, dict) or set(descriptor) != required:
+            raise RuntimeError("TensorFlow training checkpoint descriptor is malformed")
+        expected = {
+            "schema": TRAIN_CHECKPOINT_SCHEMA,
+            "schema_version": 1,
+            "model_cdef_id": exp.model.definition.stable_hash(),
+            "trainer_cdef_id": self.definition.stable_hash(),
+            "tensorflow_version": tf.__version__,
+            "checkpoint_prefix": "tensorflow/ckpt",
+        }
+        for name, value in expected.items():
+            if descriptor.get(name) != value:
+                if name == "tensorflow_version":
+                    raise ManagedCapabilityError(
+                        "TensorFlow checkpoint version does not match the active environment"
+                    )
+                raise ManagedCapabilityError(
+                    "TensorFlow training checkpoint is incompatible with the selected pipeline"
+                )
+        try:
+            state = pickle.loads((root / "train-state.pkl").read_bytes())
+        except Exception as exc:
+            raise RuntimeError("TensorFlow training progress checkpoint is unreadable") from exc
+        if not isinstance(state, TrainState):
+            raise RuntimeError("TensorFlow training progress checkpoint is malformed")
+        if (
+            state.epoch != descriptor["completed_epoch"]
+            or state.step != descriptor["completed_step"]
+            or state.epoch > descriptor["target_epoch"]
+        ):
+            raise RuntimeError("TensorFlow training progress checkpoint is inconsistent")
+        exp.state = state
+        return {"root": root, "descriptor": descriptor}
+
+    def _checkpoint_training(
+        self,
+        tf,
+        exp,
+        model,
+        optimizer,
+        *,
+        target_epoch,
+    ):
+        context = current_operation_context()
+        with tempfile.TemporaryDirectory(prefix="dryml-tf-train-checkpoint-") as temp:
+            root = Path(temp)
+            prefix = root / "tensorflow" / "ckpt"
+            prefix.parent.mkdir()
+            tf.train.Checkpoint(model=model, optimizer=optimizer).write(str(prefix))
+            descriptor = {
+                "schema": TRAIN_CHECKPOINT_SCHEMA,
+                "schema_version": 1,
+                "model_cdef_id": exp.model.definition.stable_hash(),
+                "trainer_cdef_id": self.definition.stable_hash(),
+                "tensorflow_version": tf.__version__,
+                "checkpoint_prefix": "tensorflow/ckpt",
+                "completed_epoch": exp.state.epoch,
+                "completed_step": exp.state.step,
+                "target_epoch": target_epoch,
+            }
+            (root / "tensorflow-train.json").write_text(
+                json.dumps(descriptor, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            (root / "train-state.pkl").write_bytes(
+                pickle.dumps(exp.state, protocol=5)
+            )
+            for path in sorted(item for item in root.rglob("*") if item.is_file()):
+                context.write_checkpoint(
+                    path.relative_to(root).as_posix(),
+                    _file_chunks(path),
+                )
+        return context.commit_checkpoint(
+            metadata={
+                "backend": "tensorflow",
+                "epoch": exp.state.epoch,
+                "step": exp.state.step,
+            }
+        )
+
+    def _restore_backend_checkpoint(self, tf, model, optimizer, resume):
+        descriptor = resume["descriptor"]
+        prefix = resume["root"] / descriptor["checkpoint_prefix"]
+        if not prefix.with_suffix(".index").is_file():
+            raise RuntimeError("TensorFlow training checkpoint payload is missing")
+        return tf.train.Checkpoint(model=model, optimizer=optimizer).read(str(prefix))
+
+    def _progress_callback(
+        self,
+        tf,
+        exp,
+        *,
+        context,
+        target_epoch,
+        steps_per_epoch,
+        checkpoint,
+        early_completed,
+    ):
+        class ManagedEpochCallback(tf.keras.callbacks.Callback):
+            def on_epoch_end(callback_self, epoch, logs=None):
+                completed = epoch + 1
+                exp.state.epoch = completed
+                if steps_per_epoch is not None:
+                    exp.state.step += int(steps_per_epoch)
+                if context is None:
+                    return
+                metrics = {
+                    name: metric_value(value)
+                    for name, value in (logs or {}).items()
+                }
+                context.progress(
+                    completed,
+                    total=target_epoch,
+                    message="TensorFlow training epochs",
+                    metrics=metrics,
+                )
+                control = self._managed_safe_point(context, checkpoint)
+                if control is ControlRequest.GRACEFUL_STOP:
+                    early_completed["value"] = True
+                    callback_self.model.stop_training = True
+
+        return ManagedEpochCallback()
+
+    @staticmethod
+    def _managed_safe_point(context, checkpoint):
+        checkpoint_capable = context.checkpoint_schema == TRAIN_CHECKPOINT_SCHEMA
+        before = context.checkpoint_head
+        control = context.safe_point(
+            checkpoint=checkpoint if checkpoint_capable else None
+        )
+        if checkpoint_capable and context.checkpoint_head == before:
+            checkpoint()
+        return control
+
 
 class Training(BasicTraining):
     """Low-level TensorFlow training loop for arbitrary TF-callable DRYML models."""
+
+    __dryml_train_capability__ = TrainCapability.none(
+        "low-level TensorFlow training has no managed checkpoint contract"
+    )
+
+    @classmethod
+    def resume_capability(cls, definition=None):
+        return cls.__dryml_train_capability__
 
     def __call__(self, exp):
         tf = _tensorflow()
@@ -648,6 +969,14 @@ class Training(BasicTraining):
 
 
 class BasicEarlyStoppingTraining(BasicTraining):
+    __dryml_train_capability__ = TrainCapability.none(
+        "Keras EarlyStopping callback state is not checkpointed"
+    )
+
+    @classmethod
+    def resume_capability(cls, definition=None):
+        return cls.__dryml_train_capability__
+
     def __init__(
         self,
         *args,
@@ -674,6 +1003,12 @@ class BasicEarlyStoppingTraining(BasicTraining):
 
 
 ModelWrapper = Model
+
+
+def _file_chunks(path: Path, size: int = 1024 * 1024):
+    with path.open("rb") as handle:
+        while chunk := handle.read(size):
+            yield chunk
 
 
 __all__ = [

@@ -61,6 +61,25 @@ Calling the autoencoder applies encoder then decoder. Output-spec inference foll
 
 Training functions are non-resumable by default. A trainer that can checkpoint every mutable component may advertise `TrainCapability.exact(...)` and call `TrainFunction.checkpoint(...)` at managed safe points. Unsupported or partially checkpointed pipelines must remain non-resumable and require an explicit rerun after interruption.
 
+TensorFlow `BasicTraining` provides exact managed resume at completed epoch
+boundaries. Its checkpoint contains Keras model variables, optimizer slots and
+iterations, DRYML epoch/step progress, the target epoch, trainer/model identity,
+and the TensorFlow version. A resumed invocation rebuilds fresh model and
+optimizer objects, restores that state, and continues at the next epoch against
+the originally pinned cache record. Managed callbacks are invocation-scoped;
+Keras callbacks remain part of the trainer definition. The complete Experiment
+must configure an optimizer on the trainer, in `compile_kwargs`, or in the
+Experiment capabilities before the managed runtime advertises exact resume.
+
+The exact TensorFlow capability is deliberately conservative. DRYML shuffle,
+trainer-defined Keras callbacks (including `BasicEarlyStoppingTraining`), custom
+positional `fit` arguments, and custom `fit_kwargs` disable resume because their
+within-epoch cursor, RNG, callback, worker, or prefetch state is not included in
+the epoch checkpoint. Such configurations still retain direct Keras behavior,
+but interrupted managed work requires an explicit rerun. Managed graceful stop
+is supported for an exact pipeline and completes the epoch prefix at the next
+safe boundary.
+
 ## Experiments
 
 `Experiment` is a logical recipe containing non-materializing model, trainer, train, validation, and test-data edges. Managed training requires completed `CachedDataset` inputs; it resolves their exact active records once and never computes their sources. Completed NumPy-sequence and Parquet records are iterated directly without implicit adaptation.

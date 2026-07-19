@@ -568,7 +568,7 @@ class OperationLease:
             consumed_record_links=tuple(consumed_record_links),
         )
         self.operation._write_realization(state)
-        self._write_control_for(state)
+        self._write_control_for(state, reset_progress=True)
         action = "rerun" if rerun else "start"
         return OperationDecision(action, state)
 
@@ -765,7 +765,12 @@ class OperationLease:
             raise ManagedStateError("realization is not the current pending realization")
         return control, self.operation._read_realization(realization_id)
 
-    def _write_control_for(self, state: RealizationState) -> None:
+    def _write_control_for(
+        self,
+        state: RealizationState,
+        *,
+        reset_progress: bool = False,
+    ) -> None:
         control = self.operation._read_control()
         assert control is not None
         control = replace(
@@ -775,7 +780,7 @@ class OperationLease:
             current_attempt_id=state.current_attempt_id,
             checkpoint_head=state.checkpoint_head,
             diagnostics=state.diagnostics,
-            progress=None if len(state.attempt_ids) == 1 and state.status == "running" else control.progress,
+            progress=None if reset_progress else control.progress,
         )
         _write_json(self.operation.control_path, control.to_json())
 
