@@ -1174,15 +1174,9 @@ def _materialize(repo, cdef_id):
 
 
 def _process_alive(pid):
-    if type(pid) is not int or pid < 1:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    from dryml.managed.locking import process_is_alive
+
+    return process_is_alive(pid)
 
 
 def _execution_logs():

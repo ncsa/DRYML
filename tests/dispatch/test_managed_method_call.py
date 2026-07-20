@@ -169,8 +169,22 @@ def test_managed_submit_services_worker_without_waiting_in_result(tmp_path, targ
         time.sleep(0.01)
 
     assert future.done()
-    assert box.compute.status(store=store).status == "completed"
-    assert future.result(timeout=1).status == "ok"
+    result = future.result(timeout=1)
+    assert box.compute.status(store=store).status == "completed", result.error
+    assert result.status == "ok", result.error
+
+
+def test_managed_worker_liveness_uses_platform_safe_probe(monkeypatch):
+    managed_dispatch = importlib.import_module("dryml.managed.dispatch")
+    calls = []
+
+    monkeypatch.setattr(
+        "dryml.managed.locking.process_is_alive",
+        lambda pid: calls.append(pid) or True,
+    )
+
+    assert managed_dispatch._process_alive(123)
+    assert calls == [123]
 
 
 def test_exact_consumed_and_produced_records_round_trip(tmp_path, target_module):
