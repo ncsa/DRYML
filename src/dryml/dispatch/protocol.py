@@ -512,7 +512,7 @@ def write_json_file(path: str, data: Any) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, sort_keys=True, separators=(",", ":"))
         f.write("\n")
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + 5.0
     while True:
         try:
             os.replace(tmp, path)

@@ -52,6 +52,7 @@ def _coordinator_process(store_path, module_path):
 
 
 def _output_path(store, result):
+    assert result.status == "ok", result.error
     record_id = result.managed_result["outputs"]["result"]["record_id"]
     record = store.records.read_record(record_id)
     root = store.records.resolve_storage_ref(
