@@ -1,3 +1,6 @@
+import json
+import os
+
 import pytest
 
 from dryml.dispatch import (
@@ -13,6 +16,7 @@ from dryml.dispatch import (
     validate_execution_recipe,
 )
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA
+from dryml.dispatch.protocol import write_json_file
 from dryml.formats.ids import content_id
 from dryml.operations import attach_operation_id, make_function_call_spec
 
@@ -47,6 +51,27 @@ def test_protocol_models_round_trip(tmp_path):
     assert envelope.store_refs[0].path == str(tmp_path)
     assert response.status == "ok"
     assert handshake.protocol_version == 1
+
+
+def test_protocol_json_write_retries_transient_replace_conflict(tmp_path, monkeypatch):
+    path = tmp_path / "mailbox.json"
+    path.write_text("{}", encoding="utf-8")
+    real_replace = os.replace
+    attempts = 0
+
+    def replace_with_reader_conflict(source, target):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("destination is briefly open by a reader")
+        real_replace(source, target)
+
+    monkeypatch.setattr("dryml.dispatch.protocol.os.replace", replace_with_reader_conflict)
+
+    write_json_file(str(path), {"sequence": 1})
+
+    assert attempts == 3
+    assert json.loads(path.read_text(encoding="utf-8")) == {"sequence": 1}
 
 
 def test_managed_worker_result_round_trip_is_structured(tmp_path):

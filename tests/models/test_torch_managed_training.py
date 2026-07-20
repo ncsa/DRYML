@@ -23,6 +23,9 @@ from dryml.models import Experiment, TrainResumeMode
 
 
 torch = pytest.importorskip("torch")
+if not hasattr(torch, "Tensor"):
+    sys.modules.pop("torch", None)
+    pytest.skip("PyTorch is not installed.", allow_module_level=True)
 
 
 class TrackingRegressor(torch.nn.Module):

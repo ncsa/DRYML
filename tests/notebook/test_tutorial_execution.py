@@ -222,7 +222,7 @@ with TemporaryDirectory() as directory:
     store = DirStore(directory, query_index='none')
     try:
         Dispatcher(store=store).run(
-            make_function_call_spec('time:sleep', args=[30]),
+            make_function_call_spec('time:sleep', args=[60]),
             environment=PythonExecutableSpec(executable=sys.executable, pythonpath_policy='none'),
         )
     finally:
@@ -232,7 +232,7 @@ with TemporaryDirectory() as directory:
     run_root = tmp_path / "run"
 
     with pytest.raises(NotebookExecutionError, match=r"worker-timeout\.ipynb: cell 1: execution timed out"):
-        execute_notebook(notebook, work_root=run_root, timeout=15.0 if os.name == "nt" else 5.0)
+        execute_notebook(notebook, work_root=run_root, timeout=30.0 if os.name == "nt" else 5.0)
 
     records = [
         json.loads(path.read_text(encoding="utf-8"))

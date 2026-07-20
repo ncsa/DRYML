@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -511,7 +512,15 @@ def write_json_file(path: str, data: Any) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, sort_keys=True, separators=(",", ":"))
         f.write("\n")
-    os.replace(tmp, path)
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def load_envelope(path: str) -> ExecutionEnvelope:
