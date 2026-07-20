@@ -25,6 +25,22 @@ from dryml.models import Experiment, TrainResumeMode
 tf = pytest.importorskip("tensorflow")
 
 
+def test_tf_checkpoint_staging_copies_complete_payload(tmp_path):
+    from dryml.models.tf.base import _stage_tf_checkpoint
+
+    prefix = tmp_path / "source" / "ckpt"
+    prefix.parent.mkdir()
+    prefix.with_suffix(".index").write_bytes(b"index")
+    prefix.with_suffix(".data-00000-of-00001").write_bytes(b"data")
+
+    staged, directory = _stage_tf_checkpoint(prefix)
+    try:
+        assert staged.with_suffix(".index").read_bytes() == b"index"
+        assert staged.with_suffix(".data-00000-of-00001").read_bytes() == b"data"
+    finally:
+        directory.cleanup()
+
+
 def _cache(store, values=(1.0, 2.0, 3.0, 4.0)):
     x = np.asarray(values, dtype=np.float32)[:, None]
     y = 2.0 * x

@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import pickle
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -47,6 +48,20 @@ def _latest_tf_checkpoint(tf, checkpoint_dir):
         return latest
     prefix = os.path.join(checkpoint_dir, "ckpt")
     return prefix if os.path.isfile(f"{prefix}.index") else None
+
+
+def _stage_tf_checkpoint(prefix):
+    """Copy one TensorFlow checkpoint to a short temporary restore path."""
+
+    directory = tempfile.TemporaryDirectory(prefix="dryml-tf-restore-")
+    staged = Path(directory.name) / prefix.name
+    try:
+        for source in prefix.parent.glob(f"{prefix.name}.*"):
+            shutil.copy2(source, staged.with_name(source.name))
+    except BaseException:
+        directory.cleanup()
+        raise
+    return staged, directory
 
 
 def _definition_arguments(cls, definition):
@@ -549,8 +564,9 @@ class BasicTraining(TrainFunction):
             else initial_epoch + self.epochs
         )
         restore_status = None
+        restore_directory = None
         if resume is not None:
-            restore_status = self._restore_backend_checkpoint(
+            restore_status, restore_directory = self._restore_backend_checkpoint(
                 tf,
                 backend_model,
                 optimizer,
@@ -582,32 +598,36 @@ class BasicTraining(TrainFunction):
         )
 
         try:
-            history = training_model.fit(
-                ds_train,
-                *self.fit_args,
-                validation_data=ds_val,
-                initial_epoch=initial_epoch,
-                epochs=target_epoch,
-                callbacks=callbacks or None,
-                **fit_kwargs,
-            )
-        finally:
-            exp.model.prep_eval()
+            try:
+                history = training_model.fit(
+                    ds_train,
+                    *self.fit_args,
+                    validation_data=ds_val,
+                    initial_epoch=initial_epoch,
+                    epochs=target_epoch,
+                    callbacks=callbacks or None,
+                    **fit_kwargs,
+                )
+            finally:
+                exp.model.prep_eval()
 
-        if context is not None and exp.state.epoch == initial_epoch:
-            context.progress(
-                initial_epoch,
-                total=target_epoch,
-                message="TensorFlow training epochs",
-            )
-            control = self._managed_safe_point(context, checkpoint)
-            if control is ControlRequest.GRACEFUL_STOP:
-                early_completed["value"] = True
-        if restore_status is not None:
-            restore_status.assert_existing_objects_matched()
-        if context is not None:
-            return OperationResult(early_completed=early_completed["value"])
-        return history
+            if context is not None and exp.state.epoch == initial_epoch:
+                context.progress(
+                    initial_epoch,
+                    total=target_epoch,
+                    message="TensorFlow training epochs",
+                )
+                control = self._managed_safe_point(context, checkpoint)
+                if control is ControlRequest.GRACEFUL_STOP:
+                    early_completed["value"] = True
+            if restore_status is not None:
+                restore_status.assert_existing_objects_matched()
+            if context is not None:
+                return OperationResult(early_completed=early_completed["value"])
+            return history
+        finally:
+            if restore_directory is not None:
+                restore_directory.cleanup()
 
     def _capability(self, exp, name, default=None):
         return getattr(exp, "capabilities", {}).get(name, default)
@@ -781,7 +801,16 @@ class BasicTraining(TrainFunction):
         prefix = resume["root"] / descriptor["checkpoint_prefix"]
         if not prefix.with_suffix(".index").is_file():
             raise RuntimeError("TensorFlow training checkpoint payload is missing")
-        return tf.train.Checkpoint(model=model, optimizer=optimizer).read(str(prefix))
+        restore_directory = None
+        if os.name == "nt" and len(os.path.abspath(prefix)) >= 240:
+            prefix, restore_directory = _stage_tf_checkpoint(prefix)
+        try:
+            status = tf.train.Checkpoint(model=model, optimizer=optimizer).read(str(prefix))
+        except BaseException:
+            if restore_directory is not None:
+                restore_directory.cleanup()
+            raise
+        return status, restore_directory
 
     def _progress_callback(
         self,
