@@ -743,6 +743,10 @@ def _worker_records(audit_directory: Path) -> tuple[dict[str, Any], ...]:
 def _process_exists(pid: int) -> bool:
     """Return whether *pid* still names a process visible to this user."""
 
+    if os.name == "nt":
+        from dryml.managed.locking import process_is_alive
+
+        return process_is_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -786,7 +790,7 @@ def _kill_registered_worker(record: Mapping[str, Any]) -> None:
         _taskkill_process_tree(pid)
         try:
             os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
 
 

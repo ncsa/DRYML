@@ -997,8 +997,7 @@ def _product_publication_lock(products_dir: Path):
                 import msvcrt
             except ImportError as exc:
                 raise RecordIOError("product publication requires msvcrt") from exc
-            handle.seek(0)
-            if not handle.read(1):
+            if os.fstat(handle.fileno()).st_size == 0:
                 handle.write(b"\0")
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
@@ -1025,7 +1024,7 @@ def _product_publication_lock(products_dir: Path):
 
 def _fsync_tree(root: Path) -> None:
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
-        with path.open("rb") as handle:
+        with path.open("rb+") as handle:
             os.fsync(handle.fileno())
     for path in sorted(
         (item for item in root.rglob("*") if item.is_dir()),

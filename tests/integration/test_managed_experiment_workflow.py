@@ -27,6 +27,7 @@ from managed_workflow_fixtures import (
 
 
 def test_full_managed_analyst_and_collaborator_workflow(tmp_path):
+    pytest.importorskip("pyarrow")
     source = DirStore(tmp_path / "source")
     model, train, test, experiment, accuracy, confusion = build_managed_workflow(source)
     interrupted_once = {"value": False}

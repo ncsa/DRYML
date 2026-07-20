@@ -592,6 +592,7 @@ class RecordStoreIO:
         self.records_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.records_dir / ".ref-index-v1.lock"
         handle = lock_path.open("a+b", buffering=0)
+        locked = False
         try:
             if os.name == "posix":
                 try:
@@ -599,16 +600,17 @@ class RecordStoreIO:
                 except ImportError as exc:
                     raise RecordIOError("record index coordination requires fcntl") from exc
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                locked = True
             elif os.name == "nt":
                 try:
                     import msvcrt
                 except ImportError as exc:
                     raise RecordIOError("record index coordination requires msvcrt") from exc
-                handle.seek(0)
-                if not handle.read(1):
+                if os.fstat(handle.fileno()).st_size == 0:
                     handle.write(b"\0")
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
             else:
                 raise RecordIOError(
                     f"record index coordination is unsupported on platform {os.name!r}"
@@ -616,11 +618,11 @@ class RecordStoreIO:
             yield
         finally:
             try:
-                if os.name == "posix":
+                if locked and os.name == "posix":
                     import fcntl
 
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                elif os.name == "nt":
+                elif locked and os.name == "nt":
                     import msvcrt
 
                     handle.seek(0)

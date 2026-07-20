@@ -267,7 +267,10 @@ def test_unexpected_write_is_rejected(tmp_path):
 
 
 def test_undeclared_optional_import_is_rejected(tmp_path):
-    notebook = _write_notebook(tmp_path / "optional.ipynb", "import sklearn")
+    notebook = _write_notebook(
+        tmp_path / "optional.ipynb",
+        "import sys\nimport types\nsys.modules['sklearn'] = types.ModuleType('sklearn')\nimport sklearn",
+    )
 
     with pytest.raises(NotebookExecutionError, match=r"optional\.ipynb: undeclared optional imports: sklearn"):
         execute_notebook(notebook, work_root=tmp_path / "run")

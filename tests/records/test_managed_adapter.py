@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from dryml.artifacts import CachedDataset
 from dryml.artifacts.representations import (
@@ -51,6 +52,7 @@ def _completed_cache(tmp_path):
 
 
 def test_completed_realization_adapts_to_parquet_without_recomputation(tmp_path):
+    pytest.importorskip("pyarrow")
     store, cached, invocation = _completed_cache(tmp_path)
     active_before = cached.compute.status(store=store)
 
@@ -153,6 +155,7 @@ def test_adapter_runner_type_error_is_not_masked_by_legacy_signature_retry(tmp_p
 
 
 def test_huge_products_reject_materializing_adapter_but_allow_streaming(tmp_path):
+    pytest.importorskip("pyarrow")
     store, cached, _invocation = _completed_cache(tmp_path)
     materializing = AdapterRegistry()
     materializing.register(
@@ -255,6 +258,7 @@ def test_managed_data_resolution_selects_bounded_best_cost_path(tmp_path):
 
 
 def test_representation_request_does_not_conflate_explicit_rerun(tmp_path):
+    pytest.importorskip("pyarrow")
     store, cached, first = _completed_cache(tmp_path)
     converted = cached.request_representation("parquet", store=store)
     target = DataRecord.from_envelope(

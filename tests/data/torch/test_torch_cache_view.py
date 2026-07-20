@@ -14,6 +14,9 @@ from dryml.data.torch.cache import TorchCacheView
 
 def test_torch_cache_view_is_lazy_and_iterates_numpy(tmp_path):
     torch = pytest.importorskip("torch")
+    if not hasattr(torch, "Tensor"):
+        sys.modules.pop("torch", None)
+        pytest.skip("PyTorch is not installed")
     store = DirStore(tmp_path / "store")
     cached = CachedDataset(ArrayDataset(np.arange(12, dtype=np.float32).reshape(6, 2)))
     cached.compute(store=store, representation="numpy-sequence", shard_rows=2)

@@ -14,6 +14,7 @@ from dryml.data.tf.cache import TensorFlowCacheView
 
 def test_tensorflow_cache_view_is_lazy_and_iterates_parquet(tmp_path):
     tf = pytest.importorskip("tensorflow")
+    pytest.importorskip("pyarrow")
     store = DirStore(tmp_path / "store")
     cached = CachedDataset(ArrayDataset(np.arange(12, dtype=np.float32).reshape(6, 2)))
     cached.compute(store=store, representation="numpy-sequence", shard_rows=2)

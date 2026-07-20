@@ -138,6 +138,7 @@ def test_active_lookup_counts_do_not_scale_with_realization_history():
 
 
 def test_events_adapter_and_export_emit_machine_readable_operation_counts():
+    pytest.importorskip("pyarrow")
     result = benchmark.measure_events_adapter_export(event_count=1000)
 
     assert result["events"]["submitted"] == 1000
@@ -154,6 +155,7 @@ def test_events_adapter_and_export_emit_machine_readable_operation_counts():
 
 
 def test_benchmark_result_is_versioned_bounded_json():
+    pytest.importorskip("pyarrow")
     result = benchmark.run_benchmark(
         small_rows=64,
         large_rows=256,

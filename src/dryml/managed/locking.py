@@ -101,8 +101,7 @@ class PlatformFileLock:
             import msvcrt
         except ImportError as exc:
             raise ManagedStoreUnsupportedError("Windows managed locking requires msvcrt") from exc
-        file_obj.seek(0)
-        if not file_obj.read(1):
+        if os.fstat(file_obj.fileno()).st_size == 0:
             file_obj.write(b"\0")
         file_obj.seek(0)
         try:
@@ -127,6 +126,8 @@ def process_is_alive(pid: int) -> bool:
         return False
     if pid == os.getpid():
         return True
+    if os.name == "nt":
+        return _windows_process_is_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -136,6 +137,35 @@ def process_is_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    """Probe a Windows process without sending it a control signal."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    synchronize = 0x00100000
+    wait_object_0 = 0x00000000
+    error_invalid_parameter = 87
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        return ctypes.get_last_error() != error_invalid_parameter
+    try:
+        status = kernel32.WaitForSingleObject(handle, 0)
+        if status == wait_object_0:
+            return False
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 __all__ = ["PlatformFileLock", "process_is_alive"]

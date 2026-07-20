@@ -4,6 +4,7 @@ pytest-cov
 build
 setuptools >= 42
 wheel
+pyarrow; python_version < "3.14"
 tensorflow; python_version < "3.14"
 jax >= 0.5, < 0.6; python_version < "3.14"
 jaxlib >= 0.5, < 0.6; python_version < "3.14"

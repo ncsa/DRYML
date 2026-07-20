@@ -80,7 +80,7 @@ jobs:
           from importlib import metadata
           from pathlib import Path
 
-          packages = ("build", "coverage", "dill", "jax", "jaxlib", "numpy", "pytest", "pytest-cov", "ray", "scikit-learn", "setuptools", "tensorflow", "torch", "wheel", "xgboost")
+          packages = ("build", "coverage", "dill", "jax", "jaxlib", "numpy", "pyarrow", "pytest", "pytest-cov", "ray", "scikit-learn", "setuptools", "tensorflow", "torch", "wheel", "xgboost")
           versions = {}
           for package in packages:
               try:
@@ -219,7 +219,7 @@ jobs:
           from importlib import metadata
           from pathlib import Path
 
-          packages = ("build", "coverage", "dill", "jax", "jaxlib", "numpy", "pytest", "pytest-cov", "ray", "scikit-learn", "setuptools", "tensorflow", "torch", "wheel", "xgboost")
+          packages = ("build", "coverage", "dill", "jax", "jaxlib", "numpy", "pyarrow", "pytest", "pytest-cov", "ray", "scikit-learn", "setuptools", "tensorflow", "torch", "wheel", "xgboost")
           versions = {}
           for package in packages:
               try:

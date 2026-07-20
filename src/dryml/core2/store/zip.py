@@ -315,7 +315,7 @@ def _commit_zip_destination(zip_dest, write_archive) -> None:
             temp_path = Path(temp.name)
         with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as zf:
             write_archive(zf)
-        with temp_path.open("rb") as handle:
+        with temp_path.open("rb+") as handle:
             os.fsync(handle.fileno())
         if file_like:
             with temp_path.open("rb") as source:
