@@ -4,7 +4,10 @@ import sys
 
 
 def is_tf_available():
-    return importlib.util.find_spec("tensorflow") is not None
+    try:
+        return importlib.util.find_spec("tensorflow") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def is_tf_value(x: Any) -> bool:

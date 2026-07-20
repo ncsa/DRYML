@@ -4,7 +4,10 @@ import sys
 
 
 def is_torch_available():
-    return importlib.util.find_spec("torch") is not None
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def is_torch_value(x: Any) -> bool:
