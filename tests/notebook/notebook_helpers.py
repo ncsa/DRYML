@@ -922,10 +922,12 @@ def execute_notebook(
     for drainer in drainers:
         drainer.start()
     timeout_error = None
+    timeout_report = None
     leaked_workers: tuple[int, ...] = ()
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
+        timeout_report = _read_report(report_path)
         _terminate_audited_workers(audit_directory, settle=0)
         _kill_notebook_process(process)
         process.wait()
@@ -937,7 +939,7 @@ def execute_notebook(
     stdout = _captured_output(stdout_buffer, stdout_truncated)
     stderr = _captured_output(stderr_buffer, stderr_truncated)
     if timeout_error is not None:
-        report = _read_report(report_path)
+        report = timeout_report or _read_report(report_path)
         cell = report.get("error_cell") if report else None
         location = f"{path}: cell {cell}" if isinstance(cell, int) else str(path)
         leak_detail = f"; worker cleanup failed for PIDs {', '.join(map(str, leaked_workers))}" if leaked_workers else ""
