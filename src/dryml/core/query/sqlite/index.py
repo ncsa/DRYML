@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -47,6 +47,11 @@ _CODEC = QueryIndexCodec()
 _REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
+
+
+@dataclass(slots=True)
+class _RebuildProgress:
+    modified: bool = False
 
 
 class SQLiteStoreQueryIndex:
@@ -272,13 +277,31 @@ class SQLiteStoreQueryIndex:
         the previous database file is renamed aside instead of unlinked.
         """
 
+        self._rebuild(
+            stats=stats,
+            quarantine_existing=quarantine_existing,
+            force=force,
+            progress=_RebuildProgress(),
+        )
+
+    def _rebuild(
+            self,
+            *,
+            stats: QueryStats | None,
+            quarantine_existing: bool,
+            force: bool,
+            progress: _RebuildProgress) -> None:
         self._register_persistent_sidecar()
         with self._build_claim(force=force) as acquired:
             if not acquired:
                 if stats is not None:
                     stats.refresh_action = "sqlite-rebuild-wait"
                 return
-            self._rebuild_owned(stats=stats, quarantine_existing=quarantine_existing)
+            self._rebuild_owned(
+                stats=stats,
+                quarantine_existing=quarantine_existing,
+                progress=progress,
+            )
 
     def reconcile(self) -> ReconcileReport:
         """Validate this Store index against object files and rebuild if needed.
@@ -314,18 +337,22 @@ class SQLiteStoreQueryIndex:
             issues: tuple[ValidationIssue, ...],
             *,
             quarantine_existing: bool = False) -> ReconcileReport:
-        before_file_identity = self._sidecar_file_identity()
+        progress = _RebuildProgress()
         try:
             force = before.state not in {"missing", "dirty", "building", "incompatible", "corrupt"}
-            self.rebuild(quarantine_existing=quarantine_existing, force=force)
+            self._rebuild(
+                stats=None,
+                quarantine_existing=quarantine_existing,
+                force=force,
+                progress=progress,
+            )
         except Exception as exc:
             after = self.status()
-            changed = self._sidecar_file_identity() != before_file_identity
             return ReconcileReport(
                 backend=after.backend,
                 store_key=after.store_key,
-                changed=changed,
-                action="rebuild" if changed else "validate",
+                changed=progress.modified,
+                action="rebuild" if progress.modified else "validate",
                 generation_before=before.generation,
                 generation_after=after.generation,
                 definitions_scanned=(after.row_counts or {}).get("stored_roots", 0),
@@ -364,14 +391,27 @@ class SQLiteStoreQueryIndex:
             diagnostics=after.diagnostics,
         )
 
-    def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
+    def _rebuild_owned(
+            self,
+            *,
+            progress: _RebuildProgress,
+            stats: QueryStats | None = None,
+            quarantine_existing: bool = False) -> None:
         if self.store is None or not hasattr(self.store, "hydrate_index"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
 
         dirty_marker_token = self._dirty_marker_token()
         self._connections.close_path_current_process()
-        self._remove_existing_index(quarantine=quarantine_existing)
-        self.initialize_empty(build_state="building")
+        if self._remove_existing_index(quarantine=quarantine_existing):
+            progress.modified = True
+        try:
+            self.initialize_empty(build_state="building")
+        except Exception:
+            if not progress.modified and self.path.exists():
+                progress.modified = True
+            raise
+        else:
+            progress.modified = True
         scanned = 0
         for cdefs in chunked(self.store.hydrate_index(), _REBUILD_BATCH_SIZE):
             for cdef in cdefs:
@@ -804,15 +844,16 @@ class SQLiteStoreQueryIndex:
             return False
         return age > _BUILD_CLAIM_STALE_SECONDS
 
-    def _remove_existing_index(self, *, quarantine: bool) -> None:
+    def _remove_existing_index(self, *, quarantine: bool) -> bool:
         if not self.path.exists():
-            return
+            return False
         if not quarantine:
             self.path.unlink()
-            return
+            return True
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
         self.path.replace(target)
+        return True
 
     def _set_build_state(self, state: str) -> None:
         if state not in {"building", "ready", "dirty"}:
@@ -853,13 +894,6 @@ class SQLiteStoreQueryIndex:
         register = getattr(self.store, "register_query_index_sidecar", None)
         if register is not None:
             register()
-
-    def _sidecar_file_identity(self) -> tuple[int, int] | None:
-        try:
-            stat = self.path.stat()
-        except FileNotFoundError:
-            return None
-        return stat.st_dev, stat.st_ino
 
     def _run_sqlite_busy_retry(self, operation, *, action: str):
         max_retries = max(0, int(self.config.max_write_retries))

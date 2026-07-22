@@ -982,7 +982,8 @@ def test_dirstore_reconcile_removes_deleted_object(tmp_path):
     assert list(repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().defs()) == [keep.definition]
 
 
-def test_dirstore_validate_detects_changed_or_misplaced_def_pickle(tmp_path):
+def test_dirstore_validate_detects_changed_or_misplaced_def_pickle(
+        tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
     original = QueryIndexDirLeaf("original", repo=repo)
@@ -990,6 +991,15 @@ def test_dirstore_validate_detects_changed_or_misplaced_def_pickle(tmp_path):
     repo.save_object(original)
     def_path = Path(store.object_dir(original.definition)) / "def.pkl"
     pickle_save(changed.definition, def_path)
+    index = store.open_query_index()
+    # Restore the retired identity hook to simulate immediate inode reuse and
+    # prove reconciliation no longer relies on pre/post file identity.
+    monkeypatch.setattr(
+        index,
+        "_sidecar_file_identity",
+        lambda: (1, 1),
+        raising=False,
+    )
 
     report = store.validate_query_index(thorough=True)
 
