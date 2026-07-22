@@ -2,7 +2,6 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
-import sqlite3
 import threading
 import time
 import pytest
@@ -511,6 +510,7 @@ def test_sqlite_dirty_index_rebuilds_and_clears_marker(tmp_path):
 def test_stale_cdef_codec_rebuilds_before_decoding_and_preserves_objects(
     tmp_path,
 ):
+    sqlite3 = require_sqlite()
     config = SQLiteQueryIndexConfig(journal_mode="delete")
     store = DirStore(tmp_path / "store", query_index=config)
     repo = Repo(stores=store)

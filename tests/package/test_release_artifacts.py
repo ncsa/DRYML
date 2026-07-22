@@ -60,6 +60,7 @@ FORBIDDEN_NAMES = {
     "timings.json",
 }
 REQUIRED_CANDIDATE_FILES = {"MANIFEST.in", "tests/package/test_release_artifacts.py"}
+RETIRED_CORE_PACKAGE = "core" + "2"
 
 
 def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> None:
@@ -413,8 +414,7 @@ def test_sdist_and_wheel_content_and_bounds(release_artifacts):
         path.removeprefix("src/") for path in tracked_modules
     }
     assert expected_wheel_modules <= wheel_members
-    obsolete = "core" + chr(50)
-    obsolete_package = f"/dryml/{obsolete}/"
+    obsolete_package = f"/dryml/{RETIRED_CORE_PACKAGE}/"
     assert not any(obsolete_package in f"/{path}" for path in relative_sdist)
     assert not any(obsolete_package in f"/{path}" for path in wheel_members)
 
@@ -458,7 +458,7 @@ import dryml.core.store.store
 import dryml.core.utils.general
 
 target = Path({str(target)!r}).resolve()
-obsolete = "core" + chr(50)
+obsolete = {RETIRED_CORE_PACKAGE!r}
 obsolete_path = "dryml." + obsolete
 assert Path(dryml.__file__).resolve().is_relative_to(target)
 assert dryml.__version__ == importlib.metadata.version("dryml") == "0.3.0.dev0"

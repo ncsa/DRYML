@@ -70,7 +70,7 @@ def test_ref_index_store_ref_mismatch_rebuilds_on_auto_and_fails_when_refresh_fa
     spec_ref = io.write_spec(make_spec(family="operation", kind="function_call", payload={"function": "pkg.mod:run", "args": [cdef()], "kwargs": {}}), family="operation")
     io.rebuild_ref_index()
     data = io.read_ref_index().to_json()
-    obsolete = "core" + chr(50)
+    obsolete = "core" + "2"
     data["store_ref"] = f"dryml.{obsolete}.store.dir.DirStore:/old/location"
     io.ref_index_path.write_bytes(canonical_json_bytes(data))
 
