@@ -381,16 +381,16 @@ def test_write_transaction_retries_busy_connection_open(tmp_path, monkeypatch):
     path = tmp_path / "index.sqlite"
     idx = _index(path, timeout=0.01, retries=2)
     sqlite3 = require_sqlite()
-    original_connection = idx._connections.connection
+    original_connect = sqlite3.connect
     calls = {"count": 0}
 
-    def flaky_connection(*, readonly=False):
-        if not readonly and calls["count"] == 0:
+    def flaky_connect(*args, **kwargs):
+        if calls["count"] == 0:
             calls["count"] += 1
             raise sqlite3.OperationalError("database is locked")
-        return original_connection(readonly=readonly)
+        return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(idx._connections, "connection", flaky_connection)
+    monkeypatch.setattr(sqlite3, "connect", flaky_connect)
     try:
         idx.initialize_empty()
     finally:

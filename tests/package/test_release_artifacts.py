@@ -20,6 +20,7 @@ from packaging.version import Version
 MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 20_000
 BUILD_TOOLS = ("build", "setuptools", "wheel")
+RELEASE_CONTRACT_PATH = "tests/package/test_release_artifacts.py"
 EXAMPLES = {
     "examples/requirements/requirements_and_explain.py",
     "examples/dispatch/python_shaped_dispatch.py",
@@ -59,7 +60,7 @@ FORBIDDEN_NAMES = {
     "credentials", "credentials.json", "secrets.json", "timing.json",
     "timings.json",
 }
-REQUIRED_CANDIDATE_FILES = {"MANIFEST.in", "tests/package/test_release_artifacts.py"}
+REQUIRED_CANDIDATE_FILES = {"MANIFEST.in", RELEASE_CONTRACT_PATH}
 RETIRED_CORE_PACKAGE = "core" + "2"
 
 
@@ -117,6 +118,19 @@ def _tracked_files(repository: Path, revision: str = "HEAD") -> set[str]:
     ).splitlines())
 
 
+def _worktree_blob_oid(repository: Path, relative_path: str) -> str:
+    return subprocess.check_output(
+        [
+            "git",
+            "hash-object",
+            f"--path={relative_path}",
+            str(repository / relative_path),
+        ],
+        cwd=repository,
+        text=True,
+    ).strip()
+
+
 def _archive_candidate(repository: Path, destination: Path, archive_path: Path, environment: dict[str, str]) -> tuple[set[str], str]:
     candidate_sha = _head_sha(repository)
     tracked = _tracked_files(repository, candidate_sha)
@@ -124,12 +138,12 @@ def _archive_candidate(repository: Path, destination: Path, archive_path: Path, 
         "release manifest and artifact contract must be committed before the "
         f"candidate is built: {sorted(REQUIRED_CANDIDATE_FILES - tracked)}"
     )
-    contract_path = Path(__file__).resolve()
-    committed_contract = subprocess.check_output(
-        ["git", "show", f"{candidate_sha}:tests/package/test_release_artifacts.py"],
+    committed_contract_oid = subprocess.check_output(
+        ["git", "rev-parse", f"{candidate_sha}:{RELEASE_CONTRACT_PATH}"],
         cwd=repository,
-    )
-    assert contract_path.read_bytes() == committed_contract, (
+        text=True,
+    ).strip()
+    assert _worktree_blob_oid(repository, RELEASE_CONTRACT_PATH) == committed_contract_oid, (
         "the executing release-artifact contract must match committed HEAD"
     )
     _run(
@@ -203,6 +217,33 @@ def test_manifest_uses_exact_example_allowlist():
         line.startswith(("include tutorials/", "recursive-include examples", "recursive-include tutorials"))
         for line in lines
     )
+
+
+def test_worktree_blob_oid_honors_git_line_ending_conversion(tmp_path):
+    repository = tmp_path / "repository"
+    contract_relative = RELEASE_CONTRACT_PATH
+    contract = repository / contract_relative
+    contract.parent.mkdir(parents=True)
+    contract.write_bytes(b"first line\nsecond line\n")
+
+    subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "true"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(["git", "add", contract_relative], cwd=repository, check=True)
+    committed_oid = subprocess.check_output(
+        ["git", "rev-parse", f":{contract_relative}"],
+        cwd=repository,
+        text=True,
+    ).strip()
+
+    contract.write_bytes(b"first line\r\nsecond line\r\n")
+    assert _worktree_blob_oid(repository, contract_relative) == committed_oid
+
+    contract.write_bytes(b"first line\r\nchanged line\r\n")
+    assert _worktree_blob_oid(repository, contract_relative) != committed_oid
 
 
 @pytest.mark.parametrize(

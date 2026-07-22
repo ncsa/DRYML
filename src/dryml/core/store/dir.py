@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import glob
 import tempfile
+import time
 from dataclasses import replace
 from typing import Literal
 
@@ -117,6 +118,12 @@ class DirStore(Store):
             self._mark_existing_query_index_dirty()
 
     def mark_query_index_dirty(self) -> None:
+        """Atomically publish a new dirty-marker generation.
+
+        Transient destination replacement conflicts are retried for up to five
+        seconds. A conflict that outlasts that bound is propagated.
+        """
+
         os.makedirs(self.dryml_dir, exist_ok=True)
         tmp_path = None
         try:
@@ -131,8 +138,19 @@ class DirStore(Store):
                 f.write(f"{os.urandom(16).hex()}\n")
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, self.query_index_dirty_path)
-            tmp_path = None
+            deadline = time.monotonic() + 5.0
+            delay = 0.01
+            while True:
+                try:
+                    os.replace(tmp_path, self.query_index_dirty_path)
+                    tmp_path = None
+                    break
+                except PermissionError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(delay, remaining))
+                    delay = min(delay * 2, 0.25)
         finally:
             if tmp_path is not None:
                 try:

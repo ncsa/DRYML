@@ -189,7 +189,7 @@ WAL mode can allow long-lived readers and a writer to overlap on supported local
 
 ## Failure Model
 
-Object state is published before persistent query-index root activation. If object publication succeeds and index update fails, the store can be marked dirty and reconciled later. A Store-local registration marker lets writers using `memory`, `none`, or `auto` without SQLite also mark an existing persistent sidecar or active rebuild dirty, including a sidecar configured at an explicit path, so mixed-policy access cannot publish an incomplete ready index.
+Object state is published before persistent query-index root activation. If object publication succeeds and index update fails, the store can be marked dirty and reconciled later. A Store-local registration marker lets writers using `memory`, `none`, or `auto` without SQLite also mark an existing persistent sidecar or active rebuild dirty, including a sidecar configured at an explicit path, so mixed-policy access cannot publish an incomplete ready index. Dirty-marker publication retries transient destination-replacement conflicts for up to five seconds before propagating the filesystem error.
 
 This means a missing or stale index affects performance or query completeness until reconciliation, but it should not make committed object files invalid.
 

@@ -1,5 +1,7 @@
+import gc
 import os
 import threading
+import weakref
 from uuid import UUID
 
 import pytest
@@ -86,6 +88,41 @@ def test_connection_manager_active_lease_survives_owner_closes(tmp_path):
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         con.execute("SELECT 1")
+
+
+def test_connection_manager_reserves_lease_before_delayed_owner_close(
+        tmp_path, monkeypatch):
+    manager = SQLiteConnectionManager(
+        SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete")
+    )
+    manager.connection()
+
+    class DelayedClose:
+        def __init__(self):
+            self.cycle = self
+
+        def __del__(self):
+            manager.close_all_current_process()
+
+    delayed_close = DelayedClose()
+    delayed_close_ref = weakref.ref(delayed_close)
+    del delayed_close
+
+    original_connection = manager.connection
+
+    def connection_then_collect(*, readonly=False):
+        con = original_connection(readonly=readonly)
+        # The old lease path exposed this connection before reserving it.
+        gc.collect()
+        return con
+
+    monkeypatch.setattr(manager, "connection", connection_then_collect)
+
+    with manager.lease() as con:
+        # The atomic path reaches the body before delayed cleanup can close it.
+        gc.collect()
+        assert delayed_close_ref() is None
+        assert con.execute("SELECT 1").fetchone()[0] == 1
 
 
 def test_connection_manager_reopens_externally_closed_cached_connection(tmp_path):

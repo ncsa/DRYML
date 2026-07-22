@@ -7,7 +7,8 @@ import shutil
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from collections import Counter
+from contextlib import closing, contextmanager
 import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
@@ -223,14 +224,25 @@ def test_concurrent_dirty_marker_writers_use_unique_temporary_files(
     store = DirStore(tmp_path / "store", query_index="none")
     original_replace = dir_store_module.os.replace
     replace_barrier = threading.Barrier(2)
-    sources = []
+    attempts = Counter()
+    injected_conflict = False
     source_lock = threading.Lock()
 
     def synchronized_replace(source, destination):
+        nonlocal injected_conflict
         if os.fspath(destination) == store.query_index_dirty_path:
             with source_lock:
-                sources.append(os.fspath(source))
-            replace_barrier.wait(timeout=5)
+                source = os.fspath(source)
+                attempts[source] += 1
+                first_attempt = attempts[source] == 1
+            if first_attempt:
+                replace_barrier.wait(timeout=5)
+                with source_lock:
+                    if not injected_conflict:
+                        injected_conflict = True
+                        raise PermissionError(
+                            "destination is briefly open by another writer"
+                        )
         return original_replace(source, destination)
 
     monkeypatch.setattr(dir_store_module.os, "replace", synchronized_replace)
@@ -250,9 +262,35 @@ def test_concurrent_dirty_marker_writers_use_unique_temporary_files(
 
     assert all(not thread.is_alive() for thread in threads)
     assert errors == []
-    assert len(sources) == 2
-    assert len(set(sources)) == 2
+    assert len(attempts) == 2
+    assert sorted(attempts.values()) == [1, 2]
     assert Path(store.query_index_dirty_path).exists()
+    assert list(Path(store.dryml_dir).glob(".query-index.dirty.*.tmp")) == []
+
+
+def test_dirty_marker_replace_failure_is_bounded_and_cleans_temporary_file(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    attempts = 0
+
+    def denied_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("destination remains unavailable")
+
+    times = iter((0.0, 5.0))
+    monkeypatch.setattr(dir_store_module.os, "replace", denied_replace)
+    monkeypatch.setattr(
+        dir_store_module.time,
+        "monotonic",
+        lambda: next(times),
+    )
+
+    with pytest.raises(PermissionError, match="remains unavailable"):
+        store.mark_query_index_dirty()
+
+    assert attempts == 1
+    assert not Path(store.query_index_dirty_path).exists()
     assert list(Path(store.dryml_dir).glob(".query-index.dirty.*.tmp")) == []
 
 
@@ -773,16 +811,16 @@ def test_stale_cdef_codec_rebuilds_before_decoding_and_preserves_objects(
     (product_root / "payload.bin").write_bytes(b"authoritative product")
     before = _protected_store_manifest(store)
 
-    with sqlite3.connect(store.query_index_path) as con:
-        con.execute(
-            "UPDATE catalog_state SET cdef_codec_version = ? WHERE singleton = 1",
-            (CDEF_CODEC_VERSION - 1,),
-        )
-        con.execute(
-            "UPDATE definitions SET cdef_blob = ?",
-            (b"not a CDef envelope",),
-        )
-
+    with closing(sqlite3.connect(store.query_index_path)) as con:
+        with con:
+            con.execute(
+                "UPDATE catalog_state SET cdef_codec_version = ? WHERE singleton = 1",
+                (CDEF_CODEC_VERSION - 1,),
+            )
+            con.execute(
+                "UPDATE definitions SET cdef_blob = ?",
+                (b"not a CDef envelope",),
+            )
     reopened_store = DirStore(store.base_dir, query_index=config)
     reopened_repo = Repo(stores=reopened_store)
 
@@ -822,12 +860,13 @@ def test_retired_object_definition_fails_index_recovery_without_mutation(
         def_path.parent.mkdir(parents=True)
         def_path.write_bytes(pickle.dumps(cdef, protocol=5))
         store.rebuild_query_index()
-        with sqlite3.connect(store.query_index_path) as con:
-            con.execute(
-                "UPDATE catalog_state SET cdef_codec_version = ? "
-                "WHERE singleton = 1",
-                (CDEF_CODEC_VERSION - 1,),
-            )
+        with closing(sqlite3.connect(store.query_index_path)) as con:
+            with con:
+                con.execute(
+                    "UPDATE catalog_state SET cdef_codec_version = ? "
+                    "WHERE singleton = 1",
+                    (CDEF_CODEC_VERSION - 1,),
+                )
         before = _protected_store_manifest(store)
 
     reopened_store = DirStore(store_path, query_index=config)

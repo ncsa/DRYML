@@ -44,6 +44,21 @@ class SQLiteConnectionManager:
         return Path(self.config.path)
 
     def connection(self, *, readonly: bool = False):
+        _, con = self._acquire_connection(readonly=readonly, reserve_lease=False)
+        return con
+
+    def _acquire_connection(self, *, readonly: bool, reserve_lease: bool):
+        """Return a registry key and connection.
+
+        Args:
+            readonly: Open or reuse a read-only connection when true.
+            reserve_lease: Increment the shared lease count before returning.
+
+        Returns:
+            The registry key and SQLite connection. Lease reservation, when
+            requested, is atomic with registry acquisition.
+        """
+
         key = self._key(readonly=readonly)
         path = self.path
         with _REGISTRY_LOCK:
@@ -61,7 +76,9 @@ class SQLiteConnectionManager:
                     self._owned_keys.pop(key, None)
                 else:
                     self._claim_key_locked(key, entry)
-                    return entry.con
+                    if reserve_lease:
+                        entry.lease_count += 1
+                    return key, entry.con
             else:
                 self._owned_keys.pop(key, None)
 
@@ -106,25 +123,26 @@ class SQLiteConnectionManager:
                 else:
                     con.close()
                     self._claim_key_locked(key, entry)
-                    return entry.con
+                    if reserve_lease:
+                        entry.lease_count += 1
+                    return key, entry.con
             else:
                 self._owned_keys.pop(key, None)
             entry = _SharedConnectionEntry(con, file_identity)
             _CONNECTION_REGISTRY[key] = entry
             self._claim_key_locked(key, entry)
-        return con
+            if reserve_lease:
+                entry.lease_count += 1
+        return key, con
 
     @contextmanager
     def lease(self, *, readonly: bool = False):
         """Yield a shared connection and defer physical close while in use."""
 
-        con = self.connection(readonly=readonly)
-        key = self._key(readonly=readonly)
-        with _REGISTRY_LOCK:
-            entry = _CONNECTION_REGISTRY.get(key)
-            if entry is None or entry.con is not con:
-                raise QueryIndexError("SQLite connection registry changed while acquiring a lease.")
-            entry.lease_count += 1
+        key, con = self._acquire_connection(
+            readonly=readonly,
+            reserve_lease=True,
+        )
         try:
             yield con
         finally:
