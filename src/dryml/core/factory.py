@@ -194,7 +194,7 @@ class FactorySpec:
 
     def __stable_leaf_bytes__(self):
         digest = stable_hash_function((
-            "dryml.core2.FactorySpec",
+            "dryml.core.FactorySpec",
             self.target,
             self.args,
             self.kwargs,

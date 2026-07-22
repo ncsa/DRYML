@@ -2,7 +2,7 @@ import sys
 
 import dryml
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec

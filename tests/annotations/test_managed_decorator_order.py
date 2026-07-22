@@ -5,7 +5,7 @@ import inspect
 import dryml
 import dryml.annotations as ann
 import pytest
-from dryml.core2 import Object
+from dryml.core import Object
 from dryml.managed import ManagedOutput, managed
 
 

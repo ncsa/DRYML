@@ -1,17 +1,20 @@
+import hashlib
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import threading
 import time
 import pytest
 
-from dryml.core2 import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
-from dryml.core2.query.model import QueryIndexUnavailable, ValidationIssue, ValidationReport
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.index as sqlite_index_module
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.store.dir import DirStore
-from dryml.core2.utils.general import pickle_save
+from dryml.core import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
+from dryml.core.query.model import QueryIndexUnavailable, ValidationIssue, ValidationReport
+from dryml.core.query.codecs import CDEF_CODEC_VERSION
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.general import pickle_save
 
 
 class QueryIndexDirLeaf(Object):
@@ -44,6 +47,15 @@ class FailingSaveDirLeaf(Object):
 
     def save_state_to_dir_imp(self, dest_dir, revision=None):
         raise RuntimeError("object save failed")
+
+
+def _object_manifest(store):
+    root = Path(store.object_root_dir)
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def test_dirstore_query_index_default_is_auto_and_lazy(tmp_path):
@@ -196,7 +208,7 @@ def test_dirstore_sqlite_index_can_initialize_empty_sidecar(tmp_path):
 
 
 def test_sqlite_policy_unavailable_error_message(monkeypatch, tmp_path):
-    import dryml.core2.store.dir as dir_module
+    import dryml.core.store.dir as dir_module
 
     monkeypatch.setattr(dir_module, "sqlite_available", lambda: False)
     store = DirStore(tmp_path / "store", query_index="sqlite")
@@ -494,6 +506,35 @@ def test_sqlite_dirty_index_rebuilds_and_clears_marker(tmp_path):
     assert repo2.query(selector).stored().count() == 1
     assert not reopened_store.query_index_is_dirty()
     assert repo2.index_status(store=reopened_store)[0].state == "ready"
+
+
+def test_stale_cdef_codec_rebuilds_before_decoding_and_preserves_objects(
+    tmp_path,
+):
+    config = SQLiteQueryIndexConfig(journal_mode="delete")
+    store = DirStore(tmp_path / "store", query_index=config)
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("codec-rebuild", repo=repo)
+    repo.save_object(obj)
+    before = _object_manifest(store)
+
+    with sqlite3.connect(store.query_index_path) as con:
+        con.execute(
+            "UPDATE catalog_state SET cdef_codec_version = ? WHERE singleton = 1",
+            (CDEF_CODEC_VERSION - 1,),
+        )
+        con.execute(
+            "UPDATE definitions SET cdef_blob = ?",
+            (b"not a CDef envelope",),
+        )
+
+    reopened_store = DirStore(store.base_dir, query_index=config)
+    reopened_repo = Repo(stores=reopened_store)
+
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+    assert reopened_repo.query(selector).stored().count() == 1
+    assert reopened_store.query_index_status().state == "ready"
+    assert _object_manifest(reopened_store) == before
 
 
 def test_repo_rebuild_index_rebuilds_sqlite_sidecar(tmp_path):

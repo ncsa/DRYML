@@ -20,12 +20,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from dryml.code import CodeTargetSpec, target_from_callable, target_from_definition_method
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.object import Object
-from dryml.core2.methods import bound_method_parts
-from dryml.core2.repo import Repo
-from dryml.core2.symbol import resolve_symbol
-from dryml.core2.utils.general import pickle_load
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.object import Object
+from dryml.core.methods import bound_method_parts
+from dryml.core.repo import Repo
+from dryml.core.symbol import resolve_symbol
+from dryml.core.utils.general import pickle_load
 from dryml.formats.refs import format_cdef_id
 from dryml.operations import (
     OPERATION_KINDS,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dryml.core2.canonical import (
+from dryml.core.canonical import (
     NodeKind,
     from_canonical,
     is_canonical_value,
@@ -9,14 +9,14 @@ from dryml.core2.canonical import (
     thaw_value,
     to_canonical,
 )
-from dryml.core2.dtype import DType
-from dryml.core2.repo import Repo
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core.dtype import DType
+from dryml.core.repo import Repo
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec
 
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.object import Object
-from dryml.core2.repo import default_repo
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.object import Object
+from dryml.core.repo import default_repo
 
 
 class _DummyObject(Object):
@@ -54,6 +54,15 @@ def test_enum_values_are_identity_values():
 
     assert is_runtime_leaf(Dynamic)
     assert is_runtime_leaf(Layout.DENSE)
+
+
+def test_similarly_prefixed_module_is_not_treated_as_core():
+    class SimilarPrefix:
+        pass
+
+    SimilarPrefix.__module__ = "dryml.corex"
+
+    assert not is_canonical_value(SimilarPrefix)
 
 
 def test_to_canonical_passes_dtype_through_unchanged():

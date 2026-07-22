@@ -1,5 +1,5 @@
 import dryml.annotations as ann
-from dryml.core2.arg_roles import RefCDef
+from dryml.core.arg_roles import RefCDef
 
 
 @ann.require(namespace="environment", fragment={"requirements": ["module-owner"]})

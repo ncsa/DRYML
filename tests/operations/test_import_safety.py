@@ -16,7 +16,7 @@ def test_operations_import_is_lightweight():
         """
 import sys
 import dryml.operations
-for name in ["dryml.core2", "dryml." + "execute", "dryml." + "context", "dryml.environments", "tensorflow", "torch", "jax", "ray"]:
+for name in ["dryml.core", "dryml." + "execute", "dryml." + "context", "dryml.environments", "tensorflow", "torch", "jax", "ray"]:
     assert name not in sys.modules, name
         """
     )
@@ -30,6 +30,6 @@ import dryml
 assert "dryml.operations" not in sys.modules
 _ = dryml.operations
 assert "dryml.operations" in sys.modules
-assert "dryml.core2" not in sys.modules
+assert "dryml.core" not in sys.modules
         """
     )

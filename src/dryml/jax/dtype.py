@@ -1,4 +1,4 @@
-from dryml.core2.dtype import DType, normalize_dtype
+from dryml.core.dtype import DType, normalize_dtype
 from typing import Any
 
 def _dtype_jax(self):

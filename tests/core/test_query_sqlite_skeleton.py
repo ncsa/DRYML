@@ -3,11 +3,11 @@ from uuid import UUID
 
 import pytest
 
-from dryml.core2.query.model import QueryIndexDirty, QueryIndexIncompatible
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.connection as connection_module
-from dryml.core2.query.sqlite.connection import SQLiteConnectionManager
-from dryml.core2.query.sqlite.schema import (
+from dryml.core.query.model import QueryIndexDirty, QueryIndexIncompatible
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.connection as connection_module
+from dryml.core.query.sqlite.connection import SQLiteConnectionManager
+from dryml.core.query.sqlite.schema import (
     IndexSemanticVersion,
     SQLITE_QUERY_INDEX_APPLICATION_ID,
     SQLITE_QUERY_INDEX_SCHEMA_VERSION,
@@ -16,7 +16,7 @@ from dryml.core2.query.sqlite.schema import (
     initialize_schema,
     validate_schema,
 )
-from dryml.core2.query.sqlite.utils import is_sqlite_busy_error, wal_runtime_is_known_safe
+from dryml.core.query.sqlite.utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -319,7 +319,7 @@ def test_index_semantic_version_and_compatibility_decision():
 def test_codec_version_mismatch_requests_rebuild():
     expected = expected_semantic_version(store_key="store-a", canonical_version=1)
     actual = expected.catalog_state()
-    actual["cdef_codec_version"] = expected.cdef_codec_version + 1
+    actual["cdef_codec_version"] = expected.cdef_codec_version - 1
 
     assert compatibility_decision(actual, expected=expected) == "rebuild"
 

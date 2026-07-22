@@ -6,7 +6,7 @@ from typing import Any
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, FunctionAnalyzer
 from dryml.code.facts import DiagnosticFact, SymbolFact
 from dryml.code.targets import CodeTarget
-from dryml.core2.symbol import ImportRef, SourceSpec, symbol_ref
+from dryml.core.symbol import ImportRef, SourceSpec, symbol_ref
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from dryml.core2.methods import bound_method_parts, descriptor_function
+from dryml.core.methods import bound_method_parts, descriptor_function
 
 from .facts import DiagnosticFact, json_compatible
 

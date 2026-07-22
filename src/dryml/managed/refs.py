@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dryml.core2.arg_roles import RefCDef
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.object import Object
+from dryml.core.arg_roles import RefCDef
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.object import Object
 
 
 class ManagedOutputRef(Object):

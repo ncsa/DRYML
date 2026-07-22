@@ -6,9 +6,9 @@ import numpy as np
 import pytest
 
 from dryml.artifacts import CachedDataset
-from dryml.core2 import TensorSpec
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.store.dir import DirStore
+from dryml.core import TensorSpec
+from dryml.core.cardinality import Cardinality
+from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset, Dataset, GeneratorDataset, Shuffle
 from dryml.data.resume import (
     DatasetResumeCapability,

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core2.symbol import ImportRef, SourceSpec, symbol_ref
-from dryml.core2.definition import Definition, ConcreteDefinition
-from dryml.core2.object import Object
-from dryml.core2.freeze import FrozenTuple
-from dryml.core2.utils.general import pickler, unpickler
+from dryml.core.symbol import ImportRef, SourceSpec, symbol_ref
+from dryml.core.definition import Definition, ConcreteDefinition
+from dryml.core.object import Object
+from dryml.core.freeze import FrozenTuple
+from dryml.core.utils.general import pickler, unpickler
 import numpy as np
 
 
@@ -276,7 +276,7 @@ def test_source_spec_nested_uses_outer_parameter():
 
 
 def test_source_spec_nested_uses_outer_parameter_args():
-    from dryml.core2.dtype import dtype
+    from dryml.core.dtype import dtype
     import numpy as np
 
     def outer(scale, dtype=dtype("float32")):
@@ -288,7 +288,7 @@ def test_source_spec_nested_uses_outer_parameter_args():
     assert isinstance(spec, SourceSpec)
     assert spec.kind == "function"
     assert {name: ref.import_path() for name, ref in spec.imports.items()} == {
-        "dtype": "dryml.core2.dtype:normalize_dtype"
+        "dtype": "dryml.core.dtype:normalize_dtype"
     }
 
     g = spec.resolve()
@@ -296,7 +296,7 @@ def test_source_spec_nested_uses_outer_parameter_args():
 
 
 def test_source_spec_captures_kwdefault_factory():
-    from dryml.core2.dtype import dtype
+    from dryml.core.dtype import dtype
 
     def outer(*, dt=dtype("float32")):
         def f(x):
@@ -305,7 +305,7 @@ def test_source_spec_captures_kwdefault_factory():
 
     spec = symbol_ref(outer)
     assert {name: ref.import_path() for name, ref in spec.imports.items()} == {
-        "dtype": "dryml.core2.dtype:normalize_dtype"
+        "dtype": "dryml.core.dtype:normalize_dtype"
     }
 
 

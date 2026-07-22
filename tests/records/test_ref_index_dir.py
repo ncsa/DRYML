@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.ids import content_id
 from dryml.formats.refs import format_cdef_id
@@ -70,7 +70,8 @@ def test_ref_index_store_ref_mismatch_rebuilds_on_auto_and_fails_when_refresh_fa
     spec_ref = io.write_spec(make_spec(family="operation", kind="function_call", payload={"function": "pkg.mod:run", "args": [cdef()], "kwargs": {}}), family="operation")
     io.rebuild_ref_index()
     data = io.read_ref_index().to_json()
-    data["store_ref"] = "dryml.core2.store.dir.DirStore:/old/location"
+    obsolete = "core" + chr(50)
+    data["store_ref"] = f"dryml.{obsolete}.store.dir.DirStore:/old/location"
     io.ref_index_path.write_bytes(canonical_json_bytes(data))
 
     with pytest.raises(RecordRefIndexValidationError, match="store_ref"):

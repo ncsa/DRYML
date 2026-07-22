@@ -12,7 +12,7 @@ HEAVY_FRAMEWORK_TOP_LEVEL_MODULES = frozenset(
 
 EXPECTED_DRYML_ALL = (
     "annotations",
-    "core2",
+    "core",
     "dispatch",
     "artifacts",
     "env",
@@ -133,6 +133,32 @@ def test_top_level_public_all_is_frozen_and_code_remains_explicit():
         "assert 'dryml.dispatch' not in sys.modules; "
         f"assert not {{name.split('.', 1)[0] for name in sys.modules}} "
         f"& {HEAVY_FRAMEWORK_TOP_LEVEL_MODULES!r}"
+    )
+
+
+def test_core_route_is_lazy_stable_and_has_no_obsolete_alias():
+    """The permanent package is unique and the removed route stays absent."""
+
+    _run_fresh_python(
+        "import importlib, importlib.util, dryml, sys\n"
+        "obsolete = 'core' + chr(50)\n"
+        "obsolete_path = 'dryml.' + obsolete\n"
+        "assert 'dryml.core' not in sys.modules\n"
+        "assert obsolete not in dryml.__dict__\n"
+        "assert importlib.util.find_spec(obsolete_path) is None\n"
+        "core = importlib.import_module('dryml.core')\n"
+        "assert dryml.core is core\n"
+        "assert dryml.core is core\n"
+        "assert dryml.Definition is core.Definition\n"
+        "try:\n"
+        "    importlib.import_module(obsolete_path)\n"
+        "except ModuleNotFoundError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError(\n"
+        "        'obsolete core package remained importable'\n"
+        "    )\n"
+        "assert obsolete_path not in sys.modules\n"
     )
 
 

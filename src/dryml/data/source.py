@@ -6,7 +6,7 @@ from typing import Any, Callable
 import itertools
 import numpy as np
 
-from dryml.core2.tensor_spec import (
+from dryml.core.tensor_spec import (
     SpecTree,
     TensorSpec,
     SpecHint,
@@ -14,8 +14,8 @@ from dryml.core2.tensor_spec import (
     detect_spec_tree,
     unbatch_spec_tree,
 )
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.utils.recurse import first_leaf, iter_leaves, map_leaves
+from dryml.core.cardinality import Cardinality
+from dryml.core.utils.recurse import first_leaf, iter_leaves, map_leaves
 from .dataset import Dataset
 
 

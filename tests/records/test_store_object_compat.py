@@ -2,8 +2,8 @@ import os
 import shutil
 from pathlib import Path
 
-from dryml.core2 import Object, Repo, load_object
-from dryml.core2.store.dir import DirStore
+from dryml.core import Object, Repo, load_object
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.operations import make_function_call_spec
 from dryml.records import RecordStoreIO, StorageRef, make_record, make_spec

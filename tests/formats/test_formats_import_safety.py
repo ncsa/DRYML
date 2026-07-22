@@ -17,7 +17,7 @@ def test_formats_import_is_lightweight():
 import sys
 import dryml.formats
 assert "dryml.environments" not in sys.modules
-assert "dryml.core2" not in sys.modules
+assert "dryml.core" not in sys.modules
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 assert "jax" not in sys.modules
@@ -35,7 +35,7 @@ assert "dryml.formats" not in sys.modules
 _ = dryml.formats
 assert "dryml.formats" in sys.modules
 assert "dryml.environments" not in sys.modules
-assert "dryml.core2" not in sys.modules
+assert "dryml.core" not in sys.modules
         """
     )
 

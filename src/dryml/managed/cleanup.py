@@ -8,8 +8,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from dryml.core2.repo import make_store
-from dryml.core2.store.store import Store
+from dryml.core.repo import make_store
+from dryml.core.store.store import Store
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.records import (
     RealizationRecord,

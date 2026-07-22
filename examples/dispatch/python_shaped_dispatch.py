@@ -10,9 +10,9 @@ import sys
 import tempfile
 
 import dryml
-from dryml.core2.object import Object
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core.object import Object
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.environments import PythonExecutableSpec
 
 

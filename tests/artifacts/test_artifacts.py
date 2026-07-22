@@ -3,8 +3,8 @@ import pytest
 
 import dryml.artifacts
 from dryml.artifacts import Scalar, ScalarAvg
-from dryml.core2 import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 from dryml.records import DataRecord
 

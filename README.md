@@ -37,7 +37,7 @@ Follow this workflow in order when starting with DRYML.
 
 ```python
 import dryml
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 store = DirStore("work/store", query_index="none")
 ```
@@ -220,7 +220,7 @@ ConcreteDefinition(
 
 | Submodule | Use it for |
 |---|---|
-| `dryml.core2` | Core `Object`, `Definition`, `ConcreteDefinition`, repository, store, selector, and graph-query machinery. |
+| `dryml.core` | Core `Object`, `Definition`, `ConcreteDefinition`, repository, store, selector, and graph-query machinery. |
 | `dryml.data` | Re-iterable datasets, source adapters, batching/shuffling, mapping, projection, and other dataset pipeline building blocks. |
 | `dryml.models` | Composable experiment/model abstractions, train functions, train state, and backend model wrappers. |
 | `dryml.tf`, `dryml.torch`, `dryml.jax`, `dryml.numpy` | Framework-specific dtype, tensor spec, and backend integration utilities without requiring every framework at import time. |
@@ -282,7 +282,7 @@ Local execution goes through `dryml.dispatch` and canonical operation specs:
 
 ```python
 import dryml
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 operation = dryml.operations.attach_operation_id(
     dryml.operations.make_function_call_spec("my_package.tasks:add", args=[2, 3])

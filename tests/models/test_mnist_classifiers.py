@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import Cast, Flatten, Map, Scale, Select, TFDSAdapter, Zip
 from dryml.metrics import categorical_accuracy
 from dryml.models import Experiment

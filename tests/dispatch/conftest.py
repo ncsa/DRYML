@@ -30,7 +30,7 @@ def target_module(tmp_path):
             import time
 
             import dryml
-            from dryml.core2.object import Pickleable
+            from dryml.core.object import Pickleable
             from dryml.managed import ManagedOutput, OperationResult, current_operation_context, managed
             from dryml.records import make_representation_spec
             from dryml.runtime import BOOTSTRAP_MARKER_ENV, active_runtime, active_runtime_mode, import_configured_framework

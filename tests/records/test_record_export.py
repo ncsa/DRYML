@@ -1,10 +1,10 @@
 import zipfile
 from io import BytesIO
 
-import core2_objects as objects
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.zip import ZipExportStore, ZipStore
+import core_objects as objects
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
+from dryml.core.store.zip import ZipExportStore, ZipStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
     AdapterRecord,

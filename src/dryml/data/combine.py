@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import merge_spec_trees
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import merge_spec_trees
 from dryml.data.dataset import Dataset, as_cardinality, dataset_cardinality
 
 

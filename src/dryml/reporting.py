@@ -247,7 +247,7 @@ def debug(name: str, message: str, **fields: Any) -> DrymlEvent | None:
 
 def _current_reporting_config() -> ReportingConfig:
     try:
-        from dryml.core2.session import get_config
+        from dryml.core.session import get_config
 
         return get_config().reporting
     except Exception:

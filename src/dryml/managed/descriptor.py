@@ -7,7 +7,7 @@ from functools import update_wrapper
 from types import MappingProxyType
 from typing import Any, Callable
 
-from dryml.core2.definition import ConcreteDefinition, Definition
+from dryml.core.definition import ConcreteDefinition, Definition
 
 from .declarations import (
     DelegatedOutputs,

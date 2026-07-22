@@ -8,17 +8,17 @@ import time
 
 import pytest
 
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.model import QueryIndexBusy, QueryIndexError
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.index as sqlite_index_module
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.repo_plan import SaveAction, SavePlan, execute_save_plan
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
-from dryml.core2.utils.general import pickle_save
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.model import QueryIndexBusy, QueryIndexError
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.repo_plan import SaveAction, SavePlan, execute_save_plan
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
+from dryml.core.utils.general import pickle_save
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -29,11 +29,11 @@ import json
 from pathlib import Path
 import time
 
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.query.sqlite.index import (
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.index import (
     SQLiteStoreQueryIndex,
     _EncodedNode,
     _bump_generation,
@@ -41,9 +41,9 @@ from dryml.core2.query.sqlite.index import (
     _relative_def_path,
     _resolve_definition_id,
 )
-from dryml.core2.query.utils import stable_hash_to_blob
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
+from dryml.core.query.utils import stable_hash_to_blob
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
 
 
 def cdef(name):

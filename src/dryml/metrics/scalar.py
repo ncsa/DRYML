@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dryml.core2.tensor_spec import iter_specs
+from dryml.core.tensor_spec import iter_specs
 from dryml.data import Batch, Collect, Map, Project, Select
 
 

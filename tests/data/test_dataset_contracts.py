@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import Dynamic, TensorSpec
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data import ArrayDataset, Batch, Cast, Chain, GeneratorDataset, Map, NpyFileDataset, Repeat, Shuffle, Skip, Take, Unbatch, Zip
 from dryml.data.dataset import Dataset
 

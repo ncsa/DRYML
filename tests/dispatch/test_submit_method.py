@@ -5,9 +5,9 @@ import sys
 
 import pytest
 
-from dryml.core2.definition import Definition
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core.definition import Definition
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, run
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.environments import PythonExecutableSpec

@@ -1,9 +1,9 @@
-from dryml.core2.utils.general import get_class_str, get_class_from_str, \
+from dryml.core.utils.general import get_class_str, get_class_from_str, \
     get_unique_objects, get_unique_concrete_definitions
-import core2_objects as objects
+import core_objects as objects
 import pytest
-from dryml.core2.errors import CycleError
-from dryml.core2.utils.recurse import cycle_detect
+from dryml.core.errors import CycleError
+from dryml.core.utils.recurse import cycle_detect
 
 
 def test_class_utils_1():

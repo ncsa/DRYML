@@ -4,7 +4,7 @@ import inspect
 
 import pytest
 
-from dryml.core2 import Object
+from dryml.core import Object
 from dryml.managed import (
     ManagedLifecycleUnavailableError,
     ManagedOutput,

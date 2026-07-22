@@ -178,7 +178,7 @@ Record refs serialize compactly as the raw record ID. Located refs serialize as 
 
 ```json
 {
-  "store_ref": "dryml.core2.store.dir.DirStore:/path/to/store",
+  "store_ref": "dryml.core.store.dir.DirStore:/path/to/store",
   "record_id": "record-v1-..."
 }
 ```

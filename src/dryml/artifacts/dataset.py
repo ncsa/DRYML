@@ -22,10 +22,10 @@ from dryml.artifacts.representations.parquet import (
     iter_parquet_sequence,
     numpy_to_parquet_adapter_registry,
 )
-from dryml.core2 import RefCDef, Repo
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.tensor_spec import SpecTree
+from dryml.core import RefCDef, Repo
+from dryml.core.cardinality import Cardinality
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.tensor_spec import SpecTree
 from dryml.data.dataset import Dataset, as_cardinality, dataset_cardinality
 from dryml.data.resume import (
     ResumeMode,
@@ -67,7 +67,7 @@ _DEFAULT_SHARD_BYTES = 64 * 1024 * 1024
 class CachedDataset(Artifact, Dataset):
     """A lightweight Dataset definition backed by one active managed result.
 
-    ``src`` is a non-materializing :class:`~dryml.core2.RefCDef` edge. Element
+    ``src`` is a non-materializing :class:`~dryml.core.RefCDef` edge. Element
     specification, cardinality, and order semantics are copied into this
     definition so loading or iterating a completed cache never constructs the
     source. Heavy rows live only in immutable sharded ``DataRecord`` products.

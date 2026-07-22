@@ -11,7 +11,7 @@ control—the canonical `OperationSpec` IR.
 | Legacy context resource dictionaries | [`dryml.world.req(...)`, `dryml.world.default(...)`, `WorldRequirement`, and `WorldSpec`](../world_runtime.md#boundaries) | A requested world and this process's actual allocation are distinct. |
 | Legacy execute/process helpers | [`dryml.dispatch.run(function, ...)` or `run(cdef, "method", ...)`](../dispatch.md#python-shaped-dispatch) | Normal users pass functions or CDef plus method name. |
 | Manual OperationSpec-first examples | [Python-shaped dispatch](../dispatch.md#python-shaped-dispatch) | Explicit [`OperationSpec`](../operations.md) remains supported advanced IR. |
-| `dryml.code` method-model imports | [`dryml.core2.methods`](../architecture/code_analysis.md#relationship-to-method-and-method-handles) | Compatibility aliases remain warning-free; no deprecation is issued. |
+| `dryml.code` method-model imports | [`dryml.core.methods`](../architecture/code_analysis.md#relationship-to-method-and-method-handles) | Compatibility aliases remain warning-free; no deprecation is issued. |
 | Removed `dryml.graph` prototypes | [`dryml.code` analyzers and `trace(...)`](../architecture/code_analysis.md#dynamic-trace-contract) | [No compatibility package exists](../dispatch.md#unsupported-graph-prototype-package); static possibilities and dynamic observations differ. |
 | Notebook process assumptions | [Current environment/world defaults and active runtime allocation](../world_runtime.md#requested-defaults-allocation-and-plain-mode) | Setting defaults does not allocate resources. |
 | Local execution with checks | [`runtime.plain()`](../world_runtime.md#requested-defaults-allocation-and-plain-mode) | Plain mode is inline enforcement-off execution, not dispatched isolation. |
@@ -31,7 +31,7 @@ Then dispatch it from another module or notebook:
 
 ```python
 import dryml
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 
 from my_package.tasks import add

@@ -1,4 +1,4 @@
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id, format_ref_cdef
 from dryml.operations import attach_operation_id, make_function_call_spec, make_method_call_spec
 from dryml.records import RecordStoreIO

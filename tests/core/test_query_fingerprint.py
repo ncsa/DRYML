@@ -1,16 +1,16 @@
 import pytest
 
-import core2_objects as objects
-from dryml.core2 import Definition, SKIP_ARGS, Satisfies, Selector
-from dryml.core2.definition import selector_match
-from dryml.core2.freeze import FrozenList
-from dryml.core2.query.fingerprint import (
+import core_objects as objects
+from dryml.core import Definition, SKIP_ARGS, Satisfies, Selector
+from dryml.core.definition import selector_match
+from dryml.core.freeze import FrozenList
+from dryml.core.query.fingerprint import (
     legacy_requirements_satisfied,
     legacy_selector_requirements,
     legacy_target_fingerprint,
     target_local_fingerprint,
 )
-from dryml.core2.utils.stable_hash import stable_hash_function
+from dryml.core.utils.stable_hash import stable_hash_function
 
 
 def assert_no_fingerprint_false_negative(selector, target, *, class_match="selector"):

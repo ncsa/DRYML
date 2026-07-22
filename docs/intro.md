@@ -36,7 +36,7 @@ Definition
 ## Minimal Example
 
 ```python
-from dryml.core2 import Object, Repo
+from dryml.core import Object, Repo
 
 
 class MyThing(Object):

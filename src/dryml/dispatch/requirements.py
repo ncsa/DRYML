@@ -27,8 +27,8 @@ from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult
 from dryml.code.facts import AnnotationFact, CodeFact, DiagnosticFact
 from dryml.code.probe import CodeProbeResult
 from dryml.code.targets import CodeTargetSpec
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.utils.general import pickle_load
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.utils.general import pickle_load
 from dryml.environments.records import EnvironmentRecord
 from dryml.environments.specs import EnvironmentSpec, PythonExecutableSpec, spec_from_data
 from dryml.runtime import RuntimeEnforcement, RuntimeMode

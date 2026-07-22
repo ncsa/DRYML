@@ -7,7 +7,7 @@ the probe service.
 from __future__ import annotations
 
 import dryml
-from dryml.core2.object import Object
+from dryml.core.object import Object
 
 
 BODY_EXECUTED = False

@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2 import Object, Repo
-from dryml.core2.repo import default_repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Object, Repo
+from dryml.core.repo import default_repo
+from dryml.core.store.dir import DirStore
 from dryml.managed import (
     AmbiguousManagedStoreError,
     ControlRequest,

@@ -1,9 +1,9 @@
-from dryml.core2.object import Object, Pickleable, UniqueID, Metadata
-from dryml.core2.utils.general import pickler, unpickler
+from dryml.core.object import Object, Pickleable, UniqueID, Metadata
+from dryml.core.utils.general import pickler, unpickler
 from copy import deepcopy
-from dryml.core2.object import Object
-from dryml.core2.utils.stable_hash import _stable_leaf_bytes
-from dryml.core2.utils.general import validate_class
+from dryml.core.object import Object
+from dryml.core.utils.stable_hash import _stable_leaf_bytes
+from dryml.core.utils.general import validate_class
 
 
 

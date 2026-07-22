@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.backend import Backend
-from dryml.core2.tensor_spec import Dynamic, TensorSpec
+from dryml.core.cardinality import Cardinality
+from dryml.core.backend import Backend
+from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data.dataset import Dataset, Map
 from dryml.data import (
     ArgMax,

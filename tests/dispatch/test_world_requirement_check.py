@@ -7,7 +7,7 @@ import sys
 import dryml
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
 from dryml.dispatch.errors import DispatchPlanningError

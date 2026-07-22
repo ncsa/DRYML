@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2 import Object, RefCDef, Repo
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.zip import ZipExportStore, ZipStore
+from dryml.core import Object, RefCDef, Repo
+from dryml.core.store.dir import DirStore
+from dryml.core.store.zip import ZipExportStore, ZipStore
 from dryml.managed import (
     ManagedOperationStore,
     ManagedOutput,

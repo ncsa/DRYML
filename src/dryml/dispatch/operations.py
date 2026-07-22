@@ -7,11 +7,11 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from dryml.core2.canonical import to_canonical
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.object import Object
-from dryml.core2.repo import Repo
-from dryml.core2.utils.general import pickle_load, pickle_save
+from dryml.core.canonical import to_canonical
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.object import Object
+from dryml.core.repo import Repo
+from dryml.core.utils.general import pickle_load, pickle_save
 from dryml.formats.refs import format_cdef_id, parse_cdef_id
 from dryml.operations import resolve_call_arguments
 from dryml.operations.errors import OperationResolutionError

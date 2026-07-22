@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from dryml.core2 import Definition, Object, RefCDef
+from dryml.core import Definition, Object, RefCDef
 from dryml.managed import (
     DelegatedOutputs,
     DuplicateOutputError,

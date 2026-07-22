@@ -3,12 +3,12 @@ from __future__ import annotations
 from dryml.code.analysis import CodeAnalysisContext, CodeAnalysisResult, FunctionAnalyzer
 from dryml.code.facts import MethodContractFact
 from dryml.code.targets import CodeTarget
-from dryml.core2.backend import Backend
-from dryml.core2.methods import BatchMode, Method, Traits
+from dryml.core.backend import Backend
+from dryml.core.methods import BatchMode, Method, Traits
 
 
 def _trait_selector_data(selector: Traits) -> dict[str, str | None]:
-    """Return the fixed typed wire form for a core2 trait selector.
+    """Return the fixed typed wire form for a core trait selector.
 
     Reading the declared slots avoids invoking a custom representation hook.
     Malformed selector metadata fails analysis rather than entering a fact.
@@ -29,7 +29,7 @@ def _trait_selector_data(selector: Traits) -> dict[str, str | None]:
 
 
 def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnalysisResult:
-    """Emit minimal DRYML Method contract facts from core2 semantics."""
+    """Emit minimal DRYML Method contract facts from core semantics."""
 
     if not context.include_method_contracts:
         return CodeAnalysisResult(target=target.spec)

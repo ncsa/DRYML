@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 import dryml.code as code
-from dryml.core2.methods import Method, traits
+from dryml.core.methods import Method, traits
 
 
 class CoreImportedMethod(Method):
@@ -17,7 +17,7 @@ class CoreImportedMethod(Method):
 def test_old_code_imports_are_warning_free_and_identity_compatible():
     source = """
 import dryml.code as code
-import dryml.core2.methods as methods
+import dryml.core.methods as methods
 from dryml.code.compiler_info import CompilerInfo
 from dryml.code.method import Method, traits
 from dryml.code.traits import BatchMode, Traits

@@ -3,9 +3,9 @@ import tempfile
 from pathlib import Path
 
 import dryml
-import core2_objects as objects
-from dryml.core2.repo import Repo, make_store
-from dryml.core2.store.zip import ZipStore
+import core_objects as objects
+from dryml.core.repo import Repo, make_store
+from dryml.core.store.zip import ZipStore
 
 
 def test_object_save_load_still_works_without_environment_records(store_resource_factory):
@@ -19,7 +19,7 @@ def test_object_save_load_still_works_without_environment_records(store_resource
     assert not (Path(store.base_dir) / "records").exists()
     assert not (Path(store.base_dir) / "environment").exists()
 
-    loaded_repo = dryml.core2.Repo([make_store(res.resource)])
+    loaded_repo = dryml.core.Repo([make_store(res.resource)])
     loaded = loaded_repo.get().one()
     assert loaded.definition == obj.definition
     assert loaded.get_message() == "Hello! environment guard"

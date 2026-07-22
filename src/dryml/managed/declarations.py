@@ -8,9 +8,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.links import DefLink
-from dryml.core2.symbol import resolve_symbol
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.links import DefLink
+from dryml.core.symbol import resolve_symbol
 
 from .errors import (
     DuplicateOutputError,

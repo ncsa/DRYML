@@ -9,7 +9,7 @@ import sys
 import time
 from typing import Any, Mapping
 
-from dryml.core2.repo import Repo
+from dryml.core.repo import Repo
 from dryml.records import ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, StorageRef, write_execution_record
 from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
 from dryml.runtime import RuntimeMode, activate

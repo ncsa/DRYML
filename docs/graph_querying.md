@@ -1507,20 +1507,16 @@ Optimize these only when benchmarks or real workflows show a problem.
 - Python `sqlite3` module documentation  
   https://docs.python.org/3/library/sqlite3.html
 
-### DRYML code references at `6695a21`
+### DRYML code references
 
-- Commit `6695a21`: Complete SQLite query optimizer relation planning  
+- The query implementation originated in commit `6695a21`: Complete SQLite
+  query optimizer relation planning
   https://github.com/ncsa/DRYML/commit/6695a21
-- Query package tree  
-  https://github.com/ncsa/DRYML/tree/6695a21/src/dryml/core2/query
-- SQLite query package tree  
-  https://github.com/ncsa/DRYML/tree/6695a21/src/dryml/core2/query/sqlite
-- `query/federation.py`  
-  https://raw.githubusercontent.com/ncsa/DRYML/6695a21/src/dryml/core2/query/federation.py
-- `query/sqlite/lowering.py`  
-  https://raw.githubusercontent.com/ncsa/DRYML/6695a21/src/dryml/core2/query/sqlite/lowering.py
-- `query/protocols.py`  
-  https://raw.githubusercontent.com/ncsa/DRYML/6695a21/src/dryml/core2/query/protocols.py
+- [Current query package](../src/dryml/core/query)
+- [Current SQLite query package](../src/dryml/core/query/sqlite)
+- [Current federation implementation](../src/dryml/core/query/federation.py)
+- [Current SQLite lowering implementation](../src/dryml/core/query/sqlite/lowering.py)
+- [Current query protocols](../src/dryml/core/query/protocols.py)
 
 ---
 

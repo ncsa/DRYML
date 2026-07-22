@@ -6,8 +6,8 @@ import inspect
 from collections.abc import Iterable
 from typing import Any
 
-from dryml.core2.store.store import Store
-from dryml.core2.symbol import resolve_symbol
+from dryml.core.store.store import Store
+from dryml.core.symbol import resolve_symbol
 from dryml.records import RealizationRecord, ResolvedRecord, require_product_integrity
 
 from .descriptor import ManagedMethod

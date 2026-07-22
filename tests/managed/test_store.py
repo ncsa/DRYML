@@ -4,10 +4,10 @@ from io import BytesIO
 
 import pytest
 
-from dryml.core2 import Repo
-from dryml.core2.repo import default_repo
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.zip import ZipExportStore, ZipStore
+from dryml.core import Repo
+from dryml.core.repo import default_repo
+from dryml.core.store.dir import DirStore
+from dryml.core.store.zip import ZipExportStore, ZipStore
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import (
     AmbiguousManagedStoreError,

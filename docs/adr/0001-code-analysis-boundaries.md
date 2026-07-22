@@ -8,11 +8,11 @@ focused/rolling verification deviation accepted for Sprint 9C closeout.
 
 ## Context
 
-Current helpers for callable inspection, source extraction, AST inspection, method dispatch, and symbol/source references are spread across `dryml.code` and `dryml.core2.symbol`. Upcoming dispatch and probe work needs reusable code facts without embedding analysis in dispatch.
+Current helpers for callable inspection, source extraction, AST inspection, method dispatch, and symbol/source references are spread across `dryml.code` and `dryml.core.symbol`. Upcoming dispatch and probe work needs reusable code facts without embedding analysis in dispatch.
 
 ## Decision
 
-`dryml.code` owns reusable analysis algorithms that discover facts about Python and DRYML code. `dryml.dispatch` consumes those facts and makes launch decisions. `dryml.annotations` owns fragment and merge semantics. `dryml.core2` owns stable semantic model primitives. `core2` must not depend on `dryml.code`; `dryml.code` may depend on `core2`.
+`dryml.code` owns reusable analysis algorithms that discover facts about Python and DRYML code. `dryml.dispatch` consumes those facts and makes launch decisions. `dryml.annotations` owns fragment and merge semantics. `dryml.core` owns stable semantic model primitives. `core` must not depend on `dryml.code`; `dryml.code` may depend on `core`.
 
 Static analysis and dynamic tracing share the `CodeAnalyzer`,
 `CodeAnalysisContext`, `CodeAnalysisResult`, fact, and diagnostic protocol.
@@ -59,7 +59,7 @@ Putting analysis inside dispatch would duplicate algorithms and tie them to one 
 - `src/dryml/code/ast_tools.py`
 - `src/dryml/code/method.py`
 - `src/dryml/code/traits.py`
-- `src/dryml/core2/symbol.py`
+- `src/dryml/core/symbol.py`
 
 ## Follow-up Work
 
@@ -69,7 +69,7 @@ explicit dispatch policy and bounded planning carrier for accepted facts. Its
 maintained-full and final-candidate focused/rolling exceptions, including required
 future rerun conditions, are recorded in ADRs 0006 and 0007. Unchecked graph
 prototypes remain absent from tracked distributions. Sprint 2 reviewed the
-`Method` model migration toward `core2.methods`. Alias-aware static resolution,
+`Method` model migration toward `core.methods`. Alias-aware static resolution,
 dynamic alias provenance, and general Python call tracing remain explicitly
 deferred under ADR 0008; ordinary dynamic aliases to admitted Definition proxies
 already retain normal Python identity and call behavior.

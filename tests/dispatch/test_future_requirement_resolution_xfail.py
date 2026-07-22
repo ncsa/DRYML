@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, PickledCallable
 
 

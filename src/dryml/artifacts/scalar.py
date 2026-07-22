@@ -5,9 +5,9 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from dryml.core2 import RefCDef, Repo
-from dryml.core2.repo import get_default_repo
-from dryml.core2.utils.recurse import iter_leaves
+from dryml.core import RefCDef, Repo
+from dryml.core.repo import get_default_repo
+from dryml.core.utils.recurse import iter_leaves
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import ManagedOutput, current_operation_context, managed, resolve_managed_store

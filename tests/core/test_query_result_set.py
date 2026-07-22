@@ -1,9 +1,9 @@
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
-from dryml.core2.query import QueryCardinalityError, QueryDomainError
-from dryml.core2.query.result import QueryBackedDefinitionResultSet
-from dryml.core2.store.dir import DirStore
+from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core.query import QueryCardinalityError, QueryDomainError
+from dryml.core.query.result import QueryBackedDefinitionResultSet
+from dryml.core.store.dir import DirStore
 
 
 class ResultLeaf(Object):

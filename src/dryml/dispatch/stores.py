@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 from .errors import DispatchPlanningError, WorkerHandshakeError
 from .protocol import WorkerStoreRef

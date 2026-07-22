@@ -9,8 +9,8 @@ import pytest
 
 from dryml.code import DynamicTracePolicy
 from dryml.code.facts import CodeFact, DiagnosticFact
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, ExecutionEnvelope
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
 from dryml.formats import json_ready

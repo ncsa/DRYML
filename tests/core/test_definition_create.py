@@ -1,7 +1,7 @@
 import numpy as np
-import core2_objects as objects
-from dryml.core2.definition import Definition, ConcreteDefinition
-from dryml.core2.symbol import ImportRef
+import core_objects as objects
+from dryml.core.definition import Definition, ConcreteDefinition
+from dryml.core.symbol import ImportRef
 
 ### Tests for methods of creating definitions. We verify they have the intended properties.
 

@@ -1,7 +1,7 @@
 import dryml
 
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import RepresentationRequirement, StorageRef, StoredStateRecord, find_compatible_state_record, make_representation_spec
 

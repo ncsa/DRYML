@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dryml.core2.methods import Method
-from dryml.core2.tensor_spec import Dynamic, batch_spec_tree, iter_specs
+from dryml.core.methods import Method
+from dryml.core.tensor_spec import Dynamic, batch_spec_tree, iter_specs
 
 
 class Model(Method):

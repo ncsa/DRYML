@@ -9,7 +9,7 @@ import dryml
 import pytest
 
 from dryml.dispatch import Dispatcher
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.environments import CurrentEnvironmentSpec, EnvironmentRegistry
 from dryml.runtime import active_runtime
 from dryml.runtime.allocation import is_no_allocation

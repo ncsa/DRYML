@@ -1,12 +1,12 @@
 import pytest
 
-from dryml.core2 import Object, Repo, Serializable
-from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
-from dryml.core2.query.path import Arg, GraphPath, Key, SetMember, get_subtree
-from dryml.core2.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
-from dryml.core2.repo_plan import GraphApplyResult, RuntimeBindingConflict, collect_runtime_roots
-from dryml.core2.store.dir import DirStore
-from dryml.core2.utils.general import pickle_load, pickle_save
+from dryml.core import Object, Repo, Serializable
+from dryml.core.policies import RepoLoadOptions, RepoSaveOptions
+from dryml.core.query.path import Arg, GraphPath, Key, SetMember, get_subtree
+from dryml.core.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
+from dryml.core.repo_plan import GraphApplyResult, RuntimeBindingConflict, collect_runtime_roots
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.general import pickle_load, pickle_save
 
 
 class GraphLeaf(Object):

@@ -1,8 +1,8 @@
 import importlib
 import sys
 
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.formats.refs import format_cdef_id

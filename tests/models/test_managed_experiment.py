@@ -10,9 +10,9 @@ import pytest
 
 from dryml.artifacts import CachedDataset, PARQUET_KIND, PARQUET_REPRESENTATION
 from dryml.artifacts.representations.parquet import write_parquet_sequence
-from dryml.core2 import Repo
-from dryml.core2.object import Pickleable
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.object import Pickleable
+from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec

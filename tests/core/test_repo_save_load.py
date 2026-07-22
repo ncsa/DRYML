@@ -1,18 +1,18 @@
 import dryml
 import os
 import glob
-import core2_objects as objects
+import core_objects as objects
 import pytest
 import tempfile
 import numpy as np
 
-from dryml.core2 import definition_mode
-from dryml.core2.repo import Repo, default_repo
-from dryml.core2.query.sqlite import sqlite_available
-from dryml.core2.store.dir import DirStore
-from dryml.core2.dtype import dtype
-from dryml.core2.tensor_spec import TensorSpec
-from dryml.core2.cardinality import Cardinality
+from dryml.core import definition_mode
+from dryml.core.repo import Repo, default_repo
+from dryml.core.query.sqlite import sqlite_available
+from dryml.core.store.dir import DirStore
+from dryml.core.dtype import dtype
+from dryml.core.tensor_spec import TensorSpec
+from dryml.core.cardinality import Cardinality
 
 
 def _persistent_query_index_count(store) -> int:
@@ -37,7 +37,7 @@ def test_save_1(primary_store_set):
     primary_store_set.rewind_all()
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
     assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
     assert repo._num_constructions == 0
@@ -56,7 +56,7 @@ def test_save_1(primary_store_set):
     primary_store_set.rewind_all()
 
     # Still exactly one stored object after reopening again
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.Repo(stores=primary_store_set.stores)
     assert len(repo.find_defs(None)) == 1
 
     # Test that we can load a single object
@@ -65,22 +65,22 @@ def test_save_1(primary_store_set):
 
 
 def test_save_2(primary_store_set):
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
     repo.add_objects(objects.HelloStr(msg='test'))
 
     # Save objects in repository
     repo.save()
 
-    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
     # Delete the repo
     del repo
 
-    dryml.core2.repo._global_repo.clear_cache(weak=True)
+    dryml.core.repo._global_repo.clear_cache(weak=True)
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
     assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
     result = repo.get(build_missing=False)
@@ -88,24 +88,24 @@ def test_save_2(primary_store_set):
 
     repo.save()
 
-    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
 
 def test_save_3(primary_store_set):
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
     repo.add_objects(objects.HelloStr(msg='test'))
 
     # Save objects in repository
     repo.save()
-    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
     # Delete the repo
     del repo
-    dryml.core2.repo._global_repo.clear_cache(weak=True)
+    dryml.core.repo._global_repo.clear_cache(weak=True)
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
     assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
     result = repo.get(build_missing=False)
@@ -113,7 +113,7 @@ def test_save_3(primary_store_set):
 
     repo.save()
 
-    assert len(dryml.core2.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
 
 
 def test_repo_save_on_close_persists_on_clean_context_exit(tmp_path):
@@ -202,12 +202,12 @@ def prep_and_clean_test_dir2():
 
 
 def test_save_4(prep_and_clean_test_dir2):
-    from dryml.core2.repo import make_store
+    from dryml.core.repo import make_store
 
     dir1, dir2 = prep_and_clean_test_dir2
     store1 = make_store(dir1)
     store2 = make_store(dir2)
-    repo = dryml.core2.Repo([store1, store2])
+    repo = dryml.core.Repo([store1, store2])
 
     repo.add_objects(objects.HelloStr(msg='test'))
     store1 = make_store(dir1)
@@ -221,11 +221,11 @@ def test_save_4(prep_and_clean_test_dir2):
     # Delete the repo
     del repo
 
-    assert len(dryml.core2.Repo.dir_store_inspect(dir1)) == 1
-    assert len(dryml.core2.Repo.dir_store_inspect(dir2)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(dir1)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(dir2)) == 1
 
     # Load the repository objects should not be loaded right away
-    repo = dryml.core2.Repo(dir1)
+    repo = dryml.core.Repo(dir1)
 
     assert len(repo.find_defs(None)) == 1
     with pytest.raises(ValueError, match="load_or_build"):
@@ -234,7 +234,7 @@ def test_save_4(prep_and_clean_test_dir2):
     repo.close(flush=False)
     del repo
 
-    repo = dryml.core2.Repo(dir2)
+    repo = dryml.core.Repo(dir2)
 
     assert len(repo.find_defs(None)) == 1
     with pytest.raises(ValueError, match="load_or_build"):
@@ -243,12 +243,12 @@ def test_save_4(prep_and_clean_test_dir2):
     repo.close(flush=False)
     del repo
 
-    repo = dryml.core2.Repo([dir1, dir2])
+    repo = dryml.core.Repo([dir1, dir2])
     assert len(repo.find_defs(None)) == 2
     assert len(repo.get()) == 2
 
-    assert len(dryml.core2.Repo.dir_store_inspect(dir1)) == 1
-    assert len(dryml.core2.Repo.dir_store_inspect(dir2)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(dir1)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(dir2)) == 1
     repo.close(flush=False)
 
 
@@ -274,7 +274,7 @@ def test_object_save_restore_1(primary_store_set):
     primary_store_set.rewind_all()
 
     # Load back
-    obj2 = dryml.core2.load_object(repo=primary_store_set.stores)
+    obj2 = dryml.core.load_object(repo=primary_store_set.stores)
 
     assert obj.definition == obj2.definition
     assert obj.A.data == obj2.A.data
@@ -301,7 +301,7 @@ def test_object_save_restore_2(primary_store_set):
     primary_store_set.rewind_all()
 
     # Load the object from the file
-    obj2 = dryml.core2.load_object(repo=primary_store_set.stores)
+    obj2 = dryml.core.load_object(repo=primary_store_set.stores)
 
     assert obj.definition == obj2.definition
     assert obj.A is obj.B
@@ -338,7 +338,7 @@ def test_object_save_restore_3(primary_store_set):
     primary_store_set.rewind_all()
 
     # Load the object from the file
-    obj2 = dryml.core2.load_object(repo=primary_store_set.stores)
+    obj2 = dryml.core.load_object(repo=primary_store_set.stores)
 
     assert obj.definition == obj2.definition
     assert obj.A.A.data == obj2.A.A.data
@@ -371,12 +371,12 @@ def test_object_save_restore_4(primary_store_set):
     args_def = (obj1.definition, obj2.definition)
 
     # Save objects to a buffer
-    dryml.core2.save_object(args, repo=primary_store_set.stores)
+    dryml.core.save_object(args, repo=primary_store_set.stores)
 
     primary_store_set.rewind_all()
 
     # Load objects from buffer
-    new_args = dryml.core2.load_object(args_def, repo=primary_store_set.stores)
+    new_args = dryml.core.load_object(args_def, repo=primary_store_set.stores)
 
     assert type(new_args[0]) is objects.TestClassC
     assert type(new_args[1]) is objects.TestClassC
@@ -409,11 +409,11 @@ def test_object_save_restore_5(primary_store_set):
 
     args_defs = (trainable_obj.definition,)
 
-    dryml.core2.save_object(args, repo=primary_store_set.stores)
+    dryml.core.save_object(args, repo=primary_store_set.stores)
 
     primary_store_set.rewind_all()
 
-    new_args = dryml.core2.load_object(args_defs, repo=primary_store_set.stores)
+    new_args = dryml.core.load_object(args_defs, repo=primary_store_set.stores)
 
     recon_trainable_obj = new_args[0]
     assert type(recon_trainable_obj) is objects.TestNest3
@@ -429,8 +429,8 @@ def test_save_load_1(primary_store_set):
     # Test save/load to/from a directory
     obj1 = objects.TestClass5(10, test='a')
 
-    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
-    dryml.core2.save_object(obj1, repo=repo, main=True)
+    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
+    dryml.core.save_object(obj1, repo=repo, main=True)
     repo.flush()
 
     _assert_expected_store_root_entries(repo.stores[0])
@@ -438,7 +438,7 @@ def test_save_load_1(primary_store_set):
 
     del repo
 
-    obj1_2 = dryml.core2.load_object(obj1.definition, repo=primary_store_set.stores)
+    obj1_2 = dryml.core.load_object(obj1.definition, repo=primary_store_set.stores)
     assert obj1_2.x == 10
     assert obj1_2.test == 'a'
 
@@ -454,8 +454,8 @@ def test_save_load_2(primary_store_set):
     assert obj4.test is obj2
     assert obj4.x is obj3
 
-    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
-    dryml.core2.save_object(obj4, repo=repo, main=True)
+    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
+    dryml.core.save_object(obj4, repo=repo, main=True)
     repo.flush()
 
     _assert_expected_store_root_entries(repo.stores[0])
@@ -463,7 +463,7 @@ def test_save_load_2(primary_store_set):
     assert len(obj_dirs) == 1
     del repo
 
-    obj4_2 = dryml.core2.load_object(obj4.definition, repo=primary_store_set.stores)
+    obj4_2 = dryml.core.load_object(obj4.definition, repo=primary_store_set.stores)
     assert obj4_2 is not obj4
     obj3_2 = obj4_2.x
     obj2_2 = obj4_2.test
@@ -489,8 +489,8 @@ def test_save_load_3(primary_store_set):
 
     obj11 = objects.TestClass5(obj10, test=obj10)
 
-    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
-    dryml.core2.save_object(obj11, repo=repo, main=True)
+    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
+    dryml.core.save_object(obj11, repo=repo, main=True)
     repo.flush()
 
     _assert_expected_store_root_entries(repo.stores[0])
@@ -499,7 +499,7 @@ def test_save_load_3(primary_store_set):
 
     del repo
 
-    obj11_2 = dryml.core2.load_object(obj11.definition, repo=primary_store_set.stores)
+    obj11_2 = dryml.core.load_object(obj11.definition, repo=primary_store_set.stores)
     obj10_2 = obj11_2.x
     assert obj11_2.test is obj10_2
     obj6_2 = obj10_2.x.test
@@ -578,7 +578,7 @@ def test_save_load_leaf_roundtrip(primary_store_set, leaf_case):
     obj1 = objects.TestClass5(10, test=test_obj)
     obj1.save(primary_store_set.stores)
 
-    obj1_2 = dryml.core2.load_object(obj1.definition, repo=primary_store_set.stores)
+    obj1_2 = dryml.core.load_object(obj1.definition, repo=primary_store_set.stores)
     assert obj1_2.x == 10
     assert test_check(test_obj, obj1_2.test)
 
@@ -590,7 +590,7 @@ def test_save_load_revision_1(primary_store_set):
 
     assert obj.data == 1
 
-    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
 
     repo.save_object(obj, revision='A')
 
@@ -602,7 +602,7 @@ def test_save_load_revision_1(primary_store_set):
 
     store_dir = primary_store_set.stores[0].base_dir
 
-    assert len(dryml.core2.Repo.dir_store_inspect(store_dir)) == 1
+    assert len(dryml.core.Repo.dir_store_inspect(store_dir)) == 1
     test_glob = os.path.join(store_dir, '**/*.pkl')
     assert len(glob.glob(os.path.join(store_dir, '**/*.pkl'), recursive=True)) == 3
 
@@ -611,9 +611,9 @@ def test_save_load_revision_1(primary_store_set):
     del obj
 
     # Re-create repo
-    repo = dryml.core2.repo.Repo(stores=primary_store_set.stores)
+    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
 
-    with dryml.core2.definition_mode():
+    with dryml.core.definition_mode():
         obj_def = objects.TestClassC2(10)
 
     obj = repo.load_object(obj_def, revision='A')

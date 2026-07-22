@@ -41,7 +41,7 @@ class ConfigRef:
         return self.default is not CONFIG_MISSING
 
     def resolve(self, repo=None):
-        from dryml.core2.repo import manage_repo
+        from dryml.core.repo import manage_repo
 
         with manage_repo(repo=repo) as repo_obj:
             if self.has_default:
@@ -50,14 +50,14 @@ class ConfigRef:
 
     @staticmethod
     def resolve_value(value, repo=None):
-        from dryml.core2.repo import manage_repo
+        from dryml.core.repo import manage_repo
 
         with manage_repo(repo=repo) as repo_obj:
             return repo_obj.resolve_config(value)
 
     def __stable_leaf_bytes__(self) -> bytes:
         if self.has_default:
-            from dryml.core2.utils.stable_hash import stable_hash_function
+            from dryml.core.utils.stable_hash import stable_hash_function
 
             default_hash = stable_hash_function(self.default)
         else:

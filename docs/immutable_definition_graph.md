@@ -23,7 +23,7 @@ Importable function values are symbolized at `Definition` boundaries. Anonymous 
 `SearchSpace` is the generative interpretation of a `Definition` containing generator-backed `Par` values such as `UniformIntRange` and `UniformFromSet`. It can sample definitions, enumerate finite grids, and produce a support selector.
 
 ```python
-from dryml.core2 import Definition, Ref, Selector, UniformFromSet, UniformIntRange
+from dryml.core import Definition, Ref, Selector, UniformFromSet, UniformIntRange
 
 model = Definition(Model, layers=UniformIntRange(2, 4), width=UniformFromSet([128, 256]))
 space = model.as_space()

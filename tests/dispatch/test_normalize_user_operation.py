@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import PickledCallable, normalize_user_operation
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.operations import attach_operation_id, make_function_call_spec

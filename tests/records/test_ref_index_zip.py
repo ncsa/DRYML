@@ -1,6 +1,6 @@
 from io import BytesIO
 
-from dryml.core2.store.zip import ZipStore
+from dryml.core.store.zip import ZipStore
 from dryml.formats.refs import format_cdef_id
 from dryml.operations import make_function_call_spec
 from dryml.records import RecordStoreIO

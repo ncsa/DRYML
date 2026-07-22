@@ -9,7 +9,7 @@ import pytest
 from dryml.code.ast_tools import collect_accesses_from_source
 from dryml.code.callable_info import analyze_callable
 from dryml.code.source import get_source_info
-from dryml.core2.symbol import ImportRef, SourceSpec
+from dryml.core.symbol import ImportRef, SourceSpec
 
 
 def _load_targets():
@@ -86,13 +86,13 @@ def test_ast_helper_behavior_on_nested_method_call_current_behavior():
     assert any(call.chain == ("child",) for call in collector.method_calls)
 
 
-def test_core2_symbol_import_ref_round_trip_if_public():
+def test_core_symbol_import_ref_round_trip_if_public():
     ref = ImportRef.from_import_path("operator:add")
     assert ref.import_path() == "operator:add"
     assert ref.resolve()(2, 3) == 5
 
 
-def test_core2_symbol_closure_rejection_current_behavior():
+def test_core_symbol_closure_rejection_current_behavior():
     value = 1
 
     def closure():

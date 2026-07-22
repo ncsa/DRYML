@@ -1,12 +1,12 @@
 from io import StringIO
 import os
 
-import core2_objects as objects
+import core_objects as objects
 import pytest
-from dryml.core2 import Satisfies
-from dryml.core2.definition import Definition, SKIP_ARGS, selector_match
-from dryml.core2.symbol import ImportRef
-import dryml.core2 as core2
+from dryml.core import Satisfies
+from dryml.core.definition import Definition, SKIP_ARGS, selector_match
+from dryml.core.symbol import ImportRef
+import dryml.core as core
 
 
 def test_selector_1():
@@ -116,7 +116,7 @@ def test_selector_12():
         test=objects.TestClass1(
             20,
             test=objects.TestClass1(30, test='c')))
-    with core2.definition_mode():
+    with core.definition_mode():
         def_1 = objects.TestClass2(
             10,
             test=objects.TestClass1(
@@ -143,13 +143,13 @@ def test_selector_13():
     assert not sel(obj2)
     assert not sel(obj2.definition)
 
-    core2.save_object(obj1, repo='test1.dry')
-    core2.save_object(obj2, repo='test2.dry')
+    core.save_object(obj1, repo='test1.dry')
+    core.save_object(obj2, repo='test2.dry')
 
     # Test selectors work with loaded classes
 
-    obj1_loaded = core2.load_object(repo='test1.dry')
-    obj2_loaded = core2.load_object(repo='test2.dry')
+    obj1_loaded = core.load_object(repo='test1.dry')
+    obj2_loaded = core.load_object(repo='test2.dry')
 
     assert sel(obj1_loaded)
     assert not sel(obj2_loaded)

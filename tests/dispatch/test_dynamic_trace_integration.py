@@ -14,9 +14,9 @@ import pytest
 import dryml
 from dryml.code import CodeAnalysisContext, CodeAnalysisResult, DynamicTracePolicy, target_from_callable
 from dryml.code.facts import AnnotationFact, CodeFact, DiagnosticFact, DynamicCallFact
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.object import Object
-from dryml.core2.store.dir import DirStore
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.object import Object
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.operations import PickledCallable
@@ -24,7 +24,7 @@ from dryml.dispatch.protocol import WorkerResponse
 from dryml.dispatch.normalize import normalize_callable_operation, normalize_user_operation
 from dryml.dispatch.requirements import DynamicTraceProvenance, _effective_trace_invocation, parse_analysis_policy, resolve_dispatch_plan
 from dryml.operations import resolve_call_arguments
-from dryml.core2.utils.general import pickle_save
+from dryml.core.utils.general import pickle_save
 from dryml.formats.refs import format_cdef_id
 from dryml.formats import json_ready
 from dryml.operations import attach_operation_id, make_function_call_spec

@@ -6,7 +6,7 @@ import importlib.util
 from dataclasses import dataclass
 from typing import Any
 
-from dryml.core2.utils.recurse import map_leaves
+from dryml.core.utils.recurse import map_leaves
 from dryml.data.cache import (
     CacheViewIssue,
     CacheViewSupport,

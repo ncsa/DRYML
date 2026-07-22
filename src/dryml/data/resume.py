@@ -10,11 +10,11 @@ from typing import Any
 
 import numpy as np
 
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.links import DefLink
-from dryml.core2.symbol import resolve_symbol
-from dryml.core2.tensor_spec import as_tensor_spec, unbatch_spec_tree
-from dryml.core2.utils.recurse import iter_leaves
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.links import DefLink
+from dryml.core.symbol import resolve_symbol
+from dryml.core.tensor_spec import as_tensor_spec, unbatch_spec_tree
+from dryml.core.utils.recurse import iter_leaves
 
 from .dataset import Dataset
 from .source import ArrayDataset, GeneratorDataset, _tree_index
@@ -76,7 +76,7 @@ def dataset_definition_metadata(
     opaque custom node rather than constructing it during definition loading.
     """
 
-    from dryml.core2.cardinality import Cardinality
+    from dryml.core.cardinality import Cardinality
 
     cdef = _as_cdef(dataset)
     cls = resolve_symbol(cdef.cls)

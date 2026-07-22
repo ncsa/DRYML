@@ -1,9 +1,9 @@
 import numpy as np
 import pytest
 
-from dryml.core2 import Repo
-from dryml.core2.store.dir import DirStore
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
+from dryml.core.tensor_spec import TensorSpec
 from dryml.artifacts import CachedDataset
 from dryml.data import ArrayDataset
 from dryml.managed import (

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalSubprocessFuture, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHandshakeResponse, write_json_file

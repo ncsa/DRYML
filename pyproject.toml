@@ -17,7 +17,6 @@ markers = [
     "category_artifacts: auto-applied DRYML test category",
     "category_code: auto-applied DRYML test category",
     "category_core: auto-applied DRYML test category",
-    "category_core2: auto-applied DRYML test category",
     "category_data: auto-applied DRYML test category",
     "category_dispatch: auto-applied DRYML test category",
     "category_environments: auto-applied DRYML test category",

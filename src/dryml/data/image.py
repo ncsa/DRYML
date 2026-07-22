@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dryml.core2.methods import Method, traits
-from dryml.core2.tensor_spec import SpecTree, map_spec_tree
+from dryml.core.methods import Method, traits
+from dryml.core.tensor_spec import SpecTree, map_spec_tree
 
 
 class ImageNormalize(Method):

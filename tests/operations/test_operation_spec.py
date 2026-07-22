@@ -1,7 +1,7 @@
 import pytest
 
-from dryml.core2 import Object
-from dryml.core2.store.dir import DirStore
+from dryml.core import Object
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id, format_ref_cdef
 from dryml.operations import (
     OperationSpecError,

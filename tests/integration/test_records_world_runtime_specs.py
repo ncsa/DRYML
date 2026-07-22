@@ -1,4 +1,4 @@
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.ids import content_id
 from dryml.records import RecordStoreIO, attach_record_id, make_record, scan_record_refs
 import dryml.runtime as runtime

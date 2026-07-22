@@ -2,10 +2,10 @@ import os
 
 import pytest
 
-import core2_objects as objects
-from dryml.core2.policies import RepoSaveOptions
-from dryml.core2.repo import Repo
-from dryml.core2.store.dir import DirStore
+import core_objects as objects
+from dryml.core.policies import RepoSaveOptions
+from dryml.core.repo import Repo
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
     RecordPolicyError,

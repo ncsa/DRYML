@@ -6,8 +6,8 @@ import io
 from pathlib import Path
 from typing import Literal, Sequence
 from dataclasses import dataclass
-from dryml.core2.store.store import Store
-from dryml.core2.repo import make_store
+from dryml.core.store.store import Store
+from dryml.core.repo import make_store
 import dryml.environments as envs
 
 

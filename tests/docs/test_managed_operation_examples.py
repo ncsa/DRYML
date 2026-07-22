@@ -8,7 +8,7 @@ import sys
 import numpy as np
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 from managed_workflow_fixtures import build_managed_workflow
 

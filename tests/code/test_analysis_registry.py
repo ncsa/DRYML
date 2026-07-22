@@ -35,9 +35,9 @@ def test_default_analyzers_are_registered():
     assert DEFAULT_PROBE_ALGORITHMS == EXPECTED_DEFAULT_PROBE_ALGORITHMS
 
 
-def test_core2_and_code_keep_their_import_boundaries():
-    core2 = subprocess.run(
-        [sys.executable, "-c", "import dryml.core2, sys; assert 'dryml.code' not in sys.modules"],
+def test_core_and_code_keep_their_import_boundaries():
+    core = subprocess.run(
+        [sys.executable, "-c", "import dryml.core, sys; assert 'dryml.code' not in sys.modules"],
         capture_output=True,
         text=True,
     )
@@ -47,7 +47,7 @@ def test_core2_and_code_keep_their_import_boundaries():
         text=True,
     )
 
-    assert core2.returncode == 0, core2.stderr
+    assert core.returncode == 0, core.stderr
     assert code_import.returncode == 0, code_import.stderr
 
 

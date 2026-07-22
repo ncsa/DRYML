@@ -11,7 +11,7 @@ import dryml.operations as ops
 import dryml.dispatch as dispatch
 import dryml.providers as providers
 import dryml.reporting as reporting
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.records import ExecutionRecord, RecordStoreIO, make_record, plan_record_closure
 
 

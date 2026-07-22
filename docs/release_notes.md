@@ -7,10 +7,14 @@ Status: draft.
 This development release consolidates the completed requirements, runtime,
 dispatch, world, and code-analysis work:
 
+- the active core implementation is promoted to its permanent `dryml.core`
+  package; the temporary pre-release package route is removed without an alias,
+  and persisted definitions, Stores, records, pickles, hashes, or import
+  references that depend on that removed module identity are unsupported;
 - reusable `dryml.code` facts/analyzers, conservative static calls, probes, and
   explicit current-process tracing;
 - non-invoking `analyze(...)` versus trusted invocation-bearing `trace(...)`;
-- the method semantic model at `dryml.core2.methods`, with warning-free
+- the method semantic model at `dryml.core.methods`, with warning-free
   `dryml.code` compatibility aliases;
 - class, method, function, and CDef requirement collection with source traces;
 - runtime enforcement and inline `runtime.plain()`;

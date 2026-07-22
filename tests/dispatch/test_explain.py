@@ -5,7 +5,7 @@ import math
 
 import dryml
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.worlds import LocalResourceInventory

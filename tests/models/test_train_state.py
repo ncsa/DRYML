@@ -1,7 +1,7 @@
 import pytest
 
-from dryml.core2 import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
 from dryml.models import Experiment, Model, TrainFunction, TrainState
 from dryml.models.utils import advance_train_state
 

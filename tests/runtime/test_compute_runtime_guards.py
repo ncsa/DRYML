@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core2.object import Compute
+from dryml.core.object import Compute
 from dryml.runtime import RuntimeAllocationView, RuntimeMode, enter_runtime
 from dryml.runtime.errors import NoAllocationError
 

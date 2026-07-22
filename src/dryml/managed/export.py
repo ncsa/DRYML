@@ -10,12 +10,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.object import Object
-from dryml.core2.repo import Repo, make_store
-from dryml.core2.store.store import Store
-from dryml.core2.utils.general import pickle_load
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.object import Object
+from dryml.core.repo import Repo, make_store
+from dryml.core.store.store import Store
+from dryml.core.utils.general import pickle_load
 from dryml.formats.refs import format_cdef_id, parse_cdef_id
 from dryml.records import (
     AdapterRecord,

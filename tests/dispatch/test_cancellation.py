@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, DispatchTimeout
 from dryml.environments import CurrentEnvironmentSpec
 from dryml.environments import PythonExecutableSpec

@@ -159,7 +159,7 @@ def test_network_guard_reaches_dispatch_workers(tmp_path):
         tmp_path / "worker-network.ipynb",
         """import sys
 from tempfile import TemporaryDirectory
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import make_function_call_spec
@@ -212,7 +212,7 @@ def test_timeout_reaps_independently_sessioned_dispatch_worker(tmp_path):
         tmp_path / "worker-timeout.ipynb",
         """import sys
 from tempfile import TemporaryDirectory
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import make_function_call_spec
@@ -282,7 +282,7 @@ def test_undeclared_optional_import_in_dispatch_worker_is_rejected(tmp_path):
         tmp_path / "worker-optional.ipynb",
         """import sys
 from tempfile import TemporaryDirectory
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import make_function_call_spec

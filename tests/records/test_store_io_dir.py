@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.refs import format_cdef_id
 from dryml.records import RecordIOError, RecordStoreIO, StorageRef, StorageRefError, attach_record_id, attach_spec_id, make_record, make_spec

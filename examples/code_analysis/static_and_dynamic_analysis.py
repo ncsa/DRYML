@@ -7,7 +7,7 @@ boundary, so do not trace untrusted code.
 from __future__ import annotations
 
 import dryml.code as code
-from dryml.core2 import Definition
+from dryml.core import Definition
 
 
 class TraceableModel:

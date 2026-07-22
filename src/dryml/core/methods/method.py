@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Callable, ClassVar
 
-from dryml.core2.backend import Backend, discover_backends
-from dryml.core2.object import Object
-from dryml.core2.tensor_spec import TensorSpec
-from dryml.core2.utils.recurse import iter_leaves
-from dryml.core2.methods.traits import BatchMode, Traits
+from dryml.core.backend import Backend, discover_backends
+from dryml.core.object import Object
+from dryml.core.tensor_spec import TensorSpec
+from dryml.core.utils.recurse import iter_leaves
+from dryml.core.methods.traits import BatchMode, Traits
 
 
 def traits(backend: Backend | str | None = Backend.numpy, batch_mode: BatchMode | str | None = None, traits: Traits | None = None):

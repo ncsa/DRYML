@@ -10,7 +10,7 @@ IR; manual IR construction remains supported for advanced use in
 [operations](operations.md).
 
 ```python
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 import dryml
 
 store = DirStore("work/store", query_index="none")

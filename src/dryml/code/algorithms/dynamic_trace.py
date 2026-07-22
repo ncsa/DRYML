@@ -45,9 +45,9 @@ from dryml.code.targets import (
     CodeTargetSpec,
     target_from_definition_method,
 )
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.symbol import ImportRef, SourceSpec
-from dryml.core2.utils.stable_hash import (
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.symbol import ImportRef, SourceSpec
+from dryml.core.utils.stable_hash import (
     StableHashLimitError,
     StableHashLimits,
     bounded_stable_hash_function,

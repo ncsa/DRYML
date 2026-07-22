@@ -37,7 +37,7 @@ import sys
 
 assert "tensorflow" not in sys.modules
 import dryml.tf
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.tensor_spec import TensorSpec
 
 spec = TensorSpec("float32", shape=(32,))
 assert hasattr(spec, "tf")
@@ -53,7 +53,7 @@ import sys
 
 assert "torch" not in sys.modules
 import dryml.torch
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.tensor_spec import TensorSpec
 from dryml.torch import TorchTensorSpec
 
 spec = TensorSpec("float32", shape=(32,))
@@ -73,11 +73,11 @@ import sys
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core2 import Definition, Repo
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.fingerprint import legacy_target_fingerprint
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.fingerprint import legacy_target_fingerprint
+from dryml.core.symbol import ImportRef
 
 cdef = ConcreteDefinition(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
@@ -104,10 +104,10 @@ def test_exact_query_with_candidate_does_not_import_tensorflow():
 import sys
 
 assert "tensorflow" not in sys.modules
-from dryml.core2 import Definition, Repo, SKIP_ARGS
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.symbol import ImportRef
 
 class FakeStore:
     def catalog_key(self):
@@ -138,10 +138,10 @@ def test_exact_query_with_candidate_does_not_import_torch():
 import sys
 
 assert "torch" not in sys.modules
-from dryml.core2 import Definition, Repo, SKIP_ARGS
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.symbol import ImportRef
 
 class FakeStore:
     def catalog_key(self):
@@ -173,13 +173,13 @@ import sys
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core2 import Definition, Repo, SKIP_ARGS
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.selector_graph import compile_selector_graph
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.fingerprint import target_local_fingerprint
+from dryml.core.query.selector_graph import compile_selector_graph
+from dryml.core.symbol import ImportRef
 
 child = ConcreteDefinition(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
@@ -221,13 +221,13 @@ import sys
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core2 import Definition, Repo
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph, EdgeKind
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.selector_graph import compile_selector_graph
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo
+from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.fingerprint import target_local_fingerprint
+from dryml.core.query.selector_graph import compile_selector_graph
+from dryml.core.symbol import ImportRef
 
 child = ConcreteDefinition(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
@@ -273,14 +273,14 @@ from pathlib import Path
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core2 import Definition, Repo, SKIP_ARGS
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
@@ -325,14 +325,14 @@ from pathlib import Path
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
-from dryml.core2 import Definition, Repo, SKIP_ARGS
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
@@ -379,8 +379,8 @@ import sys
 
 assert "tensorflow" not in sys.modules
 
-from dryml.core2 import Definition
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition
+from dryml.core.symbol import ImportRef
 
 obj = Definition(
     ImportRef("dryml.models.tf.base", "Wrapper"),
@@ -407,8 +407,8 @@ import sys
 
 assert "torch" not in sys.modules
 
-from dryml.core2 import Definition
-from dryml.core2.symbol import ImportRef
+from dryml.core import Definition
+from dryml.core.symbol import ImportRef
 
 obj = Definition(
     ImportRef("dryml.models.torch.base", "Wrapper"),
@@ -430,8 +430,8 @@ import sys
 
 assert "sqlite3" not in sys.modules
 
-from dryml.core2.query.graph_plan import graph_candidate_ids
-from dryml.core2.query.protocols import DefinitionGraphIndex, QueryIndexReadView, StoreQueryIndex
+from dryml.core.query.graph_plan import graph_candidate_ids
+from dryml.core.query.protocols import DefinitionGraphIndex, QueryIndexReadView, StoreQueryIndex
 
 assert graph_candidate_ids is not None
 assert DefinitionGraphIndex is not None
@@ -448,10 +448,10 @@ def test_sqlite_backend_package_import_does_not_import_sqlite3():
 import sys
 
 assert "sqlite3" not in sys.modules
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.query.sqlite.connection import SQLiteConnectionManager
-from dryml.core2.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
-from dryml.core2.query.sqlite.utils import wal_runtime_is_known_safe
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.connection import SQLiteConnectionManager
+from dryml.core.query.sqlite.schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION
+from dryml.core.query.sqlite.utils import wal_runtime_is_known_safe
 
 assert SQLiteQueryIndexConfig is not None
 assert SQLiteConnectionManager is not None
@@ -470,7 +470,7 @@ import tempfile
 from pathlib import Path
 
 assert "sqlite3" not in sys.modules
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index="auto")
@@ -490,8 +490,8 @@ import tempfile
 from pathlib import Path
 
 assert "sqlite3" not in sys.modules
-from dryml.core2 import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index="auto")

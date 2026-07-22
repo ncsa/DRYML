@@ -2,8 +2,8 @@ from collections import namedtuple
 
 import pytest
 
-from dryml.core2.errors import CycleError
-from dryml.core2.utils.recurse import (
+from dryml.core.errors import CycleError
+from dryml.core.utils.recurse import (
     cycle_detect,
     map_leaves,
     iter_leaves,

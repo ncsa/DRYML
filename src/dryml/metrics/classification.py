@@ -13,8 +13,8 @@ import numpy as np
 from dryml.artifacts.base import Artifact
 from dryml.artifacts.dataset import CachedDataset
 from dryml.artifacts.representations import NUMPY_SEQUENCE_KIND, PARQUET_KIND
-from dryml.core2 import Repo
-from dryml.core2.symbol import resolve_symbol
+from dryml.core import Repo
+from dryml.core.symbol import resolve_symbol
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import (

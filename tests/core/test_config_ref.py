@@ -1,8 +1,8 @@
 import pytest
 
-import core2_objects as objects
-from dryml.core2.config import ConfigError, ConfigRef
-from dryml.core2.repo import Repo
+import core_objects as objects
+from dryml.core.config import ConfigError, ConfigRef
+from dryml.core.repo import Repo
 
 
 def test_config_ref_resolves_during_object_construction():

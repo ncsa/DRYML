@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 import dryml
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.environments import PythonExecutableSpec
 
 

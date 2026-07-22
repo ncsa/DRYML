@@ -4,8 +4,8 @@ import pytest
 
 import numpy as np
 
-from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import (
+from dryml.core.dtype import DType
+from dryml.core.tensor_spec import (
     Dynamic,
     Layout,
     TensorSpec,
@@ -15,8 +15,8 @@ from dryml.core2.tensor_spec import (
     merge_spec_trees,
     unbatch_spec_tree,
 )
-from dryml.core2.utils.recurse import iter_leaves, map_leaves
-from dryml.core2.utils.stable_hash import stable_hash_function
+from dryml.core.utils.recurse import iter_leaves, map_leaves
+from dryml.core.utils.stable_hash import stable_hash_function
 import dryml.numpy as dryml_np
 
 

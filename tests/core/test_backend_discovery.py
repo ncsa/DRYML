@@ -3,7 +3,7 @@ import types
 
 import numpy as np
 
-from dryml.core2.backend import Backend, discover_backends
+from dryml.core.backend import Backend, discover_backends
 from dryml.jax.backend import is_jax_available
 from dryml.tf.backend import is_tf_available
 from dryml.torch.backend import is_torch_available

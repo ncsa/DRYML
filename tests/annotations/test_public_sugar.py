@@ -22,6 +22,6 @@ def test_public_sugar_and_low_level_equivalence():
 
 def test_arg_role_reexport_preserves_old_behavior():
     from dryml.annotations import RefCDef as NewRefCDef
-    from dryml.core2.arg_roles import RefCDef as OldRefCDef
+    from dryml.core.arg_roles import RefCDef as OldRefCDef
 
     assert NewRefCDef == OldRefCDef

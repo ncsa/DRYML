@@ -413,6 +413,10 @@ def test_sdist_and_wheel_content_and_bounds(release_artifacts):
         path.removeprefix("src/") for path in tracked_modules
     }
     assert expected_wheel_modules <= wheel_members
+    obsolete = "core" + chr(50)
+    obsolete_package = f"/dryml/{obsolete}/"
+    assert not any(obsolete_package in f"/{path}" for path in relative_sdist)
+    assert not any(obsolete_package in f"/{path}" for path in wheel_members)
 
     _assert_no_forbidden_payload(
         relative_sdist_files,
@@ -450,16 +454,26 @@ import sys
 
 import dryml
 import dryml.code
-import dryml.core2.store.store
-import dryml.core2.utils.general
+import dryml.core.store.store
+import dryml.core.utils.general
 
 target = Path({str(target)!r}).resolve()
+obsolete = "core" + chr(50)
+obsolete_path = "dryml." + obsolete
 assert Path(dryml.__file__).resolve().is_relative_to(target)
 assert dryml.__version__ == importlib.metadata.version("dryml") == "0.3.0.dev0"
-for name in ("annotations", "core2", "dispatch", "artifacts", "env", "environments", "formats", "operations", "providers", "reporting", "records", "runtime", "world", "worlds"):
+for name in ("annotations", "core", "dispatch", "artifacts", "env", "environments", "formats", "operations", "providers", "reporting", "records", "runtime", "world", "worlds"):
     importlib.import_module(f"dryml.{{name}}")
 assert importlib.util.find_spec("dryml.data.transforms") is None
 assert importlib.util.find_spec("dryml.graph") is None
+assert importlib.util.find_spec(obsolete_path) is None
+assert obsolete not in dryml.__dict__
+try:
+    importlib.import_module(obsolete_path)
+except ModuleNotFoundError:
+    pass
+else:
+    raise AssertionError("obsolete core package remained importable")
 assert not {{"jax", "ray", "tensorflow", "torch"}} & {{name.split(".", 1)[0] for name in sys.modules}}
 spec = dryml.operations.make_function_call_spec("builtins:sum", args=[[1, 2]])
 assert spec["kind"] == "function_call"

@@ -5,9 +5,9 @@ import sys
 
 import dryml
 import pytest
-from dryml.core2 import Definition, EdgeKind, Object, Repo
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.store.dir import DirStore
+from dryml.core import Definition, EdgeKind, Object, Repo
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedOutputRef
 
 

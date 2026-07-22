@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from dryml.core2.repo import get_default_repo
+from dryml.core.repo import get_default_repo
 from dryml.operations import attach_operation_id, make_method_call_spec
 from dryml.records import (
     ExecutionRecord,

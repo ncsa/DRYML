@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import (
     ManagedLeaseConflictError,
@@ -30,7 +30,7 @@ def _holder(path, *, exit_without_release=False):
     script = r"""
 import json
 import sys
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.managed import ManagedOperationStore, OperationKey
 
 path, producer, fingerprint, abrupt = sys.argv[1:]

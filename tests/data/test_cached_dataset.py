@@ -7,10 +7,10 @@ import pytest
 
 import dryml.artifacts
 from dryml.artifacts import CachedDataset
-from dryml.core2 import Repo, TensorSpec
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.repo import default_repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo, TensorSpec
+from dryml.core.cardinality import Cardinality
+from dryml.core.repo import default_repo
+from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 from dryml.managed import AmbiguousManagedStoreError, ManagedCapabilityError
 from dryml.managed.dispatch import ManagedDispatchRequest

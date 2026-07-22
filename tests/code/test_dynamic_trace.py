@@ -10,11 +10,11 @@ import pytest
 
 import dryml
 import dryml.code as code
-from dryml.core2 import ConcreteDefinition, Definition
-from dryml.core2.dtype import DType
-from dryml.core2.methods import Method, Traits, traits
-from dryml.core2.object import Object
-from dryml.core2.symbol import ImportRef, SourceSpec
+from dryml.core import ConcreteDefinition, Definition
+from dryml.core.dtype import DType
+from dryml.core.methods import Method, Traits, traits
+from dryml.core.object import Object
+from dryml.core.symbol import ImportRef, SourceSpec
 
 
 @dryml.env.req(requirements=("trace-class>=1",))

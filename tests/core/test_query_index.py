@@ -3,18 +3,18 @@ import pytest
 import shutil
 import threading
 
-from dryml.core2 import Definition, Object, Repo, Satisfies, Serializable, SKIP_ARGS
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query import DefinitionQuery, QueryDomainError, QueryIndexError, SetMember
-from dryml.core2.query.index import MemoryDefinitionGraphReadView, OccurrenceTraversalSnapshot
-from dryml.core2.query.path import get_subtree
-from dryml.core2.query.result import DefinitionResultSet, OccurrenceResultSet
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.store import Store
-from dryml.core2.utils.general import pickle_load, pickle_save
-from dryml.core2.utils.stable_hash import stable_hash_function
+from dryml.core import Definition, Object, Repo, Satisfies, Serializable, SKIP_ARGS
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query import DefinitionQuery, QueryDomainError, QueryIndexError, SetMember
+from dryml.core.query.index import MemoryDefinitionGraphReadView, OccurrenceTraversalSnapshot
+from dryml.core.query.path import get_subtree
+from dryml.core.query.result import DefinitionResultSet, OccurrenceResultSet
+from dryml.core.store.dir import DirStore
+from dryml.core.store.store import Store
+from dryml.core.utils.general import pickle_load, pickle_save
+from dryml.core.utils.stable_hash import stable_hash_function
 
 
 class IndexLeaf(Object):
@@ -305,7 +305,7 @@ def test_repeated_stored_registration_does_not_change_generation(tmp_path):
 
 
 def test_cache_sync_registers_union_graph_once(monkeypatch):
-    from dryml.core2.query import index as index_mod
+    from dryml.core.query import index as index_mod
 
     repo = Repo()
     child = IndexLeaf("shared", repo=repo)
@@ -360,7 +360,7 @@ def test_multiroot_graph_registration_visits_nodes_and_edges_once(monkeypatch):
 
 
 def test_shared_child_local_fingerprint_compiled_once(monkeypatch):
-    from dryml.core2.query import index as index_mod
+    from dryml.core.query import index as index_mod
 
     repo = Repo()
     child_cdef = ConcreteDefinition(IndexLeaf, FrozenTuple(("shared",)), FrozenDict({}))
@@ -752,7 +752,7 @@ def test_catalog_read_wrappers_delegate_to_memory_view(monkeypatch):
 
 
 def test_structural_verification_does_not_hold_catalog_lock(monkeypatch):
-    from dryml.core2.query import query as query_mod
+    from dryml.core.query import query as query_mod
 
     repo = Repo()
     obj = IndexLeaf("x", repo=repo)
@@ -880,7 +880,7 @@ def test_nested_definition_explanation_does_not_report_candidate_count_as_univer
 
 
 def test_count_and_explain_do_not_construct_definition_resultset(monkeypatch, tmp_path):
-    import dryml.core2.query.query as query_mod
+    import dryml.core.query.query as query_mod
 
     repo = Repo(stores=DirStore(tmp_path / "store", query_index="memory"))
     obj = IndexLeaf("stored", repo=repo)
@@ -1339,8 +1339,8 @@ def test_occurrence_owners_require_replica_metadata():
     repo = Repo()
     child = IndexLeaf("child")
     parent = IndexPersistent(child)
-    from dryml.core2.query.model import DefinitionOccurrence
-    from dryml.core2.query.path import GraphPath
+    from dryml.core.query.model import DefinitionOccurrence
+    from dryml.core.query.path import GraphPath
 
     occurrence = DefinitionOccurrence(parent.definition, GraphPath(), child.definition)
     with pytest.raises(QueryDomainError):
@@ -1368,7 +1368,7 @@ def test_auto_hydration_failure_leaves_catalog_unchanged_and_retries(tmp_path):
 
 
 def test_auto_hydration_fingerprints_each_new_cdef_once(tmp_path, monkeypatch):
-    from dryml.core2.query import index as index_mod
+    from dryml.core.query import index as index_mod
 
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
@@ -1392,7 +1392,7 @@ def test_auto_hydration_fingerprints_each_new_cdef_once(tmp_path, monkeypatch):
 
 
 def test_auto_hydration_builds_each_store_graph_once(tmp_path, monkeypatch):
-    from dryml.core2.query import index as index_mod
+    from dryml.core.query import index as index_mod
 
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)

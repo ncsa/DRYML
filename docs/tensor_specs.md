@@ -7,7 +7,7 @@ Status: draft.
 ## Basic Spec
 
 ```python
-from dryml.core2 import TensorSpec
+from dryml.core import TensorSpec
 
 image = TensorSpec("float32", shape=(28, 28, 1))
 ```
@@ -19,7 +19,7 @@ This describes one unbatched sample with dtype `float32` and sample shape `(28, 
 `shape` describes one sample. `batch` describes whether there is a batch axis.
 
 ```python
-from dryml.core2.tensor_spec import Dynamic
+from dryml.core.tensor_spec import Dynamic
 
 batched = image.with_batch(Dynamic)
 
@@ -67,7 +67,7 @@ Dense tensors are the common default. Ragged and sparse specs can carry extra la
 Many datasets and models operate on nested structures, not one tensor. DRYML supports spec trees made from `TensorSpec`, `dict`, `tuple`, and `list`.
 
 ```python
-from dryml.core2 import TensorSpec
+from dryml.core import TensorSpec
 
 sample_spec = {
     "x": TensorSpec("float32", shape=(32,)),
@@ -100,7 +100,7 @@ Datasets expose the spec of yielded elements. Methods and models use specs to in
 ```python
 import numpy as np
 
-from dryml.core2 import TensorSpec
+from dryml.core import TensorSpec
 from dryml.data import ArrayDataset
 
 dataset = ArrayDataset(

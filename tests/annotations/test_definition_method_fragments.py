@@ -4,7 +4,7 @@ import pytest
 
 import dryml
 import dryml.annotations as ann
-from dryml.core2.definition import ConcreteDefinition, Definition
+from dryml.core.definition import ConcreteDefinition, Definition
 
 
 def _requirements(fragments):

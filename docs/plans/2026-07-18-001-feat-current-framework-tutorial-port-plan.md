@@ -200,10 +200,10 @@ flowchart TB
 
 ### Research Grounding
 
-- Object identity and persistence: `docs/objects_and_defs.md`, `docs/repos.md`, `src/dryml/core2/object.py`, `tests/core/test_repo_save_load.py`, and `tests/core/test_repo_query_nested.py`.
+- Object identity and persistence: `docs/objects_and_defs.md`, `docs/repos.md`, `src/dryml/core/object.py`, `tests/core/test_repo_save_load.py`, and `tests/core/test_repo_query_nested.py`.
 - Data contracts: `docs/data.md`, `docs/tensor_specs.md`, `src/dryml/data/`, and maintained data tests.
 - Runtime and dispatch: `docs/world_runtime.md`, `docs/dispatch.md`, `docs/migration/legacy_context_execute_removal.md`, `examples/dispatch/python_shaped_dispatch.py`, and `tests/notebook/test_local_defaults.py`.
-- Models and search spaces: `docs/models.md`, `docs/immutable_definition_graph.md`, `src/dryml/models/`, `src/dryml/core2/search_space.py`, and maintained model/search-space tests.
+- Models and search spaces: `docs/models.md`, `docs/immutable_definition_graph.md`, `src/dryml/models/`, `src/dryml/core/search_space.py`, and maintained model/search-space tests.
 - Publication: `MANIFEST.in`, `tests/package/test_release_artifacts.py`, `docs/table_of_content.md`, and `tests/docs/test_local_links.py`.
 - No `docs/solutions/` corpus exists in this repository, so no institutional learning artifact supplemented the current source, docs, and test contracts.
 
@@ -301,7 +301,7 @@ flowchart TB
 - **Dependencies:** U2, U5.
 - **Files:** Create `examples/notebooks/definition_driven_experiments.ipynb`; modify `tests/notebook/notebook_helpers.py`, `tests/notebook/test_tutorial_contracts.py`, `tests/notebook/test_tutorial_execution.py`, and `tests/test_tiers.json`.
 - **Approach:** Compose a nested experiment definition from current sklearn wrapper, training, and dataset classes; derive seed/replicate variants through immutable updates, concretize and compare identities, then build/train a small bounded set and summarize deterministic metrics. Explain default reuse versus explicit fresh-instance materialization without using fresh instances as fake persisted trial identities.
-- **Patterns to follow:** `docs/immutable_definition_graph.md`, `src/dryml/core2/definition.py`, `tests/core/test_definition_concretize.py`, and `tests/core/test_materialization_plan.py`.
+- **Patterns to follow:** `docs/immutable_definition_graph.md`, `src/dryml/core/definition.py`, `tests/core/test_definition_concretize.py`, and `tests/core/test_materialization_plan.py`.
 - **Test scenarios:**
   1. Verify immutable update operations leave the source definition unchanged.
   2. Verify identical templates concretize to the same identity while different seed/replicate values produce distinct CDefs.
@@ -317,7 +317,7 @@ flowchart TB
 - **Dependencies:** U5, U6.
 - **Files:** Create `examples/notebooks/local_hyperparameter_search.ipynb`; modify `tests/notebook/notebook_helpers.py`, `tests/notebook/test_tutorial_contracts.py`, `tests/notebook/test_tutorial_execution.py`, and `tests/test_tiers.json`.
 - **Approach:** Build a deliberately small finite definition over the maintained sklearn experiment workflow, sample through `random.Random(fixed_seed)`, and consume at most `cap + 1` candidate combinations before any training or best-candidate publication. Reject empty and over-cap candidate sets without inspecting private search-space state; otherwise train serially, validate finite metrics, select the best by metric then stable CDef identity, and use `support_selector()` against all generated CDefs. State that the cap bounds candidate execution/publication, not each generator's internal grid materialization; arbitrary-range preflight remains outside this tutorial.
-- **Patterns to follow:** `docs/immutable_definition_graph.md`, `src/dryml/core2/search_space.py`, `src/dryml/core2/params.py`, `tests/core/test_immutable_definition_graph_sprint.py`, and `tests/data/test_metrics_scalar.py`.
+- **Patterns to follow:** `docs/immutable_definition_graph.md`, `src/dryml/core/search_space.py`, `src/dryml/core/params.py`, `tests/core/test_immutable_definition_graph_sprint.py`, and `tests/data/test_metrics_scalar.py`.
 - **Test scenarios:**
   1. Seeded sampling returns the same definition across runs.
   2. An empty grid raises the documented handled error before training or best-candidate publication.

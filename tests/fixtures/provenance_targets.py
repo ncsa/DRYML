@@ -2,7 +2,7 @@
 
 import dryml
 
-from dryml.core2.object import Pickleable
+from dryml.core.object import Pickleable
 
 
 @dryml.world.req(cpus={"min": 1})

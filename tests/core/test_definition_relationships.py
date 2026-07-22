@@ -1,6 +1,6 @@
-import core2_objects as objects
-from dryml.core2 import Satisfies
-from dryml.core2.definition import Definition
+import core_objects as objects
+from dryml.core import Satisfies
+from dryml.core.definition import Definition
 
 
 def test_definition_eq_1():

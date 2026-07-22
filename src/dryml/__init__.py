@@ -4,7 +4,7 @@ __version__ = "0.3.0.dev0"
 
 _SUBMODULE_EXPORTS = {
     "annotations": "dryml.annotations",
-    "core2": "dryml.core2",
+    "core": "dryml.core",
     "dispatch": "dryml.dispatch",
     "artifacts": "dryml.artifacts",
     "env": "dryml.env",
@@ -21,7 +21,7 @@ _SUBMODULE_EXPORTS = {
     "worlds": "dryml.worlds",
 }
 
-_CORE2_EXPORTS = {
+_CORE_EXPORTS = {
     "config",
     "configure",
     "reset_config",
@@ -62,11 +62,11 @@ def __getattr__(name):
         module = importlib.import_module(_SUBMODULE_EXPORTS[name])
         globals()[name] = module
         return module
-    if name in _CORE2_EXPORTS:
+    if name in _CORE_EXPORTS:
         if name in {"config", "configure", "reset_config", "status"}:
-            module = importlib.import_module("dryml.core2.session")
+            module = importlib.import_module("dryml.core.session")
         else:
-            module = importlib.import_module("dryml.core2")
+            module = importlib.import_module("dryml.core")
         value = getattr(module, name)
         globals()[name] = value
         return value
@@ -75,7 +75,7 @@ def __getattr__(name):
 
 __all__ = [
     "annotations",
-    "core2",
+    "core",
     "dispatch",
     "artifacts",
     "env",

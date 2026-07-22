@@ -2,7 +2,7 @@ from typing import Annotated, Optional
 
 import dryml
 import pytest
-from dryml.core2 import (
+from dryml.core import (
     ConcreteDefinition,
     Definition,
     EdgeKind,
@@ -14,15 +14,15 @@ from dryml.core2 import (
     SelectorArg,
     SelectorSpec,
 )
-from dryml.core2.arg_roles import resolve_arg_roles
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph, ConcreteDefinitionGraphError
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.links import DefLink
-from dryml.core2.object import Object, definition_mode
-from dryml.core2.query.selector_graph import compile_selector_graph
-from dryml.core2.utils.graph.path import Arg, GraphPath
+from dryml.core.arg_roles import resolve_arg_roles
+from dryml.core.cdef_graph import ConcreteDefinitionGraph, ConcreteDefinitionGraphError
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.links import DefLink
+from dryml.core.object import Object, definition_mode
+from dryml.core.query.selector_graph import compile_selector_graph
+from dryml.core.utils.graph.path import Arg, GraphPath
 
-import core2_objects as objects
+import core_objects as objects
 
 
 class RefOwner(Object):
@@ -134,7 +134,7 @@ def test_invalid_ref_graph_edge_validation_message():
     parent = ConcreteDefinition(objects.TestNest3, FrozenTuple((child,)), FrozenDict({}))
     bad_edge = next(iter(ConcreteDefinitionGraph.from_root(parent).edges()))
 
-    from dryml.core2.cdef_graph import CDefEdge, CDefNode
+    from dryml.core.cdef_graph import CDefEdge, CDefNode
 
     with pytest.raises(ConcreteDefinitionGraphError):
         ConcreteDefinitionGraph(

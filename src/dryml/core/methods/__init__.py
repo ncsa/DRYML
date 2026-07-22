@@ -5,9 +5,9 @@ from __future__ import annotations
 import types
 from typing import Any
 
-from dryml.core2.methods.compiler_info import CompilerInfo
-from dryml.core2.methods.method import Method, traits
-from dryml.core2.methods.traits import BatchMode, Traits
+from dryml.core.methods.compiler_info import CompilerInfo
+from dryml.core.methods.method import Method, traits
+from dryml.core.methods.traits import BatchMode, Traits
 
 
 _MISSING = object()

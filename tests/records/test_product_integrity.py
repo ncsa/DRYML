@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.refs import format_cdef_id
 from dryml.records import (
     ProductManifest,

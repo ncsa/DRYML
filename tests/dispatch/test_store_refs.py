@@ -2,7 +2,7 @@ import dataclasses
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, WorkerStoreRef, compute_dispatch_id
 from dryml.dispatch.stores import open_worker_store, select_marshal_plan, validate_worker_store_access, worker_store_ref_from_dir_store
 from dryml.formats.refs import format_cdef_id

@@ -1,9 +1,9 @@
-import core2_objects as objects
+import core_objects as objects
 import pytest
 
-from dryml.core2 import Definition, Repo
-from dryml.core2.freeze import FrozenList
-from dryml.core2.query import Arg, DefinitionPath, Index, Key, Kwarg, QueryPathError, normalize_path
+from dryml.core import Definition, Repo
+from dryml.core.freeze import FrozenList
+from dryml.core.query import Arg, DefinitionPath, Index, Key, Kwarg, QueryPathError, normalize_path
 
 
 def test_query_path_parses_root_and_segments():
@@ -18,7 +18,7 @@ def test_query_path_resolves_concrete_definition_subtrees():
     leaf = objects.TestClass1(10, test="leaf")
     root = objects.TestNest3(leaf, metadata={"x.y": [leaf]})
 
-    from dryml.core2.query.path import get_subtree
+    from dryml.core.query.path import get_subtree
 
     assert get_subtree(root.definition, "args[0]") == leaf.definition
     assert get_subtree(root.definition, 'metadata["x.y"][0]') == leaf.definition
@@ -26,7 +26,7 @@ def test_query_path_resolves_concrete_definition_subtrees():
 
 def test_invalid_paths_report_errors():
     obj = objects.TestNest3(child=1)
-    from dryml.core2.query.path import get_subtree
+    from dryml.core.query.path import get_subtree
 
     with pytest.raises(QueryPathError):
         normalize_path("$bad")
@@ -37,7 +37,7 @@ def test_invalid_paths_report_errors():
 
 
 def test_replace_subtree_preserves_container_types():
-    from dryml.core2.query.path import get_subtree, replace_subtree
+    from dryml.core.query.path import get_subtree, replace_subtree
     obj = objects.TestNest3(items=("a", "b"), mapping={"k": [1, 2]})
     replaced = replace_subtree(obj.definition, "items[1]", "c")
     replaced = replace_subtree(replaced, "mapping.k[0]", 9)

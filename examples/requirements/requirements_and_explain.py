@@ -6,7 +6,7 @@ import importlib
 
 import dryml
 import dryml.annotations as annotations
-from dryml.core2 import Definition
+from dryml.core import Definition
 from dryml.dispatch import Dispatcher
 from dryml.environments import CurrentEnvironmentSpec
 from dryml.worlds import LocalResourceInventory, WorldSpec

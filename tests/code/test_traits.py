@@ -2,7 +2,7 @@ import numpy as np
 
 import dryml.numpy
 from dryml.code import Method, traits
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.tensor_spec import TensorSpec
 
 
 class Double(Method):

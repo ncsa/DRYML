@@ -17,8 +17,8 @@ import numpy as np
 
 from dryml.artifacts import CachedDataset
 from dryml.artifacts.representations.numpy_sequence import write_numpy_sequence
-from dryml.core2 import Object
-from dryml.core2.store.dir import DirStore
+from dryml.core import Object
+from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 from dryml.formats.canonical import canonical_json_bytes
 from dryml.managed import (

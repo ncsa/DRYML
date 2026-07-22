@@ -2,9 +2,9 @@ import numpy as np
 import pytest
 import sys
 
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
-from dryml.core2 import Repo
+from dryml.core import Repo
 from dryml.models import AutoEncoder, Experiment
 
 

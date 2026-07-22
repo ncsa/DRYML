@@ -1,6 +1,6 @@
 import numpy as np
-import core2_objects as objects
-from dryml.core2.definition import Definition
+import core_objects as objects
+from dryml.core.definition import Definition
 
 ### Tests for methods of creating objects. We verify they have the intended properties.
 

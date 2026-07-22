@@ -1,11 +1,11 @@
 import pytest
 
-from dryml.core2 import ConcreteDefinition, Definition, Object, Repo, Serializable
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan, from_canonical_local
-from dryml.core2.policies import RepoLoadOptions
-from dryml.core2.repo import RepoLoadError
-from dryml.core2.store.dir import DirStore
+from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.materialization import MaterializationAction, build_materialization_plan, execute_materialization_plan, from_canonical_local
+from dryml.core.policies import RepoLoadOptions
+from dryml.core.repo import RepoLoadError
+from dryml.core.store.dir import DirStore
 
 
 class MaterialLeaf(Object):
@@ -238,7 +238,7 @@ def test_constructor_failure_does_not_publish_cache_entry():
 
 
 def test_cached_reuse_does_not_resolve_backend_class(monkeypatch):
-    from dryml.core2 import materialization as materialization_mod
+    from dryml.core import materialization as materialization_mod
 
     repo = Repo()
     obj = MaterialLeaf("cached", repo=repo)

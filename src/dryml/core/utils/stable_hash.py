@@ -455,7 +455,7 @@ class _BoundedStableHasher:
             return hasher.hexdigest()
 
         if isinstance(value, FactorySpec):
-            synthetic = ("dryml.core2.FactorySpec", value.target, value.args, value.kwargs)
+            synthetic = ("dryml.core.FactorySpec", value.target, value.args, value.kwargs)
             inner = self._hash(synthetic, depth=depth + 1, incoming_edge=True, memo={})
             return self._leaf_digest(inner.encode("ascii"))
 
@@ -677,7 +677,7 @@ class _BoundedStableHasher:
             self.budget.charge_bytes(len(_stable_leaf_bytes(value)))
             return
         if isinstance(value, FactorySpec):
-            synthetic = ("dryml.core2.FactorySpec", value.target, value.args, value.kwargs)
+            synthetic = ("dryml.core.FactorySpec", value.target, value.args, value.kwargs)
             self._account_only(synthetic, depth=depth + 1, incoming_edge=True)
             self.budget.charge_bytes(64)
             return

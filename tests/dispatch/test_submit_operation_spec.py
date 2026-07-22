@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.operations import attach_operation_id, make_function_call_spec, make_method_call_spec

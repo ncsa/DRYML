@@ -32,9 +32,9 @@ import probe_targets  # noqa: E402
 
 import dryml.code as code  # noqa: E402
 from dryml import annotations, environments  # noqa: E402
-from dryml.core2 import Definition  # noqa: E402
-from dryml.core2.repo import Repo  # noqa: E402
-from dryml.core2.store.dir import DirStore  # noqa: E402
+from dryml.core import Definition  # noqa: E402
+from dryml.core.repo import Repo  # noqa: E402
+from dryml.core.store.dir import DirStore  # noqa: E402
 from dryml.dispatch import Dispatcher  # noqa: E402
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec  # noqa: E402
 from dryml.formats.canonical import json_ready  # noqa: E402

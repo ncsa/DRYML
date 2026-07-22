@@ -6,7 +6,7 @@ import tracemalloc
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.formats.ids import content_id
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import (

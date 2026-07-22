@@ -6,12 +6,12 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from dryml.core2.backend import Backend
-from dryml.core2.methods import BatchMode, CompilerInfo, Method, Traits, traits
-from dryml.core2.methods.compiler_info import CompilerInfo as CompilerInfoFromModule
-from dryml.core2.methods.method import Method as MethodFromModule
-from dryml.core2.methods.traits import Traits as TraitsFromModule
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.backend import Backend
+from dryml.core.methods import BatchMode, CompilerInfo, Method, Traits, traits
+from dryml.core.methods.compiler_info import CompilerInfo as CompilerInfoFromModule
+from dryml.core.methods.method import Method as MethodFromModule
+from dryml.core.methods.traits import Traits as TraitsFromModule
+from dryml.core.tensor_spec import TensorSpec
 
 
 class Echo(Method):
@@ -65,11 +65,11 @@ class NumpyOnly(Method):
         return value
 
 
-def test_new_methods_imports_and_top_level_core2_exports():
-    from dryml.core2 import CompilerInfo as CoreCompilerInfo
-    from dryml.core2 import Method as CoreMethod
-    from dryml.core2 import Traits as CoreTraits
-    from dryml.core2 import traits as core_traits
+def test_new_methods_imports_and_top_level_core_exports():
+    from dryml.core import CompilerInfo as CoreCompilerInfo
+    from dryml.core import Method as CoreMethod
+    from dryml.core import Traits as CoreTraits
+    from dryml.core import traits as core_traits
 
     assert Method is MethodFromModule is CoreMethod
     assert Traits is TraitsFromModule is CoreTraits
@@ -164,19 +164,19 @@ def test_compiler_info_defaults_custom_values_and_frozen_behavior():
         custom.pure = True
 
 
-def test_core2_methods_import_does_not_import_dryml_code():
+def test_core_methods_import_does_not_import_dryml_code():
     script = """
 import sys
-import dryml.core2.methods
+import dryml.core.methods
 assert 'dryml.code' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", script], check=True)
 
 
-def test_core2_import_does_not_import_dryml_code():
+def test_core_import_does_not_import_dryml_code():
     script = """
 import sys
-import dryml.core2
+import dryml.core
 assert 'dryml.code' not in sys.modules
 """
     subprocess.run([sys.executable, "-c", script], check=True)

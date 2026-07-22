@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from dryml.artifacts import CachedDataset
-from dryml.core2 import Repo
-from dryml.core2.object import Pickleable
+from dryml.core import Repo
+from dryml.core.object import Pickleable
 from dryml.data import ArrayDataset
 from dryml.managed import current_operation_context
 from dryml.metrics import CategoricalAccuracy, ConfusionMatrix

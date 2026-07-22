@@ -5,7 +5,7 @@ import pickle
 import tempfile
 from pathlib import Path
 
-from dryml.core2.methods import Method
+from dryml.core.methods import Method
 from dryml.managed import ManagedOutput, ManagedOutputs, current_operation_context
 
 from .train_spec import (

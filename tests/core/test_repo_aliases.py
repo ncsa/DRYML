@@ -1,7 +1,7 @@
 import pytest
 
-import core2_objects as objects
-from dryml.core2.repo import Repo, RepoLoadError, load_alias, make_store, save_object
+import core_objects as objects
+from dryml.core.repo import Repo, RepoLoadError, load_alias, make_store, save_object
 
 
 def test_repo_alias_loads_object_in_same_repo(primary_store_set):

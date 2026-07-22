@@ -28,7 +28,7 @@ Repos manage DRYML object graphs. Stores own persisted object state. Most user w
 ## Basic Save And Load
 
 ```python
-from dryml.core2 import Object, Repo
+from dryml.core import Object, Repo
 
 
 class Item(Object):
@@ -51,8 +51,8 @@ loaded = repo.load(item.definition)
 The common path-backed store is `DirStore`.
 
 ```python
-from dryml.core2 import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
 
 store = DirStore("./my-dryml-store")
 repo = Repo(stores=store)
@@ -123,7 +123,7 @@ Definitions that occur inside stored object graphs, even when they are not indep
 Example:
 
 ```python
-from dryml.core2 import Definition, SKIP_ARGS
+from dryml.core import Definition, SKIP_ARGS
 
 selector = Definition(Item, SKIP_ARGS)
 

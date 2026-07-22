@@ -4,8 +4,8 @@ from dataclasses import replace
 
 import pytest
 
-from dryml.core2 import Object
-from dryml.core2.store.dir import DirStore
+from dryml.core import Object
+from dryml.core.store.dir import DirStore
 from dryml.managed import (
     ConcurrentManagedActivationError,
     ManagedOutput,

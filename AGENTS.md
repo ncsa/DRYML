@@ -32,12 +32,12 @@ Never start development with `./tests.sh full`; some maintained tests are intent
 ## Directory explanation
 
 ### `src/dryml` - The main source code repository
-`core2` - core modules of dryml.
+`core` - core modules of dryml.
 
 `code` - utilities for method instrumentation
 `execute` - The remote execution subsystem of DRYML
 `context` - The compute context subsystem of DRYML
-`core2/utils/graph` - Supported generic graph algorithms used by DRYML.
+`core/utils/graph` - Supported generic graph algorithms used by DRYML.
 
 There is no tracked `src/dryml/graph` package. Any untracked directory at that
 path is unsupported user work and must not be edited, staged, deleted, or used

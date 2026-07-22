@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from dryml.core2.dtype import DType, normalize_dtype
+from dryml.core.dtype import DType, normalize_dtype
 
 
 def _dtype_tf(self):

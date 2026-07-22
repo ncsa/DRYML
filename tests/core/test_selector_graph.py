@@ -1,9 +1,9 @@
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.query.path import DefinitionPath, Kwarg
-from dryml.core2.query.fingerprint import selector_local_requirements
-from dryml.core2.query.selector_graph import (
+from dryml.core import Definition, Object, Repo, SKIP_ARGS
+from dryml.core.query.path import DefinitionPath, Kwarg
+from dryml.core.query.fingerprint import selector_local_requirements
+from dryml.core.query.selector_graph import (
     SelectorGraph,
     SelectorGraphCycleError,
     SelectorGraphEdge,

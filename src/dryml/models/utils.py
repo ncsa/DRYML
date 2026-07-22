@@ -6,9 +6,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from dryml.core2 import Repo
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.tensor_spec import iter_specs
+from dryml.core import Repo
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.tensor_spec import iter_specs
 from dryml.data import Shuffle, Take, Unbatch
 from dryml.formats.refs import format_cdef_id
 from dryml.models.train_spec import TrainState

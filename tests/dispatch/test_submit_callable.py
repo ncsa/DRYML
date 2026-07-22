@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, plan, run, submit
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.environments import PythonExecutableSpec

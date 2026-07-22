@@ -11,8 +11,8 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from dryml.core2.repo import Repo, get_default_repo, make_store
-from dryml.core2.store.store import Store
+from dryml.core.repo import Repo, get_default_repo, make_store
+from dryml.core.store.store import Store
 from dryml.formats.canonical import canonical_json_bytes, canonical_json_load_bytes
 from dryml.formats.errors import CanonicalJSONError
 

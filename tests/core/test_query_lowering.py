@@ -1,8 +1,8 @@
 import pytest
 
-from dryml.core2 import Object
-from dryml.core2.query.lowering import CollectSink, CountSink, ExistsSink, OneOrNoneSink, OneSink, PageSink, PagedResultCursor, ScanPolicy
-from dryml.core2.query.model import QueryCardinalityError
+from dryml.core import Object
+from dryml.core.query.lowering import CollectSink, CountSink, ExistsSink, OneOrNoneSink, OneSink, PageSink, PagedResultCursor, ScanPolicy
+from dryml.core.query.model import QueryCardinalityError
 
 
 class LoweringLeaf(Object):

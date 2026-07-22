@@ -4,11 +4,11 @@ import inspect
 from types import SimpleNamespace
 
 from dryml.artifacts import CachedDataset, NUMPY_SEQUENCE_KIND, PARQUET_KIND
-from dryml.core2 import RefCDef, Repo
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.object import Object, Serializable
-from dryml.core2.repo import get_default_repo
-from dryml.core2.symbol import resolve_symbol
+from dryml.core import RefCDef, Repo
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.object import Object, Serializable
+from dryml.core.repo import get_default_repo
+from dryml.core.symbol import resolve_symbol
 from dryml.formats.refs import format_cdef_id
 from dryml.managed import (
     DelegatedOutputs,

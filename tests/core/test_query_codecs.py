@@ -1,7 +1,8 @@
 import pytest
 
-from dryml.core2 import Object
-from dryml.core2.query.codecs import (
+from dryml.core import Object
+from dryml.core.query.codecs import (
+    CDEF_CODEC_VERSION,
     QUERY_INDEX_CODEC_VERSION,
     QueryCodecError,
     QueryIndexCodec,
@@ -13,16 +14,20 @@ from dryml.core2.query.codecs import (
     encode_feature_token,
     encode_graph_path,
 )
-from dryml.core2.query.model import FeatureToken
-from dryml.core2.query.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
-from dryml.core2.query.utils import chunked, stable_hash_from_blob, stable_hash_to_blob
-from dryml.core2.utils.general import pickler
+from dryml.core.query.model import FeatureToken
+from dryml.core.query.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
+from dryml.core.query.utils import chunked, stable_hash_from_blob, stable_hash_to_blob
+from dryml.core.utils.general import pickler
 
 
 class CodecLeaf(Object):
     def __init__(self, value="leaf"):
         super().__init__()
         self.value = value
+
+
+def test_cdef_codec_version_accounts_for_permanent_module_identity():
+    assert CDEF_CODEC_VERSION == 2
 
 
 def test_cdef_codec_roundtrip():

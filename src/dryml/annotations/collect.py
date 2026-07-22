@@ -9,7 +9,7 @@ from typing import Any
 
 from .decorators import FRAGMENT_ATTR
 from .model import AnnotationFragment
-from dryml.core2.methods import bound_method_parts, descriptor_function
+from dryml.core.methods import bound_method_parts, descriptor_function
 
 
 def fragments_for(target: Any, *, namespace: str | None = None, kind: str | None = None, include_inherited: bool = True) -> tuple[AnnotationFragment, ...]:

@@ -6,8 +6,8 @@ import os
 import dryml
 
 from dryml.dispatch import NormalizedDispatchTarget, normalize_user_operation, resolve_dispatch_plan
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.utils.general import pickle_save
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.utils.general import pickle_save
 from dryml.formats.refs import format_cdef_id
 from dryml.operations import make_function_call_spec, make_method_call_spec
 

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Generic, Iterator, TypeVar
 
-from dryml.core2 import Object
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import SpecTree
+from dryml.core import Object
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import SpecTree
 
 
 T = TypeVar("T")

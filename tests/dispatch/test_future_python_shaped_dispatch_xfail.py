@@ -4,7 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher
 
 

@@ -1,6 +1,6 @@
-from dryml.core2 import Object, Repo, Serializable
-from dryml.core2.store.dir import DirStore
-from dryml.core2.utils.general import pickle_load, pickle_save
+from dryml.core import Object, Repo, Serializable
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.general import pickle_load, pickle_save
 
 
 class MultiLeaf(Object):

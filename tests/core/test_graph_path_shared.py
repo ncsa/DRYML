@@ -1,6 +1,6 @@
 import pytest
 
-from dryml.core2.query.path import (
+from dryml.core.query.path import (
     Arg,
     DefinitionPath,
     Index,
@@ -13,7 +13,7 @@ from dryml.core2.query.path import (
     normalize_path,
     parse_path,
 )
-from dryml.core2.utils.graph import GraphCtx, GraphPath
+from dryml.core.utils.graph import GraphCtx, GraphPath
 
 
 def test_query_path_types_are_shared_graph_types():
@@ -100,7 +100,7 @@ def test_integer_mapping_key_string_roundtrip_does_not_become_index():
 
 
 def test_set_member_collision_order_is_rejected(monkeypatch):
-    from dryml.core2.utils.graph import value as value_mod
+    from dryml.core.utils.graph import value as value_mod
 
     class Ambiguous:
         def __repr__(self):

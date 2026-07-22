@@ -5,18 +5,18 @@ from enum import Enum
 import numpy as np
 import pytest
 
-from dryml.core2 import ConcreteDefinition, Definition
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.config import ConfigRef
-from dryml.core2.dtype import DType
-from dryml.core2.factory import FactorySpec
-from dryml.core2.freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
-from dryml.core2.object import Object
-from dryml.core2.params import Par, PresentMatcher
-from dryml.core2.quoted import SelectorSpec
-from dryml.core2.symbol import ImportRef, SourceSpec
-from dryml.core2.tensor_spec import Layout, TensorSpec
-from dryml.core2.utils.stable_hash import (
+from dryml.core import ConcreteDefinition, Definition
+from dryml.core.cardinality import Cardinality
+from dryml.core.config import ConfigRef
+from dryml.core.dtype import DType
+from dryml.core.factory import FactorySpec
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenNDArray, FrozenSet, FrozenTuple
+from dryml.core.object import Object
+from dryml.core.params import Par, PresentMatcher
+from dryml.core.quoted import SelectorSpec
+from dryml.core.symbol import ImportRef, SourceSpec
+from dryml.core.tensor_spec import Layout, TensorSpec
+from dryml.core.utils.stable_hash import (
     StableHashLimitError,
     StableHashLimits,
     bounded_stable_hash_function,
@@ -75,7 +75,7 @@ def test_bounded_hash_preserves_existing_digest(value):
     ],
 )
 def test_frozen_containers_obey_exact_traversal_budgets(value):
-    import dryml.core2.utils.stable_hash as stable_hash
+    import dryml.core.utils.stable_hash as stable_hash
 
     expected = stable_hash_function(value)
     probe = stable_hash._BoundedStableHasher(StableHashLimits())
@@ -110,7 +110,7 @@ def test_frozen_containers_obey_exact_traversal_budgets(value):
 
 
 def test_frozen_ndarray_obeys_exact_atomic_budgets():
-    import dryml.core2.utils.stable_hash as stable_hash
+    import dryml.core.utils.stable_hash as stable_hash
 
     value = FrozenNDArray.from_array(np.asarray([1, 2], dtype=np.int32))
     expected = stable_hash_function(value)
@@ -226,7 +226,7 @@ def test_nested_factory_and_config_defaults_share_budgets_and_digest():
     ],
 )
 def test_factory_and_config_branches_obey_exact_shared_budgets(value):
-    import dryml.core2.utils.stable_hash as stable_hash
+    import dryml.core.utils.stable_hash as stable_hash
 
     probe = stable_hash._BoundedStableHasher(StableHashLimits())
     assert probe.hash(value) == stable_hash_function(value)

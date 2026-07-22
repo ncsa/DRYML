@@ -1,7 +1,7 @@
 import numpy as np
 
-import core2_objects as objects
-from dryml.core2.definition import Definition, stable_hash_function
+import core_objects as objects
+from dryml.core.definition import Definition, stable_hash_function
 
 
 def test_definition_hash_1():

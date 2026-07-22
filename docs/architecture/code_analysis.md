@@ -6,7 +6,7 @@ Current architecture for the shipped reusable `dryml.code` analysis API.
 
 ## Current State
 
-`dryml.code` contains a fact-oriented analysis layer plus compatibility helper modules for callable inspection, source extraction, and AST access collection. `dryml.core2.symbol` owns import references and source-backed symbol references. `dryml.core2.methods` owns method semantic objects such as `Method`, `Traits`, `CompilerInfo`, and the `traits` decorator. The helper modules now delegate to analyzer implementations under `dryml.code.algorithms` or re-export core semantic names for compatibility.
+`dryml.code` contains a fact-oriented analysis layer plus compatibility helper modules for callable inspection, source extraction, and AST access collection. `dryml.core.symbol` owns import references and source-backed symbol references. `dryml.core.methods` owns method semantic objects such as `Method`, `Traits`, `CompilerInfo`, and the `traits` decorator. The helper modules now delegate to analyzer implementations under `dryml.code.algorithms` or re-export core semantic names for compatibility.
 
 ## Problem Statement
 
@@ -69,9 +69,9 @@ Built-in analyzers are registered by name:
 - `callables`: callable identity, signature, and importability facts.
 - `source`: source text and source-location facts.
 - `ast_access`: static attribute-access and method-call-like hints.
-- `symbol_capture`: `ImportRef`/`SourceSpec`-style symbol facts using `dryml.core2.symbol`.
+- `symbol_capture`: `ImportRef`/`SourceSpec`-style symbol facts using `dryml.core.symbol`.
 - `direct_annotations`: raw annotation and requirement facts using the authoritative `dryml.annotations` collection/resolution APIs.
-- `method_contracts`: minimal DRYML `Method` contract metadata from `dryml.core2.methods`.
+- `method_contracts`: minimal DRYML `Method` contract metadata from `dryml.core.methods`.
 - `static_calls`: opt-in conservative resolution for direct globals and direct
   methods on concretely annotated parameters. It is not in either default
   analyzer tuple.
@@ -88,18 +88,18 @@ Compatibility imports remain available:
 - `dryml.code.ast_tools.AccessCollector`
 - `dryml.code.ast_tools.collect_accesses_from_source`
 
-## Relationship to core2.symbol
+## Relationship to core.symbol
 
-`core2.symbol` already provides stable `ImportRef` and `SourceSpec` primitives. `core2.methods` provides stable method semantic primitives. `core2` must not depend on `dryml.code`; `dryml.code` may depend on `core2`. This keeps the core semantic model independent of higher-level analysis algorithms.
+`core.symbol` already provides stable `ImportRef` and `SourceSpec` primitives. `core.methods` provides stable method semantic primitives. `core` must not depend on `dryml.code`; `dryml.code` may depend on `core`. This keeps the core semantic model independent of higher-level analysis algorithms.
 
 ## Relationship to Method and Method Handles
 
-`Method`, `Traits`, `CompilerInfo`, `BatchMode` re-export convenience, and the `traits` decorator now live under `dryml.core2.methods`. `dryml.code` re-exports these names for compatibility, but code-analysis algorithms only inspect method facts; they do not own the semantic model. Method handle or signature semantic APIs belong under `dryml.core2.methods`.
+`Method`, `Traits`, `CompilerInfo`, `BatchMode` re-export convenience, and the `traits` decorator now live under `dryml.core.methods`. `dryml.code` re-exports these names for compatibility, but code-analysis algorithms only inspect method facts; they do not own the semantic model. Method handle or signature semantic APIs belong under `dryml.core.methods`.
 
 Preferred import:
 
 ```python
-from dryml.core2.methods import Method, Traits, CompilerInfo, traits
+from dryml.core.methods import Method, Traits, CompilerInfo, traits
 ```
 
 Compatibility imports remain supported:
@@ -399,7 +399,7 @@ traceback, frame, local, arbitrary repr output, or exception message.
 When both policy and context permit annotations, observed methods collect class
 and concrete-method fragments through `dryml.annotations` and preserve current
 `AnnotationFact`/`RequirementFact` resolution data. `collect_requirements=False`
-or `include_annotations=False` omits those facts. Applicable core2 Method facts
+or `include_annotations=False` omits those facts. Applicable core Method facts
 are controlled independently by `include_method_contracts`. Their trait
 selectors use a fixed `{"backend": string|null, "batch_mode": string|null}`
 mapping rather than a Python representation; malformed selector metadata fails
@@ -451,7 +451,7 @@ guarantee.
 | Definition hash edges | 200,000 |
 | Definition hash digest-update bytes | 4,194,304 |
 
-The bounded core2 hasher computes the existing stable digest in the same
+The bounded core hasher computes the existing stable digest in the same
 budgeted traversal. It charges memo hits, nested identity values, mapping keys,
 edges, and every digest update before exceeding a limit. Hard-limit diagnostics
 include `limit_name`, `limit`, and `observed_lower_bound` when meaningful; no
@@ -503,13 +503,13 @@ work.
 - `src/dryml/code/callable_info.py`
 - `src/dryml/code/source.py`
 - `src/dryml/code/ast_tools.py`
-- `src/dryml/core2/methods/method.py`
-- `src/dryml/core2/methods/traits.py`
-- `src/dryml/core2/methods/compiler_info.py`
+- `src/dryml/core/methods/method.py`
+- `src/dryml/core/methods/traits.py`
+- `src/dryml/core/methods/compiler_info.py`
 - `src/dryml/code/method.py` compatibility wrapper
 - `src/dryml/code/traits.py` compatibility wrapper
-- `src/dryml/core2/symbol.py`
-- `src/dryml/core2/tensor_spec.py`
+- `src/dryml/core/symbol.py`
+- `src/dryml/core/tensor_spec.py`
 
 ## Open Questions
 

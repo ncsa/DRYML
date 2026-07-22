@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dryml.core2 import Serializable
+from dryml.core import Serializable
 
 
 class Artifact(Serializable):

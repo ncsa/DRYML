@@ -13,9 +13,9 @@ jnp = pytest.importorskip("jax.numpy")
 import dryml.jax as dryml_jax
 import numpy as np
 
-from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
-from dryml.core2.backend import discover_backend
+from dryml.core.dtype import DType
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
+from dryml.core.backend import discover_backend
 
 
 def _runtime_bootstrap(framework_name):

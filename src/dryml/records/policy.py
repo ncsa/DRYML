@@ -170,7 +170,7 @@ def apply_save_record_policy(repo: Any, plan: Any, save_options: Any) -> RecordP
     """Apply explicit record side effects after a save plan has written objects.
 
     The function is deliberately duck-typed so importing this module remains
-    independent of ``dryml.core2``. ``none`` returns a no-op report and does not
+    independent of ``dryml.core``. ``none`` returns a no-op report and does not
     touch store record directories or indexes.
     """
 

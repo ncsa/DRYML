@@ -5,7 +5,7 @@ import sys
 import types
 
 import dryml.code as code
-from dryml.core2 import Object
+from dryml.core import Object
 from dryml.managed import ManagedOutput, managed
 
 

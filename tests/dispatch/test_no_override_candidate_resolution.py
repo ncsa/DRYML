@@ -5,7 +5,7 @@ from dataclasses import replace
 import dryml
 import pytest
 
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
 from dryml.environments import ContainerEnvironmentSpec, CurrentEnvironmentSpec, EnvironmentRegistry, EnvironmentRequirement, PythonExecutableSpec, resolve, use
 from dryml.operations import make_function_call_spec

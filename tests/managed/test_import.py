@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core2 import Object
-from dryml.core2.store.dir import DirStore
+from dryml.core import Object
+from dryml.core.store.dir import DirStore
 from dryml.managed import (
     ManagedOutput,
     ManagedStateError,

@@ -1,7 +1,7 @@
 import numpy as np
 
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import Map
 from dryml.data.dataset import Dataset
 from dryml.data.image import ImageNormalize

@@ -35,7 +35,7 @@ The method interface supports output-spec inference. If a model has an explicit 
 Models can infer output specs from input specs.
 
 ```python
-from dryml.core2 import TensorSpec
+from dryml.core import TensorSpec
 from dryml.models import Model
 
 model = Model(output_spec=TensorSpec("float32", shape=(10,)))

@@ -1,4 +1,4 @@
-from dryml.core2.store.dir import DirStore
+from dryml.core.store.dir import DirStore
 
 import dryml.operations as ops
 import dryml.providers as providers

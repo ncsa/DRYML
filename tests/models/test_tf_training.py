@@ -3,8 +3,8 @@ import warnings
 import numpy as np
 import pytest
 
-from dryml.core2 import FactorySpec
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core import FactorySpec
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, Pipe, Project, Select
 from dryml.models import AutoEncoder, Experiment
 

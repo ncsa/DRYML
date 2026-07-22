@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from dryml.artifacts import CachedDataset
-from dryml.core2 import Repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.store.dir import DirStore
 from dryml.data import ArrayDataset
 from dryml.managed import (
     ControlRequest,

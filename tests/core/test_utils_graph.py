@@ -4,7 +4,7 @@ from collections import namedtuple
 
 import pytest
 
-from dryml.core2.utils.graph import (
+from dryml.core.utils.graph import (
     GraphCtx,
     GraphTransformError,
     GraphTransformer,
