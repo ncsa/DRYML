@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import glob
+import tempfile
 from dataclasses import replace
 from typing import Literal
 
 from .store import Store
-from ..query.model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
+from ..query.model import QueryIndexDirty, QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
 from ..utils.general import pickle_save, pickle_load
@@ -62,6 +63,10 @@ class DirStore(Store):
         return os.path.join(self.dryml_dir, "query-index.dirty")
 
     @property
+    def query_index_registration_path(self) -> str:
+        return os.path.join(self.dryml_dir, "query-index-v1.registered")
+
+    @property
     def query_index_policy(self) -> QueryIndexPolicy | str:
         return self._query_index_policy
 
@@ -86,6 +91,8 @@ class DirStore(Store):
             config = replace(config, path=path)
         else:
             path = os.fspath(config.path)
+        if os.path.exists(path) or os.path.exists(f"{path}.building"):
+            self.register_query_index_sidecar()
         self._query_index_instance = SQLiteStoreQueryIndex(
             source_key=self.catalog_key(),
             path=path,
@@ -95,12 +102,43 @@ class DirStore(Store):
         )
         return self._query_index_instance
 
+    def save_object(self, obj, *, revision: str | None = None) -> None:
+        """Publish an object and invalidate an existing persistent sidecar."""
+
+        super().save_object(obj, revision=revision)
+        if self._uses_nonpersistent_query_index():
+            self._mark_existing_query_index_dirty()
+
+    def save_definition(self, cdef) -> None:
+        """Publish a definition and invalidate an existing persistent sidecar."""
+
+        super().save_definition(cdef)
+        if self._uses_nonpersistent_query_index():
+            self._mark_existing_query_index_dirty()
+
     def mark_query_index_dirty(self) -> None:
         os.makedirs(self.dryml_dir, exist_ok=True)
-        tmp_path = f"{self.query_index_dirty_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write("dirty\n")
-        os.replace(tmp_path, self.query_index_dirty_path)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.dryml_dir,
+                    prefix=".query-index.dirty.",
+                    suffix=".tmp",
+                    delete=False) as f:
+                tmp_path = f.name
+                f.write(f"{os.urandom(16).hex()}\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.query_index_dirty_path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.remove(tmp_path)
+                except FileNotFoundError:
+                    pass
 
     def clear_query_index_dirty(self) -> None:
         try:
@@ -110,6 +148,23 @@ class DirStore(Store):
 
     def query_index_is_dirty(self) -> bool:
         return os.path.exists(self.query_index_dirty_path)
+
+    def register_query_index_sidecar(self) -> None:
+        """Record that this Store has a persistent SQLite query sidecar."""
+
+        os.makedirs(self.dryml_dir, exist_ok=True)
+        try:
+            fd = os.open(
+                self.query_index_registration_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("sqlite-v1\n")
+            f.flush()
+            os.fsync(f.fileno())
 
     def query_index_status(self) -> QueryIndexStatus:
         """Return status for this directory Store's configured query index.
@@ -175,6 +230,10 @@ class DirStore(Store):
         before = index.status()
         index.rebuild()
         after = index.status()
+        if after.state != "ready":
+            raise QueryIndexDirty(
+                f"Query-index rebuild completed with post-rebuild state {after.state!r}."
+            )
         return ReconcileReport(
             backend=after.backend,
             store_key=after.store_key,
@@ -333,6 +392,23 @@ class DirStore(Store):
         if index is None or not hasattr(index, "rebuild"):
             raise QueryIndexUnavailable(f"DirStore query_index={self._query_index_policy!r} does not provide a rebuildable persistent index.")
         return index
+
+    def _mark_existing_query_index_dirty(self) -> None:
+        claim_path = f"{self.query_index_path}.building"
+        if (
+                os.path.exists(self.query_index_registration_path)
+                or os.path.exists(self.query_index_path)
+                or os.path.exists(claim_path)):
+            self.mark_query_index_dirty()
+
+    def _uses_nonpersistent_query_index(self) -> bool:
+        return (
+            self._query_index_policy in {"memory", "none"}
+            or (
+                self._query_index_policy == "auto"
+                and not sqlite_available()
+            )
+        )
 
     def _call_query_index_factory(self, factory):
         try:

@@ -64,7 +64,7 @@ def test_identity_vectors_are_exact_in_fresh_process():
 import json
 from dryml.core import ConcreteDefinition, Definition, FactorySpec
 from dryml.core.dtype import DType
-from dryml.core.utils.stable_hash import stable_hash_function
+from dryml.core.utils.stable_hash import bounded_stable_hash_function, stable_hash_function
 
 values = (
     FactorySpec(dict, value=1),
@@ -72,7 +72,10 @@ values = (
     ConcreteDefinition(DType, ("float", 32), {}),
     {"plain": [1, 2]},
 )
-print(json.dumps([stable_hash_function(value) for value in values]))
+print(json.dumps({
+    "stable": [stable_hash_function(value) for value in values],
+    "bounded": [bounded_stable_hash_function(value) for value in values],
+}))
 """
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -81,7 +84,9 @@ print(json.dumps([stable_hash_function(value) for value in values]))
         stdout=subprocess.PIPE,
     )
 
-    assert tuple(json.loads(completed.stdout)) == EXPECTED_IDENTITY_VECTORS
+    observed = json.loads(completed.stdout)
+    assert tuple(observed["stable"]) == EXPECTED_IDENTITY_VECTORS
+    assert tuple(observed["bounded"]) == EXPECTED_IDENTITY_VECTORS
 
 
 @pytest.mark.parametrize(

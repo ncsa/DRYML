@@ -8,10 +8,11 @@ import time
 
 import pytest
 
+from dryml.core import Definition, Object, Repo, SKIP_ARGS
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
-from dryml.core.query.model import QueryIndexBusy, QueryIndexError
+from dryml.core.query.model import QueryIndexBusy, QueryIndexDirty, QueryIndexError
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
@@ -22,6 +23,12 @@ from dryml.core.utils.general import pickle_save
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+
+
+class QueryIndexConcurrentLeaf(Object):
+    def __init__(self, name="leaf"):
+        super().__init__()
+        self.name = name
 
 
 _COMMON_WORKER_CODE = r'''
@@ -624,6 +631,55 @@ with idx.read_view() as view:
     assert not store.query_index_is_dirty()
     with store.open_query_index().read_view() as view:
         assert len(view.exact_ids(root)) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not replace an open SQLite database")
+def test_original_saver_reopens_rebuilt_index_after_dirty_overlap(tmp_path):
+    config = SQLiteQueryIndexConfig(
+        journal_mode="delete",
+        busy_timeout=0.05,
+        max_write_retries=20,
+    )
+    store = DirStore(tmp_path / "store", query_index=config)
+    repo = Repo(stores=store)
+    first = QueryIndexConcurrentLeaf("before-rebuild", repo=repo)
+    repo.save_object(first)
+    assert store.query_index_status().state == "ready"
+    store.mark_query_index_dirty()
+    rebuild_snapshot = tmp_path / "rebuild-snapshot"
+    release_rebuild = tmp_path / "release-rebuild"
+
+    proc = _start_worker(f'''
+idx = store_index({store.base_dir!r})
+original_hydrate = idx.store.hydrate_index
+def synchronized_hydrate():
+    roots = tuple(original_hydrate())
+    Path({str(rebuild_snapshot)!r}).write_text("ready")
+    while not Path({str(release_rebuild)!r}).exists():
+        time.sleep(0.01)
+    yield from roots
+idx.store.hydrate_index = synchronized_hydrate
+idx.rebuild()
+emit({{"state": idx.status().state}})
+''')
+
+    try:
+        _wait_for(rebuild_snapshot)
+        second = QueryIndexConcurrentLeaf("during-rebuild", repo=repo)
+        with pytest.raises(QueryIndexDirty):
+            repo.save_object(second)
+        release_rebuild.write_text("go")
+        assert _collect_worker(proc) == {"state": "dirty"}
+    finally:
+        release_rebuild.write_text("go")
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    assert second.definition in tuple(store.hydrate_index())
+    results = repo.query(Definition(QueryIndexConcurrentLeaf, SKIP_ARGS)).stored().defs()
+    assert set(results) == {first.definition, second.definition}
+    assert store.query_index_status().state == "ready"
 
 
 def test_crash_mid_rebuild_leaves_building_state_and_recovers(tmp_path):

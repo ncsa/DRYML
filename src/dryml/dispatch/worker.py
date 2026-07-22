@@ -136,6 +136,7 @@ def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
 
     operation_id = envelope.operation_spec.get("id")
     dispatch_id = envelope.dispatch_spec.get("id")
+    recipe_id = envelope.execution_recipe.get("id")
     dispatch_operation_id = envelope.dispatch_spec.get("payload", {}).get("operation_id")
     recipe_payload = envelope.execution_recipe.get("payload", {})
     recipe_operation_id = recipe_payload.get("operation_id")
@@ -143,6 +144,10 @@ def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
     mismatches = {}
     if operation_id is None:
         mismatches["operation_spec.id"] = operation_id
+    if dispatch_id is None:
+        mismatches["dispatch_spec.id"] = dispatch_id
+    if recipe_id is None:
+        mismatches["execution_recipe.id"] = recipe_id
     if dispatch_operation_id != operation_id:
         mismatches["dispatch_spec.payload.operation_id"] = dispatch_operation_id
     if recipe_operation_id != operation_id:

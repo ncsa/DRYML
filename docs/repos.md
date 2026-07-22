@@ -175,7 +175,7 @@ store.reconcile_query_index()
 
 Use `index_status()` for lightweight diagnostics. Use `validate_index(thorough=True)` when you want filesystem-level checks, including stored-root files and hash-path consistency. Use `rebuild_index()` to explicitly recreate the persistent index from object files.
 
-`reconcile_query_index()` compares the SQLite sidecar with the authoritative Store contents. In the current v1 policy, missing, dirty, corrupt, incompatible, stale, or divergent indexes are repaired by an exclusive rebuild from Store roots. Concurrent initial rebuild attempts coordinate through a build claim so only one process performs the Store scan.
+`reconcile_query_index()` compares the SQLite sidecar with the authoritative Store contents. In the current v1 policy, missing, dirty, corrupt, incompatible, stale, or divergent indexes are repaired by an exclusive rebuild from Store roots. Concurrent initial rebuild attempts coordinate through a build claim so only one process performs the Store scan. If an overlapping save replaces the dirty-marker generation during that scan, the rebuilt sidecar remains dirty for another rebuild instead of publishing the stale snapshot as ready.
 
 Corrupt SQLite sidecars are quarantined before rebuild. A changed or misplaced `def.pkl` is reported as Store corruption instead of being silently indexed under the wrong identity.
 
@@ -183,13 +183,13 @@ Diagnostic status records include the backend, Store key, generation, schema ver
 
 ### Multi-Process Use
 
-Each process and thread opens its own SQLite connection. A worker that saves an object commits its query-index transaction after object files are published. A coordinator with an existing Store/index handle sees that committed root on its next read transaction without reconnecting.
+Each process and thread opens its own SQLite connection. A worker that saves an object commits its query-index transaction after object files are published. A coordinator with an existing Store/index handle sees that committed root on its next read transaction without reconnecting. If another process replaces the sidecar during rebuild, idle cached connections detect the changed file identity and reopen before the next operation.
 
 WAL mode can allow long-lived readers and a writer to overlap on supported local filesystems. The default `auto` journal policy is conservative and uses rollback journal unless the SQLite runtime is known safe for WAL.
 
 ## Failure Model
 
-Object state is published before persistent query-index root activation. If object publication succeeds and index update fails, the store can be marked dirty and reconciled later.
+Object state is published before persistent query-index root activation. If object publication succeeds and index update fails, the store can be marked dirty and reconciled later. A Store-local registration marker lets writers using `memory`, `none`, or `auto` without SQLite also mark an existing persistent sidecar or active rebuild dirty, including a sidecar configured at an explicit path, so mixed-policy access cannot publish an incomplete ready index.
 
 This means a missing or stale index affects performance or query completeness until reconciliation, but it should not make committed object files invalid.
 

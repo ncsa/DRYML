@@ -386,7 +386,7 @@ Local-world dispatch is local-only: all workers run on the same host and share t
 
 The local backend launches `python -m dryml.dispatch.worker` with JSON request, handshake, and response files in a per-dispatch work directory. Child stdout/stderr are captured to separate files from process start, so user output cannot corrupt protocol JSON.
 
-The worker handshake reports protocol version, Python/platform, pid, supported operation kinds, call transports, store kinds, record schemas, runtime modes, environment kind, process-group support, and store accessibility. The parent waits for this phase before trusting a worker result, and an `ok` worker response is accepted only after an observed `ok` handshake. Missing features, protocol mismatch, inaccessible store paths, or inconsistent envelope IDs return structured failed/unsupported responses.
+The worker handshake reports protocol version, Python/platform, pid, supported operation kinds, call transports, store kinds, record schemas, runtime modes, environment kind, process-group support, and store accessibility. The parent waits for this phase before trusting a worker result, and an `ok` worker response is accepted only after an observed `ok` handshake. Before Store access or execution, the worker requires operation, dispatch, and execution-recipe IDs, recomputes each ID from its canonical payload, and verifies their cross-links. Missing features, protocol mismatch, inaccessible store paths, or missing, stale, or inconsistent envelope IDs return structured failed/unsupported responses.
 
 ## Store Marshalling
 

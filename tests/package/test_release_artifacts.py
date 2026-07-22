@@ -101,35 +101,44 @@ def _offline_environment(network_guard: Path) -> dict[str, str]:
     return environment
 
 
-def _tracked_files(repository: Path) -> set[str]:
+def _head_sha(repository: Path) -> str:
+    return subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repository,
+        text=True,
+    ).strip()
+
+
+def _tracked_files(repository: Path, revision: str = "HEAD") -> set[str]:
     return set(subprocess.check_output(
-        ["git", "ls-tree", "-r", "--name-only", "HEAD"],
+        ["git", "ls-tree", "-r", "--name-only", revision],
         cwd=repository,
         text=True,
     ).splitlines())
 
 
-def _archive_candidate(repository: Path, destination: Path, archive_path: Path, environment: dict[str, str]) -> set[str]:
-    tracked = _tracked_files(repository)
+def _archive_candidate(repository: Path, destination: Path, archive_path: Path, environment: dict[str, str]) -> tuple[set[str], str]:
+    candidate_sha = _head_sha(repository)
+    tracked = _tracked_files(repository, candidate_sha)
     assert REQUIRED_CANDIDATE_FILES <= tracked, (
         "release manifest and artifact contract must be committed before the "
         f"candidate is built: {sorted(REQUIRED_CANDIDATE_FILES - tracked)}"
     )
     contract_path = Path(__file__).resolve()
     committed_contract = subprocess.check_output(
-        ["git", "show", "HEAD:tests/package/test_release_artifacts.py"],
+        ["git", "show", f"{candidate_sha}:tests/package/test_release_artifacts.py"],
         cwd=repository,
     )
     assert contract_path.read_bytes() == committed_contract, (
         "the executing release-artifact contract must match committed HEAD"
     )
     _run(
-        ["git", "archive", "--format=tar", f"--output={archive_path}", "HEAD"],
+        ["git", "archive", "--format=tar", f"--output={archive_path}", candidate_sha],
         cwd=repository,
         environment=environment,
     )
     _extract_tar(archive_path, destination)
-    return tracked
+    return tracked, candidate_sha
 
 
 def _network_guard(root: Path) -> Path:
@@ -291,7 +300,12 @@ def release_artifacts(tmp_path_factory):
     source.mkdir()
     guard = _network_guard(root)
     environment = _offline_environment(guard)
-    tracked = _archive_candidate(repository, source, root / "candidate.tar", environment)
+    tracked, candidate_sha = _archive_candidate(
+        repository,
+        source,
+        root / "candidate.tar",
+        environment,
+    )
     dist = root / "dist"
     dist.mkdir()
     _run(
@@ -310,7 +324,16 @@ def release_artifacts(tmp_path_factory):
         environment=environment,
     )
     wheel = next(dist.glob("*.whl"))
-    return tracked, root, source, guard, sdist, wheel
+    assert _head_sha(repository) == candidate_sha, (
+        "repository HEAD changed while release artifacts were being built"
+    )
+    artifacts = tracked, candidate_sha, root, source, guard, sdist, wheel
+    try:
+        yield artifacts
+    finally:
+        assert _head_sha(repository) == candidate_sha, (
+            "repository HEAD changed while release artifacts were being tested"
+        )
 
 
 def _metadata_from_wheel(wheel: Path):
@@ -328,7 +351,7 @@ def _metadata_from_sdist(sdist: Path):
 
 
 def test_artifact_metadata_and_optional_extras_are_exact(release_artifacts):
-    _, _, source, _, sdist, wheel = release_artifacts
+    _, _, _, source, _, sdist, wheel = release_artifacts
     wheel_metadata = _metadata_from_wheel(wheel)
     sdist_metadata = _metadata_from_sdist(sdist)
 
@@ -373,7 +396,7 @@ def test_artifact_metadata_and_optional_extras_are_exact(release_artifacts):
 
 
 def test_sdist_and_wheel_content_and_bounds(release_artifacts):
-    tracked, _, _, _, sdist, wheel = release_artifacts
+    tracked, _, _, _, _, sdist, wheel = release_artifacts
     assert sdist.stat().st_size <= MAX_ARTIFACT_BYTES
     assert wheel.stat().st_size <= MAX_ARTIFACT_BYTES
 
@@ -438,7 +461,7 @@ def test_sdist_and_wheel_content_and_bounds(release_artifacts):
 
 
 def test_isolated_wheel_install_uses_artifact_and_stays_lightweight(release_artifacts):
-    _, root, _, guard, _, wheel = release_artifacts
+    _, _, root, _, guard, _, wheel = release_artifacts
     target = root / "target"
     work = root / "smoke"
     work.mkdir()

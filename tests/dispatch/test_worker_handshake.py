@@ -3,8 +3,10 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
+
 from dryml.core.store.dir import DirStore
-from dryml.dispatch import Dispatcher, LocalSubprocessFuture, WorkerResponse, WorkerStoreRef
+from dryml.dispatch import Dispatcher, LocalSubprocessFuture, WorkerResponse, WorkerStoreRef, attach_recipe_id
 from dryml.dispatch.protocol import write_json_file
 from dryml.formats.ids import content_id
 from dryml.environments import PythonExecutableSpec
@@ -106,18 +108,25 @@ def test_worker_rejects_inconsistent_envelope_ids(tmp_path, target_module):
     dispatcher = Dispatcher(store=store)
     plan = dispatcher.plan(op, environment=env)
     bad_recipe = dict(plan.execution_recipe)
+    bad_recipe.pop("id")
     bad_recipe["payload"] = {**bad_recipe["payload"], "operation_id": content_id("op", 1, {"other": True})}
+    bad_recipe = attach_recipe_id(bad_recipe)
     bad_envelope = dataclasses.replace(plan.envelope, execution_recipe=bad_recipe)
 
     response = dispatcher.submit(dataclasses.replace(plan, execution_recipe=bad_recipe, envelope=bad_envelope)).result(timeout=10)
 
     assert response.status == "failed"
     assert response.error["type"] == "WorkerProtocolError"
+    assert response.error["message"] == (
+        "execution envelope operation/dispatch/recipe IDs are inconsistent"
+    )
 
 
+@pytest.mark.parametrize("spec_name", ("operation", "dispatch", "recipe"))
 def test_worker_rejects_self_consistent_links_with_stale_spec_id(
     tmp_path,
     target_module,
+    spec_name,
 ):
     store = DirStore(tmp_path / "store", query_index="none")
     env = PythonExecutableSpec(
@@ -130,26 +139,77 @@ def test_worker_rejects_self_consistent_links_with_stale_spec_id(
     )
     dispatcher = Dispatcher(store=store)
     plan = dispatcher.plan(op, environment=env, record_policy="none")
-    bad_dispatch = dict(plan.dispatch_spec)
-    bad_dispatch["payload"] = {
-        **bad_dispatch["payload"],
-        "metadata": {
-            **bad_dispatch["payload"].get("metadata", {}),
-            "tampered": True,
-        },
-    }
+    field = {
+        "operation": "operation_spec",
+        "dispatch": "dispatch_spec",
+        "recipe": "execution_recipe",
+    }[spec_name]
+    bad_spec = dict(getattr(plan.envelope, field))
+    if spec_name == "operation":
+        bad_spec["payload"] = {**bad_spec["payload"], "args": [2, 2]}
+    elif spec_name == "dispatch":
+        bad_spec["payload"] = {
+            **bad_spec["payload"],
+            "metadata": {
+                **bad_spec["payload"].get("metadata", {}),
+                "tampered": True,
+            },
+        }
+    else:
+        bad_spec["payload"] = {
+            **bad_spec["payload"],
+            "constraints": {
+                **bad_spec["payload"].get("constraints", {}),
+                "tampered": True,
+            },
+        }
+    bad_envelope = dataclasses.replace(plan.envelope, **{field: bad_spec})
+    plan_updates = {"envelope": bad_envelope}
+    if spec_name != "operation":
+        plan_updates[field] = bad_spec
+
+    response = dispatcher.submit(
+        dataclasses.replace(plan, **plan_updates)
+    ).result(timeout=10)
+
+    assert response.status == "failed"
+    assert response.error["type"] == "WorkerProtocolError"
+    assert response.error["message"] == (
+        "execution envelope contains an invalid canonical spec"
+    )
+
+
+def test_worker_rejects_missing_recipe_id_before_execution(tmp_path, target_module):
+    store = DirStore(tmp_path / "store", query_index="none")
+    env = PythonExecutableSpec(
+        sys.executable,
+        pythonpath_policy="explicit",
+        extra_pythonpath=(str(target_module.parent),),
+    ).to_data()
+    op = attach_operation_id(
+        make_function_call_spec("dispatch_target:add", args=[1, 2])
+    )
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(op, environment=env, record_policy="none")
+    bad_recipe = dict(plan.execution_recipe)
+    bad_recipe.pop("id")
     bad_envelope = dataclasses.replace(
         plan.envelope,
-        dispatch_spec=bad_dispatch,
+        execution_recipe=bad_recipe,
     )
 
     response = dispatcher.submit(
         dataclasses.replace(
             plan,
-            dispatch_spec=bad_dispatch,
+            execution_recipe=bad_recipe,
             envelope=bad_envelope,
         )
     ).result(timeout=10)
 
     assert response.status == "failed"
     assert response.error["type"] == "WorkerProtocolError"
+    assert response.error["message"] == (
+        "execution envelope operation/dispatch/recipe IDs are inconsistent"
+    )
+    assert response.execution_record_id is None
+    assert list(store.records.iter_records()) == []

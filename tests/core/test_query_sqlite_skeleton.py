@@ -1,9 +1,10 @@
+import os
 import threading
 from uuid import UUID
 
 import pytest
 
-from dryml.core.query.model import QueryIndexDirty, QueryIndexIncompatible
+from dryml.core.query.model import QueryIndexDirty, QueryIndexError, QueryIndexIncompatible
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core.query.sqlite.connection as connection_module
 from dryml.core.query.sqlite.connection import SQLiteConnectionManager
@@ -96,6 +97,63 @@ def test_connection_manager_reopens_externally_closed_cached_connection(tmp_path
 
     assert reopened is not con
     assert reopened.execute("SELECT 1").fetchone()[0] == 1
+    manager.close_current()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not replace an open SQLite database")
+def test_connection_manager_reopens_when_database_path_identity_changes(tmp_path):
+    path = tmp_path / "index.sqlite"
+    replacement_path = tmp_path / "replacement.sqlite"
+    config = SQLiteQueryIndexConfig(path, journal_mode="delete")
+    left = SQLiteConnectionManager(config)
+    right = SQLiteConnectionManager(config)
+    con = left.connection()
+    assert right.connection() is con
+    con.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+    con.execute("INSERT INTO marker VALUES ('original')")
+
+    sqlite3 = require_sqlite()
+    with sqlite3.connect(replacement_path) as replacement:
+        replacement.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+        replacement.execute("INSERT INTO marker VALUES ('replacement')")
+    os.replace(replacement_path, path)
+
+    reopened = left.connection()
+
+    assert reopened is not con
+    assert right.connection() is reopened
+    assert reopened.execute("SELECT value FROM marker").fetchone()[0] == "replacement"
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        con.execute("SELECT 1")
+    left.close_current()
+    assert reopened.execute("SELECT 1").fetchone()[0] == 1
+    right.close_current()
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        reopened.execute("SELECT 1")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not replace an open SQLite database")
+def test_connection_manager_rejects_identity_change_during_active_lease(tmp_path):
+    path = tmp_path / "index.sqlite"
+    replacement_path = tmp_path / "replacement.sqlite"
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(path, journal_mode="delete"))
+    sqlite3 = require_sqlite()
+
+    with manager.lease() as con:
+        con.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+        con.execute("INSERT INTO marker VALUES ('original')")
+        with sqlite3.connect(replacement_path) as replacement:
+            replacement.execute("CREATE TABLE marker (value TEXT NOT NULL)")
+            replacement.execute("INSERT INTO marker VALUES ('replacement')")
+        os.replace(replacement_path, path)
+
+        with pytest.raises(QueryIndexError, match="actively leased"):
+            manager.connection()
+        assert con.execute("SELECT value FROM marker").fetchone()[0] == "original"
+
+    reopened = manager.connection()
+    assert reopened is not con
+    assert reopened.execute("SELECT value FROM marker").fetchone()[0] == "replacement"
     manager.close_current()
 
 

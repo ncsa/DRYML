@@ -267,10 +267,12 @@ class SQLiteStoreQueryIndex:
         Rebuilds acquire a sidecar build claim so concurrent callers do not all
         scan the Store. Roots are registered in bounded batches, the new index is
         validated while still marked `building`, and only then is it marked
-        `ready`. When `quarantine_existing` is true, the previous database file
-        is renamed aside instead of unlinked before rebuilding.
+        `ready`. A dirty marker replaced during the scan leaves the rebuilt
+        index dirty for another rebuild. When `quarantine_existing` is true,
+        the previous database file is renamed aside instead of unlinked.
         """
 
+        self._register_persistent_sidecar()
         with self._build_claim(force=force) as acquired:
             if not acquired:
                 if stats is not None:
@@ -284,7 +286,7 @@ class SQLiteStoreQueryIndex:
         SQLite v1 uses an exclusive rebuild policy for missing, dirty, corrupt,
         incompatible, stale, or divergent indexes. Object files remain the source
         of truth. If Store files are themselves inconsistent, reconciliation
-        reports validation issues and leaves the existing index unmodified.
+        reports validation issues and leaves any replacement index non-ready.
         """
 
         before = self.status()
@@ -312,21 +314,43 @@ class SQLiteStoreQueryIndex:
             issues: tuple[ValidationIssue, ...],
             *,
             quarantine_existing: bool = False) -> ReconcileReport:
+        before_file_identity = self._sidecar_file_identity()
         try:
             force = before.state not in {"missing", "dirty", "building", "incompatible", "corrupt"}
             self.rebuild(quarantine_existing=quarantine_existing, force=force)
         except Exception as exc:
+            after = self.status()
+            changed = self._sidecar_file_identity() != before_file_identity
             return ReconcileReport(
-                backend=before.backend,
-                store_key=before.store_key,
-                changed=False,
-                action="validate",
+                backend=after.backend,
+                store_key=after.store_key,
+                changed=changed,
+                action="rebuild" if changed else "validate",
                 generation_before=before.generation,
-                generation_after=before.generation,
-                validated=True,
+                generation_after=after.generation,
+                definitions_scanned=(after.row_counts or {}).get("stored_roots", 0),
+                validated=False,
                 issues=(*issues, ValidationIssue("error", "SQLite query-index rebuild failed.", repr(exc))),
+                diagnostics=after.diagnostics,
             )
         after = self.status()
+        if after.state != "ready":
+            return ReconcileReport(
+                backend=after.backend,
+                store_key=after.store_key,
+                changed=True,
+                action="rebuild",
+                generation_before=before.generation,
+                generation_after=after.generation,
+                definitions_scanned=(after.row_counts or {}).get("stored_roots", 0),
+                validated=False,
+                issues=(*issues, ValidationIssue(
+                    "error",
+                    "SQLite query-index rebuild did not produce a ready index.",
+                    f"post-rebuild state={after.state!r}",
+                )),
+                diagnostics=after.diagnostics,
+            )
         return ReconcileReport(
             backend=after.backend,
             store_key=after.store_key,
@@ -344,6 +368,7 @@ class SQLiteStoreQueryIndex:
         if self.store is None or not hasattr(self.store, "hydrate_index"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
 
+        dirty_marker_token = self._dirty_marker_token()
         self._connections.close_path_current_process()
         self._remove_existing_index(quarantine=quarantine_existing)
         self.initialize_empty(build_state="building")
@@ -356,8 +381,10 @@ class SQLiteStoreQueryIndex:
             graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
             self._register_stored_roots(graph, cdefs, require_ready=False)
         self._validate_rebuild_before_ready()
-        self._set_build_state("ready")
-        self._clear_dirty()
+        if self._clear_dirty(dirty_marker_token):
+            self._set_build_state("ready")
+        else:
+            self._set_build_state("dirty")
         con = self._connections.connection(readonly=False)
         con.execute("PRAGMA optimize")
         if stats is not None:
@@ -567,13 +594,44 @@ class SQLiteStoreQueryIndex:
     def _is_dirty(self) -> bool:
         return self.dirty_path is not None and self.dirty_path.exists()
 
-    def _clear_dirty(self) -> None:
+    def _dirty_marker_token(self) -> bytes | None:
         if self.dirty_path is None:
-            return
+            return None
         try:
-            self.dirty_path.unlink()
+            return self.dirty_path.read_bytes()
         except FileNotFoundError:
-            pass
+            return None
+
+    def _clear_dirty(self, expected_token: bytes | None) -> bool:
+        """Clear only the dirty marker observed before a rebuild scan."""
+
+        current_token = self._dirty_marker_token()
+        if current_token != expected_token:
+            return False
+        if current_token is None or self.dirty_path is None:
+            return True
+
+        consumed_path = self.dirty_path.with_name(
+            f".{self.dirty_path.name}.clear-{os.getpid()}-{time.time_ns()}"
+        )
+        try:
+            os.replace(self.dirty_path, consumed_path)
+        except FileNotFoundError:
+            return False
+
+        moved = True
+        try:
+            consumed_token = consumed_path.read_bytes()
+            if consumed_token != expected_token:
+                os.replace(consumed_path, self.dirty_path)
+                moved = False
+                return False
+            consumed_path.unlink()
+            moved = False
+        finally:
+            if moved:
+                os.replace(consumed_path, self.dirty_path)
+        return self._dirty_marker_token() is None
 
     def _root_file_metadata(self, stable_hash: str) -> tuple[int | None, int | None]:
         if self.store is None or not hasattr(self.store, "base_dir"):
@@ -770,6 +828,8 @@ class SQLiteStoreQueryIndex:
         self._run_write_transaction(operation)
 
     def _run_write_transaction(self, operation):
+        self._register_persistent_sidecar()
+
         def attempt_write():
             with self._connections.lease(readonly=False) as con:
                 began = False
@@ -788,6 +848,18 @@ class SQLiteStoreQueryIndex:
                     raise
 
         return self._run_sqlite_busy_retry(attempt_write, action="write transaction")
+
+    def _register_persistent_sidecar(self) -> None:
+        register = getattr(self.store, "register_query_index_sidecar", None)
+        if register is not None:
+            register()
+
+    def _sidecar_file_identity(self) -> tuple[int, int] | None:
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino
 
     def _run_sqlite_busy_retry(self, operation, *, action: str):
         max_retries = max(0, int(self.config.max_write_retries))
