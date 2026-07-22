@@ -5,6 +5,67 @@ Utility functions for data methods
 import inspect
 from typing import Callable
 
+from dryml.data.collate import default_collate
+from dryml.data.methods import Project, Select
+
+
+def _xy_dataset(dataset, *, x_path=0, y_path=1):
+    from dryml.data.dataset import Map
+
+    return Map(dataset, Project(Select(x_path), Select(y_path)))
+
+
+def iter_xy(dataset, *, x_path=0, y_path=1):
+    yield from _xy_dataset(dataset, x_path=x_path, y_path=y_path)
+
+
+def collect_xy(dataset, *, x_path=0, y_path=1):
+    x_values = []
+    y_values = []
+
+    for x, y in iter_xy(dataset, x_path=x_path, y_path=y_path):
+        x_values.append(x)
+        y_values.append(y)
+
+    if not x_values:
+        raise ValueError("Cannot collect from an empty dataset.")
+    return x_values, y_values
+
+
+def collate_xy(dataset, *, x_path=0, y_path=1, collate=default_collate):
+    x_values, y_values = collect_xy(dataset, x_path=x_path, y_path=y_path)
+    return collate(x_values), collate(y_values), len(x_values)
+
+
+_MISSING = object()
+
+
+class Collect:
+    def __init__(self, reducer=None, initial=_MISSING, finalize=None):
+        self.reducer = reducer
+        self.initial = initial
+        self.finalize = finalize
+
+    def __call__(self, data):
+        if self.reducer is None:
+            return list(data)
+
+        it = iter(data)
+        if self.initial is _MISSING:
+            try:
+                acc = next(it)
+            except StopIteration as e:
+                raise ValueError("Cannot collect an empty iterable without an initial value.") from e
+        else:
+            acc = self.initial
+
+        for item in it:
+            acc = self.reducer(acc, item)
+
+        if self.finalize is not None:
+            return self.finalize(acc)
+        return acc
+
 
 def nested_flatten(data):
     flatten_data = []

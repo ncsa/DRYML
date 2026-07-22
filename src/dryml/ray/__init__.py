@@ -1,5 +1,3 @@
-from dryml.ray import tune
+from . import tune
 
-__all__ = [
-    tune
-]
+__all__ = ["tune"]

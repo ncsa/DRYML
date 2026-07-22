@@ -1,0 +1,439 @@
+from __future__ import annotations
+
+from contextlib import nullcontext
+from dataclasses import replace
+import sys
+
+import dryml
+import pytest
+
+from dryml.core2.store.dir import DirStore
+from dryml.dispatch import Dispatcher
+from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+from dryml.dispatch.errors import DispatchPlanningError
+from dryml.operations import attach_operation_id, make_function_call_spec
+from dryml.worlds import LocalResourceInventory
+
+
+@dryml.world.req(accelerators={"gpu": {"min": 1}})
+def gpu_target():
+    return None
+
+
+@dryml.world.req(cpus={"max": 0})
+def zero_cpu_target():
+    return None
+
+
+@dryml.world.req(topology={"collectives": True})
+def collective_target():
+    return None
+
+
+def test_strict_world_incompatibility_blocks_selected_cpu_world_without_search():
+    cpu_world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}
+    resolution = resolve_dispatch_plan(normalize_user_operation(gpu_target, allow_pickle=True), world=cpu_world, requirement_policy="strict")
+    assert resolution.world_selection.source == "explicit"
+    assert resolution.world_check.status == "incompatible"
+    diagnostic = next(item for item in resolution.diagnostics if item.code == "dryml.dispatch.world_check_incompatible")
+    assert diagnostic.data["check"]["requirement"] == resolution.world_check.requirement
+    assert diagnostic.data["candidate_source"] == "explicit"
+    assert diagnostic.data["policy"] == "strict"
+    assert diagnostic.data["reason"] == "incompatible"
+    assert resolution.launchable is False
+
+
+def test_ignore_skips_world_requirement_but_preserves_selected_world():
+    cpu_world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}
+    resolution = resolve_dispatch_plan(normalize_user_operation(gpu_target, allow_pickle=True), world=cpu_world, requirement_policy="ignore")
+    assert resolution.world_check.status == "skipped"
+    assert resolution.world_check.details == ({"reason": "requirement_policy_ignore"},)
+    assert resolution.launchable is True
+
+
+def test_single_subprocess_plan_rejects_multi_worker_world_under_every_policy(tmp_path):
+    world = {"roles": {"main": {"replicas": 2, "process": {}}}}
+    with __import__("pytest").raises(DispatchPlanningError, match=r"plan_world\(\) or run_world\(\)"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            requirement_policy="ignore",
+        )
+
+
+def test_single_subprocess_plan_rejects_resources_it_cannot_allocate(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"devices": {"gpu": 1}}}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    explanation = dispatcher.explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+    assert explanation.launchable is False
+    assert any(item.code == "dryml.dispatch.single_subprocess_resources_unsupported" for item in explanation.resolution.diagnostics)
+    with __import__("pytest").raises(DispatchPlanningError, match="not launchable"):
+        dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+
+
+def test_single_subprocess_rejects_unenacted_process_metadata():
+    world = {"roles": {"main": {"replicas": 1, "process": {"metadata": {"label": "training"}}}}}
+
+    explanation = Dispatcher().explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+
+    assert not explanation.launchable
+    assert any(item.code == "dryml.dispatch.single_subprocess_process_settings_unsupported" for item in explanation.resolution.diagnostics)
+
+
+@pytest.mark.parametrize("env", ({"BAD=KEY": "value"}, {"TOKEN": "bad\x00value"}, {1: "value"}))
+def test_single_subprocess_rejects_os_invalid_process_environment(env, tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"env": env}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    with pytest.raises(DispatchPlanningError, match="invalid world candidate"):
+        dispatcher.plan(make_function_call_spec("operator:add", args=[1, 2]), world=world)
+
+    assert not dispatcher.store.records.specs_dir.exists()
+
+
+def test_single_subprocess_allows_zero_valued_unsupported_resources(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"devices": {"gpu": 0}, "named": {"scratch": 0}}}}}}
+
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["cpus"] == [0]
+
+
+def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2, "accelerators": {"gpu": 1}}}}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((4, 5), {"gpu": ("gpu-a",)}),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["cpus"] == [4, 5]
+    assert plan.envelope.allocation_view["accelerators"] == {"gpu": ["gpu-a"]}
+    assert plan.envelope.allocation_view["metadata"]["backend"] == "local_subprocess"
+
+
+def test_run_allocates_synthesized_gpu_world_into_worker(tmp_path, target_module):
+    target_module.write_text(
+        target_module.read_text(encoding="utf-8")
+        + "\nimport dryml\nIMPORT_CUDA_VISIBLE_DEVICES = os.environ.get('CUDA_VISIBLE_DEVICES')\n@dryml.world.req(accelerators={'gpu': {'min': 1}})\ndef synthesized_gpu_facts():\n    return {**allocation_facts(), 'import_cuda_visible_devices': IMPORT_CUDA_VISIBLE_DEVICES, 'execution_cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES')}\n",
+        encoding="utf-8",
+    )
+    result = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).run(
+        attach_operation_id(make_function_call_spec("dispatch_target:synthesized_gpu_facts")),
+        environment={"kind": "python", "executable": sys.executable, "pythonpath_policy": "explicit", "extra_pythonpath": [str(target_module.parent)]},
+        inventory=LocalResourceInventory((4,), {"gpu": ("gpu-a",)}),
+        requirement_policy="strict",
+        timeout=10,
+    )
+
+    assert result.status == "ok"
+    assert result.result_canonical["accelerators"] == {"gpu": ["gpu-a"]}
+    assert result.result_canonical["role"] == "main"
+    assert result.result_canonical["import_cuda_visible_devices"] == "gpu-a"
+    assert result.result_canonical["execution_cuda_visible_devices"] == "gpu-a"
+
+
+def test_run_world_synthesizes_omitted_multi_worker_world(tmp_path, target_module):
+    target_module.write_text(
+        target_module.read_text(encoding="utf-8")
+        + "\nimport dryml\n@dryml.world.req(roles={'worker': {'replicas': {'exact': 2}, 'resources': {'cpus': {'exact': 1}}}})\ndef synthesized_multi_facts():\n    return allocation_facts()\n",
+        encoding="utf-8",
+    )
+    result = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).run_world(
+        attach_operation_id(make_function_call_spec("dispatch_target:synthesized_multi_facts")),
+        environment={"kind": "python", "executable": sys.executable, "pythonpath_policy": "explicit", "extra_pythonpath": [str(target_module.parent)]},
+        inventory=LocalResourceInventory((0, 1)),
+        requirement_policy="strict",
+        timeout=10,
+    )
+
+    assert result.status == "ok"
+    assert {(worker.result_canonical["role"], worker.result_canonical["replica"]) for worker in result.workers.values()} == {("worker", 0), ("worker", 1)}
+
+
+def test_single_subprocess_plan_accepts_local_subprocess_backend(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local_subprocess", "parameters": {}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((4,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["metadata"]["backend"] == "local_subprocess"
+    assert plan.envelope.launch["world_allocation_spec"]["payload"]["backend"]["kind"] == "local_subprocess"
+    assert plan.envelope.launch["world_allocation_spec"]["metadata"]["world_id"] == plan.envelope.launch["world_id"]
+
+
+def test_single_subprocess_rejects_unenacted_backend_parameters():
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}, "backend": {"kind": "local_subprocess", "parameters": {"workers": 2}}}
+
+    explanation = Dispatcher().explain(make_function_call_spec("operator:add", args=[1, 2]), world=world, requirement_policy="ignore")
+
+    assert not explanation.launchable
+    assert any(item.code == "dryml.dispatch.single_subprocess_backend_parameters_unsupported" for item in explanation.resolution.diagnostics)
+
+
+def test_single_subprocess_rejects_unknown_memory_inventory(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"memory": "1GiB"}}}}}
+    with __import__("pytest").raises(DispatchPlanningError, match="memory request cannot be proven"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy="ignore",
+        )
+
+
+def test_explain_rejects_infeasible_explicit_world_before_planning(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2}}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    explanation = dispatcher.explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    assert explanation.launchable is False
+    assert any(item.code == "dryml.dispatch.local_allocation_failed" for item in explanation.resolution.diagnostics)
+    with __import__("pytest").raises(DispatchPlanningError, match="not launchable"):
+        dispatcher.plan(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy="ignore",
+        )
+
+
+def test_plan_world_validates_actual_allocation_against_requirement(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 0}}}}}
+
+    with __import__("pytest").raises(DispatchPlanningError, match="actual local allocation does not satisfy"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan_world(
+            zero_cpu_target,
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy="strict",
+        )
+
+
+def test_actual_allocation_requirement_respects_warn_and_ignore(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 0}}}}}
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    for policy in ("warn", "ignore"):
+        explanation = dispatcher.explain(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+        assert explanation.launchable
+        assert all(
+            item.severity == "warning"
+            for item in explanation.resolution.diagnostics
+            if item.code == "dryml.dispatch.single_subprocess_requirement_unsupported"
+        )
+        expectation = pytest.warns(RuntimeWarning) if policy == "warn" else nullcontext()
+        with expectation:
+            assert dispatcher.plan(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+        expectation = pytest.warns(RuntimeWarning) if policy == "warn" else nullcontext()
+        with expectation:
+            assert dispatcher.plan_world(zero_cpu_target, world=world, inventory=LocalResourceInventory((0,)), allow_pickle=True, requirement_policy=policy)
+
+
+def test_zero_memory_request_does_not_require_known_memory_inventory(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"memory": "0B"}}}}}
+
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["memory"] == 0
+
+
+def test_local_subprocess_allocation_process_identity_uses_requested_world_id(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}, "backend": {"kind": "local_subprocess", "parameters": {}}}
+
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    allocation = plan.envelope.launch["world_allocation_spec"]
+    assert allocation["metadata"]["world_id"] == plan.envelope.launch["world_id"]
+    assert allocation["payload"]["roles"]["main"][0]["env"]["DRYML_WORLD_ID"] == plan.envelope.launch["world_id"]
+
+
+def test_single_subprocess_topology_remains_structural_under_relaxed_policies():
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
+
+    for policy in ("warn", "ignore"):
+        resolution = resolve_dispatch_plan(
+            normalize_user_operation(collective_target, allow_pickle=True),
+            world=world,
+            requirement_policy=policy,
+            single_worker_only=True,
+        )
+        assert resolution.launchable is False
+        assert any(item.code == "dryml.dispatch.single_subprocess_topology_unsupported" for item in resolution.diagnostics)
+
+
+def test_local_world_topology_remains_structural_under_relaxed_policies():
+    world = {"roles": {"main": {"replicas": 1, "process": {}}}}
+
+    for policy in ("warn", "ignore"):
+        resolution = resolve_dispatch_plan(
+            normalize_user_operation(collective_target, allow_pickle=True),
+            world=world,
+            requirement_policy=policy,
+        )
+        assert resolution.launchable is False
+        assert any(item.code == "dryml.dispatch.local_world_topology_unsupported" for item in resolution.diagnostics)
+
+
+def test_local_world_rejects_unenacted_role_process_settings(tmp_path):
+    world = {
+        "roles": {
+            "trainer": {
+                "replicas": 1,
+                "process": {"environment": "other-python", "runtime": "other-runtime"},
+            }
+        }
+    }
+
+    with pytest.raises(DispatchPlanningError, match="cannot enact role-specific process"):
+        Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan_world(
+            make_function_call_spec("operator:add", args=[1, 2]),
+            world=world,
+            inventory=LocalResourceInventory((0,)),
+            requirement_policy="ignore",
+        )
+
+
+def test_oversubscribed_local_world_has_bounded_expansion():
+    from dryml.dispatch.local_world import allocate_local_world
+
+    world = {"roles": {"main": {"replicas": 4097, "process": {}}}}
+
+    with pytest.raises(DispatchPlanningError, match="worker count exceeds"):
+        allocate_local_world(world, inventory=LocalResourceInventory((0,)), oversubscribe=True)
+
+
+def test_local_world_rejects_zero_worker_world_and_subprocess_enacts_process_env(tmp_path):
+    from dryml.dispatch.local_world import allocate_local_world
+
+    with pytest.raises(DispatchPlanningError, match="requires at least one worker"):
+        allocate_local_world({"roles": {"main": {"replicas": 0, "process": {}}}}, inventory=LocalResourceInventory((0,)))
+
+    world = {"roles": {"main": {"replicas": 1, "process": {"env": {"AUDIT_PROCESS_ENV": "enabled"}}}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["env"]["AUDIT_PROCESS_ENV"] == "enabled"
+
+
+def test_requested_world_environment_is_not_copied_to_execution_metadata(tmp_path):
+    world = {"roles": {"main": {"replicas": 1, "process": {"env": {"AUDIT_TOKEN": "secret"}}}}}
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world=world,
+        inventory=LocalResourceInventory((0,)),
+        requirement_policy="ignore",
+    )
+
+    metadata = plan.envelope.allocation_view["metadata"]
+    assert metadata["requested_world_id"] == plan.envelope.launch["world_id"]
+    assert "AUDIT_TOKEN" not in str(metadata)
+
+
+def test_synthesis_inventory_is_discovered_once_per_plan_and_explain(tmp_path, monkeypatch):
+    import dryml.worlds.synthesis as synthesis
+
+    calls = []
+    inventory = LocalResourceInventory((0,), {"gpu": ("gpu-a",)})
+    monkeypatch.setattr(synthesis, "local_inventory", lambda **_kwargs: calls.append(True) or inventory)
+    dispatcher = Dispatcher(store=DirStore(tmp_path / "store", query_index="none"))
+
+    dispatcher.explain(gpu_target, allow_pickle=True, requirement_policy="ignore")
+    assert len(calls) == 1
+    calls.clear()
+    dispatcher.plan(gpu_target, allow_pickle=True, requirement_policy="ignore")
+    assert len(calls) == 1
+
+
+def test_planning_metadata_excludes_probe_output(tmp_path):
+    from dryml.code.facts import DiagnosticFact
+    from dryml.code.probe import CodeProbeResult
+
+    explanation = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(
+        make_function_call_spec("operator:add", args=[1, 2]),
+    )
+    resolution = explanation.resolution
+    assert resolution.code_analysis is not None
+    probe = CodeProbeResult(
+        True,
+        resolution.code_analysis,
+        None,
+        (DiagnosticFact(severity="warning", code="audit", message="safe"),),
+        stdout="AUDIT_SECRET",
+        stderr="AUDIT_SECRET",
+    )
+    with_probe = replace(
+        resolution,
+        code_probe=probe,
+        bootstrap_code_probe=probe,
+        final_code_probe=probe,
+    )
+    public = with_probe.to_data()
+    public_explanation = replace(explanation, resolution=with_probe).to_data()
+    metadata = with_probe.metadata()
+
+    assert public["code_probe"]["diagnostics"][0]["message"] == "safe"
+    assert public["code_probe"]["analysis"]["facts"]
+    assert public_explanation["resolution"]["code_probe"] == public["code_probe"]
+    assert metadata["dryml.code_probe"]["bootstrap_probe"]["diagnostics"] == [
+        {"code": "audit", "severity": "warning"},
+    ]
+    assert "AUDIT_SECRET" not in str(metadata)
+
+
+def test_planning_metadata_excludes_environment_probe_output():
+    from dryml.dispatch.requirements import _bounded_probe_data
+    from dryml.environments import CurrentEnvironmentSpec, EnvironmentProbeResult
+
+    probe = EnvironmentProbeResult(
+        CurrentEnvironmentSpec(),
+        False,
+        stdout="AUDIT_SECRET",
+        stderr="AUDIT_SECRET",
+        returncode=1,
+    )
+
+    assert "AUDIT_SECRET" not in str(_bounded_probe_data(probe.to_data()))
+
+
+def test_planning_metadata_bounds_deep_nested_data():
+    from dryml.dispatch.requirements import _bounded_data
+
+    value = "leaf"
+    for _ in range(1100):
+        value = {"nested": value}
+
+    bounded = _bounded_data(value)
+    for _ in range(9):
+        bounded = bounded["nested"]
+    assert bounded == {"__dryml_truncated__": "depth_or_size"}

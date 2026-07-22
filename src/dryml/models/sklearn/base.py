@@ -1,138 +1,181 @@
-import pickle
-import zipfile
-import numpy as np
-from dryml.config import Meta
-from dryml.models import Component, Trainable
-from dryml.models import TrainFunction as BaseTrainFunction
-from dryml.data import Dataset
-from dryml.utils import validate_class
+from __future__ import annotations
+
+from dryml.core2.object import Pickleable
+from dryml.core2.tensor_spec import (
+    TensorSpec,
+    as_tensor_spec,
+    fake_from_spec_tree,
+    match_input_batch,
+    maybe_unbatch_output_spec,
+)
+from dryml.core2.utils.general import validate_class
+from dryml.data import collate_xy
+from dryml.managed import current_operation_context
+from dryml.models import Model as BaseModel
+from dryml.models import TrainCapability, TrainFunction
+from dryml.models.utils import (
+    advance_train_state,
+    prepare_training_data,
+    validate_num_examples,
+)
 
 
-class Model(Component):
-    @Meta.collect_kwargs
-    def __init__(self, cls, **kwargs):
-        # It is subclass's responsibility to fill this
-        # attribute with an actual keras class
-        self.mdl = None
+class Wrapper(Pickleable):
+    """Pickle-backed wrapper for sklearn-style Python objects."""
+
+    def __init__(self, cls, *args, **kwargs):
         self.cls = validate_class(cls)
-        self.mdl_kwargs = kwargs
+        self.args = args
+        self.kwargs = kwargs
+        self.obj = self.cls(*args, **kwargs)
 
-    def compute_prepare_imp(self):
-        self.mdl = self.cls(**self.mdl_kwargs)
 
-    def compute_cleanup_imp(self):
-        self.mdl = None
+class Model(BaseModel, Pickleable):
+    """Wrapper around an sklearn-style estimator class."""
 
-    def load_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        pkl_file_name = 'model.pkl'
-        # Load Weights
-        if pkl_file_name not in file.namelist():
-            # No model pickle file right now
-            return True
-        else:
-            with file.open(pkl_file_name, 'r') as f:
-                self.mdl = pickle.loads(f.read())
-        return True
+    def __init__(self, cls, *args, output_spec=None, **kwargs):
+        self.cls = validate_class(cls)
+        self.estimator_args = args
+        self.estimator_kwargs = kwargs
+        self.obj = self.cls(*args, **kwargs)
+        self.estimator = self.obj
+        self.output_spec = output_spec
 
-    def save_compute_imp(self, file: zipfile.ZipFile) -> bool:
-        # Save Weights
-        if self.mdl is not None:
-            pkl_file_name = 'model.pkl'
-            with file.open(pkl_file_name, 'w') as f:
-                f.write(pickle.dumps(self.mdl))
+    def fit(self, x, y, *args, **kwargs):
+        return self.estimator.fit(x, y, *args, **kwargs)
 
-        return True
+    def predict(self, x, *args, **kwargs):
+        return self.estimator.predict(x, *args, **kwargs)
 
-    def __call__(self, X, *args, target=True, index=False, **kwargs):
-        raise NotImplementedError()
+    def __call__(self, x, *args, **kwargs):
+        return self.predict(x, *args, **kwargs)
+
+    def infer_output_spec(self, input_spec):
+        if self.output_spec is not None:
+            return super().infer_output_spec(input_spec)
+
+        try:
+            sample = fake_from_spec_tree(input_spec)
+            output = self(sample)
+            return maybe_unbatch_output_spec(as_tensor_spec(output, batched=True), input_spec)
+        except Exception:
+            pass
+
+        n_outputs = getattr(self.estimator, "n_outputs_", None)
+        if n_outputs is not None:
+            shape = () if int(n_outputs) == 1 else (int(n_outputs),)
+            return match_input_batch(TensorSpec("float64", shape=shape, backend="numpy"), input_spec)
+
+        raise NotImplementedError(
+            f"Cannot infer output spec for {type(self).__name__}. "
+            "Fit the estimator first, use a probe-compatible input spec, or pass output_spec explicitly."
+        )
 
 
 class ClassifierModel(Model):
-    def __call__(self, X, *args, target=True, index=False, **kwargs):
-        return self.mdl.predict_proba(X, *args, **kwargs)
+    def __call__(self, x, *args, **kwargs):
+        if hasattr(self.estimator, "predict_proba"):
+            return self.estimator.predict_proba(x, *args, **kwargs)
+        return self.predict(x, *args, **kwargs)
+
+    def infer_output_spec(self, input_spec):
+        if self.output_spec is not None:
+            return super().infer_output_spec(input_spec)
+
+        try:
+            return super().infer_output_spec(input_spec)
+        except NotImplementedError:
+            classes = getattr(self.estimator, "classes_", None)
+            if classes is None:
+                raise
+            if isinstance(classes, (tuple, list)):
+                raise NotImplementedError("Multi-output classifier spec inference is not implemented.")
+            return match_input_batch(
+                TensorSpec("float64", shape=(len(classes),), backend="numpy"),
+                input_spec,
+            )
 
 
 class RegressionModel(Model):
-    def __call__(self, X, *args, target=True, index=False, **kwargs):
-        return self.mdl.predict(X, *args, **kwargs)
+    pass
 
 
-class BasicTraining(BaseTrainFunction):
+class BasicTraining(TrainFunction):
+    """Fit an sklearn-style estimator as an explicitly opaque operation.
+
+    Ordinary managed completion and reuse are supported, but one blocking
+    ``fit()`` call has no general exact checkpoint contract. Interruption keeps
+    the realization incomplete and requires an explicit rerun. Incremental
+    trainers may define a narrower exact capability in a separate subclass.
     """
-    The basic sklearn training method.
-    """
+
+    __dryml_train_capability__ = TrainCapability.none(
+        "opaque sklearn fit() has no exact checkpoint or continuation contract"
+    )
 
     def __init__(
-            self, num_examples=-1, shuffle=False,
-            shuffle_seed=None, shuffle_buffer_size=None):
+        self,
+        *,
+        x_path=0,
+        y_path=1,
+        num_examples: int | None = None,
+        shuffle: bool = False,
+        shuffle_seed=None,
+        shuffle_buffer_size: int | None = None,
+        fit_args=(),
+        fit_kwargs=None,
+    ):
+        validate_num_examples(num_examples)
+        self.x_path = x_path
+        self.y_path = y_path
         self.num_examples = num_examples
         self.shuffle = shuffle
         self.shuffle_seed = shuffle_seed
         self.shuffle_buffer_size = shuffle_buffer_size
-        self.train_args = ()
-        self.train_kwargs = {}
+        self.fit_args = tuple(fit_args)
+        self.fit_kwargs = dict(fit_kwargs or {})
 
-    def __call__(
-            self, trainable, train_data,
-            train_spec=None, train_callbacks=[]):
+    def __call__(self, exp):
+        train_data = prepare_training_data(
+            exp.train_data,
+            num_examples=self.num_examples,
+            shuffle=self.shuffle,
+            shuffle_seed=self.shuffle_seed,
+            shuffle_buffer_size=self.shuffle_buffer_size,
+        )
+        x, y, n = collate_xy(
+            train_data,
+            x_path=self.x_path,
+            y_path=self.y_path,
+        )
 
-        train_data = train_data.unbatch()
+        exp.model.prep_train()
+        try:
+            result = exp.model.fit(x, y, *self.fit_args, **self.fit_kwargs)
+        finally:
+            exp.model.prep_eval()
 
-        total_examples = self.num_examples
-
-        if not train_data.supervised:
-            raise ValueError(
-                "Dataset must be supervised for basic sklearn training")
-
-        data_examples = total_examples
-        if total_examples == -1:
-            data_examples = train_data.count()
-            if data_examples is np.nan or data_examples is np.inf:
-                raise ValueError(
-                    "Dataset has no known length and you must provide "
-                    "an explicit number of examples for training.")
-
-        if self.shuffle:
-            train_data = train_data.shuffle(
-                self.shuffle_buffer_size,
-                seed=self.shuffle_seed)
-
-        train_data = train_data.batch(batch_size=data_examples) \
-                               .as_not_indexed() \
-                               .numpy()
-
-        x, y = train_data.peek()
-
-        trainable.mdl.fit(x, y, *self.train_args, **self.train_kwargs)
+        advance_train_state(exp, epochs=1, steps=n)
+        try:
+            context = current_operation_context()
+        except RuntimeError:
+            context = None
+        if context is not None:
+            context.progress(1, total=1, message="sklearn fit completed")
+            context.safe_point()
+        return result
 
 
-class Trainable(Trainable):
-    __dry_compute_context__ = 'default'
+Classifier = ClassifierModel
+Regression = RegressionModel
 
-    def __init__(self, model=None, train_fn=None, **kwargs):
-        # It is subclass's responsibility to fill this
-        # attribute with an actual keras class
-        if model is None:
-            raise ValueError("Must give a model object")
-        self.model = model
-        if train_fn is None:
-            raise ValueError("Must give a train_fn object")
-        self.train_fn = train_fn
 
-    def eval(self, data: Dataset, *args, eval_batch_size=32, **kwargs):
-        if data.batched:
-            # We can execute the method directly on the data
-            return data.numpy().apply_X(
-                func=lambda X: self.model(X, *args, **kwargs))
-        else:
-            # We first need to batch the data, then unbatch to leave
-            # The dataset character unchanged.
-            return data.numpy().batch(batch_size=eval_batch_size) \
-                       .apply_X(
-                            func=lambda X: self.model(X, *args, **kwargs)) \
-                       .unbatch()
-
-    def train(
-            self, data, train_spec=None, train_callbacks=[]):
-
-        self.train_fn(self.model, data, train_spec=train_spec)
+__all__ = [
+    "BasicTraining",
+    "Classifier",
+    "ClassifierModel",
+    "Model",
+    "Regression",
+    "RegressionModel",
+    "Wrapper",
+]

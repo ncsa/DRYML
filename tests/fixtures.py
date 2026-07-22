@@ -2,64 +2,221 @@ import pytest
 import tempfile
 import uuid
 import os
+import io
+from pathlib import Path
+from typing import Literal, Sequence
+from dataclasses import dataclass
+from dryml.core2.store.store import Store
+from dryml.core2.repo import make_store
+import dryml.environments as envs
 
 
-if os.environ.get('GITHUB_ACTIONS') == 'true':
-    # Enforce special loading order to prevent crash
-    # https://github.com/pytorch/pytorch/issues/101152
-    import torch  # noqa: F401
-    import tensorflow as tf  # noqa: F401
+StoreDef = Literal["directory", "zip_filepath", "buffer", "zip_buffer"]
 
 
-@pytest.fixture
-def create_name():
-    tempf = str(uuid.uuid4())
-    yield tempf
-    fullpath = f"{tempf}.dry"
-    if os.path.exists(fullpath):
-        os.remove(fullpath)
-    if os.path.exists(tempf):
-        os.remove(tempf)
-
-
-@pytest.fixture
-def create_temp_named_file():
-    with tempfile.NamedTemporaryFile(mode='wb') as f:
-        yield f.name
-
-
-@pytest.fixture
-def create_temp_file():
-    # We need to open with 'w+b' permission so that we can both
-    # Read and write
-    with tempfile.TemporaryFile(mode='w+b') as f:
-        yield f
-
-
-@pytest.fixture
-def create_temp_dir():
-    with tempfile.TemporaryDirectory() as directory:
-        yield directory
+def make_sample_environment_record(**kwargs):
+    data = {
+        "python": envs.PythonRecord("3.11.8", "CPython", executable="/usr/bin/python"),
+        "platform": envs.PlatformRecord("Linux", "1", "v", "x86_64", "Linux-x86_64"),
+        "distributions": {
+            "DryML": envs.PackageRecord("DryML", "0.3.0"),
+            "torch": envs.PackageRecord("torch", "2.5.1"),
+        },
+        "dryml": envs.DrymlRuntimeRecord(
+            version="0.3.0-dev",
+            execution_protocol="1",
+            schema_versions={"environment_record": 1},
+            features=("dryml.environments.v1", "custom.capability"),
+        ),
+        "kind": "venv",
+        "tags": ("dev", "torch"),
+        "details": {"virtual_env": "/tmp/venv"},
+    }
+    data.update(kwargs)
+    return envs.EnvironmentRecord(**data)
 
 
 @pytest.fixture
-def get_ray():
-    try:
-        import ray
-    except ImportError:
-        pytest.skip("Ray is not installed")
+def sample_environment_record():
+    return make_sample_environment_record()
+
+
+# -------------------------
+# Layer 1: resource creation
+# -------------------------
+
+@dataclass
+class StoreResource:
+    kind: StoreDef
+    root: Path | None
+    resource: object  # str path OR IOBase
+
+    def rewind(self) -> None:
+        # only meaningful for file-like objects
+        if hasattr(self.resource, "seek"):
+            try:
+                self.resource.seek(0)
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        # close only file-like resources we own
+        if self.kind in ("buffer", "zip_buffer") and hasattr(self.resource, "close"):
+            try:
+                self.resource.close()
+            except Exception:
+                pass
+
+
+def build_store_resource(tmp_path_factory, kind: StoreDef, *, prefix: str = "store") -> StoreResource:
+    root: Path | None = None
+
+    if kind == "directory":
+        root = tmp_path_factory.mktemp(f"{prefix}_{kind}_{uuid.uuid4().hex[:8]}")
+        d = root / "repo_dir"
+        d.mkdir()
+        resource = str(d)
+
+    elif kind == "zip_filepath":
+        root = tmp_path_factory.mktemp(f"{prefix}_{kind}_{uuid.uuid4().hex[:8]}")
+        # path that does not need to exist yet
+        resource = str(root / "repo.dry")
+
+    elif kind == "buffer":
+        # disk-backed file object
+        resource = tempfile.TemporaryFile(mode="w+b")
+
+    elif kind == "zip_buffer":
+        # memory-backed file object
+        resource = io.BytesIO()
+
     else:
-        yield ray
+        raise ValueError(f"Unknown StoreDef: {kind}")
+
+    return StoreResource(kind=kind, root=root, resource=resource)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ray_server(request):
+@pytest.fixture
+def store_resource_factory(tmp_path_factory):
+    created: list[StoreResource] = []
+
+    def _make(kind: StoreDef, *, prefix: str = "store") -> StoreResource:
+        res = build_store_resource(tmp_path_factory, kind, prefix=prefix)
+        created.append(res)
+        return res
+
     try:
-        import ray
-        ray.init(num_cpus=1, num_gpus=0)
+        yield _make
+    finally:
+        for res in created:
+            res.close()
 
-        def shutdown_ray():
-            ray.shutdown()
-        request.addfinalizer(shutdown_ray)
-    except ImportError:
-        pass
+
+@pytest.fixture(params=["directory", "zip_filepath", "buffer", "zip_buffer"], ids=lambda x: x)
+def store_resource(request, store_resource_factory) -> StoreResource:
+    return store_resource_factory(request.param)
+
+
+# -------------------------
+# Layer 2: store grouping
+# -------------------------
+
+@dataclass
+class StoreHandle:
+    res: StoreResource
+    store: Store
+
+    def rewind(self) -> None:
+        self.res.rewind()
+
+    def close(self) -> None:
+        self.res.close()
+
+
+@dataclass
+class StoreSet:
+    handles: list[StoreHandle]
+
+    @property
+    def stores(self) -> list[Store]:
+        return [h.store for h in self.handles]
+
+    def rewind_all(self) -> None:
+        for h in self.handles:
+            h.rewind()
+
+    def close_all(self) -> None:
+        for h in self.handles:
+            h.close()
+
+    def fresh_stores(self) -> list[Store]:
+        """
+        Rebuild Store objects from the same underlying resources.
+        Useful for simulating "new Repo" reading the same backing data.
+        """
+        self.rewind_all()
+        return [make_store(h.res.resource) for h in self.handles]
+
+
+def _store_set_id(defs: Sequence[StoreDef]) -> str:
+    return "+".join(defs)
+
+
+def fixture_def(store_sets: list[list[StoreDef]], *, name: str):
+    @pytest.fixture(name=name, params=store_sets, ids=_store_set_id)
+    def _fx(request, store_resource_factory) -> StoreSet:
+        defs: list[StoreDef] = request.param
+        handles: list[StoreHandle] = []
+
+        try:
+            for i, kind in enumerate(defs):
+                res = store_resource_factory(kind, prefix=f"{name}_{i}")
+                store = make_store(res.resource)
+                handles.append(StoreHandle(res=res, store=store))
+            yield StoreSet(handles=handles)
+        finally:
+            # closes buffers/tempfiles (dirs are tmp_path-managed)
+            for h in handles:
+                h.close()
+
+    return _fx
+
+
+# Legacy wrappers (optional while migrating)
+@pytest.fixture
+def create_temp_dir(store_resource_factory):
+    return str(store_resource_factory("directory", prefix="legacy_dir").resource)
+
+@pytest.fixture
+def create_temp_named_file(store_resource_factory):
+    return str(store_resource_factory("zip_filepath", prefix="legacy_zip_path").resource)
+
+@pytest.fixture
+def create_temp_file(store_resource_factory):
+    return store_resource_factory("buffer", prefix="legacy_tmpfile").resource
+
+@pytest.fixture
+def create_name(store_resource_factory):
+    res = store_resource_factory("zip_filepath", prefix="legacy_name")
+    p = Path(res.resource)
+    return str(p.with_suffix(""))
+
+primary_store_set = fixture_def(
+    [
+        ["directory"],
+        ["zip_filepath"],
+        ["zip_buffer"],
+        ["buffer"],
+    ],
+    name="primary_store_set"
+)
+
+
+@pytest.fixture(scope="session")
+def ray():
+    ray = pytest.importorskip("ray")
+    ray.init(num_cpus=1, num_gpus=0, ignore_reinit_error=True)
+    try:
+        yield ray
+    finally:
+        ray.shutdown()

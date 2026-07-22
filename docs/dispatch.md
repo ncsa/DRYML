@@ -1,0 +1,497 @@
+# DRYML Dispatch
+
+`dryml.dispatch` contains both the canonical metadata plane and the reference local execution backend: a one-operation local subprocess worker.
+
+## Python-Shaped Dispatch
+
+Normal callers pass an importable module-level function or a stored CDef plus a
+method name. Dispatch normalizes both forms into the canonical `OperationSpec`
+IR; manual IR construction remains supported for advanced use in
+[operations](operations.md).
+
+```python
+from dryml.core2.store.dir import DirStore
+import dryml
+
+store = DirStore("work/store", query_index="none")
+result = dryml.dispatch.run(importable_function, store=store, args=(2, 3))
+method_result = dryml.dispatch.run(model_cdef, "train", store=store, args=(dataset_cdef,))
+```
+
+An importable function uses a verified `module:qualname` path. A non-importable
+callable requires explicit `allow_pickle=True` and stays same-Python-only. CDef
+method dispatch requires the subject to be present in the supplied Store; it is
+the reproducible object-method path.
+
+## Metadata
+
+`DispatchSpec` is durable request intent: operation ID plus policies and a
+persistence-safe projection of selected configuration. `ExecutionRecipe` is
+resolved plan metadata: backend, projected environment/runtime choices, store
+strategy, input/output plan, and log plan. Both are canonical JSON specs, not
+DRYML Objects.
+
+```python
+import dryml.operations as ops
+from dryml.dispatch import attach_dispatch_id, attach_recipe_id, make_dispatch_spec, make_execution_recipe
+
+operation = ops.attach_operation_id(ops.make_function_call_spec("my_pkg.train:run", args=[1, 2]))
+dispatch = attach_dispatch_id(make_dispatch_spec(operation_id=operation["id"], operation=operation))
+recipe = attach_recipe_id(
+    make_execution_recipe(
+        dispatch_id=dispatch["id"],
+        operation_id=operation["id"],
+        backend={"name": "dryml.local_subprocess", "kind": "local_subprocess"},
+    )
+)
+```
+
+An `ExecutionEnvelope` is launch-time worker protocol data. It may include
+absolute same-host `DirStore` paths, work directories, pickle file paths, raw
+environment overrides, runtime/framework configuration, and per-process world
+environment. Those fields are deliberately excluded from durable spec identity.
+
+The durable projection uses schema
+`dryml.dispatch.persistence_projection.v1`. It preserves stable policy,
+environment kind, requested roles, allocation ranks, backend identity, and
+resource facts as non-sensitive kinds, counts, and capacities. It replaces
+launch locators, environment maps, arbitrary framework configuration, inventory
+metadata, backend parameters, host details, CPU/device identifiers, GPU UUIDs,
+and named-resource details with explicit
+`{"__dryml_redacted__": "launch_only"}` markers or deterministic ordinal slots.
+Changing only a redacted value does not change dispatch, projected world, or
+projected allocation identity. The projection is provenance, not a launchable
+configuration and not a secret hash. Requirement checks and worker launch always
+use the unprojected envelope values.
+
+## Local Subprocess
+
+The high-level API plans and runs one function or method operation in a clean child process:
+
+```python
+from dryml.dispatch import Dispatcher, LocalSubprocessBackend
+
+dispatcher = Dispatcher(backend=LocalSubprocessBackend(), store=repo.default_store)
+result = dispatcher.run(operation, record_policy="descriptive")
+```
+
+Convenience wrapper:
+
+```python
+result = dryml.dispatch.run(operation, backend="local_subprocess", store=repo.default_store)
+```
+
+Function-call dispatch uses an import path and imports the target only inside the worker after runtime activation:
+
+```python
+operation = ops.attach_operation_id(ops.make_function_call_spec("my_pkg.math:add", args=[1, 2]))
+result = dispatcher.run(operation)
+```
+
+Method-call dispatch materializes the subject CDef from the shared/output store in the worker:
+
+```python
+operation = ops.attach_operation_id(ops.make_method_call_spec("cdef-v4-...", "train", kwargs={"epochs": 1}))
+result = dispatcher.run(operation)
+```
+
+`FunctionRef`/import-path function calls and method calls are the preferred portable path. `PickledCallable` exists only as an explicit same-Python convenience and is marked non-portable in the recipe constraints.
+
+### Managed methods
+
+A bound `dryml.managed` method can use the same single-worker API:
+
+```python
+result = dryml.dispatch.run(
+    artifact.compute,
+    store=store,
+    args=("numpy",),
+    callbacks=(progress_callback,),
+)
+```
+
+Normalization produces the ordinary method-call `OperationSpec`; Store paths,
+realization and attempt IDs, fence epochs, callback policy, and event/control
+channels remain launch-only data and do not affect the operation ID. Managed
+dispatch requires a writable same-host `DirStore` and one local subprocess.
+`plan_world()`/`run_world()` and writable ZipStore execution reject before
+managed operation state is created.
+
+Managed workers advertise `managed.operation.v1` during the existing v1 worker
+handshake. The coordinator does not acquire the managed operation lock or create
+an attempt until that handshake succeeds. It then retains the lifetime OS lock,
+runs callbacks, applies bounded event/checkpoint intents, writes control state,
+publishes typed output/execution/realization records, and activates the result.
+The worker writes only through its fence-isolated attempt workspace APIs and
+returns structured effects; this correctness boundary is not a sandbox against
+trusted user code.
+
+CachedDataset, Experiment, scalar-aggregate, and classification-metric managed
+calls all use this same bridge when dispatched. Dispatch does not change their
+declarations, logical input refs, output record kinds, reuse/staleness rules, or
+publication order. Optional backend imports occur only in the selected worker
+execution path, not while normalizing a lightweight metric or cache definition.
+
+## Requirement-Aware Planning
+
+`plan`, `submit`, and `run` normalize an operation once, collect its static
+annotation facts, resolve requirements/defaults, select candidates, and check
+the selected candidates before launch. Explicit `environment=`, `world=`, and
+`runtime=` values choose candidates but do not bypass hard requirements.
+
+Candidate precedence is deterministic: explicit, annotation-default, and
+context-current candidates remain authoritative. Only when those slots are
+absent, environment planning can perform a bounded explicit-registry search and
+world planning can synthesize a minimal local world for a hard requirement.
+Planning never searches or synthesizes after an incompatible higher-precedence
+candidate.
+
+`requirement_policy` accepts `"strict"`, `"warn"`, or `"ignore"`. When it is
+omitted, active `RuntimeEnforcement.STRICT`, `.WARN`, and `.OFF` select strict,
+warn, and ignore respectively. Warn and ignore relax only requirement checks;
+they cannot bypass invalid operation structure, worker/allocation safety, or the
+same-environment restriction of `PickledCallable`/`pickle_small` transport.
+
+Use `explain(...)` to inspect the same pipeline without launching a worker,
+allocating workload resources, or creating execution records:
+
+```python
+explanation = dryml.dispatch.explain(
+    train_fn,
+    store=repo.default_store,
+    environment=my_environment,
+)
+print(explanation.launchable)
+print(explanation.resolution.environment_check.to_data())
+```
+
+For stable examples, inspect bounded fields instead of rendering the full
+explanation, whose IDs and diagnostics vary with the request:
+
+```python
+summary = {
+    "launchable": explanation.launchable,
+    "environment_source": explanation.resolution.environment_selection.source,
+    "world_source": explanation.resolution.world_selection.source,
+    "diagnostic_count": len(explanation.resolution.diagnostics),
+}
+```
+
+Explanation may perform bounded static analysis, code/environment probes,
+explicit-registry resolution, and read-only local inventory/synthesis when
+needed. It does not launch workloads, activate an allocation, persist records,
+or solve/install packages. It does run the same
+non-allocating local capacity validation as planning, so an explanation is not
+launchable when the selected one-worker world cannot fit the supplied or
+discovered inventory. `plan(...)` and `plan_world(...)` then validate the actual
+backend allocation against hard world requirements before constructing workers
+when requirement policy is `strict`; `warn` and `ignore` retain their established
+compatibility semantics while never bypassing allocation feasibility.
+
+### Explicit current-process dynamic trace
+
+#### Target and execution-location support
+
+| Target/path | Direct `analyze` | Isolated/timeout probe | Selected environment probe | `trace` | Opt-in dispatch trace |
+|---|---|---|---|---|---|
+| Live module function | Supported | Supported when importable/reconstructible | Supported when importable there | Supported for an exact synchronous function and supported arguments | Supported under the narrower dispatch grammar |
+| Live notebook/local function | Supported inline | Unsupported without reconstructible target | Unsupported | Supported inline under trace policy | Supported only when normal dispatch transport is valid, including explicit same-Python pickle rules |
+| Import-path target | Supported with import permission | Supported | Supported | Unsupported without exact live function | Unsupported |
+| Bound method | Supported by ordinary direct analyzers | Not generally reconstructible | Not generally reconstructible | Unsupported | Unsupported |
+| Source-spec-only target | Static/source facts where implemented | No source-backed reconstruction | Unsupported | Unsupported | Unsupported |
+| Definition/CDef method dispatch | Direct class/method requirement collection | Existing static/probe behavior only | Existing static/probe behavior only | A live orchestration function may accept Definition proxies | Method-target tracing unsupported; ordinary method dispatch supported |
+
+`analyze(...)` does not intentionally invoke a target body. `trace(...)` runs
+trusted code once in the current process; it is not a sandbox and has no hard
+timeout. A probe changes runtime role/location, not analyzer semantics. Dispatch
+tracing is explicit and default-off; requested structural trace failures block
+planning rather than being ignored by compatibility policy. Source-backed
+subprocess reconstruction is not implemented.
+
+Dynamic tracing is off by default. It is requested only with the closed
+`analysis_policy` mapping; a `CodeAnalysisContext`, including one with
+`allow_dynamic_execution=True`, remains a non-tracing compatibility form.
+
+```python
+plan = dispatcher.plan(
+    orchestration_function,
+    store=repo.default_store,
+    args=(stored_cdef,),
+    analysis_policy={"dynamic_trace": True},
+)
+```
+
+The only mapping members are `context`, a positive finite `probe_timeout_s`,
+and `dynamic_trace`. When present, `context` must be a
+`CodeAnalysisContext`; `None` is not an omission. The trace member is exactly `True` (the default
+`DynamicTracePolicy`) or an already validated `DynamicTracePolicy`; falsey or
+truthy substitutes, mappings, and unknown keys are rejected before operation
+normalization or pickle transport creation. Dispatch takes a private deep JSON
+snapshot of accepted context metadata at that boundary. Later caller mutation
+cannot change discovery, trace identity, or facade metadata for that request.
+
+Only a live, exact, synchronous Python function is traceable.  Explicit
+`PickledCallable` is traceable only after its preliminary candidate is confirmed
+to use the current Python.  OperationSpec-only, source-only, CDef/object method,
+bound-method, callable-instance, class, builtin, coroutine, generator, and
+unsupported-container targets fail before invocation.  Trace-aware calls require
+an exact outer `tuple` of arguments and exact `dict[str, value]` kwargs.
+Dispatch performs that exact-function gate before generic callable inspection,
+importability metadata reads, or pickle creation, so unsupported callable
+instances, classes, wrappers, and descriptors are not inspected merely to decide
+trace eligibility.
+
+Dispatch first canonicalizes the ordinary worker payload, then derives the
+*effective worker invocation* with `resolve_call_arguments()`: raw CDef IDs are
+read structurally from the planning Store without building objects;
+`ref(cdef-v...)` remains an ID string; `{"$literal": value}` unwraps once; and
+nested lists/mappings retain canonical shape. Caller-supplied live CDefs are
+checked structurally against the Store before their private trace proxy is used.
+For `pickle_small`, the canonical identity marker remains in the operation, but
+the validated marker suffix is stripped at `identity_arg_count` before tracing.
+Malformed marker/count data, missing/mismatched CDefs, aliases, and inputs that
+cannot be reconstructed without building fail before the facade or target.
+
+For an eligible input, dispatch calls `dryml.code.trace(...)` exactly once in the
+caller process and resolves direct fragments followed by accepted trace calls
+and serialized method facts through `dryml.annotations`. Identical fragments are
+first-occurrence deduplicated in call and serialized-method-fact order; later
+observations remain provenance only, including observations through a different
+method or later fact in the same call.
+`explain` performs that same explicitly requested trace, but remains
+non-launching and non-persisting. Requested trace failures, incomplete results,
+malformed/rejected evidence, and provenance-limit failures block planning under
+`strict`, `warn`, and `ignore`; partial facts are never treated as an empty
+requirement set.
+
+This executes trusted user code in the current process. It is not a sandbox,
+does not have a hard timeout, and is not sent to a probe, selected environment,
+or worker. Dispatch forces the private facade context to collect post-start
+trace failures even when the caller context uses `diagnostics_policy="raise"`.
+Per-run bounded trace evidence is carried in dispatch/recipe/envelope planning
+metadata and explanations, not in immutable operation metadata. The versioned
+projection allows at most 256 calls, 1,024 accepted/duplicate observations, 256
+diagnostics, 4,096 characters per scalar, depth 32, and 1 MiB JSON; overflow is
+reported as `provenance_limit_exceeded`, never truncated. A recognized
+pre-execution result whose diagnostic-code projection exceeds its bound instead
+uses a bounded non-launchable pre-execution carrier; it is never allowed to leak
+an internal limit exception. Its validated complete
+or incomplete summary is retained while calls and observations are empty, so
+an over-limit trace is not mistaken for an empty trace. The policy restored from
+the carrier has the documented bounds (`max_calls` 1 through 10,000), and only the
+four normalized transport tokens `import_path`, `pickle_small`,
+`operation_spec`, and `method_call` are accepted; an unknown token is a schema
+error rather than being serialized or substituted. The v1 `calls` field retains
+ordered, complete `DynamicCallFact` wires, and annotation fragments enter
+deduplication and resolution with their canonical source metadata unchanged.
+Dispatch therefore accepts only a closed persistence-safe subset: recorded call
+arguments must be empty; annotation source paths, target metadata, and
+environment override maps must be empty; source metadata may contain only the
+established `legacy_environment_fragment_mode` semantic key with its bounded
+`base`, `add`, or `override` value. If completed evidence falls outside this
+subset, dispatch rejects the requested trace before fragment resolution or
+persistence. It does not redact the evidence, silently change the v1 schema, or
+write a plan or sidecar containing that evidence.
+
+A null `trace_input_id` is allowed only when the effective invocation itself
+could not be constructed. Dispatch admits a no-summary `pre_execution_failed`
+carrier only for the exact documented diagnostic-only set (`dynamic_trace_disabled`,
+`dynamic_trace_invalid_context`, `dynamic_trace_unsupported_target`,
+`dynamic_trace_unsupported_argument`, `dynamic_trace_argument_limit_exceeded`,
+and `dynamic_trace_receiver_resolution_failed`), with no facts and a target
+known not to have started. Stale target/envelope evidence, malformed summaries,
+unknown summary outcomes, and other malformed or mixed evidence are
+`evidence_rejected`. Dispatch independently validates a summary and calls before
+that rejection: evidence proving execution started retains nonempty input/run
+IDs and `execution_started=true`; genuinely unknown start is represented by
+`null`. Only independently validated bounded summary/call wires can be retained
+for diagnostics, never for requirement resolution or publication. Each carrier
+diagnostic uses the fixed machine schema `{"code": str, "severity":
+"info"|"warning"|"error", "data": {"trace_diagnostic_codes": [str,
+...]}}`. The bounded `trace_diagnostic_codes` array preserves safely available
+underlying diagnostic code identifiers without promoting their messages or arbitrary
+data into the projection. Carriers contain no exception messages, tracebacks,
+locals, source, environment values, streams, live objects, or arbitrary repr.
+If accepted trace facts change a `pickle_small` final candidate to a different
+Python environment, planning cleans the temporary pickle and blocks launch while
+returning that completed diagnostic trace carrier.
+
+### Bounded planning provenance
+
+Planning metadata version 4 keeps the existing operation, dispatch, execution
+recipe, and worker-envelope v1 schemas. It retains version 3's bounded analysis
+outcomes and adds the launch-only configuration projection described above.
+Version 3 added
+`dryml.dispatch.analysis_outcomes`, whose closed entries make code-probe,
+environment-probe, and dynamic-trace outcomes explicit. A skipped probe is
+`{"outcome": "not_required"}`; tracing that was not requested records
+`requested=false`, `completed=false`, and `outcome="not_requested"`. Requested
+trace outcomes record both booleans plus the existing bounded trace status.
+
+The persisted `dryml.code_analysis` value is a provenance projection, not a
+serialized analyzer result. It retains the stable target reference, counts for
+known fact kinds (with one `other` bucket), diagnostic codes/severities, and
+aggregate success. Source text, arbitrary fact
+or diagnostic payloads, live-object representations, probe/process streams,
+environment dumps, credentials, host benchmark details, and invocation
+arguments remain transient. Resolved requirements and their source traces are
+retained separately under `dryml.requirements` and
+`dryml.requirement_sources`; compatibility reports, candidate sources,
+effective policies, and enforcement outcomes retain their existing keys.
+
+## Unsupported Graph Prototype Package
+
+`dryml.graph` is not a supported DRYML package or public export. Clean source
+exports, wheels, and source distributions exclude it; applications must not
+import it. This contract concerns tracked distribution contents only and does not
+delete or otherwise modify any untracked local prototype directory.
+
+## Local Worlds
+
+`Dispatcher.run_world(...)` is the explicit entrypoint for coordinated same-host multi-worker dispatch. `Dispatcher.run(...)` remains the single-worker local subprocess path for compatibility.
+
+```python
+from dryml.dispatch import Dispatcher
+
+result = Dispatcher(store=repo.default_store).run_world(
+    operation,
+    world={
+        "trainer": {"replicas": 1, "process": {"resources": {"cpus": 2}}},
+        "data": {"replicas": 1, "process": {"resources": {"cpus": 1}}},
+    },
+)
+```
+
+The first implementation runs the same `OperationSpec` in every allocated role/replica. User code can branch on the active runtime allocation:
+
+```python
+import dryml.runtime as rt
+
+def worker_main():
+    alloc = rt.require_workload_allocation("run role-aware operation")
+    return {"role": alloc.role, "replica": alloc.replica, "rank": alloc.rank}
+```
+
+The worker process environment also includes `DRYML_WORLD_ID`, `DRYML_WORLD_ALLOCATION_ID`, `DRYML_WORLD_ROLE`, `DRYML_WORLD_REPLICA`, `DRYML_WORLD_RANK`, `DRYML_WORLD_LOCAL_RANK`, `DRYML_WORLD_SIZE`, and `DRYML_WORLD_ROLE_SIZE`.
+
+`WorldDispatchResult` contains aggregate `status`, `dispatch_id`, `recipe_id`, `world_id`, `world_allocation_id`, `primary`, `workers`, `execution_record_ids`, diagnostics, error, and cancellation fields. Worker results are keyed by `WorldWorkerKey(role, replica, rank, local_rank)`. The primary result is `main` replica 0 if present, else `worker` replica 0, else the first sorted worker. Aggregate status is conservative: any timeout, failure, cancellation, or unsupported worker prevents an `ok` aggregate.
+
+The local-world backend creates one group work directory, launches one subprocess per role/replica, waits for all handshakes, then writes a start marker. If a required worker fails, times out, reports unsupported, or misses protocol files, siblings are cancelled. `LocalWorldFuture.cancel(...)`, `result(timeout=...)`, and `KeyboardInterrupt` cancellation all target the whole worker group.
+
+Pre-start control-plane failures keep their status shape: malformed or mismatched handshakes report `failed`, unsupported handshakes report `unsupported`, and handshake timeouts report `timeout`; they are not collapsed into user cancellation. `result(timeout=...)` applies to post-handshake execution waiting after the configured handshake timeout phase.
+
+Local-world dispatch is local-only: all workers run on the same host and share the same `DirStore` path. Distributed rendezvous, collectives, Ray/Slurm/cloud launch, containers, SSH, role-specific runtime-spec selection, and heterogeneous role-specific Python executables are deferred. Role `process.env` values and DRYML role/rank facts are applied per worker; the software `EnvironmentSpec` and `RuntimeContextSpec` are currently homogeneous across the world.
+
+## Worker Protocol
+
+The local backend launches `python -m dryml.dispatch.worker` with JSON request, handshake, and response files in a per-dispatch work directory. Child stdout/stderr are captured to separate files from process start, so user output cannot corrupt protocol JSON.
+
+The worker handshake reports protocol version, Python/platform, pid, supported operation kinds, call transports, store kinds, record schemas, runtime modes, environment kind, process-group support, and store accessibility. The parent waits for this phase before trusting a worker result, and an `ok` worker response is accepted only after an observed `ok` handshake. Missing features, protocol mismatch, inaccessible store paths, or inconsistent envelope IDs return structured failed/unsupported responses.
+
+## Store Marshalling
+
+Local subprocess dispatch prefers same-host `DirStore` handoff:
+
+```text
+parent writes/has objects and sidecars in DirStore
+worker opens the same absolute DirStore path through WorkerStoreRef
+worker materializes CDef args and writes outputs/records/products back
+parent reads compact result refs and records
+```
+
+`WorkerStoreRef` roles are `input`, `work`, `output`, and `shared`; modes are `read`, `write`, and `readwrite`. Request/response JSON carries CDef IDs and record IDs, not object state bytes.
+
+## Runtime And Environment
+
+The worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default and assigned device visibility before target import or object materialization. Supported launch specs are current Python, explicit Python executable, and Conda command construction/direct prefix launch where available.
+
+Python path policies are:
+
+| Policy | Behavior |
+|---|---|
+| `none` | Do not alter `PYTHONPATH` beyond the child environment. |
+| `inherit` | Use parent `PYTHONPATH`. |
+| `explicit` | Use only `extra_pythonpath`. |
+| `dryml-source` | Add the current DRYML source root, then `extra_pythonpath`. |
+
+## Results, Logs, And Records
+
+`DispatchResult` returns compact fields: status, operation/dispatch/recipe IDs, execution record ID, canonical literal or CDef result refs, operation-produced record IDs, stdout/stderr refs, diagnostics, error, cancellation, and an optional structured `managed_result`. `WorkerResponse` enforces the same basic status context as execution records: ok responses do not carry errors, failed/timeout/unsupported responses include error details or diagnostics, and cancelled responses include cancellation facts. `execution_record_id` is provenance and is kept separate from `produced_record_ids`, which are reserved for records produced by the operation itself. A failed managed worker response retains its bounded checkpoint/effect carrier for coordinator classification; only the coordinator may turn successful effects into published records and activation.
+
+When provenance is enabled, operation, dispatch, execution-recipe, projected
+world, and projected allocation specs are written beside the execution record so
+provenance refs are Store-resolvable without copying raw launch configuration.
+Execution records refer only to projected world/allocation IDs. Raw configuration
+remains in the transient worker envelope and is not copied into records, logs,
+diagnostics, Store specs, or managed export closure. `ExecutionRecord` sidecars
+are emitted for success, user-code failure, timeout, cancellation, and
+parent-side protocol failures when metadata permits. stdout/stderr products use
+self product refs such as `products/<execution-record-id>/stdout.txt` and
+`stderr.txt`.
+
+In local-world mode, `plan_world(...)` writes projected requested-world and
+allocation specs, the operation spec, dispatch spec, and execution recipe when
+provenance is enabled, before worker execution records reference them. The raw
+requested world and concrete process environments remain launch-envelope data.
+Per-worker execution records are the provenance authority; each includes the
+projected `world_id`, projected `world_allocation_id`, worker key payload data,
+and role/replica/rank/local-rank metadata. Per-worker stdout/stderr are captured
+independently and copied into each worker execution record's product directory.
+
+## Cancellation
+
+`LocalSubprocessFuture.cancel()` starts POSIX process-group cancellation with SIGINT, escalates to SIGTERM, then SIGKILL when needed. `result(timeout=...)` cancels and records timeout provenance. `KeyboardInterrupt` while waiting cancels the worker and re-raises.
+# Automatic Local Planning
+
+When no explicit, annotation-default, or context-current environment/world is
+selected, dispatch can resolve an injected environment registry and synthesize a
+local world for hard requirements. Higher-precedence candidates are never
+silently replaced. `dispatch.explain(...)` uses the same bounded discovery path
+but does not launch work, activate an allocation, or write execution records.
+
+A synthesized single-worker local world can run through local subprocess
+dispatch. Multi-worker worlds require `plan_world(...)` or `run_world(...)`.
+
+Environment candidates are ordered as caller candidates, name-sorted entries in
+an explicitly supplied `EnvironmentRegistry`, then the current environment.
+Registry hints only avoid definite mismatches; a probe record remains the
+compatibility authority. Resolver input, probes, trace metadata, and probe
+output are bounded, including resolver probe durations and aggregate inventory
+metadata. Candidate discovery never replaces an incompatible explicit,
+annotation-default, or context-current environment/world.
+
+When candidates are retained on a `Dispatcher` for repeated notebook calls,
+pass a re-iterable collection such as a tuple or list. One-shot iterators are
+rejected at construction so an earlier `explain(...)` cannot consume candidates
+that a later `plan(...)` would need. If bounded candidate enumeration reaches its
+deadline, resolution is reported as incomplete and does not fall through to a
+lower-precedence registry or current-environment candidate.
+
+`inventory=` injects one `LocalResourceInventory` for synthesis and allocation.
+With no injection, `inventory_policy="lightweight"` is framework-free. To use
+`"external"`, call `worlds.local_inventory(policy="external",
+command_runner=...)` yourself and pass that inventory to dispatch; dispatcher
+methods do not accept a command runner. The runner timeout is cooperative for
+custom in-process callbacks, which must enforce any hard deadline themselves.
+Actual allocation feasibility, backend support, target importability, and topology
+the backend cannot enforce remain blocking even under
+`requirement_policy="warn"` or `"ignore"`.
+
+`plan_world(..., oversubscribe=True)` is an explicit advanced local-world
+allocator policy. Automatic synthesis remains disjoint; the resulting planning
+metadata records either `disjoint_local` or `oversubscribed_local` under
+`dryml.world_allocation`.
+
+For notebooks, ordinary context APIs are sufficient:
+
+```python
+registry = dryml.environments.EnvironmentRegistry()
+dryml.environments.set_current(dryml.environments.CurrentEnvironmentSpec())
+world = dryml.worlds.synthesize(None, inventory=dryml.worlds.local_inventory()).require_world()
+with dryml.worlds.use(world):
+    print(dryml.dispatch.explain(train, environment_registry=registry))
+```
+
+`explain(...)` may read local inventory and perform bounded probes, but never
+launches workloads, activates an allocation, writes Store records, or mutates
+the registry. Cross-plan probe and inventory caching is intentionally deferred.

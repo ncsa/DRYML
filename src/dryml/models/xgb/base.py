@@ -1,4 +1,4 @@
-from dryml.config import Meta
+from dryml.core.config import Meta
 from dryml.models.component import Component
 import xgboost
 import tempfile

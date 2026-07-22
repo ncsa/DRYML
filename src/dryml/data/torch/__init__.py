@@ -1,8 +1,11 @@
-from dryml.data.torch.dataset import TorchDataset, TorchIterableDatasetWrapper
-import dryml.data.torch.transforms as transforms
+"""PyTorch data namespace.
 
-__all__ = [
-    TorchDataset,
-    TorchIterableDatasetWrapper,
-    transforms,
-]
+Legacy ``TorchDataset`` wrappers have been removed. Use
+``dryml.data.TorchDatasetAdapter`` for PyTorch dataset sources and core
+``dryml.data`` transforms for batching, mapping, shuffling, and conversion.
+"""
+
+from .cache import TorchCacheView
+
+
+__all__ = ["TorchCacheView"]

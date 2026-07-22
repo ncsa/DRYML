@@ -1,24 +1,12 @@
 import dryml
-import tensorflow_datasets as tfds
-from dryml.data.tf import TFDataset
-from dryml.context import context_check
+from dryml.data import TFDSAdapter
 
 
 class MNISTDigitsWorkshop(dryml.Workshop):
+    @dryml.env.req(packages={"tensorflow-datasets": None})
+    @dryml.world.req(cpus={"min": 1})
+    @dryml.world.default(cpus=1)
+    @dryml.runtime.default(mode="worker", device_visibility={"policy": "assigned"})
     def data_prep(self):
-        context_check({'tf': {}})
-
-        (ds_train, ds_test), ds_info = tfds.load(
-            'mnist',
-            split=['train', 'test'],
-            shuffle_files=True,
-            as_supervised=True,
-            with_info=True)
-
-        self.train_ds = TFDataset(
-            ds_train,
-            supervised=True)
-        self.test_ds = TFDataset(
-            ds_test,
-            supervised=True)
-        self.info_ds = ds_info
+        self.train_ds = TFDSAdapter("mnist", split="train", as_supervised=True)
+        self.test_ds = TFDSAdapter("mnist", split="test", as_supervised=True)

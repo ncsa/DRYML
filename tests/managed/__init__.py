@@ -1,0 +1,1 @@
+"""Managed-operation test package."""
