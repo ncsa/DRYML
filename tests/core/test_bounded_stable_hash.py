@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from enum import Enum
 
 import numpy as np
@@ -26,6 +29,59 @@ from dryml.core.utils.stable_hash import (
 
 class Choice(Enum):
     A = "a"
+
+
+EXPECTED_IDENTITY_VECTORS = (
+    "7dc623b82cbb5ce9af281dafe698808e504f2a846201b10a7b39b99fc58229c0",
+    "3fa1179b5ce14fe4881d5f113ae065965541cd8c225eb459b2a6fae625f564b5",
+    "d6c5b6ab98b6d96acf972a9d9a865450c6e4b6fc67b7f78e7adbcba7118a1f9d",
+    "358141c8056244a3255469ab11f112b879ea4089906faa181407ae97bc0ccea7",
+)
+
+
+def _identity_vector_values():
+    return (
+        FactorySpec(dict, value=1),
+        Definition(DType, "float", 32),
+        ConcreteDefinition(DType, ("float", 32), {}),
+        {"plain": [1, 2]},
+    )
+
+
+def test_promoted_and_unaffected_identity_vectors_are_exact():
+    values = _identity_vector_values()
+
+    assert tuple(stable_hash_function(value) for value in values) == (
+        EXPECTED_IDENTITY_VECTORS
+    )
+    assert tuple(bounded_stable_hash_function(value) for value in values) == (
+        EXPECTED_IDENTITY_VECTORS
+    )
+
+
+def test_identity_vectors_are_exact_in_fresh_process():
+    script = """
+import json
+from dryml.core import ConcreteDefinition, Definition, FactorySpec
+from dryml.core.dtype import DType
+from dryml.core.utils.stable_hash import stable_hash_function
+
+values = (
+    FactorySpec(dict, value=1),
+    Definition(DType, "float", 32),
+    ConcreteDefinition(DType, ("float", 32), {}),
+    {"plain": [1, 2]},
+)
+print(json.dumps([stable_hash_function(value) for value in values]))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+
+    assert tuple(json.loads(completed.stdout)) == EXPECTED_IDENTITY_VECTORS
 
 
 @pytest.mark.parametrize(

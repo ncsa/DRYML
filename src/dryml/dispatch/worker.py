@@ -10,16 +10,20 @@ import time
 from typing import Any, Mapping
 
 from dryml.core.repo import Repo
+from dryml.operations import validate_operation_spec
+from dryml.operations.errors import OperationSpecError
 from dryml.records import ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, StorageRef, write_execution_record
 from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
 from dryml.runtime import RuntimeMode, activate
 from dryml.runtime.specs import RuntimeContextSpec
 
 from .backends import BACKEND_IDENTITY
-from .errors import WorkerProtocolError
+from .errors import DispatchSpecError, WorkerProtocolError
 from .operations import canonicalize_result, execute_operation
 from .planner import allocation_from_json
 from .protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, DISPATCH_WORKER_PROTOCOL_VERSION, ExecutionEnvelope, WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, load_envelope, write_json_file
+from .recipes import validate_execution_recipe
+from .specs import validate_dispatch_spec
 from .stores import open_worker_store, validate_worker_store_access
 
 
@@ -120,6 +124,16 @@ def _open_and_validate_stores(envelope: ExecutionEnvelope):
 
 
 def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
+    try:
+        validate_operation_spec(envelope.operation_spec)
+        validate_dispatch_spec(envelope.dispatch_spec)
+        validate_execution_recipe(envelope.execution_recipe)
+    except (OperationSpecError, DispatchSpecError) as exc:
+        raise WorkerProtocolError(
+            "execution envelope contains an invalid canonical spec",
+            context={"error_type": type(exc).__name__, "error": str(exc)},
+        ) from exc
+
     operation_id = envelope.operation_spec.get("id")
     dispatch_id = envelope.dispatch_spec.get("id")
     dispatch_operation_id = envelope.dispatch_spec.get("payload", {}).get("operation_id")

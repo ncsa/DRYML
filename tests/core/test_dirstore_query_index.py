@@ -1,19 +1,25 @@
 import hashlib
+import importlib
 import os
 from pathlib import Path
+import pickle
 import shutil
+import sys
 import threading
 import time
+from contextlib import contextmanager
 import pytest
 
-from dryml.core import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
-from dryml.core.query.model import QueryIndexUnavailable, ValidationIssue, ValidationReport
+from dryml.core import ConcreteDefinition, Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
+from dryml.core.query.model import QueryIndexError, QueryIndexUnavailable, ValidationIssue, ValidationReport
 from dryml.core.query.codecs import CDEF_CODEC_VERSION
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.store.dir import DirStore
 from dryml.core.utils.general import pickle_save
+from dryml.formats.refs import format_cdef_id
+from dryml.records import make_record, make_spec
 
 
 class QueryIndexDirLeaf(Object):
@@ -48,13 +54,59 @@ class FailingSaveDirLeaf(Object):
         raise RuntimeError("object save failed")
 
 
-def _object_manifest(store):
-    root = Path(store.object_root_dir)
+def _protected_store_manifest(store_or_path):
+    root = Path(getattr(store_or_path, "base_dir", store_or_path))
+
+    def is_derived(path):
+        relative = path.relative_to(root)
+        if relative.parts[:2] == ("records", "indexes"):
+            return True
+        if relative.parent != Path(".dryml"):
+            return False
+        return (
+            relative.name == "query-index.dirty"
+            or relative.name.startswith("query-index-v1.sqlite")
+        )
+
     return {
         path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
         for path in root.rglob("*")
-        if path.is_file()
+        if path.is_file() and not is_derived(path)
     }
+
+
+@contextmanager
+def _retired_core_class(tmp_path):
+    import dryml
+
+    retired_package = "core" + "2"
+    package_name = f"dryml.{retired_package}"
+    module_name = f"{package_name}.fixture"
+    source_root = tmp_path / "retired-source"
+    package_root = source_root / "dryml" / retired_package
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    (package_root / "fixture.py").write_text(
+        "from dryml.core import Object\n\n"
+        "class RetiredLeaf(Object):\n"
+        "    def __init__(self, name='retired'):\n"
+        "        super().__init__()\n"
+        "        self.name = name\n",
+        encoding="utf-8",
+    )
+    search_path = str(source_root / "dryml")
+    dryml.__path__.append(search_path)
+    importlib.invalidate_caches()
+    module = importlib.import_module(module_name)
+    try:
+        yield module.RetiredLeaf
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.modules.pop(package_name, None)
+        if getattr(dryml, retired_package, None) is not None:
+            delattr(dryml, retired_package)
+        dryml.__path__.remove(search_path)
+        importlib.invalidate_caches()
 
 
 def test_dirstore_query_index_default_is_auto_and_lazy(tmp_path):
@@ -516,7 +568,23 @@ def test_stale_cdef_codec_rebuilds_before_decoding_and_preserves_objects(
     repo = Repo(stores=store)
     obj = QueryIndexDirLeaf("codec-rebuild", repo=repo)
     repo.save_object(obj)
-    before = _object_manifest(store)
+    store.write_main_def(obj.definition)
+    store.write_aliases({"codec-rebuild": obj.definition})
+    cdef_id = format_cdef_id(obj.definition.stable_hash())
+    record_ref = store.records.write_record(
+        make_record(kind="data", payload={"subject_cdef_id": cdef_id})
+    )
+    store.records.write_spec(
+        make_spec(
+            family="representation",
+            kind="pickle",
+            payload={"subject_cdef_id": cdef_id},
+        ),
+        family="representation",
+    )
+    product_root = store.records.product_root(record_ref.record_id, create=True)
+    (product_root / "payload.bin").write_bytes(b"authoritative product")
+    before = _protected_store_manifest(store)
 
     with sqlite3.connect(store.query_index_path) as con:
         con.execute(
@@ -534,7 +602,63 @@ def test_stale_cdef_codec_rebuilds_before_decoding_and_preserves_objects(
     selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
     assert reopened_repo.query(selector).stored().count() == 1
     assert reopened_store.query_index_status().state == "ready"
-    assert _object_manifest(reopened_store) == before
+    assert _protected_store_manifest(reopened_store) == before
+
+
+def test_retired_root_definition_fails_store_open_without_mutation(tmp_path):
+    store_path = tmp_path / "store"
+    with _retired_core_class(tmp_path) as retired_cls:
+        store = DirStore(store_path, query_index="none")
+        cdef = ConcreteDefinition(retired_cls)
+        cdef_bytes = pickle.dumps(cdef, protocol=5)
+        Path(store._main_def_path()).write_bytes(cdef_bytes)
+        before = _protected_store_manifest(store)
+
+    with pytest.raises(ModuleNotFoundError):
+        DirStore(store_path, query_index="none")
+
+    assert _protected_store_manifest(store_path) == before
+
+
+@pytest.mark.parametrize("recovery", ("query", "reconcile"))
+def test_retired_object_definition_fails_index_recovery_without_mutation(
+    tmp_path,
+    recovery,
+):
+    sqlite3 = require_sqlite()
+    config = SQLiteQueryIndexConfig(journal_mode="delete")
+    store_path = tmp_path / "store"
+    with _retired_core_class(tmp_path) as retired_cls:
+        store = DirStore(store_path, query_index=config)
+        cdef = ConcreteDefinition(retired_cls)
+        def_path = Path(store._def_file(cdef))
+        def_path.parent.mkdir(parents=True)
+        def_path.write_bytes(pickle.dumps(cdef, protocol=5))
+        store.rebuild_query_index()
+        with sqlite3.connect(store.query_index_path) as con:
+            con.execute(
+                "UPDATE catalog_state SET cdef_codec_version = ? "
+                "WHERE singleton = 1",
+                (CDEF_CODEC_VERSION - 1,),
+            )
+        before = _protected_store_manifest(store)
+
+    reopened_store = DirStore(store_path, query_index=config)
+    with pytest.raises(ModuleNotFoundError):
+        list(reopened_store.hydrate_index())
+    assert _protected_store_manifest(reopened_store) == before
+
+    if recovery == "query":
+        with pytest.raises(QueryIndexError):
+            selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+            Repo(stores=reopened_store).query(selector).stored().count()
+    else:
+        report = reopened_store.reconcile_query_index()
+        assert report.action == "validate"
+        assert any(issue.severity == "error" for issue in report.issues)
+
+    assert reopened_store.query_index_status().state != "ready"
+    assert _protected_store_manifest(reopened_store) == before
 
 
 def test_repo_rebuild_index_rebuilds_sqlite_sidecar(tmp_path):

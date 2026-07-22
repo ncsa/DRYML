@@ -113,3 +113,43 @@ def test_worker_rejects_inconsistent_envelope_ids(tmp_path, target_module):
 
     assert response.status == "failed"
     assert response.error["type"] == "WorkerProtocolError"
+
+
+def test_worker_rejects_self_consistent_links_with_stale_spec_id(
+    tmp_path,
+    target_module,
+):
+    store = DirStore(tmp_path / "store", query_index="none")
+    env = PythonExecutableSpec(
+        sys.executable,
+        pythonpath_policy="explicit",
+        extra_pythonpath=(str(target_module.parent),),
+    ).to_data()
+    op = attach_operation_id(
+        make_function_call_spec("dispatch_target:add", args=[1, 2])
+    )
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(op, environment=env, record_policy="none")
+    bad_dispatch = dict(plan.dispatch_spec)
+    bad_dispatch["payload"] = {
+        **bad_dispatch["payload"],
+        "metadata": {
+            **bad_dispatch["payload"].get("metadata", {}),
+            "tampered": True,
+        },
+    }
+    bad_envelope = dataclasses.replace(
+        plan.envelope,
+        dispatch_spec=bad_dispatch,
+    )
+
+    response = dispatcher.submit(
+        dataclasses.replace(
+            plan,
+            dispatch_spec=bad_dispatch,
+            envelope=bad_envelope,
+        )
+    ).result(timeout=10)
+
+    assert response.status == "failed"
+    assert response.error["type"] == "WorkerProtocolError"

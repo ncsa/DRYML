@@ -65,6 +65,16 @@ def test_similarly_prefixed_module_is_not_treated_as_core():
     assert not is_canonical_value(SimilarPrefix)
 
 
+def test_non_type_canonical_value_does_not_read_module_attribute():
+    class ModuleProbe:
+        def __getattribute__(self, name):
+            if name == "__module__":
+                raise AssertionError("non-type module attribute was read")
+            return super().__getattribute__(name)
+
+    assert not is_canonical_value(ModuleProbe())
+
+
 def test_to_canonical_passes_dtype_through_unchanged():
     dt = DType("int", 64)
     out = to_canonical(dt)

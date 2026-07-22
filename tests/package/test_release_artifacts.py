@@ -115,6 +115,14 @@ def _archive_candidate(repository: Path, destination: Path, archive_path: Path, 
         "release manifest and artifact contract must be committed before the "
         f"candidate is built: {sorted(REQUIRED_CANDIDATE_FILES - tracked)}"
     )
+    contract_path = Path(__file__).resolve()
+    committed_contract = subprocess.check_output(
+        ["git", "show", "HEAD:tests/package/test_release_artifacts.py"],
+        cwd=repository,
+    )
+    assert contract_path.read_bytes() == committed_contract, (
+        "the executing release-artifact contract must match committed HEAD"
+    )
     _run(
         ["git", "archive", "--format=tar", f"--output={archive_path}", "HEAD"],
         cwd=repository,
