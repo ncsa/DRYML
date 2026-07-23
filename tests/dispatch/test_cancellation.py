@@ -1,0 +1,105 @@
+import os
+import importlib
+import sys
+
+import pytest
+
+from dryml.core.store.dir import DirStore
+from dryml.dispatch import Dispatcher, DispatchTimeout
+from dryml.environments import CurrentEnvironmentSpec
+from dryml.environments import PythonExecutableSpec
+from dryml.operations import attach_operation_id, make_function_call_spec
+
+
+def _plan(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="none")
+    # Keep cancellation coverage independent of probe startup; see ADR 0006.
+    environment = CurrentEnvironmentSpec().to_data()
+    op = attach_operation_id(make_function_call_spec("time:sleep", args=[60]))
+    dispatcher = Dispatcher(store=store)
+    return dispatcher, dispatcher.plan(op, environment=environment), store
+
+
+def test_sleeping_worker_cancellation_records_cancelled(tmp_path):
+    dispatcher, plan, store = _plan(tmp_path)
+    future = dispatcher.submit(plan)
+
+    assert future.cancel(grace=0.1, reason="test") is True
+    response = future.result(timeout=5)
+
+    assert response.status == "cancelled"
+    assert store.records.find_execution_records(status="cancelled")
+
+
+def test_cancellation_immediately_removes_launch_artifacts_and_keeps_response(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="none")
+    environment = CurrentEnvironmentSpec().to_data()
+
+    def sleeping_local_callable():
+        import time
+
+        time.sleep(60)
+
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(sleeping_local_callable, allow_pickle=True, environment=environment)
+    future = dispatcher.submit(plan)
+    work_dir = future.work_dir
+    cleanup_paths = tuple(plan.envelope.launch["cleanup_paths"])
+
+    assert future.cancel(grace=0.1, reason="test") is True
+    assert not os.path.exists(work_dir)
+    assert all(not os.path.exists(path) for path in cleanup_paths)
+    assert future.result(timeout=5).status == "cancelled"
+
+
+def test_timeout_records_timeout(tmp_path):
+    dispatcher, plan, store = _plan(tmp_path)
+    future = dispatcher.submit(plan)
+
+    with pytest.raises(DispatchTimeout):
+        future.result(timeout=0.1)
+    assert store.records.find_execution_records(status="timeout")
+    assert store.records.find_execution_records(status="cancelled") == ()
+
+
+def _managed_plan(tmp_path, target_module):
+    store = DirStore(tmp_path / "managed-store", query_index="none")
+    environment = PythonExecutableSpec(
+        sys.executable,
+        pythonpath_policy="explicit",
+        extra_pythonpath=(str(target_module.parent),),
+    ).to_data()
+    box = importlib.import_module("dispatch_target").ManagedBox()
+    dispatcher = Dispatcher(store=store)
+    plan = dispatcher.plan(
+        box.compute,
+        kwargs={"sleep": 60.0},
+        environment=environment,
+    )
+    return dispatcher, plan, store, box
+
+
+def test_managed_worker_cancellation_preserves_incomplete_provenance(tmp_path, target_module):
+    dispatcher, plan, store, box = _managed_plan(tmp_path, target_module)
+    future = dispatcher.submit(plan)
+
+    assert future.cancel(grace=0.1, reason="test") is True
+    response = future.result(timeout=5)
+
+    assert response.status == "cancelled"
+    assert response.managed_result["status"] == "cancelled"
+    assert box.compute.status(store=store).status == "interrupted"
+    assert store.records.find_execution_records(status="cancelled")
+
+
+def test_managed_timeout_preserves_timeout_and_incomplete_state(tmp_path, target_module):
+    dispatcher, plan, store, box = _managed_plan(tmp_path, target_module)
+    future = dispatcher.submit(plan)
+
+    with pytest.raises(DispatchTimeout):
+        future.result(timeout=0.1)
+
+    assert future.worker_response.status == "timeout"
+    assert future.worker_response.managed_result["status"] == "timeout"
+    assert box.compute.status(store=store).status == "failed"
+    assert store.records.find_execution_records(status="timeout")

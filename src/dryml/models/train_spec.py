@@ -1,66 +1,111 @@
-import pickle
-from typing import List
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import ClassVar
 
 
-class TrainStateException(Exception):
-    pass
+TRAIN_CHECKPOINT_SCHEMA = "dryml.experiment-train.v1"
 
 
-class TrainSpec(object):
-    def __init__(self, level_steps: List[int] = None, global_steps=0):
-        if level_steps is None:
-            self.level_steps = [0]
-        else:
-            self.level_steps = level_steps
-        self.global_steps = global_steps
-        self.cur_level = 0
+class TrainResumeMode(Enum):
+    """Trainer resume guarantee advertised before managed execution."""
 
-    def is_state_current(self):
-        """
-        Check spec state for preparedness to modify
-        """
-        return self.cur_level == len(self.level_steps)-1
+    NONE = "none"
+    EXACT = "exact"
 
-    def descend(self):
-        if self.is_state_current():
-            self.level_steps.append(0)
-            self.global_steps += 1
-        self.cur_level += 1
 
-    def elevate(self):
-        if not self.is_state_current():
-            raise TrainStateException()
-        self.level_steps.pop()
-        self.cur_level -= 1
+@dataclass(frozen=True, slots=True)
+class TrainCapability:
+    """Definition-derived whole-trainer checkpoint capability.
 
-    def advance(self):
-        if not self.is_state_current():
-            raise TrainStateException()
-        self.global_steps += 1
-        self.level_steps[self.cur_level] += 1
+    Exact capability means the trainer can checkpoint every mutable component
+    it owns. Completed cached inputs are immutable and are pinned separately by
+    the managed runtime.
+    """
 
-    def level_step(self):
-        return self.level_steps[self.cur_level]
+    mode: TrainResumeMode
+    diagnostic: str
+    checkpoint_schema: str | None = None
+    early_completion: bool = False
 
-    def global_step(self):
-        return self.global_steps
+    def __post_init__(self):
+        if not isinstance(self.mode, TrainResumeMode):
+            raise TypeError("train capability mode must be a TrainResumeMode")
+        if not isinstance(self.diagnostic, str) or not self.diagnostic:
+            raise ValueError("train capability diagnostic must be non-empty")
+        expected = TRAIN_CHECKPOINT_SCHEMA if self.mode is TrainResumeMode.EXACT else None
+        if self.checkpoint_schema != expected:
+            raise ValueError("train checkpoint schema does not match resume mode")
+        if not isinstance(self.early_completion, bool):
+            raise TypeError("train early_completion capability must be a bool")
 
-    def __str__(self):
-        return f"{self.level_steps}, {self.global_steps} ({self.cur_level})"
+    @classmethod
+    def none(cls, diagnostic: str = "trainer does not advertise exact resume"):
+        """Return an explicit non-resumable trainer capability."""
 
-    def __repr__(self):
-        return f"{self.level_steps}, {self.global_steps} ({self.cur_level})"
+        return cls(TrainResumeMode.NONE, diagnostic)
 
-    def save(self, path):
-        with open(path, 'wb') as f:
-            f.write(pickle.dumps({
-                'level_steps': self.level_steps,
-                'global_steps': self.global_steps}))
+    @classmethod
+    def exact(cls, diagnostic: str, *, early_completion: bool = False):
+        """Return an exact operation-checkpoint capability."""
 
-    @staticmethod
-    def load(path):
-        with open(path, 'rb') as f:
-            def_dict = pickle.loads(f.read())
-        return TrainSpec(
-            level_steps=def_dict['level_steps'],
-            global_steps=def_dict['global_steps'])
+        return cls(
+            TrainResumeMode.EXACT,
+            diagnostic,
+            TRAIN_CHECKPOINT_SCHEMA,
+            early_completion,
+        )
+
+
+@dataclass(slots=True)
+class TrainState:
+    initial: ClassVar[str | None] = None
+    training: ClassVar[str] = "training"
+    trained: ClassVar[str] = "trained"
+    failed: ClassVar[str] = "failed"
+
+    epoch: int = 0
+    step: int = 0
+    phase: str | None = initial
+
+    @property
+    def is_initial(self) -> bool:
+        return self.phase == self.initial
+
+    @property
+    def is_training(self) -> bool:
+        return self.phase == self.training
+
+    @property
+    def is_trained(self) -> bool:
+        return self.phase == self.trained
+
+    @property
+    def is_failed(self) -> bool:
+        return self.phase == self.failed
+
+    def __eq__(self, other):
+        if isinstance(other, TrainState):
+            return (
+                self.epoch == other.epoch
+                and self.step == other.step
+                and self.phase == other.phase
+            )
+        if isinstance(other, str) or other is None:
+            return self.phase == other
+        return NotImplemented
+
+    def advance_epoch(self, n: int = 1):
+        self.epoch += n
+
+    def advance_step(self, n: int = 1):
+        self.step += n
+
+
+__all__ = [
+    "TRAIN_CHECKPOINT_SCHEMA",
+    "TrainCapability",
+    "TrainResumeMode",
+    "TrainState",
+]

@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+
+import pytest
+
+import dryml.code as code
+from dryml.code.analysis import DEFAULT_ALGORITHMS
+from dryml.code.probe import DEFAULT_PROBE_ALGORITHMS
+
+
+EXPECTED_DEFAULT_ALGORITHMS = (
+    "callables",
+    "source",
+    "ast_access",
+    "symbol_capture",
+    "direct_annotations",
+    "method_contracts",
+)
+EXPECTED_DEFAULT_PROBE_ALGORITHMS = (
+    "callables",
+    "source",
+    "symbol_capture",
+    "direct_annotations",
+)
+
+
+def test_default_analyzers_are_registered():
+    names = code.available_analyzers()
+
+    assert {"callables", "source", "ast_access", "symbol_capture", "direct_annotations", "method_contracts", "static_calls", "dynamic_trace"}.issubset(names)
+    assert code.get_analyzer("callables").name == "callables"
+    assert DEFAULT_ALGORITHMS == EXPECTED_DEFAULT_ALGORITHMS
+    assert DEFAULT_PROBE_ALGORITHMS == EXPECTED_DEFAULT_PROBE_ALGORITHMS
+
+
+def test_core_and_code_keep_their_import_boundaries():
+    core = subprocess.run(
+        [sys.executable, "-c", "import dryml.core, sys; assert 'dryml.code' not in sys.modules"],
+        capture_output=True,
+        text=True,
+    )
+    code_import = subprocess.run(
+        [sys.executable, "-c", "import dryml.code, sys; assert 'dryml.dispatch' not in sys.modules"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert core.returncode == 0, core.stderr
+    assert code_import.returncode == 0, code_import.stderr
+
+
+def test_empty_probe_algorithm_selection_round_trips_to_probe_defaults(requirement_targets):
+    request = code.CodeProbeRequest(
+        target=code.normalize_target(requirement_targets.plain_importable_function).spec,
+        algorithms=(),
+    )
+
+    assert request.algorithms == DEFAULT_PROBE_ALGORITHMS
+    assert code.CodeProbeRequest.from_data(request.to_data()).algorithms == DEFAULT_PROBE_ALGORITHMS
+
+
+def test_register_duplicate_and_replace(requirement_targets):
+    analyzer = code.FunctionAnalyzer("test_duplicate_analyzer", lambda target, context: code.CodeAnalysisResult(target.spec))
+    replacement = code.FunctionAnalyzer("test_duplicate_analyzer", lambda target, context: code.CodeAnalysisResult(target.spec))
+
+    code.register_analyzer(analyzer, replace=True)
+    with pytest.raises(ValueError):
+        code.register_analyzer(replacement)
+    code.register_analyzer(replacement, replace=True)
+    assert code.get_analyzer("test_duplicate_analyzer") is replacement
+
+
+def test_explicit_algorithm_order_is_preserved(requirement_targets):
+    seen = []
+
+    def first(target, context):
+        seen.append("first")
+        return code.CodeAnalysisResult(target.spec, facts=(code.CodeFact("order", data={"name": "first"}),))
+
+    def second(target, context):
+        seen.append("second")
+        return code.CodeAnalysisResult(target.spec, facts=(code.CodeFact("order", data={"name": "second"}),))
+
+    code.register_analyzer(code.FunctionAnalyzer("test_order_first", first), replace=True)
+    code.register_analyzer(code.FunctionAnalyzer("test_order_second", second), replace=True)
+
+    result = code.analyze(requirement_targets.plain_importable_function, algorithms=("test_order_first", "test_order_second"))
+
+    assert seen == ["first", "second"]
+    assert [fact.data["name"] for fact in result.facts] == ["first", "second"]
+
+
+def test_analyzer_exception_collect_and_raise_policies(requirement_targets):
+    def broken(target, context):
+        raise RuntimeError("boom")
+
+    code.register_analyzer(code.FunctionAnalyzer("test_broken_analyzer", broken), replace=True)
+
+    collected = code.analyze(requirement_targets.plain_importable_function, algorithms=("test_broken_analyzer",))
+    assert collected.diagnostics_of_code("dryml.code.algorithm_failed")
+
+    context = code.CodeAnalysisContext(algorithms=("test_broken_analyzer",), diagnostics_policy="raise")
+    with pytest.raises(code.CodeAnalysisError):
+        code.analyze(requirement_targets.plain_importable_function, context=context)
+
+
+def test_unknown_analyzer_becomes_diagnostic(requirement_targets):
+    result = code.analyze(requirement_targets.plain_importable_function, algorithms=("does_not_exist",))
+
+    assert result.diagnostics_of_code("dryml.code.unknown_analyzer")
+
+
+def test_context_validates_algorithms_policy_and_metadata(requirement_targets):
+    context = code.CodeAnalysisContext(algorithms="source", metadata={"run_id": "audit"})
+    result = code.analyze(requirement_targets.plain_importable_function, context=context)
+
+    assert context.algorithms == ("source",)
+    assert result.facts_of_kind("source")
+    assert result.target.metadata["run_id"] == "audit"
+    with pytest.raises(ValueError):
+        code.CodeAnalysisContext(diagnostics_policy="invalid")
+    with pytest.raises(TypeError):
+        code.CodeAnalysisContext(metadata=[("not", "mapping")])
+
+
+def test_string_algorithms_argument_is_single_algorithm(requirement_targets):
+    result = code.analyze(requirement_targets.plain_importable_function, algorithms="source")
+
+    assert result.facts_of_kind("source")
+    assert not result.diagnostics_of_code("dryml.code.unknown_analyzer")
+
+
+def test_context_metadata_propagates_to_import_path_targets(requirement_targets):
+    result = code.analyze(
+        "dryml_requirement_targets:plain_importable_function",
+        algorithms="source",
+        context=code.CodeAnalysisContext(metadata={"run_id": "audit"}),
+    )
+
+    assert result.facts_of_kind("source")
+    assert result.target.metadata["run_id"] == "audit"

@@ -1,0 +1,204 @@
+from dataclasses import replace
+
+import dryml.environments as envs
+
+
+def test_registry_register_get_find_and_serialize():
+    registry = envs.EnvironmentRegistry()
+    spec = envs.CurrentEnvironmentSpec()
+    entry = registry.register("current", spec, provides=("dryml.environments.v1",), tags=("dev",))
+    assert registry.get("current") == entry
+    assert registry.list() == (entry,)
+    req = envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",), tags=("dev",))
+    assert registry.find(req) == entry
+    clone = envs.EnvironmentRegistry.from_data(registry.to_data())
+    assert clone.get("current").to_data() == entry.to_data()
+
+
+def test_registry_duplicate_and_missing_name_errors():
+    registry = envs.EnvironmentRegistry()
+    registry.register("current", envs.CurrentEnvironmentSpec())
+    try:
+        registry.register("current", envs.CurrentEnvironmentSpec())
+    except envs.EnvironmentRegistryError as exc:
+        assert exc.context["name"] == "current"
+    else:
+        raise AssertionError("expected duplicate registry error")
+    try:
+        registry.get("missing")
+    except envs.EnvironmentRegistryError as exc:
+        assert exc.context["name"] == "missing"
+    else:
+        raise AssertionError("expected missing registry error")
+
+
+def test_registry_unregister_is_deterministic_and_probe_free(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("registry lifecycle must not probe")),
+    )
+    registry = envs.EnvironmentRegistry()
+    entry = registry.register("worker", envs.CurrentEnvironmentSpec())
+    assert registry.get("worker") == entry
+    assert registry.list() == (entry,)
+    assert registry.unregister("worker") == entry
+    try:
+        registry.unregister("worker")
+    except envs.EnvironmentRegistryError as exc:
+        assert exc.context["name"] == "worker"
+    else:
+        raise AssertionError("expected missing registry error")
+
+
+def test_registry_rejects_invalid_entries_without_mutating_indexes():
+    registry = envs.EnvironmentRegistry()
+
+    try:
+        registry.register(1, envs.CurrentEnvironmentSpec())  # type: ignore[arg-type]
+    except envs.EnvironmentRegistryError:
+        pass
+    else:
+        raise AssertionError("expected invalid registry entry error")
+
+    assert registry.list() == ()
+
+
+def test_registry_probe_and_find_compatible(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append(spec) or envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
+    registry = envs.EnvironmentRegistry()
+    registry.register("current", envs.CurrentEnvironmentSpec(), tags=("current",))
+    result = registry.probe_registered("current")
+    assert result.ok
+    entry, report = registry.find_compatible(envs.EnvironmentRequirement(tags=("current",)), timeout=30)
+    assert entry.name == "current"
+    assert report.ok
+    missing, missing_report = registry.find_compatible(envs.EnvironmentRequirement(tags=("missing",)))
+    assert missing is None
+    assert not missing_report.ok
+    assert calls == [envs.CurrentEnvironmentSpec(), envs.CurrentEnvironmentSpec()]
+
+
+def test_registry_check_requirement_and_no_match_report(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append(spec) or envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
+    registry = envs.EnvironmentRegistry()
+    registry.register("current", envs.CurrentEnvironmentSpec())
+    report = registry.check_requirement("current", envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",)))
+    assert report.ok
+    no_match = registry.no_match_report(envs.EnvironmentRequirement(requirements=("torch",)))
+    assert no_match.issues[0].code == "registry_no_match"
+    assert calls == [envs.CurrentEnvironmentSpec()]
+
+
+def test_registry_find_compatible_deduplicates_and_bounds_probes(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    registry.register("first", envs.CurrentEnvironmentSpec())
+    registry.register("second", envs.CurrentEnvironmentSpec())
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append((spec, timeout)) or envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
+
+    entry, report = registry.find_compatible(envs.EnvironmentRequirement(), max_candidates=1)
+
+    assert entry.name == "first"
+    assert report.ok
+    assert len(calls) == 1
+
+
+def test_registry_find_compatible_preserves_default_full_search_and_tag_prefilter(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    for index in range(9):
+        registry.register(f"entry-{index:02}", envs.PythonExecutableSpec(f"/python-{index}"))
+    calls = []
+
+    def fake_probe(spec, *, timeout):
+        calls.append(spec.executable)
+        if spec.executable.endswith("-8"):
+            return envs.EnvironmentProbeResult(spec, True, record=sample_environment_record)
+        return envs.EnvironmentProbeResult(spec, False)
+
+    monkeypatch.setattr(registry_module, "probe", fake_probe)
+    entry, report = registry.find_compatible(envs.EnvironmentRequirement())
+
+    assert entry.name == "entry-08"
+    assert report.ok
+    assert len(calls) == 9
+
+    tagged = envs.EnvironmentRegistry()
+    tagged.register("untagged", envs.PythonExecutableSpec("/untagged"))
+    tagged.register("wanted", envs.PythonExecutableSpec("/wanted"), tags=("wanted",))
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=replace(sample_environment_record, tags=("wanted",))),
+    )
+    entry, _ = tagged.find_compatible(envs.EnvironmentRequirement(tags=("wanted",)))
+
+    assert entry.name == "wanted"
+
+
+def test_bounded_registry_search_prefilters_known_requirement_hints(monkeypatch):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    registry.register("ignored", envs.PythonExecutableSpec("/ignored"), provides=("other",))
+    registry.register("candidate", envs.PythonExecutableSpec("/candidate"), provides=("wanted",))
+    calls = []
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: calls.append(spec.executable) or envs.EnvironmentProbeResult(spec, False),
+    )
+
+    entry, _ = registry.find_compatible(
+        envs.EnvironmentRequirement(capabilities=("wanted",)),
+        max_candidates=1,
+    )
+
+    assert entry is None
+    assert calls == ["/candidate"]
+
+
+def test_bounded_registry_search_does_not_let_prefilters_hide_a_candidate(monkeypatch, sample_environment_record):
+    import dryml.environments.registry as registry_module
+
+    registry = envs.EnvironmentRegistry()
+    for index in range(40):
+        registry.register(f"ignored-{index:02}", envs.PythonExecutableSpec(f"/ignored-{index}"), provides=("other",))
+    registry.register("wanted", envs.PythonExecutableSpec("/wanted"), provides=("dryml.environments.v1",))
+    monkeypatch.setattr(
+        registry_module,
+        "probe",
+        lambda spec, *, timeout: envs.EnvironmentProbeResult(spec, True, record=sample_environment_record),
+    )
+
+    entry, report = registry.find_compatible(
+        envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",)),
+        max_candidates=1,
+    )
+
+    assert entry is not None and entry.name == "wanted"
+    assert report.ok

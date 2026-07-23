@@ -131,3 +131,10 @@ dmypy.json
 # Vim
 *.swp
 *.swo
+
+# Latex
+*.aux
+*.pdf
+
+# Local draft commit messages
+COMMIT-MSG

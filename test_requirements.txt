@@ -1,9 +1,14 @@
 flake8
 pytest
 pytest-cov
-tensorflow
-ray
-scikit-learn
-xgboost
-torch
+build
+setuptools >= 42
+wheel
+pyarrow; python_version < "3.14"
+tensorflow; python_version < "3.14"
+jax >= 0.5, < 0.6; python_version < "3.14"
+jaxlib >= 0.5, < 0.6; python_version < "3.14"
+ray; python_version < "3.14"
+scikit-learn; python_version < "3.14"
+xgboost; python_version < "3.14"
 GPUtil

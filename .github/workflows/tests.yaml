@@ -1,0 +1,308 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: test_requirements.txt
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r test_requirements.txt
+          if python -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 14) else 1)'; then
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.7.0"
+          fi
+
+      - name: Install DRYML
+        run: |
+          python -m pip install .
+
+      - name: Show Dependency Versions
+        run: |
+          python - <<'PY'
+          from importlib import metadata
+
+          for package in ("tensorflow", "keras", "jax", "jaxlib", "torch", "triton"):
+              try:
+                  version = metadata.version(package)
+              except metadata.PackageNotFoundError:
+                  version = "not installed"
+              print(f"{package}: {version}")
+          PY
+
+      - name: Installed Package Smoke Test
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import dryml
+          import dryml.core.store.store
+          import dryml.core.utils.general
+
+          assert hasattr(dryml, "core")
+          assert importlib.util.find_spec("dryml.data.transforms") is None
+          PY
+
+      - name: Run Tests
+        shell: bash
+        run: |
+          if [[ "${{ matrix.python-version }}" == "3.12" ]]; then
+            ./tests.sh measure --output-dir "$RUNNER_TEMP/dryml-measure" full --cov-report=xml --cov-report=html
+          else
+            ./tests.sh measure --output-dir "$RUNNER_TEMP/dryml-measure" --no-coverage full
+          fi
+
+      - name: Record CI Metadata
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/dryml-measure"
+          python - <<'PY'
+          import json
+          import os
+          import platform
+          from importlib import metadata
+          from pathlib import Path
+
+          packages = ("build", "coverage", "dill", "jax", "jaxlib", "numpy", "pyarrow", "pytest", "pytest-cov", "ray", "scikit-learn", "setuptools", "tensorflow", "torch", "wheel", "xgboost")
+          versions = {}
+          for package in packages:
+              try:
+                  versions[package] = metadata.version(package)
+              except metadata.PackageNotFoundError:
+                  versions[package] = None
+          payload = {
+              "schema": 2,
+              "commit": "${{ github.sha }}",
+              "python": {
+                  "version": platform.python_version(),
+                  "implementation": platform.python_implementation(),
+              },
+              "runner": {
+                  "os": "${{ runner.os }}",
+                  "arch": "${{ runner.arch }}",
+                  "image_os": os.environ.get("ImageOS"),
+                  "image_version": os.environ.get("ImageVersion"),
+              },
+              "dependencies": versions,
+          }
+          path = Path(os.environ["RUNNER_TEMP"]) / "dryml-measure" / "ci-metadata.json"
+          path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Verify Bounded Timing Artifact
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "dryml-measure"
+          required = {"run.json", "nodes.json", "junit.xml", "timing-medium.json", "timing-heavy.json", "ci-metadata.json"}
+          missing = sorted(name for name in required if not (root / name).is_file())
+          assert not missing, f"missing required timing artifacts: {missing}"
+          run = json.loads((root / "run.json").read_text())
+          ci = json.loads((root / "ci-metadata.json").read_text())
+          expected_sha = "${{ github.sha }}"
+          expected_os = "${{ runner.os }}"
+          expected_python = "${{ matrix.python-version }}"
+          assert run["schema"] == 2 and ci["schema"] == 2
+          assert run["status"] == "success" and run["mode"] == "full"
+          assert ci["commit"] == expected_sha
+          assert run["candidate"]["nested_commit"] == expected_sha
+          assert run["candidate"]["nested_tracked_clean"] is True
+          assert run["counts"]["complete"] is True
+          assert set(run["counts"]) == {"collected", "selected", "executed", "deselected", "outcomes", "complete"}
+          assert [phase["phase"] for phase in run["phases"]] == ["medium", "heavy"]
+          assert all(phase["returncode"] == 0 and "counts" in phase for phase in run["phases"])
+          assert run["counts"]["executed"] == sum(phase["counts"]["executed"] for phase in run["phases"])
+          nodes = json.loads((root / "nodes.json").read_text())
+          assert nodes["schema"] == 2 and nodes["counts"] == run["counts"]
+          for phase in run["phases"]:
+              timing = json.loads((root / phase["timing_artifact"]).read_text())
+              assert timing["version"] == 2 and timing["phase"] == phase["phase"]
+              assert timing["counts"] == phase["counts"]
+          assert run["environment"]["os"] == expected_os
+          assert run["environment"]["implementation"] == ci["python"]["implementation"]
+          assert run["environment"]["python"].split()[0] == ci["python"]["version"]
+          assert ci["python"]["version"].startswith(expected_python + ".")
+          assert ci["runner"]["os"] == expected_os
+          assert all(ci["dependencies"][tool] for tool in ("build", "setuptools", "wheel"))
+          files = [path for path in root.rglob("*") if path.is_file()]
+          assert len(files) <= 20_000
+          assert sum(path.stat().st_size for path in files) <= 100 * 1024 * 1024
+          forbidden_parts = {"__pycache__", ".pytest_cache", "pytest-temp", "stores", "records", "products", "objects"}
+          forbidden_suffixes = {".pyc", ".pkl", ".pickle", ".db", ".sqlite", ".sqlite3"}
+          for path in files:
+              relative = path.relative_to(root)
+              assert not forbidden_parts.intersection(relative.parts), relative
+              assert path.suffix.lower() not in forbidden_suffixes, relative
+          PY
+
+      - name: Upload Timing Artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: timing-linux-py${{ matrix.python-version }}-${{ github.sha }}
+          path: ${{ runner.temp }}/dryml-measure
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Send Codecov
+        if: matrix.python-version == '3.12'
+        # Coverage reporting must not override maintained test results during uploader outages.
+        continue-on-error: true
+        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ runner.temp }}/dryml-measure/coverage.xml
+          disable_search: true
+          fail_ci_if_error: true
+          verbose: true
+
+  windows-tests:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: test_requirements.txt
+
+      - name: Install Dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r test_requirements.txt
+          if python -c 'import sys; raise SystemExit(0 if sys.version_info < (3, 14) else 1)'; then
+            python -m pip install --extra-index-url https://download.pytorch.org/whl/cpu "torch>=2.7.0"
+          fi
+
+      - name: Install DRYML
+        run: |
+          python -m pip install .
+
+      - name: Run Full Test Suite
+        shell: bash
+        run: ./tests.sh measure --output-dir "$RUNNER_TEMP/dryml-measure" --no-coverage full
+
+      - name: Record CI Metadata
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/dryml-measure"
+          python - <<'PY'
+          import json
+          import os
+          import platform
+          from importlib import metadata
+          from pathlib import Path
+
+          packages = ("build", "coverage", "dill", "jax", "jaxlib", "numpy", "pyarrow", "pytest", "pytest-cov", "ray", "scikit-learn", "setuptools", "tensorflow", "torch", "wheel", "xgboost")
+          versions = {}
+          for package in packages:
+              try:
+                  versions[package] = metadata.version(package)
+              except metadata.PackageNotFoundError:
+                  versions[package] = None
+          payload = {
+              "schema": 2,
+              "commit": "${{ github.sha }}",
+              "python": {
+                  "version": platform.python_version(),
+                  "implementation": platform.python_implementation(),
+              },
+              "runner": {
+                  "os": "${{ runner.os }}",
+                  "arch": "${{ runner.arch }}",
+                  "image_os": os.environ.get("ImageOS"),
+                  "image_version": os.environ.get("ImageVersion"),
+              },
+              "dependencies": versions,
+          }
+          path = Path(os.environ["RUNNER_TEMP"]) / "dryml-measure" / "ci-metadata.json"
+          path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Verify Bounded Timing Artifact
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "dryml-measure"
+          required = {"run.json", "nodes.json", "junit.xml", "timing-medium.json", "timing-heavy.json", "ci-metadata.json"}
+          missing = sorted(name for name in required if not (root / name).is_file())
+          assert not missing, f"missing required timing artifacts: {missing}"
+          run = json.loads((root / "run.json").read_text())
+          ci = json.loads((root / "ci-metadata.json").read_text())
+          expected_sha = "${{ github.sha }}"
+          expected_os = "${{ runner.os }}"
+          expected_python = "3.12"
+          assert run["schema"] == 2 and ci["schema"] == 2
+          assert run["status"] == "success" and run["mode"] == "full"
+          assert ci["commit"] == expected_sha
+          assert run["candidate"]["nested_commit"] == expected_sha
+          assert run["candidate"]["nested_tracked_clean"] is True
+          assert run["counts"]["complete"] is True
+          assert set(run["counts"]) == {"collected", "selected", "executed", "deselected", "outcomes", "complete"}
+          assert [phase["phase"] for phase in run["phases"]] == ["medium", "heavy"]
+          assert all(phase["returncode"] == 0 and "counts" in phase for phase in run["phases"])
+          assert run["counts"]["executed"] == sum(phase["counts"]["executed"] for phase in run["phases"])
+          nodes = json.loads((root / "nodes.json").read_text())
+          assert nodes["schema"] == 2 and nodes["counts"] == run["counts"]
+          for phase in run["phases"]:
+              timing = json.loads((root / phase["timing_artifact"]).read_text())
+              assert timing["version"] == 2 and timing["phase"] == phase["phase"]
+              assert timing["counts"] == phase["counts"]
+          assert run["environment"]["os"] == expected_os
+          assert run["environment"]["implementation"] == ci["python"]["implementation"]
+          assert run["environment"]["python"].split()[0] == ci["python"]["version"]
+          assert ci["python"]["version"].startswith(expected_python + ".")
+          assert ci["runner"]["os"] == expected_os
+          assert all(ci["dependencies"][tool] for tool in ("build", "setuptools", "wheel"))
+          files = [path for path in root.rglob("*") if path.is_file()]
+          assert len(files) <= 20_000
+          assert sum(path.stat().st_size for path in files) <= 100 * 1024 * 1024
+          forbidden_parts = {"__pycache__", ".pytest_cache", "pytest-temp", "stores", "records", "products", "objects"}
+          forbidden_suffixes = {".pyc", ".pkl", ".pickle", ".db", ".sqlite", ".sqlite3"}
+          for path in files:
+              relative = path.relative_to(root)
+              assert not forbidden_parts.intersection(relative.parts), relative
+              assert path.suffix.lower() not in forbidden_suffixes, relative
+          PY
+
+      - name: Upload Timing Artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: timing-windows-py3.12-${{ github.sha }}
+          path: ${{ runner.temp }}/dryml-measure
+          if-no-files-found: error
+          retention-days: 14

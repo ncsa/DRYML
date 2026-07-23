@@ -1,0 +1,1282 @@
+import hashlib
+import importlib
+import os
+from pathlib import Path
+import pickle
+import shutil
+import sys
+import threading
+import time
+from collections import Counter
+from contextlib import closing, contextmanager
+import pytest
+
+from dryml.core import ConcreteDefinition, Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
+from dryml.core.query.model import QueryIndexDirty, QueryIndexError, QueryIndexUnavailable, ValidationIssue, ValidationReport
+from dryml.core.query.codecs import CDEF_CODEC_VERSION
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+import dryml.core.store.dir as dir_store_module
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.general import pickle_save
+from dryml.formats.refs import format_cdef_id
+from dryml.records import make_record, make_spec
+
+
+class QueryIndexDirLeaf(Object):
+    def __init__(self, name="leaf"):
+        super().__init__()
+        self.name = name
+
+
+class QueryIndexCfgOwner(Object):
+    def __init__(self, name="owner", cfg=None, ref=None):
+        super().__init__()
+        self.name = name
+        self.cfg = {} if cfg is None else cfg
+        self.ref = ref
+
+
+class QueryIndexChainNode(Object):
+    def __init__(self, name, child=None, ref=None, width=None):
+        super().__init__()
+        self.name = name
+        self.child = child
+        self.ref = ref
+        self.width = width
+
+
+class FailingSaveDirLeaf(Object):
+    def __init__(self, name="fail"):
+        super().__init__()
+        self.name = name
+
+    def save_state_to_dir_imp(self, dest_dir, revision=None):
+        raise RuntimeError("object save failed")
+
+
+def _protected_store_manifest(store_or_path):
+    root = Path(getattr(store_or_path, "base_dir", store_or_path))
+
+    def is_derived(path):
+        relative = path.relative_to(root)
+        if relative.parts[:2] == ("records", "indexes"):
+            return True
+        if relative.parent != Path(".dryml"):
+            return False
+        return (
+            relative.name == "query-index.dirty"
+            or relative.name == "query-index-v1.registered"
+            or relative.name.startswith("query-index-v1.sqlite")
+        )
+
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.rglob("*")
+        if path.is_file() and not is_derived(path)
+    }
+
+
+@contextmanager
+def _retired_core_class(tmp_path):
+    import dryml
+
+    retired_package = "core" + "2"
+    package_name = f"dryml.{retired_package}"
+    module_name = f"{package_name}.object"
+    source_root = tmp_path / "retired-source"
+    package_root = source_root / "dryml" / retired_package
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("", encoding="utf-8")
+    (package_root / "object.py").write_text(
+        "from dryml.core import Object as CurrentObject\n\n"
+        "class Object(CurrentObject):\n"
+        "    def __init__(self, name='retired'):\n"
+        "        super().__init__()\n"
+        "        self.name = name\n",
+        encoding="utf-8",
+    )
+    search_path = str(source_root / "dryml")
+    dryml.__path__.append(search_path)
+    importlib.invalidate_caches()
+    module = importlib.import_module(module_name)
+    try:
+        yield module.Object
+    finally:
+        sys.modules.pop(module_name, None)
+        sys.modules.pop(package_name, None)
+        if getattr(dryml, retired_package, None) is not None:
+            delattr(dryml, retired_package)
+        dryml.__path__.remove(search_path)
+        importlib.invalidate_caches()
+
+
+def test_dirstore_query_index_default_is_auto_and_lazy(tmp_path):
+    store = DirStore(tmp_path / "store")
+
+    assert store.query_index_policy == "auto"
+    assert Path(store.object_root_dir).exists()
+    assert not Path(store.dryml_dir).exists()
+    assert store.query_index_path == os.fspath(tmp_path / "store" / ".dryml" / "query-index-v1.sqlite")
+    assert store.query_index_dirty_path == os.fspath(tmp_path / "store" / ".dryml" / "query-index.dirty")
+    assert store.query_index_registration_path == os.fspath(tmp_path / "store" / ".dryml" / "query-index-v1.registered")
+
+
+def test_dirstore_memory_and_none_do_not_open_query_index(tmp_path):
+    memory_store = DirStore(tmp_path / "memory", query_index="memory")
+    none_store = DirStore(tmp_path / "none", query_index="none")
+
+    assert memory_store.open_query_index() is None
+    assert none_store.open_query_index() is None
+    assert not Path(memory_store.dryml_dir).exists()
+    assert not Path(none_store.dryml_dir).exists()
+
+
+@pytest.mark.parametrize("policy", ("memory", "none"))
+@pytest.mark.parametrize("publication", ("object", "definition"))
+def test_nonpersistent_writer_does_not_create_dirty_marker_without_persistent_index(
+        tmp_path, policy, publication):
+    store = DirStore(tmp_path / "store", query_index=policy)
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf(f"no-sidecar-{policy}-{publication}", repo=repo)
+
+    if publication == "object":
+        repo.save_object(obj)
+    else:
+        repo.save_definition(obj.definition)
+
+    assert not Path(store.query_index_dirty_path).exists()
+    assert not Path(store.dryml_dir).exists()
+
+
+@pytest.mark.parametrize("policy", ("memory", "none"))
+@pytest.mark.parametrize("persistent_state", ("sidecar", "build-claim"))
+@pytest.mark.parametrize("publication", ("object", "definition"))
+def test_nonpersistent_writer_marks_existing_persistent_index_dirty(
+        tmp_path, policy, persistent_state, publication):
+    store_path = tmp_path / "store"
+    if persistent_state == "sidecar":
+        persistent_store = DirStore(
+            store_path,
+            query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+        )
+        persistent_store.open_query_index().initialize_empty()
+        persistent_store.open_query_index().close()
+
+    writer = DirStore(store_path, query_index=policy)
+    if persistent_state == "build-claim":
+        claim_path = Path(f"{writer.query_index_path}.building")
+        claim_path.parent.mkdir(parents=True, exist_ok=True)
+        claim_path.write_text("active\n", encoding="utf-8")
+    repo = Repo(stores=writer)
+    obj = QueryIndexDirLeaf(f"{policy}-{persistent_state}-{publication}", repo=repo)
+
+    if publication == "object":
+        repo.save_object(obj)
+    else:
+        repo.save_definition(obj.definition)
+
+    assert Path(writer.query_index_dirty_path).exists()
+
+
+@pytest.mark.parametrize("policy", ("memory", "none", "auto"))
+def test_nonpersistent_writer_marks_explicit_path_index_dirty(
+        tmp_path, monkeypatch, policy):
+    store_path = tmp_path / "store"
+    sidecar_path = tmp_path / "indexes" / "custom.sqlite"
+    persistent_store = DirStore(
+        store_path,
+        query_index=SQLiteQueryIndexConfig(path=sidecar_path, journal_mode="delete"),
+    )
+    persistent_repo = Repo(stores=persistent_store)
+    first = QueryIndexDirLeaf("first", repo=persistent_repo)
+    persistent_repo.save_object(first)
+    persistent_store.open_query_index().close()
+
+    sqlite_available_before_writer = dir_store_module.sqlite_available
+    if policy == "auto":
+        monkeypatch.setattr(dir_store_module, "sqlite_available", lambda: False)
+    writer = DirStore(store_path, query_index=policy)
+    writer_repo = Repo(stores=writer)
+    second = QueryIndexDirLeaf("second", repo=writer_repo)
+    writer_repo.save_object(second)
+
+    assert Path(writer.query_index_dirty_path).exists()
+    monkeypatch.setattr(
+        dir_store_module,
+        "sqlite_available",
+        sqlite_available_before_writer,
+    )
+    reopened_store = DirStore(
+        store_path,
+        query_index=SQLiteQueryIndexConfig(path=sidecar_path, journal_mode="delete"),
+    )
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+    assert set(Repo(stores=reopened_store).query(selector).stored().defs()) == {
+        first.definition,
+        second.definition,
+    }
+
+
+def test_concurrent_dirty_marker_writers_use_unique_temporary_files(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    original_replace = dir_store_module.os.replace
+    replace_barrier = threading.Barrier(2)
+    attempts = Counter()
+    injected_conflict = False
+    source_lock = threading.Lock()
+
+    def synchronized_replace(source, destination):
+        nonlocal injected_conflict
+        if os.fspath(destination) == store.query_index_dirty_path:
+            with source_lock:
+                source = os.fspath(source)
+                attempts[source] += 1
+                first_attempt = attempts[source] == 1
+            if first_attempt:
+                replace_barrier.wait(timeout=5)
+                with source_lock:
+                    if not injected_conflict:
+                        injected_conflict = True
+                        raise PermissionError(
+                            "destination is briefly open by another writer"
+                        )
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(dir_store_module.os, "replace", synchronized_replace)
+    errors = []
+
+    def mark_dirty():
+        try:
+            store.mark_query_index_dirty()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=mark_dirty) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(attempts) == 2
+    assert sorted(attempts.values()) == [1, 2]
+    assert Path(store.query_index_dirty_path).exists()
+    assert list(Path(store.dryml_dir).glob(".query-index.dirty.*.tmp")) == []
+
+
+def test_dirty_marker_replace_failure_is_bounded_and_cleans_temporary_file(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="none")
+    attempts = 0
+
+    def denied_replace(source, destination):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError("destination remains unavailable")
+
+    times = iter((0.0, 5.0))
+    monkeypatch.setattr(dir_store_module.os, "replace", denied_replace)
+    monkeypatch.setattr(
+        dir_store_module.time,
+        "monotonic",
+        lambda: next(times),
+    )
+
+    with pytest.raises(PermissionError, match="remains unavailable"):
+        store.mark_query_index_dirty()
+
+    assert attempts == 1
+    assert not Path(store.query_index_dirty_path).exists()
+    assert list(Path(store.dryml_dir).glob(".query-index.dirty.*.tmp")) == []
+
+
+def test_dirstore_rejects_unknown_query_index_policy(tmp_path):
+    with pytest.raises(ValueError):
+        DirStore(tmp_path / "store", query_index="bad-policy")
+
+
+def test_dirstore_custom_query_index_factory_is_lazy(tmp_path):
+    calls = []
+
+    def factory(store):
+        calls.append(store.catalog_key())
+        return {"source": store.catalog_key()}
+
+    store = DirStore(tmp_path / "store", query_index=factory)
+
+    assert calls == []
+    opened = store.open_query_index()
+    assert opened == {"source": store.catalog_key()}
+    assert calls == [store.catalog_key()]
+
+
+def test_dirstore_sqlite_policy_opens_skeleton_without_creating_file(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    index = store.open_query_index()
+
+    assert isinstance(index, SQLiteStoreQueryIndex)
+    assert index.source_key == store.catalog_key()
+    assert index.path == Path(store.query_index_path)
+    assert not Path(store.query_index_path).exists()
+    assert index.status().state == "missing"
+
+
+def test_sqlite_stored_query_missing_does_not_require_presence(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    root_missing = QueryIndexCfgOwner("root", repo=repo)
+    nested_missing = QueryIndexCfgOwner("nested", cfg={}, repo=repo)
+    ref_child = QueryIndexCfgOwner("child", repo=repo)
+    ref_parent = QueryIndexCfgOwner("parent", ref=ref_child.definition.ref(), repo=repo)
+
+    for obj in (root_missing, nested_missing, ref_parent):
+        repo.save_object(obj)
+
+    root_selector = Definition(QueryIndexCfgOwner, "root", missing=Missing())
+    nested_selector = Definition(QueryIndexCfgOwner, "nested", cfg={"x": Missing()})
+    ref_selector = Definition(
+        QueryIndexCfgOwner,
+        "parent",
+        ref=Ref(Selector(Definition(QueryIndexCfgOwner, "child", missing=Missing()))),
+    )
+
+    assert list(repo.query(root_selector).stored().defs()) == [root_missing.definition]
+    assert list(repo.query(nested_selector).stored().defs()) == [nested_missing.definition]
+    assert list(repo.query(ref_selector).stored().defs()) == [ref_parent.definition]
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_sqlite_stored_query_can_inspect_ref_target_subgraph(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    d = Definition(QueryIndexChainNode, "D", width=512)
+    c = Definition(QueryIndexChainNode, "C", ref=d.ref())
+    b = Definition(QueryIndexChainNode, "B", child=c.mat())
+    a = Definition(QueryIndexChainNode, "A", ref=b.ref()).build(repo=repo)
+    repo.save_object(a)
+
+    selector = Definition(
+        QueryIndexChainNode,
+        "A",
+        ref=Ref(Selector(Definition(
+            QueryIndexChainNode,
+            "B",
+            child=Definition(
+                QueryIndexChainNode,
+                "C",
+                ref=Definition(QueryIndexChainNode, "D", width=512).ref(),
+            ),
+        ))),
+    )
+
+    assert list(repo.query(selector).stored().defs()) == [a.definition]
+
+
+def test_dirstore_auto_uses_sqlite_when_available_without_construction_io(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="auto")
+    index = store.open_query_index()
+
+    if sqlite_available():
+        assert isinstance(index, SQLiteStoreQueryIndex)
+        assert index.status().state == "missing"
+        assert not Path(store.query_index_path).exists()
+    else:
+        assert index is None
+
+
+def test_dirstore_sqlite_config_uses_default_sidecar_path(tmp_path):
+    config = SQLiteQueryIndexConfig(journal_mode="delete", busy_timeout=1.5)
+    store = DirStore(tmp_path / "store", query_index=config)
+    index = store.open_query_index()
+
+    assert isinstance(index, SQLiteStoreQueryIndex)
+    assert Path(index.config.path) == Path(store.query_index_path)
+    assert index.config.journal_mode == "delete"
+    assert index.config.busy_timeout == 1.5
+
+
+def test_dirstore_sqlite_config_respects_explicit_path(tmp_path):
+    explicit = tmp_path / "custom.sqlite"
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(path=explicit, journal_mode="delete"))
+    index = store.open_query_index()
+
+    assert isinstance(index, SQLiteStoreQueryIndex)
+    assert index.path == explicit
+    assert index.config.path == explicit
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_dirstore_sqlite_index_can_initialize_empty_sidecar(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    index = store.open_query_index()
+
+    index.initialize_empty()
+    status = index.status()
+
+    assert Path(store.query_index_path).exists()
+    assert status.state == "ready"
+    assert status.generation == 0
+    assert status.store_key == store.catalog_key()
+
+
+def test_sqlite_policy_unavailable_error_message(monkeypatch, tmp_path):
+    import dryml.core.store.dir as dir_module
+
+    monkeypatch.setattr(dir_module, "sqlite_available", lambda: False)
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+
+    with pytest.raises(QueryIndexUnavailable, match="query_index='sqlite'"):
+        store.open_query_index()
+
+
+def test_none_policy_exact_lookup_does_not_hydrate_store(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("exact", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index="none")
+    repo2 = Repo(stores=reopened_store)
+
+    def fail_hydrate():
+        raise AssertionError("query_index='none' should not auto-hydrate for exact lookup")
+
+    reopened_store.hydrate_index = fail_hydrate
+
+    assert repo2.query(obj.definition).stored().count() == 1
+
+
+def test_none_policy_broad_query_does_not_auto_scan(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("broad", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index="none")
+    repo2 = Repo(stores=reopened_store)
+
+    def fail_hydrate():
+        raise AssertionError("query_index='none' should not auto-hydrate broad queries")
+
+    reopened_store.hydrate_index = fail_hydrate
+
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    assert repo2.query(selector).stored().count() == 0
+
+
+def test_none_policy_refresh_true_is_explicit_scan(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("explicit", repo=repo)
+    repo.save_object(obj)
+
+    repo2 = Repo(stores=DirStore(store.base_dir, query_index="none"))
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    assert repo2.query(selector).stored(refresh=True).count() == 1
+
+
+def test_sqlite_policy_broad_query_uses_index_without_memory_scan(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("sqlite", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index="sqlite")
+    repo2 = Repo(stores=reopened_store)
+
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    assert repo2.query(selector).stored().count() == 1
+    assert Path(reopened_store.query_index_path).exists()
+
+
+def test_ready_sqlite_indexes_are_not_opened_during_repo_construction(tmp_path):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    repo.save_object(QueryIndexDirLeaf("one", repo=repo), store=store1)
+    repo.save_object(QueryIndexDirLeaf("two", repo=repo), store=store2)
+
+    reopened1 = DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    reopened2 = DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    open_calls = []
+
+    def wrap_open(source):
+        original = source.open_query_index
+
+        def opened():
+            open_calls.append(source.catalog_key())
+            return original()
+
+        return opened
+
+    reopened1.open_query_index = wrap_open(reopened1)
+    reopened2.open_query_index = wrap_open(reopened2)
+
+    repo2 = Repo(stores=[reopened1, reopened2])
+
+    assert open_calls == []
+    assert repo2.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count() == 2
+    assert sorted(open_calls) == sorted([reopened1.catalog_key(), reopened2.catalog_key()])
+
+
+def test_ready_sqlite_exact_query_does_not_scan_object_directories(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("ready-exact", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+
+    def fail_hydrate():
+        raise AssertionError("ready exact SQLite query should not hydrate Store roots")
+
+    reopened_store.hydrate_index = fail_hydrate
+    repo2 = Repo(stores=reopened_store)
+
+    assert repo2.query(obj.definition).stored().count() == 1
+
+
+def test_sqlite_missing_index_builds_once_from_store_roots(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("build", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index="sqlite")
+    calls = []
+    original = reopened_store.hydrate_index
+
+    def hydrate_once():
+        calls.append(True)
+        yield from original()
+
+    reopened_store.hydrate_index = hydrate_once
+    repo2 = Repo(stores=reopened_store)
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    assert repo2.query(selector).stored().count() == 1
+    assert len(calls) == 1
+    assert repo2.query(selector).stored().count() == 1
+    assert len(calls) == 1
+
+
+def test_sqlite_concurrent_missing_index_build_claim_scans_once(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("claim", repo=repo)
+    repo.save_object(obj)
+
+    store1 = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    calls = []
+    lock = threading.Lock()
+
+    def make_hydrate(source):
+        original = source.hydrate_index
+
+        def hydrate():
+            with lock:
+                calls.append(source.catalog_key())
+            time.sleep(0.05)
+            yield from original()
+
+        return hydrate
+
+    store1.hydrate_index = make_hydrate(store1)
+    store2.hydrate_index = make_hydrate(store2)
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+    results = []
+    errors = []
+
+    def query_store(source):
+        try:
+            results.append(Repo(stores=source).query(selector).stored().count())
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=query_store, args=(source,)) for source in (store1, store2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert errors == []
+    assert sorted(results) == [1, 1]
+    assert len(calls) == 1
+
+
+def test_sqlite_stale_build_claim_is_recovered(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("stale-claim", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    index = reopened_store.open_query_index()
+    claim_path = index._build_claim_path()
+    claim_path.parent.mkdir(parents=True, exist_ok=True)
+    claim_path.write_text("stale\n", encoding="utf-8")
+    old_time = time.time() - 1000
+    os.utime(claim_path, (old_time, old_time))
+
+    count = Repo(stores=reopened_store).query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count()
+
+    assert count == 1
+    assert not claim_path.exists()
+
+
+def test_sqlite_rebuild_registers_store_roots_in_batches(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    objs = [QueryIndexDirLeaf(f"batch-{idx}", repo=repo) for idx in range(3)]
+    for obj in objs:
+        repo.save_object(obj)
+
+    monkeypatch.setattr(sqlite_index_module, "_REBUILD_BATCH_SIZE", 2)
+    original_for_query_index_roots = sqlite_index_module.ConcreteDefinitionGraph.for_query_index_roots
+    batch_sizes = []
+
+    def spy_for_query_index_roots(cls, cdefs):
+        cdefs = tuple(cdefs)
+        batch_sizes.append(len(cdefs))
+        return original_for_query_index_roots(cdefs)
+
+    monkeypatch.setattr(sqlite_index_module.ConcreteDefinitionGraph, "for_query_index_roots", classmethod(spy_for_query_index_roots))
+    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+
+    count = Repo(stores=reopened_store).query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count()
+
+    assert count == 3
+    assert batch_sizes == [2, 1]
+
+
+def test_sqlite_interrupted_build_is_not_marked_ready(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("interrupted", repo=repo)
+    repo.save_object(obj)
+    index = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")).open_query_index()
+
+    def fail_validation(self):
+        raise RuntimeError("injected pre-ready validation failure")
+
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail_validation)
+
+    with pytest.raises(RuntimeError, match="pre-ready"):
+        index.rebuild()
+
+    assert index.status().state == "building"
+
+
+def test_sqlite_rebuild_preserves_dirty_marker_replaced_by_overlapping_save(
+        tmp_path):
+    config = SQLiteQueryIndexConfig(journal_mode="delete")
+    save_store = DirStore(tmp_path / "store", query_index=config)
+    save_repo = Repo(stores=save_store)
+    first = QueryIndexDirLeaf("before-rebuild", repo=save_repo)
+    save_repo.save_object(first)
+    save_store.mark_query_index_dirty()
+    save_store.open_query_index().close()
+
+    rebuild_store = DirStore(save_store.base_dir, query_index=config)
+    original_hydrate = rebuild_store.hydrate_index
+    snapshot_taken = threading.Event()
+    save_finished = threading.Event()
+
+    def synchronized_hydrate():
+        roots = tuple(original_hydrate())
+        snapshot_taken.set()
+        assert save_finished.wait(timeout=5)
+        yield from roots
+
+    rebuild_store.hydrate_index = synchronized_hydrate
+    rebuild_errors = []
+
+    def rebuild():
+        try:
+            rebuild_store.open_query_index().rebuild()
+        except Exception as exc:
+            rebuild_errors.append(exc)
+
+    thread = threading.Thread(target=rebuild)
+    thread.start()
+    assert snapshot_taken.wait(timeout=5)
+
+    second = QueryIndexDirLeaf("during-rebuild", repo=save_repo)
+    try:
+        with pytest.raises(QueryIndexError):
+            save_repo.save_object(second)
+    finally:
+        save_finished.set()
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert rebuild_errors == []
+    assert second.definition in tuple(save_store.hydrate_index())
+    assert rebuild_store.query_index_is_dirty()
+    assert rebuild_store.query_index_status().state == "dirty"
+
+    sqlite3 = require_sqlite()
+    con = sqlite3.connect(rebuild_store.query_index_path)
+    try:
+        assert con.execute(
+            "SELECT build_state FROM catalog_state WHERE singleton = 1"
+        ).fetchone()[0] == "dirty"
+        row = con.execute("SELECT COUNT(*) FROM stored_roots").fetchone()
+        assert row[0] == 1
+    finally:
+        con.close()
+
+
+def test_sqlite_exact_query_probes_store_without_full_rebuild(tmp_path):
+    if not sqlite_available():
+        pytest.skip("sqlite3 is unavailable")
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("exact-probe", repo=repo)
+    repo.save_object(obj)
+
+    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    calls = []
+
+    def fail_hydrate():
+        calls.append(True)
+        raise AssertionError("exact SQLite fallback should not hydrate the Store")
+
+    reopened_store.hydrate_index = fail_hydrate
+    repo2 = Repo(stores=reopened_store)
+
+    results = repo2.query(obj.definition).stored().defs()
+
+    assert list(results) == [obj.definition]
+    assert calls == []
+    status = repo2.index_status(store=reopened_store)[0]
+    assert status.generation == 1
+    assert status.row_counts["stored_roots"] == 1
+
+    assert list(repo2.query(obj.definition).stored().defs()) == [obj.definition]
+    assert calls == []
+    assert repo2.index_status(store=reopened_store)[0].generation == 1
+
+
+def test_sqlite_dirty_index_rebuilds_and_clears_marker(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("dirty", repo=repo)
+    repo.save_object(obj)
+    store.mark_query_index_dirty()
+
+    reopened_store = DirStore(store.base_dir, query_index="sqlite")
+    repo2 = Repo(stores=reopened_store)
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    assert reopened_store.query_index_is_dirty()
+    assert repo2.index_status(store=reopened_store)[0].state == "dirty"
+    assert repo2.query(selector).stored().count() == 1
+    assert not reopened_store.query_index_is_dirty()
+    assert repo2.index_status(store=reopened_store)[0].state == "ready"
+
+
+def test_stale_cdef_codec_rebuilds_before_decoding_and_preserves_objects(
+    tmp_path,
+):
+    sqlite3 = require_sqlite()
+    config = SQLiteQueryIndexConfig(journal_mode="delete")
+    store = DirStore(tmp_path / "store", query_index=config)
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("codec-rebuild", repo=repo)
+    repo.save_object(obj)
+    store.write_main_def(obj.definition)
+    store.write_aliases({"codec-rebuild": obj.definition})
+    cdef_id = format_cdef_id(obj.definition.stable_hash())
+    record_ref = store.records.write_record(
+        make_record(kind="data", payload={"subject_cdef_id": cdef_id})
+    )
+    store.records.write_spec(
+        make_spec(
+            family="representation",
+            kind="pickle",
+            payload={"subject_cdef_id": cdef_id},
+        ),
+        family="representation",
+    )
+    product_root = store.records.product_root(record_ref.record_id, create=True)
+    (product_root / "payload.bin").write_bytes(b"authoritative product")
+    before = _protected_store_manifest(store)
+
+    with closing(sqlite3.connect(store.query_index_path)) as con:
+        with con:
+            con.execute(
+                "UPDATE catalog_state SET cdef_codec_version = ? WHERE singleton = 1",
+                (CDEF_CODEC_VERSION - 1,),
+            )
+            con.execute(
+                "UPDATE definitions SET cdef_blob = ?",
+                (b"not a CDef envelope",),
+            )
+    reopened_store = DirStore(store.base_dir, query_index=config)
+    reopened_repo = Repo(stores=reopened_store)
+
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+    assert reopened_repo.query(selector).stored().count() == 1
+    assert reopened_store.query_index_status().state == "ready"
+    assert _protected_store_manifest(reopened_store) == before
+
+
+def test_retired_root_definition_fails_store_open_without_mutation(tmp_path):
+    store_path = tmp_path / "store"
+    with _retired_core_class(tmp_path) as retired_cls:
+        store = DirStore(store_path, query_index="none")
+        cdef = ConcreteDefinition(retired_cls)
+        cdef_bytes = pickle.dumps(cdef, protocol=5)
+        Path(store._main_def_path()).write_bytes(cdef_bytes)
+        before = _protected_store_manifest(store)
+
+    with pytest.raises(ModuleNotFoundError):
+        DirStore(store_path, query_index="none")
+
+    assert _protected_store_manifest(store_path) == before
+
+
+@pytest.mark.parametrize("recovery", ("query", "reconcile"))
+def test_retired_object_definition_fails_index_recovery_without_mutation(
+    tmp_path,
+    recovery,
+):
+    sqlite3 = require_sqlite()
+    config = SQLiteQueryIndexConfig(journal_mode="delete")
+    store_path = tmp_path / "store"
+    with _retired_core_class(tmp_path) as retired_cls:
+        store = DirStore(store_path, query_index=config)
+        cdef = ConcreteDefinition(retired_cls)
+        def_path = Path(store._def_file(cdef))
+        def_path.parent.mkdir(parents=True)
+        def_path.write_bytes(pickle.dumps(cdef, protocol=5))
+        store.rebuild_query_index()
+        with closing(sqlite3.connect(store.query_index_path)) as con:
+            with con:
+                con.execute(
+                    "UPDATE catalog_state SET cdef_codec_version = ? "
+                    "WHERE singleton = 1",
+                    (CDEF_CODEC_VERSION - 1,),
+                )
+        before = _protected_store_manifest(store)
+
+    reopened_store = DirStore(store_path, query_index=config)
+    with pytest.raises(ModuleNotFoundError):
+        list(reopened_store.hydrate_index())
+    assert _protected_store_manifest(reopened_store) == before
+
+    if recovery == "query":
+        with pytest.raises(QueryIndexError):
+            selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+            Repo(stores=reopened_store).query(selector).stored().count()
+    else:
+        report = reopened_store.reconcile_query_index()
+        assert report.changed is True
+        assert report.action == "rebuild"
+        assert any(issue.severity == "error" for issue in report.issues)
+
+    assert reopened_store.query_index_status().state != "ready"
+    assert _protected_store_manifest(reopened_store) == before
+
+
+def test_repo_rebuild_index_rebuilds_sqlite_sidecar(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("rebuild", repo=repo)
+    repo.save_object(obj)
+    index = store.open_query_index()
+    index.remove_stored_roots([obj.definition])
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    assert repo.query(selector).stored().count() == 0
+    repo.rebuild_index(store=store)
+    assert repo.query(selector).stored().count() == 1
+
+
+def test_dirstore_query_index_status_rebuild_and_reconcile(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("store-admin", repo=repo)
+    repo.save_object(obj)
+
+    status = store.query_index_status()
+    assert status.backend == "sqlite"
+    assert status.state == "ready"
+    assert status.row_counts["stored_roots"] == 1
+
+    validate = store.reconcile_query_index()
+    assert validate.changed is False
+    assert validate.action == "validate"
+    assert validate.generation_before == validate.generation_after == 1
+
+    index = store.open_query_index()
+    index.remove_stored_roots([obj.definition])
+    assert repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count() == 0
+
+    rebuilt = store.rebuild_query_index()
+    assert rebuilt.changed
+    assert rebuilt.action == "rebuild"
+    assert rebuilt.generation_after == 1
+    assert store.query_index_status().row_counts["stored_roots"] == 1
+
+
+def test_dirstore_rebuild_raises_when_post_rebuild_state_is_dirty(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(QueryIndexDirLeaf("dirty-rebuild-report", repo=repo))
+    index = store.open_query_index()
+    monkeypatch.setattr(index, "_clear_dirty", lambda expected_token: False)
+
+    with pytest.raises(QueryIndexDirty, match="post-rebuild state 'dirty'"):
+        store.rebuild_query_index()
+
+    assert store.query_index_status().state == "dirty"
+
+
+def test_dirstore_reconcile_reports_error_when_post_rebuild_state_is_dirty(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(QueryIndexDirLeaf("dirty-reconcile-report", repo=repo))
+    store.mark_query_index_dirty()
+    index = store.open_query_index()
+    monkeypatch.setattr(index, "_clear_dirty", lambda expected_token: False)
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert not report.validated
+    assert any(
+        issue.severity == "error"
+        and issue.message == "SQLite query-index rebuild did not produce a ready index."
+        for issue in report.issues
+    )
+    assert store.query_index_status().state == "dirty"
+
+
+def test_dirstore_reconcile_repairs_dirty_index(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("dirty-admin", repo=repo)
+    repo.save_object(obj)
+    store.mark_query_index_dirty()
+
+    assert store.query_index_status().state == "dirty"
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert not store.query_index_is_dirty()
+    assert store.query_index_status().state == "ready"
+
+
+@pytest.mark.parametrize("external_policy", ("memory", "none"))
+def test_dirstore_reconcile_adds_external_object(tmp_path, external_policy):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    first = QueryIndexDirLeaf("first", repo=repo)
+    repo.save_object(first)
+
+    external_store = DirStore(store.base_dir, query_index=external_policy)
+    external_repo = Repo(stores=external_store)
+    second = QueryIndexDirLeaf("second", repo=external_repo)
+    external_repo.save_object(second)
+
+    assert store.query_index_is_dirty()
+    assert store.query_index_status().state == "dirty"
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+    assert set(repo.query(selector).stored().defs()) == {first.definition, second.definition}
+
+
+def test_dirstore_reconcile_removes_deleted_object(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    keep = QueryIndexDirLeaf("keep", repo=repo)
+    remove = QueryIndexDirLeaf("remove", repo=repo)
+    repo.save_object(keep)
+    repo.save_object(remove)
+    shutil.rmtree(Path(store.object_dir(remove.definition)))
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert list(repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().defs()) == [keep.definition]
+
+
+def test_dirstore_validate_detects_changed_or_misplaced_def_pickle(
+        tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    original = QueryIndexDirLeaf("original", repo=repo)
+    changed = QueryIndexDirLeaf("changed", repo=repo)
+    repo.save_object(original)
+    def_path = Path(store.object_dir(original.definition)) / "def.pkl"
+    pickle_save(changed.definition, def_path)
+    index = store.open_query_index()
+    # Restore the retired identity hook to simulate immediate inode reuse and
+    # prove reconciliation no longer relies on pre/post file identity.
+    monkeypatch.setattr(
+        index,
+        "_sidecar_file_identity",
+        lambda: (1, 1),
+        raising=False,
+    )
+
+    report = store.validate_query_index(thorough=True)
+
+    reconcile = store.reconcile_query_index()
+
+    assert not report.ok
+    assert any(issue.message == "Store root scan failed." for issue in report.issues)
+    assert reconcile.changed is True
+    assert reconcile.action == "rebuild"
+    assert store.query_index_status().state == "building"
+    assert any(issue.message == "SQLite query-index rebuild failed." for issue in reconcile.issues)
+
+
+def test_dirstore_reconcile_quarantines_corrupt_database(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("corrupt", repo=repo)
+    repo.save_object(obj)
+
+    sqlite_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    path = Path(sqlite_store.query_index_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a sqlite database")
+
+    assert sqlite_store.query_index_status().state == "corrupt"
+    report = sqlite_store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert sqlite_store.query_index_status().state == "ready"
+    assert list(path.parent.glob(f"{path.name}.quarantine-*"))
+    assert Repo(stores=sqlite_store).query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().count() == 1
+
+
+def test_dirstore_reconcile_foreign_key_failure_triggers_rebuild(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("fk", repo=repo)
+    repo.save_object(obj)
+
+    sqlite3 = require_sqlite()
+    con = sqlite3.connect(store.query_index_path)
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute(
+        """
+        INSERT INTO stored_roots (def_id, storage_hash, relative_def_path, indexed_generation)
+        VALUES (?, ?, ?, ?)
+        """,
+        (9999, bytes([0]) * 32, "objects/00/missing/def.pkl", 1),
+    )
+    con.commit()
+    con.close()
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert any(issue.message == "SQLite foreign_key_check failed." for issue in report.issues)
+    assert store.validate_query_index(thorough=True).ok
+
+
+def test_dirstore_reconcile_quick_check_failure_triggers_rebuild(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("quick", repo=repo)
+    repo.save_object(obj)
+    original_validate = SQLiteStoreQueryIndex.validate
+    calls = 0
+
+    def fail_once(self, *, thorough=False):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ValidationReport(
+                "sqlite",
+                self.source_key,
+                False,
+                (ValidationIssue("error", "SQLite quick_check failed.", "injected"),),
+                row_counts={"stored_roots": 1},
+            )
+        return original_validate(self, thorough=thorough)
+
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "validate", fail_once)
+
+    report = store.reconcile_query_index()
+
+    assert report.changed
+    assert report.action == "rebuild"
+    assert any(issue.message == "SQLite quick_check failed." for issue in report.issues)
+
+
+def test_failed_object_save_does_not_update_query_index(tmp_path):
+    opened = []
+
+    class RecordingIndex:
+        def register_stored_roots(self, graph, roots):
+            raise AssertionError("failed object save should not register roots")
+
+    def factory(store):
+        index = RecordingIndex()
+        opened.append(index)
+        return index
+
+    store = DirStore(tmp_path / "store", query_index=factory)
+    repo = Repo(stores=store)
+    obj = FailingSaveDirLeaf("failed", repo=repo)
+
+    with pytest.raises(RuntimeError, match="object save failed"):
+        repo.save_object(obj)
+
+    assert opened == []
+
+
+def test_object_files_publish_before_index_root_activation(tmp_path):
+    checks = []
+
+    class AssertingIndex:
+        def __init__(self, store):
+            self.store = store
+
+        def register_stored_roots(self, graph, roots):
+            roots = tuple(roots)
+            checks.append(tuple(self.store.has(root) for root in roots))
+
+    store = DirStore(tmp_path / "store", query_index=lambda store: AssertingIndex(store))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("ordering", repo=repo)
+
+    repo.save_object(obj)
+
+    assert checks == [(True,)]
+
+
+def test_sqlite_stored_root_metadata_records_def_file_stat(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("metadata", repo=repo)
+    repo.save_object(obj)
+
+    sqlite3 = require_sqlite()
+    con = sqlite3.connect(store.query_index_path)
+    row = con.execute("SELECT relative_def_path, def_size, def_mtime_ns FROM stored_roots").fetchone()
+    con.close()
+
+    def_path = Path(store.base_dir) / row[0]
+    stat = def_path.stat()
+    assert row[1] == stat.st_size
+    assert row[2] == stat.st_mtime_ns
+
+
+def test_repo_validate_index_reports_ready_and_dirty(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("validate", repo=repo)
+    repo.save_object(obj)
+
+    report = repo.validate_index(store=store, thorough=True)[0]
+    assert report.ok
+    assert report.row_counts["stored_roots"] == 1
+    assert report.diagnostics["build_state"] == "ready"
+    status = repo.index_status(store=store)[0]
+    assert "wal_runtime_known_safe" in status.diagnostics
+
+    store.mark_query_index_dirty()
+    dirty = repo.validate_index(store=store)[0]
+    assert not dirty.ok
+    assert dirty.issues[0].message == "SQLite query index is dirty."
+
+
+def test_repo_validate_index_reports_stored_root_hash_mismatch(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("hash-mismatch", repo=repo)
+    repo.save_object(obj)
+
+    sqlite3 = require_sqlite()
+    con = sqlite3.connect(store.query_index_path)
+    con.execute("UPDATE stored_roots SET storage_hash = ?", (bytes([0]) * 32,))
+    con.commit()
+    con.close()
+
+    report = repo.validate_index(store=store, thorough=True)[0]
+
+    assert not report.ok
+    assert any(issue.message == "Stored root storage hash mismatch." for issue in report.issues)
+
+
+def test_repo_validate_index_reports_missing_root_file(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("missing-file", repo=repo)
+    repo.save_object(obj)
+
+    def_path = Path(store.base_dir) / "objects" / obj.definition.stable_hash()[:2] / obj.definition.stable_hash() / "def.pkl"
+    def_path.unlink()
+
+    report = repo.validate_index(store=store, thorough=True)[0]
+
+    assert not report.ok
+    assert any(issue.message == "Stored root def.pkl is missing." for issue in report.issues)
+
+
+def test_auto_policy_uses_sqlite_when_available(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="auto")
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("auto", repo=repo)
+    repo.save_object(obj)
+
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+    assert repo.query(selector).stored().count() == 1
+    if sqlite_available():
+        assert Path(store.query_index_path).exists()
+        assert repo.index_status(store=store)[0].backend == "sqlite"
+    else:
+        assert not Path(store.query_index_path).exists()
+
+
+def test_mixed_memory_and_sqlite_query_merges_sources(tmp_path):
+    sqlite_store = DirStore(tmp_path / "sqlite", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    memory_store = DirStore(tmp_path / "memory", query_index="memory")
+    repo = Repo(stores=[sqlite_store, memory_store])
+    sqlite_obj = QueryIndexDirLeaf("sqlite", repo=repo)
+    memory_obj = QueryIndexDirLeaf("memory", repo=repo)
+    repo.save_object(sqlite_obj, store=sqlite_store)
+    repo.save_object(memory_obj, store=memory_store)
+
+    repo2 = Repo(stores=[
+        DirStore(sqlite_store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(memory_store.base_dir, query_index="memory"),
+    ])
+    selector = Definition(QueryIndexDirLeaf, SKIP_ARGS)
+
+    results = repo2.query(selector).stored().defs()
+
+    assert set(results) == {sqlite_obj.definition, memory_obj.definition}
+    replica_dirs = {
+        cdef: tuple(store.base_dir for store in results.replicas(cdef))
+        for cdef in results
+    }
+    assert replica_dirs[sqlite_obj.definition] == (sqlite_store.base_dir,)
+    assert replica_dirs[memory_obj.definition] == (memory_store.base_dir,)
