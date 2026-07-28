@@ -3,8 +3,11 @@ import threading
 
 import pytest
 
+from dryml import session
+from dryml.runtime import RuntimeEnforcement, RuntimeState
 from dryml.runtime.errors import RuntimeTransitionError
 from dryml.runtime.publication import PublicationService, SessionGeneration, publication
+from dryml.worlds import LocalResourceInventory
 
 
 def test_writer_reentry_fails_before_recursive_state_acquisition():
@@ -113,3 +116,73 @@ def test_writer_owner_cannot_reenter_reader_snapshot_or_lease():
         with pytest.raises(RuntimeTransitionError, match="re-entry"):
             with publication.lease():
                 pass
+
+
+def test_commit_validator_runs_under_writer_admission_but_outside_the_state_mutex():
+    service = PublicationService()
+    service.initialize(object())
+    before = service.current()
+    candidate = service.stage(before, SessionGeneration(before.number + 1, before.runtime))
+    observed = []
+
+    def validate():
+        observed.append(service._state_lock.locked())
+        with pytest.raises(RuntimeTransitionError, match="re-entry"):
+            service.current()
+
+    service.commit(candidate, validator=validate)
+
+    assert observed == [False]
+
+
+def test_concurrent_facade_mutators_restage_against_one_published_generation(monkeypatch):
+    import dryml.session.state as state
+
+    affinity = {0, 1}
+    service = PublicationService(
+        environ={},
+        affinity_getter=lambda: affinity,
+        affinity_setter=lambda cpus: (affinity.clear(), affinity.update(cpus)),
+    )
+    service.initialize(RuntimeState(enforcement=RuntimeEnforcement.OFF))
+    monkeypatch.setattr(state, "publication", service)
+    monkeypatch.setattr(state, "local_inventory", lambda: LocalResourceInventory((0, 1), {}, memory=None))
+    barrier = threading.Barrier(2)
+    snapshots = []
+
+    def mutate(cpus):
+        barrier.wait(timeout=2)
+        snapshots.append(session.manage(cpus=cpus))
+
+    left = threading.Thread(target=mutate, args=(1,))
+    right = threading.Thread(target=mutate, args=(2,))
+    left.start()
+    right.start()
+    left.join(timeout=2)
+    right.join(timeout=2)
+
+    assert not left.is_alive() and not right.is_alive()
+    assert len(snapshots) == 2
+    assert session.current().generation == max(snapshot.generation for snapshot in snapshots)
+
+
+def test_facade_declarative_update_can_publish_while_the_prior_generation_is_leased(monkeypatch):
+    import dryml.runtime.context as context
+    import dryml.session.state as state
+
+    affinity = {0, 1}
+    service = PublicationService(
+        environ={},
+        affinity_getter=lambda: affinity,
+        affinity_setter=lambda cpus: (affinity.clear(), affinity.update(cpus)),
+    )
+    service.initialize(RuntimeState(enforcement=RuntimeEnforcement.OFF))
+    monkeypatch.setattr(state, "publication", service)
+    monkeypatch.setattr(context, "publication", service)
+    monkeypatch.setattr(state, "local_inventory", lambda: LocalResourceInventory((0, 1), {}, memory=None))
+    session.manage(cpus=1)
+
+    with service.lease() as leased:
+        updated = session.require_env("dryml>=0")
+        assert updated.generation > leased.number
+        assert service.current().number == updated.generation

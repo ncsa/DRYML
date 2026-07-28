@@ -9,7 +9,7 @@ from typing import Any
 
 from dryml.environments import EnvironmentRequirement
 from dryml.formats import canonical_json_bytes, deep_freeze_json, json_ready
-from dryml.worlds import ProcessAllocation, ResourceSpec, WorldSpec
+from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +57,41 @@ class SessionConfiguration:
         return data
 
 
-SessionSnapshot = SessionConfiguration
+@dataclass(frozen=True, slots=True)
+class SessionSnapshot:
+    """Immutable public projection of one published process generation."""
+
+    mode: str
+    resources: ResourceSpec | None
+    allocation: SelectedWorldAllocation | None
+    requested_world: WorldSpec | None
+    environment: EnvironmentRequirement
+    controls: Mapping[str, Any]
+    statuses: Mapping[str, str]
+    runtime: Any
+    generation: int
+    health: str = "healthy"
+    inventory: LocalResourceInventory | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "controls", deep_freeze_json(self.controls))
+        object.__setattr__(self, "statuses", deep_freeze_json(self.statuses))
+
+    def to_data(self) -> dict[str, Any]:
+        """Return a bounded JSON-ready display projection."""
+
+        return {
+            "mode": self.mode,
+            "resources": None if self.resources is None else self.resources.to_data(),
+            "allocation": None if self.allocation is None else self.allocation.to_data(),
+            "requested_world": None if self.requested_world is None else self.requested_world.to_data(),
+            "environment": self.environment.to_data(),
+            "controls": json_ready(self.controls),
+            "statuses": json_ready(self.statuses),
+            "generation": self.generation,
+            "health": self.health,
+            "inventory": None if self.inventory is None else self.inventory.summary(),
+        }
 
 
 __all__ = ["SelectedWorldAllocation", "SessionConfiguration", "SessionSnapshot"]

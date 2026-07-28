@@ -157,6 +157,10 @@ class FrameworkRegistry:
 
         # Registry freezing is a process mutation just like registration.  It
         # must not leapfrog an active loader callback or an observation.
+        if coordinator.writer_owner == threading.get_ident():
+            with self._lock:
+                self._frozen = True
+            return
         with coordinator.writer():
             with self._lock:
                 self._frozen = True

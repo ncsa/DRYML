@@ -255,6 +255,21 @@ def test_top_level_public_all_is_frozen_and_code_remains_explicit():
     )
 
 
+def test_session_facade_is_lazy_and_keeps_legacy_core_session_distinct():
+    """Loading the facade does not eagerly load dispatch or framework runtimes."""
+
+    _run_fresh_python(
+        "import dryml, sys; "
+        "assert 'dryml.session' not in sys.modules; "
+        "facade = dryml.session; "
+        "assert facade is not dryml.configure; "
+        "assert callable(facade.current); "
+        "assert 'dryml.dispatch' not in sys.modules; "
+        f"assert not {{name.split('.', 1)[0] for name in sys.modules}} "
+        f"& {HEAVY_FRAMEWORK_TOP_LEVEL_MODULES!r}"
+    )
+
+
 def test_core_route_is_lazy_stable_and_has_no_obsolete_alias():
     """The permanent package is unique and the removed route stays absent."""
 

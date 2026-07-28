@@ -102,8 +102,17 @@ def finalize_helper(framework_name: str, module_name: str | None = None) -> bool
 
 def _lifecycle(fullname: str, registration: FrameworkRegistration) -> _Lifecycle:
     bootstrap = active_runtime_bootstrap()
-    controlled = bootstrap is not None and registration.name in bootstrap.frameworks
-    result = bootstrap.framework_results.get(registration.name) if controlled else None
+    if bootstrap is not None:
+        controlled = registration.name in bootstrap.frameworks
+        result = bootstrap.framework_results.get(registration.name) if controlled else None
+    else:
+        # A persistent facade session publishes immutable adapter plans on the
+        # sole runtime generation.  Scoped bootstrap state remains an advanced
+        # override, not a second session authority.
+        generation = publication.current()
+        results = generation.metadata.get("framework_results", {})
+        controlled = bool(generation.metadata.get("session_active")) and registration.name in results
+        result = results.get(registration.name) if controlled else None
     adapter = framework_registry.adapter_for(registration) if controlled else None
     resolved, revision = framework_registry.resolve(fullname)
     if resolved is not registration:

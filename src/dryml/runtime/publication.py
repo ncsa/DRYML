@@ -181,17 +181,21 @@ class PublicationService:
         except ImportEpochReentryError as exc:
             raise PublicationReentryError(str(exc), context={"phase": "writer"}) from exc
 
-    def commit(self, candidate: PublicationCandidate, effects: EffectPlan | None = None) -> SessionGeneration:
+    def commit(self, candidate: PublicationCandidate, effects: EffectPlan | None = None, *, validator: Any = None) -> SessionGeneration:
         """CAS-commit a preplanned generation and reversible process effects.
 
-        The state lock is intentionally held only for validation, direct effect
-        writes/readback, and immutable generation replacement.  The caller must
-        resolve all framework and adapter work before calling this method.
+        ``validator`` runs under exclusive writer admission, but before the
+        state mutex.  It is for preloaded, import-free fact revalidation only;
+        arbitrary callbacks must never run while publication state is locked.
+        The caller must resolve all framework and adapter work before calling
+        this method.
         """
 
         self._reject_writer_reentry()
         effects = effects or EffectPlan()
         with self.writer():
+            if validator is not None:
+                validator()
             with self._state_lock:
                 current = self._require_generation()
                 if current.health == "failed":

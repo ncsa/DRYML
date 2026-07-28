@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 
@@ -43,16 +44,16 @@ class RuntimeAllocationView:
         object.__setattr__(self, "cpus", tuple(_require_sequence("cpus", self.cpus)))
         if not isinstance(self.accelerators, Mapping):
             raise TypeError("accelerators must be a mapping")
-        object.__setattr__(self, "accelerators", {str(key): tuple(_require_sequence(f"accelerators.{key}", value)) for key, value in self.accelerators.items()})
+        object.__setattr__(self, "accelerators", MappingProxyType({str(key): tuple(_require_sequence(f"accelerators.{key}", value)) for key, value in self.accelerators.items()}))
         if not isinstance(self.accelerator_memory, Mapping):
             raise TypeError("accelerator_memory must be a mapping")
-        object.__setattr__(self, "accelerator_memory", {str(key): dict(value) for key, value in self.accelerator_memory.items()})
+        object.__setattr__(self, "accelerator_memory", MappingProxyType({str(key): MappingProxyType(dict(value)) for key, value in self.accelerator_memory.items()}))
         if not isinstance(self.env, Mapping):
             raise TypeError("env must be a mapping")
         if not isinstance(self.metadata, Mapping):
             raise TypeError("metadata must be a mapping")
-        object.__setattr__(self, "env", {str(key): str(value) for key, value in self.env.items()})
-        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "env", MappingProxyType({str(key): str(value) for key, value in self.env.items()}))
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
     @property
     def is_no_allocation(self) -> bool:

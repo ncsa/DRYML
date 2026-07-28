@@ -248,6 +248,29 @@ def _validate_state(state: RuntimeState) -> None:
             "orchestrator/probe runtime must not hold workload allocation",
             context={"mode": state.mode.value, "allocation": repr(state.allocation), "fix": "use RuntimeMode.WORKER or RuntimeMode.INLINE for workload resources"},
         )
+    _validate_session_visibility(state)
+
+
+def _validate_session_visibility(state: RuntimeState) -> None:
+    """Keep scoped advanced allocations within a published visibility epoch."""
+
+    generation = publication.current()
+    inventory = generation.visibility_epoch
+    if not generation.metadata.get("session_active") or inventory is None or is_no_allocation(state.allocation):
+        return
+    allocation = state.allocation
+    if not set(getattr(allocation, "cpus", ())).issubset(inventory.cpus):
+        raise RuntimeTransitionError("context-local allocation broadens session CPU visibility")
+    memory = getattr(allocation, "memory", None)
+    if memory is not None and inventory.memory is not None and memory > inventory.memory:
+        raise RuntimeTransitionError("context-local allocation broadens session memory visibility")
+    for kind, devices in getattr(allocation, "accelerators", {}).items():
+        if not set(devices).issubset(inventory.accelerators.get(kind, ())):
+            raise RuntimeTransitionError("context-local allocation broadens session accelerator visibility", context={"accelerator": kind})
+        for device, limit in getattr(allocation, "accelerator_memory", {}).get(kind, {}).items():
+            capacity = inventory.accelerator_memory.get(kind, {}).get(device)
+            if capacity is not None and limit > capacity:
+                raise RuntimeTransitionError("context-local allocation broadens session accelerator-memory visibility", context={"accelerator": kind, "device": device})
 
 
 __all__ = [
