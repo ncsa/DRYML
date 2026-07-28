@@ -166,6 +166,10 @@ class Dispatcher:
             raise DispatchPlanningError(
                 "writable managed dispatch requires a same-host DirStore"
             )
+        # Managed operations have always been checked workloads.  The facade's
+        # ordinary Python-mode bypass applies to direct calls, not this existing
+        # managed-operation dispatch boundary.
+        effective_requirement_policy = "strict" if extension is not None and requirement_policy is None else requirement_policy
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
         _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
@@ -184,7 +188,7 @@ class Dispatcher:
                 environment=environment,
                 world=world,
                 runtime_spec=runtime,
-                requirement_policy=requirement_policy,
+                requirement_policy=effective_requirement_policy,
                 analysis_policy=analysis_policy,
                 _analysis_request=analysis_request,
                 environment_candidates=effective_candidates,
@@ -777,13 +781,18 @@ class Dispatcher:
             persist_object=False,
             trace_enabled=analysis_request.requested,
         )
+        effective_requirement_policy = (
+            "strict"
+            if _dispatch_extension_enabled(operation) and requirement_policy is None
+            else requirement_policy
+        )
         try:
             return explanation_for(
                 normalized,
                 environment=environment,
                 world=world,
                 runtime_spec=runtime,
-                requirement_policy=requirement_policy,
+                requirement_policy=effective_requirement_policy,
                 analysis_policy=analysis_policy,
                 _analysis_request=analysis_request,
                 environment_candidates=effective_candidates,

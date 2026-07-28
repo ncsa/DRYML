@@ -1191,7 +1191,13 @@ def run_trace(request: _InvocationRequest) -> CodeAnalysisResult:
     interruption: BaseException | None = None
     try:
         try:
-            request.target.obj(*wrapped_args, **wrapped_kwargs)
+            # Dynamic tracing deliberately executes only one trusted target.
+            # A direct requirement wrapper must not compare that analysis call
+            # against the planner process's allocation.
+            from dryml.annotations.interception import _direct_call_bypass
+
+            with _direct_call_bypass(request.target.obj):
+                request.target.obj(*wrapped_args, **wrapped_kwargs)
         except _TraceAbort:
             pass
         except Exception as exc:

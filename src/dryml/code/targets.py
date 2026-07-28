@@ -471,7 +471,9 @@ def _target_from_static_resolution(
 
 
 def _object_import_path(obj: Any) -> str | None:
-    target = _unwrap_descriptor(obj)
+    # Import transport addresses the public callable.  Trusted direct-call
+    # wrappers deliberately analyze their registry-backed original separately.
+    target = _public_descriptor_function(obj)
     if type(target) not in {types.FunctionType, type}:
         return None
     module_name = _object_module(target)
@@ -480,7 +482,7 @@ def _object_import_path(obj: Any) -> str | None:
         return None
     try:
         module = importlib.import_module(module_name)
-        resolved = _resolve_static_qualname(module, qualname)
+        resolved = _resolve_public_static_qualname(module, qualname)
     except Exception:
         return None
     if resolved is target:
@@ -489,6 +491,17 @@ def _object_import_path(obj: Any) -> str | None:
 
 
 def _unwrap_descriptor(obj: Any) -> Any:
+    target = descriptor_function(obj)
+    try:
+        from dryml.annotations.interception import trusted_original
+    except ImportError:
+        return target
+    return trusted_original(target)
+
+
+def _public_descriptor_function(obj: Any) -> Any:
+    """Unwrap descriptor binding without replacing a public trusted wrapper."""
+
     return descriptor_function(obj)
 
 
@@ -519,6 +532,17 @@ def _resolve_static_qualname(root: Any, qualname: str) -> Any:
             raise ValueError("Cannot resolve local qualname components.")
         obj = _class_static_attribute(obj, part) if _is_class(obj) else inspect.getattr_static(obj, part)
     return _unwrap_descriptor(obj)
+
+
+def _resolve_public_static_qualname(root: Any, qualname: str) -> Any:
+    """Resolve an import target while retaining its public wrapper identity."""
+
+    obj = root
+    for part in qualname.split("."):
+        if part == "<locals>":
+            raise ValueError("Cannot resolve local qualname components.")
+        obj = _class_static_attribute(obj, part) if _is_class(obj) else inspect.getattr_static(obj, part)
+    return _public_descriptor_function(obj)
 
 
 def _class_static_attribute(cls: type, name: str) -> Any:

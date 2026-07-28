@@ -1,4 +1,4 @@
-"""Low-level decorators that attach annotation fragments without wrapping."""
+"""Low-level decorators that attach annotation fragments and enforce hard ones."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ def require(*, namespace: str, fragment: Mapping[str, Any], source: SourceTrace 
     """Attach a hard requirement fragment to a function, method, or class.
 
     Example: ``@dryml.annotations.require(namespace="world", fragment={...})``.
-    The target object is returned unchanged; no wrapper is introduced.
+    Supported callables receive one trusted direct-call wrapper. Classes retain
+    their exact identity while supported method descriptors are instrumented.
     """
 
     validate_namespace(namespace)
@@ -37,6 +38,20 @@ def attach_fragment(target: Any, fragment: AnnotationFragment) -> Any:
 
     own = tuple(getattr(target, "__dict__", {}).get(FRAGMENT_ATTR, ()))
     setattr(target, FRAGMENT_ATTR, own + (fragment,))
+    # A trusted wrapper may later cross the existing same-environment pickle
+    # boundary, where the process-local registry is intentionally absent. Keep
+    # the hard fragment on its immutable analysis body as well, never by
+    # following public ``__wrapped__`` metadata.
+    try:
+        from .interception import trusted_original
+
+        original = trusted_original(target)
+    except ImportError:
+        original = target
+    if original is not target:
+        original_own = tuple(getattr(original, "__dict__", {}).get(FRAGMENT_ATTR, ()))
+        if fragment not in original_own:
+            setattr(original, FRAGMENT_ATTR, original_own + (fragment,))
     return target
 
 
@@ -49,7 +64,12 @@ def _decorator(*, namespace: str, kind: str, fragment: Mapping[str, Any], source
         else:
             trace = source_from_target(target, namespace=namespace, label=f"@dryml.annotations.{kind}")
         annotation = AnnotationFragment(namespace, kind, fragment, trace, priority=priority, merge_policy=merge_policy)
-        return attach_fragment(target, annotation)
+        decorated = attach_fragment(target, annotation)
+        if kind == "requirement":
+            from .interception import install_requirement_wrapper
+
+            return install_requirement_wrapper(decorated, annotation)
+        return decorated
 
     return decorate
 

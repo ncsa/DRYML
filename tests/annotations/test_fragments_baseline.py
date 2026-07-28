@@ -6,6 +6,7 @@ from pathlib import Path
 
 import dryml
 from dryml.annotations import fragments_for, fragments_for_class, fragments_for_callable
+from dryml.annotations.interception import is_trusted_wrapper
 
 
 def _load_targets():
@@ -30,13 +31,14 @@ def _requirements(fragments):
     return tuple(reqs)
 
 
-def test_env_req_attaches_fragment_to_function_without_wrapping():
+def test_env_req_attaches_fragment_to_trusted_function_wrapper():
     def func():
         return "ok"
 
     decorated = dryml.env.req(requirements=("example>=1",))(func)
 
-    assert decorated is func
+    assert decorated is not func
+    assert is_trusted_wrapper(decorated)
     assert decorated() == "ok"
     fragments = fragments_for(decorated)
     assert len(fragments) == 1
@@ -56,10 +58,11 @@ def test_env_req_attaches_fragment_to_class_without_wrapping():
     assert "class-only>=1" in _requirements(fragments_for_class(decorated))
 
 
-def test_world_req_attaches_fragment_to_method_without_wrapping():
+def test_world_req_attaches_fragment_to_trusted_method_wrapper():
     method = targets.LightningModel.__dict__["train"]
     fragments = fragments_for(method, namespace="world")
 
+    assert is_trusted_wrapper(method)
     assert targets.LightningModel().train(None)["target"] == "lightning.train"
     assert len(fragments) == 1
     assert fragments[0].fragment["roles"]["main"]["resources"]["accelerators"]["gpu"]["min"] == 1

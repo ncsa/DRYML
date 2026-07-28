@@ -122,11 +122,14 @@ def analyze_target(target: CodeTarget, context: CodeAnalysisContext) -> CodeAnal
             data={"error": repr(exc)},
         ))
 
-    analyzed = info.func if info is not None else obj
-    import_path = _import_path_for(analyzed)
+    analyzed = target.unwrapped if target.unwrapped is not None else (info.func if info is not None else obj)
+    # Bound methods have no stable module/qualname of their own; ``info.func``
+    # retains the public descriptor function that import resolution addresses.
+    public = info.func if info is not None else (target.obj if target.obj is not None else obj)
+    import_path = _import_path_for(public)
     if import_path is None and target.spec.import_path is not None:
         import_path = target.spec.import_path
-    importable = import_path is not None and _verify_import_path(import_path, analyzed)
+    importable = import_path is not None and _verify_import_path(import_path, public)
     if not importable:
         diagnostics.append(DiagnosticFact(
             severity="warning",

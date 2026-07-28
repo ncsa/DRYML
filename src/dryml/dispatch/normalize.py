@@ -502,7 +502,13 @@ def _normalize_pickled_callable(
     work_dir = tempfile.mkdtemp(prefix="dryml-dispatch-pickle-")
     pickle_path = os.path.join(work_dir, "callable.pkl")
     try:
-        write_pickled_callable(func, pickle_path)
+        # Public direct-call wrappers are import transport identities.  The
+        # explicit same-environment pickle fallback instead serializes the
+        # registry-backed body, avoiding a closure over process-global wrapper
+        # state while preserving the original annotation fragments for planning.
+        from dryml.annotations.interception import trusted_original
+
+        write_pickled_callable(trusted_original(func), pickle_path)
         with open(pickle_path, "rb") as f:
             digest = hashlib.sha256(f.read()).hexdigest()
         identity_marker = {"$literal": f"dryml.pickled_callable.sha256:{digest}"}
