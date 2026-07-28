@@ -17,8 +17,11 @@ from dryml.dispatch import (
 )
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA
 from dryml.dispatch.protocol import write_json_file
+from dryml.dispatch.planner import _allocation_to_json, allocation_from_json
 from dryml.formats.ids import content_id
 from dryml.operations import attach_operation_id, make_function_call_spec
+from dryml.runtime import RuntimeAllocationView
+from dryml.worlds import LocalResourceInventory
 
 
 def _envelope(tmp_path):
@@ -205,3 +208,71 @@ def test_coordination_metadata_validates_worker_key_and_paths(tmp_path):
     bad["launch"]["coordination"]["worker_key"]["rank"] = 99
     with pytest.raises(Exception, match="worker_key"):
         ExecutionEnvelope.from_json(bad)
+
+
+def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_path):
+    allocation = _allocation_to_json(
+        RuntimeAllocationView(
+            role="worker",
+            replica=0,
+            rank=0,
+            local_rank=0,
+            cpus=(0,),
+            accelerators={"gpu": ("gpu-a",)},
+            accelerator_memory={"gpu": {"gpu-a": 1024}},
+        )
+    )
+
+    assert allocation_from_json(allocation).accelerator_memory == {"gpu": {"gpu-a": 1024}}
+    with pytest.raises(Exception, match="accelerator-memory allocation requires"):
+        ExecutionEnvelope(
+            dispatch_spec=_envelope(tmp_path).dispatch_spec,
+            execution_recipe=_envelope(tmp_path).execution_recipe,
+            operation_spec=_envelope(tmp_path).operation_spec,
+            allocation_view=allocation,
+        )
+
+    envelope = ExecutionEnvelope(
+        dispatch_spec=_envelope(tmp_path).dispatch_spec,
+        execution_recipe=_envelope(tmp_path).execution_recipe,
+        operation_spec=_envelope(tmp_path).operation_spec,
+        allocation_view=allocation,
+        handshake={
+            "min_protocol": 1,
+            "required_features": ["runtime.accelerator_memory.v1"],
+        },
+    )
+    assert ExecutionEnvelope.from_json(envelope.to_json()).allocation_view == allocation
+
+
+def test_planner_requests_accelerator_memory_feature_when_allocating_limits(tmp_path):
+    from dryml.core.store.dir import DirStore
+    from dryml.dispatch import Dispatcher
+
+    plan = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world={
+            "roles": {
+                "main": {
+                    "replicas": 1,
+                    "process": {
+                        "resources": {
+                            "accelerators": {"gpu": 1},
+                            "accelerator_memory": {"gpu": ["1GiB"]},
+                        }
+                    },
+                }
+            }
+        },
+        inventory=LocalResourceInventory(
+            (0,),
+            {"gpu": ("gpu-a",)},
+            accelerator_memory={"gpu": {"gpu-a": "2GiB"}},
+        ),
+        requirement_policy="ignore",
+    )
+
+    assert plan.envelope.allocation_view["accelerator_memory"] == {
+        "gpu": [{"device": "gpu-a", "memory": 1024**3}]
+    }
+    assert "runtime.accelerator_memory.v1" in plan.envelope.handshake["required_features"]

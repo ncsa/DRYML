@@ -574,6 +574,9 @@ class DispatchPlanningResolution:
     local_inventory: worlds.LocalResourceInventory | None = None
     canonical_world_spec: Mapping[str, Any] | None = None
     dynamic_trace: DynamicTraceProvenance | None = None
+    session_generation: int | None = None
+    session_mode: str | None = None
+    session_control_statuses: Mapping[str, Any] | None = None
 
     def to_data(self) -> dict[str, Any]:
         """Return bounded JSON-ready planning decisions without live targets."""
@@ -602,6 +605,11 @@ class DispatchPlanningResolution:
             "diagnostics": [item.to_data() for item in self.diagnostics],
             "launchable": self.launchable,
             "dynamic_trace": None if self.dynamic_trace is None else self.dynamic_trace.to_data(),
+            "session": _session_metadata(
+                self.session_generation,
+                self.session_mode,
+                self.session_control_statuses,
+            ),
         }
         # DynamicTraceProvenance already rejects every schema, depth, scalar,
         # count, and byte overflow.  Passing it through the generic metadata
@@ -651,6 +659,11 @@ class DispatchPlanningResolution:
             "dryml.dispatch.launchable": self.launchable,
             "dryml.dispatch.diagnostics": [_diagnostic_summary(item) for item in self.diagnostics[:_MAX_METADATA_ITEMS]],
             "dryml.dispatch.analysis_outcomes": _analysis_outcomes(self),
+            "dryml.session": _session_metadata(
+                self.session_generation,
+                self.session_mode,
+                self.session_control_statuses,
+            ),
             **({"dryml.dispatch.dynamic_trace": data["dynamic_trace"]} if data["dynamic_trace"] is not None else {}),
         }
 
@@ -788,6 +801,80 @@ def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
     return _DynamicTraceRequest(_snapshot_analysis_context(context), float(timeout), trace_policy)
 
 
+def _capture_session_snapshot() -> Any:
+    """Read the one immutable session projection used by this planning pass."""
+
+    from dryml.session.state import current
+
+    return current()
+
+
+def _session_environment_fragments(snapshot: Any, mode: str) -> tuple[annotations.AnnotationFragment, ...]:
+    """Convert non-Python session requirements into one hard source fragment."""
+
+    requirement = getattr(snapshot, "environment", None)
+    if mode == "python" or requirement is None:
+        return ()
+    data = requirement.to_data()
+    if not any(data.get(field) for field in ("requirements", "python", "excludes", "capabilities")):
+        return ()
+    return (
+        annotations.AnnotationFragment(
+            namespace="environment",
+            kind="requirement",
+            fragment=data,
+            source=annotations.SourceTrace(
+                "synthetic",
+                label="session environment requirement",
+                namespace="environment",
+                metadata={"session_generation": getattr(snapshot, "generation", None)},
+            ),
+        ),
+    )
+
+
+def _validate_inventory_within_session_bounds(
+    inventory: worlds.LocalResourceInventory,
+    inherited: worlds.LocalResourceInventory,
+) -> None:
+    """Reject explicit same-host capacity that broadens the pinned visibility epoch."""
+
+    if not set(inventory.cpus).issubset(inherited.cpus):
+        raise DispatchPlanningError("explicit inventory broadens retained session CPU bounds")
+    if inventory.memory is not None and (inherited.memory is None or inventory.memory > inherited.memory):
+        raise DispatchPlanningError("explicit inventory broadens retained session memory bounds")
+    for kind, devices in inventory.accelerators.items():
+        if not set(devices).issubset(inherited.accelerators.get(kind, ())):
+            raise DispatchPlanningError(
+                "explicit inventory broadens retained session accelerator bounds",
+                context={"accelerator": kind},
+            )
+    for kind, limits in inventory.accelerator_memory.items():
+        inherited_limits = inherited.accelerator_memory.get(kind, {})
+        for device, limit in limits.items():
+            if device not in inherited_limits or limit > inherited_limits[device]:
+                raise DispatchPlanningError(
+                    "explicit inventory broadens retained session accelerator-memory bounds",
+                    context={"accelerator": kind, "device": str(device)},
+                )
+
+
+def _session_metadata(
+    generation: int | None,
+    mode: str | None,
+    statuses: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return non-identity session diagnostics for explain and provenance."""
+
+    if generation is None or mode is None:
+        return None
+    return {
+        "generation": generation,
+        "mode": mode,
+        "control_statuses": dict(statuses or {}),
+    }
+
+
 def _snapshot_analysis_context(context: CodeAnalysisContext) -> CodeAnalysisContext:
     """Return a private context with an isolated JSON metadata snapshot.
 
@@ -825,6 +912,7 @@ def resolve_dispatch_plan(
     inventory: worlds.LocalResourceInventory | None = None,
     inventory_policy: str = "lightweight",
     resolver_policy: str | None = None,
+    session_snapshot: Any | None = None,
     _analysis_request: _DynamicTraceRequest | None = None,
 ) -> DispatchPlanningResolution:
     """Resolve requirements and candidate checks for one normalized target.
@@ -852,6 +940,26 @@ def resolve_dispatch_plan(
     by the public normalization boundary.
     """
 
+    session_snapshot = _capture_session_snapshot() if session_snapshot is None else session_snapshot
+    session_mode = getattr(session_snapshot, "mode", "python")
+    if session_mode not in {"python", "managed", "orchestrator"}:
+        raise DispatchPlanningError("invalid session planning snapshot")
+    session_requested_world = (
+        getattr(session_snapshot, "requested_world", None)
+        if session_mode != "python"
+        else None
+    )
+    session_inventory = (
+        getattr(session_snapshot, "inventory", None)
+        if session_mode != "python"
+        else None
+    )
+    if session_inventory is not None and not isinstance(session_inventory, worlds.LocalResourceInventory):
+        raise DispatchPlanningError("invalid retained session inventory")
+    if inventory is not None and session_inventory is not None:
+        _validate_inventory_within_session_bounds(inventory, session_inventory)
+    effective_inventory = inventory if inventory is not None else session_inventory
+    session_fragments = _session_environment_fragments(session_snapshot, session_mode)
     enforcement = runtime.enforcement()
     policy = effective_requirement_policy(requirement_policy, enforcement)
     _validate_sprint8_policies(inventory_policy, resolver_policy)
@@ -901,7 +1009,7 @@ def resolve_dispatch_plan(
         )
         complete = complete and trace_provenance.data["status"] == "complete"
     resolution = annotations.resolve_fragments(
-        fragments,
+        (*fragments, *session_fragments),
         source="dryml.dispatch.dynamic_trace" if analysis_request.requested else "dryml.dispatch",
     )
     diagnostics = list(discovery_diagnostics)
@@ -922,7 +1030,8 @@ def resolve_dispatch_plan(
         world,
         resolution.world_default,
         requirement=resolution.world_requirement,
-        inventory=inventory,
+        session_requested=session_requested_world,
+        inventory=effective_inventory,
         inventory_policy=inventory_policy,
     )
     runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
@@ -1000,7 +1109,10 @@ def resolve_dispatch_plan(
         final_fragments = _fragments_from_analysis(final_probe.analysis) if final_probe.analysis is not None else []
         if final_fragments:
             reconciled_fragments = _dedupe_fragments((*fragments, *final_fragments))
-            reconciled = annotations.resolve_fragments(reconciled_fragments, source="dryml.dispatch.final_probe")
+            reconciled = annotations.resolve_fragments(
+                (*reconciled_fragments, *session_fragments),
+                source="dryml.dispatch.final_probe",
+            )
             if _resolution_decisions(reconciled) != _resolution_decisions(resolution) and (bootstrap_probe is None or bootstrap_probe.ok):
                 structural_safe = False
                 diagnostics.append(_diagnostic(
@@ -1041,7 +1153,8 @@ def resolve_dispatch_plan(
                     world,
                     resolution.world_default,
                     requirement=resolution.world_requirement,
-                    inventory=inventory or (world_synthesis.resource_inventory if world_synthesis is not None else None),
+                    session_requested=session_requested_world,
+                    inventory=effective_inventory or (world_synthesis.resource_inventory if world_synthesis is not None else None),
                     inventory_policy=inventory_policy,
                     inventory_discovery_error=(
                         None
@@ -1139,7 +1252,7 @@ def resolve_dispatch_plan(
         (env_selection, world_selection, runtime_selection),
     ))
 
-    selected_inventory = inventory
+    selected_inventory = effective_inventory
     if world_synthesis is not None:
         selected_inventory = world_synthesis.resource_inventory
     if (
@@ -1151,6 +1264,7 @@ def resolve_dispatch_plan(
             or _world_needs_inventory(world_spec)
             or world_synthesis is not None
             or resolution.world_requirement is not None
+            or session_inventory is not None
         )
     ):
         try:
@@ -1230,12 +1344,19 @@ def resolve_dispatch_plan(
         inventory_summary=(
             None
             if selected_inventory is None
-            or (world_synthesis is None and resolution.world_requirement is None)
+            or (
+                world_synthesis is None
+                and resolution.world_requirement is None
+                and session_inventory is None
+            )
             else selected_inventory.summary()
         ),
         world_allocation_summary=None,
         local_inventory=selected_inventory,
         dynamic_trace=trace_provenance,
+        session_generation=(getattr(session_snapshot, "generation", None) if session_mode != "python" else None),
+        session_mode=(session_mode if session_mode != "python" else None),
+        session_control_statuses=(dict(getattr(session_snapshot, "statuses", {})) if session_mode != "python" else None),
     )
 
 
@@ -1306,7 +1427,12 @@ def _trace_dispatch_invocation(
             _TRACE_CORRELATION_RUN_KEY: run_id,
         },
     )
-    result = trace(live_target, args=trace_args, kwargs=trace_kwargs, context=trace_context, policy=request.policy)
+    # Dynamic tracing executes the public wrapper in the parent process only to
+    # analyze the worker target. The bypass is exact-target and always reset.
+    from dryml.annotations.interception import _direct_call_bypass
+
+    with _direct_call_bypass(live_target):
+        result = trace(live_target, args=trace_args, kwargs=trace_kwargs, context=trace_context, policy=request.policy)
     expected_target = target_from_callable(live_target, metadata=trace_context.metadata).spec.to_data()
     return _admit_trace_result(normalized, request.policy, direct_fragments, target, input_id, run_id, expected_target, result)
 
@@ -2044,13 +2170,14 @@ def _select_world(
     annotation_default: Any | None,
     *,
     requirement=None,
+    session_requested=None,
     inventory=None,
     inventory_policy="lightweight",
     inventory_discovery_error: str | None = None,
 ):
     current = worlds.current(default=None)
-    if explicit is not None or annotation_default is not None or current is not None:
-        selection, data = _select("world", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("fallback", {"roles": {"main": {"replicas": 1, "process": {}}}, "backend": {"kind": "local", "parameters": {}}})), _world_data)
+    if explicit is not None or annotation_default is not None or current is not None or session_requested is not None:
+        selection, data = _select("world", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("session_requested", session_requested), ("fallback", {"roles": {"main": {"replicas": 1, "process": {}}}, "backend": {"kind": "local", "parameters": {}}})), _world_data)
         return selection, data, None
     if requirement is not None:
         result = worlds.synthesize(
@@ -2060,7 +2187,7 @@ def _select_world(
             inventory_policy=inventory_policy,
             _inventory_discovery_error=inventory_discovery_error,
         )
-        considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current"))
+        considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current", "session_requested"))
         if result.world is not None:
             data = result.world.to_data()
             return CandidateSelection("world", data, "synthesized", considered + (CandidateConsideration("synthesized", "selected", data),)), data, result

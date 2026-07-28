@@ -223,53 +223,97 @@ def _wrap_function(target: types.FunctionType, *, owner: type | None = None, nam
 
 
 def _sync_wrapper(target: types.FunctionType) -> types.FunctionType:
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        publication.current()
-        if _is_bypassed(wrapped):
-            return target(*args, **kwargs)
-        with publication.lease() as generation:
-            _check_before_body(wrapped, args, generation)
-            return target(*args, **kwargs)
+    invoke = _invoke_sync
+    holder: list[types.FunctionType] = []
 
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        return invoke(holder[0], target, args, kwargs)
+
+    wrapped = _with_target_globals(wrapped, target)
+    holder.append(wrapped)
     return wrapped
 
 
 def _coroutine_wrapper(target: types.FunctionType) -> types.FunctionType:
-    async def wrapped(*args: Any, **kwargs: Any) -> Any:
-        publication.current()
-        if _is_bypassed(wrapped):
-            return await target(*args, **kwargs)
-        with publication.lease() as generation:
-            _check_before_body(wrapped, args, generation)
-            return await target(*args, **kwargs)
+    invoke = _invoke_coroutine
+    holder: list[types.FunctionType] = []
 
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        return await invoke(holder[0], target, args, kwargs)
+
+    wrapped = _with_target_globals(wrapped, target)
+    holder.append(wrapped)
     return wrapped
 
 
 def _generator_wrapper(target: types.FunctionType) -> types.FunctionType:
+    iterate = _iterate_generator
+    holder: list[types.FunctionType] = []
+
     def wrapped(*args: Any, **kwargs: Any):
-        def iterate():
-            publication.current()
-            if _is_bypassed(wrapped):
-                yield from target(*args, **kwargs)
-                return
-            with publication.lease() as generation:
-                _check_before_body(wrapped, args, generation)
-                yield from target(*args, **kwargs)
+        yield from iterate(holder[0], target, args, kwargs)
 
-        return iterate()
-
+    wrapped = _with_target_globals(wrapped, target)
+    holder.append(wrapped)
     return wrapped
 
 
 def _async_generator_wrapper(target: types.FunctionType) -> types.FunctionType:
+    make_proxy = _make_async_generator_proxy
+    holder: list[types.FunctionType] = []
+
     def wrapped(*args: Any, **kwargs: Any):
-        if _is_bypassed(wrapped):
-            return target(*args, **kwargs)
+        return make_proxy(holder[0], target, args, kwargs)
 
-        return _LeasedAsyncGenerator(wrapped, target, args, kwargs)
-
+    wrapped = _with_target_globals(wrapped, target)
+    holder.append(wrapped)
     return wrapped
+
+
+def _with_target_globals(wrapper: types.FunctionType, target: types.FunctionType) -> types.FunctionType:
+    """Keep dill from serializing this module's process-global coordinator."""
+
+    return types.FunctionType(
+        wrapper.__code__,
+        target.__globals__,
+        name=wrapper.__name__,
+        argdefs=wrapper.__defaults__,
+        closure=wrapper.__closure__,
+    )
+
+
+def _invoke_sync(wrapper: types.FunctionType, target: types.FunctionType, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    publication.current()
+    if _is_bypassed(wrapper):
+        return target(*args, **kwargs)
+    with publication.lease() as generation:
+        _check_before_body(wrapper, args, generation)
+        return target(*args, **kwargs)
+
+
+async def _invoke_coroutine(wrapper: types.FunctionType, target: types.FunctionType, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+    publication.current()
+    if _is_bypassed(wrapper):
+        return await target(*args, **kwargs)
+    with publication.lease() as generation:
+        _check_before_body(wrapper, args, generation)
+        return await target(*args, **kwargs)
+
+
+def _iterate_generator(wrapper: types.FunctionType, target: types.FunctionType, args: tuple[Any, ...], kwargs: dict[str, Any]):
+    publication.current()
+    if _is_bypassed(wrapper):
+        yield from target(*args, **kwargs)
+        return
+    with publication.lease() as generation:
+        _check_before_body(wrapper, args, generation)
+        yield from target(*args, **kwargs)
+
+
+def _make_async_generator_proxy(wrapper: types.FunctionType, target: types.FunctionType, args: tuple[Any, ...], kwargs: dict[str, Any]):
+    if _is_bypassed(wrapper):
+        return target(*args, **kwargs)
+    return _LeasedAsyncGenerator(wrapper, target, args, kwargs)
 
 
 class _LeasedAsyncGenerator:
@@ -444,7 +488,14 @@ def _compatibility_issues(runtime: Any, generation: Any, resolution: Any) -> lis
         issues.append({"kind": "current_allowance", "message": "active runtime has no direct workload allocation"})
     elif resolution.world_requirement is not None:
         process = None if configuration is None or configuration.allocation is None else configuration.allocation.process
-        issues.extend(_world_issues(runtime.allocation, resolution.world_requirement, process=process))
+        issues.extend(
+            _world_issues(
+                runtime.allocation,
+                resolution.world_requirement,
+                process=process,
+                worker_mode=runtime.mode is RuntimeMode.WORKER,
+            )
+        )
     environment = resolution.environment_requirement
     if configuration is not None and getattr(configuration, "mode", "python") != "python":
         environment = configuration.environment.merge(environment) if environment is not None else configuration.environment
@@ -455,11 +506,18 @@ def _compatibility_issues(runtime: Any, generation: Any, resolution: Any) -> lis
     return issues
 
 
-def _world_issues(allocation: Any, requirement: Any, *, process: Any = None) -> list[dict[str, Any]]:
+def _world_issues(allocation: Any, requirement: Any, *, process: Any = None, worker_mode: bool = False) -> list[dict[str, Any]]:
     if len(requirement.roles) != 1:
         return [{"kind": "current_allowance", "message": "one process cannot prove a multi-role world requirement"}]
-    _, role = next(iter(requirement.roles.items()))
-    if not role.replicas.satisfied_by(1):
+    role_name, role = next(iter(requirement.roles.items()))
+    replica_count = 1
+    if worker_mode:
+        if allocation.role != role_name:
+            return [{"kind": "current_allowance", "message": "worker allocation role does not match the required role"}]
+        replica_count = allocation.metadata.get("role_size")
+        if isinstance(replica_count, bool) or not isinstance(replica_count, int) or replica_count <= 0:
+            return [{"kind": "current_allowance", "message": "worker allocation cannot prove its required role size"}]
+    if not role.replicas.satisfied_by(replica_count):
         return [{"kind": "current_allowance", "message": "one process cannot prove the required replica count"}]
     resources = role.resources
     devices = dict(getattr(process, "devices", {})) if process is not None else dict(getattr(allocation, "metadata", {}).get("devices", {}))

@@ -107,7 +107,7 @@ def _handshake(plan, key, *, status="ok", worker_key=None, world_id=None, world_
         python_version="3.x",
         platform="test",
         pid=1,
-        features=("operation.function_call",),
+        features=("operation.function_call", "store.dir", "runtime.worker"),
         operation_kinds=("function_call",),
         call_transports=("import_ref",),
         store_ref_kinds=("dir_store",),

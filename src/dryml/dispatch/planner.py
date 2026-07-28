@@ -24,7 +24,7 @@ from .provenance import (
     project_world_allocation_spec,
     project_world_spec,
 )
-from .protocol import DispatchResult, ExecutionEnvelope
+from .protocol import ACCELERATOR_MEMORY_FEATURE, DispatchResult, ExecutionEnvelope
 from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, parse_analysis_policy, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
@@ -150,6 +150,7 @@ class Dispatcher:
         """
 
         _report("dryml.dispatch.plan.start", "Building dispatch plan")
+        session_snapshot = _session_snapshot()
         target_store = store or self.store
         if target_store is None:
             if is_definition_or_cdef(operation):
@@ -196,6 +197,7 @@ class Dispatcher:
                 inventory=effective_inventory,
                 inventory_policy=effective_inventory_policy,
                 resolver_policy=effective_resolver_policy,
+                session_snapshot=session_snapshot,
                 emit_warnings=True,
                 single_worker_only=True,
             )
@@ -336,6 +338,7 @@ class Dispatcher:
                 transfer={"strategy": marshal.strategy},
                 record_policy=record_policy,
                 reporting={"planning": planning_metadata},
+                handshake=_handshake_for_allocation(allocation_data),
                 launch={
                     **launch,
                     "world_id": provenance_world_spec["id"],
@@ -456,6 +459,7 @@ class Dispatcher:
         from .local_world import LOCAL_WORLD_BACKEND_IDENTITY, LocalWorldPlan, WorkerLaunchPlan, allocate_local_world
 
         _report("dryml.dispatch.world.plan.start", "Building local world dispatch plan")
+        session_snapshot = _session_snapshot()
         if _dispatch_extension_enabled(operation):
             raise DispatchPlanningError(
                 "managed operations support one single local subprocess only; local-world execution is unsupported"
@@ -489,6 +493,7 @@ class Dispatcher:
                 inventory=effective_inventory,
                 inventory_policy=effective_inventory_policy,
                 resolver_policy=effective_resolver_policy,
+                session_snapshot=session_snapshot,
                 emit_warnings=True,
             )
         except BaseException:
@@ -638,6 +643,7 @@ class Dispatcher:
                     transfer={"strategy": marshal.strategy},
                     record_policy=record_policy,
                     reporting={"planning": planning_metadata},
+                    handshake=_handshake_for_allocation(_allocation_to_json(allocation, world_id=world_spec.get("id"))),
                     launch=launch_data,
                 )
                 worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))
@@ -764,6 +770,7 @@ class Dispatcher:
         """
 
         target_store = store or self.store
+        session_snapshot = _session_snapshot()
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
         _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
@@ -800,6 +807,7 @@ class Dispatcher:
                 inventory=effective_inventory,
                 inventory_policy=effective_inventory_policy,
                 resolver_policy=effective_resolver_policy,
+                session_snapshot=session_snapshot,
                 single_worker_only=True,
             )
         finally:
@@ -1028,21 +1036,32 @@ def _make_dispatch_extension(
 
 
 def allocation_from_json(data: Mapping[str, Any] | None) -> RuntimeAllocationView:
-    """Build a CPU-only real worker allocation from envelope JSON."""
+    """Parse one worker allocation using the canonical allocation validators."""
 
     data = dict(data or {})
-    return RuntimeAllocationView(
+    process = worlds.ProcessAllocation.from_data(
+        {
+            "replica": data.get("replica", 0),
+            "rank": data.get("rank", 0),
+            "local_rank": data.get("local_rank", 0),
+            "resources": {
+                "cpus": data.get("cpus") or (),
+                "memory": data.get("memory"),
+                "accelerators": data.get("accelerators") or {},
+                **(
+                    {"accelerator_memory": data["accelerator_memory"]}
+                    if "accelerator_memory" in data
+                    else {}
+                ),
+            },
+            "env": data.get("env") or {},
+            "metadata": data.get("metadata") or {},
+        }
+    )
+    return process.to_runtime_resource_view(
         world_allocation_id=data.get("world_allocation_id"),
         role=data.get("role", "worker"),
-        replica=data.get("replica", 0),
-        rank=data.get("rank", 0),
-        local_rank=data.get("local_rank", 0),
-        cpus=tuple(data.get("cpus") or ()),
-        memory=data.get("memory"),
-        accelerators=data.get("accelerators") or {},
-        env=data.get("env") or {},
-        metadata=data.get("metadata") or {},
-    )
+    ).to_runtime_allocation_view()
 
 
 def _allocation_to_json(allocation: RuntimeAllocationView, *, world_id: str | None = None) -> dict[str, Any]:
@@ -1051,18 +1070,46 @@ def _allocation_to_json(allocation: RuntimeAllocationView, *, world_id: str | No
         env["DRYML_WORLD_ID"] = world_id
     if allocation.world_allocation_id is not None:
         env["DRYML_WORLD_ALLOCATION_ID"] = allocation.world_allocation_id
-    return {
+    data = {
         "world_allocation_id": allocation.world_allocation_id,
-        "role": allocation.role,
-        "replica": allocation.replica,
-        "rank": allocation.rank,
-        "local_rank": allocation.local_rank,
+        "role": allocation.role or "worker",
+        "replica": 0 if allocation.replica is None else allocation.replica,
+        "rank": 0 if allocation.rank is None else allocation.rank,
+        "local_rank": 0 if allocation.local_rank is None else allocation.local_rank,
         "cpus": list(allocation.cpus),
         "memory": allocation.memory,
         "accelerators": {key: list(value) for key, value in sorted(allocation.accelerators.items())},
         "env": env,
         "metadata": dict(allocation.metadata),
     }
+    if allocation.accelerator_memory:
+        data["accelerator_memory"] = {
+            kind: [
+                {"device": device, "memory": memory}
+                for device in allocation.accelerators.get(kind, ())
+                if device in limits
+                for memory in (limits[device],)
+            ]
+            for kind, limits in sorted(allocation.accelerator_memory.items())
+        }
+    return data
+
+
+def _handshake_for_allocation(allocation: Mapping[str, Any]) -> dict[str, Any]:
+    """Request allocation capabilities required by this launch-only payload."""
+
+    required = ["operation.function_call", "store.dir", "runtime.worker"]
+    if "accelerator_memory" in allocation:
+        required.append(ACCELERATOR_MEMORY_FEATURE)
+    return {"min_protocol": 1, "required_features": required}
+
+
+def _session_snapshot() -> Any:
+    """Capture one session generation before a public planning operation starts."""
+
+    from dryml.session.state import current
+
+    return current()
 
 
 def _local_cpu_ids() -> list[int]:

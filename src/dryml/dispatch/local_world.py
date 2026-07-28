@@ -15,7 +15,7 @@ from typing import Any
 from dryml.records.execution import persistence_safe_execution_error
 from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldSpec, assign_local_world, attach_world_allocation_id, attach_world_id, local_inventory, make_world_allocation_spec, make_world_spec, validate_world_spec
 
-from .backends import LocalSubprocessFuture, build_worker_command
+from .backends import LocalSubprocessFuture, _require_requested_features, build_worker_command
 from .errors import DispatchLaunchError, DispatchPlanningError
 from .protocol import DispatchResult, ExecutionEnvelope, WorkerHandshakeResponse, WorkerResponse, read_json_file, save_envelope, write_json_file
 
@@ -299,6 +299,7 @@ class LocalWorldFuture:
                     try:
                         handshake = WorkerHandshakeResponse.from_json(read_json_file(future.handshake_path))
                         _validate_handshake_allocation(key, handshake, self.plan)
+                        _require_requested_features(future.plan.envelope, handshake)
                         future._handshake = handshake
                         handshakes[key] = handshake
                     except Exception as exc:
@@ -685,21 +686,6 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
         assign_local_world(world, inventory=inventory, oversubscribe=oversubscribe)
     except Exception as exc:
         raise DispatchPlanningError(str(exc), context=getattr(exc, "context", {})) from exc
-
-
-def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:
-    """Return whether a concrete unsupported resource requests backend work."""
-
-    for value in values.values():
-        if isinstance(value, Mapping):
-            if _has_positive_unsupported_resource(value):
-                return True
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            if value > 0:
-                return True
-        elif value:
-            return True
-    return False
 
 
 def _with_coordination(envelope: ExecutionEnvelope, *, group_dir: str, start_path: str, cancel_path: str, worker_key: WorldWorkerKey, start_timeout: float) -> ExecutionEnvelope:

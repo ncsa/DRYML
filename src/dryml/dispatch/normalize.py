@@ -254,15 +254,21 @@ def normalize_user_operation(
     if callable(operation) or isinstance(operation, PickledCallable):
         if norm_method is not None:
             raise DispatchPlanningError("method_name is only valid for DRYML Definition/CDef/Object targets")
-        normalized = normalize_callable_operation(
-            operation,
-            args=norm_args,
-            kwargs=norm_kwargs,
-            allow_pickle=allow_pickle,
-            trace_cdef_side_table=trace_cdefs,
-            trace_cdef_positions=trace_positions,
-            trace_store=store,
-        )
+        # Trusted normalization must retain the public wrapper as the worker
+        # target without checking it against the parent process allowance.
+        from dryml.annotations.interception import _direct_call_bypass
+
+        target = operation.callable if isinstance(operation, PickledCallable) else operation
+        with _direct_call_bypass(target):
+            normalized = normalize_callable_operation(
+                operation,
+                args=norm_args,
+                kwargs=norm_kwargs,
+                allow_pickle=allow_pickle,
+                trace_cdef_side_table=trace_cdefs,
+                trace_cdef_positions=trace_positions,
+                trace_store=store,
+            )
         if trace_enabled:
             return replace(normalized, trace_live_target=trace_candidate)
         return normalized

@@ -53,3 +53,41 @@ def test_shared_assignment_rejects_known_accelerator_memory_overage():
             world,
             inventory=LocalResourceInventory((0,), {"gpu": (2,)}, accelerator_memory={"gpu": {2: "1GiB"}}),
         )
+
+
+def test_shared_assignment_ignores_zero_valued_unsupported_resources():
+    world = WorldSpec.from_data(
+        {
+            "roles": {
+                "worker": {
+                    "replicas": 1,
+                    "process": {
+                        "resources": {
+                            "devices": {"gpu": 0},
+                            "named": {"scratch": 0},
+                        }
+                    },
+                }
+            }
+        }
+    )
+
+    assignment = assign_local_world(world, inventory=LocalResourceInventory((0,)))
+
+    assert assignment.roles["worker"][0]["resources"]["cpus"] == [0]
+
+
+def test_shared_assignment_rejects_positive_unsupported_resources():
+    world = WorldSpec.from_data(
+        {
+            "roles": {
+                "worker": {
+                    "replicas": 1,
+                    "process": {"resources": {"named": {"scratch": 1}}},
+                }
+            }
+        }
+    )
+
+    with pytest.raises(WorldSpecValidationError, match="named devices or resources"):
+        assign_local_world(world, inventory=LocalResourceInventory((0,)))

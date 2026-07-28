@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -18,7 +18,7 @@ from dryml.records import ExecutionCancellationInfo, ExecutionErrorInfo, Executi
 from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
 
 from .errors import DispatchCancelled, DispatchLaunchError, DispatchTimeout, WorkerProtocolError
-from .protocol import WorkerHandshakeResponse, WorkerResponse, read_json_file, save_envelope, write_json_file
+from .protocol import WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, read_json_file, save_envelope, write_json_file
 
 
 BACKEND_IDENTITY = {"name": "dryml.local_subprocess", "kind": "local_subprocess", "version": "1"}
@@ -96,6 +96,7 @@ class LocalSubprocessFuture:
         while True:
             if os.path.exists(self.handshake_path):
                 self._handshake = WorkerHandshakeResponse.from_json(read_json_file(self.handshake_path))
+                _require_requested_features(self.plan.envelope, self._handshake)
                 _report("dryml.dispatch.worker.handshake", "Checking worker handshake", operation_id=self.plan.envelope.operation_id, data={"status": self._handshake.status, "pid": self._handshake.pid})
                 return self._handshake
             if self.done():
@@ -300,8 +301,18 @@ class LocalSubprocessBackend:
         response_path = os.path.join(work_dir, "response.json")
         stdout_path = os.path.join(work_dir, "stdout.txt")
         stderr_path = os.path.join(work_dir, "stderr.txt")
+        start_path = os.path.join(work_dir, "start.json")
+        cancel_path = os.path.join(work_dir, "cancel.json")
         try:
             envelope = plan.envelope
+            launch = dict(envelope.launch)
+            launch["coordination"] = {
+                "start_path": start_path,
+                "cancel_path": cancel_path,
+                "start_timeout": self.handshake_timeout,
+            }
+            envelope = replace(envelope, launch=launch)
+            launch_plan = replace(plan, envelope=envelope)
             save_envelope(request_path, envelope)
             cmd, child_env = build_worker_command(envelope.environment_spec)
             child_env.update({str(key): str(value) for key, value in (envelope.allocation_view.get("env") or {}).items()})
@@ -322,7 +333,7 @@ class LocalSubprocessBackend:
             raise DispatchLaunchError("failed to launch local subprocess worker", context={"error": str(exc)}) from exc
         future = LocalSubprocessFuture(
             process,
-            plan,
+            launch_plan,
             work_dir,
             request_path,
             handshake_path,
@@ -335,7 +346,9 @@ class LocalSubprocessBackend:
             process_tree=True,
         )
         try:
-            future.wait_for_handshake(timeout=self.handshake_timeout)
+            handshake = future.wait_for_handshake(timeout=self.handshake_timeout)
+            if handshake is not None and handshake.status == "ok":
+                write_json_file(start_path, {"status": "ok", "started_at": time.time()})
         except BaseException:
             try:
                 future.cancel(reason="worker_protocol_error", record=False)
@@ -343,6 +356,20 @@ class LocalSubprocessBackend:
                 future._cleanup()
             raise
         return future
+
+
+def _require_requested_features(envelope: Any, handshake: WorkerHandshakeResponse) -> None:
+    """Fail before execution when an ok worker omits a negotiated capability."""
+
+    if handshake.status != "ok":
+        return
+    request = WorkerHandshakeRequest.from_json(envelope.handshake)
+    missing = sorted(set(request.required_features) - set(handshake.features))
+    if missing:
+        raise WorkerProtocolError(
+            "worker handshake omitted requested features",
+            context={"features": missing},
+        )
 
 
 def _cleanup_launch_paths(plan: Any) -> None:

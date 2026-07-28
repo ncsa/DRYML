@@ -22,6 +22,7 @@ from .errors import WorkerProtocolError
 
 DISPATCH_WORKER_PROTOCOL_SCHEMA = "dryml.dispatch.worker_protocol.v1"
 DISPATCH_WORKER_PROTOCOL_VERSION = 1
+ACCELERATOR_MEMORY_FEATURE = "runtime.accelerator_memory.v1"
 EXECUTION_ENVELOPE_SCHEMA = "dryml.execution_envelope.v1"
 EXECUTION_ENVELOPE_SCHEMA_VERSION = 1
 
@@ -134,6 +135,13 @@ class ExecutionEnvelope:
         except Exception as exc:
             raise WorkerProtocolError("invalid record_policy", context=getattr(exc, "context", {})) from exc
         object.__setattr__(self, "store_refs", _store_ref_tuple(self.store_refs))
+        if "accelerator_memory" in self.allocation_view:
+            request = WorkerHandshakeRequest.from_json(self.handshake)
+            if ACCELERATOR_MEMORY_FEATURE not in request.required_features:
+                raise WorkerProtocolError(
+                    "accelerator-memory allocation requires worker feature negotiation",
+                    context={"feature": ACCELERATOR_MEMORY_FEATURE},
+                )
         _validate_coordination(self.launch.get("coordination"), self.allocation_view)
 
     @property

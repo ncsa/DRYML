@@ -27,7 +27,9 @@ def test_worker_configured_framework_import_succeeds_with_runtime_spec(tmp_path,
 
     result = Dispatcher(store=store).run(op, environment=env, runtime=runtime)
 
+    assert result.status == "ok"
     assert result.result_canonical["mode"] == "worker"
     assert result.result_canonical["bootstrap"] == "1"
     assert result.result_canonical["marker"] == "fake-dispatch-torch"
     assert result.result_canonical["threads"] == 3
+    assert result.result_canonical["cuda_visible_devices"] == ""

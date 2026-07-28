@@ -1,16 +1,20 @@
 import dataclasses
 import importlib
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from dryml.core.store.dir import DirStore
-from dryml.dispatch import Dispatcher, LocalSubprocessFuture, WorkerResponse, WorkerStoreRef, attach_recipe_id
+from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalSubprocessBackend, LocalSubprocessFuture, WorkerHandshakeResponse, WorkerResponse, WorkerStoreRef, attach_recipe_id
+from dryml.dispatch.backends import _require_requested_features
+from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA
 from dryml.dispatch.protocol import write_json_file
 from dryml.formats.ids import content_id
 from dryml.environments import PythonExecutableSpec
 from dryml.operations import attach_operation_id, make_function_call_spec
+from dryml.worlds import LocalResourceInventory
 
 
 class _DoneProcess:
@@ -213,3 +217,108 @@ def test_worker_rejects_missing_recipe_id_before_execution(tmp_path, target_modu
     )
     assert response.execution_record_id is None
     assert list(store.records.iter_records()) == []
+
+
+def test_parent_rejects_ok_handshake_missing_requested_feature(tmp_path):
+    envelope = ExecutionEnvelope(
+        dispatch_spec={"schema": "dryml.dispatch.v1", "schema_version": 1, "kind": "dispatch", "payload": {"operation_id": "op-v1-test"}},
+        execution_recipe={"schema": "dryml.execution_recipe.v1", "schema_version": 1, "kind": "execution_recipe", "payload": {"operation_id": "op-v1-test", "dispatch_id": "dispatch-v1-test", "backend": {"name": "dryml.local_subprocess"}}},
+        operation_spec={"schema": "dryml.operation.v1", "schema_version": 1, "kind": "function_call", "payload": {"function": "operator:add", "args": [1, 2]}},
+        handshake={"min_protocol": 1, "required_features": ["runtime.accelerator_memory.v1"]},
+    )
+    handshake = WorkerHandshakeResponse(
+        status="ok",
+        protocol_schema=DISPATCH_WORKER_PROTOCOL_SCHEMA,
+        protocol_version=1,
+        dryml_version=None,
+        python_version="3.x",
+        platform="test",
+        pid=1,
+        features=("runtime.worker",),
+        operation_kinds=(),
+        call_transports=(),
+        store_ref_kinds=(),
+        record_schemas={},
+        runtime_modes=("worker",),
+    )
+
+    with pytest.raises(Exception, match="omitted requested features"):
+        _require_requested_features(envelope, handshake)
+
+
+def test_old_worker_missing_accelerator_memory_feature_never_receives_start(monkeypatch, tmp_path):
+    script = tmp_path / "old_worker.py"
+    side_effect = tmp_path / "target-imported"
+    script.write_text(
+        """
+import json
+import os
+import pathlib
+import sys
+import time
+
+def argument(name):
+    return sys.argv[sys.argv.index(name) + 1]
+
+request = json.loads(pathlib.Path(argument("--request")).read_text(encoding="utf-8"))
+handshake = {
+    "status": "ok",
+    "protocol_schema": "dryml.dispatch.worker_protocol.v1",
+    "protocol_version": 1,
+    "dryml_version": None,
+    "python_version": sys.version.split()[0],
+    "platform": "fake-old-worker",
+    "pid": os.getpid(),
+    "features": ["operation.function_call", "store.dir", "runtime.worker"],
+    "operation_kinds": ["function_call"],
+    "call_transports": ["import_ref"],
+    "store_ref_kinds": ["dir_store"],
+    "record_schemas": {},
+    "runtime_modes": ["worker"],
+    "store_status": {},
+    "diagnostics": [],
+}
+pathlib.Path(argument("--handshake")).write_text(json.dumps(handshake), encoding="utf-8")
+start_path = pathlib.Path(request["launch"]["coordination"]["start_path"])
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline and not start_path.exists():
+    time.sleep(0.01)
+if start_path.exists():
+    pathlib.Path(os.environ["DRYML_OLD_WORKER_EFFECT"]).write_text("imported", encoding="utf-8")
+""",
+        encoding="utf-8",
+    )
+    child_env = dict(os.environ)
+    child_env["DRYML_OLD_WORKER_EFFECT"] = str(side_effect)
+    monkeypatch.setattr(
+        "dryml.dispatch.backends.build_worker_command",
+        lambda environment: ([sys.executable, str(script)], child_env),
+    )
+    store = DirStore(tmp_path / "store", query_index="none")
+    plan = Dispatcher(store=store).plan(
+        make_function_call_spec("operator:add", args=[1, 2]),
+        world={
+            "roles": {
+                "main": {
+                    "replicas": 1,
+                    "process": {
+                        "resources": {
+                            "accelerators": {"gpu": 1},
+                            "accelerator_memory": {"gpu": ["1GiB"]},
+                        }
+                    },
+                }
+            }
+        },
+        inventory=LocalResourceInventory(
+            (0,),
+            {"gpu": ("gpu-a",)},
+            accelerator_memory={"gpu": {"gpu-a": "2GiB"}},
+        ),
+        requirement_policy="ignore",
+    )
+
+    with pytest.raises(Exception, match="omitted requested features"):
+        LocalSubprocessBackend().submit(plan)
+
+    assert not side_effect.exists()

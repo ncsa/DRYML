@@ -20,8 +20,8 @@ from dryml.runtime.specs import RuntimeContextSpec
 from .backends import BACKEND_IDENTITY
 from .errors import DispatchSpecError, WorkerProtocolError
 from .operations import canonicalize_result, execute_operation
-from .planner import allocation_from_json
-from .protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, DISPATCH_WORKER_PROTOCOL_VERSION, ExecutionEnvelope, WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, load_envelope, write_json_file
+from .planner import _allocation_to_json, allocation_from_json
+from .protocol import ACCELERATOR_MEMORY_FEATURE, DISPATCH_WORKER_PROTOCOL_SCHEMA, DISPATCH_WORKER_PROTOCOL_VERSION, ExecutionEnvelope, WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, load_envelope, write_json_file
 from .recipes import validate_execution_recipe
 from .specs import validate_dispatch_spec
 from .stores import open_worker_store, validate_worker_store_access
@@ -50,9 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         envelope = load_envelope(ns.request)
         _validate_envelope_ids(envelope)
-        stores, store_status, supported, diagnostics = _open_and_validate_stores(envelope)
+        allocation = allocation_from_json(envelope.allocation_view)
+        allocation_features = _allocation_features(envelope, allocation)
+        stores, store_status, supported, diagnostics = _open_and_validate_stores(
+            envelope,
+            features=allocation_features,
+        )
         if not supported:
-            handshake = _handshake(envelope, status="unsupported", store_status=store_status, diagnostics=diagnostics)
+            handshake = _handshake(envelope, status="unsupported", store_status=store_status, diagnostics=diagnostics, features=allocation_features)
             write_json_file(ns.handshake, handshake.to_json())
             response = WorkerResponse(
                 status="unsupported",
@@ -65,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
             write_json_file(ns.response, response.to_json())
             return 1
         repo = Repo(stores=stores)
-        handshake = _handshake(envelope, status="ok", store_status=store_status)
+        handshake = _handshake(envelope, status="ok", store_status=store_status, features=allocation_features)
         write_json_file(ns.handshake, handshake.to_json())
         barrier_response = _wait_for_start_barrier(envelope, stores[0] if stores else None)
         if barrier_response is not None:
@@ -81,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
             repo,
             stores[0] if stores else None,
             managed_ticket=managed_ticket,
+            allocation=allocation,
         )
         write_json_file(ns.response, response.to_json())
         return 0 if response.status == "ok" else 1
@@ -103,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
 
-def _open_and_validate_stores(envelope: ExecutionEnvelope):
+def _open_and_validate_stores(envelope: ExecutionEnvelope, *, features: tuple[str, ...] = FEATURES):
     statuses: dict[str, Any] = {}
     stores = []
     diagnostics = []
@@ -115,12 +121,25 @@ def _open_and_validate_stores(envelope: ExecutionEnvelope):
             error = persistence_safe_execution_error(exc)
             diagnostics.append({"message": "worker Store validation failed", "error_type": error["type"], "code": error["metadata"]["code"]})
     request = WorkerHandshakeRequest.from_json(envelope.handshake)
-    missing = sorted(set(request.required_features) - set(FEATURES))
+    missing = sorted(set(request.required_features) - set(features))
     if request.min_protocol > DISPATCH_WORKER_PROTOCOL_VERSION:
         diagnostics.append({"message": "unsupported worker protocol version", "min_protocol": request.min_protocol, "worker_protocol": DISPATCH_WORKER_PROTOCOL_VERSION})
     if missing:
         diagnostics.append({"message": "missing required worker features", "features": missing})
     return stores, statuses, not diagnostics, tuple(diagnostics)
+
+
+def _allocation_features(envelope: ExecutionEnvelope, allocation: Any) -> tuple[str, ...]:
+    """Advertise accelerator-memory support only after exact parser retention."""
+
+    if "accelerator_memory" not in envelope.allocation_view:
+        return FEATURES
+    retained = _allocation_to_json(allocation).get("accelerator_memory")
+    if retained != envelope.allocation_view["accelerator_memory"]:
+        raise WorkerProtocolError(
+            "worker allocation parser did not retain accelerator-memory limits"
+        )
+    return (*FEATURES, ACCELERATOR_MEMORY_FEATURE)
 
 
 def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
@@ -158,7 +177,7 @@ def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
         raise WorkerProtocolError("execution envelope operation/dispatch/recipe IDs are inconsistent", context={"operation_id": operation_id, "dispatch_id": dispatch_id, "mismatches": mismatches})
 
 
-def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = ()) -> WorkerHandshakeResponse:
+def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), features: tuple[str, ...] = FEATURES) -> WorkerHandshakeResponse:
     return WorkerHandshakeResponse(
         status=status,
         protocol_schema=DISPATCH_WORKER_PROTOCOL_SCHEMA,
@@ -167,7 +186,7 @@ def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mappin
         python_version=sys.version.split()[0],
         platform=platform.platform(),
         pid=os.getpid(),
-        features=FEATURES,
+        features=features,
         operation_kinds=("function_call", "method_call"),
         call_transports=("import_ref", "pickle_small"),
         store_ref_kinds=("dir_store",),
@@ -189,8 +208,9 @@ def _execute(
     store: Any,
     *,
     managed_ticket: Mapping[str, Any] | None = None,
+    allocation: Any | None = None,
 ) -> WorkerResponse:
-    allocation = allocation_from_json(envelope.allocation_view)
+    allocation = allocation_from_json(envelope.allocation_view) if allocation is None else allocation
     runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec or {"mode": "worker", "device_visibility": {"policy": "assigned"}})
     try:
         with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, env=allocation.env, restore_environ=False, enforcement=RuntimeEnforcement.STRICT):

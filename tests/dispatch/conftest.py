@@ -11,8 +11,16 @@ def target_module(tmp_path):
     fake_torch.write_text(
         textwrap.dedent(
             '''
+            import os
+
             MARKER = "fake-dispatch-torch"
             THREADS = None
+            IMPORT_CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES")
+
+            class cuda:
+                @staticmethod
+                def device_count():
+                    return len([value for value in (IMPORT_CUDA_VISIBLE_DEVICES or "").split(",") if value])
 
             def set_num_threads(value):
                 global THREADS
@@ -139,6 +147,7 @@ def target_module(tmp_path):
                     "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV),
                     "marker": getattr(module, "MARKER", None),
                     "threads": getattr(module, "THREADS", None),
+                    "cuda_visible_devices": getattr(module, "IMPORT_CUDA_VISIBLE_DEVICES", None),
                 }
 
             def allocation_facts():

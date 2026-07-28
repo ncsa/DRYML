@@ -43,7 +43,7 @@ def assign_local_world(world: WorldSpec, *, inventory: LocalResourceInventory, o
         allocations: list[Mapping[str, Any]] = []
         for replica in range(role.replicas):
             resources = role.process.resources
-            if resources.devices or resources.named:
+            if _has_positive_unsupported_resource(resources.devices) or _has_positive_unsupported_resource(resources.named):
                 raise WorldSpecValidationError("local world allocation does not support named devices or resources", context={"role": role_name})
             requested_cpus = resources.cpus or 1
             if not oversubscribe and cpu_cursor + requested_cpus > len(inventory.cpus):
@@ -92,6 +92,21 @@ def _canonical_memory(value: int) -> str:
     from .resources import canonical_byte_size
 
     return canonical_byte_size(value)  # type: ignore[return-value]
+
+
+def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:
+    """Return whether an unsupported resource requests concrete capacity."""
+
+    for value in values.values():
+        if isinstance(value, Mapping):
+            if _has_positive_unsupported_resource(value):
+                return True
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if value > 0:
+                return True
+        elif value:
+            return True
+    return False
 
 
 __all__ = ["LocalWorldAssignment", "assign_local_world"]

@@ -8,6 +8,7 @@ import gc
 import threading
 import warnings
 
+import dill
 import pytest
 
 import dryml
@@ -113,6 +114,27 @@ def test_coroutine_generator_and_async_generator_hold_the_checked_lease():
 
     asyncio.run(consume())
     assert calls == ["generator"]
+
+
+def test_hard_wrappers_do_not_serialize_the_process_coordinator_graph():
+    @dryml.world.req(cpus={"exact": 1})
+    def sync_target():
+        return None
+
+    @dryml.world.req(cpus={"exact": 1})
+    async def coroutine_target():
+        return None
+
+    @dryml.world.req(cpus={"exact": 1})
+    def generator_target():
+        yield None
+
+    @dryml.world.req(cpus={"exact": 1})
+    async def async_generator_target():
+        yield None
+
+    for target in (sync_target, coroutine_target, generator_target, async_generator_target):
+        assert dill.dumps(target, protocol=5)
 
 
 def test_async_generator_forwards_send_throw_close_and_releases_its_lease():
@@ -404,6 +426,34 @@ def test_warn_override_enters_once_and_orchestrator_rejects_with_guidance():
     with pytest.raises(RuntimeTransitionError, match="dispatch"):
         target()
     assert calls == ["body"]
+
+
+def test_worker_allocation_proves_its_required_role_cardinality():
+    @dryml.world.req(
+        roles={
+            "worker": {
+                "replicas": {"exact": 2},
+                "resources": {"cpus": {"exact": 1}},
+            }
+        }
+    )
+    def target():
+        return "ok"
+
+    allocation = RuntimeAllocationView(
+        role="worker",
+        replica=0,
+        rank=0,
+        local_rank=0,
+        cpus=(0,),
+        metadata={"role_size": 2, "world_size": 2},
+    )
+    with enter_runtime(
+        RuntimeMode.WORKER,
+        allocation,
+        enforcement=RuntimeEnforcement.STRICT,
+    ):
+        assert target() == "ok"
 
 
 def test_hard_class_decoration_preserves_identity_and_supported_binding():

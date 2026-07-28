@@ -120,6 +120,13 @@ def test_mandatory_visibility_failure_is_not_downgraded(monkeypatch):
         torch_adapter().post_import(_result(), "torch")
 
 
+def test_torch_requires_a_visibility_count_api(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", types.ModuleType("torch"))
+
+    with pytest.raises(FrameworkImportSafetyError, match="cannot prove mandatory CUDA visibility"):
+        torch_adapter().post_import(_result(devices=(), limits={}, capacity={}), "torch")
+
+
 def test_torch_requires_capacity_for_fraction_and_proves_recoverable_allocator_rejection(monkeypatch):
     calls = []
 
