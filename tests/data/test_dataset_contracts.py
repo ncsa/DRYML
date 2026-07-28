@@ -1,3 +1,5 @@
+import sys
+
 import numpy as np
 import pytest
 
@@ -135,6 +137,23 @@ def test_batch_unbatch_roundtrip_preserves_finite_values():
 
     assert out == [[0], [1], [2], [3], [4]]
     assert Unbatch(Batch(ds, 2)).__len__() == Cardinality.finite(5)
+
+
+def test_numpy_batch_does_not_import_optional_frameworks(monkeypatch):
+    requested = []
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.delitem(sys.modules, "tensorflow", raising=False)
+    monkeypatch.setattr(
+        "dryml.runtime.import_configured_framework",
+        lambda name: requested.append(name),
+    )
+
+    batch = next(iter(Batch(_finite_dataset(2), 2)))
+
+    assert batch.tolist() == [[0], [1]]
+    assert requested == []
+    assert "torch" not in sys.modules
+    assert "tensorflow" not in sys.modules
 
 
 def test_batch_unbatch_drop_remainder_cardinality_discards_partial_batch():

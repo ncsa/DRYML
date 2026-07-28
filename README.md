@@ -29,9 +29,38 @@ Runtime state such as fitted weights remains separate from that identity.
 
 DRYML aims to be as lightweight as possible. The user should be able to grab only the they need and nothing else. It does not pull in heavy dependencies unless the user wants them. Most `dryml` submodules are separable and can be used without the rest of DRYML's machinery as well. Use what you like and leave the rest!
 
-## Dispatch, Planning, and Analysis Quickstart
+## Session, Dispatch, Planning, and Analysis Quickstart
 
-Follow this workflow in order when starting with DRYML.
+For current-process setup, start with [`dryml.session`](docs/session.md). The
+intentional omitted-mode default is ordinary unchecked Python, not strict
+orchestration: base import changes neither inherited framework/device behavior
+nor allocation. Use `manage()` before importing a GPU-capable framework for a
+checked CPU-only process, or `set_mode("orchestrator")` for checked planning
+without a current workload allocation.
+
+```python
+import dryml
+
+# Ordinary Python: leave the session untouched, or set_mode("python").
+assert dryml.session.mode() == "python"
+
+# Managed current process: CPU allowance, hidden accelerators, checked direct calls.
+managed = dryml.session.manage(cpus=2)
+
+# A distinct worker request: this notebook can remain CPU-only.
+managed = dryml.session.request_world(cpus=2, gpus=1)
+
+# One atomic replacement is available when setup belongs in one cell.
+managed = dryml.session.configure(mode="managed", resources={"cpus": 2})
+```
+
+Snapshots are immutable and report the active mode, current allowance, requested
+worker world, software requirements, and per-control enforcement statuses.
+Mandatory framework visibility is fail-closed; optional controls are reported as
+pending, configured, declarative, unsupported, or failed. See the
+[session guide](docs/session.md) for framework-import and restart boundaries.
+
+Follow this dispatch and analysis workflow after session setup when needed.
 
 ### 1. Create or open a Store
 
@@ -90,18 +119,20 @@ non-launching and reports bounded planning facts:
 explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
 ```
 
-### 6. Set notebook planning defaults
+### 6. Set a worker request
 
-Current environment and world values are context-local defaults for later
-planning, not allocation of this process:
+For the common persistent notebook path, use the session facade. A requested
+worker world remains distinct from the managed current-process allowance:
 
 ```python
-with dryml.environments.use(dryml.environments.CurrentEnvironmentSpec()):
-    with dryml.worlds.use(dryml.worlds.synthesize(None).require_world()):
-        explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
+dryml.session.request_world(cpus=1)
+explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
 ```
 
-### 7. Use plain mode for trusted inline work
+The context-local environment/world APIs remain available for advanced temporary
+composition. They are planning defaults, not current-process allocation.
+
+### 7. Use low-level plain mode only for advanced trusted inline work
 
 For trusted inline local work, `with dryml.runtime.plain():` uses an inline
 allocation with enforcement off. It is not worker isolation or a dispatch
@@ -226,7 +257,8 @@ ConcreteDefinition(
 | `dryml.tf`, `dryml.torch`, `dryml.jax`, `dryml.numpy` | Framework-specific dtype, tensor spec, and backend integration utilities without requiring every framework at import time. |
 | `dryml.environments` | Software environment requirements, compatibility checks, environment IDs, and environment probe records. |
 | `dryml.worlds` | Resource/topology requirements and allocations, such as CPU, memory, accelerator, role, and process specs. |
-| `dryml.runtime` | Process-local runtime mode, active allocation, device visibility, framework bootstrap, and import/workload guardrails. |
+| `dryml.session` | Persistent facade for ordinary Python, managed current-process setup, checked orchestration, and requested worker worlds. |
+| `dryml.runtime` | Advanced process-local runtime mode, active allocation, device visibility, framework bootstrap, and import/workload guardrails. |
 | `dryml.annotations` | Decorators and metadata collection for attaching environment, world, and runtime requirements to code. |
 | `dryml.code` | Explicitly imported reusable non-invoking analysis, optional probes, and trusted opt-in current-process tracing. |
 | `dryml.operations` | Portable function and method call specifications used by execution and dispatch layers. |

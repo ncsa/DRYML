@@ -166,6 +166,26 @@ When adding tests:
 
 If a new file is not listed in `path_tiers`, it inherits its category tier.
 
+## Session And Framework Tests
+
+Default session and framework-hook coverage uses deterministic fake framework
+packages and isolated subprocesses. Base `dryml` import, `dryml.session`, and
+adapter-leaf tests must remain lightweight and must not treat installed packages
+or a local GPU as evidence of a real framework guarantee. Raw TensorFlow,
+PyTorch, and JAX imports are checked through registered hooks with fakes by
+default.
+
+Run real framework CPU checks only when deliberately enabled in an isolated
+environment:
+
+```bash
+DRYML_RUN_REAL_FRAMEWORK_TESTS=1 ./tests.sh tests/multi_framework/test_session_framework_controls.py tests/tf/test_session_runtime.py tests/torch/test_session_runtime.py tests/jax/test_session_runtime.py -x
+```
+
+GPU checks additionally require an explicitly provisioned disposable host and
+`DRYML_RUN_GPU_TESTS=1`. Neither opt-in command proves unrun framework versions,
+GPU ordinals, or aggregate accelerator-memory enforcement.
+
 ## Dispatch And Code Benchmark
 
 The deterministic dispatch/code-analysis benchmark emits one bounded versioned

@@ -121,6 +121,18 @@ under its explicit policy, while `dryml.annotations` remains the merge authority
 Analysis itself does not select environments, allocate worlds, enforce runtime
 policy, launch workers, or decide candidate compatibility.
 
+## Trusted Requirement Wrappers
+
+Hard annotation decorators may install trusted wrappers at supported callable
+boundaries so a managed `dryml.session` can check requirements before user code.
+`dryml.code` resolves the original analysis target through that trusted registry,
+while dispatch transports the public importable wrapper. This is not a general
+Python interception mechanism: class-object/custom-metaclass invocation,
+properties and arbitrary custom descriptors, methods assigned after decoration,
+and references captured before decoration remain unsupported. Managed dispatch
+and dynamic tracing receive a private owner- and target-scoped bypass only for
+their reconstruction interval; the worker still validates its own allocation.
+
 ## Analysis Contract
 
 Static analysis and dynamic tracing share the existing `CodeAnalyzer`

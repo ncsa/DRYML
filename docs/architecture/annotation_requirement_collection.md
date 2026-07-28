@@ -32,3 +32,14 @@ Requirement declaration remains separate from dispatch candidate selection,
 environment/world compatibility checks, probes, runtime enforcement policy, and
 worker launch behavior. Dispatch consumes `RequirementResolution`; it does not
 own collection or merge semantics.
+
+Hard requirement decoration additionally installs trusted direct-call wrappers
+for supported functions and descriptors. In a managed session the wrapper checks
+the current-process allowance and environment before the body; Python mode
+intentionally bypasses session-derived checks. Supported boundaries include
+functions, ordinary/bound methods, static/class methods, managed descriptors,
+and explicitly decorated `__new__`, `__init__`, and `__call__`. Class-object or
+custom-metaclass invocation, property/custom descriptors, later method
+assignment, and pre-decoration references remain unsupported. The wrapper lease
+pins its session generation through synchronous, coroutine, generator, and async
+generator lifecycle completion.

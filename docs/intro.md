@@ -56,6 +56,16 @@ The important point is that `obj.definition` is not a pickle of the object. It i
 
 ## Major API Areas
 
+### Session Runtime
+
+`dryml.session` is the common runtime entry point. Fresh DRYML intentionally uses
+unchecked Python mode, preserving inherited process and framework behavior.
+`session.manage()` opts a current process into checked resource management;
+`session.set_mode("orchestrator")` opts into checked worker planning without a
+current workload allocation. The session guide explains immutable snapshots,
+framework hooks, reset/restart boundaries, and advanced low-level alternatives:
+[Sessions](session.md).
+
 Core object system:
 
 - `Object`
@@ -85,7 +95,8 @@ ML workflow APIs:
 
 Runtime APIs:
 
-- contexts
+- `dryml.session`
+- advanced contexts
 - resource specs
 - backend compatibility checks
 

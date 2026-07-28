@@ -7,6 +7,20 @@ Status: draft.
 This development release consolidates the completed requirements, runtime,
 dispatch, world, and code-analysis work:
 
+- `dryml.session` is the documented common runtime path. Omitted session setup
+  now intentionally means unchecked Python rather than strict orchestrator
+  enforcement; `manage()` and `set_mode("orchestrator")` are explicit opt-ins;
+- session snapshots are immutable, separate the current-process allowance from a
+  requested worker world, report per-control status, and retain safe
+  reset/restart boundaries around framework imports and active generation leases;
+- raw registered TensorFlow, PyTorch, and JAX root imports traverse lightweight
+  hooks in managed/orchestrator sessions. Mandatory visibility fails closed;
+  optional framework and allocator controls are reported per adapter without
+  claiming aggregate process-memory or accelerator-memory enforcement;
+- hard annotations are checked for supported direct calls in managed sessions,
+  while Python mode remains unchecked. Managed sessions and Store-backed managed
+  operations are distinct APIs;
+
 - the active core implementation is promoted to its permanent `dryml.core`
   package; the temporary pre-release package route is removed without an alias,
   and persisted definitions, Stores, records, pickles, hashes, or import
@@ -55,11 +69,15 @@ multi-host worlds, and cross-Python pickle transport are not implemented.
 `allow_pickle=True` remains same-Python-only. Alias-aware static analysis, alias
 provenance, and general Python call tracing remain deferred under
 [ADR 0008](adr/0008-deferred-alias-aware-code-analysis.md).
-Dispatch planning and launch currently do not honor process-local
-`runtime_enforcement` `OFF`; callers must still satisfy the normal dispatch
-planning and launch requirements. This unsupported behavior is retained as the
-sole strict expected failure and does not affect trusted inline
-`runtime.disabled()` or `runtime.plain()` scopes.
+An omitted dispatch `requirement_policy` follows active runtime enforcement, so
+the fresh Python baseline selects compatibility policy `ignore`. That policy
+relaxes requirement compatibility only: malformed operations, unsafe transport,
+allocation feasibility, mandatory visibility, and worker protocol validation
+remain blocking.
+
+Real framework and GPU runtime evidence remains opt-in. The default suite uses
+deterministic fake frameworks and does not claim that local installed packages or
+an unrun GPU host prove TensorFlow, PyTorch, JAX, allocator, or GPU behavior.
 
 The draft `dryml.artifacts.Accuracy` API and object-directory Artifact payload
 contract are removed without compatibility aliases or migration. Use

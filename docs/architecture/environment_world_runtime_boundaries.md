@@ -6,7 +6,7 @@ Current ownership boundary for environments, worlds, runtime, and dispatch.
 
 ## Current State
 
-DRYML has distinct modules for software environments, resource worlds, and process-local runtime state. Dispatch records a requested world separately from its actual allocation, resolves explicit environment registries only after higher-precedence selections are absent, and can synthesize a bounded local world from a hard requirement. Notebook/session defaults are context-local through `dryml.environments.current()` and `dryml.worlds.current()`.
+DRYML has distinct modules for software environments, resource worlds, and process-local runtime state. `dryml.session` is a persistent facade over those boundaries, not a replacement authority. Dispatch records a requested world separately from its actual allocation, resolves explicit environment registries only after higher-precedence selections are absent, and can synthesize a bounded local world from a hard requirement. Context-local defaults remain available through `dryml.environments.current()` and `dryml.worlds.current()`.
 
 ## Definitions
 
@@ -35,6 +35,15 @@ Probe processes do not need the final workload world and should normally run wit
 Current-process probes can inspect live local/notebook targets because they preserve the live `CodeTarget` wrapper. Worker/subprocess probes cross a JSON boundary and therefore require a stable `module:qualname` import path; `source_spec` remains descriptive data and is not reconstructed. Timeout enforcement is subprocess-based; current-process probes with timeouts route import-path targets through the current Python worker and reject other targets with a structured diagnostic.
 
 ## Notebook Current/Default State
+
+Fresh `dryml.session` state is intentionally unchecked Python. A managed session
+creates the current-process allowance and applies pre-import visibility controls;
+an orchestrator session has checked control-plane behavior with no current
+allocation. `session.request_world(...)` remains separate worker intent, so a
+CPU-only managed notebook can dispatch a GPU worker without exposing it locally.
+Environment requirements are software compatibility only. Process memory and
+accelerator allocator memory are distinct, and both remain declarative unless a
+specific process or adapter control reports a stronger per-control status.
 
 `dryml.environments.current()` and `dryml.worlds.current()` represent context-local notebook/session defaults for future dispatches. In contrast, `dryml.runtime.active_runtime().allocation` means the actual allocation of this process. Setting a current world does not allocate resources and does not imply that the current process owns that world.
 
@@ -87,8 +96,8 @@ synthesis. `dryml.environments` owns explicit registry candidate resolution and
 probing. `dryml.dispatch` applies precedence, validates the selected candidates,
 and asks a backend to create allocations; it does not make registry state global.
 
-An ordinary notebook keeps its registry in a local variable and uses
-`environments.use(...)`/`worlds.use(...)` for restorable defaults. Inventory and
-synthesis still leave the notebook at `NoAllocation`; only a worker receives the
-actual allocation. Resolver and inventory work are bounded per request and do
-not use cross-plan caching.
+An advanced notebook can keep its registry in a local variable and use
+`environments.use(...)`/`worlds.use(...)` for temporary defaults. Inventory and
+synthesis still leave that low-level notebook path at `NoAllocation`; only a
+worker receives the actual allocation. Resolver and inventory work are bounded
+per request and do not use cross-plan caching.

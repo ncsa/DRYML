@@ -77,6 +77,14 @@ def test_canonical_notebook_registry_has_final_tutorial_order():
         ("sklearn",),
         ("sklearn",),
     ]
+    assert [item.fake_frameworks for item in CANONICAL_NOTEBOOKS] == [
+        (),
+        (),
+        ("tensorflow",),
+        (),
+        (),
+        (),
+    ]
     assert [item.python_max_exclusive for item in CANONICAL_NOTEBOOKS] == [
         None,
         None,
@@ -88,7 +96,7 @@ def test_canonical_notebook_registry_has_final_tutorial_order():
     assert [item.allowed_optional_imports for item in CANONICAL_NOTEBOOKS] == [
         frozenset(),
         frozenset(),
-        frozenset(),
+        frozenset({"tensorflow"}),
         frozenset({"sklearn"}),
         frozenset({"sklearn"}),
         frozenset({"sklearn"}),
@@ -114,7 +122,7 @@ def test_canonical_notebooks_satisfy_static_contract(item):
         assert "Python 3.10-3.13" in all_source
 
 
-def test_runtime_notebook_teaches_current_execution_distinctions():
+def test_runtime_notebook_teaches_session_first_execution_distinctions():
     item = next(
         item
         for item in CANONICAL_NOTEBOOKS
@@ -124,11 +132,18 @@ def test_runtime_notebook_teaches_current_execution_distinctions():
     all_source, executable_source = _notebook_sources(document)
 
     required_executable = {
-        "DispatchPlanningError",
+        "AnnotationResolutionError",
         "DirStore",
         "PythonExecutableSpec",
         "TemporaryDirectory",
-        "active_runtime().allocation",
+        "dryml.session.configure",
+        "dryml.session.current",
+        "dryml.session.manage",
+        "dryml.session.request_world",
+        "dryml.session.reset",
+        "NOTEBOOK_RESTART_REQUIRED_HANDLED",
+        "importlib.import_module('tensorflow')",
+        "managed.statuses",
         "diagnostic_count",
         "dryml.dispatch.run",
         "operator.add",
@@ -137,19 +152,52 @@ def test_runtime_notebook_teaches_current_execution_distinctions():
     }
     missing = {token for token in required_executable if token not in executable_source}
     assert not missing, f"runtime notebook is missing executable teaching elements: {sorted(missing)}"
-    assert "allow_pickle=True" in all_source
-    assert "same-Python" in all_source
+    assert "ordinary unchecked Python" in all_source
+    assert "CPU-only" in all_source
+    assert "fresh process" in all_source
     assert not {
         token
         for token in (
             "dryml.context",
             "dryml.execute",
+            "ExitStack",
+            "CurrentEnvironmentSpec",
+            "WorldSpec",
+            "dryml.environments.use",
+            "dryml.worlds.use",
             "requirement_policy='ignore'",
             'requirement_policy="ignore"',
             "runtime.disabled",
         )
         if token in executable_source
     }
+
+
+def test_session_docs_state_the_shipped_default_and_interception_boundaries():
+    repository = Path(__file__).resolve().parents[2]
+    session = (repository / "docs/session.md").read_text(encoding="utf-8")
+    migration = (repository / "docs/migration/session_runtime_default.md").read_text(encoding="utf-8")
+
+    for token in (
+        "ordinary unchecked Python",
+        "set_mode(\"python\")",
+        "manage()",
+        "set_mode(\"orchestrator\")",
+        "configure(...)",
+        "current-process allowance",
+        "requested worker world",
+        "generation lease",
+        "restart",
+        "Mandatory visibility",
+        "class-object/custom-metaclass",
+        "post-decoration assignment",
+        "pre-decoration references",
+        "private scoped bypass",
+    ):
+        assert token in session
+    assert "managed session" in session
+    assert "managed operation" in session
+    assert "strict orchestration" in migration
 
 
 def test_definition_variants_notebook_teaches_identity_materialization_and_structural_query():

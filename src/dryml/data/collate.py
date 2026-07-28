@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import sys
 from typing import Any
 
 import numpy as np
@@ -50,19 +51,21 @@ def default_collate(items: list[Any]) -> Any:
 
     # torch tensor
     try:
-        from dryml.runtime import import_configured_framework
-        torch = import_configured_framework("torch")
-        if isinstance(first, torch.Tensor):
-            return torch.stack(items, dim=0)
+        torch = sys.modules.get("torch")
+        tensor_type = getattr(torch, "Tensor", None)
+        stack = getattr(torch, "stack", None)
+        if tensor_type is not None and callable(stack) and isinstance(first, tensor_type):
+            return stack(items, dim=0)
     except Exception:
         pass
 
     # tf tensor
     try:
-        from dryml.runtime import import_configured_framework
-        tf = import_configured_framework("tensorflow")
-        if tf.is_tensor(first):
-            return tf.stack(items, axis=0)
+        tf = sys.modules.get("tensorflow")
+        is_tensor = getattr(tf, "is_tensor", None)
+        stack = getattr(tf, "stack", None)
+        if callable(is_tensor) and callable(stack) and is_tensor(first):
+            return stack(items, axis=0)
     except Exception:
         pass
 

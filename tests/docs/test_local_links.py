@@ -10,6 +10,7 @@ from pathlib import Path
 
 CHANGED_DOCUMENTS = (
     "README.md",
+    "docs/session.md",
     "docs/table_of_content.md",
     "docs/models.md",
     "docs/annotations.md",
@@ -19,6 +20,7 @@ CHANGED_DOCUMENTS = (
     "docs/context.md",
     "docs/operations.md",
     "docs/migration/legacy_context_execute_removal.md",
+    "docs/migration/session_runtime_default.md",
     "docs/release_notes.md",
     "docs/architecture/code_analysis.md",
     "docs/architecture/runtime_dispatch_requirements.md",

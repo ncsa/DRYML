@@ -15,13 +15,23 @@ This document summarizes the world/runtime foundation.
 `dryml.runtime` describes process-local activation:
 
 - `RuntimeMode` is one of `orchestrator`, `probe`, `worker`, or `inline`.
-- The default active runtime is `orchestrator + NoAllocation`.
+- The low-level Python baseline is `orchestrator + NoAllocation` with
+  enforcement off. This is the intentional ordinary-Python default, not strict
+  orchestration.
 - `RuntimeContextSpec` captures device visibility, framework bootstrap settings, process-local limits, and environment overrides.
 - Device visibility and bootstrap plans can be built and applied before framework imports or object materialization.
 
 World and runtime specs are canonical JSON sidecars written through `RecordStoreIO`. They are not DRYML Objects and do not change `ConcreteDefinition` identity.
 
-## Requested Defaults, Allocation, and Plain Mode
+## Session, Requested Defaults, Allocation, and Plain Mode
+
+Use `dryml.session` for persistent common setup. `session.manage()` creates a
+checked current-process allocation, while `session.request_world()` describes
+future workers without changing that allocation. This permits a CPU-only managed
+notebook to dispatch a GPU worker from retained pre-hide inventory. Process
+memory and accelerator memory are distinct; current process-memory limits remain
+declarative unless a documented low-level control proves otherwise. See
+[Sessions](session.md).
 
 `dryml.worlds.current()`, `set_current(...)`, `reset_current()`, and `use(...)`
 manage a context-local requested world for future dispatch planning. A requested
@@ -37,7 +47,7 @@ with dryml.worlds.use(requested):
     assert dryml.worlds.current() == requested
 ```
 
-For trusted inline local work, use `runtime.plain()`. It enters `INLINE` mode
+For advanced trusted inline local work, use `runtime.plain()`. It enters `INLINE` mode
 with a local allocation and enforcement off, and restores the prior runtime state
 on normal exit or exception. It neither launches a worker nor isolates code:
 

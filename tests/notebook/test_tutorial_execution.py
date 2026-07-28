@@ -44,6 +44,8 @@ def _write_notebook(path: Path, source: str) -> Path:
 def _assert_clean_result(result, item):
     assert result.returncode == 0
     assert result.state_restored
+    assert result.session_restored
+    assert result.process_effects_restored
     assert result.working_directory_restored
     assert result.module_table_restored
     assert result.linecache_restored
@@ -349,6 +351,19 @@ dryml.environments.set_current(CurrentEnvironmentSpec())
     )
 
     with pytest.raises(NotebookExecutionError, match=r"state-leak\.ipynb: child cleanup failed: state_restored"):
+        execute_notebook(notebook, work_root=tmp_path / "run")
+
+
+def test_child_cleanup_failure_names_leaked_session_configuration(tmp_path):
+    notebook = _write_notebook(
+        tmp_path / "session-leak.ipynb",
+        "import dryml\ndryml.session.require_env('dryml>=0')",
+    )
+
+    with pytest.raises(
+        NotebookExecutionError,
+        match=r"session-leak\.ipynb: child cleanup failed: state_restored, session_restored",
+    ):
         execute_notebook(notebook, work_root=tmp_path / "run")
 
 

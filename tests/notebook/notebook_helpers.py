@@ -81,6 +81,7 @@ class NotebookSpec:
 
     path: Path
     extras: tuple[str, ...] = ()
+    fake_frameworks: tuple[str, ...] = ()
     python_max_exclusive: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
@@ -89,6 +90,9 @@ class NotebookSpec:
         unknown = set(self.extras) - set(_EXTRA_OPTIONAL_IMPORTS)
         if unknown:
             raise ValueError(f"unknown notebook extras: {', '.join(sorted(unknown))}")
+        unknown_fakes = set(self.fake_frameworks) - _OPTIONAL_IMPORTS
+        if unknown_fakes:
+            raise ValueError(f"unknown fake frameworks: {', '.join(sorted(unknown_fakes))}")
         bound = self.python_max_exclusive
         if bound is not None:
             if not isinstance(bound, tuple) or len(bound) != 2:
@@ -100,7 +104,7 @@ class NotebookSpec:
     def allowed_optional_imports(self) -> frozenset[str]:
         """Return optional import roots implied by the declared DRYML extras."""
 
-        return frozenset().union(*(_EXTRA_OPTIONAL_IMPORTS[extra] for extra in self.extras))
+        return frozenset(self.fake_frameworks).union(*(_EXTRA_OPTIONAL_IMPORTS[extra] for extra in self.extras))
 
     @property
     def supports_current_python(self) -> bool:
@@ -115,6 +119,8 @@ class NotebookExecutionResult:
 
     returncode: int
     state_restored: bool
+    session_restored: bool
+    process_effects_restored: bool
     working_directory_restored: bool
     module_table_restored: bool
     linecache_restored: bool
@@ -128,7 +134,7 @@ class NotebookExecutionResult:
 CANONICAL_NOTEBOOKS = (
     NotebookSpec(Path("examples/notebooks/objects_definitions_and_repos.ipynb")),
     NotebookSpec(Path("examples/notebooks/datasets_and_transforms.ipynb")),
-    NotebookSpec(Path("examples/notebooks/local_defaults_and_plain_mode.ipynb")),
+    NotebookSpec(Path("examples/notebooks/local_defaults_and_plain_mode.ipynb"), fake_frameworks=("tensorflow",)),
     NotebookSpec(
         Path("examples/notebooks/models_experiments_and_metrics.ipynb"),
         extras=("sklearn",),
@@ -451,6 +457,10 @@ from dryml.runtime import active_runtime
 before_environment = dryml.environments.current()
 before_world = dryml.worlds.current()
 before_runtime = active_runtime()
+try:
+    before_affinity = tuple(sorted(os.sched_getaffinity(0))) if hasattr(os, 'sched_getaffinity') else None
+except OSError:
+    before_affinity = None
 before_cwd = Path.cwd()
 before_modules = dict(sys.modules)
 before_linecache = dict(linecache.cache)
@@ -623,12 +633,36 @@ try:
 finally:
     optional_imports = ({name.split('.', 1)[0] for name in sys.modules} & optional_roots) - before_optional
     try:
+        after_session = dryml.session.current()
+        ordinary_session_restored = (
+            after_session.mode == 'python'
+            and after_session.allocation is None
+            and after_session.requested_world is None
+            and not after_session.environment.requirements
+            and after_session.health == 'healthy'
+        )
+        restart_required_handled = (
+            module.__dict__.get('NOTEBOOK_RESTART_REQUIRED_HANDLED') is True
+            and after_session.mode in {'managed', 'orchestrator'}
+            and after_session.health == 'healthy'
+            and 'tensorflow' in sys.modules
+        )
+        session_restored = ordinary_session_restored or restart_required_handled
+        after_affinity = tuple(sorted(os.sched_getaffinity(0))) if hasattr(os, 'sched_getaffinity') else None
+        process_effects_restored = (
+            (not dryml.runtime.publication.effect_journal() or restart_required_handled)
+            and after_affinity == before_affinity
+        )
         state_restored = (
             dryml.environments.current() is before_environment
             and dryml.worlds.current() is before_world
-            and active_runtime() is before_runtime
+            and (active_runtime() == before_runtime or restart_required_handled)
+            and session_restored
+            and process_effects_restored
         )
     except BaseException:
+        session_restored = False
+        process_effects_restored = False
         state_restored = False
 
     try:
@@ -655,6 +689,8 @@ report = {
     'error': execution_error,
     'error_cell': error_cell,
     'state_restored': state_restored,
+    'session_restored': session_restored,
+    'process_effects_restored': process_effects_restored,
     'working_directory_restored': working_directory_restored,
     'module_table_restored': module_table_restored,
     'linecache_restored': linecache_restored,
@@ -962,6 +998,8 @@ def execute_notebook(
         )
     cleanup_fields = (
         "state_restored",
+        "session_restored",
+        "process_effects_restored",
         "working_directory_restored",
         "module_table_restored",
         "linecache_restored",
@@ -1014,6 +1052,8 @@ def execute_notebook(
     return NotebookExecutionResult(
         returncode=process.returncode,
         state_restored=True,
+        session_restored=True,
+        process_effects_restored=True,
         working_directory_restored=True,
         module_table_restored=True,
         linecache_restored=True,

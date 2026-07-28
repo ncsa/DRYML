@@ -59,6 +59,17 @@ PEP 508 environment markers are evaluated from the `EnvironmentRecord` being che
 
 Environment checks are software-focused. CUDA, GPU allocation, process topology, and framework runtime configuration belong to world, runtime, and provider policy, not ordinary `EnvironmentRequirement` fields.
 
+## Session Requirements
+
+For the common path, `dryml.session.require_env(...)` merges PEP 508 package
+requirements and concise Python, capability, or exclusion constraints into the
+persistent session. Managed sessions check the current interpreter; orchestrator
+sessions carry them into worker resolution. Python mode intentionally adds no
+session-derived enforcement. Environment requirements do not request GPUs or
+configure visibility; use `session.manage(...)` and `session.request_world(...)`
+for those separate resource concerns. Candidate registries, Conda, executable,
+and container selection remain advanced `dryml.environments` APIs.
+
 ## Content IDs
 
 `EnvironmentRecord`, `EnvironmentRequirement`, environment specs, and lock refs have stable content IDs.

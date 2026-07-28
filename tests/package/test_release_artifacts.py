@@ -61,6 +61,11 @@ FORBIDDEN_NAMES = {
     "timings.json",
 }
 REQUIRED_CANDIDATE_FILES = {"MANIFEST.in", RELEASE_CONTRACT_PATH}
+REQUIRED_RELEASE_DOCUMENTS = {
+    "README.md",
+    "docs/session.md",
+    "docs/migration/session_runtime_default.md",
+}
 RETIRED_CORE_PACKAGE = "core" + "2"
 
 
@@ -217,6 +222,13 @@ def test_manifest_uses_exact_example_allowlist():
         line.startswith(("include tutorials/", "recursive-include examples", "recursive-include tutorials"))
         for line in lines
     )
+
+
+def test_release_documentation_contract_includes_session_migration():
+    """Keep the public session guide and default-change migration in sdists."""
+
+    repository = Path(__file__).resolve().parents[2]
+    assert REQUIRED_RELEASE_DOCUMENTS <= _tracked_files(repository)
 
 
 def test_worktree_blob_oid_honors_git_line_ending_conversion(tmp_path):

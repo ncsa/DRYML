@@ -15,6 +15,26 @@ DRYML currently separates declaration, planning, and execution across several mo
 - `dryml.code.trace(...)` is the sole invocation-bearing analysis facade;
   `dryml.dispatch` owns only explicit opt-in policy, worker-effective invocation
   reconstruction, provenance admission, and launch decisions.
+- `dryml.session` projects immutable process-global generations as the common
+  Python, managed, and orchestrator facade without replacing typed low-level
+  APIs.
+
+## Session Generation Boundary
+
+Fresh sessions intentionally use the low-level orchestrator/no-allocation
+baseline with enforcement off, so ordinary Python remains unchecked. Managed
+sessions publish an inline allocation with strict checks; orchestrator sessions
+publish strict control-plane state with no current workload allocation. A
+generation holds the current allowance, requested worker world, environment
+requirements, retained visibility inventory, and per-control outcomes. Direct
+checked calls lease their generation through completion; an effect-changing
+transition fails busy while such a lease is active. Declarative updates may
+advance a later generation.
+
+The session current allowance and requested worker world are separate. Dispatch
+captures one generation, never turns the notebook allocation into worker
+capacity, and may launch a GPU worker from a CPU-only managed parent. Python mode
+does not add session requirements to direct calls or worker resolution.
 
 ## Ownership Boundary
 
@@ -114,7 +134,7 @@ There is deliberately no cross-plan resolver, probe, or inventory cache.
 
 ## Runtime Enforcement Policy
 
-`RuntimeMode` describes process role: `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy is separate and uses `RuntimeEnforcement.STRICT`, `RuntimeEnforcement.WARN`, and `RuntimeEnforcement.OFF`. Plain Python execution uses `RuntimeMode.INLINE` with a local runtime allocation view and `RuntimeEnforcement.OFF`; it does not add another runtime role.
+`RuntimeMode` describes process role: `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy is separate and uses `RuntimeEnforcement.STRICT`, `RuntimeEnforcement.WARN`, and `RuntimeEnforcement.OFF`. The fresh session baseline is `ORCHESTRATOR + NoAllocation + OFF`; advanced `runtime.plain()` uses `INLINE` with a local allocation and `OFF`. Neither adds another runtime role.
 
 Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcement guard violations emit `RuntimeWarning` where safe and continue. In `OFF`, those guard violations bypass safely without inventing resources. Python errors, import errors, serialization errors, and user code exceptions are not bypassed.
 

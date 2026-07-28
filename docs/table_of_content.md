@@ -29,7 +29,7 @@ it, then verifies exact and alias loads restore that state.
 
 1. [Objects, definitions, and repositories](../examples/notebooks/objects_definitions_and_repos.ipynb) (`base`): construction identity, mutable state, Store save/load, aliases, and query domains.
 2. [Datasets and transforms](../examples/notebooks/datasets_and_transforms.ipynb) (`base`): re-iterable sources, tensor specs, method nodes, and structural transforms.
-3. [Local defaults and plain mode](../examples/notebooks/local_defaults_and_plain_mode.ipynb) (`base`): environments, worlds, runtime allocation, trusted inline work, and worker dispatch.
+3. [Local session defaults and plain mode](../examples/notebooks/local_defaults_and_plain_mode.ipynb) (`base`): Python/managed/orchestrator sessions, immutable snapshots, worker intent, and advanced inline work.
 4. [Models, experiments, and metrics](../examples/notebooks/models_experiments_and_metrics.ipynb) (`sklearn`): the maintained sklearn model, training, experiment, metric, and persistence path.
 5. [Definition-driven experiments](../examples/notebooks/definition_driven_experiments.ipynb) (`sklearn`): immutable experiment variants and reproducible construction identity.
 6. [Local hyperparameter search](../examples/notebooks/local_hyperparameter_search.ipynb) (`sklearn`): finite search spaces, bounded execution, deterministic selection, and temporary publication.
@@ -42,20 +42,20 @@ this sequence.
 
 ## Recommended Reading Order
 
-1. [Create or open a Store](repos.md)
-2. [Declare requirements and defaults](annotations.md)
-3. [Dispatch a module-level function](dispatch.md#python-shaped-dispatch)
-4. [Dispatch a stored CDef method](dispatch.md#python-shaped-dispatch)
+1. [Choose a session mode](session.md#start-with-the-intended-mode)
+2. [Create or open a Store](repos.md)
+3. [Declare requirements and defaults](annotations.md)
+4. [Dispatch a module-level function](dispatch.md#python-shaped-dispatch)
 5. [Explain a plan before launching](dispatch.md#requirement-aware-planning)
-6. [Set notebook environment/world defaults](world_runtime.md#requested-defaults-allocation-and-plain-mode)
-7. [Use `runtime.plain()` for inline work](world_runtime.md#requested-defaults-allocation-and-plain-mode)
-8. [Analyze code without invoking it](architecture/code_analysis.md#fact-oriented-api)
-9. [Opt into trusted current-process tracing](architecture/code_analysis.md#dynamic-trace-contract)
-10. [Use Operations as advanced canonical IR](operations.md)
+6. [Use advanced environment/world defaults when needed](world_runtime.md#session-requested-defaults-allocation-and-plain-mode)
+7. [Analyze code without invoking it](architecture/code_analysis.md#fact-oriented-api)
+8. [Opt into trusted current-process tracing](architecture/code_analysis.md#dynamic-trace-contract)
+9. [Use Operations as advanced canonical IR](operations.md)
 
 ## Additional Documentation
 
 - [Introduction](intro.md)
+- [Sessions](session.md)
 - [Objects and Definitions](objects_and_defs.md)
 - [Immutable Definition Graph](immutable_definition_graph.md)
 - [Formats](formats.md)
@@ -69,6 +69,7 @@ this sequence.
 - [Artifacts API](artifacts.md)
 - [Query Index Backend Contracts](query_index_backend_contracts.md)
 - [Migration from legacy context/execute APIs](migration/legacy_context_execute_removal.md)
+- [Migration to the session runtime default](migration/session_runtime_default.md)
 - [Release Notes](release_notes.md)
 - [Testing Workflow](testing.md)
 - [ADR 0009: Managed Operation Lifecycle](adr/0009-managed-operation-lifecycle.md)

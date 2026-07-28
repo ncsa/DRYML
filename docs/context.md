@@ -2,8 +2,10 @@
 
 Status: current.
 
-DRYML separates execution concerns into four layers:
+DRYML separates execution concerns into five layers:
 
+- `dryml.session` is the persistent common facade. Fresh sessions intentionally
+  use unchecked Python; managed and orchestrator checks are explicit opt-ins.
 - `dryml.environments` describes software compatibility, such as Python versions and package requirements.
 - `dryml.worlds` describes resource and topology requirements and requested launch shapes.
 - `dryml.runtime` describes process-local mode, active allocation, device visibility, framework bootstrap, and guards.
@@ -25,6 +27,21 @@ def train(model, data):
 ```
 
 Decorators attach metadata only. They do not allocate resources, enter runtime, import frameworks, or spawn workers.
+
+## Common Session Setup
+
+```python
+import dryml
+
+dryml.session.manage(cpus=2)       # Current process, CPU-only and checked.
+dryml.session.request_world(cpus=2, gpus=1)  # Later worker intent.
+```
+
+The two calls intentionally describe different processes. `manage()` affects
+direct annotated calls and framework visibility in this process;
+`request_world()` supplies a lower-precedence default for future dispatch. See
+[Sessions](session.md) for atomic `configure(...)`, snapshots, status reporting,
+safe reset, and the post-framework-import restart boundary.
 
 ## Running Work
 

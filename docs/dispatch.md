@@ -134,6 +134,17 @@ execution path, not while normalizing a lightweight metric or cache definition.
 
 ## Requirement-Aware Planning
 
+### Session Defaults
+
+`dryml.session` is the common notebook setup path. In managed or orchestrator
+mode, dispatch captures one immutable session generation, merges its software
+requirements, and considers its requested worker world after explicit,
+annotation-default, and context-local worlds. The session's current-process
+allocation is never repurposed as worker capacity: a CPU-only managed parent can
+request and launch a GPU worker from its retained pre-hide inventory. Python mode
+intentionally contributes neither session-derived requirement enforcement nor a
+worker world. See [Sessions](session.md).
+
 `plan`, `submit`, and `run` normalize an operation once, collect its static
 annotation facts, resolve requirements/defaults, select candidates, and check
 the selected candidates before launch. Explicit `environment=`, `world=`, and
@@ -482,7 +493,7 @@ allocator policy. Automatic synthesis remains disjoint; the resulting planning
 metadata records either `disjoint_local` or `oversubscribed_local` under
 `dryml.world_allocation`.
 
-For notebooks, ordinary context APIs are sufficient:
+For advanced temporary notebook composition, context APIs remain available:
 
 ```python
 registry = dryml.environments.EnvironmentRegistry()

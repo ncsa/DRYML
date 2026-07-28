@@ -16,7 +16,33 @@ from dryml.runtime.allocation import is_no_allocation
 from dryml.worlds import WorldSpec
 
 
-def test_notebook_context_defaults_are_selected_and_restored_without_allocation():
+def test_notebook_session_defaults_are_persistent_and_reset_semantically():
+    dryml.session.reset()
+    try:
+        fresh = dryml.session.current()
+        assert fresh.mode == "python"
+        assert fresh.allocation is None
+        assert is_no_allocation(fresh.runtime.allocation)
+
+        managed = dryml.session.manage(cpus=1)
+        requested = dryml.session.request_world(cpus=1)
+        assert managed.mode == "managed"
+        assert requested.allocation == managed.allocation
+        assert requested.requested_world is not None
+        assert requested.controls["memory"] in {"undeclared", "declarative"}
+        assert requested.statuses["visibility"] == "visibility-enforced"
+
+        reset = dryml.session.reset()
+        assert reset.mode == "python"
+        assert reset.allocation is None
+        assert reset.requested_world is None
+        assert reset.environment.requirements == ()
+        assert is_no_allocation(reset.runtime.allocation)
+    finally:
+        dryml.session.reset()
+
+
+def test_advanced_context_defaults_are_selected_and_restored_without_allocation():
     requested_world = WorldSpec.from_data({"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 2}}}}})
     before_runtime = active_runtime()
     previous_environment = dryml.environments.set_current(CurrentEnvironmentSpec())

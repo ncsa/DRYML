@@ -33,6 +33,19 @@ metadata only and does not activate an environment or runtime.
 
 `dryml.runtime.default(...)` declares process-local runtime defaults such as framework settings, device visibility policy, limits, environment overrides, and metadata. Runtime defaults are mode-neutral unless `mode=` is explicit; dispatch or an explicit activation chooses worker/probe/inline mode. The decorator does not call `enter_runtime(...)`, `activate(...)`, mutate `os.environ`, or import torch, TensorFlow, or JAX.
 
+## Managed Direct Calls
+
+Hard environment and world requirements on supported decorated callables are also
+checked before direct user-code entry in a managed `dryml.session`. Python mode
+intentionally bypasses session-derived checks, and unannotated direct code has
+only the process-level controls DRYML established. Functions, methods,
+static/class methods, managed descriptors, and explicitly decorated construction
+methods are supported. Class-object/custom-metaclass calls, properties and other
+custom descriptors, post-decoration assignment, and references captured before
+decoration are not automatic boundaries. Dispatch and tracing use an internal
+scoped bypass only while reconstructing their own target; worker code checks its
+own allocation.
+
 ## Generic API
 
 The low-level decorators attach `AnnotationFragment` objects directly:
