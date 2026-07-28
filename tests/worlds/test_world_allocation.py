@@ -64,3 +64,27 @@ def test_allocation_rejects_scalar_accelerator_assignment():
                 }
             }
         )
+
+
+def test_accelerator_memory_round_trips_without_changing_legacy_payload_identity():
+    legacy = worlds.make_world_allocation_spec(allocation_roles(gpus=(0,)))
+    extended_roles = allocation_roles(gpus=(0, 2))
+    extended_roles["trainer"][0]["resources"]["accelerator_memory"] = {
+        "gpu": [{"device": 0, "memory": "1GiB"}, {"device": 2, "memory": "512MiB"}]
+    }
+    extended = worlds.WorldAllocation.from_data({"roles": extended_roles})
+
+    assert "accelerator_memory" not in legacy["payload"]["roles"]["trainer"][0]["resources"]
+    assert extended.to_data()["roles"]["trainer"][0]["resources"]["accelerator_memory"] == {
+        "gpu": [{"device": 0, "memory": "1GiB"}, {"device": 2, "memory": "512MiB"}]
+    }
+
+
+def test_accelerator_memory_rejects_unassigned_devices():
+    roles = allocation_roles(gpus=(0,))
+    roles["trainer"][0]["resources"]["accelerator_memory"] = {
+        "gpu": [{"device": 1, "memory": "1GiB"}]
+    }
+
+    with pytest.raises(WorldSpecValidationError):
+        worlds.WorldAllocation.from_data({"roles": roles})

@@ -41,3 +41,13 @@ def test_resource_requirement_canonicalization_and_merge():
 
     merged = req.merge(ResourceRequirement.from_data({"cpus": {"min": 4}}))
     assert merged.to_data()["cpus"] == {"min": 4}
+
+
+def test_accelerator_memory_is_canonical_and_requires_one_limit_per_accelerator():
+    spec = ResourceSpec.from_data(
+        {"accelerators": {"gpu": 2}, "accelerator_memory": {"gpu": [1024**3, "512MiB"]}}
+    )
+
+    assert spec.to_data()["accelerator_memory"] == {"gpu": ["1GiB", "512MiB"]}
+    with pytest.raises(ResourceValidationError):
+        ResourceSpec.from_data({"accelerators": {"gpu": 2}, "accelerator_memory": {"gpu": ["1GiB"]}})

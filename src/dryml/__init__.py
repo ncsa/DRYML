@@ -17,6 +17,7 @@ _SUBMODULE_EXPORTS = {
     "reporting": "dryml.reporting",
     "records": "dryml.records",
     "runtime": "dryml.runtime",
+    "session": "dryml.session",
     "world": "dryml.world",
     "worlds": "dryml.worlds",
 }
@@ -88,6 +89,7 @@ __all__ = [
     "reporting",
     "records",
     "runtime",
+    "session",
     "world",
     "worlds",
     "config",

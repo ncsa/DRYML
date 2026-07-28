@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from dryml.records.execution import persistence_safe_execution_error
-from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldSpec, attach_world_allocation_id, attach_world_id, local_inventory, make_world_allocation_spec, make_world_spec, validate_world_spec
+from dryml.worlds import LocalResourceInventory, WorldAllocation, WorldSpec, assign_local_world, attach_world_allocation_id, attach_world_id, local_inventory, make_world_allocation_spec, make_world_spec, validate_world_spec
 
 from .backends import LocalSubprocessFuture, build_worker_command
 from .errors import DispatchLaunchError, DispatchPlanningError
@@ -600,36 +600,22 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
     world_obj = WorldSpec.from_data(world_spec["payload"])
     inv = inventory or local_inventory()
     _validate_local_resource_requests(world_obj, inv, oversubscribe, allocation_backend_kind)
-    cpu_cursor = 0
-    memory_cursor = 0
-    accelerator_cursors = {key: 0 for key in inv.accelerators}
+    try:
+        assignment = assign_local_world(world_obj, inventory=inv, oversubscribe=oversubscribe)
+    except Exception as exc:
+        raise DispatchPlanningError(str(exc), context=getattr(exc, "context", {})) from exc
     world_size = sum(role.replicas for role in world_obj.roles.values())
     roles: dict[str, list[dict[str, Any]]] = {}
     keys: list[WorldWorkerKey] = []
-    rank = 0
     role_sizes = {name: role.replicas for name, role in world_obj.roles.items()}
     for role_name in sorted(world_obj.roles):
         role = world_obj.roles[role_name]
         roles[role_name] = []
-        for replica in range(role.replicas):
-            key = WorldWorkerKey(role_name, replica, rank, rank)
+        for raw_allocation in assignment.roles[role_name]:
+            replica = raw_allocation["replica"]
+            rank = raw_allocation["rank"]
+            key = WorldWorkerKey(role_name, replica, rank, raw_allocation["local_rank"])
             keys.append(key)
-            requested_cpus = role.process.resources.cpus or 1
-            requested_memory = role.process.resources.memory
-            if requested_memory is not None:
-                memory_cursor += requested_memory
-            if oversubscribe:
-                cpus = tuple(inv.cpus[(cpu_cursor + idx) % len(inv.cpus)] for idx in range(requested_cpus))
-                cpu_cursor = (cpu_cursor + requested_cpus) % len(inv.cpus)
-            else:
-                cpus = tuple(inv.cpus[cpu_cursor : cpu_cursor + requested_cpus])
-                cpu_cursor += requested_cpus
-            accelerators: dict[str, tuple[str | int, ...]] = {}
-            for acc_name, count in role.process.resources.accelerators.items():
-                available = inv.accelerators.get(acc_name, ())
-                cursor = accelerator_cursors.get(acc_name, 0)
-                accelerators[acc_name] = tuple(available[cursor : cursor + count])
-                accelerator_cursors[acc_name] = cursor + count
             env = dict(role.process.env)
             env.update(
                 {
@@ -645,16 +631,13 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
             allocation = {
                 "replica": replica,
                 "rank": rank,
-                "local_rank": rank,
-                "resources": {"cpus": list(cpus), "accelerators": {name: list(values) for name, values in sorted(accelerators.items())}},
+                "local_rank": raw_allocation["local_rank"],
+                "resources": dict(raw_allocation["resources"]),
                 "environment": role.process.environment,
                 "env": env,
                 "metadata": {"allocation_policy": "disjoint_local" if not oversubscribe else "oversubscribed_local", "world_size": world_size, "role_size": role_sizes[role_name]},
             }
-            if role.process.resources.memory is not None:
-                allocation["resources"]["memory"] = role.process.resources.to_data()["memory"]
             roles[role_name].append(allocation)
-            rank += 1
     backend = dict(LOCAL_WORLD_BACKEND_IDENTITY)
     if allocation_backend_kind == "local_subprocess":
         backend.update({"name": "dryml.local_subprocess", "kind": "local_subprocess"})
@@ -691,36 +674,17 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
             "local world CPU assignments exceed the bounded limit",
             context={"cpu_assignments": cpu_assignments, "limit": _MAX_LOCAL_WORLD_CPU_ASSIGNMENTS, "oversubscribe": oversubscribe},
         )
-    cpu_cursor = memory_cursor = 0
-    accelerator_cursors = {key: 0 for key in inventory.accelerators}
-    for role_name in sorted(world.roles):
-        role = world.roles[role_name]
-        for replica in range(role.replicas):
-            resources = role.process.resources
-            if _has_positive_unsupported_resource(resources.devices) or _has_positive_unsupported_resource(resources.named):
-                raise DispatchPlanningError(
-                    "local world allocation does not support named devices or resources",
-                    context={"role": role_name, "devices": dict(resources.devices), "named": dict(resources.named)},
-                )
-            requested_cpus = resources.cpus or 1
-            requested_memory = resources.memory
-            if requested_memory is not None:
-                if requested_memory > 0 and inventory.memory is None:
-                    raise DispatchPlanningError("local world memory request cannot be proven against unknown inventory", context={"role": role_name, "requested_memory": requested_memory})
-                if not oversubscribe and inventory.memory is not None and memory_cursor + requested_memory > inventory.memory:
-                    raise DispatchPlanningError("local world memory requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_memory": requested_memory, "remaining_memory": inventory.memory - memory_cursor})
-                memory_cursor += requested_memory
-            if not oversubscribe and requested_cpus > len(inventory.cpus):
-                raise DispatchPlanningError("local world CPU request exceeds inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "inventory_cpus": len(inventory.cpus)})
-            if not oversubscribe and cpu_cursor + requested_cpus > len(inventory.cpus):
-                raise DispatchPlanningError("local world CPU requests exceed disjoint inventory", context={"role": role_name, "replica": replica, "requested_cpus": requested_cpus, "remaining_cpus": len(inventory.cpus) - cpu_cursor})
-            cpu_cursor = (cpu_cursor + requested_cpus) % len(inventory.cpus) if oversubscribe else cpu_cursor + requested_cpus
-            for acc_name, count in resources.accelerators.items():
-                available = inventory.accelerators.get(acc_name, ())
-                cursor = accelerator_cursors.get(acc_name, 0)
-                if cursor + count > len(available):
-                    raise DispatchPlanningError("local world accelerator request exceeds explicit inventory", context={"role": role_name, "replica": replica, "accelerator": acc_name, "requested": count, "available": len(available)})
-                accelerator_cursors[acc_name] = cursor + count
+    for role_name, role in world.roles.items():
+        process = role.process
+        if process.environment is not None or process.runtime is not None or process.metadata:
+            raise DispatchPlanningError(
+                "local world allocation cannot enact role-specific process environment, runtime, or metadata settings",
+                context={"role": role_name, "process": process.to_data()},
+            )
+    try:
+        assign_local_world(world, inventory=inventory, oversubscribe=oversubscribe)
+    except Exception as exc:
+        raise DispatchPlanningError(str(exc), context=getattr(exc, "context", {})) from exc
 
 
 def _has_positive_unsupported_resource(values: Mapping[str, Any]) -> bool:

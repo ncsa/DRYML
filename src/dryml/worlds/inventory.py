@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .errors import ResourceValidationError
+from .resources import canonical_byte_size, parse_byte_size
 
 
 _MAX_METADATA_DEPTH = 8
@@ -50,6 +51,7 @@ class LocalResourceInventory:
     accelerators: Mapping[str, tuple[str | int, ...]] = field(default_factory=dict)
     memory: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, Mapping[str | int, int | str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.cpus, (str, bytes)) or not hasattr(self.cpus, "__iter__"):
@@ -88,6 +90,22 @@ class LocalResourceInventory:
             raise ResourceValidationError("local resource inventory metadata must be a mapping")
         object.__setattr__(self, "cpus", cpus)
         object.__setattr__(self, "accelerators", MappingProxyType({name: accelerators[name] for name in sorted(accelerators)}))
+        if not isinstance(self.accelerator_memory, Mapping):
+            raise ResourceValidationError("local resource inventory accelerator_memory must be a mapping")
+        accelerator_memory: dict[str, Mapping[str | int, int]] = {}
+        for kind, limits in self.accelerator_memory.items():
+            if kind not in accelerators or not isinstance(limits, Mapping):
+                raise ResourceValidationError("inventory accelerator_memory must map assigned accelerator identifiers")
+            normalized: dict[str | int, int] = {}
+            for device, value in limits.items():
+                if device not in accelerators[kind]:
+                    raise ResourceValidationError("inventory accelerator_memory refers to an unknown device", context={"accelerator": kind})
+                memory = parse_byte_size(value)
+                if memory is None or memory <= 0:
+                    raise ResourceValidationError("inventory accelerator_memory limits must be positive", context={"accelerator": kind})
+                normalized[device] = memory
+            accelerator_memory[kind] = MappingProxyType(normalized)
+        object.__setattr__(self, "accelerator_memory", MappingProxyType(accelerator_memory))
         object.__setattr__(self, "metadata", _freeze_json(self.metadata, budget=[_MAX_METADATA_NODES]))
 
     @classmethod
@@ -108,12 +126,18 @@ class LocalResourceInventory:
             bounded metadata suitable for :meth:`from_data`.
         """
 
-        return {
+        data = {
             "cpus": list(self.cpus),
             "accelerators": {name: list(values) for name, values in self.accelerators.items()},
             "memory": self.memory,
             "metadata": _thaw_json(self.metadata),
         }
+        if self.accelerator_memory:
+            data["accelerator_memory"] = {
+                kind: [{"device": device, "memory": canonical_byte_size(memory)} for device, memory in limits.items()]
+                for kind, limits in self.accelerator_memory.items()
+            }
+        return data
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "LocalResourceInventory":
@@ -131,7 +155,7 @@ class LocalResourceInventory:
 
         if not isinstance(data, Mapping):
             raise ResourceValidationError("local resource inventory must be a mapping")
-        unknown = set(data) - {"cpus", "accelerators", "memory", "metadata"}
+        unknown = set(data) - {"cpus", "accelerators", "memory", "metadata", "accelerator_memory"}
         if unknown:
             raise ResourceValidationError(
                 "local resource inventory has unknown fields",
@@ -142,6 +166,7 @@ class LocalResourceInventory:
             accelerators={} if "accelerators" not in data else data["accelerators"],
             memory=data.get("memory"),
             metadata={} if "metadata" not in data else data["metadata"],
+            accelerator_memory=_inventory_accelerator_memory(data.get("accelerator_memory") or {}),
         )
 
     def summary(self) -> dict[str, Any]:
@@ -536,6 +561,23 @@ def _bounded_items(values: Any, limit: int, name: str) -> tuple[Any, ...]:
         except StopIteration:
             return tuple(result)
     raise ResourceValidationError(f"local resource inventory {name} exceed the bounded limit")
+
+
+def _inventory_accelerator_memory(data: Any) -> dict[str, dict[str | int, int | str]]:
+    if not isinstance(data, Mapping):
+        raise ResourceValidationError("inventory accelerator_memory must be a mapping")
+    result = {}
+    for kind, entries in data.items():
+        if isinstance(entries, (str, bytes)) or not hasattr(entries, "__iter__"):
+            raise ResourceValidationError("inventory accelerator_memory entries must be a non-string sequence")
+        result[kind] = {
+            entry["device"]: entry["memory"]
+            for entry in entries
+            if isinstance(entry, Mapping) and set(entry) == {"device", "memory"}
+        }
+        if len(result[kind]) != len(tuple(entries)):
+            raise ResourceValidationError("inventory accelerator_memory entries require device and memory")
+    return result
 
 
 def _freeze_json(value: Any, *, depth: int = 0, budget: list[int]) -> Any:

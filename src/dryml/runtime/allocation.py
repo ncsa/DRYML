@@ -35,6 +35,7 @@ class RuntimeAllocationView:
     cpus: tuple[int, ...] = ()
     memory: int | None = None
     accelerators: Mapping[str, tuple[str | int, ...]] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
     env: Mapping[str, str] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -43,6 +44,9 @@ class RuntimeAllocationView:
         if not isinstance(self.accelerators, Mapping):
             raise TypeError("accelerators must be a mapping")
         object.__setattr__(self, "accelerators", {str(key): tuple(_require_sequence(f"accelerators.{key}", value)) for key, value in self.accelerators.items()})
+        if not isinstance(self.accelerator_memory, Mapping):
+            raise TypeError("accelerator_memory must be a mapping")
+        object.__setattr__(self, "accelerator_memory", {str(key): dict(value) for key, value in self.accelerator_memory.items()})
         if not isinstance(self.env, Mapping):
             raise TypeError("env must be a mapping")
         if not isinstance(self.metadata, Mapping):

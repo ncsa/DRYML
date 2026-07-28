@@ -7,9 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy, report_from_issues
+from .errors import EnvironmentRequirementError
 from .records import EnvironmentRecord
 from .schema import ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION
 from .serialization import deep_freeze_json, json_ready
@@ -370,6 +372,39 @@ class EnvironmentRequirement:
             "details": json_ready(self.details),
         }
 
+    def merge(self, other: "EnvironmentRequirement", *, sources: tuple[str, ...] = ()) -> "EnvironmentRequirement":
+        """Return the semantic intersection of two compatible requirements.
+
+        Package constraints are intersected only when their PEP 508 marker,
+        extras, and direct-reference identity are the same. Different markers
+        retain independent conditional requirements instead of being treated as
+        unconditional conflicts.
+        """
+
+        if not isinstance(other, EnvironmentRequirement):
+            raise EnvironmentRequirementError("environment requirement merge requires an EnvironmentRequirement")
+        details_sources = tuple(self.details.get("sources", ())) + tuple(other.details.get("sources", ())) + tuple(sources)
+        requirements = _merge_package_requirements(self.requirements, other.requirements)
+        excludes = tuple(sorted(set(self.excludes) | set(other.excludes)))
+        required_names = {normalize_distribution_name(Requirement(item).name) for item in requirements}
+        overlap = required_names & set(excludes)
+        if overlap:
+            raise EnvironmentRequirementError(
+                "required distributions cannot also be excluded",
+                context={"path": f"requirements.{sorted(overlap)[0]}"},
+            )
+        return EnvironmentRequirement(
+            python=_intersect_specifiers(self.python, other.python, path="python"),
+            requirements=requirements,
+            excludes=excludes,
+            capabilities=tuple(sorted(set(self.capabilities) | set(other.capabilities))),
+            tags=tuple(sorted(set(self.tags) | set(other.tags))),
+            dryml_protocol=_intersect_specifiers(self.dryml_protocol, other.dryml_protocol, path="dryml_protocol"),
+            schema_versions=_merge_schema_versions(self.schema_versions, other.schema_versions),
+            details={"sources": details_sources} if details_sources else {},
+            schema_version=max(self.schema_version, other.schema_version),
+        )
+
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "EnvironmentRequirement":
         """Build a requirement from serialized data."""
@@ -468,6 +503,78 @@ def _marker_variables(marker: Any) -> set[str]:
 
     visit(getattr(marker, "_markers", ()))
     return variables
+
+
+def _intersect_specifiers(left: str | None, right: str | None, *, path: str) -> str | None:
+    """Return a canonical satisfiable specifier intersection."""
+
+    if left in (None, ""):
+        return right or None
+    if right in (None, ""):
+        return left or None
+    combined = SpecifierSet(f"{left},{right}")
+    if _specifier_has_obvious_conflict(combined):
+        raise EnvironmentRequirementError("conflicting environment version constraints", context={"path": path, "left": left, "right": right})
+    return str(combined) or None
+
+
+def _merge_package_requirements(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
+    grouped: dict[tuple[str, tuple[str, ...], str | None, str | None], list[Requirement]] = {}
+    for text in left + right:
+        req = Requirement(text)
+        key = (normalize_distribution_name(req.name), tuple(sorted(req.extras)), req.url, None if req.marker is None else str(req.marker))
+        grouped.setdefault(key, []).append(req)
+    merged: list[str] = []
+    for (name, extras, url, marker), requirements in grouped.items():
+        combined = SpecifierSet(",".join(str(item.specifier) for item in requirements if str(item.specifier)))
+        if _specifier_has_obvious_conflict(combined):
+            raise EnvironmentRequirementError(
+                "conflicting package requirement specifiers",
+                context={"path": f"requirements.{name}"},
+            )
+        specifier = str(combined) or None
+        text = name + ("[" + ",".join(extras) + "]" if extras else "")
+        if url:
+            text += f" @ {url}"
+        if specifier:
+            text += specifier
+        if marker:
+            text += f"; {marker}"
+        merged.append(normalize_requirement_string(text))
+    return tuple(sorted(set(merged), key=requirement_sort_key))
+
+
+def _merge_schema_versions(left: Mapping[str, str], right: Mapping[str, str]) -> dict[str, str]:
+    result = dict(left)
+    for name, specifier in right.items():
+        result[name] = _intersect_specifiers(result.get(name), specifier, path=f"schema_versions.{name}") or ""
+    return result
+
+
+def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
+    exact_versions: set[Version] = set()
+    lower: tuple[Version, bool] | None = None
+    upper: tuple[Version, bool] | None = None
+    for item in specifier:
+        try:
+            version = Version(item.version)
+        except InvalidVersion:
+            return False
+        if item.operator == "==":
+            exact_versions.add(version)
+        elif item.operator in {">", ">="}:
+            inclusive = item.operator == ">="
+            if lower is None or version > lower[0] or (version == lower[0] and not inclusive and lower[1]):
+                lower = (version, inclusive)
+        elif item.operator in {"<", "<="}:
+            inclusive = item.operator == "<="
+            if upper is None or version < upper[0] or (version == upper[0] and not inclusive and upper[1]):
+                upper = (version, inclusive)
+    if len(exact_versions) > 1:
+        return True
+    if exact_versions:
+        return next(iter(exact_versions)) not in specifier
+    return lower is not None and upper is not None and (lower[0] > upper[0] or (lower[0] == upper[0] and (not lower[1] or not upper[1])))
 
 
 __all__ = ["EnvironmentRequirement", "marker_environment_from_record"]

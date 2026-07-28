@@ -11,6 +11,7 @@ from typing import Any
 
 from dryml.records import attach_spec_id, compute_spec_id, make_spec, validate_spec
 from dryml.records.errors import SpecValidationError
+from dryml.formats import deep_freeze_json
 
 from .errors import ResourceValidationError, WorldSpecValidationError
 from .resources import CountConstraint, ResourceRequirement, ResourceSpec
@@ -161,6 +162,7 @@ class ProcessSpec:
         """Apply launch-safe environment validation to direct construction."""
 
         object.__setattr__(self, "env", _validated_process_env(self.env))
+        object.__setattr__(self, "metadata", deep_freeze_json(self.metadata))
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any] | None) -> "ProcessSpec":
@@ -228,6 +230,10 @@ class WorldSpec:
 
     roles: Mapping[str, RoleSpec]
     backend: Mapping[str, Any] = field(default_factory=lambda: {"kind": "local", "parameters": {}})
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "roles", MappingProxyType({name: self.roles[name] for name in sorted(self.roles)}))
+        object.__setattr__(self, "backend", deep_freeze_json(self.backend))
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "WorldSpec":

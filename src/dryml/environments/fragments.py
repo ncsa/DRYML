@@ -162,81 +162,38 @@ def fragments_for_class(cls: type) -> tuple[RequirementFragment, ...]:
 def compose_fragments(fragments: Iterable[RequirementFragment]) -> EnvironmentRequirement:
     """Compose fragments into one deterministic environment requirement."""
 
-    requirements: tuple[str, ...] = ()
-    excludes: tuple[str, ...] = ()
-    capabilities: tuple[str, ...] = ()
-    tags: tuple[str, ...] = ()
-    python: str | None = None
-    dryml_protocol: str | None = None
-    schema_versions: dict[str, str] = {}
+    result = EnvironmentRequirement()
     sources: list[str] = []
 
     for fragment in fragments:
         if fragment.source:
             sources.append(fragment.source)
+        current = EnvironmentRequirement(
+            requirements=fragment.requirements,
+            excludes=fragment.excludes,
+            capabilities=fragment.capabilities,
+            tags=fragment.tags,
+            python=fragment.python,
+            dryml_protocol=fragment.dryml_protocol,
+            schema_versions=fragment.schema_versions,
+        )
         if fragment.mode == "base":
-            requirements = requirements + fragment.requirements
-            excludes = excludes + fragment.excludes
-            capabilities = capabilities + fragment.capabilities
-            tags = tags + fragment.tags
-            if fragment.python is not None:
-                python = fragment.python
-            if fragment.dryml_protocol is not None:
-                dryml_protocol = fragment.dryml_protocol
-            schema_versions.update(fragment.schema_versions)
+            result = result.merge(current)
             continue
         if fragment.mode == "override":
-            if fragment.requirements:
-                requirements = fragment.requirements
-            if fragment.excludes:
-                excludes = fragment.excludes
-            if fragment.capabilities:
-                capabilities = fragment.capabilities
-            if fragment.tags:
-                tags = fragment.tags
-            if fragment.python is not None:
-                python = fragment.python
-            if fragment.dryml_protocol is not None:
-                dryml_protocol = fragment.dryml_protocol
-            if fragment.schema_versions:
-                schema_versions.update(fragment.schema_versions)
+            result = EnvironmentRequirement(
+                requirements=current.requirements or result.requirements,
+                excludes=current.excludes or result.excludes,
+                capabilities=current.capabilities or result.capabilities,
+                tags=current.tags or result.tags,
+                python=current.python if current.python is not None else result.python,
+                dryml_protocol=current.dryml_protocol if current.dryml_protocol is not None else result.dryml_protocol,
+                schema_versions={**result.schema_versions, **current.schema_versions},
+            )
             continue
-        requirements = requirements + fragment.requirements
-        excludes = excludes + fragment.excludes
-        capabilities = capabilities + fragment.capabilities
-        tags = tags + fragment.tags
-        if fragment.python is not None:
-            if python is not None and python != fragment.python:
-                raise EnvironmentRequirementError(
-                    "conflicting additive Python requirement fragments",
-                    context={"current": python, "new": fragment.python},
-                )
-            python = fragment.python
-        if fragment.dryml_protocol is not None:
-            if dryml_protocol is not None and dryml_protocol != fragment.dryml_protocol:
-                raise EnvironmentRequirementError(
-                    "conflicting additive DRYML protocol requirement fragments",
-                    context={"current": dryml_protocol, "new": fragment.dryml_protocol},
-                )
-            dryml_protocol = fragment.dryml_protocol
-        for key, value in fragment.schema_versions.items():
-            if key in schema_versions and schema_versions[key] != value:
-                raise EnvironmentRequirementError(
-                    "conflicting additive schema requirement fragments",
-                    context={"schema": key, "current": schema_versions[key], "new": value},
-                )
-            schema_versions[key] = value
+        result = result.merge(current)
 
-    return EnvironmentRequirement(
-        python=python,
-        requirements=requirements,
-        excludes=excludes,
-        capabilities=capabilities,
-        tags=tags,
-        dryml_protocol=dryml_protocol,
-        schema_versions=schema_versions,
-        details={"sources": tuple(sources)} if sources else {},
-    )
+    return EnvironmentRequirement(**{**result.to_data(), "details": {"sources": tuple(sources)} if sources else {}})
 
 
 def requirements_for_class(cls: type) -> EnvironmentRequirement:

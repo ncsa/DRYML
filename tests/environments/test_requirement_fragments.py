@@ -66,8 +66,7 @@ def test_compose_fragments_conflict_detection_and_sources():
         envs.RequirementFragment(python=">=3.10", source="base"),
         envs.RequirementFragment(python=">=3.11", source="child"),
     )
-    with pytest.raises(envs.EnvironmentRequirementError):
-        envs.compose_fragments(fragments)
+    assert envs.compose_fragments(fragments).python == ">=3.10,>=3.11"
     composed = envs.compose_fragments((envs.RequirementFragment(requirements=("dryml",), source="one"),))
     assert "one" in composed.explain_sources()
 

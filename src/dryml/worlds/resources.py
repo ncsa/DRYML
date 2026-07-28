@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from .errors import ResourceValidationError
@@ -212,6 +213,7 @@ class ResourceSpec:
     cpus: int = 0
     memory: int | None = None
     accelerators: Mapping[str, int] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, tuple[int, ...]] = field(default_factory=dict)
     devices: Mapping[str, Any] = field(default_factory=dict)
     named: Mapping[str, Any] = field(default_factory=dict)
 
@@ -219,9 +221,11 @@ class ResourceSpec:
         _as_nonneg_int("cpus", self.cpus)
         if self.memory is not None:
             parse_byte_size(self.memory)
-        _concrete_accelerator_map(self.accelerators)
-        _concrete_resource_map(self.devices, "device")
-        _concrete_resource_map(self.named, "named resource")
+        accelerators = _concrete_accelerator_map(self.accelerators)
+        object.__setattr__(self, "accelerators", MappingProxyType(accelerators))
+        object.__setattr__(self, "accelerator_memory", MappingProxyType(_accelerator_memory_map(self.accelerator_memory, accelerators)))
+        object.__setattr__(self, "devices", MappingProxyType(_concrete_resource_map(self.devices, "device")))
+        object.__setattr__(self, "named", MappingProxyType(_concrete_resource_map(self.named, "named resource")))
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any] | None) -> "ResourceSpec":
@@ -230,7 +234,7 @@ class ResourceSpec:
         data = data or {}
         if not isinstance(data, Mapping):
             raise ResourceValidationError("resource spec must be a mapping", context={"type": type(data).__name__})
-        unknown = set(data) - {"cpus", "memory", "accelerators", "devices", "named"}
+        unknown = set(data) - {"cpus", "memory", "accelerators", "accelerator_memory", "devices", "named"}
         if unknown:
             raise ResourceValidationError("resource spec has unknown fields", context={"fields": sorted(unknown)})
         accelerators = data.get("accelerators") or {}
@@ -240,6 +244,7 @@ class ResourceSpec:
             cpus=_as_nonneg_int("cpus", data.get("cpus", 0)),
             memory=parse_byte_size(data.get("memory")),
             accelerators=_concrete_accelerator_map(accelerators),
+            accelerator_memory=data.get("accelerator_memory") or {},
             devices=_concrete_resource_map(data.get("devices") or {}, "device"),
             named=_concrete_resource_map(data.get("named") or {}, "named resource"),
         )
@@ -252,6 +257,11 @@ class ResourceSpec:
             data["memory"] = canonical_byte_size(self.memory)
         if self.accelerators:
             data["accelerators"] = {key: self.accelerators[key] for key in sorted(self.accelerators)}
+        if self.accelerator_memory:
+            data["accelerator_memory"] = {
+                key: [canonical_byte_size(value) for value in self.accelerator_memory[key]]
+                for key in sorted(self.accelerator_memory)
+            }
         if self.devices:
             data["devices"] = {key: self.devices[key] for key in sorted(self.devices)}
         if self.named:
@@ -297,6 +307,30 @@ def _concrete_accelerator_map(values: Any) -> dict[str, int]:
     for key, value in _bounded_mapping_items(values, "accelerator"):
         _validate_name(key, "accelerator")
         result[key] = _as_nonneg_int(f"accelerators.{key}", value)
+    return result
+
+
+def _accelerator_memory_map(values: Any, accelerators: Mapping[str, int]) -> dict[str, tuple[int, ...]]:
+    """Normalize per-accelerator byte limits aligned with requested slots."""
+
+    if not isinstance(values, Mapping):
+        raise ResourceValidationError("accelerator_memory must be a mapping")
+    result: dict[str, tuple[int, ...]] = {}
+    for key, raw_limits in _bounded_mapping_items(values, "accelerator_memory"):
+        _validate_name(key, "accelerator")
+        if key not in accelerators or accelerators[key] == 0:
+            raise ResourceValidationError("accelerator_memory requires requested accelerators", context={"accelerator": key})
+        if isinstance(raw_limits, (str, bytes)) or not hasattr(raw_limits, "__iter__"):
+            raise ResourceValidationError("accelerator_memory limits must be a non-string sequence", context={"accelerator": key})
+        limits = tuple(parse_byte_size(value) for value in raw_limits)
+        if len(limits) != accelerators[key]:
+            raise ResourceValidationError(
+                "accelerator_memory limits must align with requested accelerators",
+                context={"accelerator": key, "expected": accelerators[key], "actual": len(limits)},
+            )
+        if any(value is None or value <= 0 for value in limits):
+            raise ResourceValidationError("accelerator_memory limits must be positive", context={"accelerator": key})
+        result[key] = tuple(value for value in limits if value is not None)
     return result
 
 

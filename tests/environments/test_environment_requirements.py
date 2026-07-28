@@ -40,6 +40,19 @@ def test_requirement_roundtrip_and_reordered_id_stability():
     assert left.id == right.id
 
 
+def test_semantic_requirement_merge_intersects_and_deduplicates():
+    merged = envs.EnvironmentRequirement(
+        requirements=("torch>=2", "dryml>=0.3"), python=">=3.10"
+    ).merge(
+        envs.EnvironmentRequirement(requirements=("torch<3", "dryml>=0.3"), python="<3.13"),
+        sources=("test",),
+    )
+
+    assert merged.requirements == ("dryml>=0.3", "torch<3,>=2")
+    assert merged.python == "<3.13,>=3.10"
+    assert merged.details["sources"] == ("test",)
+
+
 def test_requirement_check_compatible():
     req = envs.EnvironmentRequirement(
         python=">=3.10,<3.13",

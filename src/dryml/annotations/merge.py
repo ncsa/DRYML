@@ -8,15 +8,11 @@ from typing import Any, Literal
 
 from dryml.environments.requirements import EnvironmentRequirement
 from dryml.environments.specs import spec_from_data
-from dryml.environments.utils import normalize_distribution_name
 from dryml.formats import json_ready
 from dryml import reporting
 from dryml.runtime.specs import RuntimeContextSpec
 from dryml.worlds.compatibility import check_world_spec_satisfies_requirement
 from dryml.worlds.specs import WorldRequirement, WorldSpec
-from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-from packaging.version import InvalidVersion, Version
 
 from .collect import collect_fragments, fragments_for_definition_method, fragments_for_method
 from .model import AnnotationFragment, SourceTrace
@@ -369,11 +365,11 @@ def resolve_runtime_default(target: Any, *, provider_fragments: Iterable[Annotat
 def _merge_environment_requirements(fragments: tuple[AnnotationFragment, ...], issues: list[AnnotationIssue]) -> EnvironmentRequirement | None:
     if not fragments:
         return None
-    data: dict[str, Any] = {"requirements": [], "excludes": [], "capabilities": [], "tags": [], "schema_versions": {}, "details": {"sources": [f.source.to_data() for f in fragments]}}
+    result = EnvironmentRequirement()
     saw_payload = False
     for fragment in _merge_order(fragments):
         try:
-            payload = EnvironmentRequirement.from_data(fragment.fragment).to_data()
+            current = EnvironmentRequirement.from_data(fragment.fragment)
         except Exception as exc:
             issues.append(AnnotationIssue("error", ENVIRONMENT, "/", str(exc), sources=(fragment.source,)))
             continue
@@ -382,36 +378,34 @@ def _merge_environment_requirements(fragments: tuple[AnnotationFragment, ...], i
         if mode not in {"base", "add", "override"}:
             issues.append(AnnotationIssue("error", ENVIRONMENT, "/merge_policy", "unsupported environment requirement merge policy", expected="base|add|override", actual=mode, sources=(fragment.source,)))
             continue
-        if mode == "override":
-            for key in ("requirements", "excludes", "capabilities", "tags"):
-                if payload.get(key):
-                    data[key] = list(payload[key])
-            for key in ("python", "dryml_protocol"):
-                if payload.get(key) is not None:
-                    data[key] = payload[key]
-            if payload.get("schema_versions"):
-                data["schema_versions"].update(payload["schema_versions"])
-            continue
-        for key in ("requirements", "excludes", "capabilities", "tags"):
-            data[key].extend(payload.get(key, ()))
-        for key in ("python", "dryml_protocol"):
-            value = payload.get(key)
-            if value is not None and mode != "base" and data.get(key) not in (None, value):
-                issues.append(AnnotationIssue("error", ENVIRONMENT, f"/{key}", "conflicting environment requirement", data.get(key), value, _sources(fragments)))
-            if value is not None:
-                data[key] = value
-        for key, value in payload.get("schema_versions", {}).items():
-            if mode != "base" and key in data["schema_versions"] and data["schema_versions"][key] != value:
-                issues.append(AnnotationIssue("error", ENVIRONMENT, f"/schema_versions/{key}", "conflicting schema requirement", data["schema_versions"][key], value, _sources(fragments)))
-            data["schema_versions"][key] = value
+        try:
+            if mode == "override":
+                result = EnvironmentRequirement(
+                    requirements=current.requirements or result.requirements,
+                    excludes=current.excludes or result.excludes,
+                    capabilities=current.capabilities or result.capabilities,
+                    tags=current.tags or result.tags,
+                    python=current.python if current.python is not None else result.python,
+                    dryml_protocol=current.dryml_protocol if current.dryml_protocol is not None else result.dryml_protocol,
+                    schema_versions={**result.schema_versions, **current.schema_versions},
+                )
+            else:
+                result = result.merge(current)
+        except Exception as exc:
+            path = getattr(exc, "context", {}).get("path", "")
+            issues.append(AnnotationIssue("error", ENVIRONMENT, "/" + str(path).replace(".", "/") if path else "/", str(exc), sources=_sources(fragments)))
     if not saw_payload:
         return None
-    issues.extend(_package_conflict_issues(tuple(data["requirements"]), _sources(fragments)))
-    try:
-        return EnvironmentRequirement(**data)
-    except Exception as exc:
-        issues.append(AnnotationIssue("error", ENVIRONMENT, "/", str(exc), sources=_sources(fragments)))
-        return None
+    return EnvironmentRequirement(
+        python=result.python,
+        requirements=result.requirements,
+        excludes=result.excludes,
+        capabilities=result.capabilities,
+        tags=result.tags,
+        dryml_protocol=result.dryml_protocol,
+        schema_versions=result.schema_versions,
+        details={"sources": [fragment.source.to_data() for fragment in fragments]},
+    )
 
 
 def _merge_world_requirements(fragments: tuple[AnnotationFragment, ...], issues: list[AnnotationIssue]) -> WorldRequirement | None:
@@ -539,58 +533,6 @@ def _conflict_issues(left: Mapping[str, Any], right: Mapping[str, Any], *, names
         elif current != value:
             issues.append(AnnotationIssue("error", namespace, child_path, "annotation merge conflict", expected=current, actual=value, sources=sources))
     return issues
-
-
-def _package_conflict_issues(requirements: tuple[str, ...], sources: tuple[SourceTrace, ...]) -> list[AnnotationIssue]:
-    grouped: dict[str, list[Requirement]] = {}
-    for text in requirements:
-        try:
-            req = Requirement(text)
-        except Exception as exc:
-            return [AnnotationIssue("error", ENVIRONMENT, "/requirements", str(exc), actual=text, sources=sources)]
-        if req.marker is not None or req.url is not None:
-            continue
-        grouped.setdefault(normalize_distribution_name(req.name), []).append(req)
-    issues: list[AnnotationIssue] = []
-    for name, reqs in grouped.items():
-        spec_texts = [str(req.specifier) for req in reqs if str(req.specifier)]
-        if len(spec_texts) < 2:
-            continue
-        if _specifier_has_obvious_conflict(SpecifierSet(",".join(spec_texts))):
-            issues.append(AnnotationIssue("error", ENVIRONMENT, f"/requirements/{name}", "conflicting package requirement specifiers", expected="satisfiable specifier set", actual=", ".join(spec_texts), sources=sources))
-    return issues
-
-
-def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
-    exact_versions: set[Version] = set()
-    lower: tuple[Version, bool] | None = None
-    upper: tuple[Version, bool] | None = None
-    for spec in specifier:
-        try:
-            version = Version(spec.version)
-        except InvalidVersion:
-            return False
-        if spec.operator == "==":
-            exact_versions.add(version)
-        elif spec.operator in {">", ">="}:
-            inclusive = spec.operator == ">="
-            if lower is None or version > lower[0] or (version == lower[0] and not inclusive and lower[1]):
-                lower = (version, inclusive)
-        elif spec.operator in {"<", "<="}:
-            inclusive = spec.operator == "<="
-            if upper is None or version < upper[0] or (version == upper[0] and not inclusive and upper[1]):
-                upper = (version, inclusive)
-    if len(exact_versions) > 1:
-        return True
-    if exact_versions:
-        exact = next(iter(exact_versions))
-        return exact not in specifier
-    if lower is not None and upper is not None:
-        if lower[0] > upper[0]:
-            return True
-        if lower[0] == upper[0] and (not lower[1] or not upper[1]):
-            return True
-    return False
 
 
 def _namespace_fragments(fragments: Iterable[AnnotationFragment], namespace: str) -> tuple[AnnotationFragment, ...]:

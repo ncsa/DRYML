@@ -23,6 +23,7 @@ from dryml.worlds.compatibility import (
 )
 from dryml.worlds.current import current, discover_current, reset_current, set_current, use
 from dryml.worlds.inventory import LocalResourceInventory, local_inventory
+from dryml.worlds.local_allocation import LocalWorldAssignment, assign_local_world
 from dryml.worlds.resources import ByteSize, CountConstraint, ResourceRequirement, ResourceSpec, parse_byte_size
 from dryml.worlds.specs import (
     ProcessSpec,
@@ -47,6 +48,7 @@ __all__ = [
     "CompatibilityReport",
     "CountConstraint",
     "LocalResourceInventory",
+    "LocalWorldAssignment",
     "ProcessAllocation",
     "ProcessSpec",
     "ResourceRequirement",
@@ -60,6 +62,7 @@ __all__ = [
     "WorldSynthesisResult",
     "WorldSpec",
     "attach_world_allocation_id",
+    "assign_local_world",
     "attach_world_id",
     "attach_world_requirement_id",
     "check_allocation_satisfies_requirement",
