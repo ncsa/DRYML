@@ -78,6 +78,27 @@ class EffectRecord:
     written: Any
 
 
+@dataclass(frozen=True, slots=True)
+class FrameworkAdmission:
+    """Immutable facts admitted for one wrapped framework loader callback."""
+
+    generation: int
+    control_epoch: int
+    registry_revision: int
+    group: str
+    lifecycle: str
+    fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializationFence:
+    """Reader-free bridge between PEP-451 creation and execution callbacks."""
+
+    admission: FrameworkAdmission
+    spec_id: int
+    module_id: int | None
+
+
 class PublicationService:
     """Own generation publication, leases, and import reader/writer admission."""
 
@@ -96,6 +117,9 @@ class PublicationService:
         self._generation: SessionGeneration | None = None
         self._leases: dict[int, int] = {}
         self._effects: tuple[EffectRecord, ...] = ()
+        self._materializations: dict[tuple[str, int], MaterializationFence] = {}
+        self._framework_finalizers: dict[tuple[str, str, int], str] = {}
+        self._framework_pre_stages: dict[tuple[int, str, str], str] = {}
         self._environ = os.environ if environ is None else environ
         self._meta_path = sys.meta_path if meta_path is None else meta_path
         self._windows = os.name == "nt" if windows is None else windows
@@ -227,9 +251,217 @@ class PublicationService:
         with self._state_lock:
             return self._effects
 
+    def admit_framework(self, group: str, lifecycle: str, fingerprint: str, registry_revision: int) -> FrameworkAdmission:
+        """Capture immutable generation facts while an import reader is active."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            generation = self._require_generation()
+            return FrameworkAdmission(
+                generation.number,
+                int(generation.metadata.get("control_epoch", 0)),
+                registry_revision,
+                group,
+                lifecycle,
+                fingerprint,
+            )
+
+    def store_materialization(self, key: tuple[str, int], fence: MaterializationFence) -> None:
+        """Publish one immutable creation fence without retaining a reader."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            if key in self._materializations:
+                raise PublicationError("repeated framework module creation is unsupported", context={"module": key[0]})
+            self._materializations[key] = fence
+
+    def materialization(self, key: tuple[str, int]) -> MaterializationFence:
+        """Return the persisted creation fence required by ``exec_module``."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            try:
+                return self._materializations[key]
+            except KeyError as exc:
+                raise PublicationError("framework execution requires prior PEP-451 module creation", context={"module": key[0]}) from exc
+
+    def validate_materialization(self, fence: MaterializationFence, expected: FrameworkAdmission) -> None:
+        """Accept only an exact plan/control descendant of a creation fence."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            current = self._require_generation()
+            if current.health == "failed":
+                raise PublicationFailedError("runtime publication is failed; restart the process")
+            admitted = fence.admission
+            if (
+                int(current.metadata.get("control_epoch", 0)) != admitted.control_epoch
+                or expected.control_epoch != admitted.control_epoch
+                or expected.registry_revision != admitted.registry_revision
+                or expected.group != admitted.group
+                or expected.lifecycle != admitted.lifecycle
+                or expected.fingerprint != admitted.fingerprint
+            ):
+                raise PublicationError(
+                    "framework materialization is stale after a control transition; restart the process",
+                    context={"group": admitted.group},
+                )
+
+    def finalize_framework(self, admission: FrameworkAdmission, statuses: Mapping[str, Any], *, failure: BaseException | None = None) -> SessionGeneration:
+        """Merge same-control-epoch framework outcomes or poison monotonically."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            current = self._require_generation()
+            control_epoch = int(current.metadata.get("control_epoch", 0))
+            if current.health == "failed":
+                return current
+            if control_epoch != admission.control_epoch:
+                raise PublicationError("framework finalizer is stale after a control transition", context={"group": admission.group})
+            fingerprints = dict(current.metadata.get("framework_plan_fingerprints", {}))
+            lifecycle_key = f"{admission.group}:{admission.lifecycle}"
+            existing_fingerprint = fingerprints.get(lifecycle_key)
+            if existing_fingerprint is not None and existing_fingerprint != admission.fingerprint:
+                raise PublicationError("framework finalizer is stale after adapter-plan mutation", context={"group": admission.group})
+            if failure is not None:
+                return self._fail_framework_locked(current, admission, fingerprints, control_epoch, failure)
+            outcomes = dict(current.metadata.get("framework_statuses", {}))
+            outcomes.update(statuses)
+            fingerprints[lifecycle_key] = admission.fingerprint
+            self._generation = SessionGeneration(
+                current.number + 1,
+                current.runtime,
+                visibility_epoch=current.visibility_epoch,
+                metadata={
+                    **current.metadata,
+                    "framework_statuses": outcomes,
+                    "framework_registry_revision": admission.registry_revision,
+                    "framework_plan_fingerprints": fingerprints,
+                    "control_epoch": control_epoch,
+                },
+            )
+            return self._generation
+
+    def fail_framework(self, admission: FrameworkAdmission | None, failure: BaseException) -> SessionGeneration:
+        """Poison a controlled import when its post-status publication failed."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            current = self._require_generation()
+            if current.health == "failed":
+                return current
+            if admission is None:
+                raise PublicationError("controlled framework failure has no admission token")
+            fingerprints = dict(current.metadata.get("framework_plan_fingerprints", {}))
+            return self._fail_framework_locked(current, admission, fingerprints, int(current.metadata.get("control_epoch", 0)), failure)
+
+    def claim_framework_pre_stage(self, admission: FrameworkAdmission) -> bool:
+        """Claim a non-idempotent group pre-stage without waiting for peers."""
+
+        self._reject_writer_reentry()
+        key = (admission.control_epoch, admission.group, admission.fingerprint)
+        with self._state_lock:
+            if self._require_generation().health == "failed":
+                raise PublicationFailedError("runtime publication is failed; restart the process")
+            if key in self._framework_pre_stages:
+                raise PublicationError(
+                    "non-idempotent framework pre-stage is already running; retry import",
+                    context={"group": admission.group},
+                )
+            self._framework_pre_stages[key] = "running"
+            return True
+
+    def publish_framework_pre_stage(self, admission: FrameworkAdmission) -> SessionGeneration:
+        """Publish one logical pure-validation outcome for an adapter group."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            current = self._require_generation()
+            if current.health == "failed":
+                return current
+            if int(current.metadata.get("control_epoch", 0)) != admission.control_epoch:
+                raise PublicationError("framework pre-stage is stale after a control transition", context={"group": admission.group})
+            outcomes = dict(current.metadata.get("framework_pre_stages", {}))
+            fingerprint = outcomes.get(admission.group)
+            if fingerprint is not None:
+                if fingerprint != admission.fingerprint:
+                    raise PublicationError("framework pre-stage is stale after adapter-plan mutation", context={"group": admission.group})
+                return current
+            outcomes[admission.group] = admission.fingerprint
+            self._generation = SessionGeneration(
+                current.number + 1,
+                current.runtime,
+                visibility_epoch=current.visibility_epoch,
+                metadata={**current.metadata, "framework_pre_stages": outcomes},
+            )
+            return self._generation
+
+    def complete_framework_pre_stage(self, admission: FrameworkAdmission) -> None:
+        """Complete an owned non-idempotent pre-stage after callback return."""
+
+        self._reject_writer_reentry()
+        key = (admission.control_epoch, admission.group, admission.fingerprint)
+        with self._state_lock:
+            if self._framework_pre_stages.get(key) != "running":
+                raise PublicationError("framework pre-stage completion did not own its group", context={"group": admission.group})
+            self._framework_pre_stages[key] = "complete"
+
+    def claim_framework_finalizer(self, admission: FrameworkAdmission, spec_id: int) -> bool:
+        """Claim one non-waiting post stage for a module lifecycle.
+
+        The claim is only bookkeeping.  Callers invoke adapter code after this
+        method returns, with no publication mutex held.
+        """
+
+        self._reject_writer_reentry()
+        key = (admission.group, admission.lifecycle, spec_id)
+        with self._state_lock:
+            if self._require_generation().health == "failed":
+                raise PublicationFailedError("runtime publication is failed; restart the process")
+            if key in self._framework_finalizers:
+                return False
+            self._framework_finalizers[key] = "running"
+            return True
+
+    def complete_framework_finalizer(self, admission: FrameworkAdmission, spec_id: int) -> None:
+        """Mark a claimed lifecycle post stage complete after publication."""
+
+        self._reject_writer_reentry()
+        key = (admission.group, admission.lifecycle, spec_id)
+        with self._state_lock:
+            if self._framework_finalizers.get(key) != "running":
+                raise PublicationError("framework finalizer completion did not own its lifecycle", context={"group": admission.group})
+            self._framework_finalizers[key] = "complete"
+
+    def framework_finalizer_seen(self, group: str, lifecycle: str, spec_id: int) -> bool:
+        """Return whether raw loader lifecycle already owns/completed a post stage."""
+
+        self._reject_writer_reentry()
+        with self._state_lock:
+            return (group, lifecycle, spec_id) in self._framework_finalizers
+
     def _require_generation(self) -> SessionGeneration:
         if self._generation is None:
             raise PublicationError("runtime publication has not been initialized")
+        return self._generation
+
+    def _fail_framework_locked(self, current: SessionGeneration, admission: FrameworkAdmission, fingerprints: Mapping[str, str], control_epoch: int, failure: BaseException) -> SessionGeneration:
+        """Publish the terminal state while the caller holds ``_state_lock``."""
+
+        self._generation = SessionGeneration(
+            current.number + 1,
+            current.runtime,
+            visibility_epoch=current.visibility_epoch,
+            health="failed",
+            restart_guidance="restart the process; framework import did not complete safely",
+            metadata={
+                **current.metadata,
+                "framework_failure": type(failure).__name__,
+                "framework_registry_revision": admission.registry_revision,
+                "framework_plan_fingerprints": dict(fingerprints),
+                "control_epoch": control_epoch,
+            },
+        )
         return self._generation
 
     def _reject_writer_reentry(self) -> None:
@@ -432,4 +664,4 @@ class PublicationService:
 publication = PublicationService()
 
 
-__all__ = ["EffectPlan", "EffectRecord", "PublicationCandidate", "PublicationService", "SessionGeneration", "publication"]
+__all__ = ["EffectPlan", "EffectRecord", "FrameworkAdmission", "MaterializationFence", "PublicationCandidate", "PublicationService", "SessionGeneration", "publication"]

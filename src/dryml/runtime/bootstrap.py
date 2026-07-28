@@ -11,7 +11,7 @@ from typing import Any, Iterator
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
 from .context import RuntimeBootstrapState, active_runtime, enter_runtime, reset_runtime_bootstrap, set_runtime_bootstrap
 from .devices import DeviceVisibilityPlan, apply_device_visibility_plan, build_device_visibility_plan
-from .frameworks import FrameworkBootstrapAdapter, FrameworkBootstrapResult, default_adapters
+from .frameworks import FrameworkBootstrapAdapter, FrameworkBootstrapResult, default_adapters, framework_registry
 from .errors import RuntimeTransitionError
 from .guards import BOOTSTRAP_MARKER_ENV
 from .enforcement import RuntimeEnforcement
@@ -65,7 +65,8 @@ def apply_runtime_bootstrap_plan(plan: RuntimeBootstrapPlan, *, phase: str = "pr
     if phase == "pre_import":
         if plan.strict_preimport:
             for name, result in plan.framework_results.items():
-                adapter_map[name].validate_before_import(result)
+                adapter = adapter_map[name]
+                getattr(adapter, "validate_before_activation", adapter.validate_before_import)(result)
         apply_device_visibility_plan(plan.visibility_plan, environ=environ)
         for name, result in plan.framework_results.items():
             adapter_map[name].apply_pre_import(result, environ=environ)
@@ -75,7 +76,10 @@ def apply_runtime_bootstrap_plan(plan: RuntimeBootstrapPlan, *, phase: str = "pr
         return
     if phase == "post_import":
         for name, result in plan.framework_results.items():
-            adapter_map[name].apply_post_import(result)
+            from .imports import finalize_helper
+
+            if not finalize_helper(name):
+                adapter_map[name].apply_post_import(result)
         return
     raise ValueError("phase must be 'pre_import' or 'post_import'")
 
@@ -87,6 +91,12 @@ def activate_runtime_bootstrap(plan: RuntimeBootstrapPlan, *, restore_environ: b
     _validate_plan_matches_active_runtime(plan)
     if restore_environ and not allow_process_controls:
         _reject_process_controls(plan)
+    # A selected framework plan is the first controlled import lifecycle.  The
+    # writer-protected freeze makes later registration unable to race its first
+    # wrapped callback; plain-only activation and passive Python imports remain
+    # registry-effect-free.
+    if any(name != "plain" for name in plan.framework_results):
+        framework_registry.freeze()
     snapshot = _snapshot_environ(plan) if restore_environ else None
     state = _state_from_plan(plan)
     token = set_runtime_bootstrap(state)

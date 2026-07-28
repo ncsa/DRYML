@@ -13,6 +13,7 @@ from dryml.runtime.devices import DeviceVisibilityPlan, DeviceVisibilityPolicy, 
 from dryml.runtime.decorators import default
 from dryml.runtime.enforcement import RuntimeEnforcement, normalize_enforcement, startup_enforcement_from_env
 from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_worker_allocation, require_workload_allocation
+from dryml.runtime.frameworks import FrameworkCapabilities, FrameworkImportPlan, FrameworkPostResult, FrameworkRegistration, FrameworkRegistry, framework_registry
 from dryml.runtime.modes import RuntimeMode
 from dryml.runtime.publication import EffectPlan, EffectRecord, PublicationCandidate, PublicationService, SessionGeneration, publication
 from dryml.runtime.specs import RuntimeContextSpec, attach_runtime_id, compute_runtime_id, make_runtime_spec, validate_runtime_spec
@@ -23,6 +24,11 @@ __all__ = [
     "EffectPlan",
     "EffectRecord",
     "FrameworkBootstrapPolicy",
+    "FrameworkCapabilities",
+    "FrameworkImportPlan",
+    "FrameworkPostResult",
+    "FrameworkRegistration",
+    "FrameworkRegistry",
     "BOOTSTRAP_MARKER_ENV",
     "NoAllocation",
     "PublicationCandidate",
@@ -63,6 +69,7 @@ __all__ = [
     "normalize_enforcement",
     "plain",
     "publication",
+    "framework_registry",
     "require_allocation",
     "require_worker_allocation",
     "require_workload_allocation",

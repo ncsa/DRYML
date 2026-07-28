@@ -29,6 +29,7 @@ EXPECTED_DRYML_ALL = (
     "reporting",
     "records",
     "runtime",
+    "session",
     "world",
     "worlds",
     "config",
@@ -312,4 +313,25 @@ def test_retired_ray_tune_plugin_import_is_lightweight():
         "    assert 'dryml.SearchSpace' in str(exc)\n"
         "else:\n"
         "    raise AssertionError('retired Ray Tune adapter was constructible')\n"
+    )
+
+
+@pytest.mark.parametrize("package", ("tf", "torch", "jax"))
+def test_optional_adapter_leaves_keep_parent_installation_lightweight(package):
+    """Adapter leaves preserve optional-parent registration without heavy imports."""
+
+    _run_fresh_python(
+        "import importlib, sys\n"
+        "from dryml.core.backend import Backend, backend_existence_testers, backend_testers\n"
+        "from dryml.core.dtype import DType\n"
+        "from dryml.core.tensor_spec import TensorSpec\n"
+        f"package = {package!r}\n"
+        "leaf = importlib.import_module('dryml.' + package + '.runtime')\n"
+        "parent = importlib.import_module('dryml.' + package)\n"
+        "assert leaf.adapter().name == {'tf': 'tensorflow', 'torch': 'torch', 'jax': 'jax'}[package]\n"
+        "assert hasattr(DType, package) and hasattr(TensorSpec, package)\n"
+        "backend = getattr(Backend, package)\n"
+        "assert backend in backend_testers and backend in backend_existence_testers\n"
+        "assert importlib.import_module('dryml.' + package + '.runtime') is leaf\n"
+        f"assert not {{name.split('.', 1)[0] for name in sys.modules}} & {HEAVY_FRAMEWORK_TOP_LEVEL_MODULES!r}\n"
     )

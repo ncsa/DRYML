@@ -5,6 +5,9 @@ import builtins
 import os
 import sys
 
+if os.environ.get("DRYML_RUN_GPU_TESTS") != "1":
+    os.environ["JAX_PLATFORMS"] = "cpu"
+
 _CORE_HELPERS = os.path.join(os.path.dirname(__file__), "core")
 if _CORE_HELPERS not in sys.path:
     sys.path.insert(0, _CORE_HELPERS)

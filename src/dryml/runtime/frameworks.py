@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import sys
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Protocol
+
+from dryml._framework_imports import coordinator, finder
 
 try:
     import resource
@@ -25,8 +30,172 @@ class FrameworkBootstrapResult:
 
     env_updates: Mapping[str, str] = field(default_factory=dict)
     post_import_threads: Mapping[str, int] = field(default_factory=dict)
+    post_import_interop_threads: Mapping[str, int] = field(default_factory=dict)
+    visible_devices: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
+    accelerator_capacity: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
+    allocator_policy: str | None = None
+    process_memory: int | None = None
     cpu_affinity: tuple[int, ...] | None = None
     memory_limit: int | None = None
+
+    def __post_init__(self) -> None:
+        """Freeze nested planning facts before loader callbacks retain them."""
+
+        object.__setattr__(self, "env_updates", MappingProxyType({str(key): str(value) for key, value in self.env_updates.items()}))
+        object.__setattr__(self, "post_import_threads", MappingProxyType({str(key): int(value) for key, value in self.post_import_threads.items()}))
+        object.__setattr__(self, "post_import_interop_threads", MappingProxyType({str(key): int(value) for key, value in self.post_import_interop_threads.items()}))
+        object.__setattr__(self, "visible_devices", MappingProxyType({str(key): tuple(str(device) for device in value) for key, value in self.visible_devices.items()}))
+        object.__setattr__(self, "accelerator_memory", MappingProxyType({str(kind): MappingProxyType({device: int(limit) for device, limit in limits.items()}) for kind, limits in self.accelerator_memory.items()}))
+        object.__setattr__(self, "accelerator_capacity", MappingProxyType({str(kind): MappingProxyType({device: int(limit) for device, limit in limits.items()}) for kind, limits in self.accelerator_capacity.items()}))
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkCapabilities:
+    """Controls an adapter can honestly report without importing its framework."""
+
+    visibility: str = "mandatory"
+    threads: str = "best-effort"
+    process_memory: str = "declarative"
+    accelerator_memory: str = "best-effort"
+    allocator: str = "best-effort"
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkImportPlan:
+    """Immutable group plan carried across the wrapped loader callbacks."""
+
+    group: str
+    roots: tuple[str, ...]
+    fingerprint: str
+    capabilities: FrameworkCapabilities = field(default_factory=FrameworkCapabilities)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkPostResult:
+    """Module-aware post-import statuses keyed by control name."""
+
+    module: str
+    statuses: Mapping[str, str] = field(default_factory=dict)
+    diagnostics: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Reject unverifiable status vocabulary before it reaches publication."""
+
+        allowed = {"pending-import", "visibility-enforced", "framework-configured", "declarative", "unsupported", "failed"}
+        statuses = {str(control): str(status) for control, status in self.statuses.items()}
+        unknown = set(statuses.values()) - allowed
+        if unknown:
+            raise ValueError(f"unknown framework control status: {sorted(unknown)!r}")
+        object.__setattr__(self, "statuses", MappingProxyType(statuses))
+        object.__setattr__(self, "diagnostics", MappingProxyType({str(key): str(value) for key, value in self.diagnostics.items()}))
+
+
+@dataclass(frozen=True, slots=True)
+class FrameworkRegistration:
+    """One logical adapter group and its lightweight factory import path."""
+
+    name: str
+    roots: tuple[str, ...]
+    factory: str | Any
+    capabilities: FrameworkCapabilities = field(default_factory=FrameworkCapabilities)
+
+
+def _roots_overlap(left: str, right: str) -> bool:
+    """Return whether two module roots share an ancestor/descendant relation."""
+
+    return left == right or left.startswith(right + ".") or right.startswith(left + ".")
+
+
+class FrameworkRegistry:
+    """Linearizable registry of framework groups and watched roots."""
+
+    def __init__(self) -> None:
+        self._registrations: dict[str, FrameworkRegistration] = {}
+        self._revision = 0
+        self._frozen = False
+        self._lock = threading.RLock()
+
+    @property
+    def revision(self) -> int:
+        with self._lock:
+            return self._revision
+
+    def registrations(self) -> Mapping[str, FrameworkRegistration]:
+        with self._lock:
+            return dict(self._registrations)
+
+    def register(self, registration: FrameworkRegistration, *, builtin: bool = False) -> None:
+        """Register roots before activation or reject unsafe registry mutation."""
+
+        if not registration.roots or len(set(registration.roots)) != len(registration.roots):
+            raise ValueError("framework registration requires unique roots")
+        if callable(registration.factory):
+            raise ValueError("framework factories must be lazy import paths or prebuilt adapters")
+        with coordinator.writer():
+            with self._lock:
+                if self._frozen:
+                    raise RuntimeError("framework registry is frozen")
+                if registration.name in self._registrations:
+                    raise ValueError(f"framework group {registration.name!r} is already registered")
+                for existing in self._registrations.values():
+                    if any(_roots_overlap(root, other) for root in registration.roots for other in existing.roots):
+                        raise ValueError("framework registrations may not overlap roots")
+                # ``register`` performs the check and root update under one finder
+                # mutex, closing a find-spec-to-module-cache registration race.
+                if builtin:
+                    if not set(registration.roots).issubset(finder.roots()):
+                        raise RuntimeError("built-in framework roots were not registered before interception")
+                    finder.can_register(registration.roots, allow_existing=True)
+                else:
+                    finder.register(registration.roots)
+                self._registrations[registration.name] = registration
+                self._revision += 1
+
+    def freeze(self) -> None:
+        """Prevent future registration once controlled planning is active."""
+
+        # Registry freezing is a process mutation just like registration.  It
+        # must not leapfrog an active loader callback or an observation.
+        with coordinator.writer():
+            with self._lock:
+                self._frozen = True
+
+    def registration_for(self, module: str) -> FrameworkRegistration | None:
+        return self.resolve(module)[0]
+
+    def resolve(self, module: str) -> tuple[FrameworkRegistration | None, int]:
+        """Return one registration and its revision from the same lock snapshot."""
+
+        with self._lock:
+            matches = [
+                registration
+                for registration in self._registrations.values()
+                if any(module == root or module.startswith(root + ".") for root in registration.roots)
+            ]
+            if not matches:
+                return None, self._revision
+            return max(matches, key=lambda registration: max(len(root) for root in registration.roots)), self._revision
+
+    def adapter_for(self, registration: FrameworkRegistration) -> Any:
+        """Resolve a lightweight optional adapter only when a root is imported."""
+
+        factory = registration.factory
+        if isinstance(factory, str):
+            module_name, _, attribute = factory.partition(":")
+            if not attribute:
+                raise ValueError("framework factory paths require 'module:attribute'")
+            factory = getattr(importlib.import_module(module_name), attribute)
+        return factory() if callable(factory) else factory
+
+
+framework_registry = FrameworkRegistry()
+for _registration in (
+    FrameworkRegistration("tensorflow", ("tensorflow",), "dryml.tf.runtime:adapter"),
+    FrameworkRegistration("torch", ("torch",), "dryml.torch.runtime:adapter"),
+    FrameworkRegistration("jax", ("jax", "jaxlib"), "dryml.jax.runtime:adapter"),
+):
+    framework_registry.register(_registration, builtin=True)
 
 
 class FrameworkBootstrapAdapter(Protocol):
@@ -90,8 +259,19 @@ class _LazyFrameworkAdapter:
 
     def build_plan(self, runtime_spec: RuntimeContextSpec, allocation_view: RuntimeAllocationView | Any, visibility_plan: DeviceVisibilityPlan) -> FrameworkBootstrapResult:
         config = runtime_spec.frameworks.get(self.name, {})
-        threads = config.get("num_threads")
-        return FrameworkBootstrapResult(post_import_threads={self.name: int(threads)} if threads else {})
+        threads = config.get("num_threads") or (len(getattr(allocation_view, "cpus", ())) or None)
+        interop_threads = config.get("num_interop_threads")
+        accelerator_memory = getattr(allocation_view, "accelerator_memory", {})
+        capacity = getattr(allocation_view, "metadata", {}).get("accelerator_memory_capacity", {})
+        return FrameworkBootstrapResult(
+            post_import_threads={self.name: int(threads)} if threads else {},
+            post_import_interop_threads={self.name: int(interop_threads)} if interop_threads else {},
+            visible_devices=visibility_plan.visible_devices,
+            accelerator_memory=accelerator_memory,
+            accelerator_capacity=capacity,
+            allocator_policy=config.get("allocator"),
+            process_memory=getattr(allocation_view, "memory", None),
+        )
 
     def validate_before_import(self, result: FrameworkBootstrapResult) -> None:
         if self.module_name in sys.modules:
@@ -134,7 +314,14 @@ class JaxBootstrapAdapter(_LazyFrameworkAdapter):
 def default_adapters() -> dict[str, FrameworkBootstrapAdapter]:
     """Return lightweight default bootstrap adapters."""
 
-    adapters: list[FrameworkBootstrapAdapter] = [PlainBootstrapAdapter(), TorchBootstrapAdapter(), TensorFlowBootstrapAdapter(), JaxBootstrapAdapter()]
+    # The optional-package parents install their DType/TensorSpec and backend
+    # hooks here. Their runtime leaves only use the standard library, so this
+    # planning path cannot import TensorFlow, PyTorch, JAX, or native runtimes.
+    from dryml.jax.runtime import adapter as jax_adapter
+    from dryml.tf.runtime import adapter as tensorflow_adapter
+    from dryml.torch.runtime import adapter as torch_adapter
+
+    adapters: list[FrameworkBootstrapAdapter] = [PlainBootstrapAdapter(), torch_adapter(), tensorflow_adapter(), jax_adapter()]
     return {adapter.name: adapter for adapter in adapters}
 
 
@@ -176,11 +363,17 @@ def _parse_byte_size(value: Any) -> int:
 
 
 __all__ = [
+    "FrameworkCapabilities",
     "FrameworkBootstrapAdapter",
     "FrameworkBootstrapResult",
+    "FrameworkImportPlan",
+    "FrameworkPostResult",
+    "FrameworkRegistration",
+    "FrameworkRegistry",
     "JaxBootstrapAdapter",
     "PlainBootstrapAdapter",
     "TensorFlowBootstrapAdapter",
     "TorchBootstrapAdapter",
     "default_adapters",
+    "framework_registry",
 ]

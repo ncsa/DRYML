@@ -1,8 +1,9 @@
 import importlib
 
-from ._framework_imports import install_passive_finder
+from ._framework_imports import install_builtin_roots, install_passive_finder
 
 
+install_builtin_roots()
 install_passive_finder()
 
 __version__ = "0.3.0.dev0"

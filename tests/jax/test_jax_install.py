@@ -2,7 +2,9 @@ import pytest
 import os
 import sys
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# This package-install contract is CPU-only; provisioned GPU verification uses
+# the separate opt-in session-runtime test command.
+os.environ["JAX_PLATFORMS"] = "cpu"
 
 import dryml.runtime as runtime
 jax = pytest.importorskip("jax")

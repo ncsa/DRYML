@@ -94,17 +94,23 @@ def import_configured_framework(framework_name: str, module_name: str | None = N
     target = module_name or framework_name
     if target in sys.modules or framework_name in sys.modules:
         module = importlib.import_module(target)
-        _apply_framework_post_import(framework_name)
+        _apply_framework_post_import(framework_name, target)
         return module
     assert_framework_import_configured(framework_name)
     module = importlib.import_module(target)
-    _apply_framework_post_import(framework_name)
+    _apply_framework_post_import(framework_name, target)
     return module
 
 
-def _apply_framework_post_import(framework_name: str) -> None:
+def _apply_framework_post_import(framework_name: str, module_name: str | None = None) -> None:
     bootstrap = active_runtime_bootstrap()
     if bootstrap is None or framework_name not in bootstrap.frameworks:
+        return
+    from .imports import finalize_helper
+
+    # Raw imports are finalized by the wrapped loader.  This compatibility path
+    # remains for an already-loaded module or a legacy custom adapter.
+    if finalize_helper(framework_name, module_name):
         return
     result = bootstrap.framework_results.get(framework_name)
     if result is None:
