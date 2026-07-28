@@ -40,6 +40,7 @@ class Provider(DrymlProvider):
             issues=(ProviderIssue("fake_ok", "info", "fake provider inspected operation", provider=self.identity.name),),
             metadata={
                 "runtime_mode": _runtime_mode(),
+                "runtime_enforcement": _runtime_enforcement(),
                 "allocation": _allocation_repr(),
                 "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
                 "hip_visible_devices": os.environ.get("HIP_VISIBLE_DEVICES"),
@@ -59,3 +60,9 @@ def _allocation_repr():
     import dryml.runtime as runtime
 
     return repr(runtime.active_runtime().allocation)
+
+
+def _runtime_enforcement():
+    import dryml.runtime as runtime
+
+    return runtime.enforcement().value

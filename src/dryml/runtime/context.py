@@ -38,9 +38,14 @@ class RuntimeBootstrapState:
     strict_preimport: bool = False
 
 
-_DEFAULT_RUNTIME = RuntimeState(enforcement=default_enforcement_from_env())
-_ACTIVE_RUNTIME: ContextVar[RuntimeState] = ContextVar("dryml_active_runtime", default=_DEFAULT_RUNTIME)
+from .publication import publication
+
+
+# The ContextVar is deliberately optional: absent values project the one
+# process-global generation rather than duplicating mutable session state.
+_ACTIVE_RUNTIME: ContextVar[RuntimeState | None] = ContextVar("dryml_active_runtime", default=None)
 _ACTIVE_BOOTSTRAP: ContextVar[RuntimeBootstrapState | None] = ContextVar("dryml_active_bootstrap", default=None)
+publication.initialize(RuntimeState(enforcement=default_enforcement_from_env()))
 
 
 def active_runtime() -> RuntimeState:
@@ -52,7 +57,7 @@ def active_runtime() -> RuntimeState:
         resources.
     """
 
-    return _ACTIVE_RUNTIME.get()
+    return _ACTIVE_RUNTIME.get() or publication.current().runtime
 
 
 def active_runtime_mode() -> RuntimeMode:
@@ -147,7 +152,7 @@ def enter_runtime(
         _ACTIVE_RUNTIME.reset(token)
 
 
-def set_runtime(state: RuntimeState) -> Token[RuntimeState]:
+def set_runtime(state: RuntimeState) -> Token[RuntimeState | None]:
     """Set the active runtime and return a reset token."""
 
     _validate_state(state)
@@ -160,11 +165,11 @@ def set_runtime_bootstrap(state: RuntimeBootstrapState) -> Token[RuntimeBootstra
     return _ACTIVE_BOOTSTRAP.set(state)
 
 
-def reset_runtime(token: Token[RuntimeState] | None = None) -> None:
+def reset_runtime(token: Token[RuntimeState | None] | None = None) -> None:
     """Reset active runtime to a token or the safe default."""
 
     if token is None:
-        _ACTIVE_RUNTIME.set(_DEFAULT_RUNTIME)
+        _ACTIVE_RUNTIME.set(None)
     else:
         _ACTIVE_RUNTIME.reset(token)
 

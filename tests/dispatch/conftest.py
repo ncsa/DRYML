@@ -33,7 +33,7 @@ def target_module(tmp_path):
             from dryml.core.object import Pickleable
             from dryml.managed import ManagedOutput, OperationResult, current_operation_context, managed
             from dryml.records import make_representation_spec
-            from dryml.runtime import BOOTSTRAP_MARKER_ENV, active_runtime, active_runtime_mode, import_configured_framework
+            from dryml.runtime import BOOTSTRAP_MARKER_ENV, active_runtime, active_runtime_mode, enforcement, import_configured_framework
 
             IMPORT_RUNTIME_MODE = active_runtime_mode().value
 
@@ -125,7 +125,12 @@ def target_module(tmp_path):
                 return x + y
 
             def runtime_status():
-                return {"mode": active_runtime_mode().value, "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV), "import_mode": IMPORT_RUNTIME_MODE}
+                return {
+                    "mode": active_runtime_mode().value,
+                    "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV),
+                    "import_mode": IMPORT_RUNTIME_MODE,
+                    "enforcement": enforcement().value,
+                }
 
             def configured_torch_import_status():
                 module = import_configured_framework("torch")

@@ -1,8 +1,8 @@
 """Process-local runtime mode, allocation, visibility, and bootstrap.
 
 ``dryml.runtime`` is the runtime half of the environment/world/runtime split.
-It defaults to ``orchestrator`` mode with ``NoAllocation`` so imports and
-control-plane code do not accidentally capture workload accelerators.
+Its ordinary Python baseline is ``orchestrator`` with ``NoAllocation`` and
+enforcement off; importing it does not alter inherited device visibility.
 """
 
 from dryml.runtime.allocation import NoAllocation, RuntimeAllocationView
@@ -11,17 +11,22 @@ from dryml.runtime.context import RuntimeBootstrapState, RuntimeState, active_ru
 from dryml.runtime.compatibility import RuntimeCompatibilityIssue, RuntimeCompatibilityReport, check_runtime_spec_satisfies_requirement
 from dryml.runtime.devices import DeviceVisibilityPlan, DeviceVisibilityPolicy, apply_device_visibility_plan, build_device_visibility_plan
 from dryml.runtime.decorators import default
-from dryml.runtime.enforcement import RuntimeEnforcement, normalize_enforcement
+from dryml.runtime.enforcement import RuntimeEnforcement, normalize_enforcement, startup_enforcement_from_env
 from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_worker_allocation, require_workload_allocation
 from dryml.runtime.modes import RuntimeMode
+from dryml.runtime.publication import EffectPlan, EffectRecord, PublicationCandidate, PublicationService, SessionGeneration, publication
 from dryml.runtime.specs import RuntimeContextSpec, attach_runtime_id, compute_runtime_id, make_runtime_spec, validate_runtime_spec
 
 __all__ = [
     "DeviceVisibilityPlan",
     "DeviceVisibilityPolicy",
+    "EffectPlan",
+    "EffectRecord",
     "FrameworkBootstrapPolicy",
     "BOOTSTRAP_MARKER_ENV",
     "NoAllocation",
+    "PublicationCandidate",
+    "PublicationService",
     "RuntimeBootstrapState",
     "RuntimeAllocationView",
     "RuntimeBootstrapPlan",
@@ -31,6 +36,7 @@ __all__ = [
     "RuntimeEnforcement",
     "RuntimeMode",
     "RuntimeState",
+    "SessionGeneration",
     "activate",
     "activate_runtime_bootstrap",
     "active_runtime",
@@ -56,10 +62,12 @@ __all__ = [
     "make_runtime_spec",
     "normalize_enforcement",
     "plain",
+    "publication",
     "require_allocation",
     "require_worker_allocation",
     "require_workload_allocation",
     "reset_runtime",
     "set_enforcement",
+    "startup_enforcement_from_env",
     "validate_runtime_spec",
 ]

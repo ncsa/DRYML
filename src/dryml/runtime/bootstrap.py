@@ -14,6 +14,7 @@ from .devices import DeviceVisibilityPlan, apply_device_visibility_plan, build_d
 from .frameworks import FrameworkBootstrapAdapter, FrameworkBootstrapResult, default_adapters
 from .errors import RuntimeTransitionError
 from .guards import BOOTSTRAP_MARKER_ENV
+from .enforcement import RuntimeEnforcement
 from .modes import RuntimeMode
 from .specs import RuntimeContextSpec
 
@@ -109,6 +110,7 @@ def activate(
     restore_environ: bool = True,
     allow_process_controls: bool = False,
     adapters: Mapping[str, FrameworkBootstrapAdapter] | None = None,
+    enforcement: RuntimeEnforcement | str | None = None,
 ) -> Iterator[RuntimeBootstrapState]:
     """Enter runtime mode and activate bootstrap in one scoped barrier.
 
@@ -119,7 +121,7 @@ def activate(
 
     runtime_spec = _activation_spec(spec, mode)
     plan = build_runtime_bootstrap_plan(runtime_spec, allocation, env=env, policy=policy, adapters=adapters)
-    with enter_runtime(runtime_spec.mode, allocation, runtime_spec):
+    with enter_runtime(runtime_spec.mode, allocation, runtime_spec, enforcement=enforcement):
         with activate_runtime_bootstrap(
             plan,
             restore_environ=restore_environ,

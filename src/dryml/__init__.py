@@ -1,5 +1,10 @@
 import importlib
 
+from ._framework_imports import install_passive_finder
+
+
+install_passive_finder()
+
 __version__ = "0.3.0.dev0"
 
 _SUBMODULE_EXPORTS = {

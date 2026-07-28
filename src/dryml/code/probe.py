@@ -283,7 +283,7 @@ def _run_probe_request_normalized(normalized: CodeProbeRequest, *, analysis_targ
 
     try:
         with redirect_stdout(captured_stdout), redirect_stderr(captured_stderr):
-            with runtime.enter_runtime(runtime.RuntimeMode.PROBE) as state:
+            with runtime.enter_runtime(runtime.RuntimeMode.PROBE, enforcement=runtime.RuntimeEnforcement.STRICT) as state:
                 if state.allocation is not runtime.NoAllocation:
                     diagnostics.append(diagnostic(
                         "code_probe.unexpected_error",

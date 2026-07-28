@@ -44,6 +44,25 @@ def normalize_enforcement(policy: RuntimeEnforcement | str) -> RuntimeEnforcemen
         raise ValueError(f"unsupported runtime enforcement policy {policy!r}; expected strict, warn, or off") from exc
 
 
+def startup_enforcement_from_env(environ: Any = None) -> tuple[RuntimeEnforcement, bool]:
+    """Return the startup policy and whether it was explicitly supplied.
+
+    Missing and malformed values deliberately select unchecked Python behavior.
+    A valid non-off value remains visible as an advanced low-level override until
+    a process baseline is later published.
+    """
+
+    environ = os.environ if environ is None else environ
+    raw = environ.get(ENV_VAR)
+    if raw is None:
+        return RuntimeEnforcement.OFF, False
+    try:
+        return normalize_enforcement(raw), True
+    except ValueError as exc:
+        warnings.warn(f"{ENV_VAR}={raw!r} is invalid; falling back to off: {exc}", RuntimeWarning, stacklevel=2)
+        return RuntimeEnforcement.OFF, False
+
+
 def default_enforcement_from_env(environ: Any = None) -> RuntimeEnforcement:
     """Return the initial enforcement policy from ``DRYML_RUNTIME_ENFORCEMENT``.
 
@@ -52,19 +71,11 @@ def default_enforcement_from_env(environ: Any = None) -> RuntimeEnforcement:
             ``os.environ``.
 
     Returns:
-        The configured policy, or ``RuntimeEnforcement.STRICT`` when unset or
+        The configured policy, or ``RuntimeEnforcement.OFF`` when unset or
         invalid. Invalid values emit ``RuntimeWarning`` to keep imports usable.
     """
 
-    environ = os.environ if environ is None else environ
-    raw = environ.get(ENV_VAR)
-    if raw is None:
-        return RuntimeEnforcement.STRICT
-    try:
-        return normalize_enforcement(raw)
-    except ValueError as exc:
-        warnings.warn(f"{ENV_VAR}={raw!r} is invalid; falling back to strict: {exc}", RuntimeWarning, stacklevel=2)
-        return RuntimeEnforcement.STRICT
+    return startup_enforcement_from_env(environ)[0]
 
 
-__all__ = ["ENV_VAR", "RuntimeEnforcement", "default_enforcement_from_env", "normalize_enforcement"]
+__all__ = ["ENV_VAR", "RuntimeEnforcement", "default_enforcement_from_env", "normalize_enforcement", "startup_enforcement_from_env"]

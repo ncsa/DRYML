@@ -60,7 +60,7 @@ def test_in_process_probe_restores_previous_runtime_state():
         assert runtime.active_runtime() is state
 
 
-def test_probe_works_under_runtime_enforcement_policies():
+def test_probe_uses_explicit_strict_enforcement_under_runtime_overrides():
     for policy in (runtime.RuntimeEnforcement.STRICT, runtime.RuntimeEnforcement.WARN, runtime.RuntimeEnforcement.OFF):
         token = set_runtime(runtime.RuntimeState(enforcement=policy))
         try:
@@ -69,4 +69,4 @@ def test_probe_works_under_runtime_enforcement_policies():
             runtime.reset_runtime(token)
         fact = result.analysis.facts_of_kind("runtime_state")[0]
         assert result.ok
-        assert fact.data["enforcement"] == policy.value
+        assert fact.data["enforcement"] == runtime.RuntimeEnforcement.STRICT.value

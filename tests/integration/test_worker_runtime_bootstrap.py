@@ -20,6 +20,16 @@ def test_worker_setup_before_fake_framework_import(monkeypatch):
         assert runtime.require_worker_allocation().accelerators["gpu"] == (3,)
 
 
+def test_worker_activation_can_select_strict_enforcement_over_process_baseline():
+    allocation = runtime.RuntimeAllocationView(cpus=(0,))
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "worker", "device_visibility": {"policy": "assigned"}})
+
+    with runtime.activate(mode=runtime.RuntimeMode.WORKER, allocation=allocation, spec=spec, restore_environ=True, enforcement="strict") as state:
+        assert state.mode is runtime.RuntimeMode.WORKER
+        assert runtime.enforcement() is runtime.RuntimeEnforcement.STRICT
+
+
 def test_materialization_guard_requires_runtime_allocation():
-    with pytest.raises(NoAllocationError):
-        runtime.require_allocation("materialize object")
+    with runtime.enter_runtime(runtime.RuntimeMode.ORCHESTRATOR, enforcement="strict"):
+        with pytest.raises(NoAllocationError):
+            runtime.require_allocation("materialize object")

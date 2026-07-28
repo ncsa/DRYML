@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -22,6 +23,23 @@ def test_importing_runtime_does_not_import_heavy_frameworks(monkeypatch):
     assert "torch" not in sys.modules
     assert "tensorflow" not in sys.modules
     assert "jax" not in sys.modules
+
+
+def test_fresh_dryml_import_installs_only_the_passive_finder():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, sys; import dryml; from dryml._framework_imports import finder; "
+            "print(json.dumps({'installed': any(item is finder for item in sys.meta_path), "
+            "'frameworks': [name for name in ('torch', 'tensorflow', 'jax') if name in sys.modules]}))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {"installed": True, "frameworks": []}
 
 
 def test_bootstrap_plan_builds_without_heavy_imports_and_applies_env(monkeypatch):

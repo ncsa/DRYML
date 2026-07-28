@@ -33,10 +33,30 @@ class FrameworkImportSafetyError(RuntimeErrorBase):
     """Raised when a framework import conflicts with the desired runtime setup."""
 
 
+class PublicationError(RuntimeTransitionError):
+    """Raised when a process-global runtime publication cannot complete safely."""
+
+
+class PublicationBusyError(PublicationError):
+    """Raised when import activity prevents a non-waiting transition."""
+
+
+class PublicationFailedError(PublicationError):
+    """Raised when a prior publication left the process requiring restart."""
+
+
+class PublicationReentryError(PublicationError):
+    """Raised when a transition owner re-enters publication APIs."""
+
+
 __all__ = [
     "DeviceVisibilityError",
     "FrameworkImportSafetyError",
     "NoAllocationError",
+    "PublicationBusyError",
+    "PublicationError",
+    "PublicationFailedError",
+    "PublicationReentryError",
     "RuntimeErrorBase",
     "RuntimeSpecError",
     "RuntimeTransitionError",

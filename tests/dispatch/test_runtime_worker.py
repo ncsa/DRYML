@@ -16,6 +16,7 @@ def test_worker_runtime_active_before_target_import(tmp_path, target_module):
     assert result.result_canonical["mode"] == "worker"
     assert result.result_canonical["bootstrap"] == "1"
     assert result.result_canonical["import_mode"] == "worker"
+    assert result.result_canonical["enforcement"] == "strict"
 
 
 def test_worker_configured_framework_import_succeeds_with_runtime_spec(tmp_path, target_module):

@@ -14,7 +14,7 @@ from dryml.operations import validate_operation_spec
 from dryml.operations.errors import OperationSpecError
 from dryml.records import ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, StorageRef, write_execution_record
 from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
-from dryml.runtime import RuntimeMode, activate
+from dryml.runtime import RuntimeEnforcement, RuntimeMode, activate
 from dryml.runtime.specs import RuntimeContextSpec
 
 from .backends import BACKEND_IDENTITY
@@ -193,7 +193,7 @@ def _execute(
     allocation = allocation_from_json(envelope.allocation_view)
     runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec or {"mode": "worker", "device_visibility": {"policy": "assigned"}})
     try:
-        with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, env=allocation.env, restore_environ=False):
+        with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, env=allocation.env, restore_environ=False, enforcement=RuntimeEnforcement.STRICT):
             _report("dryml.dispatch.worker.execute", "Running operation in worker", operation_id=envelope.operation_id)
             if managed_ticket is not None:
                 from dryml.managed.dispatch import execute_managed_operation

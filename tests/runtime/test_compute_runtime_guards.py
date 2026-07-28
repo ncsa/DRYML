@@ -10,8 +10,9 @@ class RuntimeGuardedCompute(Compute):
 
 
 def test_compute_pre_init_requires_runtime_allocation():
-    with pytest.raises(NoAllocationError):
-        RuntimeGuardedCompute.__pre_init__()
+    with enter_runtime(RuntimeMode.ORCHESTRATOR, enforcement="strict"):
+        with pytest.raises(NoAllocationError):
+            RuntimeGuardedCompute.__pre_init__()
 
 
 def test_compute_pre_init_accepts_cpu_only_worker_allocation():

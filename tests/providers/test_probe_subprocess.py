@@ -44,6 +44,7 @@ def test_current_environment_and_python_executable_subprocess_probe(monkeypatch)
     assert python.status == "ok"
     metadata = current.reports[0].metadata
     assert metadata["runtime_mode"] == "probe"
+    assert metadata["runtime_enforcement"] == "strict"
     assert metadata["allocation"] == "NoAllocation"
     assert metadata["cuda_visible_devices"] == ""
     assert metadata["hip_visible_devices"] == ""

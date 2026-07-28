@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
-from dryml.runtime import FrameworkBootstrapPolicy, NoAllocation, RuntimeContextSpec, RuntimeMode, activate, active_runtime, active_runtime_bootstrap, make_runtime_spec, attach_runtime_id
+from dryml.runtime import FrameworkBootstrapPolicy, NoAllocation, RuntimeContextSpec, RuntimeEnforcement, RuntimeMode, activate, active_runtime, active_runtime_bootstrap, make_runtime_spec, attach_runtime_id
 
 
 from .errors import ProviderError, ProviderProtocolError
@@ -66,7 +66,7 @@ def run_worker_request(envelope: Mapping[str, Any]) -> ProbeReport:
     runtime_envelope = attach_runtime_id(make_runtime_spec(**runtime_spec.to_data()))
     provider_reports: list[ProviderReport] = []
     diagnostics: list[ProviderIssue] = []
-    with activate(mode=RuntimeMode.PROBE, allocation=NoAllocation, spec=runtime_spec, policy=FrameworkBootstrapPolicy(strict_preimport=probe_policy.strict_preimport), restore_environ=False):
+    with activate(mode=RuntimeMode.PROBE, allocation=NoAllocation, spec=runtime_spec, policy=FrameworkBootstrapPolicy(strict_preimport=probe_policy.strict_preimport), restore_environ=False, enforcement=RuntimeEnforcement.STRICT):
         for ref in providers:
             identity = ref.fallback_identity()
             stdout = io.StringIO()
