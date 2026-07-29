@@ -21,12 +21,22 @@ def test_explain_returns_nonlaunching_structured_failure_with_plan_parity(tmp_pa
     world = {"roles": {"main": {"replicas": 1, "process": {}}}}
     dispatcher = Dispatcher(store=store)
 
-    explanation = dispatcher.explain(gpu_target, allow_pickle=True, world=world)
+    explanation = dispatcher.explain(
+        gpu_target,
+        allow_pickle=True,
+        world=world,
+        requirement_policy="strict",
+    )
     assert explanation.launchable is False
     assert explanation.resolution.world_check.status == "incompatible"
     assert json.loads(json.dumps(explanation.to_data()))["launchable"] is False
     with __import__("pytest").raises(DispatchPlanningError, match="not launchable"):
-        dispatcher.plan(gpu_target, allow_pickle=True, world=world)
+        dispatcher.plan(
+            gpu_target,
+            allow_pickle=True,
+            world=world,
+            requirement_policy="strict",
+        )
 
 
 def test_explain_does_not_write_operation_records_for_importable_target(tmp_path):

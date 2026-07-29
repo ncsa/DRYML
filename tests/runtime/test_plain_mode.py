@@ -74,13 +74,36 @@ def test_plain_mode_does_not_mutate_current_environment_or_world():
     assert worlds.current() is world
 
 
-def test_plain_mode_allocation_metadata_does_not_leak_between_entries():
+def test_plain_mode_allocation_metadata_mutation_does_not_leak_between_entries():
     with runtime.plain() as first:
         first.allocation.metadata["mutated"] = True
 
     with runtime.plain() as second:
         assert "mutated" not in second.allocation.metadata
         assert second.allocation.metadata == {"kind": "plain"}
+
+
+def test_runtime_allocation_mappings_are_mutable_defensive_copies():
+    accelerators = {"gpu": [0]}
+    accelerator_memory = {"gpu": {0: 1024}}
+    env = {"VISIBLE": "0"}
+    metadata = {"source": "worker"}
+
+    allocation = runtime.RuntimeAllocationView(
+        accelerators=accelerators,
+        accelerator_memory=accelerator_memory,
+        env=env,
+        metadata=metadata,
+    )
+    allocation.accelerators["gpu"] = (1,)
+    allocation.accelerator_memory["gpu"][0] = 2048
+    allocation.env["VISIBLE"] = "1"
+    allocation.metadata["source"] = "runtime"
+
+    assert accelerators == {"gpu": [0]}
+    assert accelerator_memory == {"gpu": {0: 1024}}
+    assert env == {"VISIBLE": "0"}
+    assert metadata == {"source": "worker"}
 
 
 def test_runtime_allocation_invariants_remain_valid():

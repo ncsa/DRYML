@@ -32,6 +32,7 @@ from dryml.core.utils.general import pickle_load
 from dryml.environments.records import EnvironmentRecord
 from dryml.environments.specs import EnvironmentSpec, PythonExecutableSpec, spec_from_data
 from dryml.runtime import RuntimeEnforcement, RuntimeMode
+from dryml.runtime.context import active_runtime_override
 from dryml.runtime.specs import RuntimeContextSpec
 from dryml.worlds.errors import ResourceValidationError, WorldSpecValidationError
 from dryml.worlds.specs import WorldSpec
@@ -859,6 +860,35 @@ def _validate_inventory_within_session_bounds(
                 )
 
 
+def _narrow_inventory_to_session_bounds(
+    inventory: worlds.LocalResourceInventory,
+    inherited: worlds.LocalResourceInventory,
+) -> worlds.LocalResourceInventory:
+    """Retain inherited capacity proofs while an explicit inventory narrows IDs."""
+
+    accelerator_memory: dict[str, dict[str | int, int]] = {}
+    for kind, devices in inventory.accelerators.items():
+        inherited_limits = inherited.accelerator_memory.get(kind, {})
+        explicit_limits = inventory.accelerator_memory.get(kind, {})
+        limits = {
+            device: min(explicit_limits.get(device, inherited_limits[device]), inherited_limits[device])
+            for device in devices
+            if device in inherited_limits
+        }
+        if limits:
+            accelerator_memory[kind] = limits
+    memory = inventory.memory
+    if inherited.memory is not None:
+        memory = inherited.memory if memory is None else min(memory, inherited.memory)
+    return worlds.LocalResourceInventory(
+        inventory.cpus,
+        inventory.accelerators,
+        memory=memory,
+        metadata=inventory.metadata,
+        accelerator_memory=accelerator_memory,
+    )
+
+
 def _session_metadata(
     generation: int | None,
     mode: str | None,
@@ -958,9 +988,17 @@ def resolve_dispatch_plan(
         raise DispatchPlanningError("invalid retained session inventory")
     if inventory is not None and session_inventory is not None:
         _validate_inventory_within_session_bounds(inventory, session_inventory)
-    effective_inventory = inventory if inventory is not None else session_inventory
+        effective_inventory = _narrow_inventory_to_session_bounds(inventory, session_inventory)
+    else:
+        effective_inventory = inventory if inventory is not None else session_inventory
     session_fragments = _session_environment_fragments(session_snapshot, session_mode)
-    enforcement = runtime.enforcement()
+    pinned_runtime = getattr(session_snapshot, "runtime", None)
+    runtime_override = active_runtime_override()
+    enforcement = (
+        runtime_override.enforcement
+        if runtime_override is not None
+        else getattr(pinned_runtime, "enforcement", RuntimeEnforcement.OFF)
+    )
     policy = effective_requirement_policy(requirement_policy, enforcement)
     _validate_sprint8_policies(inventory_policy, resolver_policy)
     if inventory is not None and not isinstance(inventory, worlds.LocalResourceInventory):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 
 from dryml.runtime.errors import FrameworkImportSafetyError
 from dryml.runtime.frameworks import FrameworkBootstrapResult, FrameworkPostResult, _LazyFrameworkAdapter
@@ -21,18 +22,7 @@ class TorchRuntimeAdapter(_LazyFrameworkAdapter):
         updates = dict(result.env_updates)
         if result.allocator_policy:
             updates["PYTORCH_CUDA_ALLOC_CONF"] = result.allocator_policy
-        return FrameworkBootstrapResult(
-            env_updates=updates,
-            post_import_threads=result.post_import_threads,
-            post_import_interop_threads=result.post_import_interop_threads,
-            visible_devices=result.visible_devices,
-            accelerator_memory=result.accelerator_memory,
-            accelerator_capacity=result.accelerator_capacity,
-            allocator_policy=result.allocator_policy,
-            process_memory=result.process_memory,
-            cpu_affinity=result.cpu_affinity,
-            memory_limit=result.memory_limit,
-        )
+        return replace(result, env_updates=updates)
 
     def validate_before_import(self, result: FrameworkBootstrapResult) -> None:
         """Validate the immutable pre-import plan without mutating the process."""

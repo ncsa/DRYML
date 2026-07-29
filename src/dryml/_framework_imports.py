@@ -36,6 +36,11 @@ class ImportEpochCoordinator:
     """Coordinate overlapping import readers with short non-waiting writers."""
 
     def __init__(self) -> None:
+        """Initialize empty reader/writer admission state.
+
+        Returns:
+            None.
+        """
         self._condition = threading.Condition(threading.Lock())
         self._readers = 0
         self._writer: int | None = None
@@ -43,7 +48,11 @@ class ImportEpochCoordinator:
 
     @contextmanager
     def reader(self) -> Iterator[ImportEpochToken]:
-        """Admit a reader, waiting only while a different writer is active."""
+        """Admit one callback reader, waiting only for an active writer.
+
+        Yields:
+            An ownership token valid for the callback lifetime.
+        """
 
         owner = threading.get_ident()
         with self._condition:
@@ -68,7 +77,14 @@ class ImportEpochCoordinator:
 
     @contextmanager
     def writer(self) -> Iterator[ImportEpochToken]:
-        """Admit an exclusive writer or fail immediately for any active epoch."""
+        """Admit an exclusive transition writer or fail when an epoch is active.
+
+        Yields:
+            An ownership token valid for the transition.
+
+        Raises:
+            ImportEpochBusyError: If another reader or writer is active.
+        """
 
         owner = threading.get_ident()
         with self._condition:
@@ -128,6 +144,14 @@ class PassiveFrameworkFinder(importlib.abc.MetaPathFinder):
     observation_limit = 4096
 
     def __init__(self, coordinator: ImportEpochCoordinator) -> None:
+        """Initialize watched-root and first-observation storage.
+
+        Args:
+            coordinator: Shared import admission coordinator.
+
+        Returns:
+            None.
+        """
         self.coordinator = coordinator
         self._roots: set[str] = set()
         # This is intentionally a fixed-size first-observation ledger, not an
@@ -205,7 +229,16 @@ class PassiveFrameworkFinder(importlib.abc.MetaPathFinder):
             return None
 
     def find_spec(self, fullname, path=None, target=None):
-        """Record watched lookups and wrap the original delegated loader."""
+        """Record a lookup and wrap a watched module's original loader.
+
+        Args:
+            fullname: Module name requested by import machinery.
+            path: Optional package search path.
+            target: Optional existing module for reload resolution.
+
+        Returns:
+            The delegated specification, wrapped only for watched modules.
+        """
 
         # Retain the exact first fullname for each candidate root.  This keeps
         # late descendant diagnostics exact without allowing a deep import
@@ -258,10 +291,14 @@ class PassiveFrameworkFinder(importlib.abc.MetaPathFinder):
             raise ValueError("framework registration requires unique roots")
         for root in roots:
             self._validate_root(root)
+            # Built-in roots are reserved before the finder is installed.  A
+            # watched root may consequently be in module creation while the
+            # lazy runtime registry materializes its matching metadata.
+            already_reserved = allow_existing and root in self._roots
             for name in self._observed.values():
-                if self._overlaps(name, root):
+                if not already_reserved and self._overlaps(name, root):
                     raise RuntimeError(f"framework root {root!r} was already observed as {name!r}")
-            if any(self._overlaps(name, root) for name in sys.modules):
+            if not already_reserved and any(self._overlaps(name, root) for name in sys.modules):
                 raise RuntimeError(f"framework root {root!r} was already loaded")
             if not allow_existing and any(self._overlaps(root, existing) for existing in self._roots):
                 raise ValueError(f"framework root {root!r} overlaps an existing watched root")
@@ -271,19 +308,53 @@ class _DelegatingLoader:
     """PEP-451 loader wrapper that keeps reader lifetimes callback-bounded."""
 
     def __init__(self, fullname, spec, loader) -> None:
+        """Retain delegated loader facts for one intercepted specification.
+
+        Args:
+            fullname: Fully qualified watched module name.
+            spec: Original delegated module specification.
+            loader: Original loader that performs module work.
+
+        Returns:
+            None.
+        """
         self._fullname = fullname
         self._spec = spec
         self._loader = loader
 
     def create_module(self, spec):
+        """Delegate module creation through the runtime lifecycle callback.
+
+        Args:
+            spec: Specification passed by Python's import machinery.
+
+        Returns:
+            The delegated loader's module object, if it supplies one.
+        """
         from_runtime = __import__("dryml.runtime.imports", fromlist=["create_module"])
         return from_runtime.create_module(self._fullname, self._spec, self._loader, spec)
 
     def exec_module(self, module):
+        """Delegate module execution through the runtime lifecycle callback.
+
+        Args:
+            module: Module instance created for this wrapped specification.
+
+        Returns:
+            None.
+        """
         from_runtime = __import__("dryml.runtime.imports", fromlist=["exec_module"])
         return from_runtime.exec_module(self._fullname, self._spec, self._loader, module)
 
     def __getattr__(self, name):
+        """Expose optional loader protocol attributes without altering behavior.
+
+        Args:
+            name: Attribute requested by import machinery.
+
+        Returns:
+            The corresponding attribute from the original loader.
+        """
         return getattr(self._loader, name)
 
 

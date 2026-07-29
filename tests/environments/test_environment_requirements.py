@@ -53,6 +53,48 @@ def test_semantic_requirement_merge_intersects_and_deduplicates():
     assert merged.details["sources"] == ("test",)
 
 
+def test_semantic_requirement_merge_rejects_conflicts_under_overlapping_markers():
+    left = envs.EnvironmentRequirement(requirements=('demo<2; python_version < "3.12"',))
+    right = envs.EnvironmentRequirement(requirements=('Demo>=2; python_version >= "3.11"',))
+
+    with pytest.raises(envs.EnvironmentRequirementError):
+        left.merge(right)
+
+
+def test_semantic_requirement_merge_preserves_requirements_under_disjoint_markers():
+    merged = envs.EnvironmentRequirement(
+        requirements=('demo<2; python_version < "3.11"',)
+    ).merge(
+        envs.EnvironmentRequirement(requirements=('Demo>=2; python_version >= "3.11"',))
+    )
+
+    assert set(merged.requirements) == {
+        'demo<2; python_version < "3.11"',
+        'demo>=2; python_version >= "3.11"',
+    }
+
+
+def test_semantic_requirement_merge_rejects_distinct_arbitrary_exact_versions():
+    with pytest.raises(envs.EnvironmentRequirementError):
+        envs.EnvironmentRequirement(requirements=("demo===foo",)).merge(
+            envs.EnvironmentRequirement(requirements=("Demo===bar",))
+        )
+
+
+def test_semantic_requirement_merge_deduplicates_identical_arbitrary_exact_versions():
+    merged = envs.EnvironmentRequirement(requirements=("demo===foo",)).merge(
+        envs.EnvironmentRequirement(requirements=("Demo===foo",))
+    )
+
+    assert merged.requirements == ("demo===foo",)
+
+
+@pytest.mark.parametrize("left,right", [("~=3.10", "<3.10"), ("==3.10.*", "!=3.10.*"), ("==3.10.*", "<3.10")])
+def test_semantic_requirement_merge_rejects_impossible_pep440_intersections(left, right):
+    with pytest.raises(envs.EnvironmentRequirementError):
+        envs.EnvironmentRequirement(python=left).merge(envs.EnvironmentRequirement(python=right))
+
+
 def test_requirement_check_compatible():
     req = envs.EnvironmentRequirement(
         python=">=3.10,<3.13",

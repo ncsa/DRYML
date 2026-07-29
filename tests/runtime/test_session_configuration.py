@@ -5,7 +5,12 @@ import pytest
 from dryml.environments import EnvironmentRequirement, EnvironmentRequirementError
 from dryml.session.configuration import normalize_configuration, select_world_allocation
 from dryml.session.errors import SessionConfigurationError
-from dryml.worlds import LocalResourceInventory, WorldAllocation
+from dryml.worlds import (
+    LocalResourceInventory,
+    WorldAllocation,
+    attach_world_allocation_id,
+    make_world_allocation_spec,
+)
 
 
 def test_complete_configuration_is_canonical_and_deeply_immutable():
@@ -100,6 +105,22 @@ def test_exact_allocation_selection_requires_unambiguous_process_selector():
     assert selected.process.cpus == (1,)
 
 
+def test_exact_allocation_accepts_canonical_envelope_with_id_and_metadata():
+    allocation = attach_world_allocation_id(
+        make_world_allocation_spec(
+            _single_allocation_envelope()["payload"]["roles"],
+            metadata={"scheduler": "local"},
+        )
+    )
+
+    selected = select_world_allocation(allocation)
+
+    assert allocation["id"].startswith("worldalloc-v1-")
+    assert allocation["metadata"] == {"scheduler": "local"}
+    assert selected.role == "main"
+    assert selected.process.cpus == (0,)
+
+
 def test_exact_allocation_rejects_unknown_envelope_and_invalid_selection():
     invalid = _single_allocation_envelope()
     invalid["extra"] = True
@@ -120,6 +141,8 @@ def test_exact_allocation_cannot_broaden_an_inherited_inventory():
 def _single_allocation_envelope():
     return {
         "schema": "dryml.world_allocation.v1",
+        "schema_version": 1,
+        "kind": "local_allocation",
         "payload": {
             "roles": {
                 "main": [
@@ -143,4 +166,9 @@ def _multi_allocation_envelope():
             {"replica": 1, "rank": 1, "local_rank": 1, "resources": {"cpus": [1], "accelerators": {}}},
         ]
     }
-    return {"schema": "dryml.world_allocation.v1", "payload": payload}
+    return {
+        "schema": "dryml.world_allocation.v1",
+        "schema_version": 1,
+        "kind": "local_allocation",
+        "payload": payload,
+    }

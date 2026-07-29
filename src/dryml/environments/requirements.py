@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy, report_from_issues
@@ -375,10 +375,10 @@ class EnvironmentRequirement:
     def merge(self, other: "EnvironmentRequirement", *, sources: tuple[str, ...] = ()) -> "EnvironmentRequirement":
         """Return the semantic intersection of two compatible requirements.
 
-        Package constraints are intersected only when their PEP 508 marker,
-        extras, and direct-reference identity are the same. Different markers
-        retain independent conditional requirements instead of being treated as
-        unconditional conflicts.
+        Package constraints with the same PEP 508 marker, extras, and
+        direct-reference identity are intersected. Requirements with different
+        markers remain separate, but contradictory constraints are rejected
+        unless their markers are proven disjoint.
         """
 
         if not isinstance(other, EnvironmentRequirement):
@@ -525,6 +525,7 @@ def _merge_package_requirements(left: tuple[str, ...], right: tuple[str, ...]) -
         key = (normalize_distribution_name(req.name), tuple(sorted(req.extras)), req.url, None if req.marker is None else str(req.marker))
         grouped.setdefault(key, []).append(req)
     merged: list[str] = []
+    combined_groups: list[tuple[tuple[str, tuple[str, ...], str | None], str | None, SpecifierSet]] = []
     for (name, extras, url, marker), requirements in grouped.items():
         combined = SpecifierSet(",".join(str(item.specifier) for item in requirements if str(item.specifier)))
         if _specifier_has_obvious_conflict(combined):
@@ -532,6 +533,17 @@ def _merge_package_requirements(left: tuple[str, ...], right: tuple[str, ...]) -
                 "conflicting package requirement specifiers",
                 context={"path": f"requirements.{name}"},
             )
+        identity = (name, extras, url)
+        for other_identity, other_marker, other_specifier in combined_groups:
+            if other_identity != identity or _markers_proven_disjoint(marker, other_marker):
+                continue
+            overlap = SpecifierSet(",".join(filter(None, (str(combined), str(other_specifier)))))
+            if _specifier_has_obvious_conflict(overlap):
+                raise EnvironmentRequirementError(
+                    "conflicting package requirement specifiers under overlapping markers",
+                    context={"path": f"requirements.{name}"},
+                )
+        combined_groups.append((identity, marker, combined))
         specifier = str(combined) or None
         text = name + ("[" + ",".join(extras) + "]" if extras else "")
         if url:
@@ -544,6 +556,74 @@ def _merge_package_requirements(left: tuple[str, ...], right: tuple[str, ...]) -
     return tuple(sorted(set(merged), key=requirement_sort_key))
 
 
+def _markers_proven_disjoint(left: str | None, right: str | None) -> bool:
+    """Return whether supported conjunctive marker constraints cannot overlap."""
+
+    if left is None or right is None:
+        return False
+    left_atoms = _conjunctive_marker_atoms(Requirement(f"x; {left}").marker)
+    right_atoms = _conjunctive_marker_atoms(Requirement(f"x; {right}").marker)
+    if left_atoms is None or right_atoms is None:
+        return False
+    return _marker_atoms_have_conflict(left_atoms + right_atoms)
+
+
+def _conjunctive_marker_atoms(marker: Any) -> list[tuple[Any, Any, Any]] | None:
+    """Return marker atoms when the expression contains conjunctions only."""
+
+    atoms: list[tuple[Any, Any, Any]] = []
+
+    def visit(value: Any) -> bool:
+        if isinstance(value, tuple) and len(value) == 3:
+            atoms.append(value)
+            return True
+        if not isinstance(value, list):
+            return value == "and"
+        for item in value:
+            if item == "or" or not visit(item):
+                return False
+        return True
+
+    return atoms if visit(getattr(marker, "_markers", ())) else None
+
+
+def _marker_atoms_have_conflict(atoms: list[tuple[Any, Any, Any]]) -> bool:
+    """Detect contradictions in the marker atom forms DRYML can prove."""
+
+    version_variables = {"implementation_version", "python_full_version", "python_version"}
+    version_operators = {"<", "<=", ">", ">=", "==", "!=", "~=", "==="}
+    reverse_operator = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "==", "!=": "!=", "===": "==="}
+    version_specifiers: dict[str, list[str]] = {}
+    string_equalities: dict[str, set[str]] = {}
+    string_exclusions: dict[str, set[str]] = {}
+    for left, operator, right in atoms:
+        if left.__class__.__name__ == "Variable" and right.__class__.__name__ == "Value":
+            variable, value, op = str(left.value), str(right.value), str(operator)
+        elif right.__class__.__name__ == "Variable" and left.__class__.__name__ == "Value":
+            variable, value = str(right.value), str(left.value)
+            op = reverse_operator.get(str(operator), "")
+        else:
+            continue
+        if variable in version_variables and op in version_operators:
+            version_specifiers.setdefault(variable, []).append(f"{op}{value}")
+        elif op == "==":
+            string_equalities.setdefault(variable, set()).add(value)
+        elif op == "!=":
+            string_exclusions.setdefault(variable, set()).add(value)
+
+    for values in version_specifiers.values():
+        try:
+            combined = SpecifierSet(",".join(values))
+        except InvalidSpecifier:
+            continue
+        if _specifier_has_obvious_conflict(combined):
+            return True
+    for variable, values in string_equalities.items():
+        if len(values) > 1 or values & string_exclusions.get(variable, set()):
+            return True
+    return False
+
+
 def _merge_schema_versions(left: Mapping[str, str], right: Mapping[str, str]) -> dict[str, str]:
     result = dict(left)
     for name, specifier in right.items():
@@ -552,6 +632,15 @@ def _merge_schema_versions(left: Mapping[str, str], right: Mapping[str, str]) ->
 
 
 def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
+    arbitrary_exact_versions = {item.version for item in specifier if item.operator == "==="}
+    if len(arbitrary_exact_versions) > 1:
+        return True
+    # SpecifierSet preserves PEP 440 syntax but does not expose whether its
+    # intersection is empty. Test a bounded set of interval/wildcard boundary
+    # witnesses before falling back to the simple range checks below.
+    candidates = _specifier_witnesses(specifier)
+    if candidates and not any(candidate in specifier for candidate in candidates):
+        return True
     exact_versions: set[Version] = set()
     lower: tuple[Version, bool] | None = None
     upper: tuple[Version, bool] | None = None
@@ -575,6 +664,39 @@ def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
     if exact_versions:
         return next(iter(exact_versions)) not in specifier
     return lower is not None and upper is not None and (lower[0] > upper[0] or (lower[0] == upper[0] and (not lower[1] or not upper[1])))
+
+
+def _specifier_witnesses(specifier: SpecifierSet) -> tuple[Version, ...]:
+    """Return bounded PEP 440 candidates around every declared boundary."""
+
+    candidates: set[Version] = set()
+    for item in specifier:
+        raw = item.version.rstrip(".*")
+        try:
+            version = Version(raw)
+        except InvalidVersion:
+            return ()
+        release = version.release or (0,)
+        candidates.update((version, Version(".".join(str(part) for part in (*release, 0))), Version(".".join(str(part) for part in (*release, 1)))))
+        # Strict adjacent bounds can admit a post release between two public
+        # releases, so do not mistake that valid PEP 440 interval for empty.
+        try:
+            candidates.add(Version(f"{version}.post1"))
+        except InvalidVersion:
+            pass
+        if release[-1] > 0:
+            before = (*release[:-1], release[-1] - 1, 999999)
+            candidates.add(Version(".".join(str(part) for part in before)))
+        if item.operator == "~=":
+            prefix = release[:-1] if len(release) > 1 else ()
+            upper = (prefix[-1] + 1,) if len(prefix) == 1 else (*prefix[:-1], prefix[-1] + 1) if prefix else (release[0] + 1,)
+            candidates.add(Version(".".join(str(part) for part in (*upper, 0))))
+        if item.operator in {"==", "!="} and item.version.endswith(".*"):
+            prefix = release
+            candidates.add(Version(".".join(str(part) for part in (*prefix, 1))))
+            upper = (*prefix[:-1], prefix[-1] + 1, 0)
+            candidates.add(Version(".".join(str(part) for part in upper)))
+    return tuple(candidates)
 
 
 __all__ = ["EnvironmentRequirement", "marker_environment_from_record"]

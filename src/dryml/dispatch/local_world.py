@@ -576,7 +576,8 @@ def validate_local_world_feasibility(world: Mapping[str, Any] | WorldSpec | None
     world_spec = normalize_world_spec(world)
     world_obj = WorldSpec.from_data(world_spec["payload"])
     inv = inventory or local_inventory()
-    _validate_local_resource_requests(world_obj, inv, oversubscribe, allocation_backend_kind)
+    _validate_local_resource_requests(world_obj, oversubscribe, allocation_backend_kind)
+    _assign_local_resources(world_obj, inv, oversubscribe)
 
 
 def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, inventory: LocalResourceInventory | None = None, oversubscribe: bool = False, allocation_backend_kind: str = "local_world", requested_world_id: str | None = None) -> LocalWorldAllocationPlan:
@@ -600,11 +601,8 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
     world_spec = normalize_world_spec(world)
     world_obj = WorldSpec.from_data(world_spec["payload"])
     inv = inventory or local_inventory()
-    _validate_local_resource_requests(world_obj, inv, oversubscribe, allocation_backend_kind)
-    try:
-        assignment = assign_local_world(world_obj, inventory=inv, oversubscribe=oversubscribe)
-    except Exception as exc:
-        raise DispatchPlanningError(str(exc), context=getattr(exc, "context", {})) from exc
+    _validate_local_resource_requests(world_obj, oversubscribe, allocation_backend_kind)
+    assignment = _assign_local_resources(world_obj, inv, oversubscribe)
     world_size = sum(role.replicas for role in world_obj.roles.values())
     roles: dict[str, list[dict[str, Any]]] = {}
     keys: list[WorldWorkerKey] = []
@@ -647,8 +645,8 @@ def allocate_local_world(world: Mapping[str, Any] | WorldSpec | None, *, invento
     return LocalWorldAllocationPlan(world_spec=world_spec, world_allocation=WorldAllocation.from_data(allocation_spec["payload"]), world_allocation_spec=allocation_spec, worker_keys=tuple(keys))
 
 
-def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResourceInventory, oversubscribe: bool, allocation_backend_kind: str) -> None:
-    """Check the shared deterministic assignment inputs before allocation."""
+def _validate_local_resource_requests(world: WorldSpec, oversubscribe: bool, allocation_backend_kind: str) -> None:
+    """Check dispatch-specific allocation shape before resource assignment."""
 
     if allocation_backend_kind not in {"local_world", "local_subprocess"}:
         raise DispatchPlanningError("unsupported local allocation backend kind", context={"kind": allocation_backend_kind})
@@ -675,15 +673,13 @@ def _validate_local_resource_requests(world: WorldSpec, inventory: LocalResource
             "local world CPU assignments exceed the bounded limit",
             context={"cpu_assignments": cpu_assignments, "limit": _MAX_LOCAL_WORLD_CPU_ASSIGNMENTS, "oversubscribe": oversubscribe},
         )
-    for role_name, role in world.roles.items():
-        process = role.process
-        if process.environment is not None or process.runtime is not None or process.metadata:
-            raise DispatchPlanningError(
-                "local world allocation cannot enact role-specific process environment, runtime, or metadata settings",
-                context={"role": role_name, "process": process.to_data()},
-            )
+
+
+def _assign_local_resources(world: WorldSpec, inventory: LocalResourceInventory, oversubscribe: bool) -> Any:
+    """Run the shared resource assignment kernel with dispatch errors."""
+
     try:
-        assign_local_world(world, inventory=inventory, oversubscribe=oversubscribe)
+        return assign_local_world(world, inventory=inventory, oversubscribe=oversubscribe)
     except Exception as exc:
         raise DispatchPlanningError(str(exc), context=getattr(exc, "context", {})) from exc
 

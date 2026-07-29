@@ -46,6 +46,15 @@ class _Bypass:
     __slots__ = ("target", "lifecycle", "thread", "task", "active", "used", "lock")
 
     def __init__(self, target: types.FunctionType, lifecycle: object) -> None:
+        """Bind one bypass authority to an exact wrapper lifecycle.
+
+        Args:
+            target: Trusted wrapper the authority may bypass once.
+            lifecycle: Opaque owner token for the active operation.
+
+        Returns:
+            None.
+        """
         self.target = target
         self.lifecycle = lifecycle
         self.thread = threading.get_ident()
@@ -55,6 +64,14 @@ class _Bypass:
         self.lock = threading.Lock()
 
     def admits(self, target: types.FunctionType) -> bool:
+        """Consume authority when the current owner invokes its exact wrapper.
+
+        Args:
+            target: Wrapper requesting the bypass.
+
+        Returns:
+            ``True`` only for the active owner, task, thread, and target.
+        """
         with self.lock:
             if (
                 not self.active
@@ -139,14 +156,15 @@ def install_requirement_wrapper(target: Any, fragment: Any) -> Any:
 
 
 def _instrument_class(cls: type) -> None:
+    namespace = type.__getattribute__(cls, "__dict__")
     for name in _supported_method_names(cls):
         raw = _static_class_attribute(cls, name)
         # Class decoration never intercepts construction.  These are supported
         # only when their own function was explicitly hard-decorated earlier.
         if name in {"__new__", "__init__", "__call__"} and not is_trusted_wrapper(_descriptor_function(raw)):
             continue
-        replacement = _instrument_descriptor(raw, cls, name)
-        if replacement is not raw or name not in type.__getattribute__(cls, "__dict__"):
+        replacement = _instrument_descriptor(raw, cls, name, inherited=name not in namespace)
+        if replacement is not raw or name not in namespace:
             setattr(cls, name, replacement)
     _install_subclass_instrumentation(cls)
 
@@ -180,11 +198,20 @@ def _supported_method_names(cls: type) -> tuple[str, ...]:
     return tuple(names)
 
 
-def _instrument_descriptor(raw: Any, owner: type, name: str) -> Any:
+def _instrument_descriptor(raw: Any, owner: type, name: str, *, inherited: bool) -> Any:
     if type(raw) is types.FunctionType:
         return _wrap_function(raw, owner=owner, name=name)
-    if type(raw) in {staticmethod, classmethod}:
-        return type(raw)(_wrap_function(raw.__func__, owner=owner, name=name))
+    if type(raw) is staticmethod:
+        return staticmethod(
+            _wrap_function(
+                raw.__func__,
+                owner=owner,
+                name=name,
+                owner_specific=inherited,
+            )
+        )
+    if type(raw) is classmethod:
+        return classmethod(_wrap_function(raw.__func__, owner=owner, name=name))
     if _is_managed_descriptor(raw):
         # ManagedMethod owns binding and lifecycle dispatch.  Its direct body is
         # still the only supported enforcement boundary.
@@ -200,21 +227,27 @@ def _wrap_builtin_descriptor(descriptor: staticmethod | classmethod, fragment: A
     return replacement
 
 
-def _wrap_function(target: types.FunctionType, *, owner: type | None = None, name: str | None = None) -> types.FunctionType:
+def _wrap_function(
+    target: types.FunctionType,
+    *,
+    owner: type | None = None,
+    name: str | None = None,
+    owner_specific: bool = False,
+) -> types.FunctionType:
     with _WRAPPER_LOCK:
-        if target in _WRAPPERS:
+        if target in _WRAPPERS and not owner_specific:
             if owner is not None and name is not None:
                 _WRAPPER_OWNERS[target] = (owner, name)
             return target
         original = trusted_original(target)
         if inspect.isasyncgenfunction(original):
-            wrapped = _async_generator_wrapper(target)
+            wrapped = _async_generator_wrapper(original)
         elif inspect.isgeneratorfunction(original):
-            wrapped = _generator_wrapper(target)
+            wrapped = _generator_wrapper(original)
         elif inspect.iscoroutinefunction(original):
-            wrapped = _coroutine_wrapper(target)
+            wrapped = _coroutine_wrapper(original)
         else:
-            wrapped = _sync_wrapper(target)
+            wrapped = _sync_wrapper(original)
         update_wrapper(wrapped, target)
         _WRAPPERS[wrapped] = original
         if owner is not None and name is not None:
@@ -322,6 +355,17 @@ class _LeasedAsyncGenerator:
     __slots__ = ("_wrapper", "_target", "_args", "_kwargs", "_lease", "_inner", "_closed")
 
     def __init__(self, wrapper: types.FunctionType, target: types.FunctionType, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        """Retain one unstarted async generator invocation and its call data.
+
+        Args:
+            wrapper: Trusted wrapper that owns requirement enforcement.
+            target: Original async-generator function.
+            args: Positional invocation arguments.
+            kwargs: Keyword invocation arguments.
+
+        Returns:
+            None.
+        """
         self._wrapper = wrapper
         self._target = target
         self._args = args
@@ -331,25 +375,61 @@ class _LeasedAsyncGenerator:
         self._closed = False
 
     def __aiter__(self):
+        """Return this proxy as the async iterator.
+
+        Returns:
+            This async-generator protocol proxy.
+        """
         return self
 
     async def __anext__(self):
+        """Advance the wrapped generator by one value.
+
+        Returns:
+            The next yielded value.
+        """
         return await self._advance("__anext__")
 
     async def asend(self, value: Any):
+        """Send a value into the wrapped async generator.
+
+        Args:
+            value: Value forwarded to the generator's ``asend`` method.
+
+        Returns:
+            The next yielded value.
+        """
         return await self._advance("asend", value)
 
     async def athrow(self, *args: Any):
+        """Throw an exception into the wrapped async generator.
+
+        Args:
+            args: Exception arguments forwarded to ``athrow``.
+
+        Returns:
+            The next yielded value, when the generator recovers.
+        """
         return await self._advance("athrow", *args)
 
     async def aclose(self):
+        """Close the wrapped async generator and release its generation lease.
+
+        Returns:
+            The wrapped generator's close result.
+        """
         if self._inner is None:
             self._closed = True
             return None
         try:
-            return await self._inner.aclose()
-        finally:
+            result = await self._inner.aclose()
+        except BaseException:
+            if self._is_finished():
+                self._finish()
+            raise
+        else:
             self._finish()
+            return result
 
     def __del__(self) -> None:
         """Schedule normal source finalization when an active proxy is abandoned."""
@@ -406,6 +486,18 @@ def _check_before_body(wrapper: types.FunctionType, args: tuple[Any, ...], gener
     if runtime.enforcement is RuntimeEnforcement.OFF:
         return
     resolution = _resolve_wrapper_requirements(wrapper, args)
+    if resolution.merge_report is not None and not resolution.merge_report.ok:
+        raise AnnotationResolutionError(
+            "direct call requirements contain contradictory hard annotations",
+            context={
+                **_diagnostic_context(generation, runtime, resolution),
+                "merge_issues": [
+                    {"namespace": issue.namespace, "path": issue.path, "message": issue.message}
+                    for issue in resolution.merge_report.issues
+                    if issue.severity == "error"
+                ],
+            },
+        )
     if not _has_hard_requirements(resolution):
         return
     if runtime.mode is RuntimeMode.ORCHESTRATOR:
@@ -590,7 +682,7 @@ def _allocation_data(allocation: Any) -> Any:
 
 
 def _has_hard_requirements(resolution: Any) -> bool:
-    return any((resolution.environment_requirement, resolution.world_requirement, resolution.runtime_requirement))
+    return any((resolution.environment_requirement, resolution.world_requirement))
 
 
 def _is_bypassed(wrapper: types.FunctionType) -> bool:

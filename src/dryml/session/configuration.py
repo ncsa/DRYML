@@ -7,7 +7,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from dryml.environments import EnvironmentRequirement
-from dryml.worlds import LocalResourceInventory, ResourceSpec, WorldAllocation, WorldSpec
+from dryml.worlds import (
+    LocalResourceInventory,
+    ResourceSpec,
+    WorldAllocation,
+    WorldSpec,
+    validate_world_allocation_spec,
+)
 from dryml.worlds.errors import WorldError
 
 from .errors import SessionConfigurationError
@@ -118,10 +124,13 @@ def _normalize_resources(value: Mapping[str, Any]) -> ResourceSpec:
 
 
 def _normalize_allocation_section(value: Mapping[str, Any]) -> SelectedWorldAllocation:
-    frozen = _bounded_value(value, path="allocation")
-    if not isinstance(frozen, Mapping) or set(frozen) - {"value", "role", "replica"} or "value" not in frozen:
+    if not isinstance(value, Mapping) or set(value) - {"value", "role", "replica"} or "value" not in value:
         raise SessionConfigurationError("allocation must contain value plus optional paired role and replica selectors")
-    return select_world_allocation(frozen["value"], role=frozen.get("role"), replica=frozen.get("replica"))
+    selectors = _bounded_value(
+        {key: value[key] for key in ("role", "replica") if key in value},
+        path="allocation",
+    )
+    return select_world_allocation(value["value"], role=selectors.get("role"), replica=selectors.get("replica"))
 
 
 def _normalize_world(value: Mapping[str, Any] | None) -> WorldSpec | None:
@@ -157,9 +166,14 @@ def _coerce_world_allocation(value: WorldAllocation | Mapping[str, Any]) -> Worl
     if isinstance(value, WorldAllocation):
         return value
     frozen = _bounded_value(value, path="world_allocation")
-    if not isinstance(frozen, Mapping) or set(frozen) != {"schema", "payload"} or frozen.get("schema") != "dryml.world_allocation.v1":
+    if not isinstance(frozen, Mapping):
         raise SessionConfigurationError("exact allocation must be a WorldAllocation or canonical world_allocation envelope")
     try:
+        if set(frozen) == {"schema", "payload"}:
+            if frozen.get("schema") != "dryml.world_allocation.v1":
+                raise SessionConfigurationError("exact allocation has an unsupported schema")
+        else:
+            validate_world_allocation_spec(frozen)
         return WorldAllocation.from_data(frozen["payload"])
     except WorldError as exc:
         raise SessionConfigurationError(str(exc), context=_bounded_context(exc.context)) from exc

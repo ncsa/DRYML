@@ -150,6 +150,24 @@ def test_allocate_local_world_two_roles_and_gpu():
     assert trainer["resources"]["memory"] == "1GiB"
 
 
+def test_allocate_local_world_invokes_assignment_kernel_once(monkeypatch):
+    import dryml.dispatch.local_world as local_world_module
+
+    assignment_kernel = local_world_module.assign_local_world
+    invocations = 0
+
+    def recording_assignment(*args, **kwargs):
+        nonlocal invocations
+        invocations += 1
+        return assignment_kernel(*args, **kwargs)
+
+    monkeypatch.setattr(local_world_module, "assign_local_world", recording_assignment)
+
+    allocate_local_world({"worker": {"replicas": 1, "process": {}}}, inventory=_inventory())
+
+    assert invocations == 1
+
+
 def test_allocate_local_world_accepts_canonical_world_spec_data():
     world = WorldSpec.from_data({"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}).to_data()
 

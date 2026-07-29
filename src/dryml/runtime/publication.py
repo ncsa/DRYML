@@ -13,13 +13,16 @@ import sys
 import threading
 from collections.abc import Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
 from dryml._framework_imports import ImportEpochBusyError, ImportEpochReentryError, coordinator
 
+from .allocation import NoAllocation
+from .enforcement import RuntimeEnforcement
 from .errors import PublicationBusyError, PublicationError, PublicationFailedError, PublicationReentryError
+from .modes import RuntimeMode
 
 
 def _frozen_mapping(value: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
@@ -113,6 +116,20 @@ class PublicationService:
         limit_getter: Any = None,
         limit_setter: Any = None,
     ) -> None:
+        """Initialize one isolated publication authority.
+
+        Args:
+            environ: Process environment mapping to own during transitions.
+            meta_path: Import finder list to update transactionally.
+            windows: Whether environment keys are case-insensitive.
+            affinity_getter: Optional CPU-affinity reader for tests or platforms.
+            affinity_setter: Optional CPU-affinity writer for tests or platforms.
+            limit_getter: Optional process-limit reader for tests or platforms.
+            limit_setter: Optional process-limit writer for tests or platforms.
+
+        Returns:
+            None.
+        """
         self._state_lock = threading.Lock()
         self._generation: SessionGeneration | None = None
         self._leases: dict[int, int] = {}
@@ -177,56 +194,69 @@ class PublicationService:
             with coordinator.writer():
                 yield
         except ImportEpochBusyError as exc:
-            raise PublicationBusyError(str(exc), context={"phase": "writer"}) from exc
+            reason = "reader_busy" if coordinator.reader_count else "writer_busy"
+            raise PublicationBusyError(str(exc), context={"phase": "writer", "reason": reason}) from exc
         except ImportEpochReentryError as exc:
             raise PublicationReentryError(str(exc), context={"phase": "writer"}) from exc
 
-    def commit(self, candidate: PublicationCandidate, effects: EffectPlan | None = None, *, validator: Any = None) -> SessionGeneration:
+    def commit(
+        self,
+        candidate: PublicationCandidate,
+        effects: EffectPlan | None = None,
+        *,
+        validator: Any = None,
+        validator_rollback: Any = None,
+    ) -> SessionGeneration:
         """CAS-commit a preplanned generation and reversible process effects.
 
-        ``validator`` runs under exclusive writer admission, but before the
-        state mutex.  It is for preloaded, import-free fact revalidation only;
-        arbitrary callbacks must never run while publication state is locked.
-        The caller must resolve all framework and adapter work before calling
-        this method.
+        ``validator`` runs under exclusive writer admission, but outside the
+        state mutex. ``validator_rollback`` must be supplied before validation
+        when validation can provisionally mutate process-global state. It runs
+        under the same writer admission if publication fails without poisoning
+        the process. Arbitrary callbacks must never run while publication state
+        is locked. The caller must resolve all framework and adapter work before
+        calling this method.
         """
 
         self._reject_writer_reentry()
         effects = effects or EffectPlan()
         with self.writer():
-            if validator is not None:
-                validator()
-            with self._state_lock:
-                current = self._require_generation()
-                if current.health == "failed":
-                    raise PublicationFailedError("runtime publication is failed; restart the process", context={"restart_guidance": current.restart_guidance})
-                if current is not candidate.expected:
-                    raise PublicationError("stale publication candidate", context={"expected": candidate.expected.number, "current": current.number})
-                if self._leases.get(current.number, 0) and self._changes_process_effects(effects):
-                    raise PublicationBusyError("active generation lease prevents process-effect transition", context={"generation": current.number})
-                records: list[EffectRecord] = []
-                journal = list(self._effects)
-                try:
+            records: list[EffectRecord] = []
+            current: SessionGeneration | None = None
+            try:
+                with self._state_lock:
+                    self._validate_candidate_locked(candidate, effects)
+                if validator is not None:
+                    validator()
+                with self._state_lock:
+                    current = self._validate_candidate_locked(candidate, effects)
+                    journal = list(self._effects)
                     self._validate_effect_plan(effects)
                     self._apply(effects, records, journal)
                     self._publish(candidate.generation)
                     self._effects = tuple(journal)
+                    validator_rollback = None
                     return candidate.generation
-                except BaseException as exc:
+            except BaseException as exc:
+                with self._state_lock:
                     rollback_ok = self._rollback(records)
                     irreversible_applied = any(record.kind == "irreversible" for record in records)
                     if rollback_ok and not irreversible_applied:
-                        self._generation = current
-                        raise
-                    self._generation = SessionGeneration(
-                        current.number + 1,
-                        current.runtime,
-                        visibility_epoch=current.visibility_epoch,
-                        health="failed",
-                        restart_guidance="restart the process; a runtime process effect could not be safely restored",
-                        metadata={"failure": type(exc).__name__},
-                    )
+                        if current is not None:
+                            self._generation = current
+                    else:
+                        validator_rollback = None
+                        failed_from = current or self._require_generation()
+                        self._generation = self._terminal_generation(
+                            failed_from,
+                            restart_guidance="restart the process; a runtime process effect could not be safely restored",
+                            metadata={"failure": type(exc).__name__},
+                        )
+                if not rollback_ok or irreversible_applied:
                     raise PublicationFailedError("runtime publication failed closed; restart the process", context={"cause": type(exc).__name__}) from exc
+                if callable(validator_rollback):
+                    validator_rollback()
+                raise
 
     @contextmanager
     def lease(self) -> Iterator[SessionGeneration]:
@@ -319,7 +349,7 @@ class PublicationService:
             current = self._require_generation()
             control_epoch = int(current.metadata.get("control_epoch", 0))
             if current.health == "failed":
-                return current
+                raise PublicationFailedError("runtime publication is failed; restart the process", context={"restart_guidance": current.restart_guidance})
             if control_epoch != admission.control_epoch:
                 raise PublicationError("framework finalizer is stale after a control transition", context={"group": admission.group})
             fingerprints = dict(current.metadata.get("framework_plan_fingerprints", {}))
@@ -433,6 +463,9 @@ class PublicationService:
         self._reject_writer_reentry()
         key = (admission.group, admission.lifecycle, spec_id)
         with self._state_lock:
+            current = self._require_generation()
+            if current.health == "failed":
+                raise PublicationFailedError("runtime publication is failed; restart the process", context={"restart_guidance": current.restart_guidance})
             if self._framework_finalizers.get(key) != "running":
                 raise PublicationError("framework finalizer completion did not own its lifecycle", context={"group": admission.group})
             self._framework_finalizers[key] = "complete"
@@ -445,6 +478,14 @@ class PublicationService:
             return (group, lifecycle, spec_id) in self._framework_finalizers
 
     def _require_generation(self) -> SessionGeneration:
+        """Return the initialized generation while the caller holds state access.
+
+        Returns:
+            The current immutable generation.
+
+        Raises:
+            PublicationError: If baseline initialization has not completed.
+        """
         if self._generation is None:
             raise PublicationError("runtime publication has not been initialized")
         return self._generation
@@ -452,14 +493,10 @@ class PublicationService:
     def _fail_framework_locked(self, current: SessionGeneration, admission: FrameworkAdmission, fingerprints: Mapping[str, str], control_epoch: int, failure: BaseException) -> SessionGeneration:
         """Publish the terminal state while the caller holds ``_state_lock``."""
 
-        self._generation = SessionGeneration(
-            current.number + 1,
-            current.runtime,
-            visibility_epoch=current.visibility_epoch,
-            health="failed",
+        self._generation = self._terminal_generation(
+            current,
             restart_guidance="restart the process; framework import did not complete safely",
             metadata={
-                **current.metadata,
                 "framework_failure": type(failure).__name__,
                 "framework_registry_revision": admission.registry_revision,
                 "framework_plan_fingerprints": dict(fingerprints),
@@ -468,13 +505,80 @@ class PublicationService:
         )
         return self._generation
 
+    def _validate_candidate_locked(self, candidate: PublicationCandidate, effects: EffectPlan) -> SessionGeneration:
+        """Validate one candidate while the caller holds ``_state_lock``."""
+
+        current = self._require_generation()
+        if current.health == "failed":
+            raise PublicationFailedError("runtime publication is failed; restart the process", context={"restart_guidance": current.restart_guidance})
+        if current is not candidate.expected:
+            raise PublicationError(
+                "publication candidate no longer matches the current generation",
+                context={"reason": "stale_candidate", "expected": candidate.expected.number, "current": current.number},
+            )
+        if self._leases and self._changes_process_effects(effects):
+            raise PublicationBusyError("active generation lease prevents process-effect transition", context={"generations": tuple(sorted(self._leases))})
+        return current
+
+    @staticmethod
+    def _terminal_generation(
+        current: SessionGeneration,
+        *,
+        restart_guidance: str,
+        metadata: Mapping[str, Any],
+    ) -> SessionGeneration:
+        """Project a failed process without retaining managed allocation state."""
+
+        try:
+            runtime = replace(
+                current.runtime,
+                mode=RuntimeMode.ORCHESTRATOR,
+                allocation=NoAllocation,
+                spec=None,
+                enforcement=RuntimeEnforcement.STRICT,
+            )
+        except TypeError:
+            # Test doubles may not be RuntimeState instances. Production
+            # generations always use RuntimeState and take the strict branch.
+            runtime = current.runtime
+        return SessionGeneration(
+            current.number + 1,
+            runtime,
+            visibility_epoch=None,
+            health="failed",
+            restart_guidance=restart_guidance,
+            metadata=metadata,
+        )
+
     def _reject_writer_reentry(self) -> None:
+        """Reject publication access from an active transition writer owner.
+
+        Returns:
+            None.
+
+        Raises:
+            PublicationReentryError: If the current thread owns the writer.
+        """
         if coordinator.writer_owner == threading.get_ident():
             raise PublicationReentryError("transition writer is active; publication API re-entry is not allowed", context={"phase": "writer"})
 
     @staticmethod
     def _changes_process_effects(effects: EffectPlan) -> bool:
-        return bool(effects.environment or effects.interceptor is not None or effects.cpu_affinity is not None or effects.process_limits)
+        """Report whether an effect plan can invalidate an active lease.
+
+        Args:
+            effects: Precomputed process-effect plan to inspect.
+
+        Returns:
+            ``True`` when committing the plan mutates process-global state.
+        """
+        return bool(
+            effects.environment
+            or effects.interceptor is not None
+            or effects.cpu_affinity is not None
+            or effects.process_limits
+            or effects.irreversible_outcome is not None
+        )
 
     def _publish(self, generation: SessionGeneration) -> None:
         """Replace the immutable generation after all effects are verified."""
@@ -500,6 +604,16 @@ class PublicationService:
                 )
 
     def _apply(self, effects: EffectPlan, records: list[EffectRecord], journal: list[EffectRecord]) -> None:
+        """Apply and verify preplanned effects while recording rollback ownership.
+
+        Args:
+            effects: Reversible effects validated for the transition.
+            records: Effects applied by this attempt for immediate rollback.
+            journal: Process effects retained across committed generations.
+
+        Returns:
+            None.
+        """
         seen_environment_keys: set[str] = set()
         for key, value in effects.environment.items():
             target_key = self._environment_key(key)
@@ -512,12 +626,16 @@ class PublicationService:
             previous = self._environ.get(target_key)
             if existing is not None and previous != existing.written:
                 raise PublicationError("environment ownership was lost before transition", context={"key": target_key})
+            record_index = None
+            if previous != value:
+                record_index = len(records)
+                records.append(EffectRecord("environment_pending", target_key, previous, value))
             if value is None:
                 self._environ.pop(target_key, None)
             else:
                 self._environ[target_key] = value
-            if previous != value:
-                records.append(EffectRecord("environment", target_key, previous, value))
+            if record_index is not None:
+                records[record_index] = EffectRecord("environment", target_key, previous, value)
             if self._environ.get(target_key) != value:
                 raise PublicationError("environment effect readback failed", context={"key": target_key})
             if previous == value:
@@ -538,8 +656,10 @@ class PublicationService:
             existing = journal[existing_index] if existing_index is not None else None
             if existing is not None and previous != existing.written:
                 raise PublicationError("CPU affinity ownership was lost before transition")
+            record_index = len(records)
+            records.append(EffectRecord("cpu_affinity_pending", 0, previous, effects.cpu_affinity))
             self._affinity_setter(effects.cpu_affinity)
-            records.append(EffectRecord("cpu_affinity", 0, previous, effects.cpu_affinity))
+            records[record_index] = EffectRecord("cpu_affinity", 0, previous, effects.cpu_affinity)
             if tuple(sorted(self._affinity_getter())) != effects.cpu_affinity:
                 raise PublicationError("CPU affinity effect readback failed")
             self._replace_journal_record(journal, existing_index, EffectRecord("cpu_affinity", 0, existing.previous if existing else previous, effects.cpu_affinity))
@@ -550,10 +670,13 @@ class PublicationService:
             if existing is not None and previous != existing.written:
                 raise PublicationError("process-limit ownership was lost before transition", context={"limit": kind})
             self._limit_setter(kind, requested)
-            if tuple(self._limit_getter(kind)) != requested:
-                raise PublicationError("process-limit effect readback failed", context={"limit": kind})
+            # A successful setter may already have changed a non-restorable
+            # limit when readback fails. Record it before the first readback so
+            # rollback and terminal-state handling retain that fact.
             record = EffectRecord("process_limit", kind, previous, requested)
             records.append(record)
+            if tuple(self._limit_getter(kind)) != requested:
+                raise PublicationError("process-limit effect readback failed", context={"limit": kind})
             self._replace_journal_record(journal, existing_index, EffectRecord("process_limit", kind, existing.previous if existing else previous, requested))
             if effects.dedicated_process:
                 irreversible = EffectRecord("irreversible", f"process_limit:{kind}", None, requested)
@@ -565,6 +688,16 @@ class PublicationService:
             journal.append(irreversible)
 
     def _journal_index(self, journal: list[EffectRecord], kind: str, key: Any) -> int | None:
+        """Find one owned effect record by its logical key.
+
+        Args:
+            journal: Retained process-effect ownership records.
+            kind: Effect category to locate.
+            key: Effect key, case-folded for Windows environments.
+
+        Returns:
+            The matching record index, or ``None`` when absent.
+        """
         for index, record in enumerate(journal):
             if record.kind != kind:
                 continue
@@ -577,6 +710,16 @@ class PublicationService:
 
     @staticmethod
     def _replace_journal_record(journal: list[EffectRecord], index: int | None, record: EffectRecord) -> None:
+        """Insert, replace, or remove one semantically neutral journal record.
+
+        Args:
+            journal: Mutable effect journal being prepared for publication.
+            index: Existing matching record index, if present.
+            record: Verified ownership record to apply.
+
+        Returns:
+            None.
+        """
         if record.previous == record.written:
             if index is not None:
                 del journal[index]
@@ -597,6 +740,14 @@ class PublicationService:
         return key
 
     def _environment_identity(self, key: str) -> str:
+        """Return the platform-specific logical identity for an environment key.
+
+        Args:
+            key: Environment variable spelling to normalize.
+
+        Returns:
+            Case-folded identity on Windows, otherwise the original key.
+        """
         return key.casefold() if self._windows else key
 
     @staticmethod
@@ -628,11 +779,22 @@ class PublicationService:
         resource.setrlimit(kind, value)
 
     def _rollback(self, records: list[EffectRecord]) -> bool:
+        """Restore only effects still owned by this failed transition.
+
+        Args:
+            records: Attempt-local records in application order.
+
+        Returns:
+            ``True`` when every reversible effect was restored and verified.
+        """
         complete = True
         for record in reversed(records):
             try:
-                if record.kind == "environment":
-                    if self._environ.get(record.key) != record.written:
+                if record.kind in {"environment", "environment_pending"}:
+                    current = self._environ.get(record.key)
+                    if record.kind == "environment_pending" and current == record.previous:
+                        continue
+                    if current != record.written:
                         complete = False
                     elif record.previous is None:
                         self._environ.pop(record.key, None)
@@ -644,8 +806,11 @@ class PublicationService:
                         del self._meta_path[position]
                     else:
                         complete = False
-                elif record.kind == "cpu_affinity":
-                    if tuple(sorted(self._affinity_getter())) != record.written:
+                elif record.kind in {"cpu_affinity", "cpu_affinity_pending"}:
+                    current = tuple(sorted(self._affinity_getter()))
+                    if record.kind == "cpu_affinity_pending" and current == record.previous:
+                        continue
+                    if current != record.written:
                         complete = False
                     else:
                         self._affinity_setter(record.previous)

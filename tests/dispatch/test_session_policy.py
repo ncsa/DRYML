@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
 from dryml.environments import EnvironmentRequirement
 from dryml.session.model import SessionSnapshot
+from dryml.runtime import RuntimeEnforcement, RuntimeMode, RuntimeState, enter_runtime
 from dryml.worlds import LocalResourceInventory, WorldSpec
 
 
@@ -70,3 +73,41 @@ def test_public_planner_uses_the_pinned_session_snapshot(monkeypatch, tmp_path):
     assert plan.resolution.world_selection.source == "session_requested"
     assert plan.envelope.allocation_view["accelerators"] == {"gpu": ["gpu-a"]}
     assert plan.dispatch_spec["payload"]["metadata"]["dryml.session"]["generation"] == 17
+
+
+def test_snapshot_pins_baseline_enforcement_while_context_overrides_remain_advanced():
+    snapshot = replace(
+        _managed_snapshot(),
+        runtime=RuntimeState(RuntimeMode.ORCHESTRATOR, enforcement=RuntimeEnforcement.STRICT),
+    )
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(lambda: None, allow_pickle=True),
+        session_snapshot=snapshot,
+    )
+
+    assert resolution.requirement_policy.value == "strict"
+
+    with enter_runtime(RuntimeMode.ORCHESTRATOR, enforcement=RuntimeEnforcement.OFF):
+        overridden = resolve_dispatch_plan(
+            normalize_user_operation(lambda: None, allow_pickle=True),
+            session_snapshot=snapshot,
+        )
+    assert overridden.requirement_policy.value == "ignore"
+
+
+def test_explicit_inventory_narrows_retained_devices_without_erasing_known_capacity():
+    snapshot = replace(
+        _managed_snapshot(),
+        inventory=LocalResourceInventory((0,), {"gpu": ("gpu-a",)}, accelerator_memory={"gpu": {"gpu-a": "8GiB"}}),
+    )
+    explicit = LocalResourceInventory((0,), {"gpu": ("gpu-a",)})
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(lambda: None, allow_pickle=True),
+        requirement_policy="ignore",
+        session_snapshot=snapshot,
+        inventory=explicit,
+    )
+
+    assert resolution.local_inventory.accelerator_memory["gpu"]["gpu-a"] == 8 * 1024**3

@@ -213,7 +213,7 @@ class ResourceSpec:
     cpus: int = 0
     memory: int | None = None
     accelerators: Mapping[str, int] = field(default_factory=dict)
-    accelerator_memory: Mapping[str, tuple[int, ...]] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, tuple[int, ...]] = field(default_factory=dict, kw_only=True)
     devices: Mapping[str, Any] = field(default_factory=dict)
     named: Mapping[str, Any] = field(default_factory=dict)
 

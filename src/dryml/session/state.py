@@ -8,6 +8,7 @@ publication generation; this module only stages candidates and projects them.
 from __future__ import annotations
 
 import sys
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,7 +18,6 @@ from dryml.runtime import (
     EffectPlan,
     FrameworkBootstrapPolicy,
     NoAllocation,
-    RuntimeAllocationView,
     RuntimeContextSpec,
     RuntimeEnforcement,
     RuntimeMode,
@@ -25,9 +25,9 @@ from dryml.runtime import (
     build_runtime_bootstrap_plan,
 )
 from dryml.runtime.frameworks import FrameworkBootstrapResult, framework_registry
-from dryml.runtime.errors import PublicationError
+from dryml.runtime.errors import PublicationBusyError, PublicationError
 from dryml.runtime.publication import SessionGeneration, publication
-from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldAllocation, WorldSpec, assign_local_world, local_inventory
+from dryml.worlds import LocalResourceInventory, ResourceSpec, WorldAllocation, WorldSpec, assign_local_world, local_inventory
 
 from .configuration import _normalize_environment, _normalize_resources, normalize_configuration, select_world_allocation
 from .errors import SessionConfigurationError
@@ -37,19 +37,34 @@ _VISIBILITY_KEYS = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "RO
 
 
 def current() -> SessionSnapshot:
-    """Project the current published generation without probing host state."""
+    """Project the current published generation without probing host state.
+
+    Returns:
+        Immutable snapshot of the active process session.
+    """
 
     return _snapshot(publication.current())
 
 
 def mode() -> str:
-    """Return the stable facade mode without process or package probing."""
+    """Return the stable facade mode without process or package probing.
 
-    return current().mode
+    Returns:
+        One of ``python``, ``managed``, or ``orchestrator``.
+    """
+
+    return _configuration(publication.current()).mode
 
 
 def set_mode(mode: str) -> SessionSnapshot:
-    """Replace the mode while preserving worker intent and requirements."""
+    """Replace the mode while preserving worker intent and requirements.
+
+    Args:
+        mode: Requested stable facade mode.
+
+    Returns:
+        Snapshot of the successfully published session.
+    """
 
     if not isinstance(mode, str) or mode not in {"python", "managed", "orchestrator"}:
         raise SessionConfigurationError("session mode must be python, managed, or orchestrator")
@@ -60,7 +75,17 @@ def set_mode(mode: str) -> SessionSnapshot:
 
 
 def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
-    """Enter managed mode with a replacement current-process allowance."""
+    """Enter managed mode with a replacement current-process allowance.
+
+    Args:
+        cpus: Optional inherited CPU count to allocate.
+        memory: Optional declarative process-memory allowance.
+        gpus: Optional accelerator count to assign.
+        accelerator_memory: Optional per-accelerator memory allowance.
+
+    Returns:
+        Snapshot of the successfully published managed session.
+    """
 
     before = _configuration(publication.current())
     supplied = {key: value for key, value in {"cpus": cpus, "memory": memory, "gpus": gpus, "accelerator_memory": accelerator_memory}.items() if value is not None}
@@ -68,7 +93,17 @@ def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: in
 
 
 def request_world(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
-    """Replace only the default requested worker world."""
+    """Replace only the default requested worker world.
+
+    Args:
+        cpus: Optional worker CPU count.
+        memory: Optional worker process-memory allowance.
+        gpus: Optional worker accelerator count.
+        accelerator_memory: Optional worker per-accelerator memory allowance.
+
+    Returns:
+        Snapshot containing the replacement worker intent.
+    """
 
     supplied = {key: value for key, value in {"cpus": cpus, "memory": memory, "gpus": gpus, "accelerator_memory": accelerator_memory}.items() if value is not None}
     if not supplied:
@@ -80,14 +115,33 @@ def request_world(*, cpus: int | None = None, memory: str | int | None = None, g
 
 
 def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str | None = None, replica: int | None = None) -> SessionSnapshot:
-    """Enter managed mode using one unambiguously selected exact allocation."""
+    """Enter managed mode using one unambiguously selected exact allocation.
+
+    Args:
+        value: Typed allocation or canonical allocation envelope.
+        role: Role selector required for multi-process allocations.
+        replica: Replica selector paired with ``role``.
+
+    Returns:
+        Snapshot of the managed session using the selected process.
+    """
 
     before = _configuration(publication.current())
     return _publish("managed", None, (value, role, replica), before.requested_world, before.environment, exact=True)
 
 
 def require_env(*requirements: str, python: str | None = None, excludes: Any = (), capabilities: Any = ()) -> SessionSnapshot:
-    """Atomically merge package and concise software constraints."""
+    """Atomically merge package and concise software constraints.
+
+    Args:
+        requirements: PEP 508 package constraints to merge.
+        python: Optional Python-version constraint.
+        excludes: Optional excluded environment capabilities.
+        capabilities: Optional required environment capabilities.
+
+    Returns:
+        Snapshot containing the merged requirements.
+    """
 
     if not requirements and python is None and not excludes and not capabilities:
         raise SessionConfigurationError("require_env requires at least one constraint")
@@ -110,7 +164,18 @@ def require_env(*requirements: str, python: str | None = None, excludes: Any = (
 
 
 def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocation: Mapping[str, Any] | None = None, requested_world: Mapping[str, Any] | None = None, environment: Mapping[str, Any] | None = None) -> SessionSnapshot:
-    """Atomically replace every facade category from one closed declaration."""
+    """Atomically replace every facade category from one closed declaration.
+
+    Args:
+        mode: Mandatory target facade mode.
+        resources: Optional simple current-process resource declaration.
+        allocation: Optional exact current-process allocation declaration.
+        requested_world: Optional default worker world declaration.
+        environment: Optional software requirement declaration.
+
+    Returns:
+        Snapshot of the complete replacement session.
+    """
 
     candidate = normalize_configuration(
         mode=mode,
@@ -137,12 +202,18 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
 
 
 def reset() -> SessionSnapshot:
-    """Restore the ordinary unchecked Python baseline and clear all categories."""
+    """Restore the ordinary unchecked Python baseline and clear all categories.
+
+    Returns:
+        Snapshot of the restored Python-mode session.
+    """
 
     return _publish("python", None, None, None, EnvironmentRequirement())
 
 
 def _configuration(generation: SessionGeneration) -> SessionConfiguration:
+    if generation.health == "failed":
+        return SessionConfiguration("orchestrator")
     value = generation.metadata.get("session_configuration")
     if isinstance(value, SessionConfiguration):
         return value
@@ -203,7 +274,13 @@ def _runtime_for(mode: str, allocation: SelectedWorldAllocation | None) -> Runti
 
 
 def _loaded_framework_roots() -> tuple[str, ...]:
-    return tuple(root for root in ("tensorflow", "torch", "jax", "jaxlib") if root in sys.modules)
+    roots = {
+        root
+        for registration in framework_registry.registrations().values()
+        for root in registration.roots
+    }
+    loaded = tuple(sys.modules)
+    return tuple(sorted(root for root in roots if any(name == root or name.startswith(root + ".") for name in loaded)))
 
 
 def _publish(
@@ -267,8 +344,11 @@ def _publish(
         ):
             return _snapshot(before)
         observed_roots = _loaded_framework_roots()
-        registry_revision = framework_registry.revision
+        registry_revision, registry_frozen = framework_registry.state()
         plan = _effect_plan(runtime, before, bootstrap)
+        control_epoch = int(before.metadata.get("control_epoch", before.number))
+        if publication._changes_process_effects(plan):
+            control_epoch = before.number + 1
         generation = SessionGeneration(
             before.number + 1,
             runtime,
@@ -280,30 +360,79 @@ def _publish(
                 "frameworks": tuple(framework_results),
                 "framework_statuses": framework_statuses,
                 "framework_registry_revision": registry_revision,
-                "control_epoch": before.number + 1,
+                "control_epoch": control_epoch,
             },
         )
 
+        freeze_needed = target_active and not registry_frozen
+        freeze_started = False
+
+        def rollback_validator() -> None:
+            """Undo this transition's provisional registry freeze on failure.
+
+            Returns:
+                None.
+            """
+            if freeze_started:
+                framework_registry.unfreeze()
+
         def validate() -> None:
-            if observed_from_probe and local_inventory() != observed:
-                raise PublicationError("session inventory changed while staging; restage before applying effects")
-            if framework_registry.revision != registry_revision:
+            """Revalidate staged inventory, registry, imports, and freeze state.
+
+            Returns:
+                None.
+            """
+            nonlocal freeze_started
+            if observed_from_probe and not _same_visibility_inventory(local_inventory(), observed):
+                raise PublicationError(
+                    "session inventory drifted while staging; restage before applying effects",
+                    context={"reason": "inventory_changed"},
+                )
+            if framework_registry.state() != (registry_revision, registry_frozen):
                 raise PublicationError("framework adapter registry changed while staging; restage before applying effects")
             if _loaded_framework_roots() != observed_roots:
                 raise PublicationError("framework import changed while staging; restage before applying effects")
             if observed_roots and adapter_plan_changes:
                 raise PublicationError("restart the process; a framework was imported before its adapter plan could change")
-            if target_active:
+            if freeze_needed:
+                # Arm rollback before calling the mutator so a mutate-then-raise
+                # BaseException cannot strand the process registry frozen.
+                freeze_started = True
                 framework_registry.freeze()
 
         try:
-            committed = publication.commit(publication.stage(before, generation), plan, validator=validate)
+            committed = publication.commit(
+                publication.stage(before, generation),
+                plan,
+                validator=validate,
+                validator_rollback=rollback_validator if freeze_needed else None,
+            )
+        except PublicationBusyError as exc:
+            if exc.context.get("reason") == "writer_busy":
+                time.sleep(0)
+                continue
+            raise
         except PublicationError as exc:
-            if "inventory changed" in str(exc) or "stale publication candidate" in str(exc):
+            if exc.context.get("reason") in {"inventory_changed", "stale_candidate"}:
                 continue
             raise
         return _snapshot(committed)
     raise SessionConfigurationError("session transition could not obtain a stable inventory")
+
+
+def _same_visibility_inventory(left: LocalResourceInventory, right: LocalResourceInventory) -> bool:
+    """Compare inherited facts that must stay fixed across visibility setup.
+
+    Available process memory is a volatile, declarative observation rather than
+    a visibility control, so it remains part of the retained epoch but not its
+    transition fence.
+    """
+
+    return (
+        left.cpus == right.cpus
+        and left.accelerators == right.accelerators
+        and left.accelerator_memory == right.accelerator_memory
+    )
 
 
 def _controls(resources: ResourceSpec | None, allocation: SelectedWorldAllocation | None) -> dict[str, str]:
@@ -340,8 +469,15 @@ def _effect_plan(runtime: RuntimeState, before: SessionGeneration, bootstrap: An
         return EffectPlan(environment=visibility, cpu_affinity=tuple(allocation.cpus))
     if runtime.enforcement is RuntimeEnforcement.STRICT:
         environment = dict(bootstrap.env_updates)
+        affinity = None
+        visibility_identities = {key.casefold() for key in _VISIBILITY_KEYS}
+        for record in publication.effect_journal():
+            if record.kind == "environment" and str(record.key).casefold() not in visibility_identities:
+                environment[record.key] = record.previous
+            elif record.kind == "cpu_affinity":
+                affinity = record.previous
         environment.update({key: "" for key in _VISIBILITY_KEYS})
-        return EffectPlan(environment=environment)
+        return EffectPlan(environment=environment, cpu_affinity=affinity)
     restore_environment: dict[str, str | None] = {}
     affinity = None
     for record in publication.effect_journal():
@@ -362,18 +498,13 @@ def _pending_framework_statuses(results: Mapping[str, FrameworkBootstrapResult])
     """Publish an honest pending control outcome for each planned root."""
 
     statuses: dict[str, str] = {}
+    registrations = framework_registry.registrations()
     for name in results:
-        registration = framework_registry.registrations().get(name)
+        registration = registrations.get(name)
         if registration is None:
             continue
         for root in registration.roots:
             for control in ("visibility", "threads", "process_memory", "accelerator_memory", "allocator"):
                 statuses[f"{name}:{root}:{control}"] = "pending-import"
     return statuses
-
-
-def _visibility_changes(previous: SessionConfiguration, candidate: SessionConfiguration) -> bool:
-    return previous.mode != candidate.mode or previous.allocation != candidate.allocation
-
-
 __all__ = ["allocate_world", "configure", "current", "manage", "mode", "request_world", "require_env", "reset", "set_mode"]

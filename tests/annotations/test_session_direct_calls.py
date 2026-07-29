@@ -19,6 +19,8 @@ from dryml.managed import ManagedOutput, managed
 from dryml.runtime import RuntimeAllocationView, RuntimeEnforcement, RuntimeMode, enter_runtime
 from dryml.runtime.errors import PublicationBusyError, PublicationReentryError, RuntimeTransitionError
 from dryml.runtime.publication import EffectPlan, SessionGeneration, publication
+from dryml.core.utils.general import pickle_load
+from dryml.dispatch import normalize_user_operation
 
 
 class _ManagedAnnotationOrderTarget(Object):
@@ -75,6 +77,38 @@ def test_free_function_does_not_collect_an_unrelated_argument_class_method():
     with pytest.raises(AnnotationResolutionError):
         target(Argument())
     assert calls == []
+
+
+def test_contradictory_hard_fragments_fail_before_the_direct_body():
+    calls = []
+
+    @dryml.world.req(cpus={"min": 2})
+    @dryml.world.req(cpus={"max": 1})
+    def target():
+        calls.append("body")
+
+    dryml.session.manage(cpus=1)
+    with pytest.raises(AnnotationResolutionError) as exc_info:
+        target()
+    assert calls == []
+    assert exc_info.value.context["merge_issues"]
+
+
+def test_pickle_transport_keeps_the_trusted_worker_requirement_wrapper():
+    @dryml.world.req(cpus={"min": 10_000_000})
+    def target():
+        return "body"
+
+    normalized = normalize_user_operation(target, allow_pickle=True)
+    try:
+        loaded = pickle_load(normalized.launch["pickle_path"])
+        dryml.session.manage(cpus=1)
+        with pytest.raises(AnnotationResolutionError):
+            loaded()
+    finally:
+        import shutil
+
+        shutil.rmtree(normalized.launch["cleanup_paths"][0], ignore_errors=True)
 
 
 def test_coroutine_generator_and_async_generator_hold_the_checked_lease():
@@ -168,6 +202,38 @@ def test_async_generator_forwards_send_throw_close_and_releases_its_lease():
     asyncio.run(consume())
     dryml.session.reset()
     assert received == ["value"]
+
+
+def test_async_generator_failed_concurrent_close_retains_its_lease():
+    advance_started = asyncio.Event()
+    release_advance = asyncio.Event()
+
+    @dryml.world.req(cpus={"exact": 1})
+    async def target():
+        yield "ready"
+        advance_started.set()
+        await release_advance.wait()
+        yield "done"
+
+    dryml.session.manage(cpus=1)
+
+    async def exercise():
+        live = target()
+        assert await anext(live) == "ready"
+        advance = asyncio.create_task(anext(live))
+        await advance_started.wait()
+
+        with pytest.raises(RuntimeError, match="already running"):
+            await live.aclose()
+        with pytest.raises(PublicationBusyError):
+            dryml.session.reset()
+
+        release_advance.set()
+        assert await advance == "done"
+        await live.aclose()
+
+    asyncio.run(exercise())
+    dryml.session.reset()
 
 
 def test_generator_lifecycles_release_only_after_exhaustion_failure_or_finalization():
@@ -428,6 +494,45 @@ def test_warn_override_enters_once_and_orchestrator_rejects_with_guidance():
     assert calls == ["body"]
 
 
+@pytest.mark.parametrize("mode", ["python", "managed", "orchestrator", "probe", "worker"])
+def test_runtime_only_requirements_remain_metadata_in_every_direct_call_mode(mode):
+    calls = []
+
+    @dryml.annotations.require(
+        namespace="runtime",
+        fragment={"frameworks": {"plain": {"num_threads": 2}}},
+    )
+    def target():
+        calls.append(mode)
+
+    resolution = dryml.annotations.resolve(target)
+    assert resolution.requirements.runtime == {"frameworks": {"plain": {"num_threads": 2}}}
+
+    if mode == "managed":
+        dryml.session.manage(cpus=1)
+        target()
+    elif mode == "orchestrator":
+        dryml.session.set_mode("orchestrator")
+        target()
+    elif mode == "probe":
+        with enter_runtime(
+            RuntimeMode.PROBE,
+            enforcement=RuntimeEnforcement.STRICT,
+        ):
+            target()
+    elif mode == "worker":
+        with enter_runtime(
+            RuntimeMode.WORKER,
+            RuntimeAllocationView(cpus=(0,)),
+            enforcement=RuntimeEnforcement.STRICT,
+        ):
+            target()
+    else:
+        target()
+
+    assert calls == [mode]
+
+
 def test_worker_allocation_proves_its_required_role_cardinality():
     @dryml.world.req(
         roles={
@@ -479,6 +584,44 @@ def test_hard_class_decoration_preserves_identity_and_supported_binding():
         with pytest.raises(AnnotationResolutionError):
             call()
     assert calls == []
+
+
+@pytest.mark.parametrize("call_order", [("base", "sibling"), ("sibling", "base")])
+def test_inherited_staticmethod_uses_owner_specific_requirements_in_both_call_orders(call_order):
+    calls = []
+
+    class Base:
+        @staticmethod
+        @dryml.world.req(cpus={"max": 1})
+        def target():
+            calls.append("base")
+
+    class Sibling(Base):
+        pass
+
+    decorated = dryml.world.req(cpus={"min": 2})(Sibling)
+    assert decorated is Sibling
+
+    base_wrapper = Base.target
+    sibling_wrapper = Sibling.target
+    assert sibling_wrapper is not base_wrapper
+    assert is_trusted_wrapper(base_wrapper)
+    assert is_trusted_wrapper(sibling_wrapper)
+    assert trusted_original(sibling_wrapper) is trusted_original(base_wrapper)
+    assert dryml.annotations.own_fragments(sibling_wrapper) == dryml.annotations.own_fragments(base_wrapper)
+
+    dryml.session.manage(cpus=1)
+    calls_by_owner = {
+        "base": Base.target,
+        "sibling": Sibling.target,
+    }
+    for owner in call_order:
+        if owner == "sibling":
+            with pytest.raises(AnnotationResolutionError, match="contradictory"):
+                calls_by_owner[owner]()
+        else:
+            calls_by_owner[owner]()
+    assert calls == ["base"]
 
 
 def test_predecoration_reference_and_property_remain_outside_interception():

@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from dataclasses import replace
 
 from dryml.runtime.errors import FrameworkImportSafetyError
 from dryml.runtime.frameworks import FrameworkBootstrapResult, FrameworkPostResult, _LazyFrameworkAdapter
+
+
+_VISIBILITY_ENV = {
+    "CUDA_VISIBLE_DEVICES": "gpu",
+    "HIP_VISIBLE_DEVICES": "rocm",
+    "ROCR_VISIBLE_DEVICES": "rocm",
+    "XLA_VISIBLE_DEVICES": "xla",
+}
 
 
 class JaxRuntimeAdapter(_LazyFrameworkAdapter):
@@ -19,7 +29,8 @@ class JaxRuntimeAdapter(_LazyFrameworkAdapter):
 
         result = super().build_plan(runtime_spec, allocation_view, visibility_plan)
         config = runtime_spec.frameworks.get(self.name, {})
-        updates = dict(result.env_updates)
+        updates = dict(visibility_plan.env_updates)
+        updates.update(result.env_updates)
         if not result.visible_devices.get("gpu", ()):
             updates.setdefault("JAX_PLATFORMS", str(config.get("platform", "cpu")))
         elif "platform" in config:
@@ -31,18 +42,7 @@ class JaxRuntimeAdapter(_LazyFrameworkAdapter):
         fraction = _uniform_fraction(result)
         if fraction is not None:
             updates["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(fraction)
-        return FrameworkBootstrapResult(
-            env_updates=updates,
-            post_import_threads=result.post_import_threads,
-            post_import_interop_threads=result.post_import_interop_threads,
-            visible_devices=result.visible_devices,
-            accelerator_memory=result.accelerator_memory,
-            accelerator_capacity=result.accelerator_capacity,
-            allocator_policy=result.allocator_policy,
-            process_memory=result.process_memory,
-            cpu_affinity=result.cpu_affinity,
-            memory_limit=result.memory_limit,
-        )
+        return replace(result, env_updates=updates)
 
     def validate_before_import(self, result: FrameworkBootstrapResult) -> None:
         """Validate the immutable pre-import plan without changing process state."""
@@ -61,13 +61,27 @@ class JaxRuntimeAdapter(_LazyFrameworkAdapter):
     def apply_pre_import(self, result: FrameworkBootstrapResult, *, environ: dict[str, str] | None = None) -> None:
         """Apply only JAX/XLA controls selected during transition planning."""
 
-        target = environ if environ is not None else __import__("os").environ
+        target = environ if environ is not None else os.environ
         target.update(result.env_updates)
 
     def post_import(self, result: FrameworkBootstrapResult, module_name: str) -> FrameworkPostResult:
         """Validate JAX platform visibility and publish JAX-level outcomes."""
 
         module = sys.modules[module_name]
+        # jaxlib has no public device API; the jax root performs the mandatory
+        # device query and all JAX-level configuration when it imports.
+        if module_name.partition(".")[0] == "jaxlib":
+            _prove_pre_import_visibility(result)
+            return FrameworkPostResult(
+                module_name,
+                {
+                    "visibility": "visibility-enforced",
+                    "threads": "pending-import",
+                    "process_memory": "declarative",
+                    "allocator": "pending-import",
+                    "accelerator_memory": "pending-import",
+                },
+            )
         expected = result.visible_devices.get("gpu", ())
         devices = _gpu_devices(module, expected)
         if len(devices) != len(expected):
@@ -76,10 +90,6 @@ class JaxRuntimeAdapter(_LazyFrameworkAdapter):
             "visibility": "visibility-enforced",
             "process_memory": "declarative",
         }
-        # jaxlib can prove visibility but cannot finalize JAX-level settings.
-        if module_name.partition(".")[0] == "jaxlib":
-            statuses.update({"threads": "pending-import", "allocator": "pending-import", "accelerator_memory": "pending-import"})
-            return FrameworkPostResult(module_name, statuses)
         statuses["threads"] = "unsupported"
         fraction = _uniform_fraction(result)
         limits = result.accelerator_memory.get("gpu", {})
@@ -112,6 +122,20 @@ def _gpu_devices(module, expected):
         raise FrameworkImportSafetyError("JAX GPU backend is unavailable for the assigned allocation") from exc
     except TypeError:
         return tuple(device for device in devices() if getattr(device, "platform", None) == "gpu")
+
+
+def _prove_pre_import_visibility(result: FrameworkBootstrapResult) -> None:
+    """Require a complete, consistent visibility plan and environment readback."""
+
+    for variable, device_kind in _VISIBILITY_ENV.items():
+        devices = result.visible_devices.get(device_kind)
+        planned = result.env_updates.get(variable)
+        expected = None if devices is None else ",".join(devices)
+        if planned is None or planned != expected or os.environ.get(variable) != planned:
+            raise FrameworkImportSafetyError(
+                "JAX cannot prove pre-import visibility for direct jaxlib import",
+                context={"variable": variable},
+            )
 
 
 def _uniform_fraction(result: FrameworkBootstrapResult) -> float | None:

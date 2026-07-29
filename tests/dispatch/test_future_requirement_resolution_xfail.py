@@ -50,7 +50,10 @@ def test_dispatch_resolves_class_and_method_requirements(tmp_path):
 def test_dispatch_explicit_world_must_satisfy_hard_world_requirement(tmp_path):
     cpu_only_world = {"roles": {"main": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}
     explanation = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).explain(
-        PickledCallable(targets.LightningModel().train), allow_pickle=True, world=cpu_only_world
+        PickledCallable(targets.LightningModel().train),
+        allow_pickle=True,
+        world=cpu_only_world,
+        requirement_policy="strict",
     )
     assert explanation.launchable is False
     assert explanation.resolution.world_check.status == "incompatible"

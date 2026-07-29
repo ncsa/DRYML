@@ -259,7 +259,7 @@ class Dispatcher:
                 allocation_backend_kind="local_subprocess",
                 requested_world_id=provenance_world_spec["id"],
             )
-            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
+            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, resolution.requirement_policy)
             launch_allocation_spec = allocation_plan.world_allocation_spec
             provenance_allocation_spec = project_world_allocation_spec(
                 launch_allocation_spec,
@@ -548,7 +548,7 @@ class Dispatcher:
                     local_inventory=selected_inventory,
                 )
             allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)
-            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, requirement_policy)
+            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, resolution.requirement_policy)
         except BaseException:
             _cleanup_launch(launch)
             raise
@@ -622,6 +622,7 @@ class Dispatcher:
             worker_plans = []
             for key in allocation_plan.worker_keys:
                 allocation = allocation_plan.world_allocation.runtime_view(key.role, key.replica, world_allocation_id=allocation_spec["id"])
+                allocation_data = _allocation_to_json(allocation, world_id=world_spec.get("id"))
                 launch_data = dict(launch)
                 launch_data.update({
                     "world_id": world_spec.get("id"),
@@ -638,12 +639,12 @@ class Dispatcher:
                     operation_spec=op_spec,
                     environment_spec=env_data,
                     runtime_spec=runtime_data,
-                    allocation_view=_allocation_to_json(allocation, world_id=world_spec.get("id")),
+                    allocation_view=allocation_data,
                     store_refs=marshal.store_refs,
                     transfer={"strategy": marshal.strategy},
                     record_policy=record_policy,
                     reporting={"planning": planning_metadata},
-                    handshake=_handshake_for_allocation(_allocation_to_json(allocation, world_id=world_spec.get("id"))),
+                    handshake=_handshake_for_allocation(allocation_data),
                     launch=launch_data,
                 )
                 worker_plans.append(WorkerLaunchPlan(key, dispatch, recipe, envelope, target_store))

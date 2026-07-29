@@ -141,10 +141,10 @@ def test_bounded_provenance_matrix(tmp_path, monkeypatch, target_kind):
     assert metadata["dryml.environment_selection"]["source"] == "explicit"
     assert metadata["dryml.world_selection"]["source"] == "synthesized"
     assert metadata["dryml.environment_check"]["status"] == "not_required"
-    assert metadata["dryml.world_check"]["status"] == "satisfied"
+    assert metadata["dryml.world_check"]["status"] == "skipped"
     assert metadata["dryml.runtime_check"]["status"] == "not_required"
-    assert metadata["dryml.requirement_policy"] == "strict"
-    assert metadata["dryml.runtime_enforcement"] == "strict"
+    assert metadata["dryml.requirement_policy"] == "ignore"
+    assert metadata["dryml.runtime_enforcement"] == "off"
     assert outcomes["code_probe"] == {"outcome": "not_required"}
     assert outcomes["environment_probe"] == {"outcome": "not_required"}
     if target_kind == "function":

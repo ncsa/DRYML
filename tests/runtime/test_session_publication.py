@@ -63,8 +63,9 @@ def test_publication_stale_candidate_and_reader_writer_overlap_fail_closed():
             publication.commit(staged)
 
     publication.commit(staged)
-    with pytest.raises(RuntimeTransitionError, match="stale"):
+    with pytest.raises(RuntimeTransitionError) as exc_info:
         publication.commit(staged)
+    assert exc_info.value.context["reason"] == "stale_candidate"
 
 
 def test_effect_failure_rolls_back_owned_environment(monkeypatch):
@@ -92,6 +93,20 @@ def test_effect_changing_transition_rejects_active_generation_lease():
                 publication.stage(before, candidate),
                 EffectPlan(environment={"DRYML_U2_LEASE_TEST": "blocked"}),
             )
+
+
+def test_effect_changing_transition_rejects_a_lease_on_a_declarative_descendant():
+    service = _service(environ={})
+    _, declarative = _candidate(service)
+    published = service.commit(declarative)
+
+    with service.lease() as leased:
+        assert leased is published
+        _, later = _candidate(service)
+        service.commit(later)
+        _, effectful = _candidate(service)
+        with pytest.raises(RuntimeTransitionError, match="active generation lease"):
+            service.commit(effectful, EffectPlan(environment={"DRYML_U2_OLD_LEASE": "blocked"}))
 
 
 def test_effect_journal_carries_environment_ownership_across_declarative_commit_and_restore():
@@ -188,6 +203,76 @@ def test_dedicated_nonrestoring_limit_is_explicit_and_reusable_limit_rejects_bef
     assert any(record.kind == "irreversible" for record in service.effect_journal())
 
 
+def test_process_limit_setter_is_journaled_before_a_failed_readback():
+    class Limits:
+        def __init__(self):
+            self.value = (10, 10)
+            self.readback_failure = False
+
+        def get(self, kind):
+            if self.readback_failure:
+                self.readback_failure = False
+                return (9, 9)
+            return self.value
+
+        def set(self, kind, value):
+            self.value = value
+            self.readback_failure = value == (5, 10)
+
+    limits = Limits()
+    service = _service(environ={}, limit_getter=limits.get, limit_setter=limits.set)
+    _, candidate = _candidate(service)
+
+    with pytest.raises(RuntimeTransitionError, match="readback"):
+        service.commit(candidate, EffectPlan(process_limits={7: (5, 10)}))
+
+    assert limits.value == (10, 10)
+    assert service.current().health == "healthy"
+
+
+def test_environment_record_precedes_a_mutate_then_raise_setter():
+    class InterruptingEnvironment(dict):
+        interrupted = False
+
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt("after environment mutation")
+
+    environ = InterruptingEnvironment(DRYML_U2_ENV_RECORD="inherited")
+    service = _service(environ=environ)
+    before, candidate = _candidate(service)
+
+    with pytest.raises(KeyboardInterrupt, match="after environment mutation"):
+        service.commit(candidate, EffectPlan(environment={"DRYML_U2_ENV_RECORD": "managed"}))
+
+    assert environ["DRYML_U2_ENV_RECORD"] == "inherited"
+    assert service.current() is before
+
+
+def test_affinity_record_precedes_a_mutate_then_raise_setter():
+    affinity = {0, 1}
+    interrupted = False
+
+    def set_affinity(cpus):
+        nonlocal interrupted
+        affinity.clear()
+        affinity.update(cpus)
+        if not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("after affinity mutation")
+
+    service = _service(affinity_getter=lambda: affinity, affinity_setter=set_affinity)
+    before, candidate = _candidate(service)
+
+    with pytest.raises(KeyboardInterrupt, match="after affinity mutation"):
+        service.commit(candidate, EffectPlan(cpu_affinity=(0,)))
+
+    assert affinity == {0, 1}
+    assert service.current() is before
+
+
 def test_affinity_is_normalized_and_restored_exactly_after_publication_failure(monkeypatch):
     affinity = {3, 1}
 
@@ -256,7 +341,11 @@ def test_failed_environment_readback_fails_closed_without_claiming_rollback():
     with pytest.raises(RuntimeTransitionError, match="failed closed"):
         service.commit(candidate, EffectPlan(environment={"DRYML_U2_READBACK": "owned"}))
 
-    assert service.current().health == "failed"
+    failed = service.current()
+    assert failed.health == "failed"
+    assert failed.runtime.mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert failed.runtime.allocation is runtime.NoAllocation
+    assert failed.runtime.enforcement is runtime.RuntimeEnforcement.STRICT
 
 
 def test_effect_write_reentry_fails_before_state_lock_and_outer_transaction_rolls_back():

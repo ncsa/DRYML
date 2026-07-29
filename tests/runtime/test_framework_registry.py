@@ -74,6 +74,18 @@ def test_base_import_rejects_a_preloaded_builtin_root():
     assert "already loaded" in completed.stderr
 
 
+def test_watched_builtin_root_can_initialize_its_lazy_registry_on_first_import(tmp_path):
+    """Base import reserves built-in metadata before the wrapped root loads."""
+
+    (tmp_path / "torch.py").write_text("VALUE = 'fake'\n", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import dryml; import torch; assert torch.VALUE == 'fake'", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_registration_rejects_overlap_loaded_and_observed_roots(monkeypatch):
     root = _root()
     registration = FrameworkRegistration(root, (root,), object())

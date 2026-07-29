@@ -15,7 +15,7 @@ def test_worker_setup_before_fake_framework_import(monkeypatch):
         plan = runtime.build_runtime_bootstrap_plan(spec, allocation)
         env = {}
         runtime.apply_runtime_bootstrap_plan(plan, environ=env)
-        sys.modules["torch"] = object()
+        monkeypatch.setitem(sys.modules, "torch", object())
         assert env["CUDA_VISIBLE_DEVICES"] == "3"
         assert runtime.require_worker_allocation().accelerators["gpu"] == (3,)
 

@@ -66,7 +66,18 @@ def pytest_configure(config):
 
 
 def pytest_collection_finish(session):
-    """Record collection completion without changing test selection."""
+    """Validate baseline node IDs and record collection completion.
+
+    Args:
+        session: The active pytest collection session.
+
+    Returns:
+        None.
+    """
+    validate_baseline_nodeids(
+        session.config._dryml_tier_baseline,
+        getattr(session.config, "_dryml_collected_nodeids", ()),
+    )
     session.config._dryml_collection_finished_at = time.monotonic()
     session.config._dryml_selected_count = len(session.items)
 
@@ -74,6 +85,7 @@ def pytest_collection_finish(session):
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     config._dryml_collected_count = len(items)
+    config._dryml_collected_nodeids = frozenset(item.nodeid for item in items)
     baseline = getattr(config, "_dryml_tier_baseline", {})
     for item in items:
         category = category_for_nodeid(item.nodeid)
@@ -162,6 +174,34 @@ def _load_baseline(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     return json.loads(path.read_text())
+
+
+def validate_baseline_nodeids(baseline: dict[str, Any], nodeids: set[str] | frozenset[str] | tuple[str, ...]) -> None:
+    """Reject explicit tier overrides that do not match collected tests.
+
+    Args:
+        baseline: Parsed tier-manifest data containing optional ``node_tiers``.
+        nodeids: Node IDs collected before any optional deselection.
+
+    Returns:
+        None.
+
+    Raises:
+        pytest.UsageError: If the manifest retains a stale explicit node ID.
+    """
+    collected = set(nodeids)
+    collected_paths = {path_for_nodeid(nodeid) for nodeid in collected}
+    manifest_nodeids = {
+        nodeid
+        for nodeid in baseline.get("node_tiers", ())
+        if path_for_nodeid(nodeid) in collected_paths
+    }
+    stale = sorted(manifest_nodeids - collected)
+    if stale:
+        shown = ", ".join(stale[:10])
+        remaining = len(stale) - 10
+        suffix = "" if remaining <= 0 else f" (+{remaining} more)"
+        raise pytest.UsageError(f"test tier baseline contains stale node IDs: {shown}{suffix}")
 
 
 def _unknown_only_enabled(config) -> bool:

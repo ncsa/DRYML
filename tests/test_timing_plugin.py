@@ -103,6 +103,18 @@ def test_unknown_only_deselects_known_nodeids():
     assert config.hook.deselected == [known]
 
 
+def test_timing_plugin_rejects_stale_baseline_nodeids():
+    config = SimpleNamespace(
+        _dryml_tier_baseline={"node_tiers": {"tests/core/test_example.py::test_renamed": "smoke"}},
+        _dryml_collected_nodeids=frozenset({"tests/core/test_example.py::test_current"}),
+    )
+
+    with pytest.raises(pytest.UsageError, match="stale node IDs"):
+        timing_plugin.pytest_collection_finish(
+            SimpleNamespace(config=config, items=[]),
+        )
+
+
 def test_unknown_only_keeps_path_tiered_tests_missing_from_node_tiers():
     item = FakeItem("tests/core/test_example.py::test_new")
     items = [item]

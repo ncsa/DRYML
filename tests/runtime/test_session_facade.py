@@ -10,7 +10,12 @@ import pytest
 from dryml import session
 from dryml.runtime import NoAllocation, RuntimeEnforcement, RuntimeMode, RuntimeState
 from dryml.runtime.publication import PublicationService
-from dryml.worlds import LocalResourceInventory
+from dryml.worlds import (
+    LocalResourceInventory,
+    WorldAllocation,
+    attach_world_allocation_id,
+    make_world_allocation_spec,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +70,7 @@ def test_fresh_inspection_is_python_and_does_not_probe_inventory(monkeypatch):
     assert snapshot.runtime.allocation is NoAllocation
 
 
-def test_manage_returns_deeply_immutable_cpu_only_snapshot():
+def test_manage_keeps_the_session_allocation_projection_deeply_immutable():
     snapshot = session.manage()
 
     assert snapshot.mode == "managed"
@@ -78,8 +83,10 @@ def test_manage_returns_deeply_immutable_cpu_only_snapshot():
         snapshot.controls["memory"] = "changed"
     with pytest.raises(TypeError):
         snapshot.statuses["visibility"] = "failed"
+    snapshot.runtime.allocation.accelerators["gpu"] = (0,)
+    assert snapshot.allocation.process.accelerators == MappingProxyType({})
     with pytest.raises(TypeError):
-        snapshot.runtime.allocation.accelerators["gpu"] = ()
+        snapshot.allocation.process.accelerators["gpu"] = (0,)
 
 
 def test_operation_table_replaces_only_its_owned_category_and_configure_is_complete_replacement():
@@ -119,6 +126,8 @@ def test_configure_exact_allocation_is_revalidated_against_the_observed_inventor
     allocation = {
         "value": {
             "schema": "dryml.world_allocation.v1",
+            "schema_version": 1,
+            "kind": "local_allocation",
             "payload": {"roles": {"main": [{
                 "replica": 0, "rank": 0, "local_rank": 0,
                 "resources": {"cpus": [9], "accelerators": {}},
@@ -129,6 +138,46 @@ def test_configure_exact_allocation_is_revalidated_against_the_observed_inventor
     with pytest.raises(ValueError, match="broadens inherited"):
         session.configure(mode="managed", allocation=allocation)
     assert session.current() == before
+
+
+def test_allocate_world_accepts_canonical_output_with_id_and_metadata():
+    allocation = attach_world_allocation_id(make_world_allocation_spec(
+        {
+            "main": [{
+                "replica": 0,
+                "rank": 0,
+                "local_rank": 0,
+                "resources": {"cpus": [2], "accelerators": {}},
+            }]
+        },
+        metadata={"scheduler": "local"},
+    ))
+
+    snapshot = session.allocate_world(allocation)
+
+    assert allocation["id"].startswith("worldalloc-v1-")
+    assert allocation["metadata"] == {"scheduler": "local"}
+    assert snapshot.allocation.process.cpus == (2,)
+
+
+def test_configure_accepts_typed_world_allocation_value():
+    allocation = WorldAllocation.from_data({
+        "roles": {
+            "main": [{
+                "replica": 0,
+                "rank": 0,
+                "local_rank": 0,
+                "resources": {"cpus": [1], "accelerators": {}},
+            }]
+        }
+    })
+
+    snapshot = session.configure(mode="managed", allocation={"value": allocation})
+
+    assert snapshot.allocation.role == "main"
+    assert snapshot.allocation.process.cpus == (1,)
+    with pytest.raises(TypeError):
+        snapshot.allocation.process.metadata["mutated"] = True
 
 
 def test_requirements_merge_atomically_and_reset_clears_all_categories():

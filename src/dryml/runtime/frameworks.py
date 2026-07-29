@@ -24,18 +24,33 @@ from .errors import FrameworkImportSafetyError, RuntimeSpecError
 from .specs import RuntimeContextSpec
 
 
+def _freeze_device_values(values: Mapping[str, Mapping[str | int, int]]) -> Mapping[str, Mapping[str, int]]:
+    """Canonicalize device identifiers before adapters compare plan controls."""
+
+    groups: dict[str, Mapping[str, int]] = {}
+    for kind, device_values in values.items():
+        normalized: dict[str, int] = {}
+        for device, value in device_values.items():
+            token = str(device)
+            if token in normalized:
+                raise ValueError(f"duplicate canonical device identifier {token!r} for {kind!r}")
+            normalized[token] = int(value)
+        groups[str(kind)] = MappingProxyType(normalized)
+    return MappingProxyType(groups)
+
+
 @dataclass(frozen=True, slots=True)
 class FrameworkBootstrapResult:
     """Framework-specific environment and post-import actions."""
 
     env_updates: Mapping[str, str] = field(default_factory=dict)
     post_import_threads: Mapping[str, int] = field(default_factory=dict)
-    post_import_interop_threads: Mapping[str, int] = field(default_factory=dict)
-    visible_devices: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
-    accelerator_capacity: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
-    allocator_policy: str | None = None
-    process_memory: int | None = None
+    post_import_interop_threads: Mapping[str, int] = field(default_factory=dict, kw_only=True)
+    visible_devices: Mapping[str, tuple[str, ...]] = field(default_factory=dict, kw_only=True)
+    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict, kw_only=True)
+    accelerator_capacity: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict, kw_only=True)
+    allocator_policy: str | None = field(default=None, kw_only=True)
+    process_memory: int | None = field(default=None, kw_only=True)
     cpu_affinity: tuple[int, ...] | None = None
     memory_limit: int | None = None
 
@@ -46,8 +61,8 @@ class FrameworkBootstrapResult:
         object.__setattr__(self, "post_import_threads", MappingProxyType({str(key): int(value) for key, value in self.post_import_threads.items()}))
         object.__setattr__(self, "post_import_interop_threads", MappingProxyType({str(key): int(value) for key, value in self.post_import_interop_threads.items()}))
         object.__setattr__(self, "visible_devices", MappingProxyType({str(key): tuple(str(device) for device in value) for key, value in self.visible_devices.items()}))
-        object.__setattr__(self, "accelerator_memory", MappingProxyType({str(kind): MappingProxyType({device: int(limit) for device, limit in limits.items()}) for kind, limits in self.accelerator_memory.items()}))
-        object.__setattr__(self, "accelerator_capacity", MappingProxyType({str(kind): MappingProxyType({device: int(limit) for device, limit in limits.items()}) for kind, limits in self.accelerator_capacity.items()}))
+        object.__setattr__(self, "accelerator_memory", _freeze_device_values(self.accelerator_memory))
+        object.__setattr__(self, "accelerator_capacity", _freeze_device_values(self.accelerator_capacity))
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +126,11 @@ class FrameworkRegistry:
     """Linearizable registry of framework groups and watched roots."""
 
     def __init__(self) -> None:
+        """Initialize an unfrozen registry with no framework groups.
+
+        Returns:
+            None.
+        """
         self._registrations: dict[str, FrameworkRegistration] = {}
         self._revision = 0
         self._frozen = False
@@ -118,10 +138,33 @@ class FrameworkRegistry:
 
     @property
     def revision(self) -> int:
+        """Return the monotonic revision for registered framework metadata.
+
+        Returns:
+            Current registry revision number.
+        """
         with self._lock:
             return self._revision
 
+    @property
+    def frozen(self) -> bool:
+        """Return whether controlled planning has frozen registration."""
+
+        with self._lock:
+            return self._frozen
+
+    def state(self) -> tuple[int, bool]:
+        """Return revision and freeze state from one registry snapshot."""
+
+        with self._lock:
+            return self._revision, self._frozen
+
     def registrations(self) -> Mapping[str, FrameworkRegistration]:
+        """Return a snapshot of all registered framework groups.
+
+        Returns:
+            Mapping from group name to immutable registration metadata.
+        """
         with self._lock:
             return dict(self._registrations)
 
@@ -152,20 +195,42 @@ class FrameworkRegistry:
                 self._registrations[registration.name] = registration
                 self._revision += 1
 
-    def freeze(self) -> None:
+    def freeze(self) -> bool:
         """Prevent future registration once controlled planning is active."""
 
         # Registry freezing is a process mutation just like registration.  It
         # must not leapfrog an active loader callback or an observation.
         if coordinator.writer_owner == threading.get_ident():
             with self._lock:
+                changed = not self._frozen
                 self._frozen = True
+            return changed
+        with coordinator.writer():
+            with self._lock:
+                changed = not self._frozen
+                self._frozen = True
+                return changed
+
+    def unfreeze(self) -> None:
+        """Undo this transition's provisional freeze after failed publication."""
+
+        if coordinator.writer_owner == threading.get_ident():
+            with self._lock:
+                self._frozen = False
             return
         with coordinator.writer():
             with self._lock:
-                self._frozen = True
+                self._frozen = False
 
     def registration_for(self, module: str) -> FrameworkRegistration | None:
+        """Resolve the registration that owns a module name.
+
+        Args:
+            module: Imported module or submodule name.
+
+        Returns:
+            Matching registration, or ``None`` when the module is unwatched.
+        """
         return self.resolve(module)[0]
 
     def resolve(self, module: str) -> tuple[FrameworkRegistration | None, int]:
@@ -258,10 +323,22 @@ class PlainBootstrapAdapter:
 
 
 class _LazyFrameworkAdapter:
+    """Build generic framework controls without importing optional runtimes."""
+
     name = "framework"
     module_name = "framework"
 
     def build_plan(self, runtime_spec: RuntimeContextSpec, allocation_view: RuntimeAllocationView | Any, visibility_plan: DeviceVisibilityPlan) -> FrameworkBootstrapResult:
+        """Build adapter-local controls from runtime and allocation facts.
+
+        Args:
+            runtime_spec: Declared runtime framework configuration.
+            allocation_view: Effective process resource assignment.
+            visibility_plan: Precomputed process device-visibility policy.
+
+        Returns:
+            Immutable controls for this adapter's import lifecycle.
+        """
         config = runtime_spec.frameworks.get(self.name, {})
         threads = config.get("num_threads") or (len(getattr(allocation_view, "cpus", ())) or None)
         interop_threads = config.get("num_interop_threads")
@@ -278,6 +355,14 @@ class _LazyFrameworkAdapter:
         )
 
     def validate_before_import(self, result: FrameworkBootstrapResult) -> None:
+        """Reject a framework already loaded before controlled import.
+
+        Args:
+            result: Planned adapter controls retained for this import.
+
+        Returns:
+            None.
+        """
         if self.module_name in sys.modules:
             raise FrameworkImportSafetyError(
                 "framework was already imported before runtime bootstrap",
@@ -285,9 +370,26 @@ class _LazyFrameworkAdapter:
             )
 
     def apply_pre_import(self, result: FrameworkBootstrapResult, *, environ: dict[str, str] | None = None) -> None:
+        """Apply generic pre-import controls when this adapter has any.
+
+        Args:
+            result: Planned adapter controls.
+            environ: Optional environment mapping receiving reversible updates.
+
+        Returns:
+            None.
+        """
         return None
 
     def apply_post_import(self, result: FrameworkBootstrapResult) -> None:
+        """Apply optional generic thread controls after framework import.
+
+        Args:
+            result: Planned adapter controls.
+
+        Returns:
+            None.
+        """
         module = sys.modules.get(self.module_name)
         if module is not None and self.name in result.post_import_threads and hasattr(module, "set_num_threads"):
             module.set_num_threads(result.post_import_threads[self.name])

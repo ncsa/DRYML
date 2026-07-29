@@ -15,7 +15,7 @@ import pytest
 import dryml.runtime as runtime
 from dryml._framework_imports import coordinator
 from dryml.runtime.frameworks import FrameworkBootstrapResult, FrameworkRegistration, framework_registry
-from dryml.runtime.publication import FrameworkAdmission, MaterializationFence, PublicationError, PublicationService, SessionGeneration
+from dryml.runtime.publication import FrameworkAdmission, MaterializationFence, PublicationError, PublicationFailedError, PublicationService, SessionGeneration
 
 
 @pytest.fixture(autouse=True)
@@ -240,6 +240,26 @@ def test_exec_without_creation_fence_rejects_before_module_execution(tmp_path, m
     _remove(name)
 
 
+def test_controlled_descendant_keeps_its_fence_without_running_the_root_post_hook(tmp_path, monkeypatch):
+    package = tmp_path / ("dryml_fake_" + uuid.uuid4().hex)
+    package.mkdir()
+    (package / "__init__.py").write_text("ROOT = True\n", encoding="utf-8")
+    (package / "child.py").write_text("CHILD = True\n", encoding="utf-8")
+    calls = []
+    name = package.name
+    adapter = _register(name, calls)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    spec = runtime.RuntimeContextSpec.from_data({"mode": "probe", "frameworks": {name: {}}, "device_visibility": {"policy": "none"}})
+    plan = runtime.build_runtime_bootstrap_plan(spec, runtime.NoAllocation, policy=runtime.FrameworkBootstrapPolicy((name,)), adapters={name: adapter})
+
+    with runtime.enter_runtime(runtime.RuntimeMode.PROBE, runtime.NoAllocation, spec):
+        with runtime.activate_runtime_bootstrap(plan, adapters={name: adapter}):
+            importlib.import_module(name + ".child")
+
+    assert calls == ["validate", "post", "validate"]
+    _remove(name)
+
+
 def test_materialization_fence_rejects_changed_lifecycle_fingerprint():
     """Execution cannot reuse a creation token for another adapter plan."""
 
@@ -253,6 +273,20 @@ def test_materialization_fence_rejects_changed_lifecycle_fingerprint():
             fence,
             FrameworkAdmission(0, 0, 1, "fake", "fake", "second"),
         )
+
+
+def test_stale_post_creation_fence_poisoning_fails_closed(monkeypatch):
+    import dryml.runtime.imports as lifecycle_imports
+
+    service = PublicationService()
+    service.initialize(object())
+    monkeypatch.setattr(lifecycle_imports, "publication", service)
+    admission = FrameworkAdmission(0, 0, 1, "fake", "fake", "plan")
+    lifecycle = lifecycle_imports._Lifecycle(None, admission, True, object(), object())
+
+    lifecycle_imports._poison(lifecycle, PublicationError("stale materialization"), after_creation=True)
+
+    assert service.current().health == "failed"
 
 
 def test_same_epoch_finalizers_merge_and_terminal_failure_is_monotonic():
@@ -269,9 +303,186 @@ def test_same_epoch_finalizers_merge_and_terminal_failure_is_monotonic():
     }
 
     failed = service.finalize_framework(second, {}, failure=RuntimeError("synthetic failure"))
-    later = service.finalize_framework(first, {"first:threads": "framework-configured"})
     assert failed.health == "failed"
-    assert later is failed
+    with pytest.raises(PublicationFailedError, match="restart"):
+        service.finalize_framework(first, {"first:threads": "framework-configured"})
+
+
+def test_successful_peer_finalizer_completion_raises_after_terminal_failure():
+    service = PublicationService()
+    service.initialize(object())
+    successful = FrameworkAdmission(0, 0, 1, "successful", "successful", "plan")
+    failing = FrameworkAdmission(0, 0, 1, "failing", "failing", "plan")
+    assert service.claim_framework_finalizer(successful, 1)
+    service.finalize_framework(successful, {"successful:visibility": "visibility-enforced"})
+    service.fail_framework(failing, RuntimeError("peer failed"))
+
+    with pytest.raises(PublicationFailedError, match="restart"):
+        service.complete_framework_finalizer(successful, 1)
+
+
+def _install_facade_plan(monkeypatch, service, name, adapter):
+    """Publish a synthetic controlled facade plan without optional imports."""
+
+    import dryml.runtime.imports as lifecycle_imports
+    import dryml.session.state as state
+
+    result = adapter.build_plan(None, runtime.NoAllocation, None)
+    bootstrap = type("Bootstrap", (), {"env_updates": {}, "framework_results": {name: result}})()
+    monkeypatch.setattr(lifecycle_imports, "publication", service)
+    monkeypatch.setattr(state, "publication", service)
+    monkeypatch.setattr(state, "_bootstrap_plan", lambda _runtime: bootstrap)
+    monkeypatch.setattr(state, "local_inventory", lambda: __import__("dryml.worlds", fromlist=["LocalResourceInventory"]).LocalResourceInventory((0, 1), {}, memory=None))
+    return bootstrap
+
+
+def test_loader_create_exec_gap_accepts_a_compatible_facade_update(tmp_path, monkeypatch):
+    from dryml import session
+
+    name = _module(tmp_path)
+    calls = []
+    adapter = _register(name, calls)
+    service = PublicationService(environ={}, affinity_getter=lambda: {0, 1}, affinity_setter=lambda _cpus: None)
+    service.initialize(runtime.RuntimeState(enforcement=runtime.RuntimeEnforcement.OFF))
+    _install_facade_plan(monkeypatch, service, name, adapter)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    session.set_mode("orchestrator")
+    spec = importlib.util.find_spec(name)
+    module = importlib.util.module_from_spec(spec)
+    created_epoch = service.current().metadata["control_epoch"]
+
+    session.require_env("dryml>=0")
+    spec.loader.exec_module(module)
+
+    assert module.VALUE == 1
+    assert service.current().metadata["control_epoch"] == created_epoch
+    assert calls == ["validate", "post"]
+    assert coordinator.reader_count == 0
+    _remove(name)
+
+
+def test_loader_create_exec_gap_rejects_an_incompatible_facade_transition(tmp_path, monkeypatch):
+    from dryml import session
+
+    name = _module(tmp_path)
+    adapter = _register(name, [])
+    affinity = {0, 1}
+    service = PublicationService(
+        environ={},
+        affinity_getter=lambda: affinity,
+        affinity_setter=lambda cpus: (affinity.clear(), affinity.update(cpus)),
+    )
+    service.initialize(runtime.RuntimeState(enforcement=runtime.RuntimeEnforcement.OFF))
+    _install_facade_plan(monkeypatch, service, name, adapter)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    session.set_mode("orchestrator")
+    spec = importlib.util.find_spec(name)
+    module = importlib.util.module_from_spec(spec)
+
+    session.manage(cpus=1)
+    with pytest.raises(PublicationError, match="materialization is stale"):
+        spec.loader.exec_module(module)
+
+    assert service.current().health == "failed"
+    assert coordinator.reader_count == 0
+    _remove(name)
+
+
+def test_loader_callback_facade_reentry_rejects_and_releases_reader(tmp_path, monkeypatch):
+    from dryml import session
+
+    name = _module(tmp_path)
+    calls = []
+
+    class ReenteringAdapter(_Adapter):
+        def validate_before_import(self, result):
+            calls.append("validate")
+            session.require_env("dryml>=0")
+
+    adapter = ReenteringAdapter(name, calls)
+    framework_registry.register(FrameworkRegistration(name, (name,), adapter))
+    service = PublicationService(environ={}, affinity_getter=lambda: {0, 1}, affinity_setter=lambda _cpus: None)
+    service.initialize(runtime.RuntimeState(enforcement=runtime.RuntimeEnforcement.OFF))
+    _install_facade_plan(monkeypatch, service, name, adapter)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    session.set_mode("orchestrator")
+    spec = importlib.util.find_spec(name)
+
+    with pytest.raises(PublicationError, match="upgrade"):
+        importlib.util.module_from_spec(spec)
+
+    assert calls == ["validate"]
+    assert service.current().health == "healthy"
+    assert coordinator.reader_count == 0
+    _remove(name)
+
+
+def test_loader_callback_and_facade_writer_overlap_rejects_without_stranding_reader(tmp_path, monkeypatch):
+    from dryml import session
+
+    name = _module(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingAdapter(_Adapter):
+        def validate_before_import(self, result):
+            entered.set()
+            assert release.wait(timeout=2)
+
+    adapter = BlockingAdapter(name, [])
+    framework_registry.register(FrameworkRegistration(name, (name,), adapter))
+    service = PublicationService(environ={}, affinity_getter=lambda: {0, 1}, affinity_setter=lambda _cpus: None)
+    service.initialize(runtime.RuntimeState(enforcement=runtime.RuntimeEnforcement.OFF))
+    _install_facade_plan(monkeypatch, service, name, adapter)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    session.set_mode("orchestrator")
+    spec = importlib.util.find_spec(name)
+    created = []
+    failures = []
+
+    def create():
+        try:
+            created.append(importlib.util.module_from_spec(spec))
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=create)
+    thread.start()
+    assert entered.wait(timeout=2)
+    with pytest.raises(PublicationError, match="import-busy"):
+        session.require_env("dryml>=0")
+    release.set()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert len(created) == 1
+    assert coordinator.reader_count == 0
+    spec.loader.exec_module(created[0])
+    assert created[0].VALUE == 1
+    assert coordinator.reader_count == 0
+    _remove(name)
+
+
+def test_interrupted_loader_execution_poisoning_releases_reader(tmp_path, monkeypatch):
+    from dryml import session
+
+    name = _module(tmp_path, "raise KeyboardInterrupt('loader interrupted')\n")
+    adapter = _register(name, [])
+    service = PublicationService(environ={}, affinity_getter=lambda: {0, 1}, affinity_setter=lambda _cpus: None)
+    service.initialize(runtime.RuntimeState(enforcement=runtime.RuntimeEnforcement.OFF))
+    _install_facade_plan(monkeypatch, service, name, adapter)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    session.set_mode("orchestrator")
+    spec = importlib.util.find_spec(name)
+    module = importlib.util.module_from_spec(spec)
+
+    with pytest.raises(KeyboardInterrupt, match="loader interrupted"):
+        spec.loader.exec_module(module)
+
+    assert service.current().health == "failed"
+    assert coordinator.reader_count == 0
+    _remove(name)
 
 
 def test_grouped_pure_validation_overlaps_and_publishes_one_pre_outcome(monkeypatch):
@@ -364,7 +575,7 @@ def test_synthetic_jax_group_lifecycle_covers_direct_recursive_and_ordered_roots
     for root in ("jax", "jaxlib"):
         package = tmp_path / root
         package.mkdir()
-        body = "def devices(kind=None):\n    return []\n"
+        body = "def devices(kind=None):\n    return []\n" if root == "jax" else ""
         if root == "jax":
             body += "import os\nif os.environ.get('DRYML_U3_RECURSIVE') == '1':\n    import jaxlib\n"
         (package / "__init__.py").write_text(body, encoding="utf-8")
@@ -384,6 +595,11 @@ with runtime.enter_runtime(runtime.RuntimeMode.PROBE, runtime.NoAllocation, spec
 metadata = runtime.publication.current().metadata
 assert len(metadata['framework_plan_fingerprints']) == int(sys.argv[3]), metadata
 assert set(metadata['framework_pre_stages']) == {'jax'}, metadata
+if sys.argv[2] == 'jaxlib':
+    statuses = metadata['framework_statuses']
+    assert statuses['jax:jaxlib:visibility'] == 'visibility-enforced', statuses
+    assert statuses['jax:jaxlib:threads'] == 'pending-import', statuses
+    assert statuses['jax:jaxlib:allocator'] == 'pending-import', statuses
 """
     environment = dict(os.environ, DRYML_U3_RECURSIVE="1" if recursive else "0")
     completed = subprocess.run(

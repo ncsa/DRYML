@@ -106,6 +106,10 @@ def _apply_framework_post_import(framework_name: str, module_name: str | None = 
     bootstrap = active_runtime_bootstrap()
     if bootstrap is None or framework_name not in bootstrap.frameworks:
         return
+    if framework_name not in sys.modules:
+        # Helper packages such as tensorflow_datasets may be configured with a
+        # framework plan without importing the framework root itself.
+        return
     from .imports import finalize_helper
 
     # Raw imports are finalized by the wrapped loader.  This compatibility path

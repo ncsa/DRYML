@@ -44,6 +44,43 @@ def test_adapter_results_are_immutable_and_pre_import_only_observes_planned_envi
         result.accelerator_memory["gpu"]["0"] = 1
 
 
+def test_new_memory_fields_do_not_shift_bootstrap_result_positional_arguments():
+    result = FrameworkBootstrapResult({"A": "1"}, {"torch": 2}, (0,), 8)
+
+    assert result.cpu_affinity == (0,)
+    assert result.memory_limit == 8
+    assert result.post_import_interop_threads == {}
+    assert result.visible_devices == {}
+    assert result.allocator_policy is None
+    assert result.process_memory is None
+
+
+def test_numeric_device_ids_are_canonicalized_for_framework_controls(monkeypatch):
+    calls = []
+
+    class CUDA:
+        @staticmethod
+        def device_count():
+            return 1
+
+        @staticmethod
+        def set_per_process_memory_fraction(fraction, device):
+            calls.append((fraction, device))
+
+    module = types.ModuleType("torch")
+    module.cuda = CUDA
+    module.set_num_threads = lambda _value: None
+    module.set_num_interop_threads = lambda _value: None
+    monkeypatch.setitem(sys.modules, "torch", module)
+    result = _result(devices=(0,), limits={0: 512 * 1024**2}, capacity={0: 1024 * 1024**2})
+
+    status = torch_adapter().post_import(result, "torch").statuses
+
+    assert result.accelerator_memory == {"gpu": {"0": 512 * 1024**2}}
+    assert calls == [(0.5, 0)]
+    assert status["accelerator_memory"] == "framework-configured"
+
+
 def test_torch_allocator_environment_is_planned_without_importing_torch():
     result = torch_adapter().build_plan(
         RuntimeContextSpec.from_data({"frameworks": {"torch": {"allocator": "backend:cudaMallocAsync"}}}),
@@ -157,14 +194,59 @@ def test_torch_requires_capacity_for_fraction_and_proves_recoverable_allocator_r
     assert result.statuses["accelerator_memory"] == "unsupported"
 
 
-def test_jax_reports_pending_jaxlib_controls_and_heterogeneous_memory_unsupported(monkeypatch):
+def test_jaxlib_proves_visibility_from_the_pre_import_environment(monkeypatch):
     module = types.ModuleType("jaxlib")
-    module.devices = lambda kind=None: []
     monkeypatch.setitem(sys.modules, "jaxlib", module)
-    pending = jax_adapter().post_import(_result(devices=(), limits={}, capacity={}), "jaxlib")
+    visibility = DeviceVisibilityPlan(
+        DeviceVisibilityPolicy.EXPLICIT,
+        {
+            "CUDA_VISIBLE_DEVICES": "0,1",
+            "HIP_VISIBLE_DEVICES": "",
+            "ROCR_VISIBLE_DEVICES": "",
+            "XLA_VISIBLE_DEVICES": "",
+        },
+        {"gpu": ("0", "1"), "rocm": (), "xla": ()},
+        remap_assigned=False,
+    )
+    result = jax_adapter().build_plan(
+        RuntimeContextSpec.from_data({"frameworks": {"jax": {}}}),
+        RuntimeAllocationView(cpus=(0,)),
+        visibility,
+    )
+    for key, value in visibility.env_updates.items():
+        monkeypatch.setenv(key, value)
+
+    pending = jax_adapter().post_import(result, "jaxlib")
+
     assert pending.statuses["visibility"] == "visibility-enforced"
+    assert pending.statuses["threads"] == "pending-import"
+    assert pending.statuses["allocator"] == "pending-import"
     assert pending.statuses["accelerator_memory"] == "pending-import"
 
+
+@pytest.mark.parametrize("failure", ["absent", "plan-mismatch", "readback-mismatch"])
+def test_jaxlib_fails_closed_without_consistent_visibility_proof(monkeypatch, failure):
+    monkeypatch.setitem(sys.modules, "jaxlib", types.ModuleType("jaxlib"))
+    env_updates = {
+        "CUDA_VISIBLE_DEVICES": "0",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "XLA_VISIBLE_DEVICES": "",
+    }
+    visible_devices = {"gpu": ("0",), "rocm": (), "xla": ()}
+    if failure == "absent":
+        env_updates = {}
+    elif failure == "plan-mismatch":
+        visible_devices["gpu"] = ("1",)
+    for key, value in env_updates.items():
+        monkeypatch.setenv(key, "different" if failure == "readback-mismatch" and key == "CUDA_VISIBLE_DEVICES" else value)
+    result = FrameworkBootstrapResult(env_updates=env_updates, visible_devices=visible_devices)
+
+    with pytest.raises(FrameworkImportSafetyError, match="pre-import visibility"):
+        jax_adapter().post_import(result, "jaxlib")
+
+
+def test_jax_reports_heterogeneous_memory_unsupported(monkeypatch):
     module = types.ModuleType("jax")
     module.devices = lambda kind=None: ("gpu-0", "gpu-1") if kind == "gpu" else ()
     monkeypatch.setitem(sys.modules, "jax", module)

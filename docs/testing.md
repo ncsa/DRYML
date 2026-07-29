@@ -175,16 +175,28 @@ or a local GPU as evidence of a real framework guarantee. Raw TensorFlow,
 PyTorch, and JAX imports are checked through registered hooks with fakes by
 default.
 
-Run real framework CPU checks only when deliberately enabled in an isolated
-environment:
+Run real framework CPU checks only when deliberately enabled. These modules
+collect without importing DRYML or an optional framework and skip every case
+unless `DRYML_RUN_REAL_FRAMEWORK_TESTS=1`:
 
 ```bash
-DRYML_RUN_REAL_FRAMEWORK_TESTS=1 ./tests.sh tests/multi_framework/test_session_framework_controls.py tests/tf/test_session_runtime.py tests/torch/test_session_runtime.py tests/jax/test_session_runtime.py -x
+DRYML_RUN_REAL_FRAMEWORK_TESTS=1 ./tests.sh tests/multi_framework/test_session_framework_controls.py tests/tf/test_session_runtime.py tests/torch/test_session_runtime.py tests/jax/test_session_runtime.py --import-mode=importlib -o pythonpath=tests -s -x
 ```
 
-GPU checks additionally require an explicitly provisioned disposable host and
-`DRYML_RUN_GPU_TESTS=1`. Neither opt-in command proves unrun framework versions,
-GPU ordinals, or aggregate accelerator-memory enforcement.
+Each enabled case imports frameworks through raw Python imports in a fresh child
+interpreter. CPU cases explicitly hide GPUs and select JAX's CPU platform;
+missing optional packages are reported as skips. Successful cases print the
+actual TensorFlow, PyTorch, JAX, and JAXLIB versions they exercised.
+`--import-mode=importlib` is required because the three framework-category
+modules intentionally have the same maintained filename. The accompanying
+`pythonpath=tests` setting preserves this repository's top-level test helpers
+under that import mode.
+
+GPU cases additionally require `DRYML_RUN_GPU_TESTS=1` and a disposable host
+with a GPU visible to DRYML. They preserve provisioned device visibility, select
+one assigned GPU, and skip when no GPU is provisioned. The checks cover only the
+adapter controls asserted by each module; they do not prove unrun framework
+versions, other GPU ordinals, or aggregate accelerator-memory enforcement.
 
 ## Dispatch And Code Benchmark
 

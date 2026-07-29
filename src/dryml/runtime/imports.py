@@ -19,6 +19,8 @@ from .publication import FrameworkAdmission, MaterializationFence, publication
 
 @dataclass(frozen=True, slots=True)
 class _Lifecycle:
+    """Carry one framework loader callback's immutable admission facts."""
+
     registration: FrameworkRegistration
     admission: FrameworkAdmission | None
     controlled: bool
@@ -33,7 +35,17 @@ def register_framework(registration: FrameworkRegistration) -> None:
 
 
 def create_module(fullname: str, wrapped_spec: Any, loader: Any, spec: Any) -> Any:
-    """Run bounded pure validation and publish a creation fence before return."""
+    """Create one watched module after pure lifecycle validation.
+
+    Args:
+        fullname: Fully qualified module name being materialized.
+        wrapped_spec: Interceptor-owned module specification identity.
+        loader: Original delegated module loader.
+        spec: Module specification passed to the original loader.
+
+    Returns:
+        The module supplied by the original loader, if any.
+    """
 
     registration, _ = framework_registry.resolve(fullname)
     if registration is None:
@@ -54,7 +66,17 @@ def create_module(fullname: str, wrapped_spec: Any, loader: Any, spec: Any) -> A
 
 
 def exec_module(fullname: str, wrapped_spec: Any, loader: Any, module: Any) -> None:
-    """Require the immutable creation fence, delegate, then finalize once."""
+    """Execute one watched module only through its creation fence.
+
+    Args:
+        fullname: Fully qualified module name being executed.
+        wrapped_spec: Interceptor-owned module specification identity.
+        loader: Original delegated module loader.
+        module: Module instance created for the matching fence.
+
+    Returns:
+        None.
+    """
 
     registration, _ = framework_registry.resolve(fullname)
     if registration is None:
@@ -62,6 +84,7 @@ def exec_module(fullname: str, wrapped_spec: Any, loader: Any, module: Any) -> N
     key = (fullname, id(wrapped_spec))
     with publication.reader():
         lifecycle = _lifecycle(fullname, registration)
+        fence = None
         try:
             fence = publication.materialization(key)
             if fence.module_id is not None and fence.module_id != id(module):
@@ -69,15 +92,23 @@ def exec_module(fullname: str, wrapped_spec: Any, loader: Any, module: Any) -> N
             if lifecycle.admission is not None:
                 publication.validate_materialization(fence, lifecycle.admission)
             _delegate_exec(loader, module)
-            if lifecycle.controlled:
+            if lifecycle.controlled and fullname in lifecycle.registration.roots:
                 _finalize(lifecycle, fullname, id(wrapped_spec))
         except BaseException as exc:
-            _poison(lifecycle, exc)
+            _poison(lifecycle, exc, after_creation=fence is not None)
             raise
 
 
 def finalize_helper(framework_name: str, module_name: str | None = None) -> bool:
-    """Route helper/bootstrap compatibility calls through the raw finalizer."""
+    """Route a compatibility helper through the raw-loader finalizer.
+
+    Args:
+        framework_name: Registered framework group name.
+        module_name: Optional watched module name to finalize.
+
+    Returns:
+        ``True`` when the helper finalized or observed an eligible lifecycle.
+    """
 
     target = module_name or framework_name
     registration, _ = framework_registry.resolve(target)
@@ -165,10 +196,10 @@ def _post(adapter: Any, result: Any, fullname: str) -> FrameworkPostResult:
     return FrameworkPostResult(fullname, {"visibility": "visibility-enforced"})
 
 
-def _poison(lifecycle: _Lifecycle, exc: BaseException) -> None:
+def _poison(lifecycle: _Lifecycle, exc: BaseException, *, after_creation: bool = False) -> None:
     # Protocol/fence rejection occurs before user or framework code and does not
     # leave native state to recover.  A controlled delegated/hook failure does.
-    if lifecycle.controlled and not isinstance(exc, PublicationError):
+    if lifecycle.controlled and (after_creation or not isinstance(exc, PublicationError)):
         publication.fail_framework(lifecycle.admission, exc)
 
 

@@ -28,7 +28,7 @@ class RuntimeResourceView:
     cpus: tuple[int, ...] = ()
     memory: int | None = None
     accelerators: Mapping[str, tuple[str | int, ...]] = field(default_factory=dict)
-    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict, kw_only=True)
     env: Mapping[str, str] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -62,7 +62,7 @@ class ProcessAllocation:
     cpus: tuple[int, ...] = ()
     memory: int | None = None
     accelerators: Mapping[str, tuple[str | int, ...]] = field(default_factory=dict)
-    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict)
+    accelerator_memory: Mapping[str, Mapping[str | int, int]] = field(default_factory=dict, kw_only=True)
     devices: Mapping[str, Any] = field(default_factory=dict)
     environment: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)

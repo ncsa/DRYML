@@ -38,6 +38,11 @@ class SessionConfiguration:
     fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
+        """Freeze display controls and derive this candidate's semantic fingerprint.
+
+        Returns:
+            None.
+        """
         object.__setattr__(self, "controls", deep_freeze_json(self.controls))
         object.__setattr__(self, "fingerprint", "session-config-v1-" + hashlib.sha256(canonical_json_bytes(self.to_data(include_fingerprint=False))).hexdigest())
 
@@ -74,6 +79,11 @@ class SessionSnapshot:
     inventory: LocalResourceInventory | None = None
 
     def __post_init__(self) -> None:
+        """Freeze nested public control and status projections.
+
+        Returns:
+            None.
+        """
         object.__setattr__(self, "controls", deep_freeze_json(self.controls))
         object.__setattr__(self, "statuses", deep_freeze_json(self.statuses))
 

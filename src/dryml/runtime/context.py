@@ -60,6 +60,12 @@ def active_runtime() -> RuntimeState:
     return _ACTIVE_RUNTIME.get() or publication.current().runtime
 
 
+def active_runtime_override() -> RuntimeState | None:
+    """Return the context-local override without reading publication state."""
+
+    return _ACTIVE_RUNTIME.get()
+
+
 def active_runtime_mode() -> RuntimeMode:
     """Return the current active runtime mode."""
 

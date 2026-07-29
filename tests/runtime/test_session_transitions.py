@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+import uuid
+
 import pytest
 
 from dryml import session
@@ -58,6 +61,20 @@ def test_inventory_drift_restages_without_process_effects(monkeypatch):
     assert snapshot.allocation.process.cpus == (0,)
 
 
+def test_volatile_memory_drift_does_not_invalidate_visibility_epoch(monkeypatch):
+    import dryml.session.state as state
+
+    first = LocalResourceInventory((0, 1), {}, memory=4 * 1024**3)
+    second = LocalResourceInventory((0, 1), {}, memory=3 * 1024**3)
+    values = iter((first, second))
+    monkeypatch.setattr(state, "local_inventory", lambda: next(values))
+
+    snapshot = session.manage()
+
+    assert snapshot.inventory is first
+    assert snapshot.allocation.process.memory == 4 * 1024**3
+
+
 def test_late_framework_import_rejects_visibility_change_without_mutating(monkeypatch):
     import dryml.session.state as state
 
@@ -98,6 +115,18 @@ def test_adapter_plan_change_after_a_framework_import_fails_without_publication(
         session.manage(cpus=1)
 
     assert session.current() == before
+
+
+def test_loaded_framework_roots_include_registered_retained_descendants(monkeypatch):
+    import dryml.session.state as state
+
+    name = "dryml_fake_" + uuid.uuid4().hex
+    registry = type(framework_registry)()
+    registry.register(FrameworkRegistration(name, (name,), object()))
+    monkeypatch.setattr(state, "framework_registry", registry)
+    monkeypatch.setitem(sys.modules, name + ".retained_after_failure", object())
+
+    assert name in state._loaded_framework_roots()
 
 
 def test_reset_deactivates_builtin_plans_without_removing_the_passive_finder():
