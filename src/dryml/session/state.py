@@ -92,8 +92,8 @@ def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: in
     return _publish("managed", None, None, before.requested_world, before.environment, synthesize=True, simple_resources=supplied)
 
 
-def request_world(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
-    """Replace only the default requested worker world.
+def worker_world_request(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
+    """Replace the default world request used by later dispatched workers.
 
     Args:
         cpus: Optional worker CPU count.
@@ -102,12 +102,12 @@ def request_world(*, cpus: int | None = None, memory: str | int | None = None, g
         accelerator_memory: Optional worker per-accelerator memory allowance.
 
     Returns:
-        Snapshot containing the replacement worker intent.
+        Snapshot containing the replacement default worker world.
     """
 
     supplied = {key: value for key, value in {"cpus": cpus, "memory": memory, "gpus": gpus, "accelerator_memory": accelerator_memory}.items() if value is not None}
     if not supplied:
-        raise SessionConfigurationError("request_world requires at least one resource field")
+        raise SessionConfigurationError("worker_world_request requires at least one resource field")
     before = _configuration(publication.current())
     resources = _normalize_resources(supplied)
     world = _world_for_resources(resources, role="worker")
@@ -507,4 +507,4 @@ def _pending_framework_statuses(results: Mapping[str, FrameworkBootstrapResult])
             for control in ("visibility", "threads", "process_memory", "accelerator_memory", "allocator"):
                 statuses[f"{name}:{root}:{control}"] = "pending-import"
     return statuses
-__all__ = ["allocate_world", "configure", "current", "manage", "mode", "request_world", "require_env", "reset", "set_mode"]
+__all__ = ["allocate_world", "configure", "current", "manage", "mode", "require_env", "reset", "set_mode", "worker_world_request"]

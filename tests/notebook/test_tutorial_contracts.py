@@ -139,7 +139,7 @@ def test_runtime_notebook_teaches_session_first_execution_distinctions():
         "dryml.session.configure",
         "dryml.session.current",
         "dryml.session.manage",
-        "dryml.session.request_world",
+        "dryml.session.worker_world_request",
         "dryml.session.reset",
         "NOTEBOOK_RESTART_REQUIRED_HANDLED",
         "importlib.import_module('tensorflow')",

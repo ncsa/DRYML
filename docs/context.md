@@ -34,12 +34,12 @@ Decorators attach metadata only. They do not allocate resources, enter runtime, 
 import dryml
 
 dryml.session.manage(cpus=2)       # Current process, CPU-only and checked.
-dryml.session.request_world(cpus=2, gpus=1)  # Later worker intent.
+dryml.session.worker_world_request(cpus=2, gpus=1)  # Default world for later workers.
 ```
 
 The two calls intentionally describe different processes. `manage()` affects
 direct annotated calls and framework visibility in this process;
-`request_world()` supplies a lower-precedence default for future dispatch. See
+`worker_world_request()` supplies a lower-precedence default worker world for future dispatch. See
 [Sessions](session.md) for atomic `configure(...)`, snapshots, status reporting,
 safe reset, and the post-framework-import restart boundary.
 

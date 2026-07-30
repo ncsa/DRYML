@@ -47,8 +47,8 @@ assert dryml.session.mode() == "python"
 # Managed current process: CPU allowance, hidden accelerators, checked direct calls.
 managed = dryml.session.manage(cpus=2)
 
-# A distinct worker request: this notebook can remain CPU-only.
-managed = dryml.session.request_world(cpus=2, gpus=1)
+# Set the default worker world; this notebook can remain CPU-only.
+managed = dryml.session.worker_world_request(cpus=2, gpus=1)
 
 # One atomic replacement is available when setup belongs in one cell.
 managed = dryml.session.configure(mode="managed", resources={"cpus": 2})
@@ -125,7 +125,7 @@ For the common persistent notebook path, use the session facade. A requested
 worker world remains distinct from the managed current-process allowance:
 
 ```python
-dryml.session.request_world(cpus=1)
+dryml.session.worker_world_request(cpus=1)
 explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
 ```
 

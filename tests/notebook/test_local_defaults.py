@@ -25,7 +25,7 @@ def test_notebook_session_defaults_are_persistent_and_reset_semantically():
         assert is_no_allocation(fresh.runtime.allocation)
 
         managed = dryml.session.manage(cpus=1)
-        requested = dryml.session.request_world(cpus=1)
+        requested = dryml.session.worker_world_request(cpus=1)
         assert managed.mode == "managed"
         assert requested.allocation == managed.allocation
         assert requested.requested_world is not None

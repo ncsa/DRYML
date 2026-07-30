@@ -61,13 +61,14 @@ internal role in the common representation.
 import dryml
 
 snapshot = dryml.session.manage(cpus=2)
-snapshot = dryml.session.request_world(cpus=2, gpus=1)
+snapshot = dryml.session.worker_world_request(cpus=2, gpus=1)
 snapshot = dryml.session.require_env("numpy>=1.26", python=">=3.10")
 assert snapshot.requested_world is not None
 ```
 
 `manage(...)` and `allocate_world(...)` replace the current-process allowance.
-`request_world(...)` replaces only the default worker intent. Repeated
+`worker_world_request(...)` replaces only the default worker world used by later
+dispatch. Repeated
 `require_env(...)` calls merge compatible software requirements atomically. The
 current Python interpreter is implicit for ordinary direct work; environment
 requirements describe software compatibility, not GPUs or device visibility.
@@ -101,7 +102,7 @@ making its own GPU visible:
 
 ```python
 dryml.session.manage(cpus=2)
-dryml.session.request_world(cpus=2, gpus=1)
+dryml.session.worker_world_request(cpus=2, gpus=1)
 # dryml.dispatch.run(...) allocates the requested worker world, not the notebook allowance.
 ```
 

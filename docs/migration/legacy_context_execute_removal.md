@@ -9,7 +9,7 @@ control—the canonical `OperationSpec` IR.
 | From | To | Required distinction |
 |---|---|---|
 | Legacy context resource dictionaries | [`dryml.world.req(...)`, `dryml.world.default(...)`, `WorldRequirement`, and `WorldSpec`](../world_runtime.md#boundaries) | A requested world and this process's actual allocation are distinct. |
-| Common notebook runtime setup | [`dryml.session`](../session.md) | Use `manage()` for the current process and `request_world()` for later workers; no role or context-manager lifetime is needed. |
+| Common notebook runtime setup | [`dryml.session`](../session.md) | Use `manage()` for the current process and `worker_world_request()` to set the default world for later workers; no role or context-manager lifetime is needed. |
 | Legacy execute/process helpers | [`dryml.dispatch.run(function, ...)` or `run(cdef, "method", ...)`](../dispatch.md#python-shaped-dispatch) | Normal users pass functions or CDef plus method name. |
 | Manual OperationSpec-first examples | [Python-shaped dispatch](../dispatch.md#python-shaped-dispatch) | Explicit [`OperationSpec`](../operations.md) remains supported advanced IR. |
 | `dryml.code` method-model imports | [`dryml.core.methods`](../architecture/code_analysis.md#relationship-to-method-and-method-handles) | Compatibility aliases remain warning-free; no deprecation is issued. |

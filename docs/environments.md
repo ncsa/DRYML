@@ -66,7 +66,7 @@ requirements and concise Python, capability, or exclusion constraints into the
 persistent session. Managed sessions check the current interpreter; orchestrator
 sessions carry them into worker resolution. Python mode intentionally adds no
 session-derived enforcement. Environment requirements do not request GPUs or
-configure visibility; use `session.manage(...)` and `session.request_world(...)`
+configure visibility; use `session.manage(...)` and `session.worker_world_request(...)`
 for those separate resource concerns. Candidate registries, Conda, executable,
 and container selection remain advanced `dryml.environments` APIs.
 

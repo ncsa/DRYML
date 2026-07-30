@@ -26,8 +26,8 @@ World and runtime specs are canonical JSON sidecars written through `RecordStore
 ## Session, Requested Defaults, Allocation, and Plain Mode
 
 Use `dryml.session` for persistent common setup. `session.manage()` creates a
-checked current-process allocation, while `session.request_world()` describes
-future workers without changing that allocation. This permits a CPU-only managed
+checked current-process allocation, while `session.worker_world_request()` sets
+the default world for future workers without changing that allocation. This permits a CPU-only managed
 notebook to dispatch a GPU worker from retained pre-hide inventory. Process
 memory and accelerator memory are distinct; current process-memory limits remain
 declarative unless a documented low-level control proves otherwise. See

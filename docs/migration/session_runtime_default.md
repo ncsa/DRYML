@@ -22,7 +22,7 @@ dryml.session.manage(cpus=4)
 dryml.session.set_mode("orchestrator")
 ```
 
-Use `session.request_world(...)` for a future worker. It does not change the
+Use `session.worker_world_request(...)` to set the default world for a future worker. It does not change the
 managed notebook allowance, so a CPU-only notebook can request a GPU worker.
 Use `session.require_env(...)` only for Python/software compatibility, not GPU
 selection. `configure(...)` atomically replaces the complete session when one
@@ -36,7 +36,7 @@ Replace manual context lifetimes and a single default role with facade calls:
 # Before: nested environments/worlds/runtime scopes and a hand-built role.
 # After:
 snapshot = dryml.session.manage(cpus=2)
-snapshot = dryml.session.request_world(cpus=2, gpus=1)
+snapshot = dryml.session.worker_world_request(cpus=2, gpus=1)
 ```
 
 Use `dryml.environments`, `dryml.worlds`, and `dryml.runtime` directly only for

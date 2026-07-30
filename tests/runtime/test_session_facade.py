@@ -45,10 +45,11 @@ def test_flat_api_has_the_closed_public_signatures():
     set_mode = inspect.signature(session.set_mode).parameters
     assert tuple(set_mode) == ("mode",)
     assert set_mode["mode"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-    for operation in (session.manage, session.request_world):
+    for operation in (session.manage, session.worker_world_request):
         parameters = inspect.signature(operation).parameters
         assert tuple(parameters) == ("cpus", "memory", "gpus", "accelerator_memory")
         assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in parameters.values())
+    assert not hasattr(session, "request_world")
     allocation = inspect.signature(session.allocate_world).parameters
     assert allocation["value"].kind is inspect.Parameter.POSITIONAL_ONLY
     assert allocation["role"].kind is inspect.Parameter.KEYWORD_ONLY
@@ -91,7 +92,7 @@ def test_manage_keeps_the_session_allocation_projection_deeply_immutable():
 
 def test_operation_table_replaces_only_its_owned_category_and_configure_is_complete_replacement():
     session.manage(cpus=1)
-    session.request_world(cpus=1, gpus=1)
+    session.worker_world_request(cpus=1, gpus=1)
     session.require_env("dryml>=0", python=">=3")
 
     orchestrator = session.set_mode(mode="orchestrator")
@@ -112,7 +113,7 @@ def test_operation_table_replaces_only_its_owned_category_and_configure_is_compl
 def test_invalid_flat_or_declarative_input_leaves_the_generation_unchanged():
     before = session.manage(cpus=1)
     with pytest.raises(ValueError):
-        session.request_world()
+        session.worker_world_request()
     with pytest.raises(ValueError):
         session.configure(mode="managed", resources={"cpus": 1}, allocation={"value": {}})
     with pytest.raises(TypeError):
@@ -182,7 +183,7 @@ def test_configure_accepts_typed_world_allocation_value():
 
 def test_requirements_merge_atomically_and_reset_clears_all_categories():
     session.manage(cpus=1)
-    session.request_world(cpus=1)
+    session.worker_world_request(cpus=1)
     session.require_env("dryml>=0", python=">=3")
     merged = session.require_env("dryml<99", capabilities=("dryml.environments.v1",))
     assert merged.environment.requirements == ("dryml<99,>=0",)

@@ -39,7 +39,7 @@ Current-process probes can inspect live local/notebook targets because they pres
 Fresh `dryml.session` state is intentionally unchecked Python. A managed session
 creates the current-process allowance and applies pre-import visibility controls;
 an orchestrator session has checked control-plane behavior with no current
-allocation. `session.request_world(...)` remains separate worker intent, so a
+allocation. `session.worker_world_request(...)` remains a separate default worker world, so a
 CPU-only managed notebook can dispatch a GPU worker without exposing it locally.
 Environment requirements are software compatibility only. Process memory and
 accelerator allocator memory are distinct, and both remain declarative unless a

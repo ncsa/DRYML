@@ -13,6 +13,9 @@ dispatch, world, and code-analysis work:
 - session snapshots are immutable, separate the current-process allowance from a
   requested worker world, report per-control status, and retain safe
   reset/restart boundaries around framework imports and active generation leases;
+- `session.request_world(...)` is removed; use
+  `session.worker_world_request(...)` to set the default world for later
+  dispatched workers;
 - raw registered TensorFlow, PyTorch, and JAX root imports traverse lightweight
   hooks in managed/orchestrator sessions. Mandatory visibility fails closed;
   optional framework and allocator controls are reported per adapter without
