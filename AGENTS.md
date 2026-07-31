@@ -1,74 +1,49 @@
-# DRYML Repo Policies
+# DRYML Framework Repository
 
-## Parent Sprint Coordination
-
-This framework repository owns implementation, tests, and durable product
-documentation, but it does not select development sprints. The parent workspace
-at `/data0/matthew/Projects/NCSA/DRYML` owns sprint plans, specifications,
-trackers, policies, participating-repository scope, and commit order.
-
-Before sprint work, read the parent `AGENTS.md` and use its resolved selector
-and exact document paths. The parent currently has no active default sprint; do
-not infer one from this repository, flat filenames, status text, numeric order,
-or unchecked tracker rows. If sprint work is requested from this child without
-a parent-resolved selector, return to the coordination root or ask the user to
-resolve the scope. Normal framework work does not require sprint selection.
-
-For a resolved cross-repository sprint, keep the selector fixed across all
-Builder and Auditor handoffs. Commit verified framework changes in this
-repository before the parent updates sprint evidence or this repository's
-submodule pointer.
+This active submodule owns DRYML implementation, tests, and durable product
+documentation. The parent development workspace owns workspace policy and
+records this repository's gitlink after coherent child work is complete.
 
 ## Documentation
-Primary documentation is via docstrings, keep those updated for all classes/methods. Docstrings should detail what classes are responsible for and method docstrings should detail their actions as well as arguments/types and return types.
 
-There is a `docs` directory containing explanatory material showing how to use the API. Keep this up to date as well. That may include new .md files, new sections, or editing existing content.
+Keep public classes, functions, methods, and types documented with responsibility,
+behavior, parameters/types, return values, failure behavior, and relevant side
+effects. Update `docs/` alongside changes to public APIs, persistent formats,
+dispatch, concurrency, recovery, or user-visible behavior.
 
 ## Tests
-Running the test suite is handled with `tests.sh`. Ignore tests in `tests/{old,dev}` they are currently old. I usually execute like this: `./tests.sh --ignore tests/old --ignore tests/dev -x tests`. The script passes additional arguments through, and you can run focused tests by specifying the files or folders you want to run.
 
-Never start development with `./tests.sh full`; some maintained tests are intentionally heavy and make poor first-line feedback. Start with a reproducer or the narrowest affected tests, then run focused files and subsystem suites such as `tests/core`. Run broader or rolling compatibility only after focused tests pass. Run `./tests.sh full` at most once at final closeout when the governing sprint or user requires it, and do not repeat it after every repair without a material documented reason.
+Use `tests.sh` for DRYML verification. The normal maintained selection is:
 
-## Directory explanation
+```bash
+./tests.sh --ignore tests/old --ignore tests/dev -x tests
+```
 
-### `src/dryml` - The main source code repository
-`core` - core modules of dryml.
+Run focused files or directories by passing them through `tests.sh`. The old and
+development tiers, `tests/old` and `tests/dev`, are excluded unless the user
+explicitly requests them. `./tests.sh full` is the maintained full selection;
+`./tests.sh profile --unknown-only` profiles unclassified test tiers.
 
-`code` - utilities for method instrumentation
-`execute` - The remote execution subsystem of DRYML
-`context` - The compute context subsystem of DRYML
-`core/utils/graph` - Supported generic graph algorithms used by DRYML.
+## Source Ownership
 
-There is no tracked `src/dryml/graph` package. Any untracked directory at that
-path is unsupported user work and must not be edited, staged, deleted, or used
-as a project fixture without explicit user direction.
-`data` - The Dataset API submodule
-`models` - The Model API submodule
-`artifacts` - The Artifacts API submodule
-`vis` - A collection of useful visualization methods that integrate with DRYML
-`devtools` - Tools to help the user while developing with DRYML for example in a jupyter notebook.
+`src/dryml` owns framework code:
 
-### Plugins
-`ray` - ray specific DRYML plugin
-`jax` - jax specific DRYML plugin
-`tf` - tf specific DRYML plugin
-`torch` - torch specific DRYML plugin
+- `core` provides core modules; `core/utils/graph` contains supported generic
+  graph algorithms.
+- `code` provides method instrumentation and analysis; `execute` is remote
+  execution; `context` is compute context.
+- `data`, `models`, `artifacts`, `vis`, and `devtools` own their named API areas.
+- `ray`, `jax`, `tf`, and `torch` are framework-specific plugin areas.
 
-## Commit Workflow
+There is no tracked `src/dryml/graph` package. Any untracked directory there is
+unsupported user work and must not be inspected, edited, staged, deleted, or
+used as a fixture without explicit user direction. Tracked `examples/` files are
+DRYML examples; pre-existing untracked example files are user work, so stage and
+test only exact paths approved for the task.
 
-After every verified coherent set of implementation, test, documentation, or policy changes, commit it unless the user explicitly says not to commit, verification fails, or the work remains incomplete:
+## Repository Architecture
 
-1. Inspect `git status`, the relevant `git diff`, and `git log --oneline -10` before staging.
-2. Stage only the intended files for that commit.
-3. Review the staged changes with `git diff --cached` and verify they contain no unrelated or private data.
-4. Draft a concise repository-style commit message that describes the changes and relevant verification in a temporary owner-only file outside the repository, such as `/tmp/opencode/<commit>-message.txt`.
-5. Commit with `git commit -F <temporary-file>`.
-6. Remove the temporary message file only after the commit succeeds; retain it when the commit fails.
-7. Report the resulting commit SHA and any required parent-repository submodule-pointer follow-up.
-
-Do not amend, push, broadly stage, reset, discard, stash, or rewrite history. Leave incomplete or failed work uncommitted and report the blocker.
-
-### Other
-Tracked files under `examples` are DRYML example programs. Pre-existing
-untracked example files remain user work; stage and test only exact paths added
-for an approved task.
+Keep `core` independent of `dryml.code`, and keep `dryml.code` independent of
+dispatch policy. Optional framework plugins must remain behind their plugin and
+backend boundaries; do not introduce eager optional-framework imports into
+lightweight package paths.
