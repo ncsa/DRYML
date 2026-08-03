@@ -549,7 +549,6 @@ class PublicationService:
             health="failed",
             restart_guidance=restart_guidance,
             metadata={
-                **current.metadata,
                 **metadata,
                 # A failed session is strict orchestrator mode. Retain one
                 # control identity so stale core ContextVar overrides cannot

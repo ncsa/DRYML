@@ -7,6 +7,7 @@ from pathlib import Path
 import dryml.operations as ops
 from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, PickledCallable
+from dryml.environments import CurrentEnvironmentSpec
 
 
 def _load_targets():
@@ -49,7 +50,7 @@ def test_plan_defaults_world_to_checked_single_worker_fallback(tmp_path):
 
 
 def test_plan_accepts_explicit_environment_and_world(tmp_path):
-    environment = {"kind": "current", "metadata": {"name": "baseline"}}
+    environment = CurrentEnvironmentSpec().to_data()
     world = {"roles": {"main": {"replicas": 1, "process": {}}}}
 
     plan = Dispatcher(store=_store(tmp_path)).plan(_operation(), environment=environment, world=world)

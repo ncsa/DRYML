@@ -13,7 +13,7 @@ from typing import Any, Callable
 from dryml import worlds
 from dryml.environments import CurrentEnvironmentSpec, PythonExecutableSpec
 from dryml import runtime
-from dryml.runtime import RuntimeAllocationView
+from dryml.runtime import RuntimeAllocationView, RuntimeContextSpec
 
 from .errors import DispatchPlanningError
 from .normalize import is_definition_or_cdef, normalize_user_operation
@@ -259,12 +259,23 @@ class Dispatcher:
                 allocation_backend_kind="local_subprocess",
                 requested_world_id=provenance_world_spec["id"],
             )
-            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, resolution.requirement_policy)
+            _require_allocation_satisfies_requirement(
+                allocation_plan.world_allocation,
+                resolution.requirements.world_requirement,
+                resolution.requirement_policy,
+                enabled="world" in resolution.requirement_axes.enabled,
+            )
             launch_allocation_spec = allocation_plan.world_allocation_spec
             provenance_allocation_spec = project_world_allocation_spec(
                 launch_allocation_spec,
                 world_id=provenance_world_spec["id"],
             )
+            runtime_data = RuntimeContextSpec.from_data(
+                {
+                    **runtime_data,
+                    "world_allocation_id": provenance_allocation_spec["id"],
+                }
+            ).to_data()
             key = allocation_plan.worker_keys[0]
             allocation = allocation_plan.world_allocation.runtime_view(
                 key.role,
@@ -554,7 +565,12 @@ class Dispatcher:
                     local_inventory=selected_inventory,
                 )
             allocation_plan = allocate_local_world(resolution.world_selection.candidate, inventory=selected_inventory, oversubscribe=oversubscribe)
-            _require_allocation_satisfies_requirement(allocation_plan.world_allocation, resolution.requirements.world_requirement, resolution.requirement_policy)
+            _require_allocation_satisfies_requirement(
+                allocation_plan.world_allocation,
+                resolution.requirements.world_requirement,
+                resolution.requirement_policy,
+                enabled="world" in resolution.requirement_axes.enabled,
+            )
         except BaseException:
             _cleanup_launch(launch)
             raise
@@ -565,6 +581,9 @@ class Dispatcher:
             launch_allocation_spec,
             world_id=world_spec["id"],
         )
+        runtime_data = RuntimeContextSpec.from_data(
+            {**runtime_data, "world_allocation_id": allocation_spec["id"]}
+        ).to_data()
         allocation_workers = []
         for key in allocation_plan.worker_keys:
             allocation = allocation_plan.world_allocation.runtime_view(
@@ -975,10 +994,16 @@ def _subprocess_allocation_world(world: Mapping[str, Any]) -> dict[str, Any]:
     return data
 
 
-def _require_allocation_satisfies_requirement(allocation: worlds.WorldAllocation, requirement: worlds.WorldRequirement | None, policy: RequirementPolicy | str | None) -> None:
+def _require_allocation_satisfies_requirement(
+    allocation: worlds.WorldAllocation,
+    requirement: worlds.WorldRequirement | None,
+    policy: RequirementPolicy | str | None,
+    *,
+    enabled: bool = True,
+) -> None:
     """Validate actual allocation compatibility and enforce the active policy."""
 
-    if requirement is None:
+    if requirement is None or not enabled:
         return
     report = worlds.check_allocation_satisfies_requirement(allocation, requirement)
     if not report.ok:

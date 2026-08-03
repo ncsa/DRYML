@@ -19,7 +19,13 @@ from functools import update_wrapper
 from typing import Any, Callable
 
 from dryml.environments import inspect_current
-from dryml.runtime import RuntimeEnforcement, RuntimeMode, active_runtime
+from dryml.runtime import (
+    RuntimeContextSpec,
+    RuntimeEnforcement,
+    RuntimeMode,
+    active_runtime,
+    check_runtime_spec_satisfies_requirement,
+)
 from dryml.runtime.allocation import is_no_allocation
 from dryml.runtime.errors import RuntimeTransitionError
 from dryml.runtime.publication import publication
@@ -486,19 +492,27 @@ def _check_before_body(wrapper: types.FunctionType, args: tuple[Any, ...], gener
     if runtime.enforcement is RuntimeEnforcement.OFF:
         return
     resolution = _resolve_wrapper_requirements(wrapper, args)
-    if resolution.merge_report is not None and not resolution.merge_report.ok:
+    merge_issues = (
+        ()
+        if resolution.merge_report is None
+        else tuple(
+            issue
+            for issue in resolution.merge_report.issues
+            if issue.severity == "error" and issue.namespace in runtime.requirement_axes.enabled
+        )
+    )
+    if merge_issues:
         raise AnnotationResolutionError(
             "direct call requirements contain contradictory hard annotations",
             context={
                 **_diagnostic_context(generation, runtime, resolution),
                 "merge_issues": [
                     {"namespace": issue.namespace, "path": issue.path, "message": issue.message}
-                    for issue in resolution.merge_report.issues
-                    if issue.severity == "error"
+                    for issue in merge_issues
                 ],
             },
         )
-    if not _has_hard_requirements(resolution):
+    if not _has_hard_requirements(resolution, runtime.requirement_axes.enabled):
         return
     if runtime.mode is RuntimeMode.ORCHESTRATOR:
         raise RuntimeTransitionError(
@@ -576,25 +590,35 @@ def _owner_for_wrapper(wrapper: types.FunctionType) -> type | None:
 def _compatibility_issues(runtime: Any, generation: Any, resolution: Any) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     configuration = generation.metadata.get("session_configuration")
-    if is_no_allocation(runtime.allocation):
-        issues.append({"kind": "current_allowance", "message": "active runtime has no direct workload allocation"})
-    elif resolution.world_requirement is not None:
-        process = None if configuration is None or configuration.allocation is None else configuration.allocation.process
-        issues.extend(
-            _world_issues(
-                runtime.allocation,
-                resolution.world_requirement,
-                process=process,
-                worker_mode=runtime.mode is RuntimeMode.WORKER,
+    axes = runtime.requirement_axes.enabled
+    if "world" in axes and resolution.world_requirement is not None:
+        if is_no_allocation(runtime.allocation):
+            issues.append({"kind": "current_allowance", "message": "active runtime has no direct workload allocation"})
+        else:
+            process = None if configuration is None or configuration.allocation is None else configuration.allocation.process
+            issues.extend(
+                _world_issues(
+                    runtime.allocation,
+                    resolution.world_requirement,
+                    process=process,
+                    worker_mode=runtime.mode is RuntimeMode.WORKER,
+                )
             )
+    if "environment" in axes:
+        environment = resolution.environment_requirement
+        if configuration is not None and getattr(configuration, "mode", "python") != "python":
+            environment = configuration.environment.merge(environment) if environment is not None else configuration.environment
+        if environment is not None:
+            report = environment.check(inspect_current(), policy="strict")
+            for issue in report.issues:
+                issues.append({"kind": "environment", "code": issue.code, "message": issue.message})
+    if "runtime" in axes and resolution.runtime_requirement is not None:
+        candidate = runtime.spec or RuntimeContextSpec(mode=runtime.mode)
+        report = check_runtime_spec_satisfies_requirement(candidate, resolution.runtime_requirement)
+        issues.extend(
+            {"kind": "runtime", **issue.to_data()}
+            for issue in report.issues
         )
-    environment = resolution.environment_requirement
-    if configuration is not None and getattr(configuration, "mode", "python") != "python":
-        environment = configuration.environment.merge(environment) if environment is not None else configuration.environment
-    if environment is not None:
-        report = environment.check(inspect_current(), policy="strict")
-        for issue in report.issues:
-            issues.append({"kind": "environment", "code": issue.code, "message": issue.message})
     return issues
 
 
@@ -681,8 +705,15 @@ def _allocation_data(allocation: Any) -> Any:
     }
 
 
-def _has_hard_requirements(resolution: Any) -> bool:
-    return any((resolution.environment_requirement, resolution.world_requirement))
+def _has_hard_requirements(resolution: Any, axes: tuple[str, ...]) -> bool:
+    return any(
+        requirement is not None and namespace in axes
+        for namespace, requirement in (
+            ("environment", resolution.environment_requirement),
+            ("world", resolution.world_requirement),
+            ("runtime", resolution.runtime_requirement),
+        )
+    )
 
 
 def _is_bypassed(wrapper: types.FunctionType) -> bool:

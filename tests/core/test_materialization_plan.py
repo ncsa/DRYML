@@ -252,10 +252,11 @@ def test_cached_reuse_does_not_resolve_backend_class(monkeypatch):
     assert repo.load_object(obj.definition, restore_state=False) is obj
 
 
-def test_executor_honors_materialization_action_kind():
+def test_executor_replans_stale_cache_reuse_without_retaining_an_object():
     repo = Repo()
     cdef = Definition(MaterialLeaf, "planned").concretize(repo=repo)
     memo = {}
+    MaterialLeaf.constructed.clear()
     plan = build_materialization_plan(
         repo,
         cdef,
@@ -265,8 +266,10 @@ def test_executor_honors_materialization_action_kind():
     )
     plan.actions[cdef] = MaterializationAction(cdef, "reuse", "$", reuse_source="cache")
 
-    with pytest.raises(RepoLoadError, match="cached reuse"):
-        execute_materialization_plan(repo, plan, memo=memo, revision={}, root=cdef)
+    obj = execute_materialization_plan(repo, plan, memo=memo, revision={}, root=cdef)
+
+    assert obj.name == "planned"
+    assert MaterialLeaf.constructed == ["planned"]
 
 
 def test_parent_failure_leaves_successful_child_cached():

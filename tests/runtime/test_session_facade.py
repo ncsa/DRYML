@@ -84,7 +84,10 @@ def test_worker_session_publication_preserves_accelerator_memory():
         world=WorldSpec.from_data(
             {"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1, "accelerators": {"gpu": 1}}}}}}
         ),
-        runtime_spec=RuntimeContextSpec(mode=RuntimeMode.WORKER),
+        runtime_spec=RuntimeContextSpec(
+            mode=RuntimeMode.WORKER,
+            world_allocation_id="worldalloc-v1-test",
+        ),
         allocation=allocation,
         requirement_policy="strict",
         requirement_axes=RequirementAxes.all(),

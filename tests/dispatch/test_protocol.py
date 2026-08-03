@@ -34,7 +34,7 @@ def _envelope(tmp_path):
         operation_spec=op,
         environment_spec={"kind": "current", "schema_version": 1},
         world_spec={"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}},
-        runtime_spec={"mode": "worker", "device_visibility": {"policy": "assigned"}},
+        runtime_spec={"mode": "worker", "device_visibility": {"policy": "assigned"}, "world_allocation_id": "worldalloc-v1-test"},
         allocation_view={"world_allocation_id": "worldalloc-v1-test", "role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": [0], "accelerators": {}, "env": {}, "metadata": {}},
         requirement_policy="strict",
         requirement_axes=["environment", "world", "runtime"],
@@ -78,6 +78,34 @@ def test_v1_or_incomplete_envelopes_require_explicit_v2_replanning(tmp_path):
     data = _envelope(tmp_path).to_json()
     data.pop("world_spec")
     with pytest.raises(Exception, match="missing required field"):
+        ExecutionEnvelope.from_json(data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("replica", 1, "replica"),
+        ("rank", 1, "ranks"),
+        ("local_rank", 1, "ranks"),
+        ("cpus", [0, 1], "CPU count"),
+        ("accelerators", {"gpu": [0]}, "accelerators"),
+    ],
+)
+def test_v2_envelope_rejects_allocation_incoherent_with_world(
+    tmp_path, field, value, message
+):
+    data = _envelope(tmp_path).to_json()
+    data["allocation_view"][field] = value
+
+    with pytest.raises(Exception, match=message):
+        ExecutionEnvelope.from_json(data)
+
+
+def test_v2_envelope_rejects_runtime_allocation_identity_mismatch(tmp_path):
+    data = _envelope(tmp_path).to_json()
+    data["runtime_spec"]["world_allocation_id"] = "worldalloc-v1-other"
+
+    with pytest.raises(Exception, match="identities do not match"):
         ExecutionEnvelope.from_json(data)
 
 
@@ -219,7 +247,7 @@ def test_worker_response_status_context_invariants():
 
 
 def test_coordination_metadata_validates_worker_key_and_paths(tmp_path):
-    allocation = {**_envelope(tmp_path).allocation_view, "role": "trainer", "replica": 0, "rank": 1, "local_rank": 1}
+    allocation = {**_envelope(tmp_path).allocation_view, "role": "trainer"}
     envelope = ExecutionEnvelope(
         dispatch_spec=_envelope(tmp_path).dispatch_spec,
         execution_recipe=_envelope(tmp_path).execution_recipe,
@@ -263,6 +291,20 @@ def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_
     ),
         "world_allocation_id": "worldalloc-v1-test",
     }
+    world_spec = {
+        "roles": {
+            "worker": {
+                "replicas": 1,
+                "process": {
+                    "resources": {
+                        "cpus": 1,
+                        "accelerators": {"gpu": 1},
+                        "accelerator_memory": {"gpu": [1024]},
+                    }
+                },
+            }
+        }
+    }
 
     assert allocation_from_json(allocation).accelerator_memory == {"gpu": {"gpu-a": 1024}}
     with pytest.raises(Exception, match="accelerator-memory allocation requires"):
@@ -271,7 +313,7 @@ def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_
             execution_recipe=_envelope(tmp_path).execution_recipe,
             operation_spec=_envelope(tmp_path).operation_spec,
             environment_spec=_envelope(tmp_path).environment_spec,
-            world_spec=_envelope(tmp_path).world_spec,
+            world_spec=world_spec,
             runtime_spec=_envelope(tmp_path).runtime_spec,
             allocation_view=allocation,
             requirement_policy="strict",
@@ -284,7 +326,7 @@ def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_
         execution_recipe=_envelope(tmp_path).execution_recipe,
         operation_spec=_envelope(tmp_path).operation_spec,
         environment_spec=_envelope(tmp_path).environment_spec,
-        world_spec=_envelope(tmp_path).world_spec,
+        world_spec=world_spec,
         runtime_spec=_envelope(tmp_path).runtime_spec,
         requirement_policy="strict",
         requirement_axes=["environment", "world", "runtime"],

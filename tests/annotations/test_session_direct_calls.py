@@ -487,6 +487,7 @@ def test_warn_override_enters_once_and_orchestrator_rejects_with_guidance():
     def target():
         calls.append("body")
 
+    dryml.session.manage(cpus=1)
     with enter_runtime(
         RuntimeMode.INLINE,
         RuntimeAllocationView(cpus=(0,)),
@@ -506,7 +507,7 @@ def test_warn_override_enters_once_and_orchestrator_rejects_with_guidance():
 
 
 @pytest.mark.parametrize("mode", ["python", "managed", "orchestrator", "probe", "worker"])
-def test_runtime_only_requirements_remain_metadata_in_every_direct_call_mode(mode):
+def test_runtime_requirements_follow_active_axes_and_mode(mode):
     calls = []
 
     @dryml.annotations.require(
@@ -521,10 +522,12 @@ def test_runtime_only_requirements_remain_metadata_in_every_direct_call_mode(mod
 
     if mode == "managed":
         dryml.session.manage(cpus=1)
-        target()
+        with pytest.raises(AnnotationResolutionError):
+            target()
     elif mode == "orchestrator":
         dryml.session.set_mode("orchestrator")
-        target()
+        with pytest.raises(RuntimeTransitionError, match="dispatch"):
+            target()
     elif mode == "probe":
         with enter_runtime(
             RuntimeMode.PROBE,
@@ -541,7 +544,48 @@ def test_runtime_only_requirements_remain_metadata_in_every_direct_call_mode(mod
     else:
         target()
 
-    assert calls == [mode]
+    assert calls == ([] if mode in {"managed", "orchestrator"} else [mode])
+
+
+@pytest.mark.parametrize(
+    "enabled",
+    [
+        (),
+        ("environment",),
+        ("world",),
+        ("runtime",),
+        ("environment", "world"),
+        ("environment", "runtime"),
+        ("world", "runtime"),
+        ("environment", "world", "runtime"),
+    ],
+)
+def test_direct_requirement_axes_control_all_compatibility_checks(enabled):
+    calls = []
+
+    @dryml.env.req(requirements=("not-an-installed-dryml-package>=1",))
+    @dryml.world.req(cpus={"min": 10_000_000})
+    @dryml.annotations.require(
+        namespace="runtime",
+        fragment={"frameworks": {"plain": {"num_threads": 2}}},
+    )
+    def target():
+        calls.append("body")
+
+    dryml.session.manage(cpus=1)
+    dryml.session.enforce_requirements(
+        environment="environment" in enabled,
+        world="world" in enabled,
+        runtime="runtime" in enabled,
+    )
+
+    if enabled:
+        with pytest.raises(AnnotationResolutionError):
+            target()
+        assert calls == []
+    else:
+        target()
+        assert calls == ["body"]
 
 
 def test_worker_allocation_proves_its_required_role_cardinality():

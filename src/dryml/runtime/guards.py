@@ -14,7 +14,12 @@ from typing import Any
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
 from .context import active_runtime, active_runtime_bootstrap
 from .enforcement import RuntimeEnforcement
-from .errors import FrameworkImportSafetyError, NoAllocationError, RuntimeTransitionError
+from .errors import (
+    FrameworkImportSafetyError,
+    NoAllocationError,
+    PublicationFailedError,
+    RuntimeTransitionError,
+)
 from .modes import RuntimeMode
 from .publication import publication
 
@@ -88,6 +93,15 @@ def _assert_control_plane_allowed(*, operation: str, kind: str):
         try:
             _enforce_control_plane_policy(operation=operation, kind=kind, warn=True)
             yield scope
+            current = publication.current()
+            if current.health == "failed":
+                raise PublicationFailedError(
+                    "runtime publication failed during guarded work; restart the process",
+                    context={
+                        "operation": operation,
+                        "restart_guidance": current.restart_guidance,
+                    },
+                )
         finally:
             scope.active = False
             _CONTROL_PLANE_GUARD.reset(token)
@@ -141,8 +155,22 @@ def assert_object_materialization_allowed(*, operation: str):
 def assert_control_plane_target_execution_allowed(*, operation: str):
     """Return a leased guard for direct local workload execution.
 
-    Unlike object materialization, strict rejection identifies local workload
-    execution so callers do not receive a misleading construction diagnostic.
+    Args:
+        operation: Stable identifier for the attempted local workload action.
+
+    Returns:
+        A context manager which pins the runtime publication until completion.
+
+    Raises:
+        RuntimeTransitionError: Under strict orchestrator enforcement before
+            the target begins.
+        PublicationFailedError: If runtime publication becomes terminal before
+            otherwise successful guarded work returns.
+
+    Side Effects:
+        Warns once for the top-level operation under WARN. Unlike object
+        materialization, strict rejection identifies local workload execution
+        so callers do not receive a misleading construction diagnostic.
     """
 
     return _assert_control_plane_allowed(operation=operation, kind="target_execution")

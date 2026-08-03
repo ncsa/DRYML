@@ -1047,7 +1047,11 @@ def resolve_dispatch_plan(
             _, preliminary_environment, _ = _select_environment(
                 environment,
                 preliminary.environment_default,
-                requirement=preliminary.environment_requirement,
+                requirement=(
+                    preliminary.environment_requirement
+                    if "environment" in axes.enabled
+                    else None
+                ),
                 session_requested=session_requested_environment,
                 candidates=environment_candidates,
                 registry=environment_registry,
@@ -1068,12 +1072,20 @@ def resolve_dispatch_plan(
     )
     diagnostics = list(discovery_diagnostics)
     diagnostics.extend(trace_diagnostics)
-    diagnostics.extend(_annotation_diagnostics(resolution))
+    diagnostics.extend(_annotation_diagnostics(resolution, axes))
+    environment_requirement = (
+        resolution.environment_requirement
+        if "environment" in axes.enabled
+        else None
+    )
+    world_requirement = (
+        resolution.world_requirement if "world" in axes.enabled else None
+    )
 
     env_selection, env_spec, environment_resolution = _select_environment(
         environment,
         resolution.environment_default,
-        requirement=resolution.environment_requirement,
+        requirement=environment_requirement,
         session_requested=session_requested_environment,
         candidates=environment_candidates,
         registry=environment_registry,
@@ -1084,12 +1096,15 @@ def resolve_dispatch_plan(
     world_selection, world_spec, world_synthesis = _select_world(
         world,
         resolution.world_default,
-        requirement=resolution.world_requirement,
+        requirement=world_requirement,
         session_requested=session_requested_world,
         inventory=effective_inventory,
         inventory_policy=inventory_policy,
     )
-    runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
+    runtime_selection, selected_runtime = _select_runtime(
+        runtime_spec,
+        _dispatch_annotation_runtime_default(resolution),
+    )
     structural_safe = trace_provenance is None or trace_provenance.data["status"] == "complete"
     if environment_resolution is not None and not environment_resolution.ok:
         incomplete = environment_resolution.status == "incomplete"
@@ -1128,7 +1143,7 @@ def resolve_dispatch_plan(
     if single_worker_only:
         world_diagnostics = _local_subprocess_world_diagnostics(
             world_spec,
-            resolution.world_requirement,
+            world_requirement,
             policy,
         )
         if world_diagnostics:
@@ -1136,7 +1151,7 @@ def resolve_dispatch_plan(
             structural_safe = structural_safe and (policy is not RequirementPolicy.STRICT and not structural_failures or policy is RequirementPolicy.STRICT and not world_diagnostics)
             diagnostics.extend(world_diagnostics)
     else:
-        world_diagnostics = _local_world_topology_diagnostics(resolution.world_requirement)
+        world_diagnostics = _local_world_topology_diagnostics(world_requirement)
         if world_diagnostics:
             # The same-host coordinator cannot enact collectives or shared
             # filesystem guarantees, regardless of compatibility policy.
@@ -1168,7 +1183,7 @@ def resolve_dispatch_plan(
                 (*reconciled_fragments, *session_fragments),
                 source="dryml.dispatch.final_probe",
             )
-            if _resolution_decisions(reconciled) != _resolution_decisions(resolution) and (bootstrap_probe is None or bootstrap_probe.ok):
+            if _resolution_decisions(reconciled, axes) != _resolution_decisions(resolution, axes) and (bootstrap_probe is None or bootstrap_probe.ok):
                 structural_safe = False
                 diagnostics.append(_diagnostic(
                     "dryml.dispatch.final_probe_annotation_mismatch",
@@ -1176,7 +1191,15 @@ def resolve_dispatch_plan(
                     data={"bootstrap_fragments": len(fragments), "final_fragments": len(final_fragments)},
                 ))
             resolution = reconciled
-            diagnostics.extend(_annotation_diagnostics(resolution))
+            diagnostics.extend(_annotation_diagnostics(resolution, axes))
+            environment_requirement = (
+                resolution.environment_requirement
+                if "environment" in axes.enabled
+                else None
+            )
+            world_requirement = (
+                resolution.world_requirement if "world" in axes.enabled else None
+            )
             if bootstrap_probe is not None and not bootstrap_probe.ok:
                 # A final probe can reveal an annotation default unavailable to
                 # bootstrap discovery. Do not continue with a lower-precedence
@@ -1199,7 +1222,7 @@ def resolve_dispatch_plan(
                         env_selection, env_spec, _ = _select_environment(
                             environment,
                             resolution.environment_default,
-                            requirement=resolution.environment_requirement,
+                            requirement=environment_requirement,
                             session_requested=session_requested_environment,
                         )
                 # Bootstrap did not provide usable requirements. Final-probe
@@ -1208,7 +1231,7 @@ def resolve_dispatch_plan(
                 world_selection, world_spec, world_synthesis = _select_world(
                     world,
                     resolution.world_default,
-                    requirement=resolution.world_requirement,
+                    requirement=world_requirement,
                     session_requested=session_requested_world,
                     inventory=effective_inventory or (world_synthesis.resource_inventory if world_synthesis is not None else None),
                     inventory_policy=inventory_policy,
@@ -1218,7 +1241,10 @@ def resolve_dispatch_plan(
                         else world_synthesis.inventory_discovery_error
                     ),
                 )
-                runtime_selection, selected_runtime = _select_runtime(runtime_spec, resolution.runtime_default)
+                runtime_selection, selected_runtime = _select_runtime(
+                    runtime_spec,
+                    _dispatch_annotation_runtime_default(resolution),
+                )
                 if world_synthesis is not None and not world_synthesis.ok:
                     synthesis_structural = world_synthesis.status not in {"insufficient_inventory", "unsupported_requirement"}
                     diagnostics.append(_diagnostic(
@@ -1234,11 +1260,11 @@ def resolve_dispatch_plan(
                 if single_worker_only:
                     world_diagnostics = _local_subprocess_world_diagnostics(
                         world_spec,
-                        resolution.world_requirement,
+                        world_requirement,
                         policy,
                     )
                 else:
-                    world_diagnostics = _local_world_topology_diagnostics(resolution.world_requirement)
+                    world_diagnostics = _local_world_topology_diagnostics(world_requirement)
                 if world_diagnostics:
                     if single_worker_only:
                         structural_failures = tuple(
@@ -1277,7 +1303,7 @@ def resolve_dispatch_plan(
 
     env_record, env_probe_diagnostics = _environment_record(
         env_spec,
-        resolution.environment_requirement,
+        environment_requirement,
         final_probe or bootstrap_probe,
         env_spec if final_probe is not None else bootstrap_environment,
         environment,
@@ -1320,7 +1346,7 @@ def resolve_dispatch_plan(
             world_selection.source == "fallback"
             or _world_needs_inventory(world_spec)
             or world_synthesis is not None
-            or resolution.world_requirement is not None
+            or world_requirement is not None
             or session_inventory is not None
         )
     ):
@@ -1336,7 +1362,7 @@ def resolve_dispatch_plan(
             )
             allocation_requirement = _effective_local_allocation_requirement_check(
                 allocation_world,
-                resolution.world_requirement,
+                world_requirement,
             )
             if allocation_requirement is not None and not allocation_requirement.ok:
                 if policy is not RequirementPolicy.IGNORE:
@@ -1360,7 +1386,7 @@ def resolve_dispatch_plan(
     if not complete:
         diagnostics.append(_diagnostic("dryml.dispatch.discovery_incomplete", "Requirement discovery is incomplete.", severity="error" if policy is RequirementPolicy.STRICT else "warning", data={"policy": policy.value, "action": "use an importable target or call dispatch.explain(...)"}))
     checks = (environment_check, world_check, runtime_check)
-    merge_safe = not _has_annotation_errors(resolution)
+    merge_safe = not _has_annotation_errors(resolution, axes)
     if policy is RequirementPolicy.STRICT:
         launchable = structural_safe and merge_safe and complete and (final_probe is None or final_probe.ok) and all(report.compatible is not False and report.status != "error" for report in checks)
     else:
@@ -1404,7 +1430,7 @@ def resolve_dispatch_plan(
             if selected_inventory is None
             or (
                 world_synthesis is None
-                and resolution.world_requirement is None
+                and world_requirement is None
                 and session_inventory is None
             )
             else selected_inventory.summary()
@@ -2319,11 +2345,13 @@ def _runtime_data(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping) and "spec" in value:
         value = value["spec"]
     data = value.to_data() if isinstance(value, RuntimeContextSpec) else dict(value)
-    # A dispatch worker always receives a worker runtime unless explicitly set.
+    # A dispatch worker always receives a worker runtime. Do not let planning
+    # accept a role that the v2 envelope must reject later.
     data.setdefault("mode", RuntimeMode.WORKER.value)
-    if data.get("mode") == RuntimeMode.ORCHESTRATOR.value:
-        data["mode"] = RuntimeMode.WORKER.value
-    return RuntimeContextSpec.from_data(data).to_data()
+    spec = RuntimeContextSpec.from_data(data)
+    if spec.mode is not RuntimeMode.WORKER:
+        raise ValueError("dispatch runtime candidate must use worker mode")
+    return spec.to_data()
 
 
 def _bootstrap_environment(explicit: Any | None) -> EnvironmentSpec:
@@ -2634,24 +2662,50 @@ def _check_runtime(requirement, candidate, policy, *, enabled: bool):
     return CandidateCheckReport("runtime", "satisfied" if report.ok else "incompatible", report.ok, dict(requirement), candidate, details)
 
 
-def _annotation_diagnostics(resolution):
-    return tuple(_diagnostic(item.code, item.message, severity=item.level, data=item.data) for item in resolution.diagnostics)
+def _annotation_diagnostics(resolution, axes: RequirementAxes):
+    return tuple(
+        _diagnostic(item.code, item.message, severity=item.level, data=item.data)
+        for item in resolution.diagnostics
+        if item.data.get("namespace") not in {"environment", "world", "runtime"}
+        or item.data["namespace"] in axes.enabled
+    )
 
 
-def _has_annotation_errors(resolution) -> bool:
-    return any(item.level == "error" for item in resolution.diagnostics)
+def _dispatch_annotation_runtime_default(resolution):
+    """Project a mode-neutral annotation default into the worker role."""
+
+    value = resolution.runtime_default
+    if value is None or any(
+        fragment.namespace == "runtime"
+        and fragment.kind == "default"
+        and "mode" in fragment.fragment
+        for fragment in resolution.fragments
+    ):
+        return value
+    return {**value.to_data(), "mode": RuntimeMode.WORKER.value}
 
 
-def _resolution_decisions(resolution) -> dict[str, Any]:
+def _has_annotation_errors(resolution, axes: RequirementAxes) -> bool:
+    return any(
+        item.level == "error"
+        and (
+            item.data.get("namespace") not in {"environment", "world", "runtime"}
+            or item.data["namespace"] in axes.enabled
+        )
+        for item in resolution.diagnostics
+    )
+
+
+def _resolution_decisions(resolution, axes: RequirementAxes) -> dict[str, Any]:
     """Return only requirement/default values whose change invalidates selection."""
 
     return {
-        "environment_requirement": None if resolution.environment_requirement is None else resolution.environment_requirement.to_data(),
+        "environment_requirement": None if resolution.environment_requirement is None or "environment" not in axes.enabled else resolution.environment_requirement.to_data(),
         "environment_default": None if resolution.environment_default is None else _environment_data(resolution.environment_default),
-        "world_requirement": None if resolution.world_requirement is None else resolution.world_requirement.to_data(),
+        "world_requirement": None if resolution.world_requirement is None or "world" not in axes.enabled else resolution.world_requirement.to_data(),
         "world_default": None if resolution.world_default is None else _world_data(resolution.world_default),
-        "runtime_requirement": None if resolution.runtime_requirement is None else dict(resolution.runtime_requirement),
-        "runtime_default": None if resolution.runtime_default is None else _runtime_data(resolution.runtime_default),
+        "runtime_requirement": None if resolution.runtime_requirement is None or "runtime" not in axes.enabled else dict(resolution.runtime_requirement),
+        "runtime_default": None if resolution.runtime_default is None else _runtime_data(_dispatch_annotation_runtime_default(resolution)),
     }
 
 

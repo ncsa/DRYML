@@ -4,7 +4,7 @@ import dryml.runtime as runtime
 from dryml.runtime.errors import RuntimeTransitionError
 
 
-def test_default_runtime_is_orchestrator_no_allocation():
+def test_default_runtime_is_no_role_no_allocation():
     state = runtime.active_runtime()
     assert state.mode is runtime.RuntimeMode.NONE
     assert state.allocation is runtime.NoAllocation

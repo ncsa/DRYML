@@ -19,7 +19,7 @@ from dryml.records.policy import normalize_record_policy
 from dryml.environments import spec_from_data
 from dryml.runtime import RequirementAxes, RuntimeMode
 from dryml.runtime.specs import RuntimeContextSpec
-from dryml.worlds import WorldSpec
+from dryml.worlds import ProcessAllocation, WorldSpec
 
 from .errors import WorkerProtocolError
 
@@ -100,13 +100,19 @@ class WorkerStoreRef:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionEnvelope:
-    """Launch-only worker request data.
+    """Validated launch-only worker request data.
 
     Unlike DispatchSpec and ExecutionRecipe, this envelope may contain absolute
     local paths, raw environment/runtime/world configuration, and other
     non-identity launch details. ``launch`` may also carry separately named
     projected world/allocation specs for provenance publication; raw launch
     specs must not be written to the Store.
+
+    Version 2 requires canonical environment, world, runtime, and exact process
+    allocation selections plus a shared compatibility policy and canonical
+    enabled-axis order. Construction and deserialization raise
+    :class:`WorkerProtocolError` for missing, malformed, or mutually incoherent
+    selections before any worker process or Store side effect can begin.
     """
 
     dispatch_spec: Mapping[str, Any]
@@ -666,6 +672,44 @@ def _validate_worker_session_selection(envelope: ExecutionEnvelope) -> None:
     role = allocation.get("role")
     if role not in world.roles:
         raise WorkerProtocolError("selected allocation role is absent from selected world")
+    allocation_id = allocation["world_allocation_id"]
+    if runtime.world_allocation_id != allocation_id:
+        raise WorkerProtocolError(
+            "selected runtime and allocation identities do not match",
+            context={
+                "runtime": runtime.world_allocation_id,
+                "allocation": allocation_id,
+            },
+        )
+    launch_allocation_id = envelope.launch.get("world_allocation_id")
+    if launch_allocation_id is not None and launch_allocation_id != allocation_id:
+        raise WorkerProtocolError("launch and selected allocation identities do not match")
+    try:
+        process = ProcessAllocation.from_data(
+            {
+                "replica": allocation.get("replica"),
+                "rank": allocation.get("rank"),
+                "local_rank": allocation.get("local_rank"),
+                "resources": {
+                    "cpus": allocation.get("cpus"),
+                    "memory": allocation.get("memory"),
+                    "accelerators": allocation.get("accelerators"),
+                    **(
+                        {"accelerator_memory": allocation["accelerator_memory"]}
+                        if "accelerator_memory" in allocation
+                        else {}
+                    ),
+                },
+                "env": allocation.get("env"),
+                "metadata": allocation.get("metadata"),
+            }
+        )
+    except Exception as exc:
+        raise WorkerProtocolError(
+            "execution envelope selected allocation is malformed",
+            context={"error": type(exc).__name__},
+        ) from exc
+    _validate_allocation_matches_world(world, role, process)
     if not isinstance(envelope.requirement_policy, str) or envelope.requirement_policy not in {"strict", "warn", "ignore"}:
         raise WorkerProtocolError("execution envelope requirement_policy is invalid")
     try:
@@ -680,6 +724,32 @@ def _validate_worker_session_selection(envelope: ExecutionEnvelope) -> None:
     if WORKER_SESSION_FEATURE not in handshake.required_features:
         raise WorkerProtocolError("execution envelope v2 requires runtime.worker_session.v2")
     del environment
+
+
+def _validate_allocation_matches_world(
+    world: WorldSpec,
+    role_name: str,
+    allocation: ProcessAllocation,
+) -> None:
+    """Validate one local assignment against its canonical selected world."""
+
+    role = world.roles[role_name]
+    if allocation.replica >= role.replicas:
+        raise WorkerProtocolError("selected allocation replica is absent from selected world")
+    expected_rank = sum(
+        world.roles[name].replicas for name in sorted(world.roles) if name < role_name
+    ) + allocation.replica
+    if allocation.rank != expected_rank or allocation.local_rank != expected_rank:
+        raise WorkerProtocolError("selected allocation ranks do not match selected world")
+    resources = role.process.resources
+    if len(allocation.cpus) != (resources.cpus or 1):
+        raise WorkerProtocolError("selected allocation CPU count does not match selected world")
+    if resources.memory is not None and allocation.memory != resources.memory:
+        raise WorkerProtocolError("selected allocation memory does not match selected world")
+    if {
+        kind: len(devices) for kind, devices in allocation.accelerators.items()
+    } != dict(resources.accelerators):
+        raise WorkerProtocolError("selected allocation accelerators do not match selected world")
 
 
 def _json_ready(value: Any, field_name: str) -> Any:

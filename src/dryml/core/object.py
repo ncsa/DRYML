@@ -294,7 +294,25 @@ class Object(metaclass=Dryml):
         load_object(self, repo=repo, revision=revision)
             
     def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
-        """Restore persisted state after strict materialization admission."""
+        """Restore persisted state after strict materialization admission.
+
+        Args:
+            src_dir: Directory containing the saved definition and object state.
+            revision: Optional revision-specific state selector.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeTransitionError: Before filesystem reads in strict
+                orchestrator mode.
+            AssertionError: If the persisted definition does not match this
+                object's definition.
+
+        Side Effects:
+            Reads persisted state and mutates this object through
+            :meth:`restore_state_from_dir_imp` while holding a runtime lease.
+        """
         from dryml.runtime import assert_object_materialization_allowed
 
         with assert_object_materialization_allowed(operation="object_restore_state"):

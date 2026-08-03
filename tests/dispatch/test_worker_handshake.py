@@ -226,7 +226,7 @@ def test_parent_rejects_ok_handshake_missing_requested_feature(tmp_path):
         operation_spec={"schema": "dryml.operation.v1", "schema_version": 1, "kind": "function_call", "payload": {"function": "operator:add", "args": [1, 2]}},
         environment_spec={"kind": "current", "schema_version": 1},
         world_spec={"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}},
-        runtime_spec={"mode": "worker", "device_visibility": {"policy": "assigned"}},
+        runtime_spec={"mode": "worker", "device_visibility": {"policy": "assigned"}, "world_allocation_id": "worldalloc-v1-test"},
         allocation_view={"world_allocation_id": "worldalloc-v1-test", "role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": [0], "accelerators": {}, "env": {}, "metadata": {}},
         requirement_policy="strict",
         requirement_axes=["environment", "world", "runtime"],

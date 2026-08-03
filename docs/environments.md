@@ -64,10 +64,11 @@ Environment checks are software-focused. CUDA, GPU allocation, process topology,
 For the common path, `dryml.session.require_env(...)` merges PEP 508 package
 requirements and concise Python, capability, or exclusion constraints into the
 persistent session. It is a hard compatibility requirement, not a worker choice.
-Use `session.worker_env_request(EnvironmentSpec(...))` for one lower-precedence
-concrete future-worker candidate; it is consumed only by explicit dispatch and
-does not describe the parent process. Managed sessions check the current
-interpreter; Python mode intentionally adds no session-derived enforcement.
+Use `session.worker_env_request(PythonExecutableSpec(...))` (or another concrete
+`EnvironmentSpec` variant) for one lower-precedence future-worker candidate; it
+is consumed only by explicit dispatch and does not describe the parent process.
+Managed sessions check the current interpreter; Python mode intentionally adds
+no session-derived enforcement.
 Environment requirements do not request GPUs or configure visibility; use
 `session.manage(...)` and `session.worker_world_request(...)` for those separate
 resource concerns. Candidate registries, Conda, executable, and container

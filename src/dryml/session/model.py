@@ -89,6 +89,28 @@ class SessionSnapshot:
 
     ``requirement_axes`` is the effective runtime compatibility mask and remains
     separate from lifecycle status and allocation controls.
+
+    Attributes:
+        mode: Public ``python``, ``managed``, or ``orchestrator`` role.
+        resources: Current-process resource declaration, when active.
+        allocation: Selected current-process allocation, when active.
+        requested_environment: Inert future-worker environment candidate.
+        requested_world: Inert future-worker world candidate.
+        environment: Current-process software requirement.
+        controls: Immutable process-control summary.
+        statuses: Immutable framework and visibility status summary.
+        runtime: Effective low-level runtime state.
+        generation: Monotonic publication generation.
+        health: ``healthy`` or terminal ``failed`` state.
+        inventory: Retained current-process inventory, when active.
+        requirement_axes: Current-process compatibility-axis mask.
+        selected_environment: Active worker environment selection, or ``None``.
+        selected_world: Active worker world selection, or ``None``.
+        selected_runtime: Active worker runtime selection, or ``None``.
+        compatibility_policy: Worker dispatch compatibility action, or ``None``.
+        compatibility_axes: Worker dispatch compatibility axes, or ``None``.
+
+    Construction validates immutable axis types and has no process side effects.
     """
 
     mode: str

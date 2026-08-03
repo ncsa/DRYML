@@ -150,7 +150,8 @@ def execute_materialization_plan(
 
     Side Effects:
         May construct Objects, restore state, update ``memo``, and publish cache
-        entries while retaining the runtime publication lease.
+        entries while retaining the runtime publication lease. A plan whose
+        weak-cache reuse became stale is rebuilt before execution begins.
     """
     from .repo import RepoLoadError
 
@@ -160,6 +161,29 @@ def execute_materialization_plan(
     # cache extraction, construction, or restoration can begin.
     with assert_object_materialization_allowed(operation="materialization_plan_execute"):
         local_memo = dict(memo)
+        resolved_cache = {}
+        for cdef in plan.order:
+            action = plan.actions[cdef]
+            if cdef in local_memo or action.reuse_source != "cache":
+                continue
+            obj = repo.get_cached(cdef, reuse_weak=plan.options.reuse_weak)
+            if obj is None:
+                refreshed = build_materialization_plan(
+                    repo,
+                    root,
+                    plan.options,
+                    revision=revision,
+                    memo=local_memo,
+                )
+                return execute_materialization_plan(
+                    repo,
+                    refreshed,
+                    memo=memo,
+                    revision=revision,
+                    root=root,
+                )
+            resolved_cache[cdef] = obj
+
         for cdef in plan.order:
             if cdef in local_memo:
                 continue
@@ -168,7 +192,7 @@ def execute_materialization_plan(
             revision_str = action.revision if action.revision is not None else revision.get(cdef, None)
 
             if action.kind == "reuse":
-                obj = local_memo.get(cdef) if action.reuse_source == "memo" else repo.get_cached(cdef, reuse_weak=plan.options.reuse_weak)
+                obj = local_memo.get(cdef) if action.reuse_source == "memo" else resolved_cache.get(cdef)
                 if obj is None:
                     source = "memoized" if action.reuse_source == "memo" else "cached"
                     raise RepoLoadError(

@@ -141,9 +141,9 @@ def test_bounded_provenance_matrix(tmp_path, monkeypatch, target_kind):
     assert metadata["dryml.environment_selection"]["source"] == "explicit"
     assert metadata["dryml.world_selection"]["source"] == "synthesized"
     assert metadata["dryml.environment_check"]["status"] == "not_required"
-    assert metadata["dryml.world_check"]["status"] == "skipped"
+    assert metadata["dryml.world_check"]["status"] == "satisfied"
     assert metadata["dryml.runtime_check"]["status"] == "not_required"
-    assert metadata["dryml.requirement_policy"] == "ignore"
+    assert metadata["dryml.requirement_policy"] == "strict"
     assert metadata["dryml.runtime_enforcement"] == "off"
     assert outcomes["code_probe"] == {"outcome": "not_required"}
     assert outcomes["environment_probe"] == {"outcome": "not_required"}
@@ -175,6 +175,7 @@ def test_bounded_provenance_matrix(tmp_path, monkeypatch, target_kind):
         args=args,
         environment=CurrentEnvironmentSpec(),
         runtime=RuntimeContextSpec(
+            mode=RuntimeMode.WORKER,
             env={"TOKEN": "RUNTIME_CANDIDATE_ENV_SENTINEL"},
             frameworks={
                 "audit": {"token": "RUNTIME_CANDIDATE_SECRET_SENTINEL"},

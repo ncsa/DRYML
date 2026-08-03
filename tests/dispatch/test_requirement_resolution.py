@@ -27,6 +27,7 @@ def test_live_callable_resolution_preserves_all_namespace_requirements_and_sourc
     assert data["environment_requirement"]["requirements"] == ["resolution-test-package>=1"]
     assert data["world_default"]["roles"]["main"]["replicas"] == 1
     assert data["runtime_default"]["device_visibility"] == {"policy": "assigned"}
+    assert resolution.runtime_selection.candidate["mode"] == "worker"
     assert data["source_traces"]
     assert json.loads(json.dumps(resolution.to_data()))["requirement_policy"] == "ignore"
     assert resolution.code_analysis is not None

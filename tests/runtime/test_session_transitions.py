@@ -17,9 +17,9 @@ from dryml.core import Object, definition_mode, selector_mode, space_mode
 from dryml.core.session import config, configure, current_object_mode, get_config, status
 from dryml.runtime import NoAllocation, RuntimeAllocationView, RuntimeEnforcement, RuntimeMode, RuntimeState, active_runtime, assert_control_plane_target_execution_allowed, assert_object_materialization_allowed, enter_runtime, plain
 from dryml.runtime.guards import internal_construction_admitted
-from dryml.runtime.errors import RuntimeTransitionError
+from dryml.runtime.errors import PublicationFailedError, RuntimeTransitionError
 from dryml.runtime.frameworks import FrameworkRegistration, framework_registry
-from dryml.runtime.publication import PublicationService
+from dryml.runtime.publication import FrameworkAdmission, PublicationService
 from dryml.worlds import LocalResourceInventory
 
 
@@ -44,6 +44,7 @@ def isolated_session(monkeypatch):
     monkeypatch.setattr(guards, "publication", service, raising=False)
     monkeypatch.setattr(state, "local_inventory", lambda: LocalResourceInventory((0, 1), {"gpu": (0, 1)}, memory=4 * 1024**3))
     core_session.reset_config()
+    yield service
 
 
 class FloorObject(Object):
@@ -161,6 +162,39 @@ def test_materialization_guard_lease_blocks_effectful_orchestrator_transition():
     with assert_object_materialization_allowed(operation="test_materialization"):
         with pytest.raises(RuntimeTransitionError, match="lease"):
             session.set_mode("orchestrator")
+
+
+def test_axis_only_publication_succeeds_while_workload_generation_is_leased():
+    session.manage(cpus=1)
+
+    with assert_object_materialization_allowed(operation="test_materialization"):
+        snapshot = session.enforce_requirements(
+            environment=True,
+            world=False,
+            runtime=True,
+        )
+
+    assert snapshot.requirement_axes.to_data() == ["environment", "runtime"]
+
+
+def test_terminal_framework_poison_prevents_guarded_success(isolated_session):
+    session.manage(cpus=1)
+    current = isolated_session.current()
+    admission = FrameworkAdmission(
+        current.number,
+        current.metadata["control_epoch"],
+        current.metadata["framework_registry_revision"],
+        "torch",
+        "torch",
+        "plan",
+    )
+
+    with pytest.raises(PublicationFailedError, match="failed during guarded work"):
+        with assert_object_materialization_allowed(operation="test_materialization"):
+            isolated_session.fail_framework(
+                admission,
+                RuntimeError("caught framework failure"),
+            )
 
 
 def test_local_execution_guard_uses_a_distinct_orchestrator_diagnostic():

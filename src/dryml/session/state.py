@@ -241,6 +241,7 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
         mode: Mandatory target facade mode.
         resources: Optional simple current-process resource declaration.
         allocation: Optional exact current-process allocation declaration.
+        requested_environment: Optional concrete default worker environment.
         requested_world: Optional default worker world declaration.
         environment: Optional software requirement declaration.
         requirement_axes: Optional complete exact-boolean compatibility-axis
@@ -248,6 +249,14 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
 
     Returns:
         Snapshot of the complete replacement session.
+
+    Raises:
+        SessionConfigurationError: If any category is malformed, incompatible,
+            or cannot be published atomically.
+
+    Side Effects:
+        Publishes one complete process generation and applies any required
+        visibility or affinity controls only after all categories validate.
     """
 
     candidate = normalize_configuration(
@@ -328,6 +337,8 @@ def publish_worker_session(
         raise SessionConfigurationError("worker compatibility axes are invalid")
     if not getattr(allocation, "world_allocation_id", None) or not getattr(allocation, "role", None):
         raise SessionConfigurationError("worker session requires an exact allocation identity")
+    if runtime_spec.world_allocation_id != allocation.world_allocation_id:
+        raise SessionConfigurationError("worker runtime and allocation identities must match")
     if allocation.role not in world.roles:
         raise SessionConfigurationError("worker allocation role is absent from selected world")
     process = ProcessAllocation(
@@ -345,10 +356,14 @@ def publish_worker_session(
     worker_runtime = RuntimeState(
         RuntimeMode.WORKER,
         allocation,
+        spec=runtime_spec,
         enforcement=RuntimeEnforcement.STRICT,
         requirement_axes=requirement_axes,
     )
     before = publication.current()
+    bootstrap = _bootstrap_plan(worker_runtime)
+    framework_results = dict(bootstrap.framework_results)
+    framework_statuses = _pending_framework_statuses(framework_results)
     configuration = SessionConfiguration(
         "managed",
         None,
@@ -357,8 +372,14 @@ def publish_worker_session(
         None,
         EnvironmentRequirement(),
         _controls(None, selected),
-        RequirementAxes.all(),
+        requirement_axes,
     )
+    registry_revision, registry_frozen = framework_registry.state()
+    observed_roots = _loaded_framework_roots()
+    plan = _effect_plan(worker_runtime, before, bootstrap)
+    control_epoch = int(before.metadata.get("control_epoch", before.number))
+    if publication._changes_process_effects(plan):
+        control_epoch = before.number + 1
     generation = SessionGeneration(
         before.number + 1,
         worker_runtime,
@@ -371,10 +392,43 @@ def publish_worker_session(
             "selected_runtime": runtime_spec,
             "compatibility_policy": requirement_policy,
             "worker_session": True,
+            "framework_results": framework_results,
+            "frameworks": tuple(framework_results),
+            "framework_statuses": framework_statuses,
+            "framework_registry_revision": registry_revision,
+            "control_epoch": control_epoch,
         },
     )
+    freeze_needed = not registry_frozen
+    freeze_started = False
+
+    def rollback_validator() -> None:
+        """Undo this publication's provisional registry freeze on failure."""
+
+        if freeze_started:
+            framework_registry.unfreeze()
+
+    def validate() -> None:
+        """Revalidate framework state before publishing worker controls."""
+
+        nonlocal freeze_started
+        if framework_registry.state() != (registry_revision, registry_frozen):
+            raise PublicationError("framework adapter registry changed while staging worker session")
+        if _loaded_framework_roots() != observed_roots:
+            raise PublicationError("framework import changed while staging worker session")
+        if observed_roots:
+            raise PublicationError("worker session must be published before framework imports")
+        if freeze_needed:
+            freeze_started = True
+            framework_registry.freeze()
+
     try:
-        committed = publication.commit(publication.stage(before, generation), EffectPlan())
+        committed = publication.commit(
+            publication.stage(before, generation),
+            plan,
+            validator=validate,
+            validator_rollback=rollback_validator if freeze_needed else None,
+        )
     except Exception as exc:
         raise SessionConfigurationError("worker session publication failed", context={"error": type(exc).__name__}) from exc
     return _snapshot(committed)
@@ -521,7 +575,7 @@ def _publish(
             _controls(candidate_resources, candidate_allocation),
             requirement_axes,
         )
-        _check_current_environment(mode, environment)
+        _check_current_environment(mode, environment, candidate.requirement_axes)
         runtime = _runtime_for(mode, candidate_allocation, candidate.requirement_axes)
         bootstrap = _bootstrap_plan(runtime)
         framework_results = dict(bootstrap.framework_results)
@@ -641,10 +695,18 @@ def _controls(resources: ResourceSpec | None, allocation: SelectedWorldAllocatio
     }
 
 
-def _check_current_environment(mode: str, environment: EnvironmentRequirement) -> None:
+def _check_current_environment(
+    mode: str,
+    environment: EnvironmentRequirement,
+    requirement_axes: RequirementAxes,
+) -> None:
     """Reject an incompatible managed interpreter before process effects begin."""
 
-    if mode != "managed" or not any((environment.requirements, environment.python, environment.excludes, environment.capabilities)):
+    if (
+        mode != "managed"
+        or "environment" not in requirement_axes.enabled
+        or not any((environment.requirements, environment.python, environment.excludes, environment.capabilities))
+    ):
         return
     report = environment.check(inspect_current(), policy="strict")
     if not report.ok:
@@ -652,18 +714,22 @@ def _check_current_environment(mode: str, environment: EnvironmentRequirement) -
 
 
 def _effect_plan(runtime: RuntimeState, before: SessionGeneration, bootstrap: Any) -> EffectPlan:
-    if before.runtime == runtime and before.metadata.get("session_active") == (runtime.enforcement is RuntimeEnforcement.STRICT):
+    if (
+        _same_runtime_process_effects(before.runtime, runtime)
+        and before.metadata.get("session_active")
+        == (runtime.enforcement is RuntimeEnforcement.STRICT)
+    ):
         # Declarative requirements and worker intent may advance independently
         # without invalidating a leased direct invocation.
         return EffectPlan()
-    if runtime.mode is RuntimeMode.INLINE:
+    if runtime.mode in {RuntimeMode.INLINE, RuntimeMode.WORKER}:
         visibility = dict(bootstrap.env_updates)
         visibility.update({key: "" for key in _VISIBILITY_KEYS if key not in visibility})
         allocation = runtime.allocation
         if getattr(allocation, "accelerators", {}):
             from dryml.runtime import build_device_visibility_plan
 
-            visibility.update(build_device_visibility_plan(mode=RuntimeMode.INLINE, allocation_view=allocation, policy="assigned").env_updates)
+            visibility.update(build_device_visibility_plan(mode=runtime.mode, allocation_view=allocation, policy="assigned").env_updates)
         return EffectPlan(environment=visibility, cpu_affinity=tuple(allocation.cpus))
     if runtime.enforcement is RuntimeEnforcement.STRICT:
         environment = dict(bootstrap.env_updates)
@@ -686,9 +752,20 @@ def _effect_plan(runtime: RuntimeState, before: SessionGeneration, bootstrap: An
     return EffectPlan(environment=restore_environment, cpu_affinity=affinity)
 
 
+def _same_runtime_process_effects(left: RuntimeState, right: RuntimeState) -> bool:
+    """Compare runtime fields that can change process-global controls."""
+
+    return (
+        left.mode is right.mode
+        and left.allocation == right.allocation
+        and left.spec == right.spec
+        and left.enforcement is right.enforcement
+    )
+
+
 def _bootstrap_plan(runtime: RuntimeState):
-    visibility = "assigned" if runtime.mode is RuntimeMode.INLINE else ("inherit" if runtime.mode is RuntimeMode.NONE else "none")
-    spec = RuntimeContextSpec(mode=runtime.mode, device_visibility={"policy": visibility})
+    visibility = "assigned" if runtime.mode in {RuntimeMode.INLINE, RuntimeMode.WORKER} else ("inherit" if runtime.mode is RuntimeMode.NONE else "none")
+    spec = runtime.spec or RuntimeContextSpec(mode=runtime.mode, device_visibility={"policy": visibility})
     frameworks = ("plain", "tensorflow", "torch", "jax") if runtime.enforcement is RuntimeEnforcement.STRICT else ("plain",)
     return build_runtime_bootstrap_plan(spec, runtime.allocation, policy=FrameworkBootstrapPolicy(frameworks))
 
