@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import replace
+import os
 import sys
 
 import dryml
@@ -120,6 +121,7 @@ def test_single_subprocess_plan_allocates_selected_gpu_world(tmp_path):
 
 
 def test_run_allocates_synthesized_gpu_world_into_worker(tmp_path, target_module):
+    cpu = min(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else 0
     target_module.write_text(
         target_module.read_text(encoding="utf-8")
         + "\nimport dryml\nIMPORT_CUDA_VISIBLE_DEVICES = os.environ.get('CUDA_VISIBLE_DEVICES')\n@dryml.world.req(accelerators={'gpu': {'min': 1}})\ndef synthesized_gpu_facts():\n    return {**allocation_facts(), 'import_cuda_visible_devices': IMPORT_CUDA_VISIBLE_DEVICES, 'execution_cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES')}\n",
@@ -128,7 +130,7 @@ def test_run_allocates_synthesized_gpu_world_into_worker(tmp_path, target_module
     result = Dispatcher(store=DirStore(tmp_path / "store", query_index="none")).run(
         attach_operation_id(make_function_call_spec("dispatch_target:synthesized_gpu_facts")),
         environment={"kind": "python", "executable": sys.executable, "pythonpath_policy": "explicit", "extra_pythonpath": [str(target_module.parent)]},
-        inventory=LocalResourceInventory((4,), {"gpu": ("gpu-a",)}),
+        inventory=LocalResourceInventory((cpu,), {"gpu": ("gpu-a",)}),
         requirement_policy="strict",
         timeout=10,
     )
