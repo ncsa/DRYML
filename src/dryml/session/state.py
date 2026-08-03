@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from dryml.environments import EnvironmentRequirement
+from dryml.environments import EnvironmentRequirement, EnvironmentSpec, spec_from_data
 from dryml.environments import inspect_current
 from dryml.runtime import (
     EffectPlan,
@@ -28,9 +28,9 @@ from dryml.runtime import (
 from dryml.runtime.frameworks import FrameworkBootstrapResult, framework_registry
 from dryml.runtime.errors import PublicationBusyError, PublicationError
 from dryml.runtime.publication import SessionGeneration, publication
-from dryml.worlds import LocalResourceInventory, ResourceSpec, WorldAllocation, WorldSpec, assign_local_world, local_inventory
+from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldAllocation, WorldSpec, assign_local_world, local_inventory
 
-from .configuration import _normalize_environment, _normalize_requirement_axes, _normalize_resources, normalize_configuration, select_world_allocation
+from .configuration import _normalize_environment, _normalize_requirement_axes, _normalize_requested_environment, _normalize_resources, normalize_configuration, select_world_allocation
 from .errors import SessionConfigurationError
 from .model import SelectedWorldAllocation, SessionConfiguration, SessionSnapshot
 
@@ -76,6 +76,7 @@ def set_mode(mode: str) -> SessionSnapshot:
         mode,
         resources,
         allocation,
+        before.requested_environment,
         before.requested_world,
         before.environment,
         _default_requirement_axes(mode),
@@ -102,6 +103,7 @@ def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: in
         "managed",
         None,
         None,
+        before.requested_environment,
         before.requested_world,
         before.environment,
         RequirementAxes.all(),
@@ -129,7 +131,31 @@ def worker_world_request(*, cpus: int | None = None, memory: str | int | None = 
     before = _configuration(publication.current())
     resources = _normalize_resources(supplied)
     world = _world_for_resources(resources, role="worker")
-    return _publish(before.mode, before.resources, before.allocation, world, before.environment, before.requirement_axes)
+    return _publish(before.mode, before.resources, before.allocation, before.requested_environment, world, before.environment, before.requirement_axes)
+
+
+def worker_env_request(value: EnvironmentSpec | Mapping[str, Any], /) -> SessionSnapshot:
+    """Replace the inert concrete environment candidate for future workers.
+
+    Args:
+        value: An ``EnvironmentSpec`` or its bounded canonical mapping.
+
+    Returns:
+        Snapshot with the replacement request. The request is consumed only by
+        an explicit dispatch operation and never describes this process.
+    """
+
+    try:
+        candidate = value if isinstance(value, EnvironmentSpec) else _normalize_requested_environment(value)
+        if candidate is None:
+            raise SessionConfigurationError("worker_env_request requires an environment spec")
+        candidate = spec_from_data(candidate.to_data())
+    except SessionConfigurationError:
+        raise
+    except Exception as exc:
+        raise SessionConfigurationError(str(exc), context=getattr(exc, "context", {})) from exc
+    before = _configuration(publication.current())
+    return _publish(before.mode, before.resources, before.allocation, candidate, before.requested_world, before.environment, before.requirement_axes)
 
 
 def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str | None = None, replica: int | None = None) -> SessionSnapshot:
@@ -145,7 +171,7 @@ def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str |
     """
 
     before = _configuration(publication.current())
-    return _publish("managed", None, (value, role, replica), before.requested_world, before.environment, RequirementAxes.all(), exact=True)
+    return _publish("managed", None, (value, role, replica), before.requested_environment, before.requested_world, before.environment, RequirementAxes.all(), exact=True)
 
 
 def require_env(*requirements: str, python: str | None = None, excludes: Any = (), capabilities: Any = ()) -> SessionSnapshot:
@@ -178,7 +204,7 @@ def require_env(*requirements: str, python: str | None = None, excludes: Any = (
         environment = before.environment.merge(addition, sources=("session",))
     except Exception as exc:
         raise SessionConfigurationError(str(exc), context=getattr(exc, "context", {})) from exc
-    return _publish(before.mode, before.resources, before.allocation, before.requested_world, environment, before.requirement_axes)
+    return _publish(before.mode, before.resources, before.allocation, before.requested_environment, before.requested_world, environment, before.requirement_axes)
 
 
 def enforce_requirements(*, environment: bool, world: bool, runtime: bool) -> SessionSnapshot:
@@ -205,10 +231,10 @@ def enforce_requirements(*, environment: bool, world: bool, runtime: bool) -> Se
         {"environment": environment, "world": world, "runtime": runtime},
         mode=before.mode,
     )
-    return _publish(before.mode, before.resources, before.allocation, before.requested_world, before.environment, axes)
+    return _publish(before.mode, before.resources, before.allocation, before.requested_environment, before.requested_world, before.environment, axes)
 
 
-def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocation: Mapping[str, Any] | None = None, requested_world: Mapping[str, Any] | None = None, environment: Mapping[str, Any] | None = None, requirement_axes: Mapping[str, bool] | None = None) -> SessionSnapshot:
+def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocation: Mapping[str, Any] | None = None, requested_environment: Mapping[str, Any] | None = None, requested_world: Mapping[str, Any] | None = None, environment: Mapping[str, Any] | None = None, requirement_axes: Mapping[str, bool] | None = None) -> SessionSnapshot:
     """Atomically replace every facade category from one closed declaration.
 
     Args:
@@ -228,6 +254,7 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
         mode=mode,
         resources=resources,
         allocation=allocation,
+        requested_environment=requested_environment,
         requested_world=requested_world,
         environment=environment,
         requirement_axes=requirement_axes,
@@ -241,6 +268,7 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
         candidate.mode,
         None if default_managed else candidate.resources,
         exact_allocation if exact_allocation is not None else candidate.allocation,
+        candidate.requested_environment,
         candidate.requested_world,
         candidate.environment,
         candidate.requirement_axes,
@@ -257,7 +285,104 @@ def reset() -> SessionSnapshot:
         Snapshot of the restored Python-mode session.
     """
 
-    return _publish("python", None, None, None, EnvironmentRequirement(), RequirementAxes())
+    return _publish("python", None, None, None, None, EnvironmentRequirement(), RequirementAxes())
+
+
+def publish_worker_session(
+    *,
+    environment: EnvironmentSpec,
+    world: WorldSpec,
+    runtime_spec: RuntimeContextSpec,
+    allocation: Any,
+    requirement_policy: str,
+    requirement_axes: RequirementAxes,
+) -> SessionSnapshot:
+    """Publish the internal strict worker session before worker setup begins.
+
+    Args:
+        environment: Canonical selected worker environment.
+        world: Canonical selected worker world.
+        runtime_spec: Canonical selected worker runtime configuration.
+        allocation: Exact allocated worker runtime view.
+        requirement_policy: Dispatch compatibility action retained for inspection.
+        requirement_axes: Dispatch compatibility axes retained for inspection.
+
+    Returns:
+        The managed-vocabulary snapshot carrying the internal worker runtime.
+
+    Raises:
+        SessionConfigurationError: If the worker selection is not an exact
+            strict allocated worker session.
+
+    Side Effects:
+        Replaces the process-local publication before handshake, Store access,
+        or workload setup. It never treats future-worker requests as active
+        selected values.
+    """
+
+    if runtime_spec.mode is not RuntimeMode.WORKER:
+        raise SessionConfigurationError("worker session runtime selection must use worker mode")
+    if requirement_policy not in {"strict", "warn", "ignore"}:
+        raise SessionConfigurationError("worker compatibility policy is invalid")
+    if not isinstance(requirement_axes, RequirementAxes):
+        raise SessionConfigurationError("worker compatibility axes are invalid")
+    if not getattr(allocation, "world_allocation_id", None) or not getattr(allocation, "role", None):
+        raise SessionConfigurationError("worker session requires an exact allocation identity")
+    if allocation.role not in world.roles:
+        raise SessionConfigurationError("worker allocation role is absent from selected world")
+    process = ProcessAllocation.from_data(
+        {
+            "replica": allocation.replica,
+            "rank": allocation.rank,
+            "local_rank": allocation.local_rank,
+            "resources": {
+                "cpus": list(allocation.cpus),
+                "memory": allocation.memory,
+                "accelerators": {key: list(value) for key, value in allocation.accelerators.items()},
+                **({"accelerator_memory": allocation.accelerator_memory} if allocation.accelerator_memory else {}),
+            },
+            "env": dict(allocation.env),
+            "metadata": dict(allocation.metadata),
+        }
+    )
+    selected = SelectedWorldAllocation(allocation.role, process)
+    worker_runtime = RuntimeState(
+        RuntimeMode.WORKER,
+        allocation,
+        enforcement=RuntimeEnforcement.STRICT,
+        requirement_axes=requirement_axes,
+    )
+    before = publication.current()
+    configuration = SessionConfiguration(
+        "managed",
+        None,
+        selected,
+        None,
+        None,
+        EnvironmentRequirement(),
+        _controls(None, selected),
+        RequirementAxes.all(),
+    )
+    generation = SessionGeneration(
+        before.number + 1,
+        worker_runtime,
+        visibility_epoch=before.visibility_epoch,
+        metadata={
+            "session_configuration": configuration,
+            "session_active": True,
+            "selected_environment": environment,
+            "selected_world": world,
+            "selected_runtime": runtime_spec,
+            "compatibility_policy": requirement_policy,
+            "compatibility_axes": requirement_axes,
+            "worker_session": True,
+        },
+    )
+    try:
+        committed = publication.commit(publication.stage(before, generation), EffectPlan())
+    except Exception as exc:
+        raise SessionConfigurationError("worker session publication failed", context={"error": type(exc).__name__}) from exc
+    return _snapshot(committed)
 
 
 def _configuration(generation: SessionGeneration) -> SessionConfiguration:
@@ -281,6 +406,7 @@ def _snapshot(generation: SessionGeneration) -> SessionSnapshot:
         configuration.mode,
         configuration.resources,
         configuration.allocation,
+        configuration.requested_environment,
         configuration.requested_world,
         configuration.environment,
         configuration.controls,
@@ -290,6 +416,11 @@ def _snapshot(generation: SessionGeneration) -> SessionSnapshot:
         generation.health,
         generation.visibility_epoch if isinstance(generation.visibility_epoch, LocalResourceInventory) else None,
         requirement_axes=generation.runtime.requirement_axes,
+        selected_environment=generation.metadata.get("selected_environment"),
+        selected_world=generation.metadata.get("selected_world"),
+        selected_runtime=generation.metadata.get("selected_runtime"),
+        compatibility_policy=generation.metadata.get("compatibility_policy"),
+        compatibility_axes=generation.metadata.get("compatibility_axes"),
     )
 
 
@@ -347,6 +478,7 @@ def _publish(
     mode: str,
     resources: ResourceSpec | None,
     allocation: SelectedWorldAllocation | tuple[Any, str | None, int | None] | None,
+    requested_environment: EnvironmentSpec | None,
     requested_world: WorldSpec | None,
     environment: EnvironmentRequirement,
     requirement_axes: RequirementAxes,
@@ -390,6 +522,7 @@ def _publish(
             mode,
             candidate_resources,
             candidate_allocation,
+            requested_environment,
             requested_world,
             environment,
             _controls(candidate_resources, candidate_allocation),
@@ -577,4 +710,4 @@ def _pending_framework_statuses(results: Mapping[str, FrameworkBootstrapResult])
             for control in ("visibility", "threads", "process_memory", "accelerator_memory", "allocator"):
                 statuses[f"{name}:{root}:{control}"] = "pending-import"
     return statuses
-__all__ = ["allocate_world", "configure", "current", "enforce_requirements", "manage", "mode", "require_env", "reset", "set_mode", "worker_world_request"]
+__all__ = ["allocate_world", "configure", "current", "enforce_requirements", "manage", "mode", "publish_worker_session", "require_env", "reset", "set_mode", "worker_env_request", "worker_world_request"]

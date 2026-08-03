@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from dryml.environments import EnvironmentRequirement
+from dryml.environments import EnvironmentRequirement, EnvironmentSpec
 from dryml.formats import canonical_json_bytes, deep_freeze_json, json_ready
 from dryml.runtime import RequirementAxes
 from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldSpec
@@ -37,6 +37,7 @@ class SessionConfiguration:
     mode: str
     resources: ResourceSpec | None = None
     allocation: SelectedWorldAllocation | None = None
+    requested_environment: EnvironmentSpec | None = None
     requested_world: WorldSpec | None = None
     environment: EnvironmentRequirement = field(default_factory=EnvironmentRequirement)
     controls: Mapping[str, Any] = field(default_factory=dict)
@@ -65,6 +66,7 @@ class SessionConfiguration:
             "mode": self.mode,
             "resources": None if self.resources is None else self.resources.to_data(),
             "allocation": None if self.allocation is None else self.allocation.to_data(),
+            "requested_environment": None if self.requested_environment is None else self.requested_environment.to_data(),
             "requested_world": None if self.requested_world is None else self.requested_world.to_data(),
             "environment": self.environment.to_data(),
             "controls": json_ready(self.controls),
@@ -86,6 +88,7 @@ class SessionSnapshot:
     mode: str
     resources: ResourceSpec | None
     allocation: SelectedWorldAllocation | None
+    requested_environment: EnvironmentSpec | None
     requested_world: WorldSpec | None
     environment: EnvironmentRequirement
     controls: Mapping[str, Any]
@@ -95,6 +98,11 @@ class SessionSnapshot:
     health: str = "healthy"
     inventory: LocalResourceInventory | None = None
     requirement_axes: RequirementAxes = field(default_factory=RequirementAxes)
+    selected_environment: EnvironmentSpec | None = None
+    selected_world: WorldSpec | None = None
+    selected_runtime: Any | None = None
+    compatibility_policy: str | None = None
+    compatibility_axes: RequirementAxes | None = None
 
     def __post_init__(self) -> None:
         """Freeze nested public control and status projections.
@@ -106,6 +114,8 @@ class SessionSnapshot:
         object.__setattr__(self, "statuses", deep_freeze_json(self.statuses))
         if not isinstance(self.requirement_axes, RequirementAxes):
             raise TypeError("snapshot requirement_axes must be a RequirementAxes value")
+        if self.compatibility_axes is not None and not isinstance(self.compatibility_axes, RequirementAxes):
+            raise TypeError("snapshot compatibility_axes must be a RequirementAxes value")
 
     def to_data(self) -> dict[str, Any]:
         """Return a bounded JSON-ready display projection."""
@@ -114,6 +124,7 @@ class SessionSnapshot:
             "mode": self.mode,
             "resources": None if self.resources is None else self.resources.to_data(),
             "allocation": None if self.allocation is None else self.allocation.to_data(),
+            "requested_environment": None if self.requested_environment is None else self.requested_environment.to_data(),
             "requested_world": None if self.requested_world is None else self.requested_world.to_data(),
             "environment": self.environment.to_data(),
             "controls": json_ready(self.controls),
@@ -122,6 +133,11 @@ class SessionSnapshot:
             "generation": self.generation,
             "health": self.health,
             "inventory": None if self.inventory is None else self.inventory.summary(),
+            "selected_environment": None if self.selected_environment is None else self.selected_environment.to_data(),
+            "selected_world": None if self.selected_world is None else self.selected_world.to_data(),
+            "selected_runtime": None if self.selected_runtime is None else self.selected_runtime.to_data(),
+            "compatibility_policy": self.compatibility_policy,
+            "compatibility_axes": None if self.compatibility_axes is None else self.compatibility_axes.to_data(),
         }
 
 

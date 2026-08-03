@@ -61,7 +61,7 @@ _RESERVED_PLANNING_KEYS = frozenset(
         "dryml.environment_probe", "dryml.environment_check", "dryml.environment_resolution",
         "dryml.world_selection", "dryml.world_check", "dryml.world_synthesis",
         "dryml.local_inventory", "dryml.world_allocation", "dryml.runtime_selection",
-        "dryml.runtime_check", "dryml.requirement_policy", "dryml.runtime_enforcement",
+        "dryml.runtime_check", "dryml.requirement_policy", "dryml.requirement_axes", "dryml.runtime_enforcement",
         "dryml.dispatch.launchable", "dryml.dispatch.diagnostics", "dryml.dispatch.dynamic_trace",
         "dryml.dispatch.analysis_outcomes",
     }

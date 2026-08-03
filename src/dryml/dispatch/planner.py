@@ -100,6 +100,7 @@ class Dispatcher:
         runtime: Mapping[str, Any] | None = None,
         world: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
+        requirement_axes: Mapping[str, bool] | None = None,
         analysis_policy: Any | None = None,
         environment_candidates: Any = _UNSET,
         environment_registry: Any = _UNSET,
@@ -123,6 +124,8 @@ class Dispatcher:
             runtime: Explicit worker runtime specification.
             world: Explicit requested world payload, object, or canonical envelope.
             requirement_policy: ``"strict"``, ``"warn"``, or ``"ignore"``.
+            requirement_axes: Exact mapping that enables dispatch compatibility
+                checks for environment, world, and runtime independently.
             analysis_policy: A `CodeAnalysisContext` compatibility value or a
                 closed mapping. Only mapping `dynamic_trace=True` or an already
                 validated `DynamicTracePolicy` requests one trusted,
@@ -167,10 +170,6 @@ class Dispatcher:
             raise DispatchPlanningError(
                 "writable managed dispatch requires a same-host DirStore"
             )
-        # Managed operations have always been checked workloads.  The facade's
-        # ordinary Python-mode bypass applies to direct calls, not this existing
-        # managed-operation dispatch boundary.
-        effective_requirement_policy = "strict" if extension is not None and requirement_policy is None else requirement_policy
         effective_inventory_policy = self.inventory_policy if inventory_policy is None else inventory_policy
         effective_resolver_policy = self.resolver_policy if resolver_policy is None else resolver_policy
         _validate_sprint8_policies(effective_inventory_policy, effective_resolver_policy)
@@ -189,7 +188,8 @@ class Dispatcher:
                 environment=environment,
                 world=world,
                 runtime_spec=runtime,
-                requirement_policy=effective_requirement_policy,
+                requirement_policy=requirement_policy,
+                requirement_axes=requirement_axes,
                 analysis_policy=analysis_policy,
                 _analysis_request=analysis_request,
                 environment_candidates=effective_candidates,
@@ -332,8 +332,11 @@ class Dispatcher:
                 execution_recipe=recipe,
                 operation_spec=op_spec,
                 environment_spec=env_data,
+                world_spec=world_data,
                 runtime_spec=runtime_data,
                 allocation_view=allocation_data,
+                requirement_policy=resolution.requirement_policy.value,
+                requirement_axes=resolution.requirement_axes.to_data(),
                 store_refs=marshal.store_refs,
                 transfer={"strategy": marshal.strategy},
                 record_policy=record_policy,
@@ -408,6 +411,7 @@ class Dispatcher:
         environment: Any | Mapping[str, Any] | None = None,
         runtime: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
+        requirement_axes: Mapping[str, bool] | None = None,
         analysis_policy: Any | None = None,
         record_policy: str = "descriptive",
         allow_pickle: bool = False,
@@ -435,6 +439,7 @@ class Dispatcher:
             environment: Explicit environment candidate.
             runtime: Explicit worker runtime specification.
             requirement_policy: ``"strict"``, ``"warn"``, or ``"ignore"``.
+            requirement_axes: Exact dispatch compatibility-axis mapping.
             analysis_policy: Optional code-analysis policy.
             record_policy: Persistence policy for execution provenance.
             allow_pickle: Permit a non-importable callable transport.
@@ -486,6 +491,7 @@ class Dispatcher:
                 world=world,
                 runtime_spec=runtime,
                 requirement_policy=requirement_policy,
+                requirement_axes=requirement_axes,
                 analysis_policy=analysis_policy,
                 _analysis_request=analysis_request,
                 environment_candidates=effective_candidates,
@@ -638,8 +644,11 @@ class Dispatcher:
                     execution_recipe=recipe,
                     operation_spec=op_spec,
                     environment_spec=env_data,
+                    world_spec=resolution.world_selection.candidate,
                     runtime_spec=runtime_data,
                     allocation_view=allocation_data,
+                    requirement_policy=resolution.requirement_policy.value,
+                    requirement_axes=resolution.requirement_axes.to_data(),
                     store_refs=marshal.store_refs,
                     transfer={"strategy": marshal.strategy},
                     record_policy=record_policy,
@@ -725,6 +734,7 @@ class Dispatcher:
         runtime: Mapping[str, Any] | None = None,
         world: Mapping[str, Any] | None = None,
         requirement_policy: str | None = None,
+        requirement_axes: Mapping[str, bool] | None = None,
         analysis_policy: Any | None = None,
         environment_candidates: Any = _UNSET,
         environment_registry: Any = _UNSET,
@@ -756,6 +766,7 @@ class Dispatcher:
             runtime: Explicit runtime specification.
             world: Explicit requested world.
             requirement_policy: Optional strict, warn, or ignore policy.
+            requirement_axes: Exact dispatch compatibility-axis mapping.
             analysis_policy: Optional code-analysis policy.
             environment_candidates: Per-call ordered resolver candidates.
             environment_registry: Per-call explicit environment registry.
@@ -789,18 +800,14 @@ class Dispatcher:
             persist_object=False,
             trace_enabled=analysis_request.requested,
         )
-        effective_requirement_policy = (
-            "strict"
-            if _dispatch_extension_enabled(operation) and requirement_policy is None
-            else requirement_policy
-        )
         try:
             return explanation_for(
                 normalized,
                 environment=environment,
                 world=world,
                 runtime_spec=runtime,
-                requirement_policy=effective_requirement_policy,
+                requirement_policy=requirement_policy,
+                requirement_axes=requirement_axes,
                 analysis_policy=analysis_policy,
                 _analysis_request=analysis_request,
                 environment_candidates=effective_candidates,
@@ -1099,7 +1106,7 @@ def _allocation_to_json(allocation: RuntimeAllocationView, *, world_id: str | No
 def _handshake_for_allocation(allocation: Mapping[str, Any]) -> dict[str, Any]:
     """Request allocation capabilities required by this launch-only payload."""
 
-    required = ["operation.function_call", "store.dir", "runtime.worker"]
+    required = ["operation.function_call", "store.dir", "runtime.worker", "runtime.worker_session.v2"]
     if "accelerator_memory" in allocation:
         required.append(ACCELERATOR_MEMORY_FEATURE)
     return {"min_protocol": 1, "required_features": required}

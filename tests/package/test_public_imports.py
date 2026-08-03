@@ -263,7 +263,7 @@ def test_session_facade_is_lazy_and_keeps_legacy_core_session_distinct():
         "assert 'dryml.session' not in sys.modules; "
         "facade = dryml.session; "
         "assert facade is not dryml.configure; "
-        "assert tuple(facade.__all__) == ('SelectedWorldAllocation', 'SessionConfiguration', 'SessionConfigurationError', 'SessionSnapshot', 'allocate_world', 'configure', 'current', 'enforce_requirements', 'manage', 'mode', 'normalize_configuration', 'require_env', 'reset', 'select_world_allocation', 'set_mode', 'worker_world_request'); "
+        "assert tuple(facade.__all__) == ('SelectedWorldAllocation', 'SessionConfiguration', 'SessionConfigurationError', 'SessionSnapshot', 'allocate_world', 'configure', 'current', 'enforce_requirements', 'manage', 'mode', 'normalize_configuration', 'require_env', 'reset', 'select_world_allocation', 'set_mode', 'worker_world_request', 'worker_env_request'); "
         "assert not hasattr(facade, 'request_world'); "
         "assert callable(facade.current); "
         "assert facade.mode() == 'python'; "

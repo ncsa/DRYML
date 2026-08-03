@@ -54,6 +54,7 @@ from .specs import (
     ContainerEnvironmentSpec,
     CurrentEnvironmentSpec,
     EnvironmentLockRef,
+    EnvironmentSpec,
     PythonExecutableSpec,
     spec_from_data,
 )
@@ -90,6 +91,7 @@ __all__ = [
     "EnvironmentRequirementError",
     "EnvironmentSerializationError",
     "EnvironmentSpecError",
+    "EnvironmentSpec",
     "PackageRecord",
     "PlatformRecord",
     "PythonExecutableSpec",

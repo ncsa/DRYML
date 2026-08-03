@@ -8,6 +8,7 @@ from types import MappingProxyType
 import pytest
 
 from dryml import session
+from dryml.environments import ContainerEnvironmentSpec, PythonExecutableSpec
 from dryml.runtime import NoAllocation, RuntimeEnforcement, RuntimeMode, RuntimeState
 from dryml.runtime.publication import PublicationService
 from dryml.worlds import (
@@ -49,6 +50,9 @@ def test_flat_api_has_the_closed_public_signatures():
         parameters = inspect.signature(operation).parameters
         assert tuple(parameters) == ("cpus", "memory", "gpus", "accelerator_memory")
         assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in parameters.values())
+    worker_environment = inspect.signature(session.worker_env_request).parameters
+    assert tuple(worker_environment) == ("value",)
+    assert worker_environment["value"].kind is inspect.Parameter.POSITIONAL_ONLY
     assert not hasattr(session, "request_world")
     allocation = inspect.signature(session.allocate_world).parameters
     assert allocation["value"].kind is inspect.Parameter.POSITIONAL_ONLY
@@ -168,6 +172,34 @@ def test_operation_table_replaces_only_its_owned_category_and_configure_is_compl
     assert replaced.requested_world is None
     assert replaced.environment.requirements == ()
     assert replaced.allocation is None
+
+
+def test_worker_environment_request_is_a_separate_typed_or_mapping_candidate():
+    typed = PythonExecutableSpec("/opt/worker/python")
+    first = session.worker_env_request(typed)
+    second = session.worker_env_request(typed.to_data())
+
+    assert first.requested_environment == typed
+    assert second.requested_environment == typed
+    assert second.environment.requirements == ()
+    assert session.worker_env_request(ContainerEnvironmentSpec("example/image")).requested_environment.kind == "container"
+
+    before = session.current()
+    with pytest.raises(ValueError):
+        session.worker_env_request({"kind": "unknown"})
+    assert session.current() == before
+
+
+def test_worker_requests_survive_flat_updates_and_configure_replaces_them():
+    session.worker_env_request(PythonExecutableSpec("/opt/worker/python"))
+    session.worker_world_request(cpus=2)
+    preserved = session.require_env("dryml>=0")
+    assert preserved.requested_environment.kind == "python"
+    assert preserved.requested_world is not None
+
+    replaced = session.configure(mode="python")
+    assert replaced.requested_environment is None
+    assert replaced.requested_world is None
 
 
 def test_invalid_flat_or_declarative_input_leaves_the_generation_unchanged():

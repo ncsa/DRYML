@@ -73,6 +73,10 @@ class CurrentEnvironmentSpec:
     kind: Literal["current"] = "current"
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != ENVIRONMENT_SPEC_SCHEMA_VERSION:
+            raise EnvironmentSpecError("unsupported current environment spec schema version")
+
     @property
     def id(self) -> str:
         """Stable content ID for this spec."""
@@ -105,6 +109,8 @@ class PythonExecutableSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.executable, str) or not self.executable or "\x00" in self.executable:
             raise EnvironmentSpecError("Python executable must be a non-empty string")
+        if type(self.schema_version) is not int or self.schema_version != ENVIRONMENT_SPEC_SCHEMA_VERSION:
+            raise EnvironmentSpecError("unsupported Python environment spec schema version")
         _validate_pythonpath_policy(self.pythonpath_policy)
         frozen_env = deep_freeze_json(self.env)
         object.__setattr__(self, "env", _validated_env(frozen_env))
@@ -175,6 +181,8 @@ class CondaEnvironmentSpec:
                 f"unsupported Conda launch mode {self.launch_mode!r}",
                 context={"launch_mode": self.launch_mode},
             )
+        if type(self.schema_version) is not int or self.schema_version != ENVIRONMENT_SPEC_SCHEMA_VERSION:
+            raise EnvironmentSpecError("unsupported Conda environment spec schema version")
         _validate_pythonpath_policy(self.pythonpath_policy)
         frozen_env = deep_freeze_json(self.env)
         object.__setattr__(self, "env", _validated_env(frozen_env))
@@ -257,6 +265,16 @@ class ContainerEnvironmentSpec:
     kind: Literal["container"] = "container"
     schema_version: int = ENVIRONMENT_SPEC_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.image, str) or not self.image or "\x00" in self.image:
+            raise EnvironmentSpecError("container image must be a non-empty string")
+        if self.runtime is not None and (
+            not isinstance(self.runtime, str) or not self.runtime or "\x00" in self.runtime
+        ):
+            raise EnvironmentSpecError("container runtime must be a non-empty string when supplied")
+        if type(self.schema_version) is not int or self.schema_version != ENVIRONMENT_SPEC_SCHEMA_VERSION:
+            raise EnvironmentSpecError("unsupported container environment spec schema version")
+
     @property
     def id(self) -> str:
         """Stable content ID for this spec."""
@@ -325,9 +343,27 @@ EnvironmentSpec = CurrentEnvironmentSpec | PythonExecutableSpec | CondaEnvironme
 
 
 def spec_from_data(data: Mapping[str, Any]) -> EnvironmentSpec:
-    """Deserialize a tagged environment spec."""
+    """Deserialize one closed canonical tagged environment spec.
 
+    Mapping input follows the same structural validation as constructing the
+    corresponding typed value, so callers cannot admit fields unavailable to
+    the public typed API.
+    """
+
+    if not isinstance(data, Mapping):
+        raise EnvironmentSpecError("environment spec must be a mapping")
     kind = data.get("kind")
+    fields = {
+        "current": {"schema_version", "kind"},
+        "python": {"schema_version", "kind", "executable", "env", "pythonpath_policy", "extra_pythonpath"},
+        "conda": {"schema_version", "kind", "prefix", "name", "conda_executable", "launch_mode", "env", "pythonpath_policy", "extra_pythonpath"},
+        "container": {"schema_version", "kind", "image", "runtime"},
+    }
+    if kind not in fields:
+        raise EnvironmentSpecError(f"unsupported environment spec kind {kind!r}")
+    unknown = set(data) - fields[kind]
+    if unknown:
+        raise EnvironmentSpecError("environment spec contains unknown fields", context={"fields": sorted(unknown)})
     if kind == "current":
         return CurrentEnvironmentSpec.from_data(data)
     if kind == "python":
@@ -336,7 +372,7 @@ def spec_from_data(data: Mapping[str, Any]) -> EnvironmentSpec:
         return CondaEnvironmentSpec.from_data(data)
     if kind == "container":
         return ContainerEnvironmentSpec.from_data(data)
-    raise EnvironmentSpecError(f"unsupported environment spec kind {kind!r}")
+    raise AssertionError("validated environment spec kind was not handled")
 
 
 __all__ = [

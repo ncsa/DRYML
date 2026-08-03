@@ -16,6 +16,10 @@ from typing import Any, Literal
 
 from dryml.formats import CanonicalJSONError, json_ready
 from dryml.records.policy import normalize_record_policy
+from dryml.environments import spec_from_data
+from dryml.runtime import RequirementAxes, RuntimeMode
+from dryml.runtime.specs import RuntimeContextSpec
+from dryml.worlds import WorldSpec
 
 from .errors import WorkerProtocolError
 
@@ -23,8 +27,9 @@ from .errors import WorkerProtocolError
 DISPATCH_WORKER_PROTOCOL_SCHEMA = "dryml.dispatch.worker_protocol.v1"
 DISPATCH_WORKER_PROTOCOL_VERSION = 1
 ACCELERATOR_MEMORY_FEATURE = "runtime.accelerator_memory.v1"
-EXECUTION_ENVELOPE_SCHEMA = "dryml.execution_envelope.v1"
-EXECUTION_ENVELOPE_SCHEMA_VERSION = 1
+EXECUTION_ENVELOPE_SCHEMA = "dryml.execution_envelope.v2"
+EXECUTION_ENVELOPE_SCHEMA_VERSION = 2
+WORKER_SESSION_FEATURE = "runtime.worker_session.v2"
 
 TRANSFER_STRATEGIES = frozenset({"shared_dir_store", "pickle_small", "unsupported"})
 RESPONSE_STATUSES = frozenset({"ok", "failed", "cancelled", "timeout", "unsupported"})
@@ -108,8 +113,11 @@ class ExecutionEnvelope:
     execution_recipe: Mapping[str, Any]
     operation_spec: Mapping[str, Any]
     environment_spec: Mapping[str, Any] = field(default_factory=dict)
+    world_spec: Mapping[str, Any] = field(default_factory=dict)
     runtime_spec: Mapping[str, Any] = field(default_factory=dict)
     allocation_view: Mapping[str, Any] = field(default_factory=dict)
+    requirement_policy: str = "strict"
+    requirement_axes: tuple[str, ...] | list[str] = ("environment", "world", "runtime")
     store_refs: tuple[WorkerStoreRef, ...] = ()
     transfer: Mapping[str, Any] = field(default_factory=lambda: {"strategy": "shared_dir_store"})
     result_policy: Mapping[str, Any] = field(default_factory=lambda: {"return": "canonical_or_refs"})
@@ -122,8 +130,8 @@ class ExecutionEnvelope:
 
     def __post_init__(self) -> None:
         if self.schema != EXECUTION_ENVELOPE_SCHEMA or self.schema_version != EXECUTION_ENVELOPE_SCHEMA_VERSION:
-            raise WorkerProtocolError("unsupported execution envelope schema", context={"schema": self.schema, "schema_version": self.schema_version})
-        for name in ("dispatch_spec", "execution_recipe", "operation_spec", "environment_spec", "runtime_spec", "allocation_view", "transfer", "result_policy", "reporting", "handshake", "launch"):
+            raise WorkerProtocolError("execution envelope v1 is unsupported; replan with execution-envelope v2", context={"schema": self.schema, "schema_version": self.schema_version})
+        for name in ("dispatch_spec", "execution_recipe", "operation_spec", "environment_spec", "world_spec", "runtime_spec", "allocation_view", "transfer", "result_policy", "reporting", "handshake", "launch"):
             value = getattr(self, name)
             if not isinstance(value, Mapping):
                 raise WorkerProtocolError(f"{name} must be a mapping", context={"type": type(value).__name__})
@@ -135,6 +143,7 @@ class ExecutionEnvelope:
         except Exception as exc:
             raise WorkerProtocolError("invalid record_policy", context=getattr(exc, "context", {})) from exc
         object.__setattr__(self, "store_refs", _store_ref_tuple(self.store_refs))
+        _validate_worker_session_selection(self)
         if "accelerator_memory" in self.allocation_view:
             request = WorkerHandshakeRequest.from_json(self.handshake)
             if ACCELERATOR_MEMORY_FEATURE not in request.required_features:
@@ -163,8 +172,11 @@ class ExecutionEnvelope:
             "execution_recipe",
             "operation_spec",
             "environment_spec",
+            "world_spec",
             "runtime_spec",
             "allocation_view",
+            "requirement_policy",
+            "requirement_axes",
             "store_refs",
             "transfer",
             "result_policy",
@@ -175,7 +187,7 @@ class ExecutionEnvelope:
         }
         if unknown:
             raise WorkerProtocolError("execution envelope contains unknown fields", context={"fields": sorted(unknown)})
-        for required in ("dispatch_spec", "execution_recipe", "operation_spec"):
+        for required in ("schema", "schema_version", "dispatch_spec", "execution_recipe", "operation_spec", "environment_spec", "world_spec", "runtime_spec", "allocation_view", "requirement_policy", "requirement_axes"):
             if required not in data:
                 raise WorkerProtocolError("execution envelope missing required field", context={"field": required})
         return cls(
@@ -184,9 +196,12 @@ class ExecutionEnvelope:
             dispatch_spec=data["dispatch_spec"],
             execution_recipe=data["execution_recipe"],
             operation_spec=data["operation_spec"],
-            environment_spec=data.get("environment_spec") or {},
-            runtime_spec=data.get("runtime_spec") or {},
-            allocation_view=data.get("allocation_view") or {},
+            environment_spec=data["environment_spec"],
+            world_spec=data["world_spec"],
+            runtime_spec=data["runtime_spec"],
+            allocation_view=data["allocation_view"],
+            requirement_policy=data["requirement_policy"],
+            requirement_axes=data["requirement_axes"],
             store_refs=data.get("store_refs") or (),
             transfer=data.get("transfer") or {"strategy": "shared_dir_store"},
             result_policy=data.get("result_policy") or {"return": "canonical_or_refs"},
@@ -207,8 +222,11 @@ class ExecutionEnvelope:
                 "execution_recipe": self.execution_recipe,
                 "operation_spec": self.operation_spec,
                 "environment_spec": self.environment_spec,
+                "world_spec": self.world_spec,
                 "runtime_spec": self.runtime_spec,
                 "allocation_view": self.allocation_view,
+                "requirement_policy": self.requirement_policy,
+                "requirement_axes": list(self.requirement_axes),
                 "store_refs": [ref.to_json() for ref in self.store_refs],
                 "transfer": self.transfer,
                 "result_policy": self.result_policy,
@@ -630,6 +648,40 @@ def _validate_coordination(coordination: Any, allocation_view: Mapping[str, Any]
             raise WorkerProtocolError("coordination worker_key does not match allocation view", context={"field": field_name, "worker_key": key.get(field_name), "allocation_view": allocation_view.get(field_name)})
 
 
+def _validate_worker_session_selection(envelope: ExecutionEnvelope) -> None:
+    """Reject incomplete or incoherent v2 worker selections before launch."""
+
+    try:
+        environment = spec_from_data(envelope.environment_spec)
+        world = WorldSpec.from_data(envelope.world_spec)
+        runtime = RuntimeContextSpec.from_data(envelope.runtime_spec)
+    except Exception as exc:
+        raise WorkerProtocolError("execution envelope has invalid selected worker specs", context={"error": type(exc).__name__}) from exc
+    if runtime.mode is not RuntimeMode.WORKER:
+        raise WorkerProtocolError("execution envelope runtime selection must be worker")
+    allocation = envelope.allocation_view
+    required_allocation = {"world_allocation_id", "role", "replica", "rank", "local_rank", "cpus", "accelerators", "env", "metadata"}
+    if not required_allocation.issubset(allocation) or not allocation.get("world_allocation_id"):
+        raise WorkerProtocolError("execution envelope requires one exact selected allocation")
+    role = allocation.get("role")
+    if role not in world.roles:
+        raise WorkerProtocolError("selected allocation role is absent from selected world")
+    if not isinstance(envelope.requirement_policy, str) or envelope.requirement_policy not in {"strict", "warn", "ignore"}:
+        raise WorkerProtocolError("execution envelope requirement_policy is invalid")
+    try:
+        if isinstance(envelope.requirement_axes, str) or not isinstance(envelope.requirement_axes, (list, tuple)):
+            raise ValueError("requirement_axes must be a JSON array")
+        axes = tuple(envelope.requirement_axes)
+        RequirementAxes(axes)
+    except Exception as exc:
+        raise WorkerProtocolError("execution envelope requirement_axes must be canonical enabled names") from exc
+    object.__setattr__(envelope, "requirement_axes", axes)
+    handshake = WorkerHandshakeRequest.from_json(envelope.handshake)
+    if WORKER_SESSION_FEATURE not in handshake.required_features:
+        raise WorkerProtocolError("execution envelope v2 requires runtime.worker_session.v2")
+    del environment
+
+
 def _json_ready(value: Any, field_name: str) -> Any:
     try:
         return json_ready(value)
@@ -642,6 +694,7 @@ __all__ = [
     "DISPATCH_WORKER_PROTOCOL_VERSION",
     "EXECUTION_ENVELOPE_SCHEMA",
     "EXECUTION_ENVELOPE_SCHEMA_VERSION",
+    "WORKER_SESSION_FEATURE",
     "DispatchResult",
     "ExecutionEnvelope",
     "WorkerHandshakeRequest",

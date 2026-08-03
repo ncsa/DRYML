@@ -62,6 +62,17 @@ def test_python_bypasses_and_managed_rejects_before_free_function_body():
     assert exc_info.value.context["controls"]["memory"] in {"undeclared", "declarative"}
 
 
+def test_direct_bound_managed_call_never_submits_a_dispatch_backend(monkeypatch):
+    from dryml.dispatch.planner import Dispatcher
+
+    submitted = []
+    monkeypatch.setattr(Dispatcher, "submit", lambda *args, **kwargs: submitted.append(args))
+
+    target = _ManagedAnnotationOrderTarget()
+    assert target.outer() == "outer"
+    assert submitted == []
+
+
 def test_free_function_does_not_collect_an_unrelated_argument_class_method():
     calls = []
 

@@ -86,3 +86,31 @@ def test_environment_lock_ref_roundtrip_and_id():
     clone = envs.EnvironmentLockRef.from_data(lock.to_data())
     assert clone.to_data() == lock.to_data()
     assert clone.id == lock.id
+
+
+@pytest.mark.parametrize(
+    "spec",
+    (
+        envs.CurrentEnvironmentSpec(),
+        envs.PythonExecutableSpec("/usr/bin/python"),
+        envs.CondaEnvironmentSpec(prefix="/opt/env"),
+        envs.ContainerEnvironmentSpec("example/image", runtime="docker"),
+    ),
+)
+def test_all_environment_spec_kinds_reject_an_unsupported_schema_version(spec):
+    data = spec.to_data()
+    data["schema_version"] = 999
+
+    with pytest.raises(envs.EnvironmentSpecError):
+        envs.spec_from_data(data)
+
+
+@pytest.mark.parametrize("data", ({"kind": "container", "image": ""}, {"kind": "container", "image": "image", "runtime": ""}))
+def test_container_spec_validates_typed_and_mapping_input_equivalently(data):
+    with pytest.raises(envs.EnvironmentSpecError):
+        envs.spec_from_data(data)
+
+
+def test_environment_spec_mapping_rejects_fields_without_a_typed_equivalent():
+    with pytest.raises(envs.EnvironmentSpecError, match="unknown fields"):
+        envs.spec_from_data({"kind": "current", "schema_version": 1, "extra": True})

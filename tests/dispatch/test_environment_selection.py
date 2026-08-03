@@ -20,7 +20,7 @@ def test_environment_selection_precedence_and_consideration_trace():
     selection = resolution.environment_selection
     assert selection.source == "explicit"
     assert selection.candidate["kind"] == "current"
-    assert [item.status for item in selection.considered] == ["selected", "not_selected", "not_selected", "not_selected"]
+    assert [item.status for item in selection.considered] == ["selected", "not_selected", "not_selected", "absent", "not_selected"]
 
 
 def test_environment_default_wins_before_current_and_fallback():

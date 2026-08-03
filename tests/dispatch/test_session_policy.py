@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import replace
 
 from dryml.core.store.dir import DirStore
 from dryml.dispatch import Dispatcher, normalize_user_operation, resolve_dispatch_plan
 from dryml.environments import EnvironmentRequirement
+from dryml.environments import PythonExecutableSpec
 from dryml.session.model import SessionSnapshot
 from dryml.runtime import RuntimeEnforcement, RuntimeMode, RuntimeState, enter_runtime
 from dryml.worlds import LocalResourceInventory, WorldSpec
@@ -15,6 +17,7 @@ def _managed_snapshot() -> SessionSnapshot:
         mode="managed",
         resources=None,
         allocation=None,
+        requested_environment=None,
         requested_world=WorldSpec.from_data(
             {
                 "roles": {
@@ -93,7 +96,7 @@ def test_snapshot_pins_baseline_enforcement_while_context_overrides_remain_advan
             normalize_user_operation(lambda: None, allow_pickle=True),
             session_snapshot=snapshot,
         )
-    assert overridden.requirement_policy.value == "ignore"
+    assert overridden.requirement_policy.value == "strict"
 
 
 def test_explicit_inventory_narrows_retained_devices_without_erasing_known_capacity():
@@ -111,3 +114,27 @@ def test_explicit_inventory_narrows_retained_devices_without_erasing_known_capac
     )
 
     assert resolution.local_inventory.accelerator_memory["gpu"]["gpu-a"] == 8 * 1024**3
+
+
+def test_python_snapshot_contributes_only_worker_candidates_to_explicit_dispatch():
+    snapshot = SessionSnapshot(
+        mode="python",
+        resources=None,
+        allocation=None,
+        requested_environment=PythonExecutableSpec(sys.executable),
+        requested_world=WorldSpec.from_data({"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}}),
+        environment=EnvironmentRequirement(requirements=("must-not-be-a-session-requirement>=1",)),
+        controls={}, statuses={}, runtime=RuntimeState(RuntimeMode.NONE), generation=3,
+    )
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(lambda: None, allow_pickle=True),
+        session_snapshot=snapshot,
+    )
+
+    assert resolution.environment_selection.source == "session_requested"
+    assert resolution.world_selection.source == "session_requested"
+    assert resolution.requirements.environment_requirement is None
+    assert resolution.requirement_policy.value == "strict"
+    assert resolution.requirement_axes.to_data() == ["environment", "world", "runtime"]
+    assert resolution.to_data()["session"] is None

@@ -17,6 +17,11 @@ def test_worker_runtime_active_before_target_import(tmp_path, target_module):
     assert result.result_canonical["bootstrap"] == "1"
     assert result.result_canonical["import_mode"] == "worker"
     assert result.result_canonical["enforcement"] == "strict"
+    assert result.result_canonical["selected_environment"] == "python"
+    assert result.result_canonical["selected_world"] == ["main"]
+    assert result.result_canonical["selected_runtime"] == "worker"
+    assert result.result_canonical["compatibility_policy"] == "strict"
+    assert result.result_canonical["compatibility_axes"] == ["environment", "world", "runtime"]
 
 
 def test_worker_configured_framework_import_succeeds_with_runtime_spec(tmp_path, target_module):

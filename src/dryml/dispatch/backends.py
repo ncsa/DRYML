@@ -432,7 +432,7 @@ def _apply_pythonpath_policy(env: dict[str, str], policy: str, extra_pythonpath:
         existing = os.environ.get("PYTHONPATH")
         if existing:
             paths.extend(existing.split(os.pathsep))
-    elif policy == "dryml-source":
+    elif policy in {"dryml-source", "explicit"}:
         paths.append(str(_dryml_source_root()))
     paths.extend(extra_pythonpath)
     if paths or policy == "explicit":

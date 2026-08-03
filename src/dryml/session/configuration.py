@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from dryml.environments import EnvironmentRequirement
+from dryml.environments import EnvironmentRequirement, EnvironmentSpec, spec_from_data
 from dryml.runtime import RequirementAxes, normalize_requirement_axes
 from dryml.worlds import (
     LocalResourceInventory,
@@ -34,6 +34,7 @@ def normalize_configuration(
     mode: str | None,
     resources: Mapping[str, Any] | None = None,
     allocation: Mapping[str, Any] | None = None,
+    requested_environment: Mapping[str, Any] | None = None,
     requested_world: Mapping[str, Any] | None = None,
     environment: Mapping[str, Any] | None = None,
     requirement_axes: Mapping[str, bool] | None = None,
@@ -54,6 +55,7 @@ def normalize_configuration(
     try:
         normalized_resources = _normalize_resources(resources) if resources is not None else (ResourceSpec() if mode == "managed" else None)
         normalized_allocation = _normalize_allocation_section(allocation) if allocation is not None else None
+        normalized_requested_environment = _normalize_requested_environment(requested_environment)
         normalized_world = _normalize_world(requested_world)
         normalized_environment = _normalize_environment(environment)
         normalized_axes = _normalize_requirement_axes(requirement_axes, mode=mode)
@@ -65,7 +67,7 @@ def normalize_configuration(
         "memory": "declarative" if (normalized_resources and normalized_resources.memory is not None) or (normalized_allocation and normalized_allocation.process.memory is not None) else "undeclared",
         "accelerator_memory": "declarative" if _has_accelerator_memory(normalized_resources, normalized_allocation) else "undeclared",
     }
-    return SessionConfiguration(mode, normalized_resources, normalized_allocation, normalized_world, normalized_environment, controls, normalized_axes)
+    return SessionConfiguration(mode, normalized_resources, normalized_allocation, normalized_requested_environment, normalized_world, normalized_environment, controls, normalized_axes)
 
 
 def _normalize_requirement_axes(value: Mapping[str, bool] | None, *, mode: str) -> RequirementAxes:
@@ -161,6 +163,20 @@ def _normalize_world(value: Mapping[str, Any] | None) -> WorldSpec | None:
         return WorldSpec.from_data(frozen)
     except WorldError as exc:
         raise SessionConfigurationError(str(exc), context=_bounded_context(exc.context)) from exc
+
+
+def _normalize_requested_environment(value: Mapping[str, Any] | None) -> EnvironmentSpec | None:
+    """Parse one bounded concrete future-worker environment candidate."""
+
+    if value is None:
+        return None
+    frozen = _bounded_value(value, path="requested_environment")
+    if not isinstance(frozen, Mapping):
+        raise SessionConfigurationError("requested_environment must be an environment spec mapping")
+    try:
+        return spec_from_data(frozen)
+    except Exception as exc:
+        raise SessionConfigurationError(str(exc), context=_bounded_context(getattr(exc, "context", {}))) from exc
 
 
 def _normalize_environment(value: Mapping[str, Any] | None) -> EnvironmentRequirement:

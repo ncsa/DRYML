@@ -28,7 +28,19 @@ def _envelope(tmp_path):
     op = attach_operation_id(make_function_call_spec("pkg.mod:fn"))
     dispatch = {"schema": "dryml.dispatch.v1", "schema_version": 1, "kind": "dispatch", "id": content_id("dispatch", 1, {"d": 1}), "payload": {"operation_id": op["id"]}}
     recipe = {"schema": "dryml.execution_recipe.v1", "schema_version": 1, "kind": "execution_recipe", "id": content_id("recipe", 1, {"r": 1}), "payload": {"dispatch_id": dispatch["id"], "operation_id": op["id"], "backend": {"name": "dryml.local_subprocess"}}}
-    return ExecutionEnvelope(dispatch_spec=dispatch, execution_recipe=recipe, operation_spec=op, store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path)),))
+    return ExecutionEnvelope(
+        dispatch_spec=dispatch,
+        execution_recipe=recipe,
+        operation_spec=op,
+        environment_spec={"kind": "current", "schema_version": 1},
+        world_spec={"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}},
+        runtime_spec={"mode": "worker", "device_visibility": {"policy": "assigned"}},
+        allocation_view={"world_allocation_id": "worldalloc-v1-test", "role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": [0], "accelerators": {}, "env": {}, "metadata": {}},
+        requirement_policy="strict",
+        requirement_axes=["environment", "world", "runtime"],
+        handshake={"min_protocol": 1, "required_features": ["runtime.worker_session.v2"]},
+        store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path)),),
+    )
 
 
 def test_protocol_models_round_trip(tmp_path):
@@ -54,6 +66,19 @@ def test_protocol_models_round_trip(tmp_path):
     assert envelope.store_refs[0].path == str(tmp_path)
     assert response.status == "ok"
     assert handshake.protocol_version == 1
+
+
+def test_v1_or_incomplete_envelopes_require_explicit_v2_replanning(tmp_path):
+    data = _envelope(tmp_path).to_json()
+    data["schema"] = "dryml.execution_envelope.v1"
+    data["schema_version"] = 1
+    with pytest.raises(Exception, match="replan with execution-envelope v2"):
+        ExecutionEnvelope.from_json(data)
+
+    data = _envelope(tmp_path).to_json()
+    data.pop("world_spec")
+    with pytest.raises(Exception, match="missing required field"):
+        ExecutionEnvelope.from_json(data)
 
 
 def test_protocol_json_write_retries_transient_replace_conflict(tmp_path, monkeypatch):
@@ -149,6 +174,13 @@ def test_planning_metadata_v2_carriers_remain_compatible(tmp_path):
         dispatch_spec=dispatch,
         execution_recipe=recipe,
         operation_spec=operation,
+        environment_spec=_envelope(tmp_path).environment_spec,
+        world_spec=_envelope(tmp_path).world_spec,
+        runtime_spec=_envelope(tmp_path).runtime_spec,
+        allocation_view=_envelope(tmp_path).allocation_view,
+        requirement_policy="strict",
+        requirement_axes=["environment", "world", "runtime"],
+        handshake={"min_protocol": 1, "required_features": ["runtime.worker_session.v2"]},
         store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path)),),
         reporting={"planning": planning_v2},
     )
@@ -187,11 +219,17 @@ def test_worker_response_status_context_invariants():
 
 
 def test_coordination_metadata_validates_worker_key_and_paths(tmp_path):
-    allocation = {"role": "trainer", "replica": 0, "rank": 1, "local_rank": 1}
+    allocation = {**_envelope(tmp_path).allocation_view, "role": "trainer", "replica": 0, "rank": 1, "local_rank": 1}
     envelope = ExecutionEnvelope(
         dispatch_spec=_envelope(tmp_path).dispatch_spec,
         execution_recipe=_envelope(tmp_path).execution_recipe,
         operation_spec=_envelope(tmp_path).operation_spec,
+        environment_spec=_envelope(tmp_path).environment_spec,
+        world_spec={"roles": {"trainer": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}},
+        runtime_spec=_envelope(tmp_path).runtime_spec,
+        requirement_policy="strict",
+        requirement_axes=["environment", "world", "runtime"],
+        handshake={"min_protocol": 1, "required_features": ["runtime.worker_session.v2"]},
         allocation_view=allocation,
         store_refs=(WorkerStoreRef("dir_store", "shared", str(tmp_path)),),
         launch={"coordination": {"worker_key": dict(allocation), "start_path": str(tmp_path / "start.json"), "cancel_path": str(tmp_path / "cancel.json")}},
@@ -211,7 +249,8 @@ def test_coordination_metadata_validates_worker_key_and_paths(tmp_path):
 
 
 def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_path):
-    allocation = _allocation_to_json(
+    allocation = {
+        **_allocation_to_json(
         RuntimeAllocationView(
             role="worker",
             replica=0,
@@ -221,7 +260,9 @@ def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_
             accelerators={"gpu": ("gpu-a",)},
             accelerator_memory={"gpu": {"gpu-a": 1024}},
         )
-    )
+    ),
+        "world_allocation_id": "worldalloc-v1-test",
+    }
 
     assert allocation_from_json(allocation).accelerator_memory == {"gpu": {"gpu-a": 1024}}
     with pytest.raises(Exception, match="accelerator-memory allocation requires"):
@@ -229,17 +270,28 @@ def test_accelerator_memory_allocation_requires_negotiation_and_round_trips(tmp_
             dispatch_spec=_envelope(tmp_path).dispatch_spec,
             execution_recipe=_envelope(tmp_path).execution_recipe,
             operation_spec=_envelope(tmp_path).operation_spec,
+            environment_spec=_envelope(tmp_path).environment_spec,
+            world_spec=_envelope(tmp_path).world_spec,
+            runtime_spec=_envelope(tmp_path).runtime_spec,
             allocation_view=allocation,
+            requirement_policy="strict",
+            requirement_axes=["environment", "world", "runtime"],
+            handshake={"min_protocol": 1, "required_features": ["runtime.worker_session.v2"]},
         )
 
     envelope = ExecutionEnvelope(
         dispatch_spec=_envelope(tmp_path).dispatch_spec,
         execution_recipe=_envelope(tmp_path).execution_recipe,
         operation_spec=_envelope(tmp_path).operation_spec,
+        environment_spec=_envelope(tmp_path).environment_spec,
+        world_spec=_envelope(tmp_path).world_spec,
+        runtime_spec=_envelope(tmp_path).runtime_spec,
+        requirement_policy="strict",
+        requirement_axes=["environment", "world", "runtime"],
         allocation_view=allocation,
         handshake={
             "min_protocol": 1,
-            "required_features": ["runtime.accelerator_memory.v1"],
+            "required_features": ["runtime.accelerator_memory.v1", "runtime.worker_session.v2"],
         },
     )
     assert ExecutionEnvelope.from_json(envelope.to_json()).allocation_view == allocation

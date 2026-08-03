@@ -133,11 +133,17 @@ def target_module(tmp_path):
                 return x + y
 
             def runtime_status():
+                snapshot = dryml.session.current()
                 return {
                     "mode": active_runtime_mode().value,
                     "bootstrap": os.environ.get(BOOTSTRAP_MARKER_ENV),
                     "import_mode": IMPORT_RUNTIME_MODE,
                     "enforcement": enforcement().value,
+                    "selected_environment": None if snapshot.selected_environment is None else snapshot.selected_environment.kind,
+                    "selected_world": None if snapshot.selected_world is None else sorted(snapshot.selected_world.roles),
+                    "selected_runtime": None if snapshot.selected_runtime is None else snapshot.selected_runtime.mode.value,
+                    "compatibility_policy": snapshot.compatibility_policy,
+                    "compatibility_axes": None if snapshot.compatibility_axes is None else snapshot.compatibility_axes.to_data(),
                 }
 
             def configured_torch_import_status():

@@ -46,7 +46,7 @@ def test_unsupported_feature_handshake_is_authoritative(tmp_path, target_module)
     op = attach_operation_id(make_function_call_spec("dispatch_target:add", args=[1, 2]))
     dispatcher = Dispatcher(store=store)
     plan = dispatcher.plan(op, environment=env)
-    bad_envelope = dataclasses.replace(plan.envelope, handshake={"min_protocol": 1, "required_features": ["missing.feature"]})
+    bad_envelope = dataclasses.replace(plan.envelope, handshake={"min_protocol": 1, "required_features": ["runtime.worker_session.v2", "missing.feature"]})
 
     response = dispatcher.submit(dataclasses.replace(plan, envelope=bad_envelope)).result(timeout=10)
 
@@ -66,7 +66,7 @@ def test_managed_feature_rejection_precedes_control_mutation(tmp_path, target_mo
     plan = dispatcher.plan(box.compute, environment=environment)
     bad_envelope = dataclasses.replace(
         plan.envelope,
-        handshake={"min_protocol": 1, "required_features": ["managed.operation.v2"]},
+        handshake={"min_protocol": 1, "required_features": ["runtime.worker_session.v2", "managed.operation.v2"]},
     )
 
     response = dispatcher.submit(
@@ -224,7 +224,13 @@ def test_parent_rejects_ok_handshake_missing_requested_feature(tmp_path):
         dispatch_spec={"schema": "dryml.dispatch.v1", "schema_version": 1, "kind": "dispatch", "payload": {"operation_id": "op-v1-test"}},
         execution_recipe={"schema": "dryml.execution_recipe.v1", "schema_version": 1, "kind": "execution_recipe", "payload": {"operation_id": "op-v1-test", "dispatch_id": "dispatch-v1-test", "backend": {"name": "dryml.local_subprocess"}}},
         operation_spec={"schema": "dryml.operation.v1", "schema_version": 1, "kind": "function_call", "payload": {"function": "operator:add", "args": [1, 2]}},
-        handshake={"min_protocol": 1, "required_features": ["runtime.accelerator_memory.v1"]},
+        environment_spec={"kind": "current", "schema_version": 1},
+        world_spec={"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1}}}}},
+        runtime_spec={"mode": "worker", "device_visibility": {"policy": "assigned"}},
+        allocation_view={"world_allocation_id": "worldalloc-v1-test", "role": "worker", "replica": 0, "rank": 0, "local_rank": 0, "cpus": [0], "accelerators": {}, "env": {}, "metadata": {}},
+        requirement_policy="strict",
+        requirement_axes=["environment", "world", "runtime"],
+        handshake={"min_protocol": 1, "required_features": ["runtime.accelerator_memory.v1", "runtime.worker_session.v2"]},
     )
     handshake = WorkerHandshakeResponse(
         status="ok",

@@ -31,7 +31,7 @@ from dryml.core.definition import ConcreteDefinition
 from dryml.core.utils.general import pickle_load
 from dryml.environments.records import EnvironmentRecord
 from dryml.environments.specs import EnvironmentSpec, PythonExecutableSpec, spec_from_data
-from dryml.runtime import RuntimeEnforcement, RuntimeMode
+from dryml.runtime import RequirementAxes, RuntimeEnforcement, RuntimeMode, normalize_requirement_axes
 from dryml.runtime.context import active_runtime_override
 from dryml.runtime.specs import RuntimeContextSpec
 from dryml.worlds.errors import ResourceValidationError, WorldSpecValidationError
@@ -125,6 +125,7 @@ _RESERVED_PLANNING_KEYS = frozenset(
         "dryml.runtime_selection",
         "dryml.runtime_check",
         "dryml.requirement_policy",
+        "dryml.requirement_axes",
         "dryml.runtime_enforcement",
         "dryml.dispatch.launchable",
         "dryml.dispatch.diagnostics",
@@ -565,6 +566,7 @@ class DispatchPlanningResolution:
     runtime_selection: CandidateSelection
     runtime_check: CandidateCheckReport
     requirement_policy: RequirementPolicy
+    requirement_axes: RequirementAxes
     runtime_enforcement: RuntimeEnforcement
     diagnostics: tuple[DiagnosticFact, ...]
     launchable: bool
@@ -602,6 +604,7 @@ class DispatchPlanningResolution:
             "runtime_selection": self.runtime_selection.to_data(),
             "runtime_check": self.runtime_check.to_data(),
             "requirement_policy": self.requirement_policy.value,
+            "requirement_axes": self.requirement_axes.to_data(),
             "runtime_enforcement": self.runtime_enforcement.value,
             "diagnostics": [item.to_data() for item in self.diagnostics],
             "launchable": self.launchable,
@@ -656,6 +659,7 @@ class DispatchPlanningResolution:
             "dryml.runtime_selection": _persisted_selection_data(self.runtime_selection),
             "dryml.runtime_check": _persisted_check_data(self.runtime_check),
             "dryml.requirement_policy": self.requirement_policy.value,
+            "dryml.requirement_axes": self.requirement_axes.to_data(),
             "dryml.runtime_enforcement": self.runtime_enforcement.value,
             "dryml.dispatch.launchable": self.launchable,
             "dryml.dispatch.diagnostics": [_diagnostic_summary(item) for item in self.diagnostics[:_MAX_METADATA_ITEMS]],
@@ -739,19 +743,31 @@ class DispatchExplanation:
 
 
 def effective_requirement_policy(explicit: RequirementPolicy | str | None, enforcement: RuntimeEnforcement | str | None = None) -> RequirementPolicy:
-    """Return an explicit policy or the context-local enforcement-derived default."""
+    """Return an explicit dispatch policy or the strict dispatch default.
+
+    ``enforcement`` is retained for callers of the historical helper, but an
+    explicit dispatch no longer inherits the caller runtime's compatibility
+    action.
+    """
 
     if explicit is not None:
         try:
             return RequirementPolicy(explicit)
         except ValueError as exc:
             raise DispatchPlanningError("invalid requirement_policy; expected strict, warn, or ignore", context={"requirement_policy": explicit}) from exc
-    current = runtime.enforcement() if enforcement is None else RuntimeEnforcement(enforcement)
-    return {
-        RuntimeEnforcement.STRICT: RequirementPolicy.STRICT,
-        RuntimeEnforcement.WARN: RequirementPolicy.WARN,
-        RuntimeEnforcement.OFF: RequirementPolicy.IGNORE,
-    }[current]
+    del enforcement
+    return RequirementPolicy.STRICT
+
+
+def _dispatch_requirement_axes(value: Mapping[str, bool] | None) -> RequirementAxes:
+    """Return explicit dispatch axes, defaulting independently to all axes."""
+
+    if value is None:
+        return RequirementAxes.all()
+    try:
+        return normalize_requirement_axes(value)
+    except ValueError as exc:
+        raise DispatchPlanningError(str(exc), context={"requirement_axes": value}) from exc
 
 
 def parse_analysis_policy(policy: Any | None) -> _DynamicTraceRequest:
@@ -934,6 +950,7 @@ def resolve_dispatch_plan(
     world: Any | None = None,
     runtime_spec: Any | None = None,
     requirement_policy: RequirementPolicy | str | None = None,
+    requirement_axes: Mapping[str, bool] | None = None,
     analysis_policy: Any | None = None,
     emit_warnings: bool = False,
     single_worker_only: bool = False,
@@ -974,11 +991,8 @@ def resolve_dispatch_plan(
     session_mode = getattr(session_snapshot, "mode", "python")
     if session_mode not in {"python", "managed", "orchestrator"}:
         raise DispatchPlanningError("invalid session planning snapshot")
-    session_requested_world = (
-        getattr(session_snapshot, "requested_world", None)
-        if session_mode != "python"
-        else None
-    )
+    session_requested_environment = getattr(session_snapshot, "requested_environment", None)
+    session_requested_world = getattr(session_snapshot, "requested_world", None)
     session_inventory = (
         getattr(session_snapshot, "inventory", None)
         if session_mode != "python"
@@ -1000,6 +1014,7 @@ def resolve_dispatch_plan(
         else getattr(pinned_runtime, "enforcement", RuntimeEnforcement.OFF)
     )
     policy = effective_requirement_policy(requirement_policy, enforcement)
+    axes = _dispatch_requirement_axes(requirement_axes)
     _validate_sprint8_policies(inventory_policy, resolver_policy)
     if inventory is not None and not isinstance(inventory, worlds.LocalResourceInventory):
         raise DispatchPlanningError("inventory must be a LocalResourceInventory")
@@ -1033,6 +1048,7 @@ def resolve_dispatch_plan(
                 environment,
                 preliminary.environment_default,
                 requirement=preliminary.environment_requirement,
+                session_requested=session_requested_environment,
                 candidates=environment_candidates,
                 registry=environment_registry,
                 resolver_policy=resolver_policy,
@@ -1058,6 +1074,7 @@ def resolve_dispatch_plan(
         environment,
         resolution.environment_default,
         requirement=resolution.environment_requirement,
+        session_requested=session_requested_environment,
         candidates=environment_candidates,
         registry=environment_registry,
         resolver_policy=resolver_policy,
@@ -1183,6 +1200,7 @@ def resolve_dispatch_plan(
                             environment,
                             resolution.environment_default,
                             requirement=resolution.environment_requirement,
+                            session_requested=session_requested_environment,
                         )
                 # Bootstrap did not provide usable requirements. Final-probe
                 # facts are therefore authoritative for world/runtime selection
@@ -1281,9 +1299,10 @@ def resolve_dispatch_plan(
         policy,
         env_probe_diagnostics,
         validate_candidate=_requires_environment_validation(env_spec, normalized),
+        enabled="environment" in axes.enabled,
     )
-    world_check = _check_world(resolution.world_requirement, world_spec, policy)
-    runtime_check = _check_runtime(resolution.runtime_requirement, selected_runtime, policy)
+    world_check = _check_world(resolution.world_requirement, world_spec, policy, enabled="world" in axes.enabled)
+    runtime_check = _check_runtime(resolution.runtime_requirement, selected_runtime, policy, enabled="runtime" in axes.enabled)
     diagnostics.extend(_check_diagnostics(
         (environment_check, world_check, runtime_check),
         policy,
@@ -1370,6 +1389,7 @@ def resolve_dispatch_plan(
         runtime_selection=runtime_selection,
         runtime_check=runtime_check,
         requirement_policy=policy,
+        requirement_axes=axes,
         runtime_enforcement=enforcement,
         diagnostics=tuple(diagnostics),
         launchable=launchable,
@@ -2162,6 +2182,7 @@ def _select_environment(
     annotation_default: Any | None,
     *,
     requirement=None,
+    session_requested=None,
     candidates=None,
     registry=None,
     resolver_policy=None,
@@ -2169,8 +2190,8 @@ def _select_environment(
     bootstrap_environment: Mapping[str, Any] | None = None,
 ):
     current = environments.current(default=None)
-    if explicit is not None or annotation_default is not None or current is not None:
-        selection, data = _select("environment", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("fallback", environments.CurrentEnvironmentSpec())), _environment_data)
+    if explicit is not None or annotation_default is not None or current is not None or session_requested is not None:
+        selection, data = _select("environment", (("explicit", explicit), ("annotation_default", annotation_default), ("current", current), ("session_requested", session_requested), ("fallback", environments.CurrentEnvironmentSpec())), _environment_data)
         return selection, data, None
     needs_resolver = candidates is not None or registry is not None or requirement is not None
     if needs_resolver:
@@ -2193,7 +2214,7 @@ def _select_environment(
             policy="first_compatible" if resolver_policy is None else resolver_policy,
             probe_runner=probe_runner,
         )
-        considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current"))
+        considered = tuple(CandidateConsideration(slot, "absent") for slot in ("explicit", "annotation_default", "current", "session_requested"))
         if result.selected is not None:
             data = result.selected.to_data()
             return CandidateSelection("environment", data, "resolver", considered + (CandidateConsideration("resolver", "selected", data),)), data, result
@@ -2562,10 +2583,12 @@ def _attached_environment_record(candidate, selected_data):
         return None
 
 
-def _check_environment(requirement, candidate, record, policy, probe_diagnostics, *, validate_candidate: bool):
+def _check_environment(requirement, candidate, record, policy, probe_diagnostics, *, validate_candidate: bool, enabled: bool):
     requirement_data = None if requirement is None else requirement.to_data()
     if requirement is None and record is None and not validate_candidate:
         return CandidateCheckReport("environment", "not_required", None, None, candidate)
+    if not enabled:
+        return CandidateCheckReport("environment", "disabled", None, requirement_data, candidate, ({"reason": "requirement_axis_disabled"},))
     if requirement is None and record is None:
         return CandidateCheckReport("environment", "error", False, None, candidate, ({"reason": "environment_record_unavailable"},), probe_diagnostics)
     if requirement is None:
@@ -2579,10 +2602,12 @@ def _check_environment(requirement, candidate, record, policy, probe_diagnostics
     return CandidateCheckReport("environment", "satisfied" if report.ok else "incompatible", report.ok, requirement_data, candidate, details)
 
 
-def _check_world(requirement, candidate, policy):
+def _check_world(requirement, candidate, policy, *, enabled: bool):
     requirement_data = None if requirement is None else requirement.to_data()
     if requirement is None:
         return CandidateCheckReport("world", "not_required", None, None, candidate)
+    if not enabled:
+        return CandidateCheckReport("world", "disabled", None, requirement_data, candidate, ({"reason": "requirement_axis_disabled"},))
     if policy is RequirementPolicy.IGNORE:
         return CandidateCheckReport("world", "skipped", None, requirement_data, candidate, ({"reason": "requirement_policy_ignore"},))
     try:
@@ -2595,9 +2620,11 @@ def _check_world(requirement, candidate, policy):
     return CandidateCheckReport("world", "satisfied" if report.ok else "incompatible", report.ok, requirement_data, candidate, details)
 
 
-def _check_runtime(requirement, candidate, policy):
+def _check_runtime(requirement, candidate, policy, *, enabled: bool):
     if requirement is None:
         return CandidateCheckReport("runtime", "not_required", None, None, candidate)
+    if not enabled:
+        return CandidateCheckReport("runtime", "disabled", None, dict(requirement), candidate, ({"reason": "requirement_axis_disabled"},))
     if policy is RequirementPolicy.IGNORE:
         return CandidateCheckReport("runtime", "skipped", None, dict(requirement), candidate, ({"reason": "requirement_policy_ignore"},))
     report = runtime.check_runtime_spec_satisfies_requirement(candidate, requirement)
@@ -2629,7 +2656,7 @@ def _resolution_decisions(resolution) -> dict[str, Any]:
 def _check_diagnostics(reports, policy, selections):
     diagnostics = []
     for report, selection in zip(reports, selections, strict=True):
-        if report.status in {"not_required", "skipped", "satisfied"}:
+        if report.status in {"not_required", "skipped", "disabled", "satisfied"}:
             continue
         severity = "error" if policy is RequirementPolicy.STRICT else "warning"
         details = report.details or ({"reason": report.status},)

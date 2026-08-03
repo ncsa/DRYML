@@ -14,7 +14,7 @@ from dryml.operations import validate_operation_spec
 from dryml.operations.errors import OperationSpecError
 from dryml.records import ExecutionErrorInfo, ExecutionLogRef, ExecutionRecord, StorageRef, write_execution_record
 from dryml.records.execution import persistence_safe_execution_error, transient_execution_error
-from dryml.runtime import RuntimeEnforcement, RuntimeMode, activate
+from dryml.runtime import RequirementAxes, RuntimeEnforcement, RuntimeMode, activate
 from dryml.runtime.specs import RuntimeContextSpec
 
 from .backends import BACKEND_IDENTITY
@@ -34,6 +34,7 @@ FEATURES = (
     "call.pickle_small",
     "store.dir",
     "runtime.worker",
+    "runtime.worker_session.v2",
     "records.execution",
     "managed.operation.v1",
 )
@@ -51,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         envelope = load_envelope(ns.request)
         _validate_envelope_ids(envelope)
         allocation = allocation_from_json(envelope.allocation_view)
+        _publish_selected_worker_session(envelope, allocation)
         allocation_features = _allocation_features(envelope, allocation)
         stores, store_status, supported, diagnostics = _open_and_validate_stores(
             envelope,
@@ -177,6 +179,34 @@ def _validate_envelope_ids(envelope: ExecutionEnvelope) -> None:
         raise WorkerProtocolError("execution envelope operation/dispatch/recipe IDs are inconsistent", context={"operation_id": operation_id, "dispatch_id": dispatch_id, "mismatches": mismatches})
 
 
+def _publish_selected_worker_session(envelope: ExecutionEnvelope, allocation: Any) -> None:
+    """Validate and publish v2 worker state before any handshake or Store work."""
+
+    from dryml.environments import PythonExecutableSpec, spec_from_data
+    from dryml.session.state import publish_worker_session
+    from dryml.worlds import WorldSpec
+
+    environment = spec_from_data(envelope.environment_spec)
+    if isinstance(environment, PythonExecutableSpec) and os.path.abspath(environment.executable) != os.path.abspath(sys.executable):
+        raise WorkerProtocolError("selected Python environment does not match worker interpreter")
+    world = WorldSpec.from_data(envelope.world_spec)
+    runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec)
+    try:
+        axes = RequirementAxes(tuple(envelope.requirement_axes))
+        publish_worker_session(
+            environment=environment,
+            world=world,
+            runtime_spec=runtime_spec,
+            allocation=allocation,
+            requirement_policy=envelope.requirement_policy,
+            requirement_axes=axes,
+        )
+    except Exception as exc:
+        if isinstance(exc, WorkerProtocolError):
+            raise
+        raise WorkerProtocolError("worker selected-session validation failed", context={"error": type(exc).__name__}) from exc
+
+
 def _handshake(envelope: ExecutionEnvelope, *, status: str, store_status: Mapping[str, Any] | None = None, diagnostics: tuple[Mapping[str, Any], ...] = (), features: tuple[str, ...] = FEATURES) -> WorkerHandshakeResponse:
     return WorkerHandshakeResponse(
         status=status,
@@ -211,7 +241,7 @@ def _execute(
     allocation: Any | None = None,
 ) -> WorkerResponse:
     allocation = allocation_from_json(envelope.allocation_view) if allocation is None else allocation
-    runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec or {"mode": "worker", "device_visibility": {"policy": "assigned"}})
+    runtime_spec = RuntimeContextSpec.from_data(envelope.runtime_spec)
     try:
         with activate(mode=RuntimeMode.WORKER, allocation=allocation, spec=runtime_spec, env=allocation.env, restore_environ=False, enforcement=RuntimeEnforcement.STRICT):
             _report("dryml.dispatch.worker.execute", "Running operation in worker", operation_id=envelope.operation_id)
