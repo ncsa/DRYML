@@ -16,7 +16,7 @@ from .context import active_runtime, active_runtime_bootstrap
 from .enforcement import RuntimeEnforcement
 from .errors import FrameworkImportSafetyError, NoAllocationError, RuntimeTransitionError
 from .modes import RuntimeMode
-from .publication import SessionGeneration, publication
+from .publication import publication
 
 
 BOOTSTRAP_MARKER_ENV = "DRYML_RUNTIME_BOOTSTRAPPED"
@@ -26,10 +26,8 @@ BOOTSTRAP_MARKER_ENV = "DRYML_RUNTIME_BOOTSTRAPPED"
 class _ControlPlaneGuardScope:
     """One task-bound leased admission for a guarded control-plane operation."""
 
-    generation: SessionGeneration
     control_epoch: int
     owner: tuple[int, int | None]
-    operation: str
     kind: str
     active: bool = True
 
@@ -43,10 +41,9 @@ def _owner_identity() -> tuple[int, int | None]:
     """Return the current thread and asyncio-task identity without creating a task."""
 
     try:
-        import asyncio
-
-        task = asyncio.current_task()
-    except RuntimeError:
+        asyncio = sys.modules.get("asyncio")
+        task = None if asyncio is None else asyncio.current_task()
+    except (AttributeError, RuntimeError):
         task = None
     return threading.get_ident(), None if task is None else id(task)
 
@@ -83,10 +80,8 @@ def _assert_control_plane_allowed(*, operation: str, kind: str):
 
     with publication.lease() as generation:
         scope = _ControlPlaneGuardScope(
-            generation=generation,
             control_epoch=int(generation.metadata.get("control_epoch", 0)),
             owner=_owner_identity(),
-            operation=operation,
             kind=kind,
         )
         token = _CONTROL_PLANE_GUARD.set(scope)

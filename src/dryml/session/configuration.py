@@ -18,7 +18,7 @@ from dryml.worlds import (
 from dryml.worlds.errors import WorldError
 
 from .errors import SessionConfigurationError
-from .model import SelectedWorldAllocation, SessionConfiguration
+from .model import _default_requirement_axes, SelectedWorldAllocation, SessionConfiguration
 
 _MODES = frozenset({"python", "managed", "orchestrator"})
 _MAX_DEPTH = 8
@@ -74,7 +74,7 @@ def _normalize_requirement_axes(value: Mapping[str, bool] | None, *, mode: str) 
     """Return a validated explicit axis mask or one public mode default."""
 
     if value is None:
-        return RequirementAxes.all() if mode in {"managed", "orchestrator"} else RequirementAxes()
+        return _default_requirement_axes(mode)
     try:
         return normalize_requirement_axes(value)
     except ValueError as exc:

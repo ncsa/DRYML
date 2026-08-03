@@ -24,7 +24,7 @@ from .provenance import (
     project_world_allocation_spec,
     project_world_spec,
 )
-from .protocol import ACCELERATOR_MEMORY_FEATURE, DispatchResult, ExecutionEnvelope
+from .protocol import ACCELERATOR_MEMORY_FEATURE, WORKER_SESSION_FEATURE, DispatchResult, ExecutionEnvelope
 from .requirements import DispatchExplanation, DispatchPlanningResolution, RequirementPolicy, _validate_sprint8_policies, effective_requirement_policy, explanation_for, parse_analysis_policy, resolve_dispatch_plan
 from .recipes import attach_recipe_id, make_execution_recipe
 from .specs import attach_dispatch_id, make_dispatch_spec
@@ -644,7 +644,7 @@ class Dispatcher:
                     execution_recipe=recipe,
                     operation_spec=op_spec,
                     environment_spec=env_data,
-                    world_spec=resolution.world_selection.candidate,
+                    world_spec=launch_world_spec["payload"],
                     runtime_spec=runtime_data,
                     allocation_view=allocation_data,
                     requirement_policy=resolution.requirement_policy.value,
@@ -1106,7 +1106,7 @@ def _allocation_to_json(allocation: RuntimeAllocationView, *, world_id: str | No
 def _handshake_for_allocation(allocation: Mapping[str, Any]) -> dict[str, Any]:
     """Request allocation capabilities required by this launch-only payload."""
 
-    required = ["operation.function_call", "store.dir", "runtime.worker", "runtime.worker_session.v2"]
+    required = ["operation.function_call", "store.dir", "runtime.worker", WORKER_SESSION_FEATURE]
     if "accelerator_memory" in allocation:
         required.append(ACCELERATOR_MEMORY_FEATURE)
     return {"min_protocol": 1, "required_features": required}

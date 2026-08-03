@@ -21,7 +21,7 @@ from .backends import BACKEND_IDENTITY
 from .errors import DispatchSpecError, WorkerProtocolError
 from .operations import canonicalize_result, execute_operation
 from .planner import _allocation_to_json, allocation_from_json
-from .protocol import ACCELERATOR_MEMORY_FEATURE, DISPATCH_WORKER_PROTOCOL_SCHEMA, DISPATCH_WORKER_PROTOCOL_VERSION, ExecutionEnvelope, WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, load_envelope, write_json_file
+from .protocol import ACCELERATOR_MEMORY_FEATURE, DISPATCH_WORKER_PROTOCOL_SCHEMA, DISPATCH_WORKER_PROTOCOL_VERSION, WORKER_SESSION_FEATURE, ExecutionEnvelope, WorkerHandshakeRequest, WorkerHandshakeResponse, WorkerResponse, load_envelope, write_json_file
 from .recipes import validate_execution_recipe
 from .specs import validate_dispatch_spec
 from .stores import open_worker_store, validate_worker_store_access
@@ -34,7 +34,7 @@ FEATURES = (
     "call.pickle_small",
     "store.dir",
     "runtime.worker",
-    "runtime.worker_session.v2",
+    WORKER_SESSION_FEATURE,
     "records.execution",
     "managed.operation.v1",
 )

@@ -1,13 +1,14 @@
 import os
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from dryml.core.store.dir import DirStore
-from dryml.dispatch import Dispatcher, ExecutionEnvelope, LocalResourceInventory, LocalSubprocessFuture, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
+from dryml.dispatch import Dispatcher, LocalResourceInventory, LocalSubprocessFuture, LocalWorldBackend, LocalWorldFuture, WorkerResponse, WorldWorkerKey, allocate_local_world
 from dryml.dispatch.errors import DispatchPlanningError
 from dryml.dispatch.protocol import DISPATCH_WORKER_PROTOCOL_SCHEMA, WorkerHandshakeResponse, write_json_file
 from dryml.dispatch.worker import _wait_for_start_barrier
@@ -107,7 +108,7 @@ def _handshake(plan, key, *, status="ok", worker_key=None, world_id=None, world_
         python_version="3.x",
         platform="test",
         pid=1,
-        features=("operation.function_call", "store.dir", "runtime.worker"),
+        features=("operation.function_call", "store.dir", "runtime.worker", "runtime.worker_session.v2"),
         operation_kinds=("function_call",),
         call_transports=("import_ref",),
         store_ref_kinds=("dir_store",),
@@ -659,21 +660,7 @@ def test_worker_start_barrier_timeout_uses_coordination_timeout(tmp_path, target
         "cancel_path": str(tmp_path / "missing-cancel.json"),
         "start_timeout": 0.01,
     }
-    envelope = ExecutionEnvelope(
-        dispatch_spec=worker_plan.envelope.dispatch_spec,
-        execution_recipe=worker_plan.envelope.execution_recipe,
-        operation_spec=worker_plan.envelope.operation_spec,
-        environment_spec=worker_plan.envelope.environment_spec,
-        world_spec=worker_plan.envelope.world_spec,
-        runtime_spec=worker_plan.envelope.runtime_spec,
-        allocation_view=worker_plan.envelope.allocation_view,
-        requirement_policy=worker_plan.envelope.requirement_policy,
-        requirement_axes=worker_plan.envelope.requirement_axes,
-        store_refs=worker_plan.envelope.store_refs,
-        transfer=worker_plan.envelope.transfer,
-        record_policy=worker_plan.envelope.record_policy,
-        launch=launch,
-    )
+    envelope = replace(worker_plan.envelope, launch=launch)
 
     response = _wait_for_start_barrier(envelope, store)
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Mapping
 from typing import Any, Iterator
 
@@ -109,16 +109,7 @@ def set_enforcement(policy: RuntimeEnforcement | str) -> RuntimeEnforcement:
     """
 
     normalized = normalize_enforcement(policy)
-    runtime = active_runtime()
-    set_runtime(
-        RuntimeState(
-            mode=runtime.mode,
-            allocation=runtime.allocation,
-            spec=runtime.spec,
-            enforcement=normalized,
-            requirement_axes=runtime.requirement_axes,
-        )
-    )
+    set_runtime(_state_with_enforcement(active_runtime(), normalized))
     return normalized
 
 
@@ -266,13 +257,7 @@ def _make_state(
 
 
 def _state_with_enforcement(state: RuntimeState, policy: RuntimeEnforcement | str) -> RuntimeState:
-    return RuntimeState(
-        mode=state.mode,
-        allocation=state.allocation,
-        spec=state.spec,
-        enforcement=normalize_enforcement(policy),
-        requirement_axes=state.requirement_axes,
-    )
+    return replace(state, enforcement=normalize_enforcement(policy))
 
 
 def _validate_state(state: RuntimeState) -> None:

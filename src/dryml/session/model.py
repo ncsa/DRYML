@@ -13,6 +13,12 @@ from dryml.runtime import RequirementAxes
 from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldSpec
 
 
+def _default_requirement_axes(mode: str) -> RequirementAxes:
+    """Return the requirement-axis default for one public session mode."""
+
+    return RequirementAxes.all() if mode in {"managed", "orchestrator"} else RequirementAxes()
+
+
 @dataclass(frozen=True, slots=True)
 class SelectedWorldAllocation:
     """One unambiguously selected process from an exact world allocation."""
@@ -52,7 +58,7 @@ class SessionConfiguration:
         """
         axes = self.requirement_axes
         if axes is None:
-            axes = RequirementAxes.all() if self.mode in {"managed", "orchestrator"} else RequirementAxes()
+            axes = _default_requirement_axes(self.mode)
         if not isinstance(axes, RequirementAxes):
             raise TypeError("session requirement_axes must be a RequirementAxes value")
         object.__setattr__(self, "requirement_axes", axes)

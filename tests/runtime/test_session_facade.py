@@ -8,11 +8,12 @@ from types import MappingProxyType
 import pytest
 
 from dryml import session
-from dryml.environments import ContainerEnvironmentSpec, PythonExecutableSpec
-from dryml.runtime import NoAllocation, RuntimeEnforcement, RuntimeMode, RuntimeState
+from dryml.environments import CurrentEnvironmentSpec, ContainerEnvironmentSpec, PythonExecutableSpec
+from dryml.runtime import NoAllocation, RequirementAxes, RuntimeAllocationView, RuntimeContextSpec, RuntimeEnforcement, RuntimeMode, RuntimeState
 from dryml.runtime.publication import PublicationService
 from dryml.worlds import (
     LocalResourceInventory,
+    WorldSpec,
     WorldAllocation,
     attach_world_allocation_id,
     make_world_allocation_spec,
@@ -62,6 +63,39 @@ def test_flat_api_has_the_closed_public_signatures():
     axes = inspect.signature(session.enforce_requirements).parameters
     assert tuple(axes) == ("environment", "world", "runtime")
     assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in axes.values())
+
+
+def test_worker_session_publication_preserves_accelerator_memory():
+    import dryml.session.state as state
+
+    allocation = RuntimeAllocationView(
+        world_allocation_id="worldalloc-v1-test",
+        role="worker",
+        replica=0,
+        rank=0,
+        local_rank=0,
+        cpus=(0,),
+        accelerators={"gpu": ("gpu-a",)},
+        accelerator_memory={"gpu": {"gpu-a": 1024}},
+    )
+
+    snapshot = state.publish_worker_session(
+        environment=CurrentEnvironmentSpec(),
+        world=WorldSpec.from_data(
+            {"roles": {"worker": {"replicas": 1, "process": {"resources": {"cpus": 1, "accelerators": {"gpu": 1}}}}}}
+        ),
+        runtime_spec=RuntimeContextSpec(mode=RuntimeMode.WORKER),
+        allocation=allocation,
+        requirement_policy="strict",
+        requirement_axes=RequirementAxes.all(),
+    )
+
+    assert snapshot.allocation.process.accelerator_memory == {
+        "gpu": {"gpu-a": 1024}
+    }
+    assert snapshot.runtime.allocation.accelerator_memory == {
+        "gpu": {"gpu-a": 1024}
+    }
 
 
 def test_fresh_inspection_is_python_and_does_not_probe_inventory(monkeypatch):

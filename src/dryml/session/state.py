@@ -32,7 +32,7 @@ from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec
 
 from .configuration import _normalize_environment, _normalize_requirement_axes, _normalize_requested_environment, _normalize_resources, normalize_configuration, select_world_allocation
 from .errors import SessionConfigurationError
-from .model import SelectedWorldAllocation, SessionConfiguration, SessionSnapshot
+from .model import _default_requirement_axes, SelectedWorldAllocation, SessionConfiguration, SessionSnapshot
 
 _VISIBILITY_KEYS = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "XLA_VISIBLE_DEVICES"})
 
@@ -330,20 +330,16 @@ def publish_worker_session(
         raise SessionConfigurationError("worker session requires an exact allocation identity")
     if allocation.role not in world.roles:
         raise SessionConfigurationError("worker allocation role is absent from selected world")
-    process = ProcessAllocation.from_data(
-        {
-            "replica": allocation.replica,
-            "rank": allocation.rank,
-            "local_rank": allocation.local_rank,
-            "resources": {
-                "cpus": list(allocation.cpus),
-                "memory": allocation.memory,
-                "accelerators": {key: list(value) for key, value in allocation.accelerators.items()},
-                **({"accelerator_memory": allocation.accelerator_memory} if allocation.accelerator_memory else {}),
-            },
-            "env": dict(allocation.env),
-            "metadata": dict(allocation.metadata),
-        }
+    process = ProcessAllocation(
+        replica=allocation.replica,
+        rank=allocation.rank,
+        local_rank=allocation.local_rank,
+        cpus=tuple(allocation.cpus),
+        memory=allocation.memory,
+        accelerators=allocation.accelerators,
+        accelerator_memory=allocation.accelerator_memory,
+        env=allocation.env,
+        metadata=allocation.metadata,
     )
     selected = SelectedWorldAllocation(allocation.role, process)
     worker_runtime = RuntimeState(
@@ -374,7 +370,6 @@ def publish_worker_session(
             "selected_world": world,
             "selected_runtime": runtime_spec,
             "compatibility_policy": requirement_policy,
-            "compatibility_axes": requirement_axes,
             "worker_session": True,
         },
     )
@@ -420,7 +415,11 @@ def _snapshot(generation: SessionGeneration) -> SessionSnapshot:
         selected_world=generation.metadata.get("selected_world"),
         selected_runtime=generation.metadata.get("selected_runtime"),
         compatibility_policy=generation.metadata.get("compatibility_policy"),
-        compatibility_axes=generation.metadata.get("compatibility_axes"),
+        compatibility_axes=(
+            generation.runtime.requirement_axes
+            if generation.metadata.get("worker_session")
+            else None
+        ),
     )
 
 
@@ -444,12 +443,6 @@ def _synthesize(resources: ResourceSpec, inventory: LocalResourceInventory) -> S
     assignment = assign_local_world(_world_for_resources(resources, role="main"), inventory=inventory)
     allocation = WorldAllocation.from_data({"roles": {name: list(processes) for name, processes in assignment.roles.items()}})
     return select_world_allocation(allocation, inventory=inventory)
-
-
-def _default_requirement_axes(mode: str) -> RequirementAxes:
-    """Return the stable requirement-axis default for one public session mode."""
-
-    return RequirementAxes.all() if mode in {"managed", "orchestrator"} else RequirementAxes()
 
 
 def _runtime_for(mode: str, allocation: SelectedWorldAllocation | None, requirement_axes: RequirementAxes) -> RuntimeState:
