@@ -206,9 +206,8 @@ def test_session_docs_state_the_shipped_default_and_interception_boundaries():
 
 
 def test_control_plane_docs_state_the_complete_runtime_boundary():
-    repository = Path(__file__).resolve().parents[2]
     documents = {
-        path: (repository / path).read_text(encoding="utf-8")
+        path: repository_path(Path(path)).read_text(encoding="utf-8")
         for path in (
             "README.md",
             "docs/session.md",

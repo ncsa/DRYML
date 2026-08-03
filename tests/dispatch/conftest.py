@@ -190,17 +190,17 @@ def target_module(tmp_path):
                 return box.value
 
             def cdef_materialization_status(box):
-                snapshot = dryml.session.current()
+                status = runtime_status()
                 return {
                     "value": box.value,
                     "constructor_mode": Box.last_construction_mode,
-                    "runtime_mode": active_runtime_mode().value,
+                    "runtime_mode": status["mode"],
                     "accelerators": {key: list(value) for key, value in active_runtime().allocation.accelerators.items()},
                     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-                    "enforcement": enforcement().value,
-                    "selected_environment": None if snapshot.selected_environment is None else snapshot.selected_environment.kind,
-                    "selected_world": None if snapshot.selected_world is None else sorted(snapshot.selected_world.roles),
-                    "selected_runtime": None if snapshot.selected_runtime is None else snapshot.selected_runtime.mode.value,
+                    "enforcement": status["enforcement"],
+                    "selected_environment": status["selected_environment"],
+                    "selected_world": status["selected_world"],
+                    "selected_runtime": status["selected_runtime"],
                 }
 
             def ref_value(ref):

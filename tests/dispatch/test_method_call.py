@@ -79,10 +79,11 @@ def _run_orchestrated_cdef_dispatch(tmp_path, target_module, monkeypatch, *, gpu
     try:
         assert active_runtime().allocation is NoAllocation
         assert os.environ["CUDA_VISIBLE_DEVICES"] == ""
-        plan = Dispatcher(store=store).plan(operation, inventory=inventory)
+        dispatcher = Dispatcher(store=store)
+        plan = dispatcher.plan(operation, inventory=inventory)
         assert plan.resolution.environment_selection.source == "session_requested"
         assert plan.resolution.world_selection.source == "session_requested"
-        result = Dispatcher(store=store).run(operation, inventory=inventory)
+        result = dispatcher.submit(plan).result()
     finally:
         session.reset()
 

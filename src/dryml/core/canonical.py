@@ -979,6 +979,32 @@ def from_canonical(
 
     Existing Object values pass through unchanged unless ``instance="new"``
     explicitly requests a new realization.
+
+    Args:
+        obj: Canonical or runtime value to transform.
+        repo: Repository used for live definition resolution.
+        options: Optional normalized repository load options.
+        instance: Instance reuse policy when ``options`` is omitted.
+        restore_state: Whether persisted state may be restored.
+        build_missing: Whether missing definitions may be constructed.
+        reuse_weak: Whether weak cached instances may be reused.
+        cache: Runtime cache publication policy.
+        revision: Optional revision selection.
+        memo: Optional graph memo shared across recursive resolution.
+        path: Optional diagnostic graph path.
+        resolve_cdef: Optional exact CDef resolver callback.
+
+    Returns:
+        The transformed runtime value.
+
+    Raises:
+        RuntimeTransitionError: If a definition would materialize in strict
+            orchestration.
+        RepoLoadError: If requested materialization cannot complete.
+
+    Side Effects:
+        May materialize, restore, or cache Objects when canonical definitions are
+        resolved. Already-held Object pass-through has no such side effect.
     """
     if memo is None:
         memo = {}

@@ -21,6 +21,18 @@ class MaterializationAction:
 
     Reuse records its source, not a live Object.  The executor resolves that
     source only after the materialization guard admits the operation.
+
+    Attributes:
+        definition: Exact definition realized by this step.
+        kind: Whether execution reuses or constructs an Object.
+        primary_path: Diagnostic path to the first graph occurrence.
+        reuse_source: Memo or cache source selected for a reuse action.
+        restore_state: Whether stored state should be restored.
+        store: Optional Store selected for restoration.
+        revision: Optional selected state revision.
+        build_missing: Whether absent stored state permits construction.
+        instance: Instance reuse policy.
+        cache: Runtime cache publication policy.
     """
 
     definition: ConcreteDefinition
@@ -37,7 +49,15 @@ class MaterializationAction:
 
 @dataclass(slots=True)
 class MaterializationPlan:
-    """Definition-only ordered materialization graph and per-node actions."""
+    """Definition-only ordered materialization graph and per-node actions.
+
+    Attributes:
+        graph: Concrete definition dependency graph.
+        actions: Planned action for each included definition.
+        order: Dependency-first execution order.
+        options: Normalized repository load options.
+        primary_paths: Stable diagnostic path for each definition.
+    """
 
     graph: ConcreteDefinitionGraph
     actions: dict[ConcreteDefinition, MaterializationAction]
@@ -53,7 +73,25 @@ def build_materialization_plan(
         revision: dict[ConcreteDefinition, str] | None = None,
         memo: dict | None = None,
         path: list[str | int] | None = None) -> MaterializationPlan:
-    """Plan construction, reuse, and restoration without retaining Objects."""
+    """Plan construction, reuse, and restoration without retaining Objects.
+
+    Args:
+        repo: Repository used for metadata-only cache and Store inspection.
+        cdef: Root concrete definition to realize.
+        options: Normalized load, restoration, instance, and cache policies.
+        revision: Optional per-definition revision selections.
+        memo: Existing realization memo used only to select reuse metadata.
+        path: Optional diagnostic root path.
+
+    Returns:
+        A definition-only plan safe to inspect in strict orchestration.
+
+    Raises:
+        ValueError: If instance and cache policies are inconsistent.
+
+    Side Effects:
+        Inspects cache membership and Store indexes without retrieving Objects.
+    """
     if memo is None:
         memo = {}
     if options.instance == "new" and options.cache != "none":
@@ -94,7 +132,26 @@ def execute_materialization_plan(
         memo: dict,
         revision: dict[ConcreteDefinition, str],
         root: ConcreteDefinition):
-    """Execute a planned live-object operation under one materialization lease."""
+    """Execute a planned live-object operation under one materialization lease.
+
+    Args:
+        repo: Repository owning construction, restoration, and cache publication.
+        plan: Definition-only plan to execute.
+        memo: Caller-owned realization memo updated with produced Objects.
+        revision: Per-definition revision fallbacks.
+        root: Root definition whose live Object is returned.
+
+    Returns:
+        The materialized or reused root Object.
+
+    Raises:
+        RuntimeTransitionError: Before execution in strict orchestration.
+        RepoLoadError: If reuse, construction, or restoration cannot complete.
+
+    Side Effects:
+        May construct Objects, restore state, update ``memo``, and publish cache
+        entries while retaining the runtime publication lease.
+    """
     from .repo import RepoLoadError
 
     from dryml.runtime import assert_object_materialization_allowed

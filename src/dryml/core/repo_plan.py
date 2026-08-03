@@ -85,23 +85,48 @@ def build_runtime_binding(
         *,
         resolve_global: bool = False,
         resolve_cached: bool = True) -> RuntimeGraphBinding:
+    """Build the definition graph and live-object bindings for runtime traversal.
+
+    Args:
+        repo: Repository supplying optional cache resolution.
+        value: Runtime root value or nested values to inspect.
+        resolve_global: Whether cache lookup may use process-global repositories.
+        resolve_cached: Whether to eagerly bind cached definitions.
+
+    Returns:
+        The graph, roots, resolved objects, and unresolved materialization nodes.
+
+    Raises:
+        RuntimeBindingConflict: If one definition maps to different live objects.
+
+    Side Effects:
+        May inspect repository caches when ``resolve_cached`` is true. It never
+        constructs or restores an Object.
+    """
+
     roots = collect_runtime_roots(value)
     graph = ConcreteDefinitionGraph.from_roots(root.definition for root in roots)
-    materialize_nodes = _materialize_reachable_nodes(graph, roots)
     objects: dict[ConcreteDefinition, Object] = {}
     for root in roots:
         if root.obj is not None:
             bind_runtime_object(objects, root.definition, root.obj, path=root.path)
-    if resolve_cached:
-        for node in graph.nodes():
-            if node.definition not in materialize_nodes:
-                continue
-            if node.definition in objects:
-                continue
-            obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
-            if obj is not None:
-                path = _node_primary_path(graph, roots, node.definition)
-                bind_runtime_object(objects, node.definition, obj, path=path)
+    if not resolve_cached:
+        return RuntimeGraphBinding(
+            graph=graph,
+            roots=roots,
+            objects=objects,
+            missing=frozenset(),
+        )
+    materialize_nodes = _materialize_reachable_nodes(graph, roots)
+    for node in graph.nodes():
+        if node.definition not in materialize_nodes:
+            continue
+        if node.definition in objects:
+            continue
+        obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
+        if obj is not None:
+            path = _node_primary_path(graph, roots, node.definition)
+            bind_runtime_object(objects, node.definition, obj, path=path)
     missing = frozenset(cdef for cdef in materialize_nodes if cdef not in objects)
     return RuntimeGraphBinding(graph=graph, roots=roots, objects=objects, missing=missing)
 

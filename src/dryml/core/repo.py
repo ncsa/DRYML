@@ -207,7 +207,6 @@ class Repo:
         self.weak_obj_cache[obj.__cdef__] = obj
         self._query_catalog.register_cached(obj.__cdef__)
 
-    # --- helpers you already have ---
     def get_cached(self, cdef, *, reuse_weak: bool = True):
         """Return a cached live Object after materialization policy admission.
 
@@ -218,18 +217,26 @@ class Repo:
         from dryml.runtime import assert_object_materialization_allowed
 
         with assert_object_materialization_allowed(operation="repo_get_cached"):
-            return self._get_cached(cdef, reuse_weak=reuse_weak)
-
-    def _get_cached(self, cdef, *, reuse_weak: bool = True):
-        obj = self.strong_obj_cache.get(cdef)
-        if obj is not None:
-            return obj
-        if reuse_weak:
-            return self.weak_obj_cache.get(cdef)
-        return None
+            obj = self.strong_obj_cache.get(cdef)
+            if obj is not None:
+                return obj
+            if reuse_weak:
+                return self.weak_obj_cache.get(cdef)
+            return None
 
     def has_cached(self, cdef, *, reuse_weak: bool = True) -> bool:
-        """Report cache membership without retrieving a live Object."""
+        """Report cache membership without retrieving a live Object.
+
+        Args:
+            cdef: Concrete definition whose cache membership is queried.
+            reuse_weak: Include weak-cache membership when true.
+
+        Returns:
+            True when the definition has an eligible strong or weak cache entry.
+
+        Side Effects:
+            None. This metadata-only query is valid during strict orchestration.
+        """
         return cdef in self.strong_obj_cache or (reuse_weak and cdef in self.weak_obj_cache)
 
     def pin(self, obj):
