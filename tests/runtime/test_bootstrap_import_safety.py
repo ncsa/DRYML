@@ -147,7 +147,7 @@ def test_activate_convenience_enters_runtime_and_bootstrap(monkeypatch):
         assert os.environ["CUDA_VISIBLE_DEVICES"] == "2"
         assert os.environ[runtime.BOOTSTRAP_MARKER_ENV] == "1"
 
-    assert runtime.active_runtime().mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert runtime.active_runtime().mode is runtime.RuntimeMode.NONE
     assert runtime.active_runtime_bootstrap() is None
     assert runtime.BOOTSTRAP_MARKER_ENV not in os.environ
 
@@ -167,7 +167,7 @@ def test_activate_runtime_bootstrap_requires_matching_active_runtime():
     with pytest.raises(RuntimeTransitionError) as excinfo:
         with runtime.activate_runtime_bootstrap(plan):
             pass
-    assert excinfo.value.context["active_mode"] == "orchestrator"
+    assert excinfo.value.context["active_mode"] == "none"
 
 
 def test_activate_runtime_bootstrap_rejects_process_controls_by_default(monkeypatch):

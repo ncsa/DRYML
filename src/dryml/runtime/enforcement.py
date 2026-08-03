@@ -4,11 +4,94 @@ from __future__ import annotations
 
 import os
 import warnings
+from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
 
 ENV_VAR = "DRYML_RUNTIME_ENFORCEMENT"
+REQUIREMENT_AXIS_NAMES = ("environment", "world", "runtime")
+
+
+@dataclass(frozen=True, slots=True)
+class RequirementAxes:
+    """Canonical immutable subset of requirement compatibility axes.
+
+    The value identifies which of the ``environment``, ``world``, and
+    ``runtime`` requirement checks participate in compatibility collection.
+    It has no effect on runtime role, allocation, visibility, protocol, or
+    lifecycle validation. Enabled names are stored in stable canonical order.
+
+    Args:
+        enabled: Iterable of enabled canonical axis names.
+
+    Raises:
+        ValueError: If an axis is unknown, duplicated, or not in canonical
+            order.
+    """
+
+    enabled: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate and freeze the enabled subset in canonical order."""
+
+        enabled = tuple(self.enabled)
+        if len(set(enabled)) != len(enabled) or any(axis not in REQUIREMENT_AXIS_NAMES for axis in enabled):
+            raise ValueError("requirement axes must contain unique environment, world, and runtime names")
+        canonical = tuple(axis for axis in REQUIREMENT_AXIS_NAMES if axis in enabled)
+        if enabled != canonical:
+            raise ValueError("requirement axes must use canonical environment, world, runtime order")
+        object.__setattr__(self, "enabled", canonical)
+
+    @classmethod
+    def all(cls) -> "RequirementAxes":
+        """Return the immutable mask with every supported axis enabled."""
+
+        return cls(REQUIREMENT_AXIS_NAMES)
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, bool]) -> "RequirementAxes":
+        """Normalize one complete exact-boolean axis mapping.
+
+        Args:
+            value: Mapping containing exactly ``environment``, ``world``, and
+                ``runtime`` with literal boolean values.
+
+        Returns:
+            The canonical immutable enabled subset.
+
+        Raises:
+            ValueError: If the mapping is incomplete, has unknown names, or
+                contains a non-boolean value.
+        """
+
+        if not isinstance(value, Mapping) or set(value) != set(REQUIREMENT_AXIS_NAMES):
+            raise ValueError("requirement axes must contain exactly environment, world, and runtime")
+        if any(type(value[axis]) is not bool for axis in REQUIREMENT_AXIS_NAMES):
+            raise ValueError("requirement axis values must be booleans")
+        return cls(tuple(axis for axis in REQUIREMENT_AXIS_NAMES if value[axis]))
+
+    def to_data(self) -> list[str]:
+        """Return the enabled names as a fresh canonical JSON-ready list."""
+
+        return list(self.enabled)
+
+
+def normalize_requirement_axes(value: Mapping[str, bool]) -> RequirementAxes:
+    """Normalize one complete requirement-axis mapping.
+
+    Args:
+        value: Exact mapping accepted by :meth:`RequirementAxes.from_mapping`.
+
+    Returns:
+        A canonical immutable requirement-axis mask.
+
+    Raises:
+        ValueError: If the mapping is malformed.
+    """
+
+    return RequirementAxes.from_mapping(value)
 
 
 class RuntimeEnforcement(str, Enum):
@@ -78,4 +161,4 @@ def default_enforcement_from_env(environ: Any = None) -> RuntimeEnforcement:
     return startup_enforcement_from_env(environ)[0]
 
 
-__all__ = ["ENV_VAR", "RuntimeEnforcement", "default_enforcement_from_env", "normalize_enforcement", "startup_enforcement_from_env"]
+__all__ = ["ENV_VAR", "REQUIREMENT_AXIS_NAMES", "RequirementAxes", "RuntimeEnforcement", "default_enforcement_from_env", "normalize_enforcement", "normalize_requirement_axes", "startup_enforcement_from_env"]

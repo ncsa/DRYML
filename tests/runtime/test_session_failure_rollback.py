@@ -138,6 +138,7 @@ def test_terminal_framework_failure_projects_a_sanitized_orchestrator(monkeypatc
     monkeypatch.setattr(state, "publication", service)
     monkeypatch.setattr(state, "local_inventory", lambda: LocalResourceInventory((0,), {}, memory=None))
     session.manage(cpus=1)
+    session.enforce_requirements(environment=True, world=False, runtime=False)
     current = service.current()
     admission = FrameworkAdmission(
         current.number,
@@ -154,6 +155,7 @@ def test_terminal_framework_failure_projects_a_sanitized_orchestrator(monkeypatc
     assert failed.runtime.mode is RuntimeMode.ORCHESTRATOR
     assert failed.runtime.allocation is NoAllocation
     assert failed.runtime.enforcement is RuntimeEnforcement.STRICT
+    assert failed.runtime.requirement_axes.to_data() == ["environment", "world", "runtime"]
     assert snapshot.mode == "orchestrator"
     assert snapshot.allocation is None
     assert snapshot.inventory is None

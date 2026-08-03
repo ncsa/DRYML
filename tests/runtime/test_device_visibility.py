@@ -9,6 +9,14 @@ def test_orchestrator_and_probe_default_to_hidden_devices():
     assert runtime.build_device_visibility_plan(mode=runtime.RuntimeMode.PROBE).env_updates["CUDA_VISIBLE_DEVICES"] == ""
 
 
+def test_no_role_inherits_visibility_without_managed_inherit_opt_in():
+    plan = runtime.build_device_visibility_plan(mode=runtime.RuntimeMode.NONE)
+
+    assert plan.policy is runtime.DeviceVisibilityPolicy.INHERIT
+    assert plan.env_updates == {}
+    assert plan.remap_assigned is False
+
+
 def test_worker_assigned_gpu_visibility_and_apply(monkeypatch):
     allocation = runtime.RuntimeAllocationView(accelerators={"gpu": (2, 4)})
     plan = runtime.build_device_visibility_plan(mode=runtime.RuntimeMode.WORKER, allocation_view=allocation)

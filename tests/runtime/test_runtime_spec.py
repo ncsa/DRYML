@@ -34,3 +34,11 @@ def test_runtime_spec_rejects_non_mapping_framework_config():
 
     with pytest.raises(RuntimeSpecError):
         runtime.RuntimeContextSpec.from_data({"frameworks": {"torch": "bad"}})
+
+
+def test_runtime_spec_serializes_explicit_none_without_reinterpreting_legacy_payloads():
+    no_role = runtime.RuntimeContextSpec.from_data({"mode": "none"})
+    legacy = runtime.RuntimeContextSpec.from_data({})
+
+    assert no_role.to_data()["mode"] == "none"
+    assert legacy.mode is runtime.RuntimeMode.ORCHESTRATOR

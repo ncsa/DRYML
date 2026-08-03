@@ -50,7 +50,7 @@ def build_device_visibility_plan(runtime_spec: RuntimeContextSpec | Mapping[str,
     resolved_policy = DeviceVisibilityPolicy.coerce(policy or visibility.get("policy") or _default_policy(resolved_mode))
     explicit = explicit_devices or visibility.get("devices") or visibility.get("explicit") or {}
     if resolved_policy is DeviceVisibilityPolicy.INHERIT:
-        if not allow_inherit and not visibility.get("allow_inherit", False):
+        if resolved_mode is not RuntimeMode.NONE and not allow_inherit and not visibility.get("allow_inherit", False):
             raise DeviceVisibilityError("inherit visibility requires explicit opt-in", context={"mode": resolved_mode.value})
         return DeviceVisibilityPlan(resolved_policy, {}, {}, remap_assigned=False)
     if resolved_policy is DeviceVisibilityPolicy.NONE:
@@ -77,6 +77,8 @@ def apply_device_visibility_plan(plan: DeviceVisibilityPlan, *, environ: dict[st
 
 
 def _default_policy(mode: RuntimeMode) -> DeviceVisibilityPolicy:
+    if mode is RuntimeMode.NONE:
+        return DeviceVisibilityPolicy.INHERIT
     if mode in {RuntimeMode.ORCHESTRATOR, RuntimeMode.PROBE}:
         return DeviceVisibilityPolicy.NONE
     if mode is RuntimeMode.WORKER:

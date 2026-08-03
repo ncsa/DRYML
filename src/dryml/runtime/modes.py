@@ -6,8 +6,9 @@ from enum import Enum
 
 
 class RuntimeMode(str, Enum):
-    """Process-local runtime mode."""
+    """Process-local runtime role, including the effect-free no-role state."""
 
+    NONE = "none"
     ORCHESTRATOR = "orchestrator"
     PROBE = "probe"
     WORKER = "worker"

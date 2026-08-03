@@ -24,9 +24,10 @@ def _candidate(service, *, runtime_state=None):
 def test_fresh_process_baseline_is_unchecked_python_without_effects():
     state = runtime.active_runtime()
 
-    assert state.mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert state.mode is runtime.RuntimeMode.NONE
     assert state.allocation is runtime.NoAllocation
     assert state.enforcement is runtime.RuntimeEnforcement.OFF
+    assert state.requirement_axes.to_data() == []
 
 
 def test_publication_commits_and_restores_owned_environment(monkeypatch):
@@ -346,6 +347,7 @@ def test_failed_environment_readback_fails_closed_without_claiming_rollback():
     assert failed.runtime.mode is runtime.RuntimeMode.ORCHESTRATOR
     assert failed.runtime.allocation is runtime.NoAllocation
     assert failed.runtime.enforcement is runtime.RuntimeEnforcement.STRICT
+    assert failed.runtime.requirement_axes.to_data() == ["environment", "world", "runtime"]
 
 
 def test_effect_write_reentry_fails_before_state_lock_and_outer_transaction_rolls_back():

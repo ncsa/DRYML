@@ -20,7 +20,7 @@ def test_current_environment_probe_returns_structured_result():
     assert record.platform.platform
     assert isinstance(record.distributions, Mapping)
     assert before == after
-    assert after.mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert after.mode is runtime.RuntimeMode.NONE
     assert after.allocation is runtime.NoAllocation
 
 

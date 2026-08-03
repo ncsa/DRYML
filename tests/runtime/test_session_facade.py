@@ -55,6 +55,9 @@ def test_flat_api_has_the_closed_public_signatures():
     assert allocation["role"].kind is inspect.Parameter.KEYWORD_ONLY
     assert allocation["replica"].kind is inspect.Parameter.KEYWORD_ONLY
     assert inspect.signature(session.require_env).parameters["requirements"].kind is inspect.Parameter.VAR_POSITIONAL
+    axes = inspect.signature(session.enforce_requirements).parameters
+    assert tuple(axes) == ("environment", "world", "runtime")
+    assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in axes.values())
 
 
 def test_fresh_inspection_is_python_and_does_not_probe_inventory(monkeypatch):
@@ -67,8 +70,65 @@ def test_fresh_inspection_is_python_and_does_not_probe_inventory(monkeypatch):
     assert session.mode() == "python"
     assert snapshot.mode == "python"
     assert snapshot.allocation is None
-    assert snapshot.runtime.mode is RuntimeMode.ORCHESTRATOR
+    assert snapshot.runtime.mode is RuntimeMode.NONE
     assert snapshot.runtime.allocation is NoAllocation
+    assert snapshot.requirement_axes.to_data() == []
+
+
+@pytest.mark.parametrize(
+    ("enabled", "expected"),
+    [
+        ((False, False, False), []),
+        ((True, False, False), ["environment"]),
+        ((False, True, False), ["world"]),
+        ((False, False, True), ["runtime"]),
+        ((True, True, False), ["environment", "world"]),
+        ((True, False, True), ["environment", "runtime"]),
+        ((False, True, True), ["world", "runtime"]),
+        ((True, True, True), ["environment", "world", "runtime"]),
+    ],
+)
+def test_requirement_axes_are_canonical_and_atomically_replaced(enabled, expected):
+    environment, world, runtime_axis = enabled
+    snapshot = session.enforce_requirements(environment=environment, world=world, runtime=runtime_axis)
+
+    assert snapshot.requirement_axes.to_data() == expected
+    assert snapshot.to_data()["requirement_axes"] == expected
+    configuration = session.normalize_configuration(
+        mode="python",
+        requirement_axes={"runtime": runtime_axis, "environment": environment, "world": world},
+    )
+    assert configuration.requirement_axes.to_data() == expected
+    assert configuration.to_data()["requirement_axes"] == expected
+
+
+def test_requirement_axes_reject_malformed_replacement_without_mutating_generation():
+    before = session.enforce_requirements(environment=True, world=False, runtime=True)
+
+    with pytest.raises(ValueError):
+        session.configure(mode="managed", requirement_axes={"environment": True, "world": False})
+    with pytest.raises(ValueError):
+        session.configure(
+            mode="managed",
+            requirement_axes={"environment": True, "world": False, "runtime": 1},
+        )
+
+    assert session.current() == before
+
+
+def test_configure_uses_mode_axis_defaults_when_omitted_and_replaces_explicit_axes():
+    session.enforce_requirements(environment=True, world=False, runtime=False)
+
+    managed = session.configure(mode="managed")
+    python = session.configure(mode="python")
+    orchestrator = session.configure(
+        mode="orchestrator",
+        requirement_axes={"runtime": False, "environment": True, "world": False},
+    )
+
+    assert managed.requirement_axes.to_data() == ["environment", "world", "runtime"]
+    assert python.requirement_axes.to_data() == []
+    assert orchestrator.requirement_axes.to_data() == ["environment"]
 
 
 def test_manage_keeps_the_session_allocation_projection_deeply_immutable():

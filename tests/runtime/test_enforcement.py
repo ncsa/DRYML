@@ -132,10 +132,60 @@ def test_fresh_python_baseline_leaves_inherited_visibility_unchanged():
     )
 
     assert json.loads(proc.stdout) == {
-        "mode": "orchestrator",
+        "mode": "none",
         "enforcement": "off",
         "visibility": "inherited-device",
         "bootstrap": False,
+    }
+
+
+@pytest.mark.parametrize("value", ["warn", "strict"])
+def test_valid_startup_override_stays_no_role_with_all_requirement_axes(value):
+    env = dict(os.environ, DRYML_RUNTIME_ENFORCEMENT=value)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json; import dryml.runtime as runtime; "
+            "print(json.dumps({'mode': runtime.active_runtime().mode.value, "
+            "'allocation': runtime.active_runtime().allocation is runtime.NoAllocation, "
+            "'enforcement': runtime.enforcement().value, "
+            "'axes': runtime.active_runtime().requirement_axes.to_data()}))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert json.loads(proc.stdout) == {
+        "mode": "none",
+        "allocation": True,
+        "enforcement": value,
+        "axes": ["environment", "world", "runtime"],
+    }
+
+
+def test_startup_override_is_superseded_by_first_facade_mutation():
+    env = dict(os.environ, DRYML_RUNTIME_ENFORCEMENT="warn")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json; from dryml import session; "
+            "before = session.current(); after = session.set_mode('python'); "
+            "print(json.dumps({'before': [before.runtime.mode.value, before.runtime.enforcement.value, before.requirement_axes.to_data()], "
+            "'after': [after.runtime.mode.value, after.runtime.enforcement.value, after.requirement_axes.to_data()]}))",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert json.loads(proc.stdout) == {
+        "before": ["none", "warn", ["environment", "world", "runtime"]],
+        "after": ["none", "off", []],
     }
 
 

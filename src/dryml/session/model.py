@@ -9,6 +9,7 @@ from typing import Any
 
 from dryml.environments import EnvironmentRequirement
 from dryml.formats import canonical_json_bytes, deep_freeze_json, json_ready
+from dryml.runtime import RequirementAxes
 from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldSpec
 
 
@@ -27,7 +28,11 @@ class SelectedWorldAllocation:
 
 @dataclass(frozen=True, slots=True)
 class SessionConfiguration:
-    """Deeply immutable, effect-free session candidate and display projection."""
+    """Deeply immutable session candidate and display projection.
+
+    The requirement-axis mask affects compatibility collection only. Omitted
+    masks default to empty for Python and all axes for managed/orchestrator.
+    """
 
     mode: str
     resources: ResourceSpec | None = None
@@ -35,6 +40,7 @@ class SessionConfiguration:
     requested_world: WorldSpec | None = None
     environment: EnvironmentRequirement = field(default_factory=EnvironmentRequirement)
     controls: Mapping[str, Any] = field(default_factory=dict)
+    requirement_axes: RequirementAxes | None = None
     fingerprint: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -43,6 +49,12 @@ class SessionConfiguration:
         Returns:
             None.
         """
+        axes = self.requirement_axes
+        if axes is None:
+            axes = RequirementAxes.all() if self.mode in {"managed", "orchestrator"} else RequirementAxes()
+        if not isinstance(axes, RequirementAxes):
+            raise TypeError("session requirement_axes must be a RequirementAxes value")
+        object.__setattr__(self, "requirement_axes", axes)
         object.__setattr__(self, "controls", deep_freeze_json(self.controls))
         object.__setattr__(self, "fingerprint", "session-config-v1-" + hashlib.sha256(canonical_json_bytes(self.to_data(include_fingerprint=False))).hexdigest())
 
@@ -56,6 +68,7 @@ class SessionConfiguration:
             "requested_world": None if self.requested_world is None else self.requested_world.to_data(),
             "environment": self.environment.to_data(),
             "controls": json_ready(self.controls),
+            "requirement_axes": self.requirement_axes.to_data(),
         }
         if include_fingerprint:
             data["fingerprint"] = self.fingerprint
@@ -64,7 +77,11 @@ class SessionConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class SessionSnapshot:
-    """Immutable public projection of one published process generation."""
+    """Immutable public projection of one published process generation.
+
+    ``requirement_axes`` is the effective runtime compatibility mask and remains
+    separate from lifecycle status and allocation controls.
+    """
 
     mode: str
     resources: ResourceSpec | None
@@ -77,6 +94,7 @@ class SessionSnapshot:
     generation: int
     health: str = "healthy"
     inventory: LocalResourceInventory | None = None
+    requirement_axes: RequirementAxes = field(default_factory=RequirementAxes)
 
     def __post_init__(self) -> None:
         """Freeze nested public control and status projections.
@@ -86,6 +104,8 @@ class SessionSnapshot:
         """
         object.__setattr__(self, "controls", deep_freeze_json(self.controls))
         object.__setattr__(self, "statuses", deep_freeze_json(self.statuses))
+        if not isinstance(self.requirement_axes, RequirementAxes):
+            raise TypeError("snapshot requirement_axes must be a RequirementAxes value")
 
     def to_data(self) -> dict[str, Any]:
         """Return a bounded JSON-ready display projection."""
@@ -98,6 +118,7 @@ class SessionSnapshot:
             "environment": self.environment.to_data(),
             "controls": json_ready(self.controls),
             "statuses": json_ready(self.statuses),
+            "requirement_axes": self.requirement_axes.to_data(),
             "generation": self.generation,
             "health": self.health,
             "inventory": None if self.inventory is None else self.inventory.summary(),

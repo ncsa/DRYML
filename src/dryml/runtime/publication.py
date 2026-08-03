@@ -20,7 +20,7 @@ from typing import Any
 from dryml._framework_imports import ImportEpochBusyError, ImportEpochReentryError, coordinator
 
 from .allocation import NoAllocation
-from .enforcement import RuntimeEnforcement
+from .enforcement import RequirementAxes, RuntimeEnforcement
 from .errors import PublicationBusyError, PublicationError, PublicationFailedError, PublicationReentryError
 from .modes import RuntimeMode
 
@@ -536,6 +536,7 @@ class PublicationService:
                 allocation=NoAllocation,
                 spec=None,
                 enforcement=RuntimeEnforcement.STRICT,
+                requirement_axes=RequirementAxes.all(),
             )
         except TypeError:
             # Test doubles may not be RuntimeState instances. Production

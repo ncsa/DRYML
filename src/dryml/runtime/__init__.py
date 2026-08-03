@@ -1,8 +1,8 @@
 """Process-local runtime mode, allocation, visibility, and bootstrap.
 
 ``dryml.runtime`` is the runtime half of the environment/world/runtime split.
-Its ordinary Python baseline is ``orchestrator`` with ``NoAllocation`` and
-enforcement off; importing it does not alter inherited device visibility.
+Its ordinary Python baseline is ``none`` with ``NoAllocation`` and enforcement
+off; importing it does not alter inherited device visibility.
 """
 
 from dryml.runtime.allocation import NoAllocation, RuntimeAllocationView
@@ -11,7 +11,7 @@ from dryml.runtime.context import RuntimeBootstrapState, RuntimeState, active_ru
 from dryml.runtime.compatibility import RuntimeCompatibilityIssue, RuntimeCompatibilityReport, check_runtime_spec_satisfies_requirement
 from dryml.runtime.devices import DeviceVisibilityPlan, DeviceVisibilityPolicy, apply_device_visibility_plan, build_device_visibility_plan
 from dryml.runtime.decorators import default
-from dryml.runtime.enforcement import RuntimeEnforcement, normalize_enforcement, startup_enforcement_from_env
+from dryml.runtime.enforcement import REQUIREMENT_AXIS_NAMES, RequirementAxes, RuntimeEnforcement, normalize_enforcement, normalize_requirement_axes, startup_enforcement_from_env
 from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_worker_allocation, require_workload_allocation
 from dryml.runtime.frameworks import FrameworkCapabilities, FrameworkImportPlan, FrameworkPostResult, FrameworkRegistration, FrameworkRegistry, framework_registry
 from dryml.runtime.modes import RuntimeMode
@@ -42,6 +42,8 @@ __all__ = [
     "RuntimeEnforcement",
     "RuntimeMode",
     "RuntimeState",
+    "RequirementAxes",
+    "REQUIREMENT_AXIS_NAMES",
     "SessionGeneration",
     "activate",
     "activate_runtime_bootstrap",
@@ -67,6 +69,7 @@ __all__ = [
     "import_configured_framework",
     "make_runtime_spec",
     "normalize_enforcement",
+    "normalize_requirement_axes",
     "plain",
     "publication",
     "framework_registry",

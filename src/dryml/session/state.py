@@ -22,6 +22,7 @@ from dryml.runtime import (
     RuntimeEnforcement,
     RuntimeMode,
     RuntimeState,
+    RequirementAxes,
     build_runtime_bootstrap_plan,
 )
 from dryml.runtime.frameworks import FrameworkBootstrapResult, framework_registry
@@ -29,7 +30,7 @@ from dryml.runtime.errors import PublicationBusyError, PublicationError
 from dryml.runtime.publication import SessionGeneration, publication
 from dryml.worlds import LocalResourceInventory, ResourceSpec, WorldAllocation, WorldSpec, assign_local_world, local_inventory
 
-from .configuration import _normalize_environment, _normalize_resources, normalize_configuration, select_world_allocation
+from .configuration import _normalize_environment, _normalize_requirement_axes, _normalize_resources, normalize_configuration, select_world_allocation
 from .errors import SessionConfigurationError
 from .model import SelectedWorldAllocation, SessionConfiguration, SessionSnapshot
 
@@ -71,7 +72,15 @@ def set_mode(mode: str) -> SessionSnapshot:
     before = _configuration(publication.current())
     allocation = before.allocation if mode == "managed" else None
     resources = before.resources if mode == "managed" and allocation is not None else None
-    return _publish(mode, resources, allocation, before.requested_world, before.environment, default_managed=mode == "managed" and allocation is None)
+    return _publish(
+        mode,
+        resources,
+        allocation,
+        before.requested_world,
+        before.environment,
+        _default_requirement_axes(mode),
+        default_managed=mode == "managed" and allocation is None,
+    )
 
 
 def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
@@ -89,7 +98,16 @@ def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: in
 
     before = _configuration(publication.current())
     supplied = {key: value for key, value in {"cpus": cpus, "memory": memory, "gpus": gpus, "accelerator_memory": accelerator_memory}.items() if value is not None}
-    return _publish("managed", None, None, before.requested_world, before.environment, synthesize=True, simple_resources=supplied)
+    return _publish(
+        "managed",
+        None,
+        None,
+        before.requested_world,
+        before.environment,
+        RequirementAxes.all(),
+        synthesize=True,
+        simple_resources=supplied,
+    )
 
 
 def worker_world_request(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
@@ -111,7 +129,7 @@ def worker_world_request(*, cpus: int | None = None, memory: str | int | None = 
     before = _configuration(publication.current())
     resources = _normalize_resources(supplied)
     world = _world_for_resources(resources, role="worker")
-    return _publish(before.mode, before.resources, before.allocation, world, before.environment)
+    return _publish(before.mode, before.resources, before.allocation, world, before.environment, before.requirement_axes)
 
 
 def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str | None = None, replica: int | None = None) -> SessionSnapshot:
@@ -127,7 +145,7 @@ def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str |
     """
 
     before = _configuration(publication.current())
-    return _publish("managed", None, (value, role, replica), before.requested_world, before.environment, exact=True)
+    return _publish("managed", None, (value, role, replica), before.requested_world, before.environment, RequirementAxes.all(), exact=True)
 
 
 def require_env(*requirements: str, python: str | None = None, excludes: Any = (), capabilities: Any = ()) -> SessionSnapshot:
@@ -160,10 +178,37 @@ def require_env(*requirements: str, python: str | None = None, excludes: Any = (
         environment = before.environment.merge(addition, sources=("session",))
     except Exception as exc:
         raise SessionConfigurationError(str(exc), context=getattr(exc, "context", {})) from exc
-    return _publish(before.mode, before.resources, before.allocation, before.requested_world, environment)
+    return _publish(before.mode, before.resources, before.allocation, before.requested_world, environment, before.requirement_axes)
 
 
-def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocation: Mapping[str, Any] | None = None, requested_world: Mapping[str, Any] | None = None, environment: Mapping[str, Any] | None = None) -> SessionSnapshot:
+def enforce_requirements(*, environment: bool, world: bool, runtime: bool) -> SessionSnapshot:
+    """Atomically replace the session requirement-axis mask.
+
+    Args:
+        environment: Whether environment compatibility is enabled.
+        world: Whether world compatibility is enabled.
+        runtime: Whether runtime compatibility is enabled.
+
+    Returns:
+        The published snapshot with the canonical replacement mask.
+
+    Raises:
+        SessionConfigurationError: If any value is not an exact boolean.
+
+    Side Effects:
+        Publishes a generation only after all values validate. This does not
+        change role, allocation, framework visibility, or lifecycle controls.
+    """
+
+    before = _configuration(publication.current())
+    axes = _normalize_requirement_axes(
+        {"environment": environment, "world": world, "runtime": runtime},
+        mode=before.mode,
+    )
+    return _publish(before.mode, before.resources, before.allocation, before.requested_world, before.environment, axes)
+
+
+def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocation: Mapping[str, Any] | None = None, requested_world: Mapping[str, Any] | None = None, environment: Mapping[str, Any] | None = None, requirement_axes: Mapping[str, bool] | None = None) -> SessionSnapshot:
     """Atomically replace every facade category from one closed declaration.
 
     Args:
@@ -172,6 +217,8 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
         allocation: Optional exact current-process allocation declaration.
         requested_world: Optional default worker world declaration.
         environment: Optional software requirement declaration.
+        requirement_axes: Optional complete exact-boolean compatibility-axis
+            replacement. Omission selects the target mode's default mask.
 
     Returns:
         Snapshot of the complete replacement session.
@@ -183,6 +230,7 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
         allocation=allocation,
         requested_world=requested_world,
         environment=environment,
+        requirement_axes=requirement_axes,
     )
     default_managed = candidate.mode == "managed" and resources is None and allocation is None
     exact_allocation = None
@@ -195,6 +243,7 @@ def configure(*, mode: str, resources: Mapping[str, Any] | None = None, allocati
         exact_allocation if exact_allocation is not None else candidate.allocation,
         candidate.requested_world,
         candidate.environment,
+        candidate.requirement_axes,
         default_managed=default_managed,
         synthesize=candidate.mode == "managed" and resources is not None,
         exact=exact_allocation is not None,
@@ -208,7 +257,7 @@ def reset() -> SessionSnapshot:
         Snapshot of the restored Python-mode session.
     """
 
-    return _publish("python", None, None, None, EnvironmentRequirement())
+    return _publish("python", None, None, None, EnvironmentRequirement(), RequirementAxes())
 
 
 def _configuration(generation: SessionGeneration) -> SessionConfiguration:
@@ -240,6 +289,7 @@ def _snapshot(generation: SessionGeneration) -> SessionSnapshot:
         generation.number,
         generation.health,
         generation.visibility_epoch if isinstance(generation.visibility_epoch, LocalResourceInventory) else None,
+        requirement_axes=generation.runtime.requirement_axes,
     )
 
 
@@ -265,12 +315,22 @@ def _synthesize(resources: ResourceSpec, inventory: LocalResourceInventory) -> S
     return select_world_allocation(allocation, inventory=inventory)
 
 
-def _runtime_for(mode: str, allocation: SelectedWorldAllocation | None) -> RuntimeState:
+def _default_requirement_axes(mode: str) -> RequirementAxes:
+    """Return the stable requirement-axis default for one public session mode."""
+
+    return RequirementAxes.all() if mode in {"managed", "orchestrator"} else RequirementAxes()
+
+
+def _runtime_for(mode: str, allocation: SelectedWorldAllocation | None, requirement_axes: RequirementAxes) -> RuntimeState:
+    """Project one public session mode into its low-level runtime state."""
+
     if mode == "managed":
         assert allocation is not None
         view = allocation.process.to_runtime_resource_view(role=allocation.role).to_runtime_allocation_view()
-        return RuntimeState(RuntimeMode.INLINE, view, enforcement=RuntimeEnforcement.STRICT)
-    return RuntimeState(RuntimeMode.ORCHESTRATOR, NoAllocation, enforcement=RuntimeEnforcement.OFF if mode == "python" else RuntimeEnforcement.STRICT)
+        return RuntimeState(RuntimeMode.INLINE, view, enforcement=RuntimeEnforcement.STRICT, requirement_axes=requirement_axes)
+    runtime_mode = RuntimeMode.NONE if mode == "python" else RuntimeMode.ORCHESTRATOR
+    enforcement = RuntimeEnforcement.OFF if mode == "python" else RuntimeEnforcement.STRICT
+    return RuntimeState(runtime_mode, NoAllocation, enforcement=enforcement, requirement_axes=requirement_axes)
 
 
 def _loaded_framework_roots() -> tuple[str, ...]:
@@ -289,6 +349,7 @@ def _publish(
     allocation: SelectedWorldAllocation | tuple[Any, str | None, int | None] | None,
     requested_world: WorldSpec | None,
     environment: EnvironmentRequirement,
+    requirement_axes: RequirementAxes,
     *,
     default_managed: bool = False,
     synthesize: bool = False,
@@ -325,9 +386,17 @@ def _publish(
             assert candidate_resources is not None and observed is not None
             candidate_allocation = _synthesize(candidate_resources, observed)
         assert candidate_allocation is None or isinstance(candidate_allocation, SelectedWorldAllocation)
-        candidate = SessionConfiguration(mode, candidate_resources, candidate_allocation, requested_world, environment, _controls(candidate_resources, candidate_allocation))
+        candidate = SessionConfiguration(
+            mode,
+            candidate_resources,
+            candidate_allocation,
+            requested_world,
+            environment,
+            _controls(candidate_resources, candidate_allocation),
+            requirement_axes,
+        )
         _check_current_environment(mode, environment)
-        runtime = _runtime_for(mode, candidate_allocation)
+        runtime = _runtime_for(mode, candidate_allocation, candidate.requirement_axes)
         bootstrap = _bootstrap_plan(runtime)
         framework_results = dict(bootstrap.framework_results)
         framework_statuses = _pending_framework_statuses(framework_results)
@@ -489,7 +558,8 @@ def _effect_plan(runtime: RuntimeState, before: SessionGeneration, bootstrap: An
 
 
 def _bootstrap_plan(runtime: RuntimeState):
-    spec = RuntimeContextSpec(mode=runtime.mode, device_visibility={"policy": "assigned" if runtime.mode is RuntimeMode.INLINE else "none"})
+    visibility = "assigned" if runtime.mode is RuntimeMode.INLINE else ("inherit" if runtime.mode is RuntimeMode.NONE else "none")
+    spec = RuntimeContextSpec(mode=runtime.mode, device_visibility={"policy": visibility})
     frameworks = ("plain", "tensorflow", "torch", "jax") if runtime.enforcement is RuntimeEnforcement.STRICT else ("plain",)
     return build_runtime_bootstrap_plan(spec, runtime.allocation, policy=FrameworkBootstrapPolicy(frameworks))
 
@@ -507,4 +577,4 @@ def _pending_framework_statuses(results: Mapping[str, FrameworkBootstrapResult])
             for control in ("visibility", "threads", "process_memory", "accelerator_memory", "allocator"):
                 statuses[f"{name}:{root}:{control}"] = "pending-import"
     return statuses
-__all__ = ["allocate_world", "configure", "current", "manage", "mode", "require_env", "reset", "set_mode", "worker_world_request"]
+__all__ = ["allocate_world", "configure", "current", "enforce_requirements", "manage", "mode", "require_env", "reset", "set_mode", "worker_world_request"]

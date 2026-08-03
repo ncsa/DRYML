@@ -3,7 +3,7 @@
 from .configuration import normalize_configuration, select_world_allocation
 from .errors import SessionConfigurationError
 from .model import SelectedWorldAllocation, SessionConfiguration, SessionSnapshot
-from .state import allocate_world, configure, current, manage, mode, require_env, reset, set_mode, worker_world_request
+from .state import allocate_world, configure, current, enforce_requirements, manage, mode, require_env, reset, set_mode, worker_world_request
 
 __all__ = [
     "SelectedWorldAllocation",
@@ -13,6 +13,7 @@ __all__ = [
     "allocate_world",
     "configure",
     "current",
+    "enforce_requirements",
     "manage",
     "mode",
     "normalize_configuration",

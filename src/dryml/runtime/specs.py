@@ -15,7 +15,12 @@ from .modes import RuntimeMode
 
 @dataclass(frozen=True, slots=True)
 class RuntimeContextSpec:
-    """Process-local runtime setup, separate from resource allocation."""
+    """Process-local runtime setup, separate from resource allocation.
+
+    ``RuntimeMode.NONE`` serializes explicitly as ``"none"``. Omitted legacy
+    mode data remains ``orchestrator`` so older payloads are never reinterpreted
+    as the new no-role state.
+    """
 
     mode: RuntimeMode = RuntimeMode.ORCHESTRATOR
     device_visibility: Mapping[str, Any] = field(default_factory=dict)

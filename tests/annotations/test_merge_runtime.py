@@ -16,7 +16,7 @@ def test_runtime_default_merge_and_override(monkeypatch):
     assert isinstance(spec, runtime.RuntimeContextSpec)
     assert spec.frameworks["torch"] == {"deterministic": True, "num_threads": 8}
     assert dict(os.environ) == before
-    assert runtime.active_runtime().mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert runtime.active_runtime().mode is runtime.RuntimeMode.NONE
 
 
 def test_runtime_default_convenience_accepts_direct_override_payload():

@@ -11,11 +11,14 @@ def _allocation():
 def test_default_runtime_state_current_behavior():
     state = runtime.active_runtime()
 
-    assert state.mode is runtime.RuntimeMode.ORCHESTRATOR
+    assert state.mode is runtime.RuntimeMode.NONE
     assert state.allocation is runtime.NoAllocation
+    assert state.enforcement is runtime.RuntimeEnforcement.OFF
+    assert state.requirement_axes.to_data() == []
 
 
 def test_runtime_modes_exist():
+    assert runtime.RuntimeMode.NONE.value == "none"
     assert runtime.RuntimeMode.PROBE.value == "probe"
     assert runtime.RuntimeMode.ORCHESTRATOR.value == "orchestrator"
     assert runtime.RuntimeMode.WORKER.value == "worker"
@@ -23,7 +26,7 @@ def test_runtime_modes_exist():
 
 
 def test_probe_and_orchestrator_reject_workload_allocation():
-    for mode in (runtime.RuntimeMode.PROBE, runtime.RuntimeMode.ORCHESTRATOR):
+    for mode in (runtime.RuntimeMode.NONE, runtime.RuntimeMode.PROBE, runtime.RuntimeMode.ORCHESTRATOR):
         with pytest.raises(RuntimeTransitionError, match="must not hold workload allocation"):
             with runtime.enter_runtime(mode, allocation=_allocation()):
                 pass

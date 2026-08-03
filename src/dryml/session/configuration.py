@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from dryml.environments import EnvironmentRequirement
+from dryml.runtime import RequirementAxes, normalize_requirement_axes
 from dryml.worlds import (
     LocalResourceInventory,
     ResourceSpec,
@@ -35,9 +36,14 @@ def normalize_configuration(
     allocation: Mapping[str, Any] | None = None,
     requested_world: Mapping[str, Any] | None = None,
     environment: Mapping[str, Any] | None = None,
+    requirement_axes: Mapping[str, bool] | None = None,
     **extra: Any,
 ) -> SessionConfiguration:
-    """Normalize one complete replacement candidate without process effects."""
+    """Normalize one complete replacement candidate without process effects.
+
+    ``requirement_axes`` must be a complete mapping of the three canonical axis
+    names to exact booleans. Omitting it selects the requested mode's default.
+    """
 
     if extra:
         raise SessionConfigurationError("session configuration has unknown fields", context={"fields": sorted(extra)})
@@ -50,6 +56,7 @@ def normalize_configuration(
         normalized_allocation = _normalize_allocation_section(allocation) if allocation is not None else None
         normalized_world = _normalize_world(requested_world)
         normalized_environment = _normalize_environment(environment)
+        normalized_axes = _normalize_requirement_axes(requirement_axes, mode=mode)
     except SessionConfigurationError:
         raise
     except Exception as exc:
@@ -58,7 +65,18 @@ def normalize_configuration(
         "memory": "declarative" if (normalized_resources and normalized_resources.memory is not None) or (normalized_allocation and normalized_allocation.process.memory is not None) else "undeclared",
         "accelerator_memory": "declarative" if _has_accelerator_memory(normalized_resources, normalized_allocation) else "undeclared",
     }
-    return SessionConfiguration(mode, normalized_resources, normalized_allocation, normalized_world, normalized_environment, controls)
+    return SessionConfiguration(mode, normalized_resources, normalized_allocation, normalized_world, normalized_environment, controls, normalized_axes)
+
+
+def _normalize_requirement_axes(value: Mapping[str, bool] | None, *, mode: str) -> RequirementAxes:
+    """Return a validated explicit axis mask or one public mode default."""
+
+    if value is None:
+        return RequirementAxes.all() if mode in {"managed", "orchestrator"} else RequirementAxes()
+    try:
+        return normalize_requirement_axes(value)
+    except ValueError as exc:
+        raise SessionConfigurationError(str(exc)) from exc
 
 
 def select_world_allocation(

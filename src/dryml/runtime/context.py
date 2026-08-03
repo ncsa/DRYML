@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from typing import Any, Iterator
 
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
-from .enforcement import RuntimeEnforcement, default_enforcement_from_env, normalize_enforcement
+from .enforcement import RequirementAxes, RuntimeEnforcement, normalize_enforcement, startup_enforcement_from_env
 from .errors import RuntimeTransitionError
 from .modes import RuntimeMode
 from .specs import RuntimeContextSpec
@@ -17,12 +17,17 @@ from .specs import RuntimeContextSpec
 
 @dataclass(frozen=True, slots=True)
 class RuntimeState:
-    """Current process-local runtime mode, allocation view, spec, and policy."""
+    """Current process-local runtime role, allocation, and compatibility policy.
 
-    mode: RuntimeMode = RuntimeMode.ORCHESTRATOR
+    ``requirement_axes`` selects compatibility collection only. It cannot weaken
+    runtime allocation or lifecycle validation.
+    """
+
+    mode: RuntimeMode = RuntimeMode.NONE
     allocation: RuntimeAllocationView | Any = NoAllocation
     spec: RuntimeContextSpec | None = None
-    enforcement: RuntimeEnforcement = RuntimeEnforcement.STRICT
+    enforcement: RuntimeEnforcement = RuntimeEnforcement.OFF
+    requirement_axes: RequirementAxes = field(default_factory=RequirementAxes)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,14 +50,20 @@ from .publication import publication
 # process-global generation rather than duplicating mutable session state.
 _ACTIVE_RUNTIME: ContextVar[RuntimeState | None] = ContextVar("dryml_active_runtime", default=None)
 _ACTIVE_BOOTSTRAP: ContextVar[RuntimeBootstrapState | None] = ContextVar("dryml_active_bootstrap", default=None)
-publication.initialize(RuntimeState(enforcement=default_enforcement_from_env()))
+_startup_enforcement, _startup_supplied = startup_enforcement_from_env()
+publication.initialize(
+    RuntimeState(
+        enforcement=_startup_enforcement,
+        requirement_axes=RequirementAxes.all() if _startup_supplied and _startup_enforcement is not RuntimeEnforcement.OFF else RequirementAxes(),
+    )
+)
 
 
 def active_runtime() -> RuntimeState:
     """Return the context-local state for the current process.
 
     Returns:
-        The active ``RuntimeState``. The default is orchestrator mode with
+        The active ``RuntimeState``. The default is no-role mode with
         ``NoAllocation``; this accessor does not activate a runtime or allocate
         resources.
     """
@@ -99,7 +110,15 @@ def set_enforcement(policy: RuntimeEnforcement | str) -> RuntimeEnforcement:
 
     normalized = normalize_enforcement(policy)
     runtime = active_runtime()
-    set_runtime(RuntimeState(mode=runtime.mode, allocation=runtime.allocation, spec=runtime.spec, enforcement=normalized))
+    set_runtime(
+        RuntimeState(
+            mode=runtime.mode,
+            allocation=runtime.allocation,
+            spec=runtime.spec,
+            enforcement=normalized,
+            requirement_axes=runtime.requirement_axes,
+        )
+    )
     return normalized
 
 
@@ -133,7 +152,8 @@ def enter_runtime(
     Args:
         mode: Process role accepted by ``RuntimeMode.coerce``.
         allocation: Allocation view. Worker and inline modes require a real
-            allocation; orchestrator and probe modes require ``NoAllocation``.
+            allocation; none, orchestrator, and probe modes require
+            ``NoAllocation``.
         spec: Optional process-local runtime configuration.
         enforcement: Optional strict, warn, or off policy; the current policy is
             retained when omitted.
@@ -234,24 +254,38 @@ def _make_state(
     enforcement: RuntimeEnforcement | str | None,
 ) -> RuntimeState:
     policy = active_runtime().enforcement if enforcement is None else normalize_enforcement(enforcement)
-    state = RuntimeState(mode=RuntimeMode.coerce(mode), allocation=allocation, spec=spec, enforcement=policy)
+    state = RuntimeState(
+        mode=RuntimeMode.coerce(mode),
+        allocation=allocation,
+        spec=spec,
+        enforcement=policy,
+        requirement_axes=active_runtime().requirement_axes,
+    )
     _validate_state(state)
     return state
 
 
 def _state_with_enforcement(state: RuntimeState, policy: RuntimeEnforcement | str) -> RuntimeState:
-    return RuntimeState(mode=state.mode, allocation=state.allocation, spec=state.spec, enforcement=normalize_enforcement(policy))
+    return RuntimeState(
+        mode=state.mode,
+        allocation=state.allocation,
+        spec=state.spec,
+        enforcement=normalize_enforcement(policy),
+        requirement_axes=state.requirement_axes,
+    )
 
 
 def _validate_state(state: RuntimeState) -> None:
+    if not isinstance(state.requirement_axes, RequirementAxes):
+        raise RuntimeTransitionError("runtime requirement_axes must be a RequirementAxes value")
     if state.mode in {RuntimeMode.WORKER, RuntimeMode.INLINE} and is_no_allocation(state.allocation):
         raise RuntimeTransitionError(
             "worker/inline runtime requires an explicit allocation",
             context={"mode": state.mode.value, "allocation": repr(state.allocation), "fix": "enter worker/inline runtime with RuntimeAllocationView"},
         )
-    if state.mode in {RuntimeMode.ORCHESTRATOR, RuntimeMode.PROBE} and not is_no_allocation(state.allocation):
+    if state.mode in {RuntimeMode.NONE, RuntimeMode.ORCHESTRATOR, RuntimeMode.PROBE} and not is_no_allocation(state.allocation):
         raise RuntimeTransitionError(
-            "orchestrator/probe runtime must not hold workload allocation",
+            "none/orchestrator/probe runtime must not hold workload allocation",
             context={"mode": state.mode.value, "allocation": repr(state.allocation), "fix": "use RuntimeMode.WORKER or RuntimeMode.INLINE for workload resources"},
         )
     _validate_session_visibility(state)
