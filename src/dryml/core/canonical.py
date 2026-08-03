@@ -847,14 +847,17 @@ class _FromCanonicalTransformer(GraphTransformer):
             return np.array(obj, copy=True)
 
         if kind is NodeKind.CONCRETE_DEFINITION:
-            if self.resolve_cdef is not None:
-                return self.resolve_cdef(obj)
-            return self.repo._materialize_cdef(
-                obj,
-                options=self.config,
-                memo=ctx.memo,
-                path=list(ctx.path),
-            )
+            from dryml.runtime import assert_object_materialization_allowed
+
+            with assert_object_materialization_allowed(operation="canonical_cdef_resolution"):
+                if self.resolve_cdef is not None:
+                    return self.resolve_cdef(obj)
+                return self.repo._materialize_cdef(
+                    obj,
+                    options=self.config,
+                    memo=ctx.memo,
+                    path=list(ctx.path),
+                )
 
         if kind is NodeKind.DEFLINK:
             from .cdef_graph import EdgeKind
@@ -867,14 +870,17 @@ class _FromCanonicalTransformer(GraphTransformer):
 
         if kind is NodeKind.DEFINITION:
             cdef = to_canonical(obj, repo=self.repo)
-            if self.resolve_cdef is not None:
-                return self.resolve_cdef(cdef)
-            return self.repo._materialize_cdef(
-                cdef,
-                options=self.config,
-                memo=ctx.memo,
-                path=list(ctx.path),
-            )
+            from dryml.runtime import assert_object_materialization_allowed
+
+            with assert_object_materialization_allowed(operation="canonical_definition_resolution"):
+                if self.resolve_cdef is not None:
+                    return self.resolve_cdef(cdef)
+                return self.repo._materialize_cdef(
+                    cdef,
+                    options=self.config,
+                    memo=ctx.memo,
+                    path=list(ctx.path),
+                )
 
         if kind is NodeKind.OBJECT:
             if self.resolve_cdef is not None:
@@ -887,7 +893,10 @@ class _FromCanonicalTransformer(GraphTransformer):
                     path=list(ctx.path),
                 )
 
-            if self.repo.get_cached(obj.definition, reuse_weak=self.config.reuse_weak) is None:
+            # This branch returns the caller's existing Object.  Membership is
+            # sufficient to preserve cache behavior without turning pass-through
+            # canonical conversion into a guarded cache extraction.
+            if not self.repo.has_cached(obj.definition, reuse_weak=self.config.reuse_weak):
                 self.repo.cache_weak(obj)
 
             return obj
@@ -966,6 +975,11 @@ def from_canonical(
     path: list[str | int] | tuple[str | int, ...] | None = None,
     resolve_cdef=None,
 ):
+    """Restore runtime values, guarding only CDef/Definition materialization.
+
+    Existing Object values pass through unchanged unless ``instance="new"``
+    explicitly requests a new realization.
+    """
     if memo is None:
         memo = {}
 

@@ -15,6 +15,7 @@ from dryml.core.dtype import DType
 from dryml.core.methods import Method, Traits, traits
 from dryml.core.object import Object
 from dryml.core.symbol import ImportRef, SourceSpec
+from dryml.runtime.errors import RuntimeTransitionError
 
 
 @dryml.env.req(requirements=("trace-class>=1",))
@@ -72,6 +73,25 @@ class UnboundOrchestration:
 
 def _enabled(**kwargs):
     return code.CodeAnalysisContext(allow_dynamic_execution=True, **kwargs)
+
+
+def test_public_dynamic_trace_is_fenced_in_strict_orchestration():
+    called = []
+
+    def target():
+        called.append(True)
+
+    dryml.session.set_mode("orchestrator")
+    try:
+        with pytest.raises(
+            RuntimeTransitionError,
+            match="Orchestration mode prohibits local workload execution",
+        ):
+            code.trace(target, context=_enabled())
+    finally:
+        dryml.session.reset()
+
+    assert called == []
 
 
 def _summary(result):

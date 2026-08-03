@@ -42,18 +42,24 @@ class BoundManagedMethod:
         self.result = self.outputs[declarations.primary.slot]
 
     def __call__(self, *args, **kwargs):
-        """Invoke directly in definition-only mode or through the local runtime."""
+        """Invoke directly or through the local runtime under a workload lease.
+
+        Strict orchestration rejects both local paths before Store mutation or
+        user-method execution; explicit managed dispatch remains separate.
+        """
 
         from .runtime import invoke_managed, should_use_managed_runtime
+        from dryml.runtime import assert_control_plane_target_execution_allowed
 
-        if not should_use_managed_runtime(self, kwargs):
-            return self.__func__(self.__self__, *args, **kwargs)
-        runtime = {
-            name: kwargs.pop(name)
-            for name in ("repo", "store", "callbacks", "rerun")
-            if name in kwargs
-        }
-        return invoke_managed(self, *args, **runtime, **kwargs)
+        with assert_control_plane_target_execution_allowed(operation="managed_method_call"):
+            if not should_use_managed_runtime(self, kwargs):
+                return self.__func__(self.__self__, *args, **kwargs)
+            runtime = {
+                name: kwargs.pop(name)
+                for name in ("repo", "store", "callbacks", "rerun")
+                if name in kwargs
+            }
+            return invoke_managed(self, *args, **runtime, **kwargs)
 
     def output(self, slot: str) -> ManagedOutputRef:
         """Return the stable logical reference for a declared output slot."""

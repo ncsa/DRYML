@@ -209,12 +209,28 @@ class Repo:
 
     # --- helpers you already have ---
     def get_cached(self, cdef, *, reuse_weak: bool = True):
+        """Return a cached live Object after materialization policy admission.
+
+        Use :meth:`has_cached` for definition-only planning.  Strict
+        orchestration rejects this live-object extraction before a cache entry
+        is returned.
+        """
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="repo_get_cached"):
+            return self._get_cached(cdef, reuse_weak=reuse_weak)
+
+    def _get_cached(self, cdef, *, reuse_weak: bool = True):
         obj = self.strong_obj_cache.get(cdef)
         if obj is not None:
             return obj
         if reuse_weak:
             return self.weak_obj_cache.get(cdef)
         return None
+
+    def has_cached(self, cdef, *, reuse_weak: bool = True) -> bool:
+        """Report cache membership without retrieving a live Object."""
+        return cdef in self.strong_obj_cache or (reuse_weak and cdef in self.weak_obj_cache)
 
     def pin(self, obj):
         """Promote to strong cache."""
@@ -755,22 +771,27 @@ class Repo:
         revision: RevisionType|str | None = None,
         options: RepoLoadOptions | None = None,
     ):
-        load_options = self._load_options(
-            options=options,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-        memo: dict[ConcreteDefinition, Object] = {}
-        return self._realize(
-            x,
-            options=load_options,
-            path=[""],
-            memo=memo,
-        )
+        """Resolve a live Object under one top-level materialization lease."""
+
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="repo_load_object"):
+            load_options = self._load_options(
+                options=options,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+            )
+            memo: dict[ConcreteDefinition, Object] = {}
+            return self._realize(
+                x,
+                options=load_options,
+                path=[""],
+                memo=memo,
+            )
 
     def load(self, cdef: ConcreteDefinition, **kwargs) -> Object:
         if not isinstance(cdef, ConcreteDefinition):
@@ -965,9 +986,12 @@ class Repo:
         selected_objects: dict[ConcreteDefinition, Object] = {}
         for sel in selectors:
             if isinstance(sel, Callable) and not isinstance(sel, (Definition, ConcreteDefinition)):
-                for cdef, obj in self.strong_obj_cache.items():
-                    if sel(obj, *sel_args, **sel_kwargs):
-                        selected_objects[cdef] = obj
+                from dryml.runtime import assert_object_materialization_allowed
+
+                with assert_object_materialization_allowed(operation="repo_get_callable_selector"):
+                    for cdef, obj in self.strong_obj_cache.items():
+                        if sel(obj, *sel_args, **sel_kwargs):
+                            selected_objects[cdef] = obj
                 continue
 
             objs = (
@@ -997,23 +1021,24 @@ class Repo:
         if func_kwargs is None:
             func_kwargs = {}
 
-        # Create apply function
-        def apply_func(obj):
-            return func(obj, *func_args, **func_kwargs)
+        from dryml.runtime import assert_object_materialization_allowed
 
-        # Get object list
-        objs = self.get(
-            selector=selector,
-            sel_args=sel_args, sel_kwargs=sel_kwargs,
-            options=options,
-            **kwargs)
+        with assert_object_materialization_allowed(operation="repo_apply"):
+            def apply_func(obj):
+                return func(obj, *func_args, **func_kwargs)
 
-        obj_iter = objs.items()
-        if verbose:
-            obj_iter = tqdm(obj_iter)
-        return {
-            obj_def: apply_func(obj) for obj_def, obj in obj_iter
-        }
+            objs = self.get(
+                selector=selector,
+                sel_args=sel_args, sel_kwargs=sel_kwargs,
+                options=options,
+                **kwargs)
+
+            obj_iter = objs.items()
+            if verbose:
+                obj_iter = tqdm(obj_iter)
+            return {
+                obj_def: apply_func(obj) for obj_def, obj in obj_iter
+            }
 
     def _graph_options(
             self,

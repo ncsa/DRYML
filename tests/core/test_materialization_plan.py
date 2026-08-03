@@ -263,7 +263,7 @@ def test_executor_honors_materialization_action_kind():
         memo=memo,
         path=[""],
     )
-    plan.actions[cdef] = MaterializationAction(cdef, "reuse", "$")
+    plan.actions[cdef] = MaterializationAction(cdef, "reuse", "$", reuse_source="cache")
 
     with pytest.raises(RepoLoadError, match="cached reuse"):
         execute_materialization_plan(repo, plan, memo=memo, revision={}, root=cdef)

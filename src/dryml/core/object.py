@@ -294,9 +294,13 @@ class Object(metaclass=Dryml):
         load_object(self, repo=repo, revision=revision)
             
     def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
-        loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
-        assert loaded_def == self.definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.definition}"
-        self.restore_state_from_dir_imp(src_dir, revision=revision)
+        """Restore persisted state after strict materialization admission."""
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="object_restore_state"):
+            loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
+            assert loaded_def == self.definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.definition}"
+            self.restore_state_from_dir_imp(src_dir, revision=revision)
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str|None = None):
         pass

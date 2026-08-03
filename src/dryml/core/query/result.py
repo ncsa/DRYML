@@ -157,24 +157,27 @@ class DefinitionResultSet:
             cache: CachePolicy = "weak",
             revision=None,
             options: RepoLoadOptions | None = None) -> "ObjectResultSet":
-        if not self.materializable:
-            raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
-        objs = {}
-        for cdef in self._definitions:
-            replicas = self._replicas.get(cdef, ())
-            if replicas:
-                self.repo.set_object_store(cdef, replicas[0])
-            objs[cdef] = self.repo.load_object(
-                cdef,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=False,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-                options=options,
-            )
-        return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="definition_result_set_objects"):
+            if not self.materializable:
+                raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
+            objs = {}
+            for cdef in self._definitions:
+                replicas = self._replicas.get(cdef, ())
+                if replicas:
+                    self.repo.set_object_store(cdef, replicas[0])
+                objs[cdef] = self.repo.load_object(
+                    cdef,
+                    instance=instance,
+                    restore_state=restore_state,
+                    build_missing=False,
+                    reuse_weak=reuse_weak,
+                    cache=cache,
+                    revision=revision,
+                    options=options,
+                )
+            return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
 
     def apply(self, func, *args, **kwargs):
         """Materialize this definition set and apply ``func`` to each object."""
@@ -472,7 +475,10 @@ class ObjectResultSet(Mapping):
         object.__setattr__(self, "explanation", explanation)
 
     def __getitem__(self, key: ConcreteDefinition) -> Object:
-        return self._objects[key]
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="object_result_set_getitem"):
+            return self._objects[key]
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
         return iter(self._objects)
@@ -487,17 +493,26 @@ class ObjectResultSet(Mapping):
         return len(self) > 0
 
     def one(self) -> Object:
-        if len(self) != 1:
-            raise QueryCardinalityError(f"Expected exactly one object, found {len(self)}.")
-        return next(iter(self._objects.values()))
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="object_result_set_one"):
+            if len(self) != 1:
+                raise QueryCardinalityError(f"Expected exactly one object, found {len(self)}.")
+            return next(iter(self._objects.values()))
 
     def one_or_none(self) -> Object | None:
-        if len(self) > 1:
-            raise QueryCardinalityError(f"Expected zero or one object, found {len(self)}.")
-        return next(iter(self._objects.values())) if self._objects else None
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="object_result_set_one_or_none"):
+            if len(self) > 1:
+                raise QueryCardinalityError(f"Expected zero or one object, found {len(self)}.")
+            return next(iter(self._objects.values())) if self._objects else None
 
     def first(self) -> Object | None:
-        return next(iter(self._objects.values())) if self._objects else None
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="object_result_set_first"):
+            return next(iter(self._objects.values())) if self._objects else None
 
     def apply(self, func, *args, **kwargs) -> "ObjectResultSet":
         """Apply ``func`` to every loaded object in deterministic result order.
@@ -505,6 +520,9 @@ class ObjectResultSet(Mapping):
         The result set itself is returned so callers can chain additional result
         set operations while mutating or inspecting only the selected objects.
         """
-        for obj in self._objects.values():
-            func(obj, *args, **kwargs)
-        return self
+        from dryml.runtime import assert_object_materialization_allowed
+
+        with assert_object_materialization_allowed(operation="object_result_set_apply"):
+            for obj in self._objects.values():
+                func(obj, *args, **kwargs)
+            return self

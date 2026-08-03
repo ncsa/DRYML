@@ -159,21 +159,22 @@ class Store(ABC):
                 os.remove(temp_path)
 
     def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
+        """Restore persisted state into ``obj`` when the object exists here.
+
+        Strict orchestration rejects before reading stored state or calling an
+        Object restoration hook.  Missing state is a no-op.
         """
-        Load data for this object, if present. Returns True if loaded,
-        False if this store doesn't have data for it.
-        Store is responsible for creating/using a directory and
-        calling obj.load_from_dir().
-        """
 
-        cdef = obj.definition
-        def_path = self._def_file(cdef)
-        if not os.path.exists(def_path):
-            return
+        from dryml.runtime import assert_object_materialization_allowed
 
-        obj_dir = self.object_dir(cdef)
+        with assert_object_materialization_allowed(operation="store_restore_object"):
+            cdef = obj.definition
+            def_path = self._def_file(cdef)
+            if not os.path.exists(def_path):
+                return
 
-        obj.restore_state_from_dir(obj_dir, revision=revision)
+            obj_dir = self.object_dir(cdef)
+            obj.restore_state_from_dir(obj_dir, revision=revision)
 
     def read_definition(self, cdef: "ConcreteDefinition") -> "ConcreteDefinition | None":
         def_path = self._def_file(cdef)

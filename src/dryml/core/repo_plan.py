@@ -83,7 +83,8 @@ def build_runtime_binding(
         repo,
         value: Any,
         *,
-        resolve_global: bool = False) -> RuntimeGraphBinding:
+        resolve_global: bool = False,
+        resolve_cached: bool = True) -> RuntimeGraphBinding:
     roots = collect_runtime_roots(value)
     graph = ConcreteDefinitionGraph.from_roots(root.definition for root in roots)
     materialize_nodes = _materialize_reachable_nodes(graph, roots)
@@ -91,15 +92,16 @@ def build_runtime_binding(
     for root in roots:
         if root.obj is not None:
             bind_runtime_object(objects, root.definition, root.obj, path=root.path)
-    for node in graph.nodes():
-        if node.definition not in materialize_nodes:
-            continue
-        if node.definition in objects:
-            continue
-        obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
-        if obj is not None:
-            path = _node_primary_path(graph, roots, node.definition)
-            bind_runtime_object(objects, node.definition, obj, path=path)
+    if resolve_cached:
+        for node in graph.nodes():
+            if node.definition not in materialize_nodes:
+                continue
+            if node.definition in objects:
+                continue
+            obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
+            if obj is not None:
+                path = _node_primary_path(graph, roots, node.definition)
+                bind_runtime_object(objects, node.definition, obj, path=path)
     missing = frozenset(cdef for cdef in materialize_nodes if cdef not in objects)
     return RuntimeGraphBinding(graph=graph, roots=roots, objects=objects, missing=missing)
 
@@ -120,8 +122,18 @@ def bind_runtime_object(
 
 def iter_graph_objects(repo, root: Any, options: RepoGraphOptions) -> Iterator[Object]:
     _validate_graph_options(options)
-    binding = build_runtime_binding(repo, root)
-    for occurrence in _iter_bound_graph_object_occurrences(repo, binding, options):
+    binding = build_runtime_binding(repo, root, resolve_cached=False)
+    occurrences = _iter_bound_graph_object_occurrences(repo, binding, options)
+    from dryml.runtime import assert_object_materialization_allowed
+
+    while True:
+        # Each next() holds admission only through resolution.  Releasing before
+        # yield lets a transition between yields govern the next retrieval.
+        with assert_object_materialization_allowed(operation="repo_iter_graph"):
+            try:
+                occurrence = next(occurrences)
+            except StopIteration:
+                return
         yield occurrence.obj
 
 
@@ -147,12 +159,11 @@ def _iter_bound_graph_object_occurrences(
         binding: RuntimeGraphBinding,
         options: RepoGraphOptions,
         *,
-        resolve_global: bool = False) -> tuple[GraphObjectOccurrence, ...]:
-    out: list[GraphObjectOccurrence] = []
+        resolve_global: bool = False) -> Iterator[GraphObjectOccurrence]:
     load_memo: dict[ConcreteDefinition, Object] = {}
     seen: set[ConcreteDefinition] = set()
 
-    def visit(cdef: ConcreteDefinition, path: GraphPath, explicit_obj: Object | None = None) -> None:
+    def visit(cdef: ConcreteDefinition, path: GraphPath, explicit_obj: Object | None = None) -> Iterator[GraphObjectOccurrence]:
         obj = explicit_obj if explicit_obj is not None else binding.objects.get(cdef)
         if obj is None and resolve_global:
             obj = _cached_object(repo, cdef, reuse_weak=options.load.reuse_weak, resolve_global=True)
@@ -169,19 +180,18 @@ def _iter_bound_graph_object_occurrences(
 
         should_apply = options.include_root or bool(path)
         if options.order == "pre" and should_apply:
-            out.append(GraphObjectOccurrence(path, cdef, obj))
+            yield GraphObjectOccurrence(path, cdef, obj)
 
         for edge in binding.graph.outgoing(cdef):
             if edge.kind is not EdgeKind.MATERIALIZE:
                 continue
-            visit(edge.child, path.join(edge.path))
+            yield from visit(edge.child, path.join(edge.path))
 
         if options.order == "post" and should_apply:
-            out.append(GraphObjectOccurrence(path, cdef, obj))
+            yield GraphObjectOccurrence(path, cdef, obj)
 
     for root_occ in binding.roots:
-        visit(root_occ.definition, root_occ.path, root_occ.obj)
-    return tuple(out)
+        yield from visit(root_occ.definition, root_occ.path, root_occ.obj)
 
 
 def apply_graph_objects(
@@ -189,18 +199,21 @@ def apply_graph_objects(
         root: Any,
         func: Callable[[Object], T],
         options: RepoGraphOptions) -> dict[ConcreteDefinition, T] | tuple[GraphApplyResult[T], ...]:
-    _validate_graph_options(options)
-    binding = build_runtime_binding(repo, root)
-    occurrences = _iter_bound_graph_object_occurrences(repo, binding, options)
-    if not options.dedupe:
-        return tuple(
-            GraphApplyResult(occ.path, occ.definition, func(occ.obj))
-            for occ in occurrences
-        )
-    results: dict[ConcreteDefinition, T] = {}
-    for occ in occurrences:
-        results[occ.definition] = func(occ.obj)
-    return results
+    from dryml.runtime import assert_object_materialization_allowed
+
+    with assert_object_materialization_allowed(operation="repo_apply_graph"):
+        _validate_graph_options(options)
+        binding = build_runtime_binding(repo, root)
+        occurrences = _iter_bound_graph_object_occurrences(repo, binding, options)
+        if not options.dedupe:
+            return tuple(
+                GraphApplyResult(occ.path, occ.definition, func(occ.obj))
+                for occ in occurrences
+            )
+        results: dict[ConcreteDefinition, T] = {}
+        for occ in occurrences:
+            results[occ.definition] = func(occ.obj)
+        return results
 
 
 def add_objects(repo, values: Iterable[Any], *, store=None) -> None:

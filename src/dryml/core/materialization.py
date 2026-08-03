@@ -12,14 +12,21 @@ from .symbol import resolve_symbol
 
 
 MaterializationActionKind = Literal["reuse", "construct"]
+MaterializationReuseSource = Literal["memo", "cache", None]
 
 
 @dataclass(frozen=True, slots=True)
 class MaterializationAction:
+    """Definition-only recipe for one runtime materialization step.
+
+    Reuse records its source, not a live Object.  The executor resolves that
+    source only after the materialization guard admits the operation.
+    """
+
     definition: ConcreteDefinition
     kind: MaterializationActionKind
     primary_path: str
-    obj: Object | None = None
+    reuse_source: MaterializationReuseSource = None
     restore_state: bool = True
     store: Any | None = None
     revision: str | None = None
@@ -30,6 +37,8 @@ class MaterializationAction:
 
 @dataclass(slots=True)
 class MaterializationPlan:
+    """Definition-only ordered materialization graph and per-node actions."""
+
     graph: ConcreteDefinitionGraph
     actions: dict[ConcreteDefinition, MaterializationAction]
     order: tuple[ConcreteDefinition, ...]
@@ -44,6 +53,7 @@ def build_materialization_plan(
         revision: dict[ConcreteDefinition, str] | None = None,
         memo: dict | None = None,
         path: list[str | int] | None = None) -> MaterializationPlan:
+    """Plan construction, reuse, and restoration without retaining Objects."""
     if memo is None:
         memo = {}
     if options.instance == "new" and options.cache != "none":
@@ -57,16 +67,16 @@ def build_materialization_plan(
     actions = {}
     revision = {} if revision is None else revision
     for node in order:
-        cached_obj = repo.get_cached(node, reuse_weak=options.reuse_weak) if options.instance == "reuse" else None
-        memo_obj = memo.get(node)
-        reuse_obj = memo_obj if memo_obj is not None else cached_obj
-        kind: MaterializationActionKind = "reuse" if reuse_obj is not None else "construct"
+        memo_reuse = memo.get(node) is not None
+        cache_reuse = options.instance == "reuse" and repo.has_cached(node, reuse_weak=options.reuse_weak)
+        reuse_source: MaterializationReuseSource = "memo" if memo_reuse else ("cache" if cache_reuse else None)
+        kind: MaterializationActionKind = "reuse" if reuse_source is not None else "construct"
         selected_store = repo._first_store_with(node) if options.restore_state else None
         actions[node] = MaterializationAction(
             definition=node,
             kind=kind,
             primary_path=root_path if node == cdef else str(primary_paths.get(node, "<unknown>")),
-            obj=reuse_obj,
+            reuse_source=reuse_source,
             restore_state=options.restore_state,
             store=selected_store,
             revision=revision.get(node),
@@ -84,82 +94,89 @@ def execute_materialization_plan(
         memo: dict,
         revision: dict[ConcreteDefinition, str],
         root: ConcreteDefinition):
+    """Execute a planned live-object operation under one materialization lease."""
     from .repo import RepoLoadError
 
-    local_memo = dict(memo)
-    for cdef in plan.order:
-        if cdef in local_memo:
-            continue
+    from dryml.runtime import assert_object_materialization_allowed
 
-        action = plan.actions[cdef]
-        revision_str = action.revision if action.revision is not None else revision.get(cdef, None)
+    # This public executor is also used directly, so it owns admission before
+    # cache extraction, construction, or restoration can begin.
+    with assert_object_materialization_allowed(operation="materialization_plan_execute"):
+        local_memo = dict(memo)
+        for cdef in plan.order:
+            if cdef in local_memo:
+                continue
 
-        if action.kind == "reuse":
-            obj = action.obj if action.obj is not None else repo.get_cached(cdef, reuse_weak=plan.options.reuse_weak)
-            if obj is None:
+            action = plan.actions[cdef]
+            revision_str = action.revision if action.revision is not None else revision.get(cdef, None)
+
+            if action.kind == "reuse":
+                obj = local_memo.get(cdef) if action.reuse_source == "memo" else repo.get_cached(cdef, reuse_weak=plan.options.reuse_weak)
+                if obj is None:
+                    source = "memoized" if action.reuse_source == "memo" else "cached"
+                    raise RepoLoadError(
+                        f"Materialization plan requested {source} reuse for {cdef} at {action.primary_path}, "
+                        "but no cached object is available."
+                    )
+                if action.restore_state:
+                    _restore_cached_if_needed(
+                        repo,
+                        cdef,
+                        obj,
+                        is_serializable=isinstance(obj, Serializable),
+                        store=action.store,
+                        revision_str=revision_str,
+                        build_missing=action.build_missing,
+                    )
+                local_memo[cdef] = obj
+                memo[cdef] = obj
+                continue
+
+            if action.kind != "construct":
+                raise RepoLoadError(f"Unknown materialization action kind {action.kind!r} at {action.primary_path}.")
+
+            try:
+                cls = resolve_symbol(cdef.cls)
+            except Exception as e:
+                cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
+                raise RepoLoadError(f"Error resolving {cls_name} at {action.primary_path}: {e}") from e
+
+            is_serializable = isinstance(cls, type) and issubclass(cls, Serializable)
+
+            in_store = action.store is not None
+            if action.restore_state and is_serializable and (not in_store) and (not action.build_missing):
                 raise RepoLoadError(
-                    f"Materialization plan requested cached reuse for {cdef} at {action.primary_path}, "
-                    "but no cached object is available."
+                    f"Missing stored state for {cdef} at {action.primary_path} "
+                    f"(set build_missing=True to allow fresh construction)"
                 )
-            if action.restore_state:
-                _restore_cached_if_needed(
-                    repo,
-                    cdef,
-                    obj,
-                    is_serializable=isinstance(obj, Serializable),
-                    store=action.store,
-                    revision_str=revision_str,
-                    build_missing=action.build_missing,
-                )
+
+            rt_args = from_canonical_local(cdef.args, resolve_cdef=lambda child: local_memo[child], repo=repo)
+            rt_kwargs = from_canonical_local(cdef.kwargs, resolve_cdef=lambda child: local_memo[child], repo=repo)
+
+            try:
+                obj = cls(*rt_args, repo=repo, __cdef__=cdef, **rt_kwargs)
+                repo._num_constructions += 1
+            except Exception as e:
+                cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
+                raise RepoLoadError(f"Error constructing {cls_name} at {action.primary_path}: {e}") from e
+
+            if action.restore_state and in_store:
+                st = action.store
+                if st is None:
+                    if not action.build_missing:
+                        raise RepoLoadError(f"Inconsistent store index for {cdef}")
+                else:
+                    try:
+                        st.restore_object(obj, revision=revision_str)
+                        repo.set_object_store(cdef, st)
+                    except Exception as e:
+                        raise RepoLoadError(f"Error restoring state for {cdef} at {action.primary_path}: {e}") from e
+
             local_memo[cdef] = obj
             memo[cdef] = obj
-            continue
+            _publish_cache(repo, obj, action.cache, action.instance)
 
-        if action.kind != "construct":
-            raise RepoLoadError(f"Unknown materialization action kind {action.kind!r} at {action.primary_path}.")
-
-        try:
-            cls = resolve_symbol(cdef.cls)
-        except Exception as e:
-            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
-            raise RepoLoadError(f"Error resolving {cls_name} at {action.primary_path}: {e}") from e
-
-        is_serializable = isinstance(cls, type) and issubclass(cls, Serializable)
-
-        in_store = action.store is not None
-        if action.restore_state and is_serializable and (not in_store) and (not action.build_missing):
-            raise RepoLoadError(
-                f"Missing stored state for {cdef} at {action.primary_path} "
-                f"(set build_missing=True to allow fresh construction)"
-            )
-
-        rt_args = from_canonical_local(cdef.args, resolve_cdef=lambda child: local_memo[child], repo=repo)
-        rt_kwargs = from_canonical_local(cdef.kwargs, resolve_cdef=lambda child: local_memo[child], repo=repo)
-
-        try:
-            obj = cls(*rt_args, repo=repo, __cdef__=cdef, **rt_kwargs)
-            repo._num_constructions += 1
-        except Exception as e:
-            cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
-            raise RepoLoadError(f"Error constructing {cls_name} at {action.primary_path}: {e}") from e
-
-        if action.restore_state and in_store:
-            st = action.store
-            if st is None:
-                if not action.build_missing:
-                    raise RepoLoadError(f"Inconsistent store index for {cdef}")
-            else:
-                try:
-                    st.restore_object(obj, revision=revision_str)
-                    repo.set_object_store(cdef, st)
-                except Exception as e:
-                    raise RepoLoadError(f"Error restoring state for {cdef} at {action.primary_path}: {e}") from e
-
-        local_memo[cdef] = obj
-        memo[cdef] = obj
-        _publish_cache(repo, obj, action.cache, action.instance)
-
-    return local_memo[root]
+        return local_memo[root]
 
 
 def from_canonical_local(value: Any, *, resolve_cdef, repo):
@@ -175,7 +192,7 @@ def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefiniti
         included.add(cdef)
         if cdef in memo:
             return
-        cached = options.instance == "reuse" and repo.get_cached(cdef, reuse_weak=options.reuse_weak) is not None
+        cached = options.instance == "reuse" and repo.has_cached(cdef, reuse_weak=options.reuse_weak)
         if cached and not options.restore_state:
             return
         for edge in graph.outgoing(cdef):

@@ -295,6 +295,8 @@ def trace(
             failure occurs while ``context.diagnostics_policy`` is ``"raise"``,
             after trace state is restored. Ordinary target failures and
             supported trace failures are returned as structured diagnostics.
+        RuntimeTransitionError: Before the target runs in strict orchestration,
+            where current-process workload execution is prohibited.
         BaseException: An interruption raised by the invoked target propagates
             after trace state is restored.
     """
@@ -361,13 +363,16 @@ def trace(
         or inspect.isgeneratorfunction(code_target.obj)
     ):
         return _unsupported_trace_target(code_target.spec)
-    return run_trace(_InvocationRequest(
-        target=code_target,
-        args=args,
-        kwargs=dict(selected_kwargs),
-        context=selected_context,
-        policy=selected_policy,
-    ))
+    from dryml.runtime import assert_control_plane_target_execution_allowed
+
+    with assert_control_plane_target_execution_allowed(operation="code_dynamic_trace"):
+        return run_trace(_InvocationRequest(
+            target=code_target,
+            args=args,
+            kwargs=dict(selected_kwargs),
+            context=selected_context,
+            policy=selected_policy,
+        ))
 
 
 def _trace_target_spec_without_resolution(target: Any) -> CodeTargetSpec:

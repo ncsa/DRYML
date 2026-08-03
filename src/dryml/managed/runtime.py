@@ -91,7 +91,32 @@ def invoke_managed(
     rerun: bool = False,
     **kwargs: Any,
 ) -> ManagedInvocationResult:
-    """Execute, resume, rerun, or reuse one managed method in one Store."""
+    """Execute, resume, rerun, or reuse one managed method in one Store.
+
+    Strict orchestration rejects before Store lifecycle work begins.  An
+    admitted invocation retains its control-plane lease through completion or
+    failure.
+    """
+
+    from dryml.runtime import assert_control_plane_target_execution_allowed
+
+    with assert_control_plane_target_execution_allowed(operation="managed_local_runtime"):
+        return _invoke_managed(
+            bound, *args, repo=repo, store=store, callbacks=callbacks,
+            rerun=rerun, **kwargs,
+        )
+
+
+def _invoke_managed(
+    bound: BoundManagedMethod,
+    *args: Any,
+    repo: Any | None = None,
+    store: Any | None = None,
+    callbacks: Any = (),
+    rerun: bool = False,
+    **kwargs: Any,
+) -> ManagedInvocationResult:
+    """Run the local managed lifecycle after control-plane admission."""
 
     if not isinstance(bound, BoundManagedMethod):
         raise TypeError("invoke_managed requires a bound managed method")

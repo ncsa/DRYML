@@ -1488,9 +1488,11 @@ def _trace_dispatch_invocation(
     # Dynamic tracing executes the public wrapper in the parent process only to
     # analyze the worker target. The bypass is exact-target and always reset.
     from dryml.annotations.interception import _direct_call_bypass
+    from dryml.runtime import assert_control_plane_target_execution_allowed
 
-    with _direct_call_bypass(live_target):
-        result = trace(live_target, args=trace_args, kwargs=trace_kwargs, context=trace_context, policy=request.policy)
+    with assert_control_plane_target_execution_allowed(operation="dispatch_dynamic_trace"):
+        with _direct_call_bypass(live_target):
+            result = trace(live_target, args=trace_args, kwargs=trace_kwargs, context=trace_context, policy=request.policy)
     expected_target = target_from_callable(live_target, metadata=trace_context.metadata).spec.to_data()
     return _admit_trace_result(normalized, request.policy, direct_fragments, target, input_id, run_id, expected_target, result)
 
