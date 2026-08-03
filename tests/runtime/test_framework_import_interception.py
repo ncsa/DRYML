@@ -171,6 +171,62 @@ assert statuses['tensorflow:tensorflow:process_memory'] == 'declarative'
     assert completed.returncode == 0, completed.stderr
 
 
+def test_orchestrator_hides_visible_accelerators_before_fake_torch_module_execution(tmp_path):
+    """Strict orchestration permits definition work after hiding raw Torch visibility."""
+
+    (tmp_path / "torch.py").write_text(
+        "import os\n"
+        "SEEN_VISIBILITY = {name: os.environ.get(name) for name in (\n"
+        "    'CUDA_VISIBLE_DEVICES', 'HIP_VISIBLE_DEVICES',\n"
+        "    'ROCR_VISIBLE_DEVICES', 'XLA_VISIBLE_DEVICES',\n"
+        ")}\n"
+        "class cuda:\n"
+        "    @staticmethod\n"
+        "    def device_count(): return 0\n"
+        "def set_num_threads(value): pass\n",
+        encoding="utf-8",
+    )
+    script = """
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from dryml import session
+from dryml.core import Definition, Object
+from dryml.runtime import NoAllocation, active_runtime
+
+session.set_mode('orchestrator')
+assert active_runtime().allocation is NoAllocation
+assert 'torch' not in sys.modules
+import torch
+
+class DefinitionOnly(Object):
+    def __init__(self):
+        raise AssertionError('definition construction must not run __init__')
+
+assert isinstance(DefinitionOnly(), Definition)
+assert torch.SEEN_VISIBILITY == {
+    'CUDA_VISIBLE_DEVICES': '',
+    'HIP_VISIBLE_DEVICES': '',
+    'ROCR_VISIBLE_DEVICES': '',
+    'XLA_VISIBLE_DEVICES': '',
+}
+"""
+    environment = dict(
+        os.environ,
+        CUDA_VISIBLE_DEVICES="synthetic-cuda-0",
+        HIP_VISIBLE_DEVICES="synthetic-hip-0",
+        ROCR_VISIBLE_DEVICES="synthetic-rocr-0",
+        XLA_VISIBLE_DEVICES="synthetic-xla-0",
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_mandatory_leaf_failure_prevents_caller_target_entry(tmp_path):
     """A fake TensorFlow lacking its visibility API poisons the controlled import."""
 

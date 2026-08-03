@@ -46,8 +46,11 @@ def target_module(tmp_path):
             IMPORT_RUNTIME_MODE = active_runtime_mode().value
 
             class Box(Pickleable):
+                last_construction_mode = None
+
                 def __init__(self, value):
                     super().__init__()
+                    type(self).last_construction_mode = active_runtime_mode().value
                     self.value = value
 
                 def plus(self, amount):
@@ -185,6 +188,20 @@ def target_module(tmp_path):
 
             def box_value(box):
                 return box.value
+
+            def cdef_materialization_status(box):
+                snapshot = dryml.session.current()
+                return {
+                    "value": box.value,
+                    "constructor_mode": Box.last_construction_mode,
+                    "runtime_mode": active_runtime_mode().value,
+                    "accelerators": {key: list(value) for key, value in active_runtime().allocation.accelerators.items()},
+                    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+                    "enforcement": enforcement().value,
+                    "selected_environment": None if snapshot.selected_environment is None else snapshot.selected_environment.kind,
+                    "selected_world": None if snapshot.selected_world is None else sorted(snapshot.selected_world.roles),
+                    "selected_runtime": None if snapshot.selected_runtime is None else snapshot.selected_runtime.mode.value,
+                }
 
             def ref_value(ref):
                 return ref

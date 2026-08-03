@@ -10,10 +10,12 @@ from contextvars import copy_context
 import pytest
 
 from dryml import session
+from dryml.dispatch import normalize_user_operation, resolve_dispatch_plan
+from dryml.environments import PythonExecutableSpec
 from dryml._framework_imports import finder
 from dryml.core import Object, definition_mode, selector_mode, space_mode
 from dryml.core.session import config, configure, current_object_mode, get_config, status
-from dryml.runtime import RuntimeAllocationView, RuntimeEnforcement, RuntimeMode, RuntimeState, active_runtime, assert_control_plane_target_execution_allowed, assert_object_materialization_allowed, enter_runtime, plain
+from dryml.runtime import NoAllocation, RuntimeAllocationView, RuntimeEnforcement, RuntimeMode, RuntimeState, active_runtime, assert_control_plane_target_execution_allowed, assert_object_materialization_allowed, enter_runtime, plain
 from dryml.runtime.guards import internal_construction_admitted
 from dryml.runtime.errors import RuntimeTransitionError
 from dryml.runtime.frameworks import FrameworkRegistration, framework_registry
@@ -85,6 +87,27 @@ def test_orchestrator_object_mode_floor_projects_and_rejects_materializing_conte
 
     session.reset()
     assert current_object_mode() == "load_or_build"
+
+
+def test_orchestrator_worker_environment_and_zero_gpu_world_remain_independent_requests():
+    requested_environment = PythonExecutableSpec(sys.executable)
+    session.set_mode("orchestrator")
+    session.worker_env_request(requested_environment)
+    snapshot = session.worker_world_request(cpus=2, gpus=0)
+
+    resolution = resolve_dispatch_plan(
+        normalize_user_operation(lambda: None, allow_pickle=True),
+        session_snapshot=snapshot,
+    )
+
+    assert snapshot.runtime is not None
+    assert snapshot.runtime.allocation is NoAllocation
+    assert snapshot.requested_environment == requested_environment
+    assert snapshot.requested_world is not None
+    assert resolution.environment_selection.source == "session_requested"
+    assert resolution.environment_selection.candidate["kind"] == "python"
+    assert resolution.world_selection.source == "session_requested"
+    assert resolution.world_selection.candidate["roles"]["worker"]["process"]["resources"] == {"cpus": 2}
 
 
 def test_definition_build_guard_has_stable_diagnostic_and_warn_off_admission():
