@@ -6,6 +6,8 @@ Omitting runtime/session setup now intentionally means ordinary Python:
 `dryml.session.mode()` is `"python"`, runtime enforcement is off, and DRYML does
 not change inherited framework or device behavior. This replaces the prior
 documentation assumption that an omitted mode behaved as strict orchestration.
+The serialized low-level role is explicitly `none` (`RuntimeMode.NONE`), not an
+unchecked orchestrator; legacy role data is not silently reclassified.
 
 ## Choose The Explicit Behavior You Need
 
@@ -22,11 +24,12 @@ dryml.session.manage(cpus=4)
 dryml.session.set_mode("orchestrator")
 ```
 
-Use `session.worker_world_request(...)` to set the default world for a future worker. It does not change the
+Use `session.worker_env_request(...)` and `session.worker_world_request(...)` to
+set concrete default candidates for a future worker. They do not change the
 managed notebook allowance, so a CPU-only notebook can request a GPU worker.
-Use `session.require_env(...)` only for Python/software compatibility, not GPU
-selection. `configure(...)` atomically replaces the complete session when one
-declaration is preferred.
+Use `session.require_env(...)` only for hard Python/software compatibility, not
+GPU selection. `configure(...)` atomically replaces the complete session when
+one declaration is preferred.
 
 ## Update Old Notebook Setup
 
@@ -36,6 +39,9 @@ Replace manual context lifetimes and a single default role with facade calls:
 # Before: nested environments/worlds/runtime scopes and a hand-built role.
 # After:
 snapshot = dryml.session.manage(cpus=2)
+snapshot = dryml.session.worker_env_request(
+    dryml.environments.CurrentEnvironmentSpec()
+)
 snapshot = dryml.session.worker_world_request(cpus=2, gpus=1)
 ```
 
@@ -60,3 +66,23 @@ pre-decoration references remain unsupported direct-call interception.
 
 `managed session` does not mean `managed operation`: Store-backed managed
 `compute`/`train` lifecycles keep their existing contract.
+
+## Dispatch And Strict Orchestration Breaking Changes
+
+Explicit dispatch now defaults to strict compatibility on environment, world,
+and runtime axes regardless of the caller session. Each launch carries complete
+canonical environment, world, runtime, and allocation selections; the child
+publishes its strict worker session before handshake or workload setup.
+
+Serialized `none` is required for the new no-role runtime. V1 execution envelopes
+are rejected with migration guidance because they cannot express the mandatory
+complete worker selections; recreate the dispatch plan rather than relying on
+worker-side defaults.
+
+Strict orchestration is intentional breaking behavior for local materialization
+and local managed workload execution. It sets a session-wide definition mode:
+definition/concrete/selector/space work remains available, while `fresh`,
+`load_or_build`, and APIs that newly return live Objects fail with
+`Orchestration mode prohibits Object materialization`. Set up orchestration before
+framework/project imports, then dispatch the workload or use a managed fresh
+process when live execution is required.

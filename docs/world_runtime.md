@@ -14,10 +14,10 @@ This document summarizes the world/runtime foundation.
 
 `dryml.runtime` describes process-local activation:
 
-- `RuntimeMode` is one of `orchestrator`, `probe`, `worker`, or `inline`.
-- The low-level Python baseline is `orchestrator + NoAllocation` with
-  enforcement off. This is the intentional ordinary-Python default, not strict
-  orchestration.
+- `RuntimeMode` is one of `none`, `orchestrator`, `probe`, `worker`, or `inline`.
+- The low-level Python baseline is `RuntimeMode.NONE + NoAllocation` with
+  enforcement off and no session compatibility axes. This is the intentional
+  ordinary-Python default, not strict orchestration.
 - `RuntimeContextSpec` captures device visibility, framework bootstrap settings, process-local limits, and environment overrides.
 - Device visibility and bootstrap plans can be built and applied before framework imports or object materialization.
 
@@ -26,9 +26,10 @@ World and runtime specs are canonical JSON sidecars written through `RecordStore
 ## Session, Requested Defaults, Allocation, and Plain Mode
 
 Use `dryml.session` for persistent common setup. `session.manage()` creates a
-checked current-process allocation, while `session.worker_world_request()` sets
-the default world for future workers without changing that allocation. This permits a CPU-only managed
-notebook to dispatch a GPU worker from retained pre-hide inventory. Process
+checked current-process allocation, while `session.worker_env_request()` and
+`session.worker_world_request()` set concrete defaults for future workers without
+changing that allocation. This permits a CPU-only managed notebook to dispatch a
+GPU worker from retained pre-hide inventory. Process
 memory and accelerator memory are distinct; current process-memory limits remain
 declarative unless a documented low-level control proves otherwise. See
 [Sessions](session.md).
@@ -66,7 +67,7 @@ contracts.
 
 ## Runtime Setup Order
 
-Workers and explicit inline execution should derive a `RuntimeAllocationView` from `WorldAllocation`, enter runtime mode, build/apply device visibility and bootstrap plans, then import frameworks or materialize objects. Framework-backed DRYML modules use `import_configured_framework(...)` so DRYML does not newly import heavy frameworks before runtime bootstrap. If user code already imported a framework, the helper reuses that loaded module instead of retroactively blocking normal object construction. Existing framework-object ingestion may read dtype/shape metadata without importing a framework; conversions that create framework-native objects require either active bootstrap or an already-imported framework. Bootstrap activation must match the active runtime mode/allocation and records process-local bootstrap state separate from the exported environment marker. By default, runtime bootstrap includes the `plain` adapter and framework adapters named in `RuntimeContextSpec.frameworks`; callers that need strict pre-import checks can pass an explicit `FrameworkBootstrapPolicy(..., strict_preimport=True)`. CPU affinity and hard memory limits require explicit process-control opt-in in reusable current-process activation scopes.
+Workers and explicit inline execution should derive a `RuntimeAllocationView` from `WorldAllocation`, enter runtime mode, build/apply device visibility and bootstrap plans, then import frameworks or materialize objects. Dispatched children validate their complete selected environment, world, runtime, and allocation and publish that strict worker session before handshake or workload setup. Framework-backed DRYML modules use `import_configured_framework(...)` so DRYML does not newly import heavy frameworks before runtime bootstrap. If user code already imported a framework, the helper reuses that loaded module instead of retroactively blocking normal object construction. Existing framework-object ingestion may read dtype/shape metadata without importing a framework; conversions that create framework-native objects require either active bootstrap or an already-imported framework. Bootstrap activation must match the active runtime mode/allocation and records process-local bootstrap state separate from the exported environment marker. By default, runtime bootstrap includes the `plain` adapter and framework adapters named in `RuntimeContextSpec.frameworks`; callers that need strict pre-import checks can pass an explicit `FrameworkBootstrapPolicy(..., strict_preimport=True)`. CPU affinity and hard memory limits require explicit process-control opt-in in reusable current-process activation scopes.
 
 For explicit backend/power-user setup, `dryml.runtime.activate(...)` combines `enter_runtime(...)`, `build_runtime_bootstrap_plan(...)`, and `activate_runtime_bootstrap(...)` into one scoped barrier. It remains a runtime primitive; `dryml.env.req(...)`, `dryml.world.req(...)`, `dryml.world.default(...)`, and `dryml.runtime.default(...)` provide the normal user-facing declaration surface.
 
@@ -78,7 +79,7 @@ Orchestrator and probe processes default to hidden workload accelerators through
 
 ## Local Dispatch
 
-`dryml.dispatch.LocalSubprocessBackend` is the spec/record/runtime-aware local path. Its worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default, applies assigned device visibility, and only then imports target functions or materializes CDef arguments from shared `DirStore` refs.
+`dryml.dispatch.LocalSubprocessBackend` is the spec/record/runtime-aware local path. Its worker enters `RuntimeMode.WORKER` with a real allocated `RuntimeAllocationView`, applies assigned device visibility, and only then imports target functions or materializes CDef arguments from shared `DirStore` refs. Its compatibility default is strict on all axes; axes control compatibility only, never worker lifecycle guards.
 
 ## Local Multi-Worker Runtime
 

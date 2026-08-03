@@ -5,7 +5,8 @@ Status: current.
 DRYML separates execution concerns into five layers:
 
 - `dryml.session` is the persistent common facade. Fresh sessions intentionally
-  use unchecked Python; managed and orchestrator checks are explicit opt-ins.
+  use `RuntimeMode.NONE` unchecked Python; managed and orchestrator checks are
+  explicit opt-ins.
 - `dryml.environments` describes software compatibility, such as Python versions and package requirements.
 - `dryml.worlds` describes resource and topology requirements and requested launch shapes.
 - `dryml.runtime` describes process-local mode, active allocation, device visibility, framework bootstrap, and guards.
@@ -34,12 +35,16 @@ Decorators attach metadata only. They do not allocate resources, enter runtime, 
 import dryml
 
 dryml.session.manage(cpus=2)       # Current process, CPU-only and checked.
+dryml.session.worker_env_request(dryml.environments.CurrentEnvironmentSpec())
 dryml.session.worker_world_request(cpus=2, gpus=1)  # Default world for later workers.
 ```
 
 The two calls intentionally describe different processes. `manage()` affects
 direct annotated calls and framework visibility in this process;
-`worker_world_request()` supplies a lower-precedence default worker world for future dispatch. See
+`worker_env_request()` and `worker_world_request()` supply lower-precedence
+concrete candidates for future dispatch. `require_env()` remains a hard software
+compatibility requirement. Direct managed calls remain local and never
+auto-dispatch. See
 [Sessions](session.md) for atomic `configure(...)`, snapshots, status reporting,
 safe reset, and the post-framework-import restart boundary.
 

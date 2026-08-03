@@ -21,20 +21,23 @@ DRYML currently separates declaration, planning, and execution across several mo
 
 ## Session Generation Boundary
 
-Fresh sessions intentionally use the low-level orchestrator/no-allocation
-baseline with enforcement off, so ordinary Python remains unchecked. Managed
+Fresh sessions intentionally use the low-level `RuntimeMode.NONE`/no-allocation
+baseline with enforcement off and no requirement axes, so ordinary Python remains
+unchecked. Managed
 sessions publish an inline allocation with strict checks; orchestrator sessions
 publish strict control-plane state with no current workload allocation. A
-generation holds the current allowance, requested worker world, environment
+generation holds the current allowance, requested worker environment/world, environment
 requirements, retained visibility inventory, and per-control outcomes. Direct
 checked calls lease their generation through completion; an effect-changing
 transition fails busy while such a lease is active. Declarative updates may
 advance a later generation.
 
-The session current allowance and requested worker world are separate. Dispatch
+The session current allowance and requested worker environment/world are separate. Dispatch
 captures one generation, never turns the notebook allocation into worker
 capacity, and may launch a GPU worker from a CPU-only managed parent. Python mode
-does not add session requirements to direct calls or worker resolution.
+does not add session requirements to direct calls or worker resolution beyond its
+explicit future-worker candidates. Direct managed calls remain local and never
+auto-dispatch.
 
 ## Ownership Boundary
 
@@ -79,7 +82,12 @@ that resolution during planning but does not reimplement its merge semantics.
 
 ## Dispatch Planning Pipeline
 
-Dispatch normalizes user targets into an `OperationSpec`, collects code and annotation facts, merges hard requirements and defaults, selects candidate environment/world/runtime data, checks candidates, and then launches through the backend. Environment precedence is explicit, annotation default, context current, resolver, then current fallback; world precedence is explicit, annotation default, context current, synthesized local world, then fallback. DRYML-managed resolver probes are deadline-bounded; local inventory uses OS facts and any injected external command runner remains cooperative. An actual worker allocation is validated again before execution. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
+Dispatch normalizes user targets into an `OperationSpec`, collects code and annotation facts, merges hard requirements and defaults, selects candidate environment/world/runtime data, checks candidates, and then launches through the backend. Environment precedence is explicit, annotation default, context current, session requested, resolver, then current fallback; world precedence is explicit, annotation default, context current, session requested, synthesized local world, then fallback. Dispatch defaults to strict compatibility on all three axes independently of the caller; advanced policy/axis overrides affect compatibility only. DRYML-managed resolver probes are deadline-bounded; local inventory uses OS facts and any injected external command runner remains cooperative. An actual worker allocation is validated again before execution. `OperationSpec` remains the canonical internal IR even when normal users submit functions or CDef method calls directly.
+
+Every v2 execution envelope contains canonical environment, world, runtime, and
+exact allocation selections with the effective compatibility policy/axes. The
+child validates those selections and publishes its strict worker session before handshake, Store access, target import, or materialization. V1 envelopes are
+rejected rather than synthesizing omitted worker defaults.
 
 An `analysis_policy={"dynamic_trace": True | DynamicTracePolicy(...)}` request
 adds one narrow branch. It is default-off even if a supplied
@@ -134,7 +142,7 @@ There is deliberately no cross-plan resolver, probe, or inventory cache.
 
 ## Runtime Enforcement Policy
 
-`RuntimeMode` describes process role: `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy is separate and uses `RuntimeEnforcement.STRICT`, `RuntimeEnforcement.WARN`, and `RuntimeEnforcement.OFF`. The fresh session baseline is `ORCHESTRATOR + NoAllocation + OFF`; advanced `runtime.plain()` uses `INLINE` with a local allocation and `OFF`. Neither adds another runtime role.
+`RuntimeMode` describes process role: `NONE`, `ORCHESTRATOR`, `PROBE`, `WORKER`, and `INLINE`. Runtime enforcement policy is separate and uses `RuntimeEnforcement.STRICT`, `RuntimeEnforcement.WARN`, and `RuntimeEnforcement.OFF`. The fresh session baseline is `NONE + NoAllocation + OFF`; advanced `runtime.plain()` uses `INLINE` with a local allocation and `OFF`. Neither adds another runtime role.
 
 Guard functions preserve prior behavior in `STRICT`. In `WARN`, DRYML enforcement guard violations emit `RuntimeWarning` where safe and continue. In `OFF`, those guard violations bypass safely without inventing resources. Python errors, import errors, serialization errors, and user code exceptions are not bypassed.
 

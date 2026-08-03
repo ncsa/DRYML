@@ -29,7 +29,7 @@ it, then verifies exact and alias loads restore that state.
 
 1. [Objects, definitions, and repositories](../examples/notebooks/objects_definitions_and_repos.ipynb) (`base`): construction identity, mutable state, Store save/load, aliases, and query domains.
 2. [Datasets and transforms](../examples/notebooks/datasets_and_transforms.ipynb) (`base`): re-iterable sources, tensor specs, method nodes, and structural transforms.
-3. [Local session defaults and plain mode](../examples/notebooks/local_defaults_and_plain_mode.ipynb) (`base`): Python/managed/orchestrator sessions, immutable snapshots, worker intent, and advanced inline work.
+3. [Local session defaults and plain mode](../examples/notebooks/local_defaults_and_plain_mode.ipynb) (`base`): no-role Python, managed/strict-orchestrator setup before framework imports, worker intent, and advanced inline work.
 4. [Models, experiments, and metrics](../examples/notebooks/models_experiments_and_metrics.ipynb) (`sklearn`): the maintained sklearn model, training, experiment, metric, and persistence path.
 5. [Definition-driven experiments](../examples/notebooks/definition_driven_experiments.ipynb) (`sklearn`): immutable experiment variants and reproducible construction identity.
 6. [Local hyperparameter search](../examples/notebooks/local_hyperparameter_search.ipynb) (`sklearn`): finite search spaces, bounded execution, deterministic selection, and temporary publication.
@@ -42,7 +42,7 @@ this sequence.
 
 ## Recommended Reading Order
 
-1. [Choose a session mode](session.md#start-with-the-intended-mode)
+1. [Choose a session mode before framework/project imports](session.md#start-with-the-intended-mode)
 2. [Create or open a Store](repos.md)
 3. [Declare requirements and defaults](annotations.md)
 4. [Dispatch a module-level function](dispatch.md#python-shaped-dispatch)

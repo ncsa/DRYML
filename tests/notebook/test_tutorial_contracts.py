@@ -139,6 +139,7 @@ def test_runtime_notebook_teaches_session_first_execution_distinctions():
         "dryml.session.configure",
         "dryml.session.current",
         "dryml.session.manage",
+        "dryml.session.worker_env_request",
         "dryml.session.worker_world_request",
         "dryml.session.reset",
         "NOTEBOOK_RESTART_REQUIRED_HANDLED",
@@ -153,6 +154,10 @@ def test_runtime_notebook_teaches_session_first_execution_distinctions():
     missing = {token for token in required_executable if token not in executable_source}
     assert not missing, f"runtime notebook is missing executable teaching elements: {sorted(missing)}"
     assert "ordinary unchecked Python" in all_source
+    assert "RuntimeMode.NONE" in all_source
+    assert "requirement axes" in all_source
+    assert "strict orchestration" in all_source
+    assert "Orchestration mode prohibits Object materialization" in all_source
     assert "CPU-only" in all_source
     assert "fresh process" in all_source
     assert not {
@@ -198,6 +203,43 @@ def test_session_docs_state_the_shipped_default_and_interception_boundaries():
     assert "managed session" in session
     assert "managed operation" in session
     assert "strict orchestration" in migration
+
+
+def test_control_plane_docs_state_the_complete_runtime_boundary():
+    repository = Path(__file__).resolve().parents[2]
+    documents = {
+        path: (repository / path).read_text(encoding="utf-8")
+        for path in (
+            "README.md",
+            "docs/session.md",
+            "docs/environments.md",
+            "docs/world_runtime.md",
+            "docs/objects_and_defs.md",
+            "docs/repos.md",
+            "docs/dispatch.md",
+            "docs/migration/session_runtime_default.md",
+            "docs/architecture/environment_world_runtime_boundaries.md",
+            "docs/architecture/runtime_dispatch_requirements.md",
+            "docs/release_notes.md",
+        )
+    }
+
+    required = {
+        "README.md": ("RuntimeMode.NONE", "never auto-dispatch", "strict/all"),
+        "docs/session.md": ("worker_env_request", "requirement axes", "object_mode=\"definition\""),
+        "docs/environments.md": ("worker_env_request", "hard compatibility requirement"),
+        "docs/world_runtime.md": ("RuntimeMode.NONE", "worker session"),
+        "docs/objects_and_defs.md": ("Orchestration mode prohibits Object materialization", "definition-only"),
+        "docs/repos.md": ("strict orchestration", "load_or_build"),
+        "docs/dispatch.md": ("requirement_axes", "runtime.worker_session.v2", "execution-envelope v2"),
+        "docs/migration/session_runtime_default.md": ("Serialized `none`", "V1 execution envelopes", "breaking behavior"),
+        "docs/architecture/environment_world_runtime_boundaries.md": ("RuntimeMode.NONE", "compatibility only", "trusted-code lifecycle boundary"),
+        "docs/architecture/runtime_dispatch_requirements.md": ("all three axes", "before handshake"),
+        "docs/release_notes.md": ("serialized `none`", "V1 execution envelopes", "Strict orchestrator"),
+    }
+    for path, tokens in required.items():
+        missing = [token for token in tokens if token not in documents[path]]
+        assert not missing, f"{path} is missing runtime-boundary documentation: {missing}"
 
 
 def test_definition_variants_notebook_teaches_identity_materialization_and_structural_query():

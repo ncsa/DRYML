@@ -23,12 +23,16 @@ def test_notebook_session_defaults_are_persistent_and_reset_semantically():
         assert fresh.mode == "python"
         assert fresh.allocation is None
         assert is_no_allocation(fresh.runtime.allocation)
+        assert fresh.runtime.mode.value == "none"
+        assert fresh.requirement_axes.to_data() == []
 
         managed = dryml.session.manage(cpus=1)
         requested = dryml.session.worker_world_request(cpus=1)
         assert managed.mode == "managed"
         assert requested.allocation == managed.allocation
         assert requested.requested_world is not None
+        requested = dryml.session.worker_env_request(CurrentEnvironmentSpec())
+        assert requested.requested_environment is not None
         assert requested.controls["memory"] in {"undeclared", "declarative"}
         assert requested.statuses["visibility"] == "visibility-enforced"
 
@@ -36,6 +40,7 @@ def test_notebook_session_defaults_are_persistent_and_reset_semantically():
         assert reset.mode == "python"
         assert reset.allocation is None
         assert reset.requested_world is None
+        assert reset.requested_environment is None
         assert reset.environment.requirements == ()
         assert is_no_allocation(reset.runtime.allocation)
     finally:

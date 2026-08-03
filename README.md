@@ -32,17 +32,22 @@ DRYML aims to be as lightweight as possible. The user should be able to grab onl
 ## Session, Dispatch, Planning, and Analysis Quickstart
 
 For current-process setup, start with [`dryml.session`](docs/session.md). The
-intentional omitted-mode default is ordinary unchecked Python, not strict
-orchestration: base import changes neither inherited framework/device behavior
-nor allocation. Use `manage()` before importing a GPU-capable framework for a
-checked CPU-only process, or `set_mode("orchestrator")` for checked planning
-without a current workload allocation.
+intentional omitted-mode default is ordinary unchecked Python: its low-level
+runtime is `RuntimeMode.NONE + NoAllocation + OFF`, so base import changes
+neither inherited framework/device behavior nor allocation. Use `manage()`
+before importing a GPU-capable framework for a checked CPU-only process, or
+`set_mode("orchestrator")` for definition-only planning without a current
+workload allocation.
 
 ```python
 import dryml
 
 # Ordinary Python: leave the session untouched, or set_mode("python").
 assert dryml.session.mode() == "python"
+
+# These are separate defaults for a future explicit worker, not parent state.
+dryml.session.worker_env_request(dryml.environments.CurrentEnvironmentSpec())
+dryml.session.worker_world_request(cpus=2, gpus=1)
 
 # Managed current process: CPU allowance, hidden accelerators, checked direct calls.
 managed = dryml.session.manage(cpus=2)
@@ -55,7 +60,11 @@ managed = dryml.session.configure(mode="managed", resources={"cpus": 2})
 ```
 
 Snapshots are immutable and report the active mode, current allowance, requested
-worker world, software requirements, and per-control enforcement statuses.
+worker environment/world, software requirements, compatibility axes, and
+per-control enforcement statuses. Direct managed calls remain direct or local
+Store-backed calls and never auto-dispatch; call `dryml.dispatch` explicitly to
+launch a worker. Explicit dispatch defaults independently to strict/all
+environment, world, and runtime compatibility checks.
 Mandatory framework visibility is fail-closed; optional controls are reported as
 pending, configured, declarative, unsupported, or failed. See the
 [session guide](docs/session.md) for framework-import and restart boundaries.
@@ -74,7 +83,9 @@ store = DirStore("work/store", query_index="none")
 ### 2. Declare requirements and defaults
 
 Declare hard requirements separately from soft environment, world, and runtime
-defaults. Put a portable function at module scope, for example in
+defaults. `require_env(...)` is hard software compatibility; the session's
+`worker_env_request(...)` is only a concrete future-worker candidate. Put a
+portable function at module scope, for example in
 `my_package/tasks.py`:
 
 ```python
@@ -129,8 +140,12 @@ dryml.session.worker_world_request(cpus=1)
 explanation = dryml.dispatch.explain(importable_function, store=store, args=(2, 3))
 ```
 
-The context-local environment/world APIs remain available for advanced temporary
-composition. They are planning defaults, not current-process allocation.
+`worker_env_request(...)` similarly sets a lower-precedence concrete environment
+candidate. The context-local environment/world APIs remain available for advanced
+temporary composition. They are planning defaults, not current-process allocation.
+Each launch resolves complete canonical environment, world, runtime, and exact
+allocation selections; the child publishes its strict worker session before its
+handshake or workload setup.
 
 ### 7. Use low-level plain mode only for advanced trusted inline work
 

@@ -46,6 +46,13 @@ loaded = repo.load(item.definition)
 
 `repo.save_object()` saves the root object and any graph objects selected by the save plan. `repo.load()` requires an exact `ConcreteDefinition`.
 
+In strict orchestration, repositories still support definition lookup, query
+planning, and record inspection, but they cannot newly return live Objects.
+`repo.load()`, `repo.load_or_build()`, aliases, cache extraction, and
+object-yielding query helpers fail before hydration with the orchestration
+materialization diagnostic. Keep the control plane definition-only, or dispatch
+the materializing work to a worker.
+
 ## Stores
 
 The common path-backed store is `DirStore`.

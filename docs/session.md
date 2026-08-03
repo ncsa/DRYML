@@ -7,10 +7,12 @@ dispatch should run. It does not replace the advanced `dryml.environments`,
 
 ## Start With The Intended Mode
 
-Fresh DRYML is intentionally ordinary unchecked Python. Importing `dryml` does
-not change inherited device visibility, allocate resources, import TensorFlow,
-PyTorch, or JAX, or add session requirement checks. Leaving the facade untouched
-and explicitly selecting Python mode are equivalent:
+Fresh DRYML is intentionally ordinary unchecked Python. Its low-level state is
+`RuntimeMode.NONE + NoAllocation + OFF` with no enabled requirement axes.
+Importing `dryml` does not change inherited device visibility, allocate
+resources, import TensorFlow, PyTorch, or JAX, or add session requirement
+checks. Leaving the facade untouched and explicitly selecting Python mode are
+equivalent:
 
 ```python
 import dryml
@@ -38,13 +40,21 @@ stop arbitrary Python allocations. Per-device `accelerator_memory` is separate
 from process memory; supporting adapters report their own allocator outcome and
 must not be read as one aggregate process cap.
 
-Use checked orchestration without a current workload allocation when the process
-only plans or launches workers:
+Use strict orchestration without a current workload allocation when the process
+only builds definitions, inspects metadata, plans, or launches workers:
 
 ```python
 snapshot = dryml.session.set_mode("orchestrator")
 assert snapshot.allocation is None
 ```
+
+Strict orchestration publishes `object_mode="definition"` session-wide. Nested
+definition, concrete, selector, and space modes remain available, but `fresh`
+and `load_or_build` transitions fail at context entry. DRYML APIs that would
+newly construct, restore, reuse, or return a live Object raise
+`RuntimeTransitionError` containing `Orchestration mode prohibits Object
+materialization`. Use `Definition`/`ConcreteDefinition` APIs for control-plane
+work, or run the workload in a managed fresh process or dispatched worker.
 
 `managed` is a **managed session**, not a managed operation. Managed operations
 remain the Store-backed `dryml.managed` lifecycle documented separately.
@@ -53,25 +63,34 @@ remain the Store-backed `dryml.managed` lifecycle documented separately.
 
 Every mutating call returns an immutable `SessionSnapshot`. Its nested controls
 and statuses are immutable too, making a snapshot suitable for notebook display.
-The current-process allowance, requested worker world, environment requirements,
-per-control status, generation, and health are inspectable without exposing an
-internal role in the common representation.
+The current-process allowance, requested worker environment/world, environment
+requirements, requirement axes, per-control status, generation, and health are
+inspectable without exposing an internal role in the common representation.
 
 ```python
 import dryml
 
 snapshot = dryml.session.manage(cpus=2)
+snapshot = dryml.session.worker_env_request(
+    dryml.environments.CurrentEnvironmentSpec()
+)
 snapshot = dryml.session.worker_world_request(cpus=2, gpus=1)
 snapshot = dryml.session.require_env("numpy>=1.26", python=">=3.10")
 assert snapshot.requested_world is not None
 ```
 
 `manage(...)` and `allocate_world(...)` replace the current-process allowance.
-`worker_world_request(...)` replaces only the default worker world used by later
-dispatch. Repeated
-`require_env(...)` calls merge compatible software requirements atomically. The
-current Python interpreter is implicit for ordinary direct work; environment
-requirements describe software compatibility, not GPUs or device visibility.
+`worker_env_request(...)` and `worker_world_request(...)` replace only their
+respective default candidates for later explicit dispatch. Repeated
+`require_env(...)` calls merge hard software compatibility requirements
+atomically. The current Python interpreter is implicit for ordinary direct work;
+environment requirements describe software compatibility, not GPUs or device
+visibility.
+
+`enforce_requirements(environment=..., world=..., runtime=...)` atomically
+replaces the three requirement axes. The shared enforcement action and enabled
+axes affect compatibility reports, warnings, and failures only; they never
+weaken allocation, materialization, worker-role, or framework-visibility guards.
 
 Use `configure(...)` when one cell should replace the complete session. Its
 `mode` is mandatory; omitted non-mode sections clear or return to the selected
@@ -95,7 +114,7 @@ candidate registries, and scoped low-level activation remain advanced APIs.
 The session deliberately keeps two resource facts separate:
 
 - The managed allowance controls direct work in this process.
-- The requested worker world is input to later dispatch planning.
+- The requested worker environment/world are inputs to later dispatch planning.
 
 Therefore a CPU-only notebook can request and dispatch a GPU worker without
 making its own GPU visible:
@@ -106,11 +125,18 @@ dryml.session.worker_world_request(cpus=2, gpus=1)
 # dryml.dispatch.run(...) allocates the requested worker world, not the notebook allowance.
 ```
 
-Dispatch captures one immutable session generation. Its world precedence remains
-explicit dispatch input, annotation default, context-local world, session request,
-synthesis, then fallback. Session requirements apply to worker resolution outside
-Python mode; an explicit dispatch policy cannot make the current-process
-allowance into worker capacity.
+Dispatch captures one immutable session generation. Environment precedence is
+explicit, annotation default, context-local, session request, resolver, then
+fallback; world precedence is explicit, annotation default, context-local,
+session request, synthesis, then fallback. Session requirements apply to worker
+resolution outside Python mode; Python contributes only its configured worker
+candidates. An explicit dispatch policy cannot make the current-process allowance
+into worker capacity.
+
+Direct managed calls preserve their direct or local Store-backed lifecycle and
+never auto-dispatch. Explicit dispatch defaults independently to strict
+compatibility with all three requirement axes, then resolves complete canonical
+environment, world, runtime, and allocation selections for the child.
 
 ## Framework Hooks And Statuses
 

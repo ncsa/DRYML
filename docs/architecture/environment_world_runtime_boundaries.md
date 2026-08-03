@@ -18,7 +18,7 @@ DRYML has distinct modules for software environments, resource worlds, and proce
 
 `allocation` means actual resources assigned to a process from a world allocation.
 
-`enforcement` means how strictly DRYML checks environment/world/runtime constraints; it is not the same as runtime role.
+`enforcement` means how strictly DRYML checks environment/world/runtime constraints; it is not the same as runtime role. Requirement axes select compatibility only and never weaken lifecycle, allocation, materialization, or visibility guards.
 
 `probe` means a lightweight process role for inspection; it is not a workload worker and is not tied to the final workload world.
 
@@ -36,12 +36,14 @@ Current-process probes can inspect live local/notebook targets because they pres
 
 ## Notebook Current/Default State
 
-Fresh `dryml.session` state is intentionally unchecked Python. A managed session
+Fresh `dryml.session` state is intentionally `RuntimeMode.NONE` unchecked Python
+with `NoAllocation` and `OFF`. A managed session
 creates the current-process allowance and applies pre-import visibility controls;
 an orchestrator session has checked control-plane behavior with no current
-allocation. `session.worker_world_request(...)` remains a separate default worker world, so a
-CPU-only managed notebook can dispatch a GPU worker without exposing it locally.
-Environment requirements are software compatibility only. Process memory and
+allocation. `session.worker_env_request(...)` and
+`session.worker_world_request(...)` remain separate default worker candidates, so
+a CPU-only managed notebook can dispatch a GPU worker without exposing it
+locally. Environment requirements are software compatibility only. Process memory and
 accelerator allocator memory are distinct, and both remain declarative unless a
 specific process or adapter control reports a stronger per-control status.
 
@@ -53,11 +55,20 @@ than synthesizing worlds or converting runtime allocation into a requested world
 
 ## Dispatch Candidate Selection Direction
 
-Dispatch combines current/default state, explicit kwargs, annotation defaults, and hard requirements into candidate selections. Explicit candidates override defaults but remain checked against hard requirements; `warn` and `ignore` may relax compatibility reporting but never structural launchability, allocation feasibility, or target importability.
+Dispatch combines current/default state, explicit kwargs, annotation defaults, and hard requirements into candidate selections. Explicit candidates override defaults but remain checked against hard requirements; strict compatibility on all axes is the dispatch default, while advanced policies and masks affect compatibility only, never structural launchability, allocation feasibility, or target importability.
 
 ## Notebook and Orchestration Examples
 
-In a notebook, a user may set a default requested world for later dispatch while the notebook process remains orchestrator mode with no workload allocation. During local worker execution, a child process enters worker mode with a real CPU-only allocation. During a code probe, a child process can enter probe mode with no workload allocation and inspect metadata safely.
+In a notebook, a user may set default requested environment/world candidates for later dispatch while the notebook process remains orchestrator mode with no workload allocation. During local worker execution, a child process validates complete selections and enters worker mode with a real allocation before handshake or workload setup. During a code probe, a child process can enter probe mode with no workload allocation and inspect metadata safely.
+
+## Control-Plane Boundary
+
+Strict orchestration is a trusted-code lifecycle boundary, not a sandbox. It
+publishes a session-wide definition mode and accelerator-hidden `NoAllocation`
+parent. Definition, concrete, selector, and space work may proceed after setup;
+new live Object materialization and local managed workload execution must move to
+a managed process or explicit worker. A future worker request may still select
+accelerators without changing parent visibility.
 
 ## Non-Goals
 

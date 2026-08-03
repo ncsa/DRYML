@@ -136,31 +136,33 @@ execution path, not while normalizing a lightweight metric or cache definition.
 
 ### Session Defaults
 
-`dryml.session` is the common notebook setup path. In managed or orchestrator
-mode, dispatch captures one immutable session generation, merges its software
-requirements, and considers its requested worker world after explicit,
-annotation-default, and context-local worlds. The session's current-process
-allocation is never repurposed as worker capacity: a CPU-only managed parent can
-request and launch a GPU worker from its retained pre-hide inventory. Python mode
-intentionally contributes neither session-derived requirement enforcement nor a
-worker world. See [Sessions](session.md).
+`dryml.session` is the common notebook setup path. Dispatch captures one
+immutable session generation. In managed or orchestrator mode it merges session
+software requirements; in every mode it considers configured
+`requested_environment` and `requested_world` after explicit, annotation-default,
+and context-local candidates. Python mode contributes no other session-derived
+requirements, allocation, inventory, control, or provenance. The session's
+current-process allocation is never repurposed as worker capacity: a CPU-only
+managed or orchestrator parent can request and launch a GPU worker from retained
+pre-hide inventory. See [Sessions](session.md).
 
 `plan`, `submit`, and `run` normalize an operation once, collect its static
 annotation facts, resolve requirements/defaults, select candidates, and check
 the selected candidates before launch. Explicit `environment=`, `world=`, and
 `runtime=` values choose candidates but do not bypass hard requirements.
 
-Candidate precedence is deterministic: explicit, annotation-default, and
-context-current candidates remain authoritative. Only when those slots are
-absent, environment planning can perform a bounded explicit-registry search and
-world planning can synthesize a minimal local world for a hard requirement.
-Planning never searches or synthesizes after an incompatible higher-precedence
-candidate.
+Candidate precedence is deterministic: environment is explicit,
+annotation-default, context-current, session-requested, resolver, then current
+fallback; world is explicit, annotation-default, context-current,
+session-requested, synthesis, then fallback. Planning never searches or
+synthesizes after an incompatible higher-precedence candidate.
 
-`requirement_policy` accepts `"strict"`, `"warn"`, or `"ignore"`. When it is
-omitted, active `RuntimeEnforcement.STRICT`, `.WARN`, and `.OFF` select strict,
-warn, and ignore respectively. Warn and ignore relax only requirement checks;
-they cannot bypass invalid operation structure, worker/allocation safety, or the
+`requirement_policy` accepts `"strict"`, `"warn"`, or `"ignore"`. Omitted
+explicit dispatch policy is `RequirementPolicy.STRICT` on all three axes,
+independently of caller runtime enforcement. `requirement_axes` is an optional
+exact mapping for `environment`, `world`, and `runtime`; disabled axes report a
+structured disabled result. Policy and axes relax compatibility only: they cannot
+bypass invalid operation structure, worker/allocation safety, or the
 same-environment restriction of `PickledCallable`/`pickle_small` transport.
 
 Use `explain(...)` to inspect the same pipeline without launching a worker,
@@ -414,7 +416,14 @@ parent reads compact result refs and records
 
 ## Runtime And Environment
 
-The worker enters `RuntimeMode.WORKER` with a real CPU-only `RuntimeAllocationView` by default and assigned device visibility before target import or object materialization. Supported launch specs are current Python, explicit Python executable, and Conda command construction/direct prefix launch where available.
+Every execution-envelope v2 (`dryml.execution_envelope.v2`) carries nonempty canonical environment,
+world, runtime, and exact allocation selections plus the effective policy and
+`requirement_axes`. It requires the `runtime.worker_session.v2` handshake
+feature. The child validates and publishes its strict allocated worker session
+before handshake, Store access, target import, CDef materialization, or workload
+setup; v1 envelopes are rejected with migration guidance rather than upgraded.
+Supported launch specs are current Python, explicit Python executable, and Conda
+command construction/direct prefix launch where available.
 
 Python path policies are:
 

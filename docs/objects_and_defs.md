@@ -54,6 +54,17 @@ with definition_mode():
 
 Inside definition mode, class construction returns a `Definition` rather than a live object. This is useful for composing object graphs declaratively.
 
+## Strict Orchestration
+
+After `dryml.session.set_mode("orchestrator")`, the effective object mode is
+session-wide `definition`. Definition, concrete-definition, selector, and search
+space work remain available in this definition-only control plane, including
+project/framework imports performed after session setup. Selecting `fresh` or
+`load_or_build` fails at context entry.
+Any DRYML-owned API that would newly construct, restore, reuse, or return a live
+Object raises `RuntimeTransitionError` with `Orchestration mode prohibits Object materialization`. Dispatch the workload to a worker, or use a managed session in
+a fresh process when a live Object is required.
+
 ## Concrete Definitions As Identity
 
 Concrete definitions are stable identities. They are used to:

@@ -168,6 +168,12 @@ If a new file is not listed in `path_tiers`, it inherits its category tier.
 
 ## Session And Framework Tests
 
+Session, dispatch, and notebook contract tests also cover the explicit
+`RuntimeMode.NONE` Python baseline, separate worker environment/world requests,
+strict complete worker bootstrap, and strict-orchestrator definition-only
+boundary. Keep tutorial notebooks output-free; validate their JSON and static
+contracts without executing heavyweight frameworks by default.
+
 Default session and framework-hook coverage uses deterministic fake framework
 packages and isolated subprocesses. Base `dryml` import, `dryml.session`, and
 adapter-leaf tests must remain lightweight and must not treat installed packages
