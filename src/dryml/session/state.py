@@ -563,6 +563,9 @@ def _publish(
                 "framework_statuses": framework_statuses,
                 "framework_registry_revision": registry_revision,
                 "control_epoch": control_epoch,
+                # The core ContextVar projects this epoch as definition mode
+                # without absorbing unrelated repository/cache configuration.
+                "object_mode_floor": control_epoch if mode == "orchestrator" else None,
             },
         )
 

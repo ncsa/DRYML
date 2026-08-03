@@ -12,7 +12,7 @@ from dryml.runtime.compatibility import RuntimeCompatibilityIssue, RuntimeCompat
 from dryml.runtime.devices import DeviceVisibilityPlan, DeviceVisibilityPolicy, apply_device_visibility_plan, build_device_visibility_plan
 from dryml.runtime.decorators import default
 from dryml.runtime.enforcement import REQUIREMENT_AXIS_NAMES, RequirementAxes, RuntimeEnforcement, normalize_enforcement, normalize_requirement_axes, startup_enforcement_from_env
-from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, import_configured_framework, require_allocation, require_worker_allocation, require_workload_allocation
+from dryml.runtime.guards import BOOTSTRAP_MARKER_ENV, assert_control_plane_target_execution_allowed, assert_framework_import_configured, assert_framework_import_safe, assert_no_workload_allocation, assert_object_materialization_allowed, import_configured_framework, require_allocation, require_worker_allocation, require_workload_allocation
 from dryml.runtime.frameworks import FrameworkCapabilities, FrameworkImportPlan, FrameworkPostResult, FrameworkRegistration, FrameworkRegistry, framework_registry
 from dryml.runtime.modes import RuntimeMode
 from dryml.runtime.publication import EffectPlan, EffectRecord, PublicationCandidate, PublicationService, SessionGeneration, publication
@@ -54,6 +54,8 @@ __all__ = [
     "apply_runtime_bootstrap_plan",
     "assert_framework_import_configured",
     "assert_framework_import_safe",
+    "assert_object_materialization_allowed",
+    "assert_control_plane_target_execution_allowed",
     "assert_no_workload_allocation",
     "attach_runtime_id",
     "build_device_visibility_plan",

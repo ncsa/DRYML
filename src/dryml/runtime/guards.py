@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import importlib
 import sys
+import threading
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
@@ -12,9 +16,141 @@ from .context import active_runtime, active_runtime_bootstrap
 from .enforcement import RuntimeEnforcement
 from .errors import FrameworkImportSafetyError, NoAllocationError, RuntimeTransitionError
 from .modes import RuntimeMode
+from .publication import SessionGeneration, publication
 
 
 BOOTSTRAP_MARKER_ENV = "DRYML_RUNTIME_BOOTSTRAPPED"
+
+
+@dataclass(slots=True)
+class _ControlPlaneGuardScope:
+    """One task-bound leased admission for a guarded control-plane operation."""
+
+    generation: SessionGeneration
+    control_epoch: int
+    owner: tuple[int, int | None]
+    operation: str
+    kind: str
+    active: bool = True
+
+
+_CONTROL_PLANE_GUARD: ContextVar[_ControlPlaneGuardScope | None] = ContextVar(
+    "dryml_control_plane_guard", default=None
+)
+
+
+def _owner_identity() -> tuple[int, int | None]:
+    """Return the current thread and asyncio-task identity without creating a task."""
+
+    try:
+        import asyncio
+
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return threading.get_ident(), None if task is None else id(task)
+
+
+def _scope_is_current(scope: _ControlPlaneGuardScope, *, kind: str) -> bool:
+    """Check context ownership and control-epoch lifetime for a nested scope."""
+
+    if not scope.active or scope.kind != kind or scope.owner != _owner_identity():
+        return False
+    return int(publication.current().metadata.get("control_epoch", 0)) == scope.control_epoch
+
+
+def internal_construction_admitted() -> bool:
+    """Report whether a live materialization scope admits private fresh construction.
+
+    This private bridge is intentionally not a public object-mode override. A
+    copied context, sibling task, foreign thread, stale control epoch, or scope
+    that has exited cannot retain the admission.
+    """
+
+    scope = _CONTROL_PLANE_GUARD.get()
+    return scope is not None and _scope_is_current(scope, kind="materialization")
+
+
+@contextmanager
+def _assert_control_plane_allowed(*, operation: str, kind: str):
+    """Lease one top-level operation and apply orchestration lifecycle policy."""
+
+    existing = _CONTROL_PLANE_GUARD.get()
+    if existing is not None and _scope_is_current(existing, kind=kind):
+        _enforce_control_plane_policy(operation=operation, kind=kind, warn=False)
+        yield existing
+        return
+
+    with publication.lease() as generation:
+        scope = _ControlPlaneGuardScope(
+            generation=generation,
+            control_epoch=int(generation.metadata.get("control_epoch", 0)),
+            owner=_owner_identity(),
+            operation=operation,
+            kind=kind,
+        )
+        token = _CONTROL_PLANE_GUARD.set(scope)
+        try:
+            _enforce_control_plane_policy(operation=operation, kind=kind, warn=True)
+            yield scope
+        finally:
+            scope.active = False
+            _CONTROL_PLANE_GUARD.reset(token)
+
+
+def _enforce_control_plane_policy(*, operation: str, kind: str, warn: bool) -> None:
+    """Apply the active orchestrator policy, optionally owning its warning."""
+
+    runtime = active_runtime()
+    if runtime.mode is not RuntimeMode.ORCHESTRATOR:
+        return
+    if kind == "materialization":
+        message = "Orchestration mode prohibits Object materialization"
+        fix = "use Definition/CDef APIs for metadata, or execute in a managed inline session or dispatched worker"
+    else:
+        message = "Orchestration mode prohibits local workload execution"
+        fix = "dispatch the workload to a worker, or execute in a managed inline session"
+    context = {
+        "mode": runtime.mode.value,
+        "enforcement": runtime.enforcement.value,
+        "operation": operation,
+        "fix": fix,
+    }
+    if runtime.enforcement is RuntimeEnforcement.STRICT:
+        _handle_enforcement_violation(message, error_type=RuntimeTransitionError, context=context)
+    elif runtime.enforcement is RuntimeEnforcement.WARN and warn:
+        _handle_enforcement_violation(message, error_type=RuntimeTransitionError, context=context)
+
+
+def assert_object_materialization_allowed(*, operation: str):
+    """Return a leased guard for a DRYML-owned live Object operation.
+
+    Args:
+        operation: Stable identifier for the attempted materialization action.
+
+    Returns:
+        A context manager which pins the runtime publication until completion.
+
+    Raises:
+        RuntimeTransitionError: Under strict orchestrator enforcement before
+            construction or restoration begins.
+
+    Side Effects:
+        Warns once for the top-level operation under WARN and grants private
+        fresh-construction admission only while the returned scope is active.
+    """
+
+    return _assert_control_plane_allowed(operation=operation, kind="materialization")
+
+
+def assert_control_plane_target_execution_allowed(*, operation: str):
+    """Return a leased guard for direct local workload execution.
+
+    Unlike object materialization, strict rejection identifies local workload
+    execution so callers do not receive a misleading construction diagnostic.
+    """
+
+    return _assert_control_plane_allowed(operation=operation, kind="target_execution")
 
 
 def require_allocation(reason: str | None = None) -> RuntimeAllocationView:
@@ -158,8 +294,11 @@ __all__ = [
     "BOOTSTRAP_MARKER_ENV",
     "assert_framework_import_configured",
     "assert_framework_import_safe",
+    "assert_object_materialization_allowed",
+    "assert_control_plane_target_execution_allowed",
     "assert_no_workload_allocation",
     "import_configured_framework",
+    "internal_construction_admitted",
     "require_allocation",
     "require_worker_allocation",
     "require_workload_allocation",

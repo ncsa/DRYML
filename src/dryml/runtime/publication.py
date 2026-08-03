@@ -548,7 +548,16 @@ class PublicationService:
             visibility_epoch=None,
             health="failed",
             restart_guidance=restart_guidance,
-            metadata=metadata,
+            metadata={
+                **current.metadata,
+                **metadata,
+                # A failed session is strict orchestrator mode. Retain one
+                # control identity so stale core ContextVar overrides cannot
+                # reveal materializing object modes in the terminal state.
+                "object_mode_floor": int(
+                    current.metadata.get("control_epoch", current.number)
+                ),
+            },
         )
 
     def _reject_writer_reentry(self) -> None:

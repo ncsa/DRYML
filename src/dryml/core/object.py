@@ -28,6 +28,16 @@ def definition_mode_concrete() -> bool:
 
 @contextmanager
 def selector_mode(enabled: bool = True):
+    """Temporarily select selector construction or ordinary fresh construction.
+
+    Args:
+        enabled: Select ``selector`` when true; false requests ``fresh``.
+
+    Raises:
+        RuntimeTransitionError: If false requests public fresh construction
+            while the public orchestrator floor is active.
+    """
+
     from .session import config
 
     with config(object_mode="selector" if enabled else "fresh"):
@@ -36,6 +46,16 @@ def selector_mode(enabled: bool = True):
 
 @contextmanager
 def space_mode(enabled: bool = True):
+    """Temporarily select search-space construction or fresh construction.
+
+    Args:
+        enabled: Select ``space`` when true; false requests ``fresh``.
+
+    Raises:
+        RuntimeTransitionError: If false requests public fresh construction
+            while the public orchestrator floor is active.
+    """
+
     from .session import config
 
     with config(object_mode="space" if enabled else "fresh"):
@@ -44,6 +64,18 @@ def space_mode(enabled: bool = True):
 
 @contextmanager
 def definition_mode(enabled: bool = True, *, concrete: bool = False):
+    """Temporarily select definition, concrete-definition, or fresh behavior.
+
+    Args:
+        enabled: Select a definition-like mode when true; false requests fresh
+            construction.
+        concrete: Select ``concrete`` instead of ``definition`` when enabled.
+
+    Raises:
+        RuntimeTransitionError: If false requests public fresh construction
+            while the public orchestrator floor is active.
+    """
+
     from .session import config
 
     if not enabled:
@@ -60,10 +92,10 @@ class Dryml(type):
     # Support metaclass to enable capture of input arguments
 
     def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
-        from .session import get_config
+        from .session import current_object_mode, get_config
 
         session_config = get_config()
-        object_mode = session_config.object_mode
+        object_mode = current_object_mode()
         active_repo = repo if repo is not None else session_config.repo
 
         if __cdef__ is None and object_mode == "definition":
@@ -79,58 +111,60 @@ class Dryml(type):
         if __cdef__ is None and object_mode == "space":
             return cls.defn(*args, **kwargs).as_space()
 
-        if __cdef__ is None and object_mode == "load_or_build":
-            from .repo import manage_repo
+        from dryml.runtime import assert_object_materialization_allowed
+        with assert_object_materialization_allowed(operation="direct_construct"):
+            if __cdef__ is None and object_mode == "load_or_build":
+                from .repo import manage_repo
 
+                with manage_repo(repo=active_repo) as sub_repo:
+                    _cache_runtime_object_args(sub_repo, args, kwargs)
+                    cdef = Definition(cls, *args, **kwargs).concretize(repo=sub_repo)
+                    return sub_repo.load_or_build(cdef, cache=session_config.cache)
+
+            from .repo import default_repo, manage_repo
             with manage_repo(repo=active_repo) as sub_repo:
-                _cache_runtime_object_args(sub_repo, args, kwargs)
-                cdef = Definition(cls, *args, **kwargs).concretize(repo=sub_repo)
-                return sub_repo.load_or_build(cdef, cache=session_config.cache)
+                if __cdef__ is None:
+                    # First-time construction from a soft Definition
+                    _cache_runtime_object_args(sub_repo, args, kwargs)
+                    defn = Definition(cls, *args, **kwargs)
+                    cdef = defn.concretize(repo=sub_repo)
 
-        from .repo import default_repo, manage_repo
-        with manage_repo(repo=active_repo) as sub_repo:
-            if __cdef__ is None:
-                # First-time construction from a soft Definition
-                _cache_runtime_object_args(sub_repo, args, kwargs)
-                defn = Definition(cls, *args, **kwargs)
-                cdef = defn.concretize(repo=sub_repo)
+                    rt_args = sub_repo.load_object(cdef.args, build_missing=True)
+                    rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
 
-                rt_args = sub_repo.load_object(cdef.args, build_missing=True)
-                rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
+                else:
+                    # Reconstruction from an existing ConcreteDefinition
+                    cdef = __cdef__
+                    rt_args = args
+                    rt_kwargs = kwargs
 
-            else:
-                # Reconstruction from an existing ConcreteDefinition
-                cdef = __cdef__
-                rt_args = args
-                rt_kwargs = kwargs
+                # Run pre-init check
+                cls.__pre_init__()
 
-            # Run pre-init check
-            cls.__pre_init__()
+                # Resolve host/runtime-specific config leaves after identity has been
+                # computed, but before the user initializer receives its arguments.
+                rt_args = sub_repo.resolve_config(rt_args)
+                rt_kwargs = sub_repo.resolve_config(rt_kwargs)
 
-            # Resolve host/runtime-specific config leaves after identity has been
-            # computed, but before the user initializer receives its arguments.
-            rt_args = sub_repo.resolve_config(rt_args)
-            rt_kwargs = sub_repo.resolve_config(rt_kwargs)
+                # Actual object allocation
+                obj = cls.__new__(cls)
 
-            # Actual object allocation
-            obj = cls.__new__(cls)
+                # Attach the definition to the object.
+                obj.__cdef__ = cdef
 
-            # Attach the definition to the object.
-            obj.__cdef__ = cdef
+                # Set the workspace
+                if isinstance(obj, WorkspaceCapable):
+                    ws = sub_repo.workspace_manager.alloc(cdef.stable_hash())
+                    os.makedirs(ws.path(), exist_ok=True)
+                    obj.__ws__ = ws
+                else:
+                    obj.__ws__ = None
 
-            # Set the workspace
-            if isinstance(obj, WorkspaceCapable):
-                ws = sub_repo.workspace_manager.alloc(cdef.stable_hash())
-                os.makedirs(ws.path(), exist_ok=True)
-                obj.__ws__ = ws
-            else:
-                obj.__ws__ = None
-
-            # Initialize with runtime (built) args while exposing the construction
-            # repo to code that consults get_default_repo().
-            from .session import config
-            with config(object_mode="fresh"), default_repo(sub_repo):
-                obj.__init__(*rt_args, **rt_kwargs)
+                # Initialize with runtime (built) args while exposing the construction
+                # repo to code that consults get_default_repo().
+                from .session import _construction_config
+                with _construction_config(), default_repo(sub_repo):
+                    obj.__init__(*rt_args, **rt_kwargs)
 
 
         return obj

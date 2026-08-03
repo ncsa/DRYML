@@ -62,19 +62,47 @@ class DefInterface(ABC):
             reuse_weak: bool = True,
             cache: "CachePolicy" = "weak",
             revision: "str | None" = None) -> Object:
+        """Materialize this definition through a repository lifecycle.
+
+        Args:
+            repo: Optional repository to use for concretization and loading.
+            instance: Instance reuse policy.
+            restore_state: Whether an existing saved state may be restored.
+            build_missing: Whether a missing definition may be constructed.
+            reuse_weak: Whether weak cached instances may be reused.
+            cache: Runtime cache policy.
+            revision: Optional saved-state revision.
+
+        Returns:
+            The materialized live Object.
+
+        Raises:
+            RuntimeTransitionError: Before any concretization, cache access,
+                restoration, or construction in strict orchestration.
+
+        Side Effects:
+            Holds the runtime publication lease through the repository and
+            construction lifecycle. WARN/OFF advanced runtime scopes can admit
+            the private fresh scope without changing public object-mode status.
+        """
+
+        from dryml.runtime import assert_object_materialization_allowed
         from .repo import manage_repo
-        from .session import config
-        with manage_repo(repo=repo) as sub_repo:
-            concrete_def = self.concretize(repo=sub_repo)
-            loader = sub_repo.load_or_build if build_missing else sub_repo.load
-            with config(object_mode="fresh"):
-                return loader(
-                    concrete_def,
-                    instance=instance,
-                    restore_state=restore_state,
-                    reuse_weak=reuse_weak,
-                    cache=cache,
-                    revision=revision)
+        from .session import _construction_config
+        # The guard must precede concretization and the private fresh scope so
+        # strict orchestration cannot reach cache, restore, or user code.
+        with assert_object_materialization_allowed(operation="definition_build"):
+            with manage_repo(repo=repo) as sub_repo:
+                concrete_def = self.concretize(repo=sub_repo)
+                loader = sub_repo.load_or_build if build_missing else sub_repo.load
+                with _construction_config():
+                    return loader(
+                        concrete_def,
+                        instance=instance,
+                        restore_state=restore_state,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision)
 
     def match(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs) -> bool:
         from .selector import Selector

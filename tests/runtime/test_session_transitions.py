@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import sys
 import uuid
+import warnings
+from contextvars import copy_context
 
 import pytest
 
 from dryml import session
 from dryml._framework_imports import finder
-from dryml.runtime import RuntimeAllocationView, RuntimeEnforcement, RuntimeMode, RuntimeState, active_runtime, enter_runtime
+from dryml.core import Object, definition_mode, selector_mode, space_mode
+from dryml.core.session import config, configure, current_object_mode, get_config, status
+from dryml.runtime import RuntimeAllocationView, RuntimeEnforcement, RuntimeMode, RuntimeState, active_runtime, assert_control_plane_target_execution_allowed, assert_object_materialization_allowed, enter_runtime, plain
+from dryml.runtime.guards import internal_construction_admitted
 from dryml.runtime.errors import RuntimeTransitionError
 from dryml.runtime.frameworks import FrameworkRegistration, framework_registry
 from dryml.runtime.publication import PublicationService
@@ -29,9 +34,120 @@ def isolated_session(monkeypatch):
     service.initialize(RuntimeState(enforcement=RuntimeEnforcement.OFF))
     monkeypatch.setattr(state, "publication", service)
     import dryml.runtime.context as context
+    import dryml.core.session as core_session
+    import dryml.runtime.guards as guards
 
     monkeypatch.setattr(context, "publication", service)
+    monkeypatch.setattr(core_session, "publication", service, raising=False)
+    monkeypatch.setattr(guards, "publication", service, raising=False)
     monkeypatch.setattr(state, "local_inventory", lambda: LocalResourceInventory((0, 1), {"gpu": (0, 1)}, memory=4 * 1024**3))
+    core_session.reset_config()
+
+
+class FloorObject(Object):
+    initialized = 0
+
+    def __init__(self, value):
+        super().__init__()
+        type(self).initialized += 1
+        self.value = value
+
+
+def test_orchestrator_object_mode_floor_projects_and_rejects_materializing_contexts():
+    configure(object_mode="load_or_build")
+    before = get_config()
+    session.set_mode("orchestrator")
+
+    assert current_object_mode() == "definition"
+    assert status()["object_mode"] == "definition"
+    assert isinstance(FloorObject(1), __import__("dryml").Definition)
+
+    with definition_mode(concrete=True):
+        assert current_object_mode() == "concrete"
+        with selector_mode():
+            assert current_object_mode() == "selector"
+            with space_mode():
+                assert current_object_mode() == "space"
+            assert current_object_mode() == "selector"
+        assert current_object_mode() == "concrete"
+
+    for enter in (
+        lambda: config(object_mode="fresh"),
+        lambda: config(object_mode="load_or_build"),
+        lambda: definition_mode(False),
+        lambda: selector_mode(False),
+        lambda: space_mode(False),
+    ):
+        with pytest.raises(RuntimeTransitionError, match="orchestration"):
+            with enter():
+                pass
+        assert get_config() == before
+
+    session.reset()
+    assert current_object_mode() == "load_or_build"
+
+
+def test_definition_build_guard_has_stable_diagnostic_and_warn_off_admission():
+    definition = FloorObject.defn(1)
+    session.set_mode("orchestrator")
+
+    with pytest.raises(RuntimeTransitionError, match="Orchestration mode prohibits Object materialization") as exc_info:
+        definition.build()
+    assert exc_info.value.context == {
+        "mode": "orchestrator",
+        "enforcement": "strict",
+        "operation": "definition_build",
+        "fix": "use Definition/CDef APIs for metadata, or execute in a managed inline session or dispatched worker",
+    }
+    assert FloorObject.initialized == 0
+
+    with enter_runtime(RuntimeMode.ORCHESTRATOR, enforcement="warn"):
+        with pytest.warns(RuntimeWarning, match="Orchestration mode prohibits Object materialization") as caught:
+            built = definition.build()
+    assert isinstance(built, FloorObject)
+    assert len(caught) == 1
+    assert status()["object_mode"] == "definition"
+
+    with plain():
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            built = definition.build()
+    assert isinstance(built, FloorObject)
+    assert not caught
+
+
+def test_floor_projects_into_copied_contexts_and_guard_admission_expires():
+    configure(object_mode="fresh")
+    copied = copy_context()
+    session.set_mode("orchestrator")
+
+    assert copied.run(current_object_mode) == "definition"
+    captured = None
+    with plain():
+        with assert_object_materialization_allowed(operation="test_materialization"):
+            assert internal_construction_admitted()
+            with pytest.raises(RuntimeTransitionError, match="orchestration"):
+                with config(object_mode="fresh"):
+                    pass
+            captured = copy_context()
+    assert captured is not None
+    assert not captured.run(internal_construction_admitted)
+
+
+def test_materialization_guard_lease_blocks_effectful_orchestrator_transition():
+    with assert_object_materialization_allowed(operation="test_materialization"):
+        with pytest.raises(RuntimeTransitionError, match="lease"):
+            session.set_mode("orchestrator")
+
+
+def test_local_execution_guard_uses_a_distinct_orchestrator_diagnostic():
+    session.set_mode("orchestrator")
+
+    with pytest.raises(RuntimeTransitionError, match="Orchestration mode prohibits local workload execution") as exc_info:
+        with assert_control_plane_target_execution_allowed(operation="managed_method_call"):
+            pass
+    assert "Object materialization" not in str(exc_info.value)
+    assert exc_info.value.context["operation"] == "managed_method_call"
 
 
 def test_exact_allocation_requires_an_unambiguous_process_and_respects_inventory():
