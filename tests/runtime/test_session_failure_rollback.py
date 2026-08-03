@@ -114,7 +114,7 @@ def test_managed_to_orchestrator_restores_nonvisibility_effects(monkeypatch):
     monkeypatch.setattr(state, "_loaded_framework_roots", lambda: ())
 
     session.manage(cpus=1)
-    assert affinity == {0}
+    assert affinity == {0, 1}
     assert environ["OMP_NUM_THREADS"] == "1"
 
     snapshot = session.set_mode("orchestrator")

@@ -1,3 +1,5 @@
+import builtins
+import importlib
 import os
 
 import pytest
@@ -5,6 +7,9 @@ import pytest
 import dryml.runtime as runtime
 from dryml.runtime.errors import RuntimeTransitionError
 from dryml.runtime.publication import EffectPlan, PublicationService, SessionGeneration, publication
+
+
+publication_module = importlib.import_module("dryml.runtime.publication")
 
 
 def _service(runtime_state=None, **kwargs):
@@ -81,6 +86,25 @@ def test_effect_failure_rolls_back_owned_environment(monkeypatch):
 
     assert publication.current() is before
     assert key not in os.environ
+
+
+def test_unsupported_process_limit_does_not_import_under_publication_writer(monkeypatch):
+    service = _service(environ={})
+    before, candidate = _candidate(service)
+    real_import = builtins.__import__
+
+    def reject_resource_import(name, *args, **kwargs):
+        if name == "resource":
+            raise AssertionError("resource imported under publication writer")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(publication_module, "_resource", None, raising=False)
+    monkeypatch.setattr(builtins, "__import__", reject_resource_import)
+
+    with pytest.raises(RuntimeTransitionError, match="process limits are unsupported"):
+        service.commit(candidate, EffectPlan(process_limits={1: (1, 1)}))
+
+    assert service.current() is before
 
 
 def test_effect_changing_transition_rejects_active_generation_lease():

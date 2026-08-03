@@ -730,7 +730,7 @@ def _effect_plan(runtime: RuntimeState, before: SessionGeneration, bootstrap: An
             from dryml.runtime import build_device_visibility_plan
 
             visibility.update(build_device_visibility_plan(mode=runtime.mode, allocation_view=allocation, policy="assigned").env_updates)
-        return EffectPlan(environment=visibility, cpu_affinity=tuple(allocation.cpus))
+        return EffectPlan(environment=visibility)
     if runtime.enforcement is RuntimeEnforcement.STRICT:
         environment = dict(bootstrap.env_updates)
         affinity = None

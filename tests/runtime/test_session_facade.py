@@ -99,6 +99,7 @@ def test_worker_session_publication_preserves_accelerator_memory():
     assert snapshot.runtime.allocation.accelerator_memory == {
         "gpu": {"gpu-a": 1024}
     }
+    assert all(record.kind != "cpu_affinity" for record in state.publication.effect_journal())
 
 
 def test_fresh_inspection_is_python_and_does_not_probe_inventory(monkeypatch):
@@ -173,6 +174,8 @@ def test_configure_uses_mode_axis_defaults_when_omitted_and_replaces_explicit_ax
 
 
 def test_manage_keeps_the_session_allocation_projection_deeply_immutable():
+    import dryml.session.state as state
+
     snapshot = session.manage()
 
     assert snapshot.mode == "managed"
@@ -181,6 +184,7 @@ def test_manage_keeps_the_session_allocation_projection_deeply_immutable():
     assert snapshot.allocation.process.accelerators == MappingProxyType({})
     assert snapshot.allocation.process.memory == 8 * 1024**3
     assert snapshot.controls["memory"] == "declarative"
+    assert all(record.kind != "cpu_affinity" for record in state.publication.effect_journal())
     with pytest.raises(TypeError):
         snapshot.controls["memory"] = "changed"
     with pytest.raises(TypeError):

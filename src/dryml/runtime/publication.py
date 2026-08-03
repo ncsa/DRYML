@@ -17,6 +17,11 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
+try:
+    import resource as _resource
+except ImportError:  # pragma: no cover - exercised on Windows CI
+    _resource = None
+
 from dryml._framework_imports import ImportEpochBusyError, ImportEpochReentryError, coordinator
 
 from .allocation import NoAllocation
@@ -773,19 +778,15 @@ class PublicationService:
 
     @staticmethod
     def _default_limit_getter(kind: int) -> tuple[int, int]:
-        try:
-            import resource
-        except ModuleNotFoundError as exc:
-            raise PublicationError("process limits are unsupported on this platform") from exc
-        return tuple(resource.getrlimit(kind))
+        if _resource is None:
+            raise PublicationError("process limits are unsupported on this platform")
+        return tuple(_resource.getrlimit(kind))
 
     @staticmethod
     def _default_limit_setter(kind: int, value: tuple[int, int]) -> None:
-        try:
-            import resource
-        except ModuleNotFoundError as exc:
-            raise PublicationError("process limits are unsupported on this platform") from exc
-        resource.setrlimit(kind, value)
+        if _resource is None:
+            raise PublicationError("process limits are unsupported on this platform")
+        _resource.setrlimit(kind, value)
 
     def _rollback(self, records: list[EffectRecord]) -> bool:
         """Restore only effects still owned by this failed transition.
