@@ -151,19 +151,16 @@ For example:
 FeatureToken(CLASS_KEY, AutoEncoder)
     → CDef IDs whose root class key is AutoEncoder
 
-FeatureToken(KWARG_PRESENT, "encoder")
-    → CDef IDs whose local kwargs include encoder
-
-FeatureToken(SCALAR_VALUE, path="$.kwargs.units", value=32)
-    → CDef IDs with that local scalar value
+FeatureToken(SCALAR_VALUE, path='$[@param("units")]', value=32)
+    → V2 CDef IDs with that local semantic scalar value
 ```
 
 A selector requiring several features can intersect postings lists:
 
 ```text
 CLASS_KEY(AutoEncoder)
-∩ KWARG_PRESENT("encoder")
-∩ KWARG_PRESENT("decoder")
+∩ local requirement at Parameter("encoder")
+∩ local requirement at Parameter("decoder")
 ```
 
 The rarest feature is usually the best anchor because it has the shortest postings list.
@@ -204,7 +201,8 @@ Querying tries to avoid `Object` materialization. A query returns `ConcreteDefin
 
 ### 4.2 Definition
 
-A `Definition` is a mutable, selector-capable object description. Users write or transform it. It can be partial.
+A `Definition` is an immutable, selector-capable object description. Copy-on-
+write transformations create new expressions. It can be partial.
 
 A `Definition` can be used as:
 
@@ -217,7 +215,10 @@ categorical/base template
 
 ### 4.3 ConcreteDefinition / CDef
 
-A `ConcreteDefinition` is the exact canonical identity of an object. It is immutable and hashable. Stores use it to locate object state.
+A `ConcreteDefinition` is the exact canonical identity of an object. It is
+immutable and hashable. Stores use it to locate object state. New V2 CDefs are
+fully bound semantic parameter records; legacy V1 CDefs retain raw invocation
+fields and remain a separate exact identity domain.
 
 In this document, **CDef** means `ConcreteDefinition`.
 
@@ -257,11 +258,11 @@ Graph:
 
 ```text
 Experiment
-    -- Kwarg("model") --> AutoEncoder
+    -- Parameter("model") --> AutoEncoder
 
 AutoEncoder
-    -- Kwarg("encoder") --> Encoder
-    -- Kwarg("decoder") --> Decoder
+    -- Parameter("encoder") --> Encoder
+    -- Parameter("decoder") --> Decoder
 ```
 
 ### 4.6 GraphPath
@@ -271,6 +272,7 @@ A `GraphPath` is a typed path through constructor/canonical values.
 Common segments:
 
 ```text
+Parameter(name)
 Arg(i)
 Kwarg(name)
 Index(i)
@@ -284,6 +286,12 @@ Typed paths prevent ambiguity such as:
 Index(5)        sequence index
 Key(5)          mapping key with integer value 5
 ```
+
+V2 paths use `Parameter` at the CDef boundary, for example
+`$[@param("model")]`. Paths below a parameter use normal typed container
+segments. V1 paths retain `Arg` and `Kwarg`; query planning keeps the two path
+domains distinct and does not reinterpret one as the other. The V2 record can
+be inspected, graphed, and indexed without resolving its referenced class.
 
 ### 4.7 Local feature
 
@@ -745,11 +753,11 @@ Selector graph:
 
 ```text
 node 0: Experiment local requirements
-    -- Kwarg("model") --> node 1
+    -- Parameter("model") --> node 1
 
 node 1: AutoEncoder local requirements
-    -- Kwarg("encoder") --> node 2
-    -- Kwarg("decoder") --> node 3
+    -- Parameter("encoder") --> node 2
+    -- Parameter("decoder") --> node 3
 
 node 2: exact encoder CDef
 node 3: decoder local requirements
@@ -1093,7 +1101,7 @@ Without postings:
 ```text
 for every CDef:
     load CDef
-    inspect class/args/kwargs
+    inspect class and version-specific semantic parameters
     run selector match
 ```
 
@@ -1103,7 +1111,7 @@ With postings:
 feature: CLASS_KEY(AutoEncoder)
     postings list maybe 100,000
 
-feature: KWARG_PRESENT("encoder")
+feature: scalar or child constraint at Parameter("encoder")
     postings list maybe 80,000
 
 feature: SCALAR_VALUE(units=32)
@@ -1136,8 +1144,8 @@ The rare anchor may be `exact_encoder`. Direct edges let the backend climb:
 
 ```text
 exact_encoder
-    ← Kwarg("encoder") -- AutoEncoder
-    ← Kwarg("model")   -- Experiment
+    ← Parameter("encoder") -- AutoEncoder
+    ← Parameter("model")   -- Experiment
 ```
 
 This avoids scanning every Experiment and inspecting its nested model.

@@ -1,4 +1,9 @@
-"""Immutable constructor records used by the private V2 CDef pipeline."""
+"""Immutable semantic constructor records for V2 CDef binding and projection.
+
+The helpers in this module bind live classes only when creating or
+materializing a CDef. Persisted V2 records are decoded and inspected from their
+name/value data without resolving the referenced class.
+"""
 
 from __future__ import annotations
 
@@ -44,27 +49,53 @@ class BoundArguments(Mapping[str, Any]):
         object.__setattr__(self, "_values", FrozenDict(pairs))
 
     def __getitem__(self, name: str) -> Any:
-        """Return the value recorded for ``name``."""
+        """Return the immutable value recorded for a semantic parameter.
+
+        Args:
+            name: Persisted constructor parameter name.
+
+        Returns:
+            The recorded canonical value.
+
+        Raises:
+            KeyError: If ``name`` is not recorded.
+        """
 
         return self._values[name]
 
     def __iter__(self):
-        """Iterate recorded parameter names in declaration/binding order."""
+        """Iterate parameter names in deterministic binding order.
+
+        Returns:
+            An iterator over string parameter names.
+        """
 
         return iter(self._values)
 
     def __len__(self) -> int:
-        """Return the number of recorded semantic parameters."""
+        """Return the number of recorded semantic parameters.
+
+        Returns:
+            The number of name/value pairs in this immutable record.
+        """
 
         return len(self._values)
 
     def items(self):
-        """Return immutable record items."""
+        """Return immutable semantic parameter name/value pairs.
+
+        Returns:
+            A dynamic mapping-items view over the immutable record.
+        """
 
         return self._values.items()
 
     def as_frozen_dict(self) -> FrozenDict[str, Any]:
-        """Return the immutable persisted name-to-value representation."""
+        """Return the immutable persisted name-to-value representation.
+
+        Returns:
+            The ``FrozenDict`` stored by this record; mutating it is unsupported.
+        """
 
         return self._values
 

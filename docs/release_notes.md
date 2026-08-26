@@ -2,6 +2,46 @@
 
 Status: draft.
 
+## Bound Concrete Definitions (V2)
+
+New exact `ConcreteDefinition` identities are V2 fully bound semantic
+constructor records. They capture declared defaults, normalize equivalent
+positional and keyword calls, and expose canonical values through direct
+non-reserved attributes, `parameters`, and semantic graph paths such as
+`$[@param("model")]`. `parameters[name]` remains the collision-safe access
+surface when a constructor name conflicts with a CDef API member.
+
+`Definition`, `Selector`, and `SearchSpace` remain partial expressions:
+their semantic mappings include supplied fields only, and omitted selector
+fields do not constrain V2 candidates. Semantic inspection, graph extraction,
+hashing, query planning, and index rebuilding read V2 parameter records without
+resolving the referenced class. V2 `.args` and `.kwargs` are compatibility
+accessors that project the persisted record using the current class signature
+at materialization time; they may resolve/import that class and can report a
+current-signature error.
+
+V1 records remain readable with their original raw `cls`/`args`/`kwargs`,
+hashes, and paths. They are not migrated, equated, or substituted with V2.
+Symbolic V1 records can be inspected without resolution, while raw-class V1
+pickles retain their normal import requirement. DRYML does not recover a
+historical omitted default from a V1 record.
+
+### Store Support Matrix
+
+| Operation | New DRYML software | Old DRYML software |
+| --- | --- | --- |
+| Read V1 Store | Supported | Supported |
+| Read V2 or mixed V1/V2 Store | Supported | Unsupported |
+| Write a new exact identity | Writes V2 | May write only an untouched V1-only Store |
+| Downgrade after V2 authority exists | Restore a pre-V2 backup | Unsupported in place |
+
+Object roots and mutable Store references are staged and atomically replaced
+only after validation. SQLite query sidecars are derived state and rebuild from
+authoritative object files; failed rebuilds do not replace a valid sidecar or
+expose a partial ready index. These guarantees apply to supported local Store
+filesystems and do not extend to arbitrary `IOBase` implementations or
+unsupported filesystem semantics.
+
 ## SQLite Query Index Sprint
 
 The core repo/query path now supports Store-owned persistent SQLite query indexes for `DirStore`.

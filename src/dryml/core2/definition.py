@@ -38,6 +38,12 @@ SKIP_ARGS = object()
 
 
 class DefInterface(ABC):
+    """Common read, exact-construction, and matching interface for definitions.
+
+    Implementations expose a class reference and constructor representation.
+    ``Definition`` is a partial expression, while ``ConcreteDefinition`` is an
+    exact identity that can be materialized through a repository.
+    """
     @property
     @abstractmethod
     def cls(self):
@@ -58,6 +64,18 @@ class DefInterface(ABC):
         ...
 
     def categorical(self, recursive=False):
+        """Return a categorical form with unique arguments removed.
+
+        Args:
+            recursive: Whether to strip unique arguments from nested definitions
+                as well as this definition.
+
+        Returns:
+            A transformed definition expression.
+
+        Raises:
+            ValueError: If a definition required for categorization has no class.
+        """
         return categorical_definition(self, recursive=recursive)
 
     def build(
@@ -69,6 +87,29 @@ class DefInterface(ABC):
             reuse_weak: bool = True,
             cache: "CachePolicy" = "weak",
             revision: "str | None" = None) -> Object:
+        """Load or materialize this definition through a repository.
+
+        Args:
+            repo: Repository used to resolve links and persisted objects.
+            instance: Instance reuse policy passed to the repository loader.
+            restore_state: Whether to restore saved object state when loading.
+            build_missing: Whether a missing exact definition may be built.
+            reuse_weak: Whether weakly cached instances may be reused.
+            cache: Cache policy for the resulting object.
+            revision: Optional saved-state revision to restore.
+
+        Returns:
+            The loaded or newly materialized runtime object.
+
+        Raises:
+            KeyError: If loading is requested but no matching persisted object
+                is available.
+            TypeError: If this definition cannot be concretized or materialized.
+
+        Side Effects:
+            May create a runtime object and populate repository caches. It does
+            not change this immutable definition.
+        """
         from .repo import manage_repo
         from .session import config
         with manage_repo(repo=repo) as sub_repo:
@@ -84,6 +125,22 @@ class DefInterface(ABC):
                     revision=revision)
 
     def match(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs) -> bool:
+        """Test this definition against another definition using selector rules.
+
+        Args:
+            other_def: Candidate definition or object to test.
+            strict: Whether matching requires exact rather than selector
+                semantics.
+            verbose: Whether matching diagnostics are emitted.
+            **sel_kwargs: Selector policy options, including ``cls_policy``.
+
+        Returns:
+            ``True`` when the candidate satisfies the applicable selector or
+            exact-definition semantics.
+
+        Raises:
+            TypeError: If strict matching encounters an unsupported selector.
+        """
         from .selector import Selector
 
         sel_kwargs.pop("full_diagnostic", None)
@@ -102,16 +159,35 @@ class DefInterface(ABC):
         return self.match(other_def, strict=strict, verbose=verbose, **sel_kwargs)
 
     def stable_hash(self):
+        """Return the deterministic hash for this definition representation.
+
+        Returns:
+            A stable hexadecimal content hash.
+        """
         return stable_hash_function(self)
 
 
 @dataclass(frozen=True, slots=True, init=False, eq=False)
 class Definition(DefInterface, Mapping):
-    """
-    Immutable structural graph expression.
+    """Immutable, partial structural graph expression.
 
     Values supplied at construction and update boundaries are deeply frozen so
-    user-owned containers cannot mutate the Definition after creation.
+    user-owned containers cannot mutate the Definition after creation. A
+    Definition preserves omission: its ``parameters`` mapping contains only
+    supplied values and never applies constructor defaults. It can therefore
+    represent partial selector or search-space intent as well as a construction
+    recipe. ``concretize()`` produces a fully bound exact V2
+    ``ConcreteDefinition`` when its class and values are materializable.
+
+    Args:
+        *args: Optional class or symbol reference followed by positional
+            constructor values. Use ``SKIP_ARGS`` after a class to preserve
+            keyword-only partial intent.
+        **kwargs: Supplied constructor values, retained as immutable fields.
+
+    Raises:
+        ValueError: If the leading value is not a supported class, callable, or
+            symbol reference, or ``SKIP_ARGS`` is used incorrectly.
     """
 
     _cls: Callable[..., Any] | type | ImportRef | SourceSpec | None
@@ -120,6 +196,19 @@ class Definition(DefInterface, Mapping):
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def __init__(self, *args, **kwargs):
+        """Create an immutable partial expression from supplied call spelling.
+
+        Args:
+            *args: Class/symbol reference and optional positional values.
+            **kwargs: Explicit keyword values.
+
+        Raises:
+            ValueError: If the class or ``SKIP_ARGS`` form is invalid.
+
+        Side Effects:
+            Deeply freezes supplied definition values; caller-owned containers
+            cannot subsequently mutate this expression.
+        """
         object.__setattr__(self, "_stable_hash_cache", None)
         if len(args) > 0:
             if not callable(args[0]) and not isclass(args[0]) and not isinstance(args[0], (ImportRef, SourceSpec)):
@@ -311,6 +400,14 @@ class Definition(DefInterface, Mapping):
         return self
 
     def thaw(self, memo: dict|None=None) -> Any:
+        """Return this immutable expression without materializing it.
+
+        Args:
+            memo: Unused compatibility memo argument.
+
+        Returns:
+            This ``Definition`` instance.
+        """
         return self
 
     def freeze(self):
@@ -319,6 +416,24 @@ class Definition(DefInterface, Mapping):
         return self.quote()
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
+        """Convert this expression to a fully bound canonical V2 CDef.
+
+        Args:
+            repo: Optional repository used to resolve supported definition
+                values during canonicalization.
+
+        Returns:
+            An exact ``ConcreteDefinition`` whose semantic record includes all
+            effective declared defaults.
+
+        Raises:
+            TypeError: If required arguments are missing or a bound value cannot
+                be canonicalized.
+
+        Side Effects:
+            May run the class preparation hook once and resolve values required
+            for exact canonicalization.
+        """
         return to_canonical(self, repo=repo)
 
     def with_cls(self, cls) -> "Definition":
@@ -394,11 +509,28 @@ class DefinitionLens:
 
 @dataclass(frozen=True, slots=True, init=False)
 class ConcreteDefinition(DefInterface, Mapping):
-    """
-    Exact canonical materializable object identity.
+    """Immutable exact canonical identity for a materializable object.
 
-    Values are deeply frozen and validated at construction. Equality is exact
-    structural equality, and hashes are stable across processes.
+    New instances are V2 identities: they persist a fully bound immutable
+    ``parameters`` name/value record, including declared defaults. Equivalent
+    positional and keyword calls therefore have one identity. V1 records remain
+    readable as legacy exact identities with raw ``args`` and ``kwargs``; V1 and
+    V2 records are never exact-equal and are not transparently migrated.
+
+    Semantic inspection through attributes, ``parameters``, ``graph_path()``,
+    hashing, and graph/query processing reads the stored record without class
+    resolution. Existing API names win attribute collisions; use
+    ``parameters[name]`` for every V2 constructor name. ``args`` and ``kwargs``
+    are compatibility call projections for V2 only, not identity or inspection
+    surfaces, and can resolve/import the current class.
+
+    Args:
+        cdef_cls: Live class for a new exact constructor call.
+        args: Positional constructor values before preparation and binding.
+        kwargs: Keyword constructor values before preparation and binding.
+
+    Raises:
+        TypeError: If the call cannot be fully bound or canonicalized.
     """
 
     cls: type | ImportRef | SourceSpec
@@ -655,6 +787,18 @@ class ConcreteDefinition(DefInterface, Mapping):
         self._copy_record(restored)
 
     def __getitem__(self, k: str) -> Any:
+        """Return a version-specific immutable record field by name.
+
+        Args:
+            k: ``"cls"`` plus ``"parameters"`` for V2, or ``"args"`` and
+                ``"kwargs"`` for V1.
+
+        Returns:
+            The stored canonical record field.
+
+        Raises:
+            KeyError: If ``k`` is unavailable for this identity version.
+        """
         if k == "cls": return self.cls
         if k == "parameters" and self._bound_args is not None: return self.parameters
         if k == "args" and self._bound_args is None: return self._args
@@ -718,7 +862,12 @@ class ConcreteDefinition(DefInterface, Mapping):
         return deepcopy(self)
 
     def freeze(self):
-        """Return a non-materializing canonical reference to this CDef."""
+        """Return a non-materializing canonical reference to this CDef.
+
+        Returns:
+            A ``Ref`` that preserves this exact identity without materializing
+            the referenced object.
+        """
 
         return self.ref()
 
@@ -731,9 +880,35 @@ class ConcreteDefinition(DefInterface, Mapping):
         return Mat(self)
 
     def thaw(self, memo: dict | None = None) -> Any:
+        """Return a Definition surface for this exact identity.
+
+        Args:
+            memo: Optional memo used while thawing a definition graph.
+
+        Returns:
+            A partial ``Definition`` or thawed canonical value suitable for
+            editing or later concretization.
+
+        Raises:
+            TypeError: If the current class signature cannot accept a persisted
+                V2 semantic record.
+
+        Side Effects:
+            V2 call projection resolves the current class and may import its
+            backend. It does not execute the constructor, preparation hook, or
+            declared defaults.
+        """
         return thaw_value(self, memo=memo)
 
     def concretize(self, repo: "Repo | None"=None) -> Any:
+        """Return this already exact identity unchanged.
+
+        Args:
+            repo: Unused compatibility repository argument.
+
+        Returns:
+            This ``ConcreteDefinition`` instance.
+        """
         return self
 
     def graph_path(self, path: Any = "$") -> Any:
@@ -758,7 +933,18 @@ class ConcreteDefinition(DefInterface, Mapping):
 
 
 def freeze(value: Any) -> Any:
-    """Return the new immutable graph wrapper for a DRYML definition value."""
+    """Return a non-materializing immutable graph wrapper for a definition value.
+
+    Args:
+        value: An ``Object``, ``Definition``, or ``ConcreteDefinition``.
+
+    Returns:
+        A quoted definition for partial expressions or a ``Ref`` for exact
+        identities and objects.
+
+    Raises:
+        TypeError: If ``value`` is not a supported DRYML definition value.
+    """
 
     from .object import Object
 

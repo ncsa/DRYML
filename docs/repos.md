@@ -59,6 +59,26 @@ repo = Repo(stores=store)
 
 A directory store uses stable definition hashes to organize object state under its object directory. It may also maintain a `.dryml/` sidecar directory for query-index metadata.
 
+## CDef Format Compatibility
+
+Store definitions, aliases, and main-definition references are authoritative.
+New DRYML software reads both legacy V1 and bound V2 CDefs and writes new exact
+identities as V2. V1 records keep their raw call fields, original hashes, and
+paths; they are not automatically migrated or rewritten when read.
+
+| Store contents and operation | New DRYML software | Old DRYML software |
+| --- | --- | --- |
+| Read an untouched V1-only Store | Supported | Supported |
+| Write an untouched V1-only Store | Writes new identities as V2 | Supported only while the Store remains V1-only |
+| Read a Store containing V1 and V2 authority | Supported | Unsupported |
+| Downgrade or rollback after V2 authority exists | Restore a pre-V2 backup | Do not attempt in place |
+
+There is no transparent V1-to-V2 migration and no recovery of historical
+defaults omitted from a V1 raw call. After V2 authoritative data exists, use a
+pre-V2 backup for a downgrade or rollback rather than opening the Store with
+old software. Query sidecars are derived acceleration data: compatible ones
+may be used, and incompatible ones are rebuilt from authoritative Store roots.
+
 ## Save Semantics
 
 Important save entry points:
@@ -75,7 +95,13 @@ Save options include:
 - main-definition flag
 - ephemeral depth
 
-The save planner builds a concrete-definition graph, saves required object state to the selected store, then updates repo/store query metadata after object files are published.
+The save planner builds a concrete-definition graph, stages and validates
+required object state, then atomically publishes the object root before
+activating repo/store query metadata. Aliases, main definitions, path-backed
+Zip archives, and replacement query sidecars are likewise staged before their
+final replacement. These publication rules rely on the supported local
+filesystem and Python atomic-replace behavior; they do not promise atomicity
+for arbitrary `IOBase` implementations or unsupported filesystems.
 
 ## Load Semantics
 
@@ -161,7 +187,7 @@ store.reconcile_query_index()
 
 Use `index_status()` for lightweight diagnostics. Use `validate_index(thorough=True)` when you want filesystem-level checks, including stored-root files and hash-path consistency. Use `rebuild_index()` to explicitly recreate the persistent index from object files.
 
-`reconcile_query_index()` compares the SQLite sidecar with the authoritative Store contents. In the current v1 policy, missing, dirty, corrupt, incompatible, stale, or divergent indexes are repaired by an exclusive rebuild from Store roots. Concurrent initial rebuild attempts coordinate through a build claim so only one process performs the Store scan.
+`reconcile_query_index()` compares the SQLite sidecar with the authoritative Store contents. Missing, dirty, corrupt, incompatible, stale, or divergent indexes are rebuilt by staged replacement from Store roots. A complete replacement is validated before atomic activation; failure retains authoritative object files and does not expose a partial ready sidecar. Concurrent initial rebuild attempts coordinate through a build claim so only one process performs the Store scan.
 
 Corrupt SQLite sidecars are quarantined before rebuild. A changed or misplaced `def.pkl` is reported as Store corruption instead of being silently indexed under the wrong identity.
 

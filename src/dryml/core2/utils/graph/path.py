@@ -1,3 +1,10 @@
+"""Typed, serializable paths through canonical definition graph values.
+
+V2 CDefs address constructor fields with ``Parameter`` segments, while legacy
+V1 CDefs retain invocation-oriented ``Arg`` and ``Kwarg`` segments. These
+types describe paths only; resolving a path is owned by graph-value utilities.
+"""
+
 from __future__ import annotations
 
 import ast
@@ -12,7 +19,7 @@ _SUPPORTED_GRAPH_PATH_SCHEMA_VERSIONS = frozenset((1, GRAPH_PATH_SCHEMA_VERSION)
 
 
 class GraphPathError(Exception):
-    pass
+    """Raised when a graph path is malformed, unsupported, or cannot resolve."""
 
 
 QueryPathError = GraphPathError
@@ -20,6 +27,11 @@ QueryPathError = GraphPathError
 
 @dataclass(frozen=True, slots=True)
 class Kwarg:
+    """Legacy V1 keyword-call path segment.
+
+    Args:
+        name: Persisted keyword argument name.
+    """
     name: str
 
     def __str__(self) -> str:
@@ -46,6 +58,11 @@ class Parameter:
 
 @dataclass(frozen=True, slots=True)
 class Arg:
+    """Legacy V1 positional-call path segment.
+
+    Args:
+        index: Zero-based position in the persisted raw argument tuple.
+    """
     index: int
 
     def __str__(self) -> str:
@@ -54,6 +71,11 @@ class Arg:
 
 @dataclass(frozen=True, slots=True)
 class Index:
+    """Sequence-index path segment.
+
+    Args:
+        index: Zero-based index in the current sequence value.
+    """
     index: int
 
     def __str__(self) -> str:
@@ -62,6 +84,11 @@ class Index:
 
 @dataclass(frozen=True, slots=True)
 class Key:
+    """Mapping-key path segment distinct from a sequence index.
+
+    Args:
+        key: Exact mapping key to resolve.
+    """
     key: Any
 
     def __str__(self) -> str:
@@ -72,6 +99,12 @@ class Key:
 
 @dataclass(frozen=True, slots=True)
 class SetMember:
+    """Stable set-member path segment.
+
+    Args:
+        fingerprint: Stable fingerprint of the selected member.
+        ordinal: Zero-based occurrence among colliding fingerprints.
+    """
     fingerprint: str
     ordinal: int = 0
 
@@ -85,18 +118,50 @@ GraphPathLike = str | Iterable[PathSegment | str | int] | "GraphPath"
 
 @dataclass(frozen=True, slots=True, eq=False)
 class GraphPath:
+    """Immutable ordered sequence of typed canonical-value path segments.
+
+    Args:
+        segments: Typed path segments from the root to a child value. The empty
+            tuple represents the root.
+    """
     segments: tuple[PathSegment, ...] = ()
 
     def __iter__(self):
+        """Iterate typed path segments from root to leaf.
+
+        Returns:
+            An iterator over ``PathSegment`` instances.
+        """
         return iter(self.segments)
 
     def __len__(self) -> int:
+        """Return the number of segments in this path.
+
+        Returns:
+            Zero for the root path, otherwise the path depth.
+        """
         return len(self.segments)
 
     def __bool__(self) -> bool:
+        """Report whether this path addresses a value below the root.
+
+        Returns:
+            ``False`` for the root path and ``True`` otherwise.
+        """
         return bool(self.segments)
 
     def __getitem__(self, item):
+        """Return a segment or path slice.
+
+        Args:
+            item: Integer index or slice into the typed segments.
+
+        Returns:
+            A ``PathSegment`` for an index or a new ``GraphPath`` for a slice.
+
+        Raises:
+            IndexError: If an integer index is outside this path.
+        """
         if isinstance(item, slice):
             return type(self)(self.segments[item])
         return self.segments[item]
@@ -110,54 +175,146 @@ class GraphPath:
         return False
 
     def child(self, segment: PathSegment | str | int) -> "GraphPath":
+        """Return a new path with one normalized child segment appended.
+
+        Args:
+            segment: Typed segment, legacy string keyword, or integer index.
+
+        Returns:
+            A new ``GraphPath``.
+
+        Raises:
+            QueryPathError: If ``segment`` is unsupported.
+        """
         return type(self)(self.segments + (_normalize_segment(segment),))
 
     def join(self, other: GraphPathLike) -> "GraphPath":
+        """Return a new path formed by appending another normalized path.
+
+        Args:
+            other: Typed, textual, or iterable path representation.
+
+        Returns:
+            A combined ``GraphPath``.
+
+        Raises:
+            QueryPathError: If ``other`` cannot be normalized.
+        """
         norm = normalize_path(other)
         return type(self)(self.segments + norm.segments)
 
     @property
     def parent(self) -> "GraphPath":
+        """Return the path one segment nearer the root.
+
+        Returns:
+            A new parent path, or the root path itself when already at root.
+        """
         if not self.segments:
             return self
         return type(self)(self.segments[:-1])
 
     @property
     def name(self) -> str | None:
+        """Return the display form of the last segment, if any.
+
+        Returns:
+            A segment display string, or ``None`` for the root path.
+        """
         if not self.segments:
             return None
         return str(self.segments[-1])
 
     @property
     def is_root(self) -> bool:
+        """Report whether this path denotes the root value.
+
+        Returns:
+            ``True`` when this path has no segments.
+        """
         return not self.segments
 
     def startswith(self, other: GraphPathLike) -> bool:
+        """Report whether this path begins with another normalized path.
+
+        Args:
+            other: Candidate typed, textual, or iterable prefix.
+
+        Returns:
+            ``True`` when ``other`` is a prefix of this path.
+
+        Raises:
+            QueryPathError: If ``other`` cannot be normalized.
+        """
         norm = normalize_path(other)
         return self.segments[:len(norm.segments)] == norm.segments
 
     def overlaps(self, other: GraphPathLike) -> bool:
+        """Report whether either normalized path is a prefix of the other.
+
+        Args:
+            other: Candidate typed, textual, or iterable path.
+
+        Returns:
+            ``True`` when the paths share one addressed root-to-leaf branch.
+
+        Raises:
+            QueryPathError: If ``other`` cannot be normalized.
+        """
         norm = normalize_path(other)
         return self.startswith(norm) or norm.startswith(self)
 
     def relative_to(self, prefix: GraphPathLike) -> "GraphPath":
+        """Return this path with a required normalized prefix removed.
+
+        Args:
+            prefix: Required leading path.
+
+        Returns:
+            The suffix relative to ``prefix``.
+
+        Raises:
+            QueryPathError: If this path does not begin with ``prefix``.
+        """
         norm = normalize_path(prefix)
         if not self.startswith(norm):
             raise QueryPathError(f"Path {self!s} is not relative to prefix {norm!s}.")
         return type(self)(self.segments[len(norm.segments):])
 
     def legacy_tuple(self) -> tuple[str | int, ...]:
+        """Return the lossy historical tuple display representation.
+
+        Returns:
+            A tuple of strings and integers for compatibility callers. Use typed
+            paths for identity-sensitive V1/V2 graph processing.
+        """
         return tuple(_legacy_segment_value(seg) for seg in self.segments)
 
     def to_legacy_tuple(self) -> tuple[str | int, ...]:
+        """Return ``legacy_tuple()`` under its compatibility API name.
+
+        Returns:
+            The historical tuple representation of this path.
+        """
         return self.legacy_tuple()
 
     def legacy_str(self) -> str:
+        """Return the slash-delimited historical display representation.
+
+        Returns:
+            ``"<root>"`` for root or a compatibility display string.
+        """
         if not self.segments:
             return "<root>"
         return "/".join(map(str, self.legacy_tuple()))
 
     def to_data(self) -> dict[str, Any]:
+        """Serialize this path with its current schema version.
+
+        Returns:
+            A machine-readable mapping containing ``schema_version`` and typed
+            segment data.
+        """
         return {
             "schema_version": GRAPH_PATH_SCHEMA_VERSION,
             "segments": [_segment_to_data(seg) for seg in self.segments],
@@ -165,6 +322,18 @@ class GraphPath:
 
     @classmethod
     def from_data(cls, data: Any) -> "GraphPath":
+        """Deserialize a supported versioned graph path.
+
+        Args:
+            data: A schema-versioned mapping or compatible segment iterable.
+
+        Returns:
+            The decoded immutable graph path.
+
+        Raises:
+            QueryPathError: If the schema version or segment representation is
+                missing, malformed, or unsupported.
+        """
         segments_data, schema_version = _segments_from_path_data(data)
         return cls(tuple(_segment_from_data(seg_data, schema_version) for seg_data in segments_data))
 
@@ -197,6 +366,17 @@ DefinitionPathLike = GraphPathLike
 
 
 def normalize_path(path: GraphPathLike = "$") -> GraphPath:
+    """Normalize typed, textual, or iterable input to a ``GraphPath``.
+
+    Args:
+        path: ``GraphPath``, textual path, or iterable of supported segments.
+
+    Returns:
+        The normalized path; an empty path denotes the root.
+
+    Raises:
+        QueryPathError: If a segment or textual form is invalid.
+    """
     if isinstance(path, GraphPath):
         return path
     if isinstance(path, str):
@@ -212,6 +392,18 @@ normalize_graph_path = normalize_path
 
 
 def normalize_ctx_path(path: GraphPathLike | None = None) -> GraphPath:
+    """Normalize a graph-context path, preserving legacy tuple semantics.
+
+    Args:
+        path: Optional path. Tuples of strings and integers use legacy context
+            normalization; all other forms use ``normalize_path``.
+
+    Returns:
+        A normalized ``GraphPath``.
+
+    Raises:
+        QueryPathError: If ``path`` is invalid.
+    """
     if path is None:
         return GraphPath()
     if isinstance(path, tuple) and all(isinstance(part, (str, int)) for part in path):
@@ -221,6 +413,19 @@ def normalize_ctx_path(path: GraphPathLike | None = None) -> GraphPath:
 
 
 def parse_path(text: str) -> GraphPath:
+    """Parse textual graph-path syntax into typed segments.
+
+    Args:
+        text: Root ``$`` or a path using ``args[i]``, keyword, index, key, set,
+            or semantic parameter syntax such as ``$[@param("model")]``.
+
+    Returns:
+        The parsed ``GraphPath``.
+
+    Raises:
+        QueryPathError: If syntax, quoting, brackets, or segment kinds are
+            invalid.
+    """
     if text == "" or text == "$":
         return GraphPath()
     if text.startswith("$."):

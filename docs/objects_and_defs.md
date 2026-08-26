@@ -8,11 +8,17 @@ The object/definition split is the core DRYML concept. A runtime object can have
 
 `Definition`:
 
-An unresolved construction recipe. It records a class plus constructor arguments, but those arguments may still contain other definitions or values that require repo/config resolution.
+An immutable partial construction expression. It records only the class and
+arguments that the caller supplied. Omitted constructor fields remain omitted:
+this is what makes a `Definition` suitable for selectors and search spaces as
+well as construction recipes.
 
 `ConcreteDefinition`:
 
-A fully resolved, canonical definition. This is the stable identity used for hashing, equality, graph indexing, save paths, and query matching.
+An immutable, fully bound canonical definition (CDef). New CDefs use the V2
+identity format: they capture every effective declared parameter, including
+defaults, and are the stable identity used for hashing, equality, graph
+indexing, save paths, and exact matching.
 
 `Object`:
 
@@ -40,6 +46,81 @@ assert obj.definition == concrete
 ```
 
 Most users construct objects directly. DRYML still captures the concrete definition behind the object.
+
+## Partial Expressions And Exact CDefs
+
+`Definition` and `ConcreteDefinition` deliberately have different omission
+rules. A partial `Definition` records intent without applying defaults:
+
+```python
+soft = Definition(Layer, width=32)
+assert soft.parameters["width"] == 32
+# A selector built from soft does not constrain omitted Layer parameters.
+```
+
+Concretization fully binds the prepared constructor call, applies declared
+defaults, applies argument roles, and canonicalizes the resulting values. New
+V2 CDefs therefore normalize equivalent call spellings:
+
+```python
+first = Definition(Layer, 32).concretize()
+second = Definition(Layer, width=32).concretize()
+
+assert first == second
+assert first.stable_hash() == second.stable_hash()
+```
+
+If `Layer` declares another defaulted parameter, that parameter is present in
+`first.parameters` even when it was omitted by the caller. The effective value
+is captured when the V2 CDef is created. A later call after a Python default
+changes produces a later identity; existing V2 CDefs retain their captured
+value.
+
+This does not make partial expressions exact. `Definition.parameters`,
+`Selector.parameters`, and `SearchSpace.parameters` contain supplied fields
+only. When a live constructor signature is safely available, positional and
+keyword selector spelling for the same supplied field constrain the same V2
+semantic parameter. An unresolved `ImportRef` or `SourceSpec` selector must
+use semantic keyword spelling or `SKIP_ARGS` when positional spelling would
+need class resolution; DRYML does not resolve code merely to interpret it.
+
+## Semantic Parameter Access
+
+V2 CDefs expose their persisted semantic parameters directly and through an
+immutable mapping. The mapping is the complete collision-safe interface:
+
+```python
+experiment = Definition(Experiment, model=Definition(Layer, width=32)).concretize()
+
+model = experiment.model
+assert model is experiment.parameters["model"]
+```
+
+Existing DRYML attributes and methods win name collisions. For example, a
+constructor parameter named `args`, `kwargs`, `build`, or `stable_hash` is
+always available as `cdef.parameters["args"]`,
+`cdef.parameters["kwargs"]`, and so on, rather than replacing the framework
+member. Values returned by direct access and the mapping are canonical values;
+they do not materialize runtime objects or resolve optional backends.
+
+V2's `.args` and `.kwargs` are compatibility accessors, not semantic inspection
+or identity surfaces. At materialization time they resolve the current class
+signature and project the persisted names and values into a call. They can
+therefore import a backend or raise a current-signature error. Materialization
+does not rerun preparation or reapply defaults.
+
+## Identity Versions And Legacy Data
+
+V1 CDefs retain their stored raw `cls`/`args`/`kwargs` identity, hash, paths,
+and materialization behavior. V1 and V2 CDefs are distinct exact identities,
+even when their visible constructor values look equivalent. DRYML reads V1
+records but does not map, migrate, or silently substitute them with V2 records.
+
+V1 symbolic class references remain inspectable without class resolution. A
+V1 pickle that embeds a raw live class retains the ordinary Python import
+requirement of that pickle; it is not made import-free. V1 omitted defaults are
+also legacy raw-call behavior: DRYML does not reconstruct a historical default
+value that was never stored.
 
 ## Definition Mode
 
