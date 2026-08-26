@@ -273,7 +273,7 @@ def test_parent_failure_leaves_successful_child_cached():
     repo = Repo()
     child_def = Definition(MaterialLeaf, "child")
     parent_def = Definition(FailingMaterial, child_def).concretize(repo=repo)
-    child_cdef = parent_def.args[0]
+    child_cdef = parent_def.parameters["child"]
 
     with pytest.raises(RepoLoadError, match="Error constructing"):
         repo.load_object(parent_def, build_missing=True, cache="strong")

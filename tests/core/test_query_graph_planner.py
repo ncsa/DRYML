@@ -264,7 +264,7 @@ def test_nonexact_nested_anchor_does_not_enumerate_all_definition_ids(monkeypatc
     assert max(bounded_universe_sizes) < full_domain_size
 
 
-def test_anchor_selection_estimates_every_node_and_materializes_only_chosen(monkeypatch):
+def test_anchor_selection_estimates_every_node_and_materializes_chosen_branches(monkeypatch):
     repo = Repo()
     wanted = PlannerParent(child=PlannerLeaf(name="wanted", repo=repo), name="wanted-root", repo=repo)
     for idx in range(8):
@@ -301,7 +301,9 @@ def test_anchor_selection_estimates_every_node_and_materializes_only_chosen(monk
 
     assert list(results) == [wanted.definition]
     assert len(estimate_calls) >= 2
-    assert len(materialize_calls) == 1
+    # The selected semantic node has one native fingerprint branch for each
+    # persisted identity version; no requirements from the other node are read.
+    assert len(materialize_calls) == 2
 
 
 def test_planner_runs_against_backend_without_lock_or_internal_dicts():
@@ -401,7 +403,10 @@ def test_graph_query_matches_bruteforce_across_domains_and_replicas(tmp_path):
         Definition(PlannerParent, SKIP_ARGS, child=Definition(PlannerLeaf, SKIP_ARGS, name="shared")),
         Definition(PlannerParent, SKIP_ARGS, child=rare.definition),
         Definition(PlannerSetParent, SKIP_ARGS, members={rare.definition}),
-        repo.query(stored_a.definition).categorical(path="child", recursive=True).selector,
+        repo.query(stored_a.definition).categorical(
+            path='$[@param("child")]',
+            recursive=True,
+        ).selector,
         repo.query(stored_a.definition).categorical(recursive=True).selector,
     ]
 

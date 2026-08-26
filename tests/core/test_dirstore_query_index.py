@@ -7,6 +7,7 @@ import pytest
 
 from dryml.core2 import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
 from dryml.core2.bound_args import BoundArguments
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
@@ -502,6 +503,135 @@ def test_sqlite_failed_replacement_preserves_ready_sidecar(tmp_path, monkeypatch
         assert view.exact_ids(obj.definition)
 
 
+def test_sqlite_rebuild_preserves_dirty_marker_from_concurrent_store_save(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    first = QueryIndexDirLeaf("before", repo=repo)
+    repo.save_object(first)
+    index = store.open_query_index()
+    original_validation = SQLiteStoreQueryIndex._validate_rebuild_before_ready
+    later = QueryIndexDirLeaf("during", repo=repo)
+
+    def save_during_validation(self, *, roots):
+        store.save_object(later)
+        return original_validation(self, roots=roots)
+
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", save_during_validation)
+    index.rebuild()
+
+    assert store.query_index_is_dirty()
+
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", original_validation)
+    index.refresh("auto")
+    with index.read_view() as view:
+        assert view.exact_ids(later.definition)
+    assert not store.query_index_is_dirty()
+
+
+def test_sqlite_registration_clears_only_markers_for_registered_roots(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    baseline = QueryIndexDirLeaf("baseline", repo=repo)
+    repo.save_object(baseline)
+    first = QueryIndexDirLeaf("first-overlap", repo=repo)
+    second = QueryIndexDirLeaf("second-overlap", repo=repo)
+
+    store.save_object(first)
+    first_markers = set(store._query_index_dirty_markers())
+    store.save_object(second)
+    index = store.open_query_index()
+    index.register_stored_roots(
+        ConcreteDefinitionGraph.for_query_index(second.definition),
+        [second.definition],
+    )
+
+    assert first_markers <= set(store._query_index_dirty_markers())
+    assert store.query_index_is_dirty()
+    index.refresh("auto")
+    with index.read_view() as view:
+        assert view.exact_ids(first.definition)
+        assert view.exact_ids(second.definition)
+    assert not store.query_index_is_dirty()
+
+
+def test_sqlite_rebuild_keeps_token_for_root_published_after_snapshot(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(QueryIndexDirLeaf("baseline", repo=repo))
+    later = QueryIndexDirLeaf("published-later", repo=repo)
+    marker = Path(store.mark_query_index_dirty(later.definition))
+    index = store.open_query_index()
+
+    index.rebuild()
+
+    assert marker.exists()
+    store.save_object(later)
+    index.refresh("auto")
+    with index.read_view() as view:
+        assert view.exact_ids(later.definition)
+    assert not store.query_index_is_dirty()
+
+
+def test_failed_root_publication_discards_its_dirty_token(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(QueryIndexDirLeaf("baseline", repo=repo))
+    failed = QueryIndexDirLeaf("failed-publication", repo=repo)
+    failed_dir = store.object_dir(failed.definition)
+    original_replace = os.replace
+
+    def fail_final_replace(source, destination):
+        if destination == failed_dir:
+            raise OSError("injected root publication failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("dryml.core2.store.store.os.replace", fail_final_replace)
+
+    with pytest.raises(OSError, match="root publication"):
+        store.save_object(failed)
+
+    assert not store.has(failed.definition)
+    assert not store.query_index_is_dirty()
+
+
+@pytest.mark.parametrize("payload", [b"", b"\xff", b"garbage\n"])
+def test_successful_rebuild_clears_malformed_dirty_marker(tmp_path, payload):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    repo.save_object(QueryIndexDirLeaf("baseline", repo=repo))
+    marker = Path(store.mark_query_index_dirty())
+    marker.write_bytes(payload)
+    index = store.open_query_index()
+
+    index.rebuild()
+
+    assert not marker.exists()
+    assert not store.query_index_is_dirty()
+    assert index.status().state == "ready"
+
+
+def test_sqlite_peer_connection_reopens_after_replacement(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    first = QueryIndexDirLeaf("first")
+    store.save_object(first)
+    rebuilding = store.open_query_index()
+    rebuilding.rebuild()
+
+    peer_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    peer = peer_store.open_query_index()
+    with peer.read_view() as view:
+        old_generation = view.generation
+        assert view.exact_ids(first.definition)
+
+    second = QueryIndexDirLeaf("second")
+    store.save_object(second)
+    rebuilding.rebuild()
+
+    with peer.read_view() as view:
+        assert view.generation > old_generation
+        assert view.exact_ids(second.definition)
+
+
 def test_sqlite_future_sidecar_fails_before_store_scan_or_row_decode(tmp_path):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -618,7 +748,7 @@ def test_dirstore_query_index_status_rebuild_and_reconcile(tmp_path):
     rebuilt = store.rebuild_query_index()
     assert rebuilt.changed
     assert rebuilt.action == "rebuild"
-    assert rebuilt.generation_after == 1
+    assert rebuilt.generation_after > rebuilt.generation_before
     assert store.query_index_status().row_counts["stored_roots"] == 1
 
 

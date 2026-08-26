@@ -222,8 +222,8 @@ def test_mnist_execute_definition_only_train_and_score_matches_model_score(
     repo_dir.mkdir()
     repo = Repo(stores=repo_dir)
     exp_def = experiment_factory()
-    model_def = exp_def.args[0]
-    val_data_def = exp_def.kwargs["val_data"]
+    model_def = exp_def.parameters["model"]
+    val_data_def = exp_def.parameters["val_data"]
 
     train_score = execute.run(
         _train_experiment_and_score,

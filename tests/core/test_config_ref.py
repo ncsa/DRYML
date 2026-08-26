@@ -11,7 +11,7 @@ def test_config_ref_resolves_during_object_construction():
     obj = objects.ConfigConsumer(ConfigRef("data.root"), repo=repo)
 
     assert obj.value == "/local/data"
-    assert obj.definition.args[0] == ConfigRef("data.root")
+    assert obj.definition.parameters["value"] == ConfigRef("data.root")
 
 
 def test_config_ref_missing_key_raises_during_construction():

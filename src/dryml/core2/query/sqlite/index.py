@@ -92,15 +92,30 @@ class SQLiteStoreQueryIndex:
     def source_key(self) -> str:
         return self._source_key
 
-    def initialize_empty(self, *, build_state: str = "ready") -> None:
-        self._run_write_transaction(
-            lambda con: initialize_schema(
+    def initialize_empty(self, *, build_state: str = "ready", generation: int = 0) -> None:
+        """Initialize an empty sidecar with an explicit state and generation.
+
+        Args:
+            build_state: Catalog state exposed during initialization.
+            generation: Initial non-negative generation. Replacement rebuilds
+                use this to remain monotonic across atomic sidecar publication.
+
+        Raises:
+            QueryIndexError: If the sidecar schema cannot be initialized.
+            QueryIndexUnavailable: If SQLite is unavailable.
+        """
+
+        def initialize(con):
+            initialize_schema(
                 con,
                 store_key=self.source_key,
                 canonical_version=self.canonical_version,
                 build_state=build_state,
             )
-        )
+            if generation:
+                _bump_generation(con, generation)
+
+        self._run_write_transaction(initialize)
         con = self._connections.connection(readonly=False)
         con.execute("PRAGMA optimize")
 
@@ -266,6 +281,17 @@ class SQLiteStoreQueryIndex:
         scan the Store. They preflight all authoritative roots, validate a
         complete sibling sidecar while it is `building`, then atomically replace
         the active sidecar. Store roots are never changed by rebuild or recovery.
+
+        Args:
+            stats: Optional query statistics updated with the refresh action.
+            quarantine_existing: Preserve an incompatible or corrupt previous
+                sidecar after successful replacement when possible.
+            force: Acquire the build claim even when another ready index exists.
+
+        Raises:
+            QueryIndexError: If authoritative roots are invalid, staging fails,
+                or the replacement sidecar does not validate.
+            QueryIndexUnavailable: If SQLite is unavailable.
         """
 
         with self._build_claim(force=force) as acquired:
@@ -342,6 +368,8 @@ class SQLiteStoreQueryIndex:
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
         self._assert_sidecar_rebuildable()
 
+        dirty_markers = self._dirty_markers()
+        generation_seed = self._replacement_generation_seed()
         try:
             roots = self._preflight_store_roots()
         except Exception:
@@ -358,7 +386,7 @@ class SQLiteStoreQueryIndex:
         )
         scanned = 0
         try:
-            replacement.initialize_empty(build_state="building")
+            replacement.initialize_empty(build_state="building", generation=generation_seed)
             for cdefs in chunked(roots, _REBUILD_BATCH_SIZE):
                 scanned += len(cdefs)
                 graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
@@ -376,7 +404,7 @@ class SQLiteStoreQueryIndex:
             replacement.close()
             self._cleanup_replacement(replacement_path)
             raise
-        self._clear_dirty()
+        self._clear_dirty(dirty_markers, roots=roots, clear_unscoped=True)
         if stats is not None:
             stats.store_scan_count += 1
             stats.refresh_action = "sqlite-rebuild"
@@ -430,6 +458,7 @@ class SQLiteStoreQueryIndex:
             raise QueryIndexBusy(
                 "Cannot register Store roots while a SQLite query-index rebuild is active."
             )
+        dirty_markers = self._dirty_markers()
         roots = tuple(dict.fromkeys(roots))
         graph = as_query_index_graph(graph, roots if roots else graph.roots)
         graph_nodes = graph.nodes()
@@ -523,7 +552,9 @@ class SQLiteStoreQueryIndex:
                 roots_added=counters.roots_added,
             )
 
-        return self._run_write_transaction(operation)
+        result = self._run_write_transaction(operation)
+        self._clear_dirty(dirty_markers, roots=roots)
+        return result
 
     def _preflight_graph_nodes(self, graph_nodes, node_hash_blobs, *, require_ready: bool):
         missing_nodes = [node.definition for node in graph_nodes]
@@ -611,30 +642,54 @@ class SQLiteStoreQueryIndex:
         validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
 
     def _is_dirty(self) -> bool:
-        return self.dirty_path is not None and self.dirty_path.exists()
+        return bool(self._dirty_markers())
 
-    def _clear_dirty(self) -> None:
+    def _dirty_markers(self) -> tuple[Path, ...]:
         if self.dirty_path is None:
-            return
-        try:
-            self.dirty_path.unlink()
-        except FileNotFoundError:
-            pass
+            return ()
+        markers = tuple(self.dirty_path.parent.glob(f"{self.dirty_path.name}.*"))
+        if self.dirty_path.exists():
+            markers = (*markers, self.dirty_path)
+        return markers
+
+    @staticmethod
+    def _clear_dirty(
+            markers: tuple[Path, ...], *,
+            roots: tuple[ConcreteDefinition, ...],
+            clear_unscoped: bool = False) -> None:
+        root_hashes = {root.stable_hash() for root in roots}
+        for marker in markers:
+            try:
+                mutation = marker.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                mutation = ""
+            is_scoped = (
+                len(mutation) == 64
+                and all(char in "0123456789abcdef" for char in mutation)
+            )
+            if mutation not in root_hashes and not (clear_unscoped and not is_scoped):
+                continue
+            try:
+                marker.unlink()
+            except FileNotFoundError:
+                pass
 
     def _mark_dirty(self) -> None:
         if self.dirty_path is None:
             return
         self.dirty_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.dirty_path.with_name(f"{self.dirty_path.name}.tmp-{uuid4().hex}")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as file:
-                file.write("dirty\n")
-            os.replace(tmp_path, self.dirty_path)
-        finally:
+        marker_path = self.dirty_path.with_name(f"{self.dirty_path.name}.{uuid4().hex}")
+        with open(marker_path, "x", encoding="utf-8") as file:
+            file.write("dirty\n")
+
+    def _replacement_generation_seed(self) -> int:
+        current = -1
+        if self.path.exists():
             try:
-                tmp_path.unlink()
-            except FileNotFoundError:
+                current = _read_generation(self._connections.connection(readonly=True))
+            except Exception:
                 pass
+        return max(current + 1, time.time_ns())
 
     def _root_file_metadata(self, stable_hash: str) -> tuple[int | None, int | None]:
         if self.store is None or not hasattr(self.store, "base_dir"):

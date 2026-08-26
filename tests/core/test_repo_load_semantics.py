@@ -1,6 +1,7 @@
 import pytest
 
 from dryml.core2 import Definition, Object, Repo, Serializable
+from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core2.policies import RepoLoadOptions
 from dryml.core2.repo import RepoLoadError
 from dryml.core2.store.dir import DirStore
@@ -40,7 +41,7 @@ def test_load_or_build_concretizes_definition_once(tmp_path):
 
     assert obj.name == "x"
     assert LoadLeaf.prepare_count == 1
-    assert obj.definition.identity_version == 1
+    assert obj.definition.identity_version == V2_IDENTITY_VERSION
 
 
 def test_load_or_build_does_not_choose_compatible_sibling(tmp_path):

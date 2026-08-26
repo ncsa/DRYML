@@ -38,7 +38,7 @@ def test_nested_query_finds_ephemeral_child_and_owner(tmp_path):
     occurrence = occurrences.one()
     assert occurrence.owner == parent.definition
     assert occurrence.definition == child.definition
-    assert str(occurrence.path) == "$.args[0]"
+    assert str(occurrence.path) == '$[@param("child")]'
 
     owner_defs = repo2.find_owner_defs(selector)
     assert list(owner_defs) == [parent.definition]
@@ -61,6 +61,9 @@ def test_nested_occurrences_preserve_duplicate_paths(tmp_path):
     occurrences = repo2.find_occurrences(Definition(QueryLeaf, SKIP_ARGS))
 
     assert occurrences.count() == 2
-    assert {str(occ.path) for occ in occurrences} == {"$.args[0][0]", "$.args[0][1]"}
+    assert {str(occ.path) for occ in occurrences} == {
+        '$[@param("child")][0]',
+        '$[@param("child")][1]',
+    }
     assert occurrences.definitions().count() == 1
     assert occurrences.owners().count() == 1

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 import glob
+import tempfile
 from dataclasses import replace
 from typing import Literal
+from uuid import uuid4
 
 from .store import Store, StoreAuthorityError
 from ..query.model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
@@ -15,9 +17,15 @@ from ..utils.general import atomic_pickle_save, pickle_load
 QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
 
 class DirStore(Store):
-    """
-    Store that keeps objects in a directory tree:
-      base_dir/objects/<hh>/<full_hash>/...
+    """Persist authoritative objects in a stable hash-addressed directory tree.
+
+    Roots live below ``base_dir/objects/<hh>/<full_hash>``. Optional SQLite
+    query indexes are derived sidecars; tokenized dirty markers prevent one
+    rebuild from clearing a concurrent authority mutation.
+
+    Args:
+        base_dir: Directory containing authoritative roots and Store metadata.
+        query_index: Built-in policy, SQLite configuration, or custom backend.
     """
     def __init__(self, base_dir: str, *, query_index: QueryIndexPolicy | SQLiteQueryIndexConfig | object = "auto"):
         self._base_dir = os.fspath(base_dir)
@@ -74,21 +82,64 @@ class DirStore(Store):
         )
         return self._query_index_instance
 
-    def mark_query_index_dirty(self) -> None:
+    def mark_query_index_dirty(self, cdef: ConcreteDefinition | None = None) -> str:
+        """Create and return one durable query-index mutation token.
+
+        Args:
+            cdef: Definition root affected by the pending or completed mutation.
+                ``None`` records an unscoped mutation that only a full rebuild
+                may clear.
+
+        Returns:
+            The created marker path. Incremental registration clears only tokens
+            naming roots included in its successful transaction.
+        """
+
         os.makedirs(self.dryml_dir, exist_ok=True)
-        tmp_path = f"{self.query_index_dirty_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write("dirty\n")
-        os.replace(tmp_path, self.query_index_dirty_path)
+        marker_path = f"{self.query_index_dirty_path}.{uuid4().hex}"
+        fd, temporary_path = tempfile.mkstemp(prefix=".query-index-dirty-", dir=self.dryml_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("dirty\n" if cdef is None else f"{cdef.stable_hash()}\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, marker_path)
+        except BaseException:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
+        return marker_path
 
     def clear_query_index_dirty(self) -> None:
-        try:
-            os.remove(self.query_index_dirty_path)
-        except FileNotFoundError:
-            pass
+        for marker_path in self._query_index_dirty_markers():
+            try:
+                os.remove(marker_path)
+            except FileNotFoundError:
+                pass
 
     def query_index_is_dirty(self) -> bool:
-        return os.path.exists(self.query_index_dirty_path)
+        return bool(self._query_index_dirty_markers())
+
+    def _query_index_dirty_markers(self) -> tuple[str, ...]:
+        markers = tuple(glob.glob(f"{self.query_index_dirty_path}.*"))
+        if os.path.exists(self.query_index_dirty_path):
+            markers = (*markers, self.query_index_dirty_path)
+        return markers
+
+    def _mark_authority_dirty(self, cdef: ConcreteDefinition | None = None) -> str | None:
+        if self._query_index_policy in {"auto", "sqlite"}:
+            return self.mark_query_index_dirty(cdef)
+        return None
+
+    def _discard_authority_dirty(self, token) -> None:
+        if token is None:
+            return
+        try:
+            os.remove(token)
+        except FileNotFoundError:
+            pass
 
     def query_index_status(self) -> QueryIndexStatus:
         """Return status for this directory Store's configured query index.
@@ -247,9 +298,9 @@ class DirStore(Store):
         """
 
         # Walk the objects tree, load def.pkl for each, and yield cdef
-        pattern = os.path.join(self.obj_dir, "**", "def.pkl")
+        pattern = os.path.join(self.obj_dir, "*", "*", "def.pkl")
         seen_hashes: set[str] = set()
-        for def_path in glob.glob(pattern, recursive=True):
+        for def_path in glob.glob(pattern):
             try:
                 cdef = self._validate_root_definition_path(def_path)
             except StoreAuthorityError as exc:

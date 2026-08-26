@@ -14,7 +14,7 @@ from ..symbol import maybe_symbol_ref
 from ..utils.stable_hash import stable_hash_function
 from ..utils.types import is_nonclass_callable
 from .model import ClassMatchPolicy
-from .path import Arg, DefinitionPath, Key, Kwarg, Parameter, SetMember, iter_value_edges
+from .path import DefinitionPath, Key, Kwarg, SetMember, iter_value_edges
 
 
 LocalStructureMode = Literal["target-full", "target-local", "selector-full", "selector-local"]
@@ -252,7 +252,7 @@ def _walk_definition_children(
         mode: LocalStructureMode,
         class_match: ClassMatchPolicy,
         unordered_set_boundaries: bool) -> None:
-    for index, edge in enumerate(iter_value_edges(definition)):
+    for edge in iter_value_edges(definition):
         if isinstance(edge.segment, Kwarg):
             if not _can_match_absent(edge.value):
                 consumer.feature("HAS_KWARG", path, edge.segment.name)
@@ -265,22 +265,6 @@ def _walk_definition_children(
             class_match=class_match,
             unordered_set_boundaries=unordered_set_boundaries,
         )
-        if mode.startswith("target") and isinstance(definition, ConcreteDefinition) and isinstance(edge.segment, Parameter):
-            # Feature paths are derived state.  Preserve V1 selector spellings
-            # as aliases so a V2 semantic record is never pruned before Python
-            # verification solely because its call spelling was normalized.
-            for alias in (Arg(index), Kwarg(edge.segment.name)):
-                if isinstance(alias, Kwarg) and not _can_match_absent(edge.value):
-                    consumer.feature("HAS_KWARG", path, alias.name)
-                _walk(
-                    edge.value,
-                    path.child(alias),
-                    consumer,
-                    active=active,
-                    mode=mode,
-                    class_match=class_match,
-                    unordered_set_boundaries=unordered_set_boundaries,
-                )
 
 
 def _walk_mapping(

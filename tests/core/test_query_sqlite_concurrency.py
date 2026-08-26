@@ -46,7 +46,11 @@ from dryml.core2.symbol import ImportRef
 
 
 def cdef(name):
-    return ConcreteDefinition(ImportRef("builtins", "dict"), FrozenTuple((name,)), FrozenDict({}))
+    return ConcreteDefinition._from_persisted_record(
+        ImportRef("builtins", "dict"),
+        FrozenTuple((name,)),
+        FrozenDict({}),
+    )
 
 
 def index(path, *, timeout=0.05, retries=20):
@@ -133,7 +137,11 @@ def _spawn_register_worker(path: str, queue) -> None:
 
 
 def _cdef(name: str) -> ConcreteDefinition:
-    return ConcreteDefinition(ImportRef("builtins", "dict"), FrozenTuple((name,)), FrozenDict({}))
+    return ConcreteDefinition._from_persisted_record(
+        ImportRef("builtins", "dict"),
+        FrozenTuple((name,)),
+        FrozenDict({}),
+    )
 
 
 def _index(path: Path, *, timeout: float = 0.05, retries: int = 20) -> SQLiteStoreQueryIndex:
@@ -413,7 +421,7 @@ def test_root_registration_fails_dirty_while_rebuild_claim_is_active(tmp_path):
     with pytest.raises(QueryIndexBusy, match="rebuild"):
         idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
 
-    assert dirty_path.exists()
+    assert idx._is_dirty()
     assert idx.status().state == "dirty"
 
 
@@ -568,7 +576,8 @@ with idx.read_view() as view:
     emit({{"count": len(ids), "generation": view.generation}})
 ''')
 
-    assert result == {"count": 1, "generation": 1}
+    assert result["count"] == 1
+    assert result["generation"] > 0
     assert not store.query_index_is_dirty()
     with store.open_query_index().read_view() as view:
         assert len(view.exact_ids(root)) == 1
@@ -609,7 +618,9 @@ with idx.read_view() as view:
     emit({{"state": idx.status().state, "count": len(view.exact_ids(cdef("building-recovery"))), "generation": view.generation}})
 ''')
 
-    assert result == {"state": "ready", "count": 1, "generation": 1}
+    assert result["state"] == "ready"
+    assert result["count"] == 1
+    assert result["generation"] > 0
 
 
 def test_save_plan_does_not_register_index_before_object_publication():

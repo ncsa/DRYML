@@ -57,9 +57,30 @@ def definition_mode(enabled: bool = True, *, concrete: bool = False):
 
 
 class Dryml(type):
-    # Support metaclass to enable capture of input arguments
+    """Capture Object construction calls and apply the active repository mode."""
 
-    def __call__(cls, *args, repo=None, __cdef__=None, **kwargs):
+    def __call__(dryml_cls, /, *args, repo=None, __cdef__=None, **kwargs):
+        """Create, describe, concretize, or load an Object construction call.
+
+        Args:
+            *args: Runtime constructor positional arguments.
+            repo: Optional repository for canonicalization and materialization.
+            __cdef__: Internal exact identity used during reconstruction.
+            **kwargs: Runtime constructor keyword arguments. ``cls`` remains a
+                normal user keyword rather than colliding with this metaclass.
+
+        Returns:
+            An Object, Definition, ConcreteDefinition, Selector, or SearchSpace
+            according to the active object mode.
+
+        Raises:
+            TypeError: If constructor binding or runtime initialization fails.
+
+        Side Effects:
+            May canonicalize arguments, access Store state, populate repository
+            caches, allocate a workspace, and initialize a runtime object.
+        """
+
         from .session import get_config
 
         session_config = get_config()
@@ -67,24 +88,24 @@ class Dryml(type):
         active_repo = repo if repo is not None else session_config.repo
 
         if __cdef__ is None and object_mode == "definition":
-            defn = cls.defn(*args, **kwargs)
+            defn = dryml_cls.defn(*args, **kwargs)
             return defn
 
         if __cdef__ is None and object_mode == "concrete":
-            return cls.defn(*args, **kwargs).concretize(repo=active_repo)
+            return dryml_cls.defn(*args, **kwargs).concretize(repo=active_repo)
 
         if __cdef__ is None and object_mode == "selector":
-            return cls.defn(*args, **kwargs).as_selector()
+            return dryml_cls.defn(*args, **kwargs).as_selector()
 
         if __cdef__ is None and object_mode == "space":
-            return cls.defn(*args, **kwargs).as_space()
+            return dryml_cls.defn(*args, **kwargs).as_space()
 
         if __cdef__ is None and object_mode == "load_or_build":
             from .repo import manage_repo
 
             with manage_repo(repo=active_repo) as sub_repo:
                 _cache_runtime_object_args(sub_repo, args, kwargs)
-                cdef = Definition(cls, *args, **kwargs).concretize(repo=sub_repo)
+                cdef = Definition(dryml_cls, *args, **kwargs).concretize(repo=sub_repo)
                 return sub_repo.load_or_build(cdef, cache=session_config.cache)
 
         from .repo import default_repo, manage_repo
@@ -92,12 +113,12 @@ class Dryml(type):
             if __cdef__ is None:
                 # First-time construction from a soft Definition
                 _cache_runtime_object_args(sub_repo, args, kwargs)
-                defn = Definition(cls, *args, **kwargs)
+                defn = Definition(dryml_cls, *args, **kwargs)
                 cdef = defn.concretize(repo=sub_repo)
 
                 from .materialization import project_cdef_call
 
-                canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=cls)
+                canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=dryml_cls)
                 rt_args = sub_repo.load_object(canonical_args, build_missing=True)
                 rt_kwargs = sub_repo.load_object(canonical_kwargs, build_missing=True)
 
@@ -108,7 +129,7 @@ class Dryml(type):
                 rt_kwargs = kwargs
 
             # Run pre-init check
-            cls.__pre_init__()
+            dryml_cls.__pre_init__()
 
             # Resolve host/runtime-specific config leaves after identity has been
             # computed, but before the user initializer receives its arguments.
@@ -116,7 +137,7 @@ class Dryml(type):
             rt_kwargs = sub_repo.resolve_config(rt_kwargs)
 
             # Actual object allocation
-            obj = cls.__new__(cls)
+            obj = dryml_cls.__new__(dryml_cls)
 
             # Attach the definition to the object.
             obj.__cdef__ = cdef

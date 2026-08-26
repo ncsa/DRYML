@@ -321,6 +321,19 @@ class SQLiteRelationCompiler:
             ctes.append(f"{anchor_name}(def_id) AS (SELECT d.def_id FROM definitions d WHERE {where_sql})")
             return
 
+        if anchor.alternate_local_requirements:
+            selects = [
+                self._compile_requirement_branch_select(
+                    anchor,
+                    branch,
+                    params,
+                    selector_graph.outgoing(anchor.node_id),
+                )
+                for branch in anchor.requirement_branches
+            ]
+            ctes.append(f"{anchor_name}(def_id) AS ({' UNION '.join(selects)})")
+            return
+
         posting_req = self._posting_anchor_requirement(anchor)
         if posting_req is None:
             predicates = self._node_predicates(anchor, params)
@@ -353,6 +366,35 @@ class SQLiteRelationCompiler:
                 WHERE {where_sql}
             )
             """
+        )
+
+    def _compile_requirement_branch_select(self, node, branch, params, outgoing) -> str:
+        posting_req = self._posting_anchor_requirement_from(branch)
+        if posting_req is None:
+            predicates = self._requirements_predicates(branch, params)
+            predicates.extend(
+                self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+                for edge in outgoing
+            )
+            where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+            return f"SELECT d.def_id FROM definitions d WHERE {where_sql}"
+
+        feature_id = self._feature_id(posting_req.token)
+        if feature_id is None:
+            predicates = ["0 = 1"]
+        else:
+            predicates = ["p.feature_id = ?", "p.multiplicity >= ?"]
+            params.extend((feature_id, posting_req.count))
+        predicates.extend(self._requirements_predicates(branch, params, skip_requirement=posting_req))
+        predicates.extend(
+            self._child_exists_predicate(edge, f"subtree_{edge.child}", params)
+            for edge in outgoing
+        )
+        where_sql = " AND ".join(f"({predicate})" for predicate in predicates) if predicates else "1 = 1"
+        return (
+            "SELECT DISTINCT p.def_id FROM postings p "
+            "JOIN definitions d ON d.def_id = p.def_id "
+            f"WHERE {where_sql}"
         )
 
     def _compile_subtree_relation(
@@ -407,10 +449,27 @@ class SQLiteRelationCompiler:
         if node.exact_definition is not None:
             predicates.append("d.stable_hash = ?")
             params.append(stable_hash_to_blob(node.exact_definition.stable_hash()))
-        for req in node.local_requirements:
-            if skip_requirement is not None and req == skip_requirement:
+        branch_predicates = []
+        for branch in node.requirement_branches:
+            requirements = self._requirements_predicates(
+                branch,
+                params,
+                skip_requirement=skip_requirement,
+            )
+            branch_predicates.append(
+                " AND ".join(f"({predicate})" for predicate in requirements)
+                if requirements else "1 = 1"
+            )
+        if branch_predicates and any(node.requirement_branches):
+            predicates.append(" OR ".join(f"({predicate})" for predicate in branch_predicates))
+        return predicates
+
+    def _requirements_predicates(self, requirements, params, *, skip_requirement=None):
+        predicates = []
+        for requirement in requirements:
+            if skip_requirement is not None and requirement == skip_requirement:
                 continue
-            feature_id = self._feature_id(req.token)
+            feature_id = self._feature_id(requirement.token)
             if feature_id is None:
                 predicates.append("0 = 1")
                 continue
@@ -425,7 +484,7 @@ class SQLiteRelationCompiler:
                 )
                 """
             )
-            params.extend((feature_id, req.count))
+            params.extend((feature_id, requirement.count))
         return predicates
 
     def _choose_anchor(self, selector_graph: SelectorGraph) -> SelectorGraphNode | None:
@@ -465,8 +524,11 @@ class SQLiteRelationCompiler:
         return "scan"
 
     def _posting_anchor_requirement(self, node: SelectorGraphNode):
+        return self._posting_anchor_requirement_from(node.local_requirements)
+
+    def _posting_anchor_requirement_from(self, requirements):
         candidates = []
-        for req in node.local_requirements:
+        for req in requirements:
             feature_id = self._feature_id(req.token)
             if feature_id is None:
                 candidates.append((0, req))
@@ -487,15 +549,23 @@ class SQLiteRelationCompiler:
                 "SELECT COUNT(*) FROM definitions WHERE stable_hash = ?",
                 (stable_hash_to_blob(node.exact_definition.stable_hash()),),
             ).fetchone()[0])
-        for req in node.local_requirements:
-            feature_id = self._feature_id(req.token)
-            if feature_id is None:
-                return 0
-            row = self.con.execute(
-                "SELECT document_frequency FROM feature_tokens WHERE feature_id = ?",
-                (feature_id,),
-            ).fetchone()
-            estimates.append(0 if row is None else row[0])
+        branch_totals = []
+        for branch in node.requirement_branches:
+            branch_estimates = []
+            for req in branch:
+                feature_id = self._feature_id(req.token)
+                if feature_id is None:
+                    branch_estimates = [0]
+                    break
+                row = self.con.execute(
+                    "SELECT document_frequency FROM feature_tokens WHERE feature_id = ?",
+                    (feature_id,),
+                ).fetchone()
+                branch_estimates.append(0 if row is None else row[0])
+            if branch_estimates:
+                branch_totals.append(min(branch_estimates))
+        if branch_totals:
+            estimates.append(sum(branch_totals))
         return min(estimates) if estimates else None
 
     def _apply_domain_sql(self, body_sql: str, domain_name: str) -> str:
@@ -549,15 +619,9 @@ class SQLiteRelationCompiler:
                     "SELECT COUNT(*) FROM definitions WHERE stable_hash = ?",
                     (stable_hash_to_blob(node.exact_definition.stable_hash()),),
                 ).fetchone()[0])
-            for req in node.local_requirements:
-                feature_id = self._feature_id(req.token)
-                if feature_id is None:
-                    return 0
-                row = self.con.execute(
-                    "SELECT document_frequency FROM feature_tokens WHERE feature_id = ?",
-                    (feature_id,),
-                ).fetchone()
-                estimates.append(0 if row is None else row[0])
+            estimate = self._node_estimate(node)
+            if estimate is not None:
+                estimates.append(estimate)
         if estimates:
             return min(estimates)
         table = "stored_roots" if domain_name == "stored" else "definitions"
@@ -568,8 +632,8 @@ class SQLiteRelationCompiler:
         for node in selector_graph.nodes:
             if node.exact_definition is not None:
                 anchors.append((0, str(node.source_path), "exact"))
-            elif node.local_requirements:
-                anchors.append((len(node.local_requirements), str(node.source_path), "local-posting"))
+            elif any(node.requirement_branches):
+                anchors.append((min(map(len, node.requirement_branches)), str(node.source_path), "local-posting"))
         if not anchors:
             return None
         _, path, mode = min(anchors)
@@ -608,6 +672,6 @@ def _has_indexable_requirement(selector_graph: SelectorGraph) -> bool:
     if selector_graph.requires_scan:
         return False
     for node in selector_graph.nodes:
-        if node.exact_definition is not None or node.local_requirements:
+        if node.exact_definition is not None or any(node.requirement_branches):
             return True
     return False

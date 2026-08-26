@@ -56,7 +56,7 @@ def _graph_candidate_ids_full(
         if node.exact_definition is not None:
             ids = catalog.exact_ids(node.exact_definition)
         else:
-            ids = catalog.local_candidates(node.local_requirements, within=all_ids)
+            ids = _local_candidate_ids(catalog, node, within=all_ids)
         candidates[node.node_id] = ids
         initial_sizes[node.node_id] = len(ids)
 
@@ -147,10 +147,10 @@ def _choose_anchor(catalog, selector_graph: SelectorGraph) -> tuple[int, str] | 
     for node in selector_graph.nodes:
         if node.exact_definition is not None:
             anchor_data.append((node.node_id, catalog.estimate_exact_ids(node.exact_definition), "exact"))
-        elif node.local_requirements:
+        elif any(node.requirement_branches):
             anchor_data.append((
                 node.node_id,
-                catalog.estimate_local_candidates(node.local_requirements),
+                sum(catalog.estimate_local_candidates(branch) for branch in node.requirement_branches),
                 "local-posting",
             ))
     if not anchor_data:
@@ -168,7 +168,7 @@ def _choose_anchor(catalog, selector_graph: SelectorGraph) -> tuple[int, str] | 
 def _anchor_candidate_ids(catalog, node: SelectorGraphNode, mode: str) -> set[DefinitionId]:
     if mode == "exact":
         return _exact_candidate_ids(catalog, node)
-    return catalog.local_candidates(node.local_requirements)
+    return _local_candidate_ids(catalog, node)
 
 
 def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -> set[DefinitionId]:
@@ -176,7 +176,14 @@ def _filter_node_ids(catalog, node: SelectorGraphNode, ids: set[DefinitionId]) -
         return set()
     if node.exact_definition is not None:
         return ids & _exact_candidate_ids(catalog, node)
-    return catalog.local_candidates(node.local_requirements, within=ids)
+    return _local_candidate_ids(catalog, node, within=ids)
+
+
+def _local_candidate_ids(catalog, node: SelectorGraphNode, *, within=None) -> set[DefinitionId]:
+    return set().union(*(
+        catalog.local_candidates(branch, within=within)
+        for branch in node.requirement_branches
+    ))
 
 
 def _exact_candidate_ids(catalog, node: SelectorGraphNode) -> set[DefinitionId]:

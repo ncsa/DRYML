@@ -83,6 +83,12 @@ class AddedLeadingVarargProjectionFixture(Object):
         self.items = items
 
 
+class ClassParameterFixture(Object):
+    def __init__(self, cls, dryml_cls=None):
+        self.cls = cls
+        self.dryml_cls = dryml_cls
+
+
 def test_bound_arguments_are_immutable_semantic_name_value_records():
     record = BoundArguments((("value", 1),))
 
@@ -149,6 +155,22 @@ def test_projection_uses_the_current_signature_without_changing_bound_identity()
     assert kwargs == {"value": 3}
     with pytest.raises(TypeError, match="required"):
         project_bound_arguments(RequiredFixture, BoundArguments((("renamed", 3),)))
+
+
+def test_materialization_preserves_constructor_parameter_named_cls():
+    direct = ClassParameterFixture(Object, dryml_cls=Definition)
+    cdef = Definition(
+        ClassParameterFixture,
+        Object,
+        dryml_cls=Definition,
+    ).concretize()
+
+    rebuilt = cdef.build(instance="new", cache="none")
+
+    assert direct.cls is Object
+    assert direct.dryml_cls is Definition
+    assert rebuilt.cls is Object
+    assert rebuilt.dryml_cls is Definition
 
 
 def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypatch):
@@ -241,6 +263,11 @@ def test_persisted_bound_records_reject_malformed_names_and_values_without_bindi
         decode_bound_arguments(((1, "value"),))
     with pytest.raises(TypeError, match="Non-canonical.*value"):
         decode_bound_arguments((("value", []),))
+    assert decode_bound_arguments((("value", Object),))["value"] is Object
+    with pytest.raises(TypeError, match="Non-canonical.*value"):
+        decode_bound_arguments((("value", ClassParameterFixture),))
+    with pytest.raises(TypeError, match="Non-canonical.*0"):
+        decode_bound_arguments((("value", FrozenTuple((ClassParameterFixture,))),))
 
     restored = object.__new__(ConcreteDefinition)
     with pytest.raises(ValueError, match="duplicate"):

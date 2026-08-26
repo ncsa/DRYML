@@ -6,6 +6,7 @@ import subprocess
 import sys
 
 import numpy as np
+import pytest
 
 import core2_objects as objects
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
@@ -304,3 +305,41 @@ def test_v1_and_private_v2_records_are_distinct_mapping_keys_and_graph_nodes():
     graph = ConcreteDefinitionGraph.from_roots((root_v1, root_v1, root_v2, root_v2))
     assert graph.roots == (root_v1, root_v2)
     assert {node.definition for node in graph.nodes()} == {root_v1, child_v1, root_v2, child_v2}
+
+
+def test_v2_persisted_hash_cache_must_match_identity_record():
+    cdef = Definition(objects.TestClass1, 10, test="cached").concretize()
+
+    with pytest.raises(ValueError, match="hash cache"):
+        ConcreteDefinition._from_persisted_record(
+            cdef.cls,
+            identity_version=V2_IDENTITY_VERSION,
+            parameters=cdef._bound_args,
+            stable_hash_cache="0" * 64,
+        )
+
+    restored = ConcreteDefinition._from_persisted_record(
+        cdef.cls,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=cdef._bound_args,
+        stable_hash_cache=cdef.stable_hash(),
+    )
+    assert restored == cdef
+    assert restored.stable_hash() == cdef.stable_hash()
+
+
+def test_v2_parameter_order_is_not_part_of_identity():
+    first = ConcreteDefinition._from_persisted_record(
+        objects.TestClass1,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("value", 10), ("test", "ordered"))),
+    )
+    second = ConcreteDefinition._from_persisted_record(
+        objects.TestClass1,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("test", "ordered"), ("value", 10))),
+    )
+
+    assert first == second
+    assert first.stable_hash() == second.stable_hash()
+    assert len({first, second}) == 1

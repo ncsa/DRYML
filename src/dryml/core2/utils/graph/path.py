@@ -512,18 +512,43 @@ def _segment_from_data(data: Mapping[str, Any], schema_version: int) -> PathSegm
     if kind == "parameter":
         if schema_version < 2:
             raise QueryPathError("Semantic parameter segments require graph path schema version 2.")
-        return Parameter(data["name"])
+        return Parameter(_required_segment_field(data, "name", str, kind))
     if kind == "kwarg":
-        return Kwarg(data["name"])
+        return Kwarg(_required_segment_field(data, "name", str, kind))
     if kind == "arg":
-        return Arg(data["index"])
+        return Arg(_required_segment_index(data, "index", kind))
     if kind == "index":
-        return Index(data["index"])
+        return Index(_required_segment_index(data, "index", kind))
     if kind == "key":
+        if "value" not in data:
+            raise QueryPathError("Graph path key segment is missing required field 'value'.")
         return Key(data["value"])
     if kind == "set_member":
-        return SetMember(data["fingerprint"], data.get("ordinal", 0))
+        fingerprint = _required_segment_field(data, "fingerprint", str, kind)
+        ordinal = data.get("ordinal", 0)
+        if type(ordinal) is not int or ordinal < 0:
+            raise QueryPathError("Graph path set_member field 'ordinal' must be a non-negative integer.")
+        return SetMember(fingerprint, ordinal)
     raise QueryPathError(f"Unknown graph path segment kind {kind!r}.")
+
+
+def _required_segment_field(data: Mapping[str, Any], field: str, expected_type: type, kind: str) -> Any:
+    if field not in data:
+        raise QueryPathError(f"Graph path {kind} segment is missing required field {field!r}.")
+    value = data[field]
+    if not isinstance(value, expected_type):
+        raise QueryPathError(
+            f"Graph path {kind} field {field!r} must be {expected_type.__name__}, "
+            f"got {type(value).__name__}."
+        )
+    return value
+
+
+def _required_segment_index(data: Mapping[str, Any], field: str, kind: str) -> int:
+    value = _required_segment_field(data, field, int, kind)
+    if type(value) is not int or value < 0:
+        raise QueryPathError(f"Graph path {kind} field {field!r} must be a non-negative integer.")
+    return value
 
 
 def _split_path_tokens(text: str) -> list[str]:

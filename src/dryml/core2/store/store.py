@@ -5,15 +5,28 @@ from typing import Iterable
 import os
 import shutil
 import tempfile
+from uuid import uuid4
 
-from ..utils.general import is_regular_file, pickle_load
+from ..utils.general import atomic_pickle_save, is_regular_file, pickle_load
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
 
 class StoreAuthorityError(RuntimeError):
     """Raised when an authoritative Store definition is malformed or misplaced."""
 
 
+_STATE_GENERATIONS_DIR = ".state-generations"
+_STATE_POINTER_FILE = ".state-current.pkl"
+
+
 class Store(ABC):
+    """Abstract authoritative persistence backend for definitions and object state.
+
+    Object roots are addressed by concrete-definition identity. New roots are
+    published by atomic directory replacement; updates to existing roots publish
+    immutable state generations through one atomic pointer so readers observe a
+    complete old or new state. Concrete backends own durability and commit timing.
+    """
+
     @property
     def base_dir(self) -> str:
         """Base directory"""
@@ -51,10 +64,22 @@ class Store(ABC):
         return os.path.join(self.object_dir(cdef), "def.pkl")
 
     def save_object(self, obj: Object, *, revision: str|None = None) -> None:
-        """
-        Save an individual object.
-        Store is responsible for creating/using a directory (dir store),
-        or temp dir (S3/HDF5/etc.), and calling obj.save_to_dir().
+        """Persist one object's complete state under its definition identity.
+
+        New roots become discoverable only after staging and identity validation.
+        Existing roots retain their authoritative ``def.pkl`` and publish a
+        complete replacement state generation through an atomic pointer.
+
+        Args:
+            obj: Materialized object whose definition and state are persisted.
+            revision: Optional object-state revision selected by the object.
+
+        Raises:
+            ValueError: If ``revision`` is not a string or ``None``.
+            StoreAuthorityError: If a staged or existing root has a mismatched
+                identity, malformed definition, or invalid state pointer.
+            OSError: If staging or publication fails. The prior published state
+                remains active when replacement publication fails.
         """
 
         if revision is not None:
@@ -64,46 +89,111 @@ class Store(ABC):
         parent = os.path.dirname(obj_dir)
         os.makedirs(parent, exist_ok=True)
         existing_root = os.path.exists(obj_dir)
+        previous_state_dir = None
         if existing_root:
             existing_def = self._validate_root_definition_path(os.path.join(obj_dir, "def.pkl"))
             if existing_def != obj.definition:
                 raise StoreAuthorityError(
                     "Existing Store root identity does not match the object being saved."
                 )
+            previous_state_dir = self._active_state_dir(obj_dir)
         stage_dir = tempfile.mkdtemp(prefix=f".{obj.definition.stable_hash()}-", dir=parent)
         try:
+            if existing_root:
+                self._copy_active_state(obj_dir, stage_dir)
             # A root is undiscoverable until its complete staged definition has
             # been verified and the directory is atomically renamed.
             obj.save_state_to_dir(stage_dir, revision=revision)
             staged_def = self._read_concrete_definition(os.path.join(stage_dir, "def.pkl"))
             if staged_def != obj.definition:
                 raise StoreAuthorityError("Staged object definition does not match the object identity.")
-            if existing_root:
-                self._publish_existing_root(stage_dir, obj_dir)
-            else:
-                os.replace(stage_dir, obj_dir)
-                stage_dir = None
-            self._mark_authority_dirty()
+            dirty_token = self._mark_authority_dirty(obj.definition)
+            try:
+                if existing_root:
+                    self._publish_existing_root(stage_dir, obj_dir)
+                else:
+                    os.replace(stage_dir, obj_dir)
+                    stage_dir = None
+            except BaseException:
+                if self._publication_may_be_visible(
+                        obj_dir,
+                        existing_root=existing_root,
+                        previous_state_dir=previous_state_dir):
+                    stage_dir = None
+                else:
+                    self._discard_authority_dirty(dirty_token)
+                raise
         finally:
             if stage_dir is not None:
                 shutil.rmtree(stage_dir, ignore_errors=True)
 
+    @classmethod
+    def _publish_existing_root(cls, stage_dir: str, object_dir: str) -> None:
+        """Publish a complete state generation through one atomic pointer."""
+
+        generation = uuid4().hex
+        generations_dir = os.path.join(object_dir, _STATE_GENERATIONS_DIR)
+        generation_dir = os.path.join(generations_dir, generation)
+        os.makedirs(generations_dir, exist_ok=True)
+        os.replace(stage_dir, generation_dir)
+        try:
+            atomic_pickle_save(generation, os.path.join(object_dir, _STATE_POINTER_FILE))
+        except BaseException:
+            try:
+                generation_is_active = cls._active_state_dir(object_dir) == generation_dir
+            except Exception:
+                generation_is_active = True
+            if not generation_is_active:
+                shutil.rmtree(generation_dir, ignore_errors=True)
+            raise
+
+    @classmethod
+    def _publication_may_be_visible(
+            cls,
+            object_dir: str, *,
+            existing_root: bool,
+            previous_state_dir: str | None) -> bool:
+        if not existing_root:
+            return os.path.exists(object_dir)
+        try:
+            return cls._active_state_dir(object_dir) != previous_state_dir
+        except Exception:
+            return True
+
+    @classmethod
+    def _copy_active_state(cls, object_dir: str, stage_dir: str) -> None:
+        source_dir = cls._active_state_dir(object_dir)
+        for name in os.listdir(source_dir):
+            if source_dir == object_dir and name in {_STATE_GENERATIONS_DIR, _STATE_POINTER_FILE}:
+                continue
+            source = os.path.join(source_dir, name)
+            destination = os.path.join(stage_dir, name)
+            if os.path.isdir(source):
+                shutil.copytree(source, destination)
+            else:
+                shutil.copy2(source, destination)
+
     @staticmethod
-    def _publish_existing_root(stage_dir: str, object_dir: str) -> None:
-        """Atomically replace explicit state files without reserializing def.pkl."""
+    def _active_state_dir(object_dir: str) -> str:
+        pointer_path = os.path.join(object_dir, _STATE_POINTER_FILE)
+        if not os.path.exists(pointer_path):
+            return object_dir
+        generation = pickle_load(pointer_path)
+        if (
+                not isinstance(generation, str)
+                or len(generation) != 32
+                or any(char not in "0123456789abcdef" for char in generation)):
+            raise StoreAuthorityError(f"Store state pointer is malformed: {pointer_path!r}.")
+        state_dir = os.path.join(object_dir, _STATE_GENERATIONS_DIR, generation)
+        if not os.path.isdir(state_dir):
+            raise StoreAuthorityError(f"Store state generation is missing: {state_dir!r}.")
+        return state_dir
 
-        for root, dirs, files in os.walk(stage_dir):
-            rel_root = os.path.relpath(root, stage_dir)
-            target_root = object_dir if rel_root == "." else os.path.join(object_dir, rel_root)
-            for name in dirs:
-                os.makedirs(os.path.join(target_root, name), exist_ok=True)
-            for name in files:
-                if rel_root == "." and name == "def.pkl":
-                    continue
-                os.replace(os.path.join(root, name), os.path.join(target_root, name))
-
-    def _mark_authority_dirty(self) -> None:
+    def _mark_authority_dirty(self, cdef: "ConcreteDefinition | None" = None):
         """Record an explicit authority mutation for buffered Store backends."""
+
+    def _discard_authority_dirty(self, token) -> None:
+        """Discard this operation's marker after publication definitively fails."""
 
     @staticmethod
     def _read_concrete_definition(path: str) -> "ConcreteDefinition":
@@ -142,11 +232,19 @@ class Store(ABC):
         return cdef
 
     def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
-        """
-        Load data for this object, if present. Returns True if loaded,
-        False if this store doesn't have data for it.
-        Store is responsible for creating/using a directory and
-        calling obj.load_from_dir().
+        """Restore an object's requested revision from the active state generation.
+
+        Args:
+            obj: Materialized object whose definition selects the Store root.
+            revision: Optional revision forwarded to the object's state loader.
+
+        Returns:
+            ``None``. A missing root leaves ``obj`` unchanged.
+
+        Raises:
+            StoreAuthorityError: If the active state pointer or generation is
+                malformed or missing.
+            OSError: If persisted state cannot be read.
         """
 
         cdef = obj.definition
@@ -156,18 +254,29 @@ class Store(ABC):
 
         obj_dir = self.object_dir(cdef)
 
-        obj.restore_state_from_dir(obj_dir, revision=revision)
+        obj.restore_state_from_dir(self._active_state_dir(obj_dir), revision=revision)
 
     def read_definition(self, cdef: "ConcreteDefinition") -> "ConcreteDefinition | None":
+        """Read and validate the authoritative root matching ``cdef``.
+
+        Args:
+            cdef: Expected concrete definition and storage identity.
+
+        Returns:
+            The persisted definition, or ``None`` when the root is absent or a
+            different valid definition occupies the same stable-hash path.
+
+        Raises:
+            StoreAuthorityError: If the root path, digest, or payload type is
+                malformed or inconsistent.
+        """
+
         def_path = self._def_file(cdef)
         if not os.path.exists(def_path):
             return None
         stored = self._validate_root_definition_path(def_path)
         if stored != cdef:
-            raise StoreAuthorityError(
-                "Store definition identity does not match the requested identity "
-                f"at {def_path!r}."
-            )
+            return None
         return stored
 
     def read_main_def(self) -> "ConcreteDefinition" | None:

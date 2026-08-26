@@ -13,6 +13,18 @@ from ..utils.general import atomic_pickle_save, pickle_load
 
 
 class ZipStore(Store):
+    """Expose one Zip archive as an extracted, hash-addressed object Store.
+
+    Args:
+        zip_dest: Existing or destination archive path, or a seekable binary
+            stream. Opening and hydration are read-only; explicit mutations are
+            buffered in an extracted view until ``commit`` publishes the archive.
+
+    Filesystem-backed commits construct and validate a complete sibling archive
+    before atomic replacement. File-like destinations cannot provide that
+    filesystem atomicity guarantee.
+    """
+
     def __init__(self, zip_dest: str | Path | IOBase):
         self.zip_dest = zip_dest
         self._tmp = tempfile.TemporaryDirectory()
@@ -69,10 +81,20 @@ class ZipStore(Store):
         return os.path.exists(self._def_file(cdef))
 
     def hydrate_index(self) -> list["ConcreteDefinition"]:
-        pattern = os.path.join(self.obj_dir, "**", "def.pkl")
+        """Return validated authoritative root definitions from the archive.
+
+        Returns:
+            Stored root definitions without nested state-generation definitions.
+
+        Raises:
+            StoreAuthorityError: If a root path, digest, payload, or duplicate
+                stable identity is invalid.
+        """
+
+        pattern = os.path.join(self.obj_dir, "*", "*", "def.pkl")
         definitions = []
         seen_hashes: set[str] = set()
-        for path in glob.glob(pattern, recursive=True):
+        for path in glob.glob(pattern):
             cdef = self._validate_root_definition_path(path)
             digest = cdef.stable_hash()
             if digest in seen_hashes:
@@ -89,10 +111,15 @@ class ZipStore(Store):
         self._write_archive_atomically()
         self._archive_dirty = False
 
-    def _mark_authority_dirty(self) -> None:
+    def _mark_authority_dirty(self, cdef: ConcreteDefinition | None = None) -> bool:
         """Mark the extracted archive view for explicit publication on commit."""
 
+        was_dirty = self._archive_dirty
         self._archive_dirty = True
+        return was_dirty
+
+    def _discard_authority_dirty(self, token) -> None:
+        self._archive_dirty = bool(token)
 
     def _write_archive_atomically(self) -> None:
         """Validate and publish a complete path-backed archive by replacement."""

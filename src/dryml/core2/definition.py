@@ -713,6 +713,10 @@ class ConcreteDefinition(DefInterface, Mapping):
                 {} if kwargs is None else kwargs,
             )
         object.__setattr__(result, "_identity_version", validate_identity_version(identity_version))
+        if identity_version == V2_IDENTITY_VERSION and stable_hash_cache is not None:
+            computed_hash = stable_hash_function(result)
+            if stable_hash_cache != computed_hash:
+                raise ValueError("V2 ConcreteDefinition hash cache does not match its identity record.")
         object.__setattr__(result, "_stable_hash_cache", stable_hash_cache)
         return result
 
@@ -834,11 +838,18 @@ class ConcreteDefinition(DefInterface, Mapping):
         if self.identity_version != rhs.identity_version:
             return False
         if self._bound_args is not None or rhs._bound_args is not None:
+            left_parameters = self._bound_args.as_frozen_dict() if self._bound_args is not None else None
+            right_parameters = rhs._bound_args.as_frozen_dict() if rhs._bound_args is not None else None
             return (
-                self._bound_args is not None
-                and rhs._bound_args is not None
+                left_parameters is not None
+                and right_parameters is not None
                 and _structural_value_equal(self.cls, rhs.cls)
-                and _structural_value_equal(self._bound_args.as_frozen_dict(), rhs._bound_args.as_frozen_dict())
+                and len(left_parameters) == len(right_parameters)
+                and all(
+                    key in right_parameters
+                    and _structural_value_equal(value, right_parameters[key])
+                    for key, value in left_parameters.items()
+                )
             )
         return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self._args, rhs._args) and _structural_value_equal(self._kwargs, rhs._kwargs)
 

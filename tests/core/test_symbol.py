@@ -87,7 +87,7 @@ def test_concrete_definition_import_function_arg():
     d = Definition(FunctionHolder, top_level_add1)
     cdef = d.concretize()
 
-    fn_spec = cdef["args"][0]
+    fn_spec = cdef["parameters"]["fn"]
     assert isinstance(fn_spec, ImportRef)
     assert fn_spec.module == __name__
     assert fn_spec.qualname == "top_level_add1"
@@ -101,7 +101,7 @@ def test_concrete_definition_import_function_kwarg():
     d = Definition(FunctionKwargHolder, fn=top_level_add1)
     cdef = d.concretize()
 
-    fn_spec = cdef["kwargs"]["fn"]
+    fn_spec = cdef["parameters"]["fn"]
     assert isinstance(fn_spec, ImportRef)
     assert fn_spec.resolve()(10) == 11
 
@@ -112,7 +112,7 @@ def test_concrete_definition_local_function_falls_back_to_source():
     d = Definition(FunctionHolder, local_add2)
     cdef = d.concretize()
 
-    fn_spec = cdef["args"][0]
+    fn_spec = cdef["parameters"]["fn"]
     assert isinstance(fn_spec, SourceSpec)
     assert fn_spec.kind == "function"
     assert fn_spec.name == "local_add2"
@@ -136,8 +136,8 @@ def test_concrete_definition_equal_for_same_local_function_source():
     cdef1 = Definition(FunctionHolder, f1).concretize()
     cdef2 = Definition(FunctionHolder, f2).concretize()
 
-    assert cdef1["args"][0].kind == "function"
-    assert cdef2["args"][0].kind == "function"
+    assert cdef1.parameters["fn"].kind == "function"
+    assert cdef2.parameters["fn"].kind == "function"
 
     assert cdef1 == cdef2
     assert hash(cdef1) == hash(cdef2)
@@ -154,14 +154,14 @@ def test_concrete_definition_symbol_ref_passthrough():
     spec = symbol_ref(top_level_add1)
     cdef = ConcreteDefinition(FunctionHolder, FrozenTuple((spec,)))
 
-    assert cdef["args"][0] is spec
+    assert cdef.parameters["fn"] is spec
 
 
 def test_concrete_definition_source_lambda_string():
     spec = SourceSpec.from_source("lambda x: x + 3")
     cdef = ConcreteDefinition(FunctionHolder, FrozenTuple((spec,)))
 
-    fn = cdef["args"][0].resolve()
+    fn = cdef.parameters["fn"].resolve()
     assert fn(10) == 13
 
 
@@ -171,7 +171,7 @@ def test_concrete_definition_thaw_source_lambda_string():
 
     d = cdef.thaw()
 
-    assert d.args[0].resolve()(10) == 13
+    assert d.parameters["fn"].resolve()(10) == 13
 
 
 def test_concrete_definition_thaw_symbol_ref():
@@ -180,7 +180,7 @@ def test_concrete_definition_thaw_symbol_ref():
 
     d = cdef.thaw()
 
-    assert d.args[0].resolve()(3) == 4
+    assert d.parameters["fn"].resolve()(3) == 4
 
 
 def test_concrete_definition_build_source_lambda_string():
@@ -315,8 +315,8 @@ def test_concrete_definition_import_class_arg():
 
     assert isinstance(cdef.cls, ImportRef)
     assert cdef.cls.resolve() is ValueHolder
-    assert isinstance(cdef.args[0], ImportRef)
-    assert cdef.args[0].resolve() is FunctionHolder
+    assert isinstance(cdef.parameters["value"], ImportRef)
+    assert cdef.parameters["value"].resolve() is FunctionHolder
 
     obj = cdef.build()
     assert obj.value is FunctionHolder
@@ -328,16 +328,16 @@ def test_concrete_definition_import_refs_survive_serialization():
     loaded = unpickler(pickler(cdef))
 
     assert isinstance(loaded.cls, ImportRef)
-    assert isinstance(loaded.args[0], ImportRef)
+    assert isinstance(loaded.parameters["value"], ImportRef)
     assert loaded.cls == cdef.cls
-    assert loaded.args[0] == cdef.args[0]
+    assert loaded.parameters["value"] == cdef.parameters["value"]
 
 
 def test_core_classes_remain_naked_in_concrete_definition():
     cdef = Definition(ValueHolder, Object).concretize()
 
     assert isinstance(cdef.cls, ImportRef)
-    assert cdef.args[0] is Object
+    assert cdef.parameters["value"] is Object
 
 
 def test_concrete_definition_local_class_arg_uses_source_spec():
@@ -347,10 +347,10 @@ def test_concrete_definition_local_class_arg_uses_source_spec():
 
     cdef = Definition(ValueHolder, LocalValue).concretize()
 
-    assert isinstance(cdef.args[0], SourceSpec)
-    assert cdef.args[0].kind == "class"
-    assert cdef.args[0].name == "LocalValue"
-    assert cdef.args[0].resolve().__name__ == "LocalValue"
+    assert isinstance(cdef.parameters["value"], SourceSpec)
+    assert cdef.parameters["value"].kind == "class"
+    assert cdef.parameters["value"].name == "LocalValue"
+    assert cdef.parameters["value"].resolve().__name__ == "LocalValue"
 
 
 def test_concrete_definition_local_object_class_can_build_from_source_spec():

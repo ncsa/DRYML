@@ -291,6 +291,7 @@ def _validate_canonical_value(value: Any, path: tuple[str | int, ...]) -> None:
         CANONICAL_DICT_KINDS,
         CANONICAL_SEQ_KINDS,
         NodeKind,
+        _is_naked_core_type,
         iter_value_children,
         node_kind,
     )
@@ -306,11 +307,24 @@ def _validate_canonical_value(value: Any, path: tuple[str | int, ...]) -> None:
         NodeKind.FROZEN_NDARRAY,
         NodeKind.CONCRETE_DEFINITION,
         NodeKind.DEFLINK,
-        NodeKind.QUOTED_DEF,
-        NodeKind.SELECTOR_SPEC,
         NodeKind.IMPORT_REF,
         NodeKind.SOURCE_SPEC,
     }:
         return
     location = "/".join(map(str, path))
+    if kind is NodeKind.TYPE:
+        if _is_naked_core_type(value):
+            return
+        raise TypeError(f"Non-canonical bound argument value at {location}: {type(value).__name__}.")
+    if kind in {NodeKind.QUOTED_DEF, NodeKind.SELECTOR_SPEC}:
+        from .utils.stable_hash import stable_hash_function
+
+        try:
+            stable_hash_function(value)
+        except Exception as error:
+            raise TypeError(
+                f"ConcreteDefinition selector-as-data value at {location} "
+                "must be stable-hashable."
+            ) from error
+        return
     raise TypeError(f"Non-canonical bound argument value at {location}: {type(value).__name__}.")

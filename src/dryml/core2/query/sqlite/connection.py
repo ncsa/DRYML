@@ -21,6 +21,7 @@ class SQLiteConnectionManager:
     def __init__(self, config: SQLiteQueryIndexConfig):
         self.config = config
         self._connections = {}
+        self._file_identities = {}
 
     @property
     def path(self) -> Path:
@@ -29,22 +30,48 @@ class SQLiteConnectionManager:
         return Path(self.config.path)
 
     def connection(self, *, readonly: bool = False):
+        """Return this process/thread's live connection to the active sidecar.
+
+        Args:
+            readonly: Open in SQLite read-only mode when ``True``.
+
+        Returns:
+            A configured ``sqlite3.Connection``. A cached connection outside a
+            transaction is replaced when atomic sidecar publication changes the
+            path's device/inode identity; active transactions remain pinned.
+
+        Raises:
+            QueryIndexError: If no sidecar path is configured or required SQLite
+                connection settings cannot be established.
+            QueryIndexUnavailable: If the optional SQLite backend is unavailable.
+        """
+
         key = (os.getpid(), threading.get_ident(), readonly)
         con = self._connections.get(key)
         if con is not None:
-            return con
+            if con.in_transaction or self._file_identities.get(key) == self._path_identity():
+                return con
+            self._connections.pop(key).close()
+            self._file_identities.pop(key, None)
 
         sqlite3 = require_sqlite()
         path = self.path
         timeout = float(self.config.busy_timeout)
-        if readonly:
-            uri = f"file:{path.as_posix()}?mode=ro"
-            con = sqlite3.connect(uri, uri=True, timeout=timeout, isolation_level=None, check_same_thread=True)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            con = sqlite3.connect(str(path), timeout=timeout, isolation_level=None, check_same_thread=True)
+        while True:
+            before = self._path_identity()
+            if readonly:
+                uri = f"file:{path.as_posix()}?mode=ro"
+                con = sqlite3.connect(uri, uri=True, timeout=timeout, isolation_level=None, check_same_thread=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                con = sqlite3.connect(str(path), timeout=timeout, isolation_level=None, check_same_thread=True)
+            after = self._path_identity()
+            if before == after or before is None:
+                break
+            con.close()
         self._initialize_connection(con, readonly=readonly)
         self._connections[key] = con
+        self._file_identities[key] = after
         return con
 
     def close_current(self) -> None:
@@ -52,12 +79,21 @@ class SQLiteConnectionManager:
         for key in list(self._connections):
             if key[:2] == key_prefix:
                 self._connections.pop(key).close()
+                self._file_identities.pop(key, None)
 
     def close_all_current_process(self) -> None:
         pid = os.getpid()
         for key in list(self._connections):
             if key[0] == pid:
                 self._connections.pop(key).close()
+                self._file_identities.pop(key, None)
+
+    def _path_identity(self) -> tuple[int, int] | None:
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino
 
     def _initialize_connection(self, con, *, readonly: bool) -> None:
         con.execute("PRAGMA foreign_keys = ON")

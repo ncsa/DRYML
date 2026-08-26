@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -13,6 +14,7 @@ from dryml.core2.utils.general import pickle_save, unpickler
 
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "cdef_v1" / "manifest.json"
+_STORE_FIXTURE_ROOT = _FIXTURE_PATH.parent / "store-fixture"
 
 
 class AtomicStoreObject(Object):
@@ -30,6 +32,22 @@ class LegacyDefaultObject(Object):
     def __init__(self, value=3):
         super().__init__()
         self.value = value
+
+
+class MultiFileAtomicStoreObject(Object):
+    def __init__(self, name="state"):
+        super().__init__()
+        self.name = name
+        self.left = "left-v1"
+        self.right = "right-v1"
+
+    def save_state_to_dir_imp(self, dest_dir, revision=None):
+        Path(dest_dir, "left.txt").write_text(self.left)
+        Path(dest_dir, "right.txt").write_text(self.right)
+
+    def restore_state_from_dir_imp(self, src_dir, revision=None):
+        self.left = Path(src_dir, "left.txt").read_text()
+        self.right = Path(src_dir, "right.txt").read_text()
 
 
 def _tree_digest(root: Path) -> str:
@@ -56,18 +74,21 @@ def _write_root(store: DirStore, cdef, *, fanout=None, digest=None):
 
 
 def test_v1_fixture_hydration_and_read_only_flush_preserve_authoritative_tree(tmp_path):
+    fixture_manifest = json.loads((_STORE_FIXTURE_ROOT / "manifest.json").read_text())
+    for relative, expected in fixture_manifest["files"].items():
+        assert hashlib.sha256((_STORE_FIXTURE_ROOT / relative).read_bytes()).hexdigest() == expected
+
+    shutil.copytree(_STORE_FIXTURE_ROOT / "dir-store", tmp_path / "store")
     store = DirStore(tmp_path / "store", query_index="memory")
-    legacy = _fixture_v1_definition()
-    _write_root(store, legacy)
-    pickle_save(legacy, Path(store.base_dir) / "def.pkl")
-    pickle_save({"legacy": legacy}, Path(store.base_dir) / "aliases.pkl")
+    legacy = store.read_main_def()
     before = _tree_digest(Path(store.base_dir))
 
     reopened = DirStore(store.base_dir, query_index="memory")
     repo = Repo(stores=reopened)
     assert tuple(reopened.hydrate_index()) == (legacy,)
     assert reopened.read_definition(legacy) == legacy
-    assert repo.get_alias("legacy") == legacy
+    assert repo.get_alias("primary") == legacy
+    assert repo.get_alias("secondary") == legacy
     repo.flush()
     repo.close(flush=True)
 
@@ -164,6 +185,89 @@ def test_new_root_is_not_visible_when_state_or_final_replace_fails(tmp_path, mon
     monkeypatch.setattr(os, "replace", original_replace)
     repo.save_object(obj)
     assert store.has(obj.definition)
+
+
+def test_existing_root_state_switches_as_one_generation(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    obj = MultiFileAtomicStoreObject()
+    store.save_object(obj)
+    object_dir = Path(store.object_dir(obj.definition))
+    before = _tree_digest(object_dir)
+
+    obj.left = "left-v2"
+    obj.right = "right-v2"
+    original_replace = os.replace
+
+    def fail_pointer_replace(source, destination):
+        if os.fspath(destination) == os.fspath(object_dir / ".state-current.pkl"):
+            raise OSError("injected state generation publication failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_pointer_replace)
+    with pytest.raises(OSError, match="state generation"):
+        store.save_object(obj)
+
+    assert not (object_dir / ".state-current.pkl").exists()
+    assert (object_dir / "left.txt").read_text() == "left-v1"
+    assert (object_dir / "right.txt").read_text() == "right-v1"
+    assert _tree_digest(object_dir) == before
+
+    monkeypatch.setattr(os, "replace", original_replace)
+    store.save_object(obj)
+    restored = MultiFileAtomicStoreObject()
+    store.restore_object(restored)
+
+    assert restored.left == "left-v2"
+    assert restored.right == "right-v2"
+
+
+def test_new_root_interruption_after_replace_retains_root_and_dirty_token(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    obj = AtomicStoreObject("published-before-interrupt")
+    object_dir = store.object_dir(obj.definition)
+    original_replace = os.replace
+
+    def interrupt_after_replace(source, destination):
+        result = original_replace(source, destination)
+        if os.fspath(destination) == object_dir:
+            raise KeyboardInterrupt("injected after root replacement")
+        return result
+
+    monkeypatch.setattr(os, "replace", interrupt_after_replace)
+
+    with pytest.raises(KeyboardInterrupt, match="root replacement"):
+        store.save_object(obj)
+
+    assert store.read_definition(obj.definition) == obj.definition
+    assert store.query_index_is_dirty()
+
+
+def test_existing_root_interruption_after_pointer_retains_generation_and_token(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index="sqlite")
+    obj = MultiFileAtomicStoreObject("interrupted-pointer")
+    store.save_object(obj)
+    store.clear_query_index_dirty()
+    obj.left = "left-v2"
+    obj.right = "right-v2"
+    pointer_path = os.path.join(store.object_dir(obj.definition), ".state-current.pkl")
+    original_replace = os.replace
+
+    def interrupt_after_replace(source, destination):
+        result = original_replace(source, destination)
+        if os.fspath(destination) == pointer_path:
+            raise KeyboardInterrupt("injected after pointer replacement")
+        return result
+
+    monkeypatch.setattr(os, "replace", interrupt_after_replace)
+
+    with pytest.raises(KeyboardInterrupt, match="pointer replacement"):
+        store.save_object(obj)
+
+    restored = MultiFileAtomicStoreObject("interrupted-pointer")
+    store.restore_object(restored)
+    assert restored.left == "left-v2"
+    assert restored.right == "right-v2"
+    assert store.query_index_is_dirty()
 
 
 def test_alias_and_main_references_publish_only_after_explicit_mutation(tmp_path, monkeypatch):

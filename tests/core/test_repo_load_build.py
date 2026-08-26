@@ -60,7 +60,7 @@ def test_object_args_passing_1():
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
-    assert obj.definition.args == (1,)
+    assert obj.definition.parameters["layers"] == 1
 
 
 @pytest.mark.usefixtures("create_name")
@@ -73,7 +73,7 @@ def test_object_args_passing_2(create_name):
 
     obj_loaded = load_object(repo=create_name)
 
-    assert obj_loaded.definition.args == (1,)
+    assert obj_loaded.definition.parameters["layers"] == 1
 
 
 def test_object_args_passing_3():
@@ -211,5 +211,4 @@ def test_object_args_passing_7():
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A['A'][0][0]) is type(obj1)
     assert type(obj2_cpy.A['A'][0][0]) is type(obj1)
-
 

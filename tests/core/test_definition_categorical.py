@@ -14,11 +14,11 @@ def test_def_1():
 
     obj_def_manual = Definition(
         objects.TestNest4,
-        Definition(
+        A=Definition(
             objects.TestNest2,
             A=Definition(
                 objects.TestNest4,
-                5)
+                A=5)
             )
         )
 
@@ -45,16 +45,16 @@ def test_def_2():
     obj = objects.TestNest4(('test', 'test'))
     obj_def = obj.definition.categorical()
 
-    assert type(obj_def.args[0]) is FrozenTuple
-    assert obj_def.args[0][0] == 'test'
-    assert obj_def.args[0][1] == 'test'
+    assert type(obj_def.parameters["A"]) is FrozenTuple
+    assert obj_def.parameters["A"][0] == 'test'
+    assert obj_def.parameters["A"][1] == 'test'
 
     obj = objects.TestNest4(['test', 'test'])
     obj_def = obj.definition.categorical()
 
-    assert type(obj_def.args[0]) is FrozenList
-    assert obj_def.args[0][0] == 'test'
-    assert obj_def.args[0][1] == 'test'
+    assert type(obj_def.parameters["A"]) is FrozenList
+    assert obj_def.parameters["A"][0] == 'test'
+    assert obj_def.parameters["A"][1] == 'test'
 
 
 def test_def_3():

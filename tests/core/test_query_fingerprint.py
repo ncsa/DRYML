@@ -11,6 +11,7 @@ from dryml.core2.query.fingerprint import (
     legacy_target_fingerprint,
     target_local_fingerprint,
 )
+from dryml.core2.utils.graph.path import Arg, Kwarg
 from dryml.core2.utils.stable_hash import stable_hash_function
 
 
@@ -155,3 +156,7 @@ def test_v2_target_fingerprint_uses_semantic_parameter_paths():
     assert positional.parameters["x"] == 10
     assert positional.parameters["test"] == "a"
     assert any(str(token.path) == '$[@param("x")]' for token in fingerprint.counts)
+    assert not any(
+        token.path and isinstance(token.path.segments[0], (Arg, Kwarg))
+        for token in fingerprint.counts
+    )

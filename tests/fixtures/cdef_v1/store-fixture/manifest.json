@@ -1,0 +1,12 @@
+{
+  "format": "pre-v2-store-fixture/v1",
+  "producer": "85ea268",
+  "files": {
+    "dir-store/aliases.pkl": "495704e1b2de3459d00c82a179c1abe55e46b4439551c8225ab41ecfcfcbcf04",
+    "dir-store/def.pkl": "6f5ed772647f549ebe444f39ed16cfb147e7c218981e2ee47bff4a07f01d67c5",
+    "dir-store/objects/5a/5a5a9f87cbc54e804032afe232427df0608d8839743bc31b4ec2ae73caa83aa4/def.pkl": "6f5ed772647f549ebe444f39ed16cfb147e7c218981e2ee47bff4a07f01d67c5",
+    "zip-store.zip": "9a339ed2c761f236078ad50a7aefa5df524283259419abbb96522da29fff2af6"
+  },
+  "root_hash": "5a5a9f87cbc54e804032afe232427df0608d8839743bc31b4ec2ae73caa83aa4",
+  "aliases": ["primary", "secondary"]
+}

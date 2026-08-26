@@ -286,7 +286,7 @@ def test_indexed_query_missing_does_not_require_presence():
     repo = Repo()
     root_missing = Definition(Cls2).concretize()
     nested_missing = Definition(Nest3, cfg={}).concretize()
-    ref_child = Definition(Cls1).concretize()
+    ref_child = Definition(Cls1, {}).concretize()
     ref_parent = Definition(Nest3, ref=ref_child.ref()).concretize()
     for cdef in (root_missing, nested_missing, ref_parent):
         repo._query_catalog.register_stored(cdef, FakeStore())
@@ -294,7 +294,10 @@ def test_indexed_query_missing_does_not_require_presence():
     assert list(repo.query(Definition(Cls2, missing=Missing())).stored(refresh=False).defs()) == [root_missing]
     assert list(repo.query(Definition(Nest3, cfg={"x": Missing()})).stored(refresh=False).defs()) == [nested_missing]
 
-    ref_selector = Definition(Nest3, ref=Ref(Selector(Definition(Cls1, test=Missing()))))
+    ref_selector = Definition(
+        Nest3,
+        ref=Ref(Selector(Definition(Cls1, x={"missing": Missing()}))),
+    )
     assert list(repo.query(ref_selector).stored(refresh=False).defs()) == [ref_parent]
 
 
@@ -327,9 +330,14 @@ def test_concretize_rejects_nested_par_inside_container():
         Definition(Nest3, xs=[Missing()]).concretize()
 
 
-def test_concrete_definition_rejects_nested_definition_inside_container():
-    with pytest.raises(TypeError, match="unresolved Definition"):
-        ConcreteDefinition(Nest3, FrozenTuple((FrozenList([Definition(Cls1)]),)), FrozenDict({}))
+def test_concrete_definition_concretizes_nested_definition_inside_container():
+    cdef = ConcreteDefinition(
+        Nest3,
+        FrozenTuple((FrozenList([Definition(Cls1, 1)]),)),
+        FrozenDict({}),
+    )
+
+    assert isinstance(cdef.parameters["args"][0][0], ConcreteDefinition)
 
 
 def test_concrete_definition_rejects_cyclic_container():
@@ -341,7 +349,7 @@ def test_concrete_definition_rejects_cyclic_container():
 
 
 def test_nested_concrete_boundary_error_reports_path():
-    with pytest.raises(CannotConcretizeParameterizedDefinition, match="kwargs/xs/0"):
+    with pytest.raises(CannotConcretizeParameterizedDefinition, match=r"kwargs/xs/\[0\]"):
         ConcreteDefinition(Nest3, FrozenTuple(()), FrozenDict({"xs": FrozenList([Missing()])}))
 
 

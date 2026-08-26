@@ -514,11 +514,12 @@ def test_save_load_revision_1(primary_store_set):
 
     repo.save_object(obj, revision='B')
 
-    store_dir = primary_store_set.stores[0].base_dir
+    store = primary_store_set.stores[0]
+    store_dir = store.base_dir
 
     assert len(dryml.core2.Repo.dir_store_inspect(store_dir)) == 1
-    test_glob = os.path.join(store_dir, '**/*.pkl')
-    assert len(glob.glob(os.path.join(store_dir, '**/*.pkl'), recursive=True)) == 3
+    active_dir = store._active_state_dir(store.object_dir(obj.definition))
+    assert len(glob.glob(os.path.join(active_dir, '*.pkl'))) == 3
 
     # Remove the objects
     del repo

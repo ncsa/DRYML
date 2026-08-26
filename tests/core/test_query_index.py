@@ -288,7 +288,7 @@ def test_graph_registration_records_direct_edges_once():
     edge = next(iter(catalog.edge_by_key.values()))
     assert edge.parent_id == parent_id
     assert edge.child_id == child_id
-    assert str(edge.path) == "$.args[0]"
+    assert str(edge.path) == '$[@param("child")]'
 
 
 def test_repeated_stored_registration_does_not_change_generation(tmp_path):
@@ -389,7 +389,7 @@ def test_parent_local_postings_do_not_contain_child_interior_features():
     repo._query_catalog.register_cached(parent.definition)
     parent_id = repo._query_catalog.cdef_id(parent.definition)
     parent_record = repo._query_catalog.definitions_by_id[parent_id]
-    child_name_hash = stable_hash_function(child.definition.args[0])
+    child_name_hash = stable_hash_function(child.definition.parameters["name"])
 
     assert all(
         not (token.kind == "SCALAR_VALUE" and token.payload == child_name_hash)
@@ -408,7 +408,10 @@ def test_repeated_nested_cdef_keeps_every_owner_path_occurrence(tmp_path):
     occurrences = repo2.find_occurrences(Definition(IndexLeaf, SKIP_ARGS))
 
     assert occurrences.count() == 2
-    assert {str(occ.path) for occ in occurrences} == {"$.args[0][0]", "$.args[0][1]"}
+    assert {str(occ.path) for occ in occurrences} == {
+        '$[@param("child")][0]',
+        '$[@param("child")][1]',
+    }
     assert occurrences.definitions().count() == 1
 
 
@@ -1447,7 +1450,7 @@ def test_forced_refresh_removes_deleted_root_and_occurrences(tmp_path):
 
 
 def test_exact_store_probe_confirms_persisted_definition_after_hash_hit(tmp_path, monkeypatch):
-    monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "collision")
+    monkeypatch.setattr(ConcreteDefinition, "stable_hash", lambda self: "0" * 64)
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
     stored = IndexLeaf("stored", repo=repo)

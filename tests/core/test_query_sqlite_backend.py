@@ -3,7 +3,8 @@ from dataclasses import replace
 
 import pytest
 
-from dryml.core2 import Definition, Object, SKIP_ARGS
+from dryml.core2 import ConcreteDefinition, Definition, Object, SKIP_ARGS
+from dryml.core2.cdef_identity import V1_IDENTITY_VERSION
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.query.fingerprint import target_local_fingerprint
 from dryml.core2.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
@@ -334,10 +335,22 @@ def test_lowered_plan_reports_local_posting_anchor_kind(tmp_path):
 
 def test_lowered_child_edge_join_matches_v1_path(tmp_path):
     index = sqlite_index(tmp_path)
-    wanted = SQLiteParent(child=SQLiteLeaf(name="wanted"), name="root")
-    other = SQLiteParent(child=SQLiteLeaf(name="other"), name="root")
-    graph = ConcreteDefinitionGraph.from_roots([wanted.definition, other.definition])
-    index.register_stored_roots(graph, [wanted.definition, other.definition])
+    wanted_child = ConcreteDefinition._from_persisted_record(SQLiteLeaf, (), {"name": "wanted"})
+    other_child = ConcreteDefinition._from_persisted_record(SQLiteLeaf, (), {"name": "other"})
+    wanted = ConcreteDefinition._from_persisted_record(
+        SQLiteParent,
+        (),
+        {"child": wanted_child, "name": "root"},
+    )
+    other = ConcreteDefinition._from_persisted_record(
+        SQLiteParent,
+        (),
+        {"child": other_child, "name": "root"},
+    )
+    assert wanted.identity_version == V1_IDENTITY_VERSION
+    assert other.identity_version == V1_IDENTITY_VERSION
+    graph = ConcreteDefinitionGraph.from_roots([wanted, other])
+    index.register_stored_roots(graph, [wanted, other])
 
     selector = Definition(SQLiteParent, SKIP_ARGS, child=Definition(SQLiteLeaf, SKIP_ARGS, name="wanted"))
     selector_graph = compile_selector_graph(selector)
@@ -353,7 +366,7 @@ def test_lowered_child_edge_join_matches_v1_path(tmp_path):
         batch = next(view.iter_candidate_cdef_batches(plan, batch_size=10))
 
     assert set(batch.ids) == v1_ids
-    assert batch.cdefs == (wanted.definition,)
+    assert batch.cdefs == (wanted,)
 
 
 def test_lowered_sql_uses_rare_exact_nested_anchor(tmp_path):

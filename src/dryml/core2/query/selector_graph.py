@@ -32,6 +32,13 @@ class SelectorGraphNode:
     selector: Definition | ConcreteDefinition
     local_requirements: tuple[FeatureRequirement, ...]
     exact_definition: ConcreteDefinition | None = None
+    alternate_local_requirements: tuple[tuple[FeatureRequirement, ...], ...] = ()
+
+    @property
+    def requirement_branches(self) -> tuple[tuple[FeatureRequirement, ...], ...]:
+        """Return version-specific local requirement alternatives."""
+
+        return (self.local_requirements, *self.alternate_local_requirements)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +165,21 @@ class _SelectorGraphCompiler:
                 FeatureRequirement(token, count)
                 for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
             )
-            self.nodes[node_id] = SelectorGraphNode(node_id, source_path, selector, requirements, exact)
+            alternate_requirements = ()
+            if exact is None:
+                semantic_requirements = _semantic_selector_requirements(selector, requirements)
+                if semantic_requirements is None:
+                    self.requires_scan = True
+                elif semantic_requirements != requirements:
+                    alternate_requirements = (semantic_requirements,)
+            self.nodes[node_id] = SelectorGraphNode(
+                node_id,
+                source_path,
+                selector,
+                requirements,
+                exact,
+                alternate_requirements,
+            )
             return node_id
         finally:
             if active_id is not None:
@@ -214,10 +235,14 @@ def _semantic_selector_path(definition: Definition | ConcreteDefinition, path: D
 
     if isinstance(definition, ConcreteDefinition):
         return path
-    if not isinstance(definition, Definition) or not isinstance(definition.cls, type) or not path:
+    if not isinstance(definition, Definition) or not path:
+        return None
+    first, *rest = path.segments
+    if not isinstance(definition.cls, type):
+        if isinstance(first, Kwarg):
+            return DefinitionPath((Parameter(first.name), *rest))
         return None
     params = [param for param in signature(definition.cls.__init__).parameters.values() if param.name != "self"]
-    first, *rest = path.segments
     if isinstance(first, Arg):
         position = first.index
         for param in params:
@@ -235,6 +260,33 @@ def _semantic_selector_path(definition: Definition | ConcreteDefinition, path: D
             if param.kind is SignatureParameter.VAR_KEYWORD:
                 return DefinitionPath((Parameter(param.name), Key(first.name), *rest))
     return None
+
+
+def _semantic_selector_requirements(
+        definition: Definition | ConcreteDefinition,
+        requirements: tuple[FeatureRequirement, ...]) -> tuple[FeatureRequirement, ...] | None:
+    if isinstance(definition, ConcreteDefinition):
+        return requirements
+
+    counts: Counter[FeatureToken] = Counter()
+    for requirement in requirements:
+        token = requirement.token
+        if token.kind == "HAS_KWARG":
+            continue
+        path = token.path
+        if path is None or not path:
+            semantic_path = path
+        elif isinstance(path.segments[0], (Arg, Kwarg)):
+            semantic_path = _semantic_selector_path(definition, path)
+            if semantic_path is None:
+                return None
+        else:
+            semantic_path = path
+        counts[FeatureToken(token.kind, semantic_path, token.payload)] += requirement.count
+    return tuple(
+        FeatureRequirement(token, count)
+        for token, count in sorted(counts.items(), key=lambda item: repr(item[0]))
+    )
 
 
 def _selector_requires_scan(selector: Definition | ConcreteDefinition) -> bool:

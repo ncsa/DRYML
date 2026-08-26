@@ -506,7 +506,7 @@ def test_contract_owner_projection_and_occurrence_capture(backend_case):
     assert set(projection.cdefs) == {owner1.definition, owner2.definition}
     assert {occ.owner for occ in occurrences} == {owner1.definition, owner2.definition}
     assert {occ.definition for occ in occurrences} == {leaf.definition}
-    assert all(str(occ.path) == "$.child" for occ in occurrences)
+    assert all(str(occ.path) == '$[@param("child")]' for occ in occurrences)
 
 
 def test_contract_remove_stored_roots_when_supported(backend_case):

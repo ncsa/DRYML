@@ -114,6 +114,23 @@ def test_graph_path_rejects_future_schema_before_segment_use():
         GraphPath.from_data({"schema_version": 999, "segments": [{"kind": "parameter", "name": "model"}]})
 
 
+@pytest.mark.parametrize(
+    "segment",
+    [
+        {"kind": "parameter"},
+        {"kind": "parameter", "name": 1},
+        {"kind": "kwarg", "name": None},
+        {"kind": "arg", "index": True},
+        {"kind": "index", "index": -1},
+        {"kind": "key"},
+        {"kind": "set_member", "fingerprint": "hash", "ordinal": -1},
+    ],
+)
+def test_graph_path_rejects_malformed_segment_fields(segment):
+    with pytest.raises(QueryPathError):
+        GraphPath.from_data({"schema_version": 2, "segments": [segment]})
+
+
 def test_legacy_path_payload_remains_decodable_without_semantic_reinterpretation():
     payload = {"schema_version": 1, "segments": [{"kind": "kwarg", "name": "model"}]}
 
