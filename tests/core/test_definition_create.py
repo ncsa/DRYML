@@ -1,6 +1,12 @@
 import numpy as np
+import pytest
 import core2_objects as objects
-from dryml.core2.definition import Definition, ConcreteDefinition
+import dryml
+from dryml.core2.bound_args import BoundArguments
+from dryml.core2.canonical import _to_bound_canonical
+from dryml.core2.definition import Definition, ConcreteDefinition, SKIP_ARGS
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.object import Object
 from dryml.core2.symbol import ImportRef
 
 ### Tests for methods of creating definitions. We verify they have the intended properties.
@@ -11,6 +17,10 @@ from dryml.core2.symbol import ImportRef
 def test_create_definition_1():
     # Empty definition creation
     Definition()
+
+
+def test_skip_args_is_available_from_top_level_dryml():
+    assert dryml.SKIP_ARGS is SKIP_ARGS
 
 
 def test_create_definition_2():
@@ -229,3 +239,92 @@ def test_build_definition_6():
     def_1 = def_3.args[0]
     assert def_3.kwargs['test'] == def_2
     assert def_3.args[0] == def_1
+
+
+class SemanticFixture(Object):
+    def __init__(self, required, optional=2, *tail, keyword=3, **options):
+        self.required = required
+        self.optional = optional
+        self.tail = tail
+        self.keyword = keyword
+        self.options = options
+
+
+class SemanticCollisionFixture(Object):
+    def __init__(self, cls, args, kwargs, build, stable_hash):
+        self.values = (cls, args, kwargs, build, stable_hash)
+
+
+def test_v2_concrete_definition_exposes_immutable_semantic_parameters():
+    child = _to_bound_canonical(Definition(SemanticFixture, "child"))
+    cdef = _to_bound_canonical(
+        Definition(SemanticFixture, child, 4, "tail", keyword=5, feature=True)
+    )
+
+    assert cdef.parameters == FrozenDict({
+        "required": child,
+        "optional": 4,
+        "tail": FrozenTuple(("tail",)),
+        "keyword": 5,
+        "options": FrozenDict({"feature": True}),
+    })
+    assert cdef.required is child
+    assert cdef.required.required == "child"
+    assert cdef.optional == 4
+    assert cdef.tail == FrozenTuple(("tail",))
+    assert cdef.options == FrozenDict({"feature": True})
+    with pytest.raises(AttributeError):
+        cdef.missing
+    with pytest.raises(AttributeError):
+        cdef.parameters.update({"required": "changed"})
+
+
+def test_semantic_parameters_preserve_framework_member_collisions():
+    cdef = _to_bound_canonical(Definition(
+        SemanticCollisionFixture,
+        "constructor-cls",
+        "constructor-args",
+        "constructor-kwargs",
+        "constructor-build",
+        "constructor-stable-hash",
+    ))
+
+    assert cdef.cls != "constructor-cls"
+    assert cdef.args == FrozenTuple()
+    assert cdef.kwargs == FrozenDict({})
+    assert callable(cdef.build)
+    assert callable(cdef.stable_hash)
+    assert cdef.parameters == FrozenDict({
+        "cls": "constructor-cls",
+        "args": "constructor-args",
+        "kwargs": "constructor-kwargs",
+        "build": "constructor-build",
+        "stable_hash": "constructor-stable-hash",
+    })
+
+
+def test_partial_definition_parameters_bind_only_supplied_fields(monkeypatch):
+    partial = Definition(SemanticFixture, 1, keyword=4)
+    skipped = Definition(SemanticFixture, SKIP_ARGS, keyword=4)
+    unresolved = Definition(ImportRef("missing.semantic.fixture", "Fixture"), SKIP_ARGS, explicit=2)
+    unresolved_positional = Definition(ImportRef("missing.semantic.fixture", "Fixture"), 1, explicit=2)
+
+    assert partial.parameters == FrozenDict({"required": 1, "keyword": 4})
+    assert partial.required == 1
+    assert partial.keyword == 4
+    assert not hasattr(partial, "optional")
+    assert skipped.parameters == FrozenDict({"keyword": 4})
+    assert unresolved.parameters == FrozenDict({"explicit": 2})
+    assert unresolved.explicit == 2
+    with pytest.raises(TypeError, match="positional"):
+        unresolved_positional.parameters
+    monkeypatch.setattr(ImportRef, "resolve", lambda self: pytest.fail("must not resolve symbols"))
+    assert not hasattr(unresolved, "required")
+
+
+def test_v1_concrete_definition_retains_raw_call_without_semantic_parameters():
+    cdef = Definition(SemanticFixture, 1, keyword=4).concretize()
+
+    assert cdef.args == FrozenTuple((1,))
+    assert cdef.kwargs == FrozenDict({"keyword": 4})
+    assert not hasattr(cdef, "parameters")

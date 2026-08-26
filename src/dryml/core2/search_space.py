@@ -17,10 +17,44 @@ class ParameterBinding:
 
 @dataclass(frozen=True, slots=True)
 class SearchSpace:
-    """Generative interpretation of a Definition template containing Par values."""
+    """Generative interpretation of a Definition template containing Par values.
+
+    Supplied template fields remain partial and are available through
+    ``parameters`` and direct non-reserved semantic attributes.
+    """
 
     template: Any
     params: tuple[ParameterBinding, ...]
+
+    @property
+    def parameters(self):
+        """Return the immutable supplied semantic parameters of ``template``.
+
+        Returns:
+            The partial parameter record stored by the Definition template.
+        """
+
+        return self.template.parameters
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate non-reserved semantic parameter access to ``template``.
+
+        Args:
+            name: Requested Python attribute name.
+
+        Returns:
+            The supplied frozen semantic value from the Definition template.
+
+        Raises:
+            AttributeError: If ``name`` is not supplied on the template.
+        """
+
+        try:
+            return getattr(self.template, name)
+        except AttributeError as error:
+            raise AttributeError(
+                f"{type(self).__name__!s} object has no attribute {name!r}"
+            ) from error
 
     @classmethod
     def from_def(cls, defn: Any) -> "SearchSpace":

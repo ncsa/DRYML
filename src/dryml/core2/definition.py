@@ -175,6 +175,61 @@ class Definition(DefInterface, Mapping):
         else:
             return False
 
+    @property
+    def parameters(self) -> FrozenDict[str, Any]:
+        """Return the immutable record of supplied semantic parameters.
+
+        A live class is partially bound without applying defaults, so positional
+        fields receive their declared names. Symbolic and callable definitions
+        retain explicit keyword fields without resolution; positional values on
+        those definitions are rejected because their semantic names are unknown.
+
+        Returns:
+            The supplied parameter names mapped to their frozen definition
+            values. Omitted fields are not present.
+
+        Raises:
+            TypeError: If a safely available live class rejects the supplied
+                partial constructor call, or unresolved positional values would
+                require class resolution to name.
+        """
+
+        if self._cls is None or not isclass(self._cls):
+            if self._args:
+                raise TypeError(
+                    "Semantic parameters for an unresolved definition require "
+                    "keyword spelling or SKIP_ARGS; positional names are unknown."
+                )
+            return self._kwargs
+        from .bound_args import bind_partial_arguments
+
+        args = () if self._args is None else tuple(self._args)
+        bound_args = bind_partial_arguments(self._cls, args, self._kwargs)
+        return FrozenDict(
+            (name, self._freeze_value(value))
+            for name, value in bound_args.items()
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        """Return a supplied non-reserved semantic parameter by name.
+
+        Args:
+            name: Requested Python attribute name.
+
+        Returns:
+            The frozen supplied value for ``name``.
+
+        Raises:
+            AttributeError: If ``name`` is not a supplied semantic parameter.
+        """
+
+        try:
+            return self.parameters[name]
+        except KeyError as error:
+            raise AttributeError(
+                f"{type(self).__name__!s} object has no attribute {name!r}"
+            ) from error
+
     # --- mapping interface (for view compatibility) ---
     def __getitem__(self, k: str) -> Any:
         if k == "cls":
@@ -373,6 +428,43 @@ class ConcreteDefinition(DefInterface, Mapping):
 
         return self._identity_version
 
+    @property
+    def parameters(self) -> FrozenDict[str, Any]:
+        """Return this V2 CDef's immutable persisted semantic record.
+
+        Returns:
+            The canonical parameter-name/value mapping persisted with a V2
+            CDef. Values are returned without resolving the CDef class.
+
+        Raises:
+            AttributeError: If this legacy V1 CDef has only raw call fields.
+        """
+
+        if self._bound_args is None:
+            raise AttributeError("V1 ConcreteDefinition records have no semantic parameters.")
+        return self._bound_args.as_frozen_dict()
+
+    def __getattr__(self, name: str) -> Any:
+        """Return a non-reserved V2 semantic parameter by name.
+
+        Args:
+            name: Requested Python attribute name.
+
+        Returns:
+            The canonical persisted value for ``name``.
+
+        Raises:
+            AttributeError: If this is a V1 record or ``name`` is not an
+                effective V2 parameter.
+        """
+
+        if self._bound_args is not None:
+            try:
+                return self._bound_args[name]
+            except KeyError:
+                pass
+        raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
+
     @classmethod
     def _from_persisted_record(
             cls,
@@ -481,7 +573,7 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     def __getitem__(self, k: str) -> Any:
         if k == "cls": return self.cls
-        if k == "parameters" and self._bound_args is not None: return self._bound_args.as_frozen_dict()
+        if k == "parameters" and self._bound_args is not None: return self.parameters
         if k == "args" and self._bound_args is None: return self.args
         if k == "kwargs" and self._bound_args is None: return self.kwargs
         raise KeyError(k)

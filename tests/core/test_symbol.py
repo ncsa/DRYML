@@ -4,6 +4,7 @@ import pytest
 
 from dryml.core2.symbol import ImportRef, SourceSpec, symbol_ref
 from dryml.core2.definition import Definition, ConcreteDefinition
+from dryml.core2.bound_args import BoundArguments
 from dryml.core2.object import Object
 from dryml.core2.freeze import FrozenTuple
 from dryml.core2.utils.general import pickler, unpickler
@@ -365,3 +366,18 @@ def test_concrete_definition_local_object_class_can_build_from_source_spec():
     obj = cdef.build()
     assert type(obj).__name__ == "LocalHolder"
     assert obj.value == 7
+
+
+def test_v2_source_spec_semantic_access_does_not_resolve_the_source(monkeypatch):
+    spec = SourceSpec.from_source(
+        "raise AssertionError('semantic inspection executed source')",
+        kind="class",
+        name="Danger",
+    )
+    cdef = ConcreteDefinition._from_bound_record(spec, BoundArguments((("value", 7),)))
+    monkeypatch.setattr(SourceSpec, "resolve", lambda self: pytest.fail("must not resolve source"))
+
+    assert cdef.value == 7
+    assert cdef.parameters["value"] == 7
+    with pytest.raises(AttributeError):
+        cdef.missing

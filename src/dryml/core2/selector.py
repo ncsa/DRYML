@@ -6,7 +6,11 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class Selector:
-    """Query interpretation wrapper around an immutable Definition root."""
+    """Query interpretation wrapper around an immutable Definition root.
+
+    Supplied semantic parameters are exposed through ``parameters`` and direct
+    non-reserved attributes without changing selector omission semantics.
+    """
 
     root: Any
     strict: bool = False
@@ -20,6 +24,36 @@ class Selector:
             if not isinstance(self_root, Definition):
                 raise TypeError(f"Selector root must be a Definition, got {type(self.root).__name__}.")
             object.__setattr__(self, "root", self_root)
+
+    @property
+    def parameters(self):
+        """Return the immutable supplied semantic parameters of ``root``.
+
+        Returns:
+            The partial parameter record supplied to the wrapped Definition.
+        """
+
+        return self.root.parameters
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate non-reserved semantic parameter access to ``root``.
+
+        Args:
+            name: Requested Python attribute name.
+
+        Returns:
+            The supplied frozen semantic value from the wrapped Definition.
+
+        Raises:
+            AttributeError: If ``name`` is not supplied on the wrapped root.
+        """
+
+        try:
+            return getattr(self.root, name)
+        except AttributeError as error:
+            raise AttributeError(
+                f"{type(self).__name__!s} object has no attribute {name!r}"
+            ) from error
 
     def compile(self, ctx=None):
         from .query.selector_graph import compile_selector_graph

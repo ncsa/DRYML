@@ -65,6 +65,45 @@ assert "torch" not in sys.modules
     )
 
 
+def test_v2_semantic_access_does_not_import_or_execute_symbolic_classes():
+    _run_import_probe(
+        """
+import sys
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+
+from dryml.core2.bound_args import BoundArguments
+from dryml.core2.definition import ConcreteDefinition, Definition, SKIP_ARGS
+from dryml.core2.freeze import FrozenTuple
+from dryml.core2.symbol import ImportRef, SourceSpec
+
+tf_cdef = ConcreteDefinition._from_bound_record(
+    ImportRef("dryml.models.tf.keras.base", "Sequential"),
+    BoundArguments((("layer_defs", FrozenTuple(())),)),
+)
+source_cdef = ConcreteDefinition._from_bound_record(
+    SourceSpec.from_source(
+        "raise AssertionError('semantic inspection executed source')",
+        kind="class",
+        name="Danger",
+    ),
+    BoundArguments((("value", "safe"),)),
+)
+selector = Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, name="safe")
+
+assert tf_cdef.layer_defs == FrozenTuple(())
+assert tf_cdef.parameters["layer_defs"] == FrozenTuple(())
+assert source_cdef.value == "safe"
+assert source_cdef.parameters["value"] == "safe"
+assert selector.name == "safe"
+assert selector.parameters["name"] == "safe"
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )
+
+
 def test_query_indexing_canonical_refs_does_not_import_backends():
     _run_import_probe(
         """
