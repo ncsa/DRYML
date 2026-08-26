@@ -12,10 +12,10 @@ from .params import Par
 from .quoted import QuotedDef, SelectorSpec
 from .object import Object
 from .utils.graph.path import GraphPath
-from .utils.graph.value import get_subtree, iter_value_edges
+from .utils.graph.value import iter_value_edges
 
 
-CDEF_GRAPH_SCHEMA_VERSION = 4
+CDEF_GRAPH_SCHEMA_VERSION = 5
 
 
 class EdgeKind(Enum):
@@ -236,7 +236,7 @@ class ConcreteDefinitionGraph:
     def resolve(self, root: ConcreteDefinition, path: GraphPath) -> ConcreteDefinition:
         if not path:
             return root
-        value = get_subtree(root, path)
+        value = root.graph_path(path)
         if isinstance(value, DefLink):
             return value.target
         if not isinstance(value, ConcreteDefinition):
@@ -438,7 +438,7 @@ def _validate_graph_parts(
         if edge.child not in node_defs:
             raise ConcreteDefinitionGraphError(f"Graph edge child {edge.child} is missing from nodes.")
         try:
-            resolved = get_subtree(edge.parent, edge.path)
+            resolved = edge.parent.graph_path(edge.path)
         except Exception as e:
             raise ConcreteDefinitionGraphError(
                 f"Graph edge path {edge.path!s} cannot be resolved on parent {edge.parent}."

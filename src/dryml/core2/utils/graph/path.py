@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+import json
 from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any, Iterable
 
 
-GRAPH_PATH_SCHEMA_VERSION = 1
+GRAPH_PATH_SCHEMA_VERSION = 2
+_SUPPORTED_GRAPH_PATH_SCHEMA_VERSIONS = frozenset((1, GRAPH_PATH_SCHEMA_VERSION))
 
 
 class GraphPathError(Exception):
@@ -22,6 +24,24 @@ class Kwarg:
 
     def __str__(self) -> str:
         return self.name
+
+
+@dataclass(frozen=True, slots=True)
+class Parameter:
+    """A persisted semantic constructor parameter path segment.
+
+    V2 concrete definitions use this segment instead of invocation-specific
+    ``Arg`` or ``Kwarg`` segments, so a path remains stable across equivalent
+    positional and keyword call spellings.
+
+    Attributes:
+        name: The persisted semantic constructor parameter name.
+    """
+
+    name: str
+
+    def __str__(self) -> str:
+        return f"@param({json.dumps(self.name)})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +79,7 @@ class SetMember:
         return f'@set("{self.fingerprint}", {self.ordinal})'
 
 
-PathSegment = Kwarg | Arg | Index | Key | SetMember
+PathSegment = Parameter | Kwarg | Arg | Index | Key | SetMember
 GraphPathLike = str | Iterable[PathSegment | str | int] | "GraphPath"
 
 
@@ -145,8 +165,8 @@ class GraphPath:
 
     @classmethod
     def from_data(cls, data: Any) -> "GraphPath":
-        segments_data = _segments_from_path_data(data)
-        return cls(tuple(_segment_from_data(seg_data) for seg_data in segments_data))
+        segments_data, schema_version = _segments_from_path_data(data)
+        return cls(tuple(_segment_from_data(seg_data, schema_version) for seg_data in segments_data))
 
     def __str__(self) -> str:
         if not self.segments:
@@ -154,7 +174,9 @@ class GraphPath:
 
         out = "$"
         for seg in self.segments:
-            if isinstance(seg, Kwarg):
+            if isinstance(seg, Parameter):
+                out += f"[@param({json.dumps(seg.name)})]"
+            elif isinstance(seg, Kwarg):
                 out += f".{seg.name}"
             elif isinstance(seg, Arg):
                 out += f".args[{seg.index}]"
@@ -219,7 +241,7 @@ def parse_path(text: str) -> GraphPath:
 
 
 def _normalize_segment(part: PathSegment | str | int) -> PathSegment:
-    if isinstance(part, (Kwarg, Arg, Index, Key, SetMember)):
+    if isinstance(part, (Parameter, Kwarg, Arg, Index, Key, SetMember)):
         return part
     if isinstance(part, str):
         return Kwarg(part)
@@ -235,6 +257,8 @@ def _normalize_legacy_segment(part: str | int) -> PathSegment:
 
 
 def _legacy_segment_value(seg: PathSegment) -> str | int:
+    if isinstance(seg, Parameter):
+        return str(seg)
     if isinstance(seg, Kwarg):
         return seg.name
     if isinstance(seg, Arg):
@@ -249,6 +273,8 @@ def _legacy_segment_value(seg: PathSegment) -> str | int:
 
 
 def _segment_to_data(seg: PathSegment) -> dict[str, Any]:
+    if isinstance(seg, Parameter):
+        return {"kind": "parameter", "name": seg.name}
     if isinstance(seg, Kwarg):
         return {"kind": "kwarg", "name": seg.name}
     if isinstance(seg, Arg):
@@ -262,22 +288,26 @@ def _segment_to_data(seg: PathSegment) -> dict[str, Any]:
     raise TypeError(seg)
 
 
-def _segments_from_path_data(data: Any) -> Iterable[Mapping[str, Any]]:
+def _segments_from_path_data(data: Any) -> tuple[Iterable[Mapping[str, Any]], int]:
     if isinstance(data, Mapping):
         version = data.get("schema_version")
-        if version != GRAPH_PATH_SCHEMA_VERSION:
+        if type(version) is not int or version not in _SUPPORTED_GRAPH_PATH_SCHEMA_VERSIONS:
             raise QueryPathError(f"Unsupported graph path schema version {version!r}.")
         segments = data.get("segments")
         if segments is None:
             raise QueryPathError("Graph path data is missing 'segments'.")
-        return segments
-    return data
+        return segments, version
+    return data, GRAPH_PATH_SCHEMA_VERSION
 
 
-def _segment_from_data(data: Mapping[str, Any]) -> PathSegment:
+def _segment_from_data(data: Mapping[str, Any], schema_version: int) -> PathSegment:
     if not isinstance(data, Mapping):
         raise QueryPathError(f"Graph path segment data must be a mapping, got {type(data).__name__}.")
     kind = data.get("kind")
+    if kind == "parameter":
+        if schema_version < 2:
+            raise QueryPathError("Semantic parameter segments require graph path schema version 2.")
+        return Parameter(data["name"])
     if kind == "kwarg":
         return Kwarg(data["name"])
     if kind == "arg":
@@ -362,6 +392,8 @@ def _parse_token(token: str) -> list[PathSegment]:
         if inside.startswith("@set("):
             value = _parse_set_member(inside)
             segments.append(value)
+        elif inside.startswith("@param("):
+            segments.append(_parse_parameter(inside))
         elif inside.startswith("@key("):
             value = _parse_key_member(inside)
             segments.append(Key(value))
@@ -434,6 +466,18 @@ def _parse_set_member(text: str) -> SetMember:
         raise QueryPathError(f"Set-member fingerprint must be a string in {text!r}.")
     ordinal = int(parts[1].strip()) if len(parts) == 2 else 0
     return SetMember(fp, ordinal)
+
+
+def _parse_parameter(text: str) -> Parameter:
+    if not text.endswith(")"):
+        raise QueryPathError(f"Invalid semantic parameter segment {text!r}.")
+    try:
+        name = ast.literal_eval(text[len("@param("):-1].strip())
+    except Exception as error:
+        raise QueryPathError(f"Invalid semantic parameter segment {text!r}.") from error
+    if not isinstance(name, str):
+        raise QueryPathError(f"Semantic parameter names must be strings in {text!r}.")
+    return Parameter(name)
 
 
 def _parse_key_member(text: str) -> Any:

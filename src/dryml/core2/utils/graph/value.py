@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from ...cdef_identity import V2_IDENTITY_VERSION
 from ...definition import ConcreteDefinition, Definition, SKIP_ARGS
 from ...freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ...utils.stable_hash import stable_hash_function
@@ -14,6 +15,7 @@ from .path import (
     Index,
     Key,
     Kwarg,
+    Parameter,
     PathSegment,
     QueryPathError,
     SetMember,
@@ -68,6 +70,9 @@ def resolve_set_member(values: Iterable[Any], segment: SetMember) -> Any:
 
 
 def iter_value_edges(value: Any) -> tuple[ValueEdge, ...]:
+    if isinstance(value, ConcreteDefinition) and value.identity_version == V2_IDENTITY_VERSION:
+        return tuple(ValueEdge(Parameter(name), child) for name, child in value.parameters.items())
+
     if isinstance(value, (Definition, ConcreteDefinition)):
         edges: list[ValueEdge] = []
         if value.args is not None:
@@ -113,6 +118,11 @@ def replace_subtree(obj: Any, path: DefinitionPathLike, replacement: Any) -> Any
 
 
 def _get_child(obj: Any, seg: PathSegment) -> Any:
+    if isinstance(obj, ConcreteDefinition) and obj.identity_version == V2_IDENTITY_VERSION:
+        if isinstance(seg, Parameter):
+            return obj.parameters[seg.name]
+        raise TypeError(f"{seg!s} is not valid on a V2 concrete definition.")
+
     if isinstance(obj, (Definition, ConcreteDefinition)):
         if isinstance(seg, Kwarg):
             return obj.kwargs[seg.name]

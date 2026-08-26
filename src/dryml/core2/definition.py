@@ -653,6 +653,26 @@ class ConcreteDefinition(DefInterface, Mapping):
     def concretize(self, repo: "Repo | None"=None) -> Any:
         return self
 
+    def graph_path(self, path: Any = "$") -> Any:
+        """Resolve a version-aware graph path without materializing this CDef.
+
+        Args:
+            path: A typed ``GraphPath`` or textual graph path. V1 records use
+                legacy ``Arg`` and ``Kwarg`` segments; V2 records require
+                semantic ``Parameter`` segments.
+
+        Returns:
+            The canonical value addressed by ``path``.
+
+        Raises:
+            QueryPathError: If the path is malformed or cannot be resolved
+                under this CDef's identity-version path semantics.
+        """
+
+        from .utils.graph.value import get_subtree
+
+        return get_subtree(self, path)
+
 
 def freeze(value: Any) -> Any:
     """Return the new immutable graph wrapper for a DRYML definition value."""

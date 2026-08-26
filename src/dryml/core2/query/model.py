@@ -153,7 +153,7 @@ class FeatureRequirement:
     count: int = 1
 
 
-FINGERPRINT_SCHEMA_VERSION = 1
+FINGERPRINT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)

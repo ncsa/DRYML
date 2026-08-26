@@ -11,9 +11,11 @@ from dryml.core2.cdef_graph import (
     as_query_index_graph,
     iter_direct_cdef_edges,
 )
+from dryml.core2.bound_args import BoundArguments, bind_complete_arguments
+from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.path import Arg, GraphPath, Kwarg, get_subtree
+from dryml.core2.query.path import Arg, GraphPath, Kwarg, Parameter, get_subtree
 
 
 class GraphLeaf(Object):
@@ -60,6 +62,76 @@ def test_direct_child_creates_two_nodes_and_one_edge():
     assert str(edge.path) == "$.args[0]"
     assert edge.child == child.definition
     assert graph.resolve(parent.definition, edge.path) == child.definition
+
+
+def test_v2_parent_uses_semantic_parameter_edge_and_keeps_legacy_child_identity():
+    child = ConcreteDefinition(GraphLeaf, ("child",), {})
+    parent = ConcreteDefinition._from_persisted_record(
+        GraphParent,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("child", child),)),
+    )
+
+    graph = ConcreteDefinitionGraph.from_root(parent)
+    edge = graph.edges()[0]
+
+    assert edge.path == GraphPath((Parameter("child"),))
+    assert graph.resolve(parent, edge.path) == child
+    assert {node.definition for node in graph.nodes()} == {parent, child}
+
+
+def test_equivalent_v2_call_spellings_produce_the_same_semantic_edge_path():
+    child = ConcreteDefinition(GraphLeaf, ("child",), {})
+    positional = ConcreteDefinition._from_persisted_record(
+        GraphParent,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=bind_complete_arguments(GraphParent, (child,), {}),
+    )
+    keyword = ConcreteDefinition._from_persisted_record(
+        GraphParent,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=bind_complete_arguments(GraphParent, (), {"child": child}),
+    )
+
+    assert positional == keyword
+    assert ConcreteDefinitionGraph.from_root(positional).edges()[0].path == GraphPath((Parameter("child"),))
+    assert ConcreteDefinitionGraph.from_root(keyword).edges()[0].path == GraphPath((Parameter("child"),))
+
+
+def test_mixed_version_parent_paths_follow_each_parent_identity_version():
+    leaf = ConcreteDefinition(GraphLeaf, ("leaf",), {})
+    v2_parent = ConcreteDefinition._from_persisted_record(
+        GraphParent,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("child", leaf),)),
+    )
+    v1_root = ConcreteDefinition(GraphParent, (v2_parent,), {})
+
+    graph = ConcreteDefinitionGraph.from_root(v1_root)
+
+    assert {str(edge.path) for edge in graph.edges()} == {"$.args[0]", '$[@param("child")]'}
+    assert {node.definition for node in graph.nodes()} == {v1_root, v2_parent, leaf}
+
+
+def test_v2_variadic_parameter_buckets_produce_stable_child_edges():
+    first = ConcreteDefinition(GraphLeaf, ("first",), {})
+    second = ConcreteDefinition(GraphLeaf, ("second",), {})
+    parent = ConcreteDefinition._from_persisted_record(
+        GraphContainer,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((
+            ("sources", FrozenTuple((first, second))),
+            ("capabilities", FrozenDict({"encoder": second})),
+        )),
+    )
+
+    graph = ConcreteDefinitionGraph.from_root(parent)
+
+    assert {str(edge.path) for edge in graph.edges()} == {
+        '$[@param("sources")][0]',
+        '$[@param("sources")][1]',
+        '$[@param("capabilities")][\'encoder\']',
+    }
 
 
 def test_grandchild_uses_two_direct_edges_not_one_transitive_edge():

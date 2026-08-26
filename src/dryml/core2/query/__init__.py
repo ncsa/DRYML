@@ -1,4 +1,4 @@
-from .path import Arg, DefinitionPath, GraphPath, GraphPathError, Index, Key, Kwarg, QueryPathError, SetMember, normalize_path
+from .path import Arg, DefinitionPath, GraphPath, GraphPathError, Index, Key, Kwarg, Parameter, QueryPathError, SetMember, normalize_path
 from .model import (
     QueryCardinalityError,
     QueryDomainError,
@@ -25,6 +25,7 @@ __all__ = [
     "Index",
     "Key",
     "Kwarg",
+    "Parameter",
     "LoweredEdgeStep",
     "LoweredGraphPlan",
     "ObjectResultSet",

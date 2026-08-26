@@ -17,7 +17,7 @@ from dryml.core2.query.codecs import (
     encode_graph_path,
 )
 from dryml.core2.query.model import FeatureToken
-from dryml.core2.query.path import Arg, GraphPath, Index, Key, Kwarg, SetMember
+from dryml.core2.query.path import Arg, GraphPath, Index, Key, Kwarg, Parameter, SetMember
 from dryml.core2.query.utils import chunked, stable_hash_from_blob, stable_hash_to_blob
 from dryml.core2.utils.general import pickler
 
@@ -98,6 +98,15 @@ def test_graph_path_codec_roundtrip_all_segments():
     path = GraphPath((Arg(0), Kwarg("model"), Index(3), Key(("tuple", 1)), SetMember("def", 2)))
 
     assert decode_graph_path(encode_graph_path(path)) == path
+
+
+def test_path_codec_keeps_v1_and_v2_path_kinds_distinct():
+    legacy = GraphPath((Kwarg("model"),))
+    semantic = GraphPath((Parameter("model"),))
+
+    assert decode_graph_path(encode_graph_path(legacy)) == legacy
+    assert decode_graph_path(encode_graph_path(semantic)) == semantic
+    assert legacy != semantic
 
 
 def test_codec_rejects_corruption():

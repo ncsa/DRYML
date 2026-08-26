@@ -291,4 +291,4 @@ def test_v1_and_private_v2_records_are_distinct_mapping_keys_and_graph_nodes():
 
     graph = ConcreteDefinitionGraph.from_roots((root_v1, root_v1, root_v2, root_v2))
     assert graph.roots == (root_v1, root_v2)
-    assert {node.definition for node in graph.nodes()} == {root_v1, child_v1, root_v2}
+    assert {node.definition for node in graph.nodes()} == {root_v1, child_v1, root_v2, child_v2}

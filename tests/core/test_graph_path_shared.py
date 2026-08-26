@@ -6,6 +6,7 @@ from dryml.core2.query.path import (
     Index,
     Key,
     Kwarg,
+    Parameter,
     QueryPathError,
     SetMember,
     get_subtree,
@@ -59,6 +60,15 @@ def test_kwarg_and_key_are_not_equal():
     assert str(GraphPath((Key("x"),))) == "$['x']"
 
 
+def test_parameter_is_distinct_from_invocation_keyword_and_round_trips():
+    parameter = GraphPath((Parameter("model"),))
+
+    assert Parameter("model") != Kwarg("model")
+    assert str(parameter) == '$[@param("model")]'
+    assert parse_path(str(parameter)) == parameter
+    assert GraphPath.from_data(parameter.to_data()) == parameter
+
+
 def test_set_member_path_string_round_trips():
     path = GraphPath((Kwarg("items"), SetMember("abc", 2)))
 
@@ -97,6 +107,17 @@ def test_integer_mapping_key_string_roundtrip_does_not_become_index():
 
     assert str(path) == "$[@key(5)]"
     assert parse_path(str(path)) == path
+
+
+def test_graph_path_rejects_future_schema_before_segment_use():
+    with pytest.raises(QueryPathError, match="schema version"):
+        GraphPath.from_data({"schema_version": 999, "segments": [{"kind": "parameter", "name": "model"}]})
+
+
+def test_legacy_path_payload_remains_decodable_without_semantic_reinterpretation():
+    payload = {"schema_version": 1, "segments": [{"kind": "kwarg", "name": "model"}]}
+
+    assert GraphPath.from_data(payload) == GraphPath((Kwarg("model"),))
 
 
 def test_set_member_collision_order_is_rejected(monkeypatch):
