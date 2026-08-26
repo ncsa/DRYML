@@ -397,6 +397,26 @@ emit({{"released": True}})
         assert _collect_worker(proc) == {"released": True}
 
 
+def test_root_registration_fails_dirty_while_rebuild_claim_is_active(tmp_path):
+    path = tmp_path / "index.sqlite"
+    dirty_path = tmp_path / "index.dirty"
+    idx = SQLiteStoreQueryIndex(
+        source_key="concurrency-store",
+        path=path,
+        config=SQLiteQueryIndexConfig(journal_mode="delete"),
+        dirty_path=dirty_path,
+    )
+    idx.initialize_empty()
+    idx._build_claim_path().write_text("active\n")
+    root = _cdef("overlap")
+
+    with pytest.raises(QueryIndexBusy, match="rebuild"):
+        idx.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+
+    assert dirty_path.exists()
+    assert idx.status().state == "dirty"
+
+
 def test_writer_busy_retry_succeeds_after_lock_release(tmp_path):
     path = tmp_path / "index.sqlite"
     ready = tmp_path / "writer-ready"

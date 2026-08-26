@@ -6,11 +6,16 @@ import time
 import pytest
 
 from dryml.core2 import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
-from dryml.core2.query.model import QueryIndexUnavailable, ValidationIssue, ValidationReport
+from dryml.core2.bound_args import BoundArguments
+from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query.model import QueryIndexIncompatible, QueryIndexUnavailable, ValidationIssue, ValidationReport
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core2.query.sqlite.index as sqlite_index_module
 from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core2.store.dir import DirStore
+from dryml.core2.symbol import ImportRef
 from dryml.core2.utils.general import pickle_save
 
 
@@ -429,6 +434,29 @@ def test_sqlite_rebuild_registers_store_roots_in_batches(tmp_path, monkeypatch):
     assert batch_sizes == [2, 1]
 
 
+def test_sqlite_rebuilds_mixed_v1_v2_authoritative_roots(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    v1 = ConcreteDefinition(ImportRef("builtins", "dict"), FrozenTuple(("v1",)), FrozenDict({}))
+    v2 = ConcreteDefinition._from_persisted_record(
+        ImportRef("builtins", "dict"),
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("value", "v2"),)),
+    )
+    for cdef in (v1, v2):
+        def_path = Path(store.object_dir(cdef)) / "def.pkl"
+        def_path.parent.mkdir(parents=True)
+        pickle_save(cdef, def_path)
+
+    index = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")).open_query_index()
+    index.rebuild()
+
+    assert index.status().state == "ready"
+    assert index.status().row_counts["stored_roots"] == 2
+    with index.read_view() as view:
+        assert view.exact_ids(v1)
+        assert view.exact_ids(v2)
+
+
 def test_sqlite_interrupted_build_is_not_marked_ready(tmp_path, monkeypatch):
     store = DirStore(tmp_path / "store", query_index="memory")
     repo = Repo(stores=store)
@@ -444,7 +472,60 @@ def test_sqlite_interrupted_build_is_not_marked_ready(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="pre-ready"):
         index.rebuild()
 
-    assert index.status().state == "building"
+    assert index.status().state == "missing"
+    assert not list(Path(index.path).parent.glob(f"{Path(index.path).name}.rebuild-*.tmp"))
+
+
+def test_sqlite_failed_replacement_preserves_ready_sidecar(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("replacement-failure", repo=repo)
+    repo.save_object(obj)
+    index = store.open_query_index()
+    before = Path(index.path).read_bytes()
+
+    def fail_validation(self):
+        raise RuntimeError("injected replacement validation failure")
+
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail_validation)
+
+    with pytest.raises(RuntimeError, match="replacement validation"):
+        index.rebuild()
+
+    assert Path(index.path).read_bytes() == before
+    assert index.status().state == "ready"
+    with index.read_view() as view:
+        assert view.exact_ids(obj.definition)
+
+
+def test_sqlite_future_sidecar_fails_before_store_scan_or_row_decode(tmp_path):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("future-sidecar", repo=repo)
+    repo.save_object(obj)
+    path = Path(store.query_index_path)
+    con = require_sqlite().connect(path)
+    con.execute("UPDATE catalog_state SET cdef_codec_version = cdef_codec_version + 1")
+    con.commit()
+    con.close()
+    before = path.read_bytes()
+
+    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    index = reopened_store.open_query_index()
+    calls = []
+
+    def fail_hydrate():
+        calls.append(True)
+        raise AssertionError("future sidecar must fail before Store scanning")
+
+    reopened_store.hydrate_index = fail_hydrate
+
+    with pytest.raises(QueryIndexIncompatible, match="refusing to rebuild"):
+        index.rebuild()
+
+    assert calls == []
+    assert path.read_bytes() == before
+    assert index.status().state == "incompatible"
 
 
 def test_sqlite_exact_query_probes_store_without_full_rebuild(tmp_path):
@@ -599,6 +680,7 @@ def test_dirstore_validate_detects_changed_or_misplaced_def_pickle(tmp_path):
     repo.save_object(original)
     def_path = Path(store.object_dir(original.definition)) / "def.pkl"
     pickle_save(changed.definition, def_path)
+    authority_bytes = def_path.read_bytes()
 
     report = store.validate_query_index(thorough=True)
 
@@ -608,6 +690,8 @@ def test_dirstore_validate_detects_changed_or_misplaced_def_pickle(tmp_path):
     assert any(issue.message == "Store root scan failed." for issue in report.issues)
     assert reconcile.changed is False
     assert any(issue.message == "SQLite query-index rebuild failed." for issue in reconcile.issues)
+    assert def_path.read_bytes() == authority_bytes
+    assert store.query_index_status().state == "dirty"
 
 
 def test_dirstore_reconcile_quarantines_corrupt_database(tmp_path):

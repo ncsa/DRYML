@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 import time
+from uuid import uuid4
 
 from ...cdef_graph import ConcreteDefinitionGraph, EdgeKind, as_query_index_graph
 from ...definition import ConcreteDefinition
@@ -27,18 +28,20 @@ from ..model import (
     QueryIndexBusy,
     QueryIndexDirty,
     QueryIndexError,
+    QueryIndexIncompatible,
     QueryIndexStatus,
     QueryIndexUnavailable,
     QueryStats,
     ReconcileReport,
     ValidationIssue,
     ValidationReport,
+    CANONICAL_QUERY_SEMANTICS_VERSION,
 )
 from ..lowering import CandidateRelation, LoweredQueryPlan, LoweringDiagnostics, PagedResultCursor, PhysicalRelationPlan, QueryTerminal, ScanPolicy
 from ..utils import cdef_equal, chunked, feature_token_equal, stable_hash_from_blob, stable_hash_to_blob
 from . import SQLiteQueryIndexConfig, require_sqlite
 from .connection import SQLiteConnectionManager
-from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, validate_schema
+from .schema import SQLITE_QUERY_INDEX_SCHEMA_VERSION, initialize_schema, stored_compatibility_decision, validate_schema
 from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 from .lowering import SQLiteOptimizerPolicy, SQLiteRelationCompiler
 
@@ -64,7 +67,7 @@ class SQLiteStoreQueryIndex:
             source_key: str,
             path: str | Path,
             config: SQLiteQueryIndexConfig | None = None,
-            canonical_version: int = 1,
+            canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION,
             store=None,
             dirty_path: str | Path | None = None):
         if config is None:
@@ -139,7 +142,7 @@ class SQLiteStoreQueryIndex:
                 """
                 SELECT index_uuid, generation, schema_version, graph_schema_version, path_schema_version,
                        fingerprint_version, cdef_codec_version, feature_codec_version,
-                       canonical_version, build_state, dirty
+                       query_index_codec_version, canonical_version, build_state, dirty
                 FROM catalog_state
                 WHERE singleton = 1
                 """
@@ -169,7 +172,7 @@ class SQLiteStoreQueryIndex:
             semantic_versions = {}
         else:
             diagnostics["index_uuid"] = row[0]
-            diagnostics["dirty_flag"] = bool(row[10])
+            diagnostics["dirty_flag"] = bool(row[11])
             generation = row[1]
             schema_version = row[2]
             semantic_versions = {
@@ -178,9 +181,10 @@ class SQLiteStoreQueryIndex:
                 "fingerprint_version": row[5],
                 "cdef_codec_version": row[6],
                 "feature_codec_version": row[7],
-                "canonical_version": row[8],
+                "query_index_codec_version": row[8],
+                "canonical_version": row[9],
             }
-            state = "dirty" if row[10] else row[9]
+            state = "dirty" if row[11] else row[10]
         return QueryIndexStatus(
             backend="sqlite",
             store_key=self.source_key,
@@ -259,10 +263,9 @@ class SQLiteStoreQueryIndex:
         """Recreate this SQLite index from the owning Store's root definitions.
 
         Rebuilds acquire a sidecar build claim so concurrent callers do not all
-        scan the Store. Roots are registered in bounded batches, the new index is
-        validated while still marked `building`, and only then is it marked
-        `ready`. When `quarantine_existing` is true, the previous database file
-        is renamed aside instead of unlinked before rebuilding.
+        scan the Store. They preflight all authoritative roots, validate a
+        complete sibling sidecar while it is `building`, then atomically replace
+        the active sidecar. Store roots are never changed by rebuild or recovery.
         """
 
         with self._build_claim(force=force) as acquired:
@@ -337,27 +340,78 @@ class SQLiteStoreQueryIndex:
     def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
         if self.store is None or not hasattr(self.store, "hydrate_index"):
             raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
+        self._assert_sidecar_rebuildable()
 
-        self._connections.close_all_current_process()
-        self._remove_existing_index(quarantine=quarantine_existing)
-        self.initialize_empty(build_state="building")
+        try:
+            roots = self._preflight_store_roots()
+        except Exception:
+            self._mark_dirty()
+            raise
+
+        replacement_path = self._replacement_path()
+        replacement = SQLiteStoreQueryIndex(
+            source_key=self.source_key,
+            path=replacement_path,
+            config=replace(self.config, path=replacement_path),
+            canonical_version=self.canonical_version,
+            store=self.store,
+        )
         scanned = 0
-        for cdefs in chunked(self.store.hydrate_index(), _REBUILD_BATCH_SIZE):
-            for cdef in cdefs:
-                if not isinstance(cdef, ConcreteDefinition):
-                    raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
-            scanned += len(cdefs)
-            graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
-            self._register_stored_roots(graph, cdefs, require_ready=False)
-        self._validate_rebuild_before_ready()
-        self._set_build_state("ready")
+        try:
+            replacement.initialize_empty(build_state="building")
+            replacement._rebuild_roots = roots
+            for cdefs in chunked(roots, _REBUILD_BATCH_SIZE):
+                scanned += len(cdefs)
+                graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
+                replacement._register_stored_roots(graph, cdefs, require_ready=False)
+            replacement._validate_rebuild_before_ready()
+            replacement._set_build_state("ready")
+            con = replacement._connections.connection(readonly=False)
+            con.execute("PRAGMA optimize")
+            # Activation replaces only the database file, so checkpoint a staged
+            # WAL before closing it and atomically publishing its main file.
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            replacement.close()
+            self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
+        except Exception:
+            replacement.close()
+            self._cleanup_replacement(replacement_path)
+            raise
         self._clear_dirty()
-        con = self._connections.connection(readonly=False)
-        con.execute("PRAGMA optimize")
         if stats is not None:
             stats.store_scan_count += 1
             stats.refresh_action = "sqlite-rebuild"
             stats.result_count = scanned
+
+    def _preflight_store_roots(self) -> tuple[ConcreteDefinition, ...]:
+        """Read and type-check every authoritative root before sidecar creation."""
+
+        roots = tuple(self.store.hydrate_index())
+        for cdef in roots:
+            if not isinstance(cdef, ConcreteDefinition):
+                raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
+        return roots
+
+    def _assert_sidecar_rebuildable(self) -> None:
+        """Reject future sidecars before scanning Store authority or index rows."""
+
+        if not self.path.exists():
+            return
+        try:
+            con = self._connections.connection(readonly=True)
+            decision = stored_compatibility_decision(
+                con,
+                store_key=self.source_key,
+                canonical_version=self.canonical_version,
+            )
+        except Exception as exc:
+            if _is_sqlite_corrupt_exception(exc):
+                return
+            raise QueryIndexError("Could not inspect SQLite query-index compatibility before rebuild.") from exc
+        if decision == "future-unsupported":
+            raise QueryIndexIncompatible(
+                "SQLite query-index metadata is future, missing, or malformed; refusing to rebuild over it."
+            )
 
     def register_stored_roots(self, graph, roots):
         return self._register_stored_roots(graph, roots, require_ready=True)
@@ -372,6 +426,11 @@ class SQLiteStoreQueryIndex:
         return self.register_stored_roots(graph, roots)
 
     def _register_stored_roots(self, graph, roots, *, require_ready: bool):
+        if require_ready and self._build_claim_path().exists():
+            self._mark_dirty()
+            raise QueryIndexBusy(
+                "Cannot register Store roots while a SQLite query-index rebuild is active."
+            )
         roots = tuple(dict.fromkeys(roots))
         graph = as_query_index_graph(graph, roots if roots else graph.roots)
         graph_nodes = graph.nodes()
@@ -563,6 +622,21 @@ class SQLiteStoreQueryIndex:
         except FileNotFoundError:
             pass
 
+    def _mark_dirty(self) -> None:
+        if self.dirty_path is None:
+            return
+        self.dirty_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.dirty_path.with_name(f"{self.dirty_path.name}.tmp-{uuid4().hex}")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as file:
+                file.write("dirty\n")
+            os.replace(tmp_path, self.dirty_path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
     def _root_file_metadata(self, stable_hash: str) -> tuple[int | None, int | None]:
         if self.store is None or not hasattr(self.store, "base_dir"):
             return None, None
@@ -580,6 +654,7 @@ class SQLiteStoreQueryIndex:
         _validate_sqlite_integrity(con, issues)
         self._validate_decodable_rows(con, issues)
         self._validate_stored_roots(con, issues)
+        self._validate_store_roots(con, issues, roots=getattr(self, "_rebuild_roots", None))
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
             detail = "; ".join(issue.message for issue in errors[:3])
@@ -645,18 +720,26 @@ class SQLiteStoreQueryIndex:
             if def_mtime_ns is not None and def_mtime_ns != stat.st_mtime_ns:
                 issues.append(ValidationIssue("warning", "Stored root def.pkl mtime changed.", f"{did}: stored={def_mtime_ns}, actual={stat.st_mtime_ns}"))
 
-    def _validate_store_roots(self, con, issues: list[ValidationIssue]) -> None:
+    def _validate_store_roots(
+            self,
+            con,
+            issues: list[ValidationIssue],
+            *,
+            roots: tuple[ConcreteDefinition, ...] | None = None) -> None:
         if self.store is None or not hasattr(self.store, "hydrate_index"):
             return
-        try:
-            roots = tuple(self.store.hydrate_index())
-        except Exception as exc:
-            issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
-            return
+        if roots is None:
+            try:
+                roots = tuple(self.store.hydrate_index())
+            except Exception as exc:
+                issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
+                return
+        actual_roots = set()
         for cdef in roots:
             if not isinstance(cdef, ConcreteDefinition):
                 issues.append(ValidationIssue("error", "Store scan yielded non-CDef root.", type(cdef).__name__))
                 continue
+            actual_roots.add(cdef)
             root_ids = _exact_ids_for_cdef(con, cdef)
             if not root_ids:
                 issues.append(ValidationIssue("error", "Store root is missing from SQLite query index.", cdef.stable_hash()))
@@ -667,6 +750,14 @@ class SQLiteStoreQueryIndex:
             ).fetchone()
             if stored is None:
                 issues.append(ValidationIssue("error", "Store root is indexed but not active as a stored root.", cdef.stable_hash()))
+        indexed_roots = {
+            _CODEC.decode_cdef(row[0])
+            for row in con.execute(
+                "SELECT definitions.cdef_blob FROM stored_roots JOIN definitions ON definitions.def_id = stored_roots.def_id"
+            )
+        }
+        if indexed_roots != actual_roots:
+            issues.append(ValidationIssue("error", "SQLite stored roots differ from authoritative Store roots."))
 
     @contextmanager
     def _build_claim(self, *, force: bool = False):
@@ -734,15 +825,28 @@ class SQLiteStoreQueryIndex:
             return False
         return age > _BUILD_CLAIM_STALE_SECONDS
 
-    def _remove_existing_index(self, *, quarantine: bool) -> None:
-        if not self.path.exists():
-            return
-        if not quarantine:
-            self.path.unlink()
-            return
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
-        self.path.replace(target)
+    def _replacement_path(self) -> Path:
+        return self.path.with_name(f"{self.path.name}.rebuild-{uuid4().hex}.tmp")
+
+    def _activate_replacement(self, replacement_path: Path, *, quarantine_existing: bool) -> None:
+        self._connections.close_all_current_process()
+        if quarantine_existing and self.path.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
+            self.path.replace(target)
+        os.replace(replacement_path, self.path)
+
+    @staticmethod
+    def _cleanup_replacement(replacement_path: Path) -> None:
+        for path in (
+                replacement_path,
+                replacement_path.with_name(f"{replacement_path.name}-journal"),
+                replacement_path.with_name(f"{replacement_path.name}-wal"),
+                replacement_path.with_name(f"{replacement_path.name}-shm")):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     def _set_build_state(self, state: str) -> None:
         if state not in {"building", "ready", "dirty"}:

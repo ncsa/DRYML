@@ -136,7 +136,7 @@ def test_catalog_state_persists_required_metadata(tmp_path):
         """
         SELECT index_uuid, generation, schema_version, graph_schema_version,
                path_schema_version, fingerprint_version, cdef_codec_version,
-               feature_codec_version, canonical_version, store_key, build_state,
+               feature_codec_version, query_index_codec_version, canonical_version, store_key, build_state,
                dirty, created_at, updated_at
         FROM catalog_state
         WHERE singleton = 1
@@ -146,19 +146,20 @@ def test_catalog_state_persists_required_metadata(tmp_path):
     UUID(row[0])
     assert row[1] == 0
     assert row[2] == SQLITE_QUERY_INDEX_SCHEMA_VERSION
-    assert row[3:9] == tuple(expected_semantic_version(store_key="store-a").catalog_state()[key] for key in (
+    assert row[3:10] == tuple(expected_semantic_version(store_key="store-a").catalog_state()[key] for key in (
         "graph_schema_version",
         "path_schema_version",
         "fingerprint_version",
         "cdef_codec_version",
         "feature_codec_version",
+        "query_index_codec_version",
         "canonical_version",
     ))
-    assert row[9] == "store-a"
-    assert row[10] == "ready"
-    assert row[11] == 0
-    assert row[12]
+    assert row[10] == "store-a"
+    assert row[11] == "ready"
+    assert row[12] == 0
     assert row[13]
+    assert row[14]
 
     initialize_schema(con, store_key="store-a")
     assert con.execute("SELECT index_uuid FROM catalog_state WHERE singleton = 1").fetchone()[0] == row[0]
@@ -185,6 +186,7 @@ def test_schema_tables_expose_required_columns_and_constraints(tmp_path):
         "path_schema_version",
         "cdef_codec_version",
         "feature_codec_version",
+        "query_index_codec_version",
         "canonical_version",
         "store_key",
         "build_state",
@@ -245,21 +247,43 @@ def test_index_semantic_version_and_compatibility_decision():
     assert isinstance(expected, IndexSemanticVersion)
     assert compatibility_decision(actual, expected=expected) == "compatible"
 
-    needs_migration = dict(actual)
-    needs_migration["schema_version"] = SQLITE_QUERY_INDEX_SCHEMA_VERSION - 1
-    assert compatibility_decision(needs_migration, expected=expected) == "migrate"
+    older = dict(actual)
+    older["schema_version"] = SQLITE_QUERY_INDEX_SCHEMA_VERSION - 1
+    assert compatibility_decision(older, expected=expected) == "rebuild"
 
     future = dict(actual)
     future["schema_version"] = SQLITE_QUERY_INDEX_SCHEMA_VERSION + 1
     assert compatibility_decision(future, expected=expected) == "future-unsupported"
 
 
-def test_codec_version_mismatch_requests_rebuild():
+def test_future_codec_version_fails_closed():
     expected = expected_semantic_version(store_key="store-a", canonical_version=1)
     actual = expected.catalog_state()
     actual["cdef_codec_version"] = expected.cdef_codec_version + 1
 
-    assert compatibility_decision(actual, expected=expected) == "rebuild"
+    assert compatibility_decision(actual, expected=expected) == "future-unsupported"
+
+
+def test_every_semantic_version_rebuilds_only_known_older_values():
+    expected = expected_semantic_version(store_key="store-a", canonical_version=1)
+    for key, value in expected.catalog_state().items():
+        if key == "store_key":
+            continue
+        lower = dict(expected.catalog_state())
+        lower[key] = value - 1
+        assert compatibility_decision(lower, expected=expected) == "rebuild"
+
+        future = dict(expected.catalog_state())
+        future[key] = value + 1
+        assert compatibility_decision(future, expected=expected) == "future-unsupported"
+
+        missing = dict(expected.catalog_state())
+        missing.pop(key)
+        assert compatibility_decision(missing, expected=expected) == "future-unsupported"
+
+        malformed = dict(expected.catalog_state())
+        malformed[key] = "wrong-type"
+        assert compatibility_decision(malformed, expected=expected) == "future-unsupported"
 
 
 def test_schema_initialization_is_idempotent_and_has_one_catalog_row(tmp_path):
@@ -336,6 +360,20 @@ def test_schema_rejects_future_user_version(tmp_path):
 
     with pytest.raises(QueryIndexIncompatible, match="schema version"):
         validate_schema(con, store_key="store-a")
+    manager.close_all_current_process()
+
+
+def test_schema_initialization_does_not_modify_an_incompatible_sidecar(tmp_path):
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    con = manager.connection()
+    initialize_schema(con, store_key="store-a")
+    con.execute("UPDATE catalog_state SET cdef_codec_version = cdef_codec_version + 1")
+    before = con.execute("SELECT cdef_codec_version FROM catalog_state").fetchone()[0]
+
+    with pytest.raises(QueryIndexIncompatible):
+        initialize_schema(con, store_key="store-a")
+
+    assert con.execute("SELECT cdef_codec_version FROM catalog_state").fetchone()[0] == before
     manager.close_all_current_process()
 
 

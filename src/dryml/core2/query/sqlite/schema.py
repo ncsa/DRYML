@@ -8,12 +8,12 @@ from uuid import uuid4
 
 from ...cdef_graph import CDEF_GRAPH_SCHEMA_VERSION
 from ..codecs import CDEF_CODEC_VERSION, FEATURE_CODEC_VERSION, PATH_CODEC_VERSION, QUERY_INDEX_CODEC_VERSION
-from ..model import FINGERPRINT_SCHEMA_VERSION, QueryIndexDirty, QueryIndexIncompatible
+from ..model import CANONICAL_QUERY_SEMANTICS_VERSION, FINGERPRINT_SCHEMA_VERSION, QueryIndexDirty, QueryIndexIncompatible
 
 
 SQLITE_QUERY_INDEX_APPLICATION_ID = 0x44524D4C
-SQLITE_QUERY_INDEX_SCHEMA_VERSION = 3
-IndexCompatibilityDecision = Literal["compatible", "migrate", "rebuild", "future-unsupported"]
+SQLITE_QUERY_INDEX_SCHEMA_VERSION = 4
+IndexCompatibilityDecision = Literal["compatible", "rebuild", "future-unsupported"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,7 @@ class IndexSemanticVersion:
             "fingerprint_version": self.fingerprint_version,
             "cdef_codec_version": self.cdef_codec_version,
             "feature_codec_version": self.feature_codec_version,
+            "query_index_codec_version": self.query_index_codec_version,
             "canonical_version": self.canonical_version,
             "store_key": self.store_key,
         }
@@ -57,6 +58,7 @@ DDL = (
         fingerprint_version INTEGER NOT NULL,
         cdef_codec_version INTEGER NOT NULL,
         feature_codec_version INTEGER NOT NULL,
+        query_index_codec_version INTEGER NOT NULL,
         canonical_version INTEGER NOT NULL,
         store_key TEXT NOT NULL,
         build_state TEXT NOT NULL CHECK (build_state IN ('building', 'ready', 'dirty')),
@@ -124,9 +126,17 @@ DDL = (
 )
 
 
-def initialize_schema(con, *, store_key: str, canonical_version: int = 1, build_state: str = "ready") -> None:
+def initialize_schema(con, *, store_key: str, canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION, build_state: str = "ready") -> None:
     if build_state not in {"building", "ready", "dirty"}:
         raise ValueError("build_state must be 'building', 'ready', or 'dirty'.")
+    tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if tables:
+        validate_schema(con, store_key=store_key, canonical_version=canonical_version, require_ready=False)
+        return
+    application_id = con.execute("PRAGMA application_id").fetchone()[0]
+    user_version = con.execute("PRAGMA user_version").fetchone()[0]
+    if application_id != 0 or user_version != 0:
+        raise QueryIndexIncompatible("SQLite file is not an empty query-index sidecar.")
     con.execute(f"PRAGMA application_id = {SQLITE_QUERY_INDEX_APPLICATION_ID}")
     con.execute(f"PRAGMA user_version = {SQLITE_QUERY_INDEX_SCHEMA_VERSION}")
     for statement in DDL:
@@ -134,7 +144,7 @@ def initialize_schema(con, *, store_key: str, canonical_version: int = 1, build_
     _ensure_catalog_state(con, store_key=store_key, canonical_version=canonical_version, build_state=build_state)
 
 
-def validate_schema(con, *, store_key: str, canonical_version: int = 1, require_ready: bool = True) -> None:
+def validate_schema(con, *, store_key: str, canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION, require_ready: bool = True) -> None:
     application_id = con.execute("PRAGMA application_id").fetchone()[0]
     if application_id != SQLITE_QUERY_INDEX_APPLICATION_ID:
         raise QueryIndexIncompatible("SQLite file is not a DRYML query index.")
@@ -147,14 +157,20 @@ def validate_schema(con, *, store_key: str, canonical_version: int = 1, require_
     columns = [info[1] for info in con.execute("PRAGMA table_info(catalog_state)")]
     state = dict(zip(columns, row))
     expected = _semantic_versions(store_key=store_key, canonical_version=canonical_version)
-    for key, value in expected.items():
-        if state[key] != value:
-            raise QueryIndexIncompatible(f"SQLite query index {key}={state[key]!r} is incompatible with expected {value!r}.")
+    decision = compatibility_decision(state, expected=expected_semantic_version(
+        store_key=store_key,
+        canonical_version=canonical_version,
+    ))
+    if decision != "compatible":
+        raise QueryIndexIncompatible(
+            f"SQLite query index metadata is {decision}: "
+            f"{_compatibility_detail(state, expected)}."
+        )
     if require_ready and (state["build_state"] != "ready" or state["dirty"]):
         raise QueryIndexDirty(f"SQLite query index build_state={state['build_state']!r} is not ready.")
 
 
-def expected_semantic_version(*, store_key: str, canonical_version: int = 1) -> IndexSemanticVersion:
+def expected_semantic_version(*, store_key: str, canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION) -> IndexSemanticVersion:
     """Return the semantic version bundle expected for a Store index."""
 
     return IndexSemanticVersion(
@@ -176,16 +192,55 @@ def compatibility_decision(
         expected: IndexSemanticVersion) -> IndexCompatibilityDecision:
     """Classify how to handle persisted query-index version metadata."""
 
-    actual_schema = actual.get("schema_version")
-    if isinstance(actual_schema, int):
-        if actual_schema > expected.schema_version:
-            return "future-unsupported"
-        if actual_schema < expected.schema_version:
-            return "migrate"
     for key, value in expected.catalog_state().items():
-        if actual.get(key) != value:
+        actual_value = actual.get(key)
+        if key == "store_key":
+            if actual_value != value:
+                return "rebuild"
+            continue
+        if type(actual_value) is not int:
+            return "future-unsupported"
+        if actual_value > value:
+            return "future-unsupported"
+        if actual_value < value:
             return "rebuild"
     return "compatible"
+
+
+def stored_compatibility_decision(
+        con,
+        *,
+        store_key: str,
+        canonical_version: int = CANONICAL_QUERY_SEMANTICS_VERSION) -> IndexCompatibilityDecision:
+    """Classify sidecar metadata without decoding any index rows.
+
+    Args:
+        con: Open SQLite connection for the sidecar being inspected.
+        store_key: Expected owning Store identifier.
+        canonical_version: Expected canonical query-value semantic version.
+
+    Returns:
+        ``"compatible"``, ``"rebuild"`` for known older metadata, or
+        ``"future-unsupported"`` for future, missing, or malformed metadata.
+    """
+
+    application_id = con.execute("PRAGMA application_id").fetchone()[0]
+    if application_id != SQLITE_QUERY_INDEX_APPLICATION_ID:
+        return "future-unsupported"
+    user_version = con.execute("PRAGMA user_version").fetchone()[0]
+    if type(user_version) is not int or user_version > SQLITE_QUERY_INDEX_SCHEMA_VERSION:
+        return "future-unsupported"
+    if user_version < SQLITE_QUERY_INDEX_SCHEMA_VERSION:
+        return "rebuild"
+    columns = {info[1] for info in con.execute("PRAGMA table_info(catalog_state)")}
+    expected = expected_semantic_version(store_key=store_key, canonical_version=canonical_version)
+    if not set(expected.catalog_state()) <= columns:
+        return "future-unsupported"
+    row = con.execute("SELECT * FROM catalog_state WHERE singleton = 1").fetchone()
+    if row is None:
+        return "future-unsupported"
+    state = dict(zip([info[1] for info in con.execute("PRAGMA table_info(catalog_state)")], row))
+    return compatibility_decision(state, expected=expected)
 
 
 def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_state: str) -> None:
@@ -207,13 +262,14 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_
             fingerprint_version,
             cdef_codec_version,
             feature_codec_version,
+            query_index_codec_version,
             canonical_version,
             store_key,
             build_state,
             dirty,
             created_at,
             updated_at
-        ) VALUES (1, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (1, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(uuid4()),
@@ -223,6 +279,7 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_
             values["fingerprint_version"],
             values["cdef_codec_version"],
             values["feature_codec_version"],
+            values["query_index_codec_version"],
             values["canonical_version"],
             values["store_key"],
             build_state,
@@ -235,3 +292,10 @@ def _ensure_catalog_state(con, *, store_key: str, canonical_version: int, build_
 
 def _semantic_versions(*, store_key: str, canonical_version: int) -> dict[str, int | str]:
     return expected_semantic_version(store_key=store_key, canonical_version=canonical_version).catalog_state()
+
+
+def _compatibility_detail(actual: Mapping[str, int | str], expected: Mapping[str, int | str]) -> str:
+    for key, value in expected.items():
+        if actual.get(key) != value:
+            return f"{key}={actual.get(key)!r}, expected {value!r}"
+    return "unknown metadata mismatch"

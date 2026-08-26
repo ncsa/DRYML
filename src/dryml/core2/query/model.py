@@ -153,7 +153,9 @@ class FeatureRequirement:
     count: int = 1
 
 
-FINGERPRINT_SCHEMA_VERSION = 2
+# This version covers canonical values embedded in query features and CDef rows.
+CANONICAL_QUERY_SEMANTICS_VERSION = 2
+FINGERPRINT_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
