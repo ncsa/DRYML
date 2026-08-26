@@ -204,6 +204,36 @@ assert "torch" not in sys.modules
     )
 
 
+def test_unresolved_semantic_selector_query_is_import_free_and_rejects_positional_binding():
+    _run_import_probe(
+        """
+import sys
+
+assert "tensorflow" not in sys.modules
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.bound_args import BoundArguments
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.symbol import ImportRef
+
+class FakeStore:
+    def catalog_key(self):
+        return "unresolved-v2-store"
+
+cls = ImportRef("dryml.models.tf.keras.base", "Sequential")
+cdef = ConcreteDefinition._from_bound_record(cls, BoundArguments((("name", "safe"),)))
+repo = Repo()
+repo._query_catalog.register_stored(cdef, FakeStore())
+
+selector = Definition(cls, SKIP_ARGS, name="safe")
+assert tuple(repo.query(selector).stored(refresh=False).defs()) == (cdef,)
+with __import__("pytest").raises(TypeError, match="keyword spelling or SKIP_ARGS"):
+    repo.query(Definition(cls, "safe")).stored(refresh=False).count()
+
+assert "tensorflow" not in sys.modules
+        """
+    )
+
+
 def test_graph_building_and_planning_canonical_refs_does_not_import_backends():
     _run_import_probe(
         """
@@ -349,6 +379,49 @@ with tempfile.TemporaryDirectory() as tmp:
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
+        """
+    )
+
+
+def test_sqlite_v2_semantic_selector_is_import_free():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "tensorflow" not in sys.modules
+from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core2.bound_args import BoundArguments
+from dryml.core2.cdef_graph import ConcreteDefinitionGraph
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core2.store.dir import DirStore
+from dryml.core2.symbol import ImportRef
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    leaf_cls = ImportRef("dryml.models.tf.keras.base", "Sequential")
+    root_cls = ImportRef("dryml.models.tf.base", "Model")
+    child = ConcreteDefinition._from_bound_record(leaf_cls, BoundArguments((("name", "v2-child"),)))
+    root = ConcreteDefinition._from_bound_record(root_cls, BoundArguments((("child", child),)))
+    index = SQLiteStoreQueryIndex(
+        source_key=store.catalog_key(),
+        path=store.query_index_path,
+        config=SQLiteQueryIndexConfig(path=store.query_index_path, journal_mode="delete"),
+    )
+    index.register_stored_roots(ConcreteDefinitionGraph.from_root(root), [root])
+    index.close()
+
+    repo = Repo(stores=store)
+    selector = Definition(leaf_cls, SKIP_ARGS, name="v2-child")
+    assert list(repo.query(selector).nested().definitions().defs()) == [child]
+    assert list(repo.query(selector).nested().owners().defs()) == [root]
+    nested_selector = Definition(root_cls, child=selector)
+    assert list(repo.query(nested_selector).stored().defs()) == [root]
+
+assert "tensorflow" not in sys.modules
         """
     )
 

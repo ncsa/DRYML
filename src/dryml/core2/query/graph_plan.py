@@ -20,6 +20,12 @@ def graph_candidate_ids(
             stats.candidate_count = len(universe_ids)
         return set(universe_ids)
 
+    if selector_graph.requires_scan:
+        universe_ids = domain.all_ids() if domain is not None else catalog.all_definition_ids()
+        if stats is not None:
+            stats.candidate_count = len(universe_ids)
+        return set(universe_ids)
+
     anchor = _choose_anchor(catalog, selector_graph)
     if anchor is not None:
         anchor_id, anchor_mode = anchor
@@ -230,18 +236,26 @@ def _children_for_parents(
 
 
 def _parents(catalog, child_ids, edge: SelectorGraphEdge, *, within=None):
+    return set().union(*(_parents_at_path(catalog, child_ids, edge, path, within=within) for path in (edge.path, *edge.alternate_paths)))
+
+
+def _parents_at_path(catalog, child_ids, edge, path, *, within=None):
     try:
-        return catalog.parents(child_ids, edge.path, unordered=edge.unordered, edge_kind=edge.edge_kind, within=within)
+        return catalog.parents(child_ids, path, unordered=edge.unordered, edge_kind=edge.edge_kind, within=within)
     except TypeError:
         if edge.edge_kind.value != "materialize":
             raise
-        return catalog.parents(child_ids, edge.path, unordered=edge.unordered, within=within)
+        return catalog.parents(child_ids, path, unordered=edge.unordered, within=within)
 
 
 def _children(catalog, parent_ids, edge: SelectorGraphEdge, *, within=None):
+    return set().union(*(_children_at_path(catalog, parent_ids, edge, path, within=within) for path in (edge.path, *edge.alternate_paths)))
+
+
+def _children_at_path(catalog, parent_ids, edge, path, *, within=None):
     try:
-        return catalog.children(parent_ids, edge.path, unordered=edge.unordered, edge_kind=edge.edge_kind, within=within)
+        return catalog.children(parent_ids, path, unordered=edge.unordered, edge_kind=edge.edge_kind, within=within)
     except TypeError:
         if edge.edge_kind.value != "materialize":
             raise
-        return catalog.children(parent_ids, edge.path, unordered=edge.unordered, within=within)
+        return catalog.children(parent_ids, path, unordered=edge.unordered, within=within)

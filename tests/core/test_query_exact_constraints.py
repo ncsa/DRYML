@@ -5,6 +5,84 @@ from dryml.core2 import Definition, Repo, SKIP_ARGS
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenSet
 from dryml.core2.query.query import _query_match
+from dryml.core2.canonical import _to_bound_canonical
+
+
+class SemanticQueryLeaf(objects.Object):
+    def __init__(self, value=3, *, label="default"):
+        self.value = value
+        self.label = label
+
+
+class SemanticQueryParent(objects.Object):
+    def __init__(self, child=None):
+        self.child = child
+
+
+class SemanticVariadicLeaf(objects.Object):
+    def __init__(self, *items, **options):
+        self.items = items
+        self.options = options
+
+
+class SemanticQueryStore:
+    def catalog_key(self):
+        return "semantic-query-store"
+
+
+def test_memory_query_uses_v2_parameters_for_partial_selector_constraints():
+    repo = Repo()
+    match = _to_bound_canonical(Definition(SemanticQueryLeaf, 7, label="match"))
+    default = _to_bound_canonical(Definition(SemanticQueryLeaf))
+    store = SemanticQueryStore()
+    repo._query_catalog.register_stored(match, store)
+    repo._query_catalog.register_stored(default, store)
+
+    positional = tuple(repo.query(Definition(SemanticQueryLeaf, 7)).stored(refresh=False).defs())
+    keyword = tuple(repo.query(Definition(SemanticQueryLeaf, value=7)).stored(refresh=False).defs())
+    explicit_default = tuple(repo.query(Definition(SemanticQueryLeaf, value=3)).stored(refresh=False).defs())
+    omitted = tuple(repo.query(Definition(SemanticQueryLeaf)).stored(refresh=False).defs())
+
+    assert positional == keyword == (match,)
+    assert explicit_default == (default,)
+    assert set(omitted) == {match, default}
+
+
+def test_nested_v2_selector_falls_back_to_authoritative_verification():
+    repo = Repo()
+    match_child = _to_bound_canonical(Definition(SemanticQueryLeaf, 7))
+    other_child = _to_bound_canonical(Definition(SemanticQueryLeaf, 8))
+    match = _to_bound_canonical(Definition(SemanticQueryParent, match_child))
+    other = _to_bound_canonical(Definition(SemanticQueryParent, other_child))
+    store = SemanticQueryStore()
+    repo._query_catalog.register_stored(match, store)
+    repo._query_catalog.register_stored(other, store)
+
+    query = repo.query(
+        Definition(SemanticQueryParent, child=Definition(SemanticQueryLeaf, value=7))
+    ).stored(refresh=False)
+
+    assert query.selector is not None
+    assert tuple(query.defs()) == (match,)
+
+
+def test_v2_variadic_selectors_are_not_pruned_by_legacy_feature_paths():
+    repo = Repo()
+    target = _to_bound_canonical(
+        Definition(SemanticVariadicLeaf, "first", "second", enabled=True)
+    )
+    store = SemanticQueryStore()
+    repo._query_catalog.register_stored(target, store)
+
+    positional = repo.query(
+        Definition(SemanticVariadicLeaf, "first", "second")
+    ).stored(refresh=False)
+    keyword = repo.query(
+        Definition(SemanticVariadicLeaf, enabled=True)
+    ).stored(refresh=False)
+
+    assert tuple(positional.defs()) == (target,)
+    assert tuple(keyword.defs()) == (target,)
 
 
 def test_exact_root_rejects_structurally_compatible_extra_kwargs():

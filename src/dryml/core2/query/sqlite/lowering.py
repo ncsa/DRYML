@@ -72,10 +72,16 @@ class SQLiteRelationCompiler:
             self._apply_scan_policy(scan_policy, diagnostics, scan_reason)
         else:
             if not _has_indexable_requirement(selector_graph):
-                scan_reason = "selector graph has no indexable requirements"
+                scan_reason = (
+                    "selector graph has version-dependent nested paths"
+                    if selector_graph.requires_scan
+                    else "selector graph has no indexable requirements"
+                )
                 diagnostics.anchor_relation_kind = "scan"
                 self._apply_scan_policy(scan_policy, diagnostics, scan_reason)
-            body_sql = self._compile_graph(selector_graph, params, diagnostics, scan_policy)
+                body_sql = "SELECT d.def_id FROM definitions d"
+            else:
+                body_sql = self._compile_graph(selector_graph, params, diagnostics, scan_policy)
 
         domain_sql = self._apply_domain_sql(body_sql, domain.name)
         if within_relation is not None:
@@ -388,9 +394,12 @@ class SQLiteRelationCompiler:
         params.append(edge.edge_kind.value)
         if edge.unordered:
             return filters
-        path_blob = self.codec.encode_graph_path(edge.path)
-        params.extend((digest_blob(path_blob), path_blob))
-        filters.extend([f"{alias}.path_hash = ?", f"{alias}.path_blob = ?"])
+        path_filters = []
+        for path in (edge.path, *edge.alternate_paths):
+            path_blob = self.codec.encode_graph_path(path)
+            params.extend((digest_blob(path_blob), path_blob))
+            path_filters.append(f"({alias}.path_hash = ? AND {alias}.path_blob = ?)")
+        filters.append("(" + " OR ".join(path_filters) + ")")
         return filters
 
     def _node_predicates(self, node: SelectorGraphNode, params: list[Any], *, skip_requirement=None) -> list[str]:
@@ -596,6 +605,8 @@ class SQLiteRelationCompiler:
 
 
 def _has_indexable_requirement(selector_graph: SelectorGraph) -> bool:
+    if selector_graph.requires_scan:
+        return False
     for node in selector_graph.nodes:
         if node.exact_definition is not None or node.local_requirements:
             return True

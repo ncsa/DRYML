@@ -3,6 +3,7 @@ import pytest
 import core2_objects as objects
 from dryml.core2 import Definition, SKIP_ARGS, Satisfies, Selector
 from dryml.core2.definition import selector_match
+from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.freeze import FrozenList
 from dryml.core2.query.fingerprint import (
     legacy_requirements_satisfied,
@@ -137,3 +138,13 @@ def test_child_local_fingerprint_contains_child_interior():
     child_scalar = stable_hash_function("needle")
 
     assert any(token.kind == "SCALAR_VALUE" and token.payload == child_scalar for token in fingerprint.counts)
+
+
+def test_v2_target_fingerprint_accepts_positional_and_keyword_selector_spellings():
+    positional = _to_bound_canonical(Definition(objects.TestClass1, 10, test="a"))
+    positional_selector = Definition(objects.TestClass1, 10)
+    keyword_selector = Definition(objects.TestClass1, test="a")
+
+    fingerprint = legacy_target_fingerprint(positional)
+    assert legacy_requirements_satisfied(fingerprint, legacy_selector_requirements(positional_selector))
+    assert legacy_requirements_satisfied(fingerprint, legacy_selector_requirements(keyword_selector))

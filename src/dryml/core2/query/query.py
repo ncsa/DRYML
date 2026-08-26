@@ -6,6 +6,7 @@ from typing import Any
 
 from ..canonical import matching_container_family
 from ..arg_roles import apply_definition_arg_roles
+from ..cdef_identity import V2_IDENTITY_VERSION
 from ..definition import ConcreteDefinition, Definition, categorical_definition, selector_match
 from ..freeze import FrozenDict, FrozenList, FrozenSet, FrozenTuple
 from ..links import DefLink
@@ -732,6 +733,18 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         if selector.cls is not None:
             if not _query_match_class(selector.cls, target.cls, strict=strict, class_match=class_match):
                 return False
+        if isinstance(target, ConcreteDefinition) and target.identity_version == V2_IDENTITY_VERSION:
+            # V2 identities persist semantic names rather than a particular
+            # positional/keyword call spelling.  Partial binding deliberately
+            # omits defaults, so only supplied parameters constrain matching.
+            for name, child in selector.parameters.items():
+                if name not in target.parameters:
+                    if isinstance(child, Par) and child.matches(None, present=False):
+                        continue
+                    return False
+                if not _query_match(child, target.parameters[name], strict=strict, class_match=class_match):
+                    return False
+            return True
         if selector.args is not None:
             if target.args is None:
                 return False

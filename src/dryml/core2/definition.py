@@ -202,9 +202,11 @@ class Definition(DefInterface, Mapping):
                 )
             return self._kwargs
         from .bound_args import bind_partial_arguments
+        from .arg_roles import apply_bound_arg_roles
 
         args = () if self._args is None else tuple(self._args)
         bound_args = bind_partial_arguments(self._cls, args, self._kwargs)
+        bound_args = apply_bound_arg_roles(self._cls, bound_args)
         return FrozenDict(
             (name, self._freeze_value(value))
             for name, value in bound_args.items()
@@ -1164,6 +1166,23 @@ class SelectorMatcher(GraphMatcher):
                 compare_failed = True
                 if not self.full_diagnostic:
                     return False
+
+        if isinstance(sel_def, Definition) and isinstance(tgt_def, ConcreteDefinition) and tgt_def._bound_args is not None:
+            # V2 records have no raw invocation fields.  Bind only the values
+            # supplied by the soft selector; defaults remain unconstrained.
+            for name, child in sel_def.parameters.items():
+                child_ctx = ctx.child(f"parameters[{name!r}]")
+                if name not in tgt_def.parameters:
+                    compare_failed = True
+                    self._print(child_ctx, "Semantic parameter missing in target")
+                    if not self.full_diagnostic:
+                        return False
+                    continue
+                if not self.match(child, tgt_def.parameters[name], child_ctx):
+                    compare_failed = True
+                    if not self.full_diagnostic:
+                        return False
+            return not compare_failed
 
         if sel_def.args is not None:
             if not self.match(sel_def.args, tgt_def.args, ctx.child("args")):

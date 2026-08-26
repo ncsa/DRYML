@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from inspect import Parameter as SignatureParameter, signature
 from typing import Any
 
 from ..cdef_graph import EdgeKind
@@ -10,7 +11,7 @@ from ..object import Object
 from ..selector import Selector
 from .local_structure import LocalStructureCycleError, walk_local_structure
 from .model import ClassMatchPolicy, FeatureRequirement, FeatureToken
-from .path import DefinitionPath
+from .path import Arg, DefinitionPath, Index, Key, Kwarg, Parameter
 
 
 SelectorNodeId = int
@@ -40,6 +41,7 @@ class SelectorGraphEdge:
     child: SelectorNodeId
     unordered: bool = False
     edge_kind: EdgeKind = EdgeKind.MATERIALIZE
+    alternate_paths: tuple[DefinitionPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,7 @@ class SelectorGraph:
     root: SelectorNodeId
     nodes: tuple[SelectorGraphNode, ...]
     edges: tuple[SelectorGraphEdge, ...]
+    requires_scan: bool = False
     _outgoing: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]] = field(init=False, repr=False, compare=False)
     _incoming: dict[SelectorNodeId, tuple[SelectorGraphEdge, ...]] = field(init=False, repr=False, compare=False)
 
@@ -102,7 +105,15 @@ def compile_selector_graph(
         class_match = "selector"
     compiler = _SelectorGraphCompiler(class_match=class_match)
     root = compiler.add_node(selector, DefinitionPath())
-    return SelectorGraph(root=root, nodes=tuple(compiler.nodes), edges=tuple(compiler.edges))
+    return SelectorGraph(
+        root=root,
+        nodes=tuple(compiler.nodes),
+        edges=tuple(compiler.edges),
+        # A parent V2 CDef addresses children by Parameter while V1 uses its
+        # persisted call spelling.  Until lowering can union those edge
+        # relations, direct verification is the only sound candidate plan.
+        requires_scan=compiler.requires_scan,
+    )
 
 
 class _SelectorGraphCompiler:
@@ -111,6 +122,7 @@ class _SelectorGraphCompiler:
         self.nodes: list[SelectorGraphNode] = []
         self.edges: list[SelectorGraphEdge] = []
         self.active: dict[int, DefinitionPath] = {}
+        self.requires_scan = False
 
     def add_node(self, selector: Definition | ConcreteDefinition, source_path: DefinitionPath) -> SelectorNodeId:
         active_id = id(selector) if isinstance(selector, Definition) else None
@@ -124,6 +136,8 @@ class _SelectorGraphCompiler:
 
         node_id = len(self.nodes)
         self.nodes.append(SelectorGraphNode(node_id, source_path, selector, (), None))
+        if _selector_requires_scan(selector):
+            self.requires_scan = True
         try:
             counts: Counter[FeatureToken] = Counter()
             exact = selector if isinstance(selector, ConcreteDefinition) else None
@@ -185,7 +199,67 @@ class _GraphLocalConsumer:
             self.feature(f"CDEF_EDGE_EXACT:{edge_kind.value}", path, definition.stable_hash())
             if edge_kind is EdgeKind.MATERIALIZE:
                 self.feature("CDEF_EDGE_EXACT", path, definition.stable_hash())
-        self.compiler.edges.append(SelectorGraphEdge(self.parent_id, path, child_id, unordered=unordered, edge_kind=edge_kind))
+        parent = self.compiler.nodes[self.parent_id].selector
+        semantic_path = _semantic_selector_path(parent, path)
+        if semantic_path is None:
+            self.compiler.requires_scan = True
+            alternate_paths = ()
+        else:
+            alternate_paths = () if semantic_path == path else (semantic_path,)
+        self.compiler.edges.append(SelectorGraphEdge(self.parent_id, path, child_id, unordered=unordered, edge_kind=edge_kind, alternate_paths=alternate_paths))
+
+
+def _semantic_selector_path(definition: Definition | ConcreteDefinition, path: DefinitionPath) -> DefinitionPath | None:
+    """Translate a safely bound soft-selector edge to its V2 parameter path."""
+
+    if isinstance(definition, ConcreteDefinition):
+        return path
+    if not isinstance(definition, Definition) or not isinstance(definition.cls, type) or not path:
+        return None
+    params = [param for param in signature(definition.cls.__init__).parameters.values() if param.name != "self"]
+    first, *rest = path.segments
+    if isinstance(first, Arg):
+        position = first.index
+        for param in params:
+            if param.kind in {SignatureParameter.POSITIONAL_ONLY, SignatureParameter.POSITIONAL_OR_KEYWORD}:
+                if position == 0:
+                    return DefinitionPath((Parameter(param.name), *rest))
+                position -= 1
+            elif param.kind is SignatureParameter.VAR_POSITIONAL:
+                return DefinitionPath((Parameter(param.name), Index(position), *rest))
+        return None
+    if isinstance(first, Kwarg):
+        for param in params:
+            if param.name == first.name and param.kind is not SignatureParameter.POSITIONAL_ONLY:
+                return DefinitionPath((Parameter(param.name), *rest))
+            if param.kind is SignatureParameter.VAR_KEYWORD:
+                return DefinitionPath((Parameter(param.name), Key(first.name), *rest))
+    return None
+
+
+def _selector_requires_scan(selector: Definition | ConcreteDefinition) -> bool:
+    """Return whether semantic lowering cannot safely express this selector."""
+
+    if not isinstance(selector, Definition):
+        return False
+    supplied_args = () if selector.args is None else tuple(selector.args)
+    if not isinstance(selector.cls, type):
+        return bool(supplied_args or selector.kwargs)
+    try:
+        supplied = selector.parameters
+        params = [
+            param
+            for param in signature(selector.cls.__init__).parameters.values()
+            if param.name != "self"
+        ]
+    except (TypeError, ValueError):
+        return bool(supplied_args or selector.kwargs)
+    return any(
+        param.kind in {SignatureParameter.VAR_POSITIONAL, SignatureParameter.VAR_KEYWORD}
+        and param.name in supplied
+        and bool(supplied[param.name])
+        for param in params
+    )
 
 
 def _validate_acyclic(

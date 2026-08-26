@@ -44,6 +44,8 @@ def test_nested_definition_creates_selector_edge():
     assert len(graph.edges) == 1
     assert str(graph.edges[0].path) == "$.child"
     assert str(graph.node(graph.edges[0].child).source_path) == "$.child"
+    assert not graph.requires_scan
+    assert str(graph.edges[0].alternate_paths[0]) == '$[@param("child")]'
 
 
 def test_nested_exact_cdef_creates_exact_node():
