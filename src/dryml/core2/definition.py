@@ -13,6 +13,7 @@ from typing import Any, Callable, Iterator
 from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .cdef_identity import (
     V1_IDENTITY_VERSION,
+    V2_IDENTITY_VERSION,
     decode_identity_record,
     validate_identity_version,
 )
@@ -30,6 +31,7 @@ from .canonical import (
     matching_container_family,
     node_kind)
 from .symbol import ImportRef, SourceSpec, maybe_symbol_ref, resolve_symbol
+from .bound_args import BoundArguments, validate_canonical_bound_arguments
 
 # Special value to skip args
 SKIP_ARGS = object()
@@ -347,6 +349,7 @@ class ConcreteDefinition(DefInterface, Mapping):
     kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
     _identity_version: int = field(default=V1_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
+    _bound_args: BoundArguments | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         from .canonical import freeze_concrete_value
@@ -374,10 +377,11 @@ class ConcreteDefinition(DefInterface, Mapping):
     def _from_persisted_record(
             cls,
             cdef_cls,
-            args,
-            kwargs,
+            args=None,
+            kwargs=None,
             *,
             identity_version: int = V1_IDENTITY_VERSION,
+            parameters: BoundArguments | None = None,
             stable_hash_cache: str | None = None) -> "ConcreteDefinition":
         """Hydrate a validated identity record without public canonicalization.
 
@@ -386,9 +390,43 @@ class ConcreteDefinition(DefInterface, Mapping):
         the later bound-record activation unit.
         """
 
-        result = cls(cdef_cls, args, kwargs)
+        if identity_version == V2_IDENTITY_VERSION:
+            if parameters is None:
+                raise ValueError("V2 CDef records require bound parameters.")
+            if args is not None or kwargs is not None:
+                raise ValueError("V2 CDef records cannot contain legacy args or kwargs.")
+            result = cls._from_bound_record(cdef_cls, parameters)
+        elif parameters is not None:
+            if identity_version != V2_IDENTITY_VERSION:
+                raise ValueError("Bound CDef records require V2 identity version.")
+        else:
+            result = cls(cdef_cls, () if args is None else args, {} if kwargs is None else kwargs)
         object.__setattr__(result, "_identity_version", validate_identity_version(identity_version))
         object.__setattr__(result, "_stable_hash_cache", stable_hash_cache)
+        return result
+
+    @classmethod
+    def _from_bound_record(cls, cdef_cls, bound_args: BoundArguments) -> "ConcreteDefinition":
+        """Create a validated private V2 identity from an already-bound record.
+
+        Args:
+            cdef_cls: Canonical class reference for the exact definition.
+            bound_args: Fully canonical semantic constructor record.
+
+        Returns:
+            A V2 CDef whose identity is the supplied name/value record.
+
+        Raises:
+            TypeError: If the record is not recursively canonical.
+
+        This is intentionally private: callers must use the binding pipeline in
+        ``canonical`` rather than manufacture public exact identities.
+        """
+
+        bound_args = validate_canonical_bound_arguments(bound_args)
+        result = cls(cdef_cls, (), {})
+        object.__setattr__(result, "_bound_args", bound_args)
+        object.__setattr__(result, "_identity_version", V2_IDENTITY_VERSION)
         return result
 
     def __hash__(self) -> int:
@@ -407,6 +445,13 @@ class ConcreteDefinition(DefInterface, Mapping):
 
         if self.identity_version == V1_IDENTITY_VERSION:
             return [self.cls, self.args, self.kwargs, self._stable_hash_cache]
+        if self._bound_args is not None:
+            return {
+                "identity_version": self.identity_version,
+                "cls": self.cls,
+                "parameters": self._bound_args.as_frozen_dict(),
+                "stable_hash_cache": self._stable_hash_cache,
+            }
         return {
             "identity_version": self.identity_version,
             "cls": self.cls,
@@ -424,27 +469,37 @@ class ConcreteDefinition(DefInterface, Mapping):
             record.args,
             record.kwargs,
             identity_version=record.version,
+            parameters=record.parameters,
             stable_hash_cache=record.stable_hash_cache,
         )
         object.__setattr__(self, "cls", restored.cls)
         object.__setattr__(self, "args", restored.args)
         object.__setattr__(self, "kwargs", restored.kwargs)
         object.__setattr__(self, "_identity_version", restored.identity_version)
+        object.__setattr__(self, "_bound_args", restored._bound_args)
         object.__setattr__(self, "_stable_hash_cache", restored._stable_hash_cache)
 
     def __getitem__(self, k: str) -> Any:
         if k == "cls": return self.cls
-        if k == "args": return self.args
-        if k == "kwargs": return self.kwargs
+        if k == "parameters" and self._bound_args is not None: return self._bound_args.as_frozen_dict()
+        if k == "args" and self._bound_args is None: return self.args
+        if k == "kwargs" and self._bound_args is None: return self.kwargs
         raise KeyError(k)
 
     def __iter__(self) -> Iterator[str]:
+        if self._bound_args is not None:
+            yield from ("cls", "parameters")
+            return
         yield from ("cls", "args", "kwargs")
 
     def __len__(self) -> int:
+        if self._bound_args is not None:
+            return 2
         return 3
 
     def __repr__(self):
+        if self._bound_args is not None:
+            return f"{type(self).__name__}({self.cls}, parameters={self._bound_args.as_frozen_dict()})"
         arg_elements = []
         arg_str = ""
         arg_elements.append(f"{self.cls}")
@@ -460,6 +515,13 @@ class ConcreteDefinition(DefInterface, Mapping):
             return False
         if self.identity_version != rhs.identity_version:
             return False
+        if self._bound_args is not None or rhs._bound_args is not None:
+            return (
+                self._bound_args is not None
+                and rhs._bound_args is not None
+                and _structural_value_equal(self.cls, rhs.cls)
+                and _structural_value_equal(self._bound_args.as_frozen_dict(), rhs._bound_args.as_frozen_dict())
+            )
         return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self.args, rhs.args) and _structural_value_equal(self.kwargs, rhs.kwargs)
 
     def __ne__(self, rhs):

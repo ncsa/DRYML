@@ -15,6 +15,7 @@ from dryml.core2 import (
     SelectorSpec,
 )
 from dryml.core2.arg_roles import resolve_arg_roles
+from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph, ConcreteDefinitionGraphError
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.links import DefLink
@@ -38,6 +39,11 @@ class OptionalRefOwner(Object):
 
 class SelectorOwner(Object):
     def __init__(self, selector: SelectorArg):
+        self.selector = selector
+
+
+class OptionalSelectorOwner(Object):
+    def __init__(self, selector: Optional[Annotated[object, SelectorArg()]] = None):
         self.selector = selector
 
 
@@ -71,6 +77,19 @@ def test_optional_ref_role_resolution():
 
     assert cdef.args[0].kind is EdgeKind.REF
     assert cdef.args[0].target == child
+
+
+def test_optional_role_default_and_explicit_none_match_in_private_bound_records():
+    omitted = _to_bound_canonical(Definition(OptionalRefOwner))
+    explicit = _to_bound_canonical(Definition(OptionalRefOwner, None))
+
+    assert omitted == explicit
+    assert omitted["parameters"]["child"] is None
+
+    selector_omitted = _to_bound_canonical(Definition(OptionalSelectorOwner))
+    selector_explicit = _to_bound_canonical(Definition(OptionalSelectorOwner, None))
+    assert selector_omitted == selector_explicit
+    assert selector_omitted["parameters"]["selector"] is None
 
 
 def test_selector_arg_stores_quoted_selector_data_not_edge():

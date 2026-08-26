@@ -687,6 +687,18 @@ class _ToCanonicalTransformer(GraphTransformer):
 
             live_cls = resolve_symbol(obj.cls)
             prep_args, prep_kwargs = live_cls.__prepare_args__(*obj.args, **obj.kwargs)
+            if ctx.state.get("bound_records", False):
+                from .arg_roles import apply_bound_arg_roles
+                from .bound_args import BoundArguments, bind_complete_arguments
+
+                bound_args = bind_complete_arguments(live_cls, tuple(prep_args), dict(prep_kwargs))
+                bound_args = apply_bound_arg_roles(live_cls, bound_args)
+                canonical_bound_args = BoundArguments(
+                    (name, self.transform(value, ctx.child(name)))
+                    for name, value in bound_args.items()
+                )
+                c_cls = self.transform(live_cls, ctx.child("cls"))
+                return ConcreteDefinition._from_bound_record(c_cls, canonical_bound_args)
             from .arg_roles import apply_arg_roles
             prep_args, prep_kwargs = apply_arg_roles(live_cls, tuple(prep_args), dict(prep_kwargs))
             c_args = self.transform(prep_args, ctx.child("args"))
@@ -928,6 +940,29 @@ def to_canonical(
         ctx = GraphCtx(
             path=tuple(path) if path is not None else (),
             state={"repo": sub_repo},
+        )
+        return _ToCanonicalTransformer().transform(x, ctx)
+
+
+def _to_bound_canonical(
+    x: Any,
+    *,
+    repo: "Repo | None" = None,
+    path: list[str | int] | tuple[str | int, ...] | None = None,
+):
+    """Build a private V2 CDef through preparation, binding, roles, and freezing.
+
+    This internal transition seam intentionally is not exported from
+    ``dryml.core2``. Public exact construction remains on V1 until all V2
+    consumers can safely read the semantic record.
+    """
+
+    from .repo import manage_repo
+
+    with manage_repo(repo=repo) as sub_repo:
+        ctx = GraphCtx(
+            path=tuple(path) if path is not None else (),
+            state={"repo": sub_repo, "bound_records": True},
         )
         return _ToCanonicalTransformer().transform(x, ctx)
 

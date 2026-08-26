@@ -1,6 +1,7 @@
 import pytest
 
 from dryml.core2 import Object
+from dryml.core2.bound_args import BoundArguments
 from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.query.codecs import (
@@ -46,9 +47,8 @@ def test_cdef_codec_retains_v1_identity_when_pickle_state_has_no_version():
 def test_cdef_codec_decodes_private_v2_record_in_a_distinct_hash_domain():
     cdef = ConcreteDefinition._from_persisted_record(
         CodecLeaf,
-        ("legacy",),
-        {},
         identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("value", "legacy"),)),
     )
     decoded = decode_cdef(encode_cdef(cdef))
     v1 = ConcreteDefinition(CodecLeaf, ("legacy",), {})

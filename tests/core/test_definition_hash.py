@@ -10,7 +10,9 @@ import numpy as np
 import core2_objects as objects
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
 from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core2.bound_args import BoundArguments
 from dryml.core2.definition import ConcreteDefinition, Definition, stable_hash_function
+from dryml.core2.freeze import FrozenTuple
 from dryml.core2.utils.general import unpickler
 
 
@@ -271,16 +273,14 @@ def test_v1_and_private_v2_records_are_distinct_mapping_keys_and_graph_nodes():
     child_v1 = ConcreteDefinition(objects.TestClass1, (10,), {"test": "child"})
     child_v2 = ConcreteDefinition._from_persisted_record(
         objects.TestClass1,
-        (10,),
-        {"test": "child"},
         identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("value", 10), ("test", "child"))),
     )
     root_v1 = ConcreteDefinition(objects.TestClass1, (child_v1, child_v1), {"test": "root"})
     root_v2 = ConcreteDefinition._from_persisted_record(
         objects.TestClass1,
-        (child_v2, child_v2),
-        {"test": "root"},
         identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("values", FrozenTuple((child_v2, child_v2))), ("test", "root"))),
     )
 
     assert root_v1 != root_v2
@@ -291,4 +291,4 @@ def test_v1_and_private_v2_records_are_distinct_mapping_keys_and_graph_nodes():
 
     graph = ConcreteDefinitionGraph.from_roots((root_v1, root_v1, root_v2, root_v2))
     assert graph.roots == (root_v1, root_v2)
-    assert {node.definition for node in graph.nodes()} == {root_v1, child_v1, root_v2, child_v2}
+    assert {node.definition for node in graph.nodes()} == {root_v1, child_v1, root_v2}

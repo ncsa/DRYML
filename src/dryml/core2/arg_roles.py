@@ -10,6 +10,7 @@ from .definition import ConcreteDefinition, Definition
 from .links import DefLink, Ref
 from .quoted import QuotedDef, SelectorSpec
 from .selector import Selector
+from .bound_args import BoundArguments
 
 
 class ArgRole:
@@ -37,6 +38,8 @@ class RefCDefArg(ArgRole):
     def canonicalize(self, value: Any) -> Any:
         from .object import Object
 
+        if value is None:
+            return None
         if isinstance(value, DefLink):
             return value
         if isinstance(value, Object):
@@ -55,6 +58,8 @@ class SelectorArg(ArgRole):
 
     name: str = "selector_arg"
     def canonicalize(self, value: Any) -> Any:
+        if value is None:
+            return None
         if isinstance(value, (QuotedDef, SelectorSpec)):
             return value
         if isinstance(value, Selector):
@@ -129,6 +134,34 @@ def apply_arg_roles(cls: type, args: tuple[Any, ...], kwargs: dict[str, Any]) ->
         if name not in consumed:
             out_kwargs[name] = value
     return tuple(out_args), out_kwargs
+
+
+def apply_bound_arg_roles(cls: type, bound_args: BoundArguments) -> BoundArguments:
+    """Apply declared argument roles to an already-bound semantic record.
+
+    Args:
+        cls: Constructor class declaring DRYML roles.
+        bound_args: Fully or partially bound semantic argument record.
+
+    Returns:
+        A record with each declared role applied by parameter name.
+
+    This path deliberately does not inspect or bind the constructor again. The
+    V2 construction pipeline owns exactly one preparation and signature bind.
+    """
+
+    roles = resolve_arg_roles(cls)
+    if not roles:
+        return bound_args
+    values = []
+    for name, value in bound_args.items():
+        if name in roles:
+            try:
+                value = roles[name].canonicalize(value)
+            except (TypeError, ValueError) as error:
+                raise type(error)(f"Invalid argument role value at {name}: {error}") from error
+        values.append((name, value))
+    return BoundArguments(values)
 
 
 def apply_definition_arg_roles(definition: Definition) -> Definition:

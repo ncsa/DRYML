@@ -1,6 +1,7 @@
 from dryml.core2.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode, selector_mode, space_mode
 from dryml.core2.definition import ConcreteDefinition, Definition, SKIP_ARGS, freeze
 from dryml.core2.arg_roles import ArgRole, MaterializeArg, RefCDef, RefCDefArg, SelectorArg, ValueArg
+from dryml.core2.bound_args import BoundArguments
 from dryml.core2.links import DefLink, Mat, Ref
 from dryml.core2.params import AnyValue, Choice, Exact, IntRange, Missing, Par, Present, Satisfies, SubclassOf, UniformFromSet, UniformIntRange
 from dryml.core2.quoted import QuotedDef, SelectorSpec
@@ -68,6 +69,7 @@ __all__ = [
     "SelectorArg",
     "MaterializeArg",
     "ValueArg",
+    "BoundArguments",
     "QuotedDef",
     "SelectorSpec",
     "Selector",

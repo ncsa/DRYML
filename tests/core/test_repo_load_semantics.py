@@ -40,6 +40,7 @@ def test_load_or_build_concretizes_definition_once(tmp_path):
 
     assert obj.name == "x"
     assert LoadLeaf.prepare_count == 1
+    assert obj.definition.identity_version == 1
 
 
 def test_load_or_build_does_not_choose_compatible_sibling(tmp_path):
