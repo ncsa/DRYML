@@ -6,6 +6,7 @@ import zipfile
 import importlib
 import tempfile
 import sys
+import stat
 from typing import Optional, Callable
 from collections.abc import Mapping, Iterable, ItemsView
 from inspect import getmodule, \
@@ -127,6 +128,46 @@ def pickler(obj):
 def pickle_save(obj, path):
     with open(path, 'wb') as f:
         f.write(pickler(obj))
+
+
+def atomic_pickle_save(obj, path: str) -> None:
+    """Serialize ``obj`` to ``path`` through a validated sibling temporary file.
+
+    Args:
+        obj: Value accepted by DRYML's pickle codec.
+        path: Final file path to replace atomically.
+
+    Raises:
+        OSError: If the temporary file cannot be written or atomically replaced.
+
+    The prior file remains authoritative until ``os.replace`` succeeds.  This
+    helper is for explicit mutable-reference publication; callers must not use
+    it as part of read or recovery paths.
+    """
+
+    directory = os.path.dirname(os.fspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".dryml-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(pickler(obj))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def is_regular_file(path: str) -> bool:
+    """Return whether ``path`` is a regular file without following symlinks."""
+
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def pickle_load(path):

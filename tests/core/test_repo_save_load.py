@@ -20,7 +20,7 @@ def _persistent_query_index_count(store) -> int:
 
 def _assert_expected_store_root_entries(store):
     entries = set(os.listdir(store.base_dir))
-    assert {"def.pkl", "aliases.pkl", "objects"} <= entries
+    assert {"def.pkl", "objects"} <= entries
     assert entries <= {"def.pkl", "aliases.pkl", "objects", ".dryml"}
 
 

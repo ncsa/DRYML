@@ -3,9 +3,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterable
 import os
+import shutil
+import tempfile
 
-from ..utils.general import pickle_load
+from ..utils.general import is_regular_file, pickle_load
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
+
+class StoreAuthorityError(RuntimeError):
+    """Raised when an authoritative Store definition is malformed or misplaced."""
+
 
 class Store(ABC):
     @property
@@ -51,14 +57,89 @@ class Store(ABC):
         or temp dir (S3/HDF5/etc.), and calling obj.save_to_dir().
         """
 
-        obj_dir = self.object_dir(obj.definition)
-        os.makedirs(obj_dir, exist_ok=True)
-
-        # Let the object serialize itself
         if revision is not None:
             if not isinstance(revision, str):
                 raise ValueError("revision must be a string or None at the Store.")
-        obj.save_state_to_dir(obj_dir, revision=revision)
+        obj_dir = self.object_dir(obj.definition)
+        parent = os.path.dirname(obj_dir)
+        os.makedirs(parent, exist_ok=True)
+        existing_root = os.path.exists(obj_dir)
+        if existing_root:
+            existing_def = self._validate_root_definition_path(os.path.join(obj_dir, "def.pkl"))
+            if existing_def != obj.definition:
+                raise StoreAuthorityError(
+                    "Existing Store root identity does not match the object being saved."
+                )
+        stage_dir = tempfile.mkdtemp(prefix=f".{obj.definition.stable_hash()}-", dir=parent)
+        try:
+            # A root is undiscoverable until its complete staged definition has
+            # been verified and the directory is atomically renamed.
+            obj.save_state_to_dir(stage_dir, revision=revision)
+            staged_def = self._read_concrete_definition(os.path.join(stage_dir, "def.pkl"))
+            if staged_def != obj.definition:
+                raise StoreAuthorityError("Staged object definition does not match the object identity.")
+            if existing_root:
+                self._publish_existing_root(stage_dir, obj_dir)
+            else:
+                os.replace(stage_dir, obj_dir)
+                stage_dir = None
+            self._mark_authority_dirty()
+        finally:
+            if stage_dir is not None:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+
+    @staticmethod
+    def _publish_existing_root(stage_dir: str, object_dir: str) -> None:
+        """Atomically replace explicit state files without reserializing def.pkl."""
+
+        for root, dirs, files in os.walk(stage_dir):
+            rel_root = os.path.relpath(root, stage_dir)
+            target_root = object_dir if rel_root == "." else os.path.join(object_dir, rel_root)
+            for name in dirs:
+                os.makedirs(os.path.join(target_root, name), exist_ok=True)
+            for name in files:
+                if rel_root == "." and name == "def.pkl":
+                    continue
+                os.replace(os.path.join(root, name), os.path.join(target_root, name))
+
+    def _mark_authority_dirty(self) -> None:
+        """Record an explicit authority mutation for buffered Store backends."""
+
+    @staticmethod
+    def _read_concrete_definition(path: str) -> "ConcreteDefinition":
+        """Decode one regular persisted definition without class resolution."""
+
+        if not is_regular_file(path):
+            raise StoreAuthorityError(f"Store definition is not a regular file: {path!r}.")
+        value = pickle_load(path)
+        from ..definition import ConcreteDefinition
+
+        if not isinstance(value, ConcreteDefinition):
+            raise StoreAuthorityError(
+                f"Store definition is {type(value).__name__}, not a ConcreteDefinition: {path!r}."
+            )
+        return value
+
+    def _validate_root_definition_path(self, path: str) -> "ConcreteDefinition":
+        """Decode and validate a complete object-root relative path and digest."""
+
+        relative = os.path.relpath(path, self.object_root_dir)
+        parts = relative.split(os.sep)
+        if len(parts) != 3 or parts[2] != "def.pkl":
+            raise StoreAuthorityError(f"Store root must be objects/<fanout>/<digest>/def.pkl: {path!r}.")
+        fanout, digest, _ = parts
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise StoreAuthorityError(f"Store root has an invalid stable-hash digest: {path!r}.")
+        if fanout != digest[:2]:
+            raise StoreAuthorityError(f"Store root fanout does not match its digest: {path!r}.")
+        cdef = self._read_concrete_definition(path)
+        actual_digest = cdef.stable_hash()
+        if actual_digest != digest:
+            raise StoreAuthorityError(
+                "Store def.pkl is stored under the wrong stable-hash directory. "
+                f"path={path!r}, expected={digest!r}, actual={actual_digest!r}"
+            )
+        return cdef
 
     def restore_object(self, obj: Object, *, revision: str|None = None) -> None:
         """
@@ -81,7 +162,13 @@ class Store(ABC):
         def_path = self._def_file(cdef)
         if not os.path.exists(def_path):
             return None
-        return pickle_load(def_path)
+        stored = self._validate_root_definition_path(def_path)
+        if stored != cdef:
+            raise StoreAuthorityError(
+                "Store definition identity does not match the requested identity "
+                f"at {def_path!r}."
+            )
+        return stored
 
     def read_main_def(self) -> "ConcreteDefinition" | None:
         """Return the stored main ConcreteDefinition, or None if not present."""

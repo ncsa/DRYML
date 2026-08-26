@@ -249,7 +249,14 @@ class Object(metaclass=Dryml):
             
     def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
         loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
-        assert loaded_def == self.definition, f"Loaded definition {loaded_def} doesn't match expected definition {self.definition}"
+        if loaded_def != self.definition:
+            expected_version = getattr(self.definition, "identity_version", "unknown")
+            loaded_version = getattr(loaded_def, "identity_version", "unknown")
+            raise ValueError(
+                "Stored definition does not match the object being restored "
+                f"(stored identity version={loaded_version!r}, "
+                f"expected identity version={expected_version!r})."
+            )
         self.restore_state_from_dir_imp(src_dir, revision=revision)
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str|None = None):

@@ -104,6 +104,38 @@ assert "torch" not in sys.modules
     )
 
 
+def test_symbolic_store_hydration_does_not_import_tensorflow():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "tensorflow" not in sys.modules
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.store.dir import DirStore
+from dryml.core2.symbol import ImportRef
+from dryml.core2.utils.general import pickle_save
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index="memory")
+    cdef = ConcreteDefinition(
+        ImportRef("dryml.models.tf.keras.base", "Sequential"),
+        FrozenTuple(()),
+        FrozenDict({"name": "symbolic"}),
+    )
+    path = Path(store.object_dir(cdef)) / "def.pkl"
+    path.parent.mkdir(parents=True)
+    pickle_save(cdef, path)
+    assert tuple(store.hydrate_index()) == (cdef,)
+    assert store.read_definition(cdef) == cdef
+
+assert "tensorflow" not in sys.modules
+        """
+    )
+
+
 def test_query_indexing_canonical_refs_does_not_import_backends():
     _run_import_probe(
         """

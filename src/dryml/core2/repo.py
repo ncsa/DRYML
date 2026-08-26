@@ -89,6 +89,7 @@ class Repo:
         self.obj_config = {}
         self.config = dict(config or {})
         self.alias_index = {}
+        self._aliases_dirty = False
         # Compatibility facade and live cache overlay. Store-owned indexes handle
         # persistent sources; this aggregate remains the memory backend and cache
         # source for existing APIs and `known()` cache federation.
@@ -126,9 +127,12 @@ class Repo:
                     if main_def is not None:
                         break
             if main_def is not None:
-                self.set_main_def(main_def)
+                # Hydration is read-only. Explicit set_main_def() calls own
+                # propagation to a selected Store.
+                self.main_def = main_def
 
             self._load_aliases_from_stores()
+            self._aliases_dirty = False
 
     # Store Methods
 
@@ -289,7 +293,9 @@ class Repo:
             else:
                 self.add_objects(target, store=store)
 
-        self.alias_index[alias] = cdef
+        if self.alias_index.get(alias) != cdef:
+            self.alias_index[alias] = cdef
+            self._aliases_dirty = True
         return cdef
 
     def get_alias(self, alias: str) -> ConcreteDefinition:
@@ -302,7 +308,9 @@ class Repo:
     def delete_alias(self, alias: str) -> ConcreteDefinition:
         self._validate_alias(alias)
         try:
-            return self.alias_index.pop(alias)
+            cdef = self.alias_index.pop(alias)
+            self._aliases_dirty = True
+            return cdef
         except KeyError as e:
             raise KeyError(f"Repo has no alias {alias!r}.") from e
 
@@ -990,8 +998,10 @@ class Repo:
     def flush(self):
         # Commit all stores
         for store in self.stores:
-            store.write_aliases(self.alias_index)
+            if self._aliases_dirty:
+                store.write_aliases(self.alias_index)
             store.commit()
+        self._aliases_dirty = False
 
     def close(self, flush=True):
         if flush:

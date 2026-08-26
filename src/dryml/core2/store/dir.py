@@ -5,11 +5,11 @@ import glob
 from dataclasses import replace
 from typing import Literal
 
-from .store import Store
+from .store import Store, StoreAuthorityError
 from ..query.model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
-from ..utils.general import pickle_save, pickle_load
+from ..utils.general import atomic_pickle_save, pickle_load
 
 
 QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
@@ -25,7 +25,8 @@ class DirStore(Store):
         self._query_index_policy, self._query_index_config, self._query_index_instance = self._normalize_query_index(query_index)
         self.obj_dir = os.path.join(self.base_dir, "objects")
         os.makedirs(self.obj_dir, exist_ok=True)
-        self.set_main_def(self.read_main_def())
+        self._main_def = self.read_main_def()
+        self._main_def_dirty = False
 
     @property
     def dryml_dir(self) -> str:
@@ -246,16 +247,17 @@ class DirStore(Store):
         """
 
         # Walk the objects tree, load def.pkl for each, and yield cdef
-        pattern = os.path.join(self.obj_dir, "[0-9a-f][0-9a-f]", "*", "def.pkl")
-        for def_path in glob.glob(pattern):
-            cdef = pickle_load(def_path)
-            expected_hash = os.path.basename(os.path.dirname(def_path))
-            actual_hash = cdef.stable_hash()
-            if actual_hash != expected_hash:
-                raise QueryIndexError(
-                    "Store def.pkl is stored under the wrong stable-hash directory."
-                    f" path={def_path!r}, expected={expected_hash!r}, actual={actual_hash!r}"
-                )
+        pattern = os.path.join(self.obj_dir, "**", "def.pkl")
+        seen_hashes: set[str] = set()
+        for def_path in glob.glob(pattern, recursive=True):
+            try:
+                cdef = self._validate_root_definition_path(def_path)
+            except StoreAuthorityError as exc:
+                raise QueryIndexError(str(exc)) from exc
+            digest = cdef.stable_hash()
+            if digest in seen_hashes:
+                raise QueryIndexError(f"Store contains duplicate root definitions for digest {digest!r}.")
+            seen_hashes.add(digest)
             yield cdef
 
     def _main_def_path(self) -> str:
@@ -267,28 +269,48 @@ class DirStore(Store):
     def read_main_def(self) -> ConcreteDefinition | None:
         path = self._main_def_path()
         if os.path.exists(path):
-            return pickle_load(path)
+            return self._read_concrete_definition(path)
         return None
 
     def set_main_def(self, main_def: ConcreteDefinition) -> None:
-        self._main_def = main_def
+        if main_def != self._main_def:
+            self._main_def = main_def
+            self._main_def_dirty = True
 
     def write_main_def(self, main_def: ConcreteDefinition) -> None:
         path = self._main_def_path()
-        pickle_save(main_def, path)
+        atomic_pickle_save(main_def, path)
+        self._main_def = main_def
+        self._main_def_dirty = False
 
     def read_aliases(self) -> dict[str, ConcreteDefinition]:
         path = self._aliases_path()
         if os.path.exists(path):
-            return pickle_load(path)
+            aliases = pickle_load(path)
+            if not isinstance(aliases, dict):
+                raise StoreAuthorityError("Store aliases payload is not a dictionary.")
+            for alias, cdef in aliases.items():
+                if not isinstance(alias, str):
+                    raise StoreAuthorityError("Store aliases contain a non-string alias.")
+                self._validate_alias_definition(cdef, alias)
+            return aliases
         return {}
 
     def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> None:
-        pickle_save(dict(aliases), self._aliases_path())
+        atomic_pickle_save(dict(aliases), self._aliases_path())
 
     def commit(self) -> None:
-        if self._main_def is not None:
+        if self._main_def_dirty and self._main_def is not None:
             self.write_main_def(self._main_def)
+
+    @staticmethod
+    def _validate_alias_definition(cdef, alias: str) -> None:
+        from ..definition import ConcreteDefinition
+
+        if not isinstance(cdef, ConcreteDefinition):
+            raise StoreAuthorityError(
+                f"Store alias {alias!r} points to {type(cdef).__name__}, not a ConcreteDefinition."
+            )
 
     def __repr__(self) -> str:
         return f"{type(self)}(dir: {self.base_dir})"
