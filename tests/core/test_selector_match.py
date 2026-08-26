@@ -1,5 +1,3 @@
-import os
-
 import core2_objects as objects
 import pytest
 from dryml.core2 import Satisfies
@@ -144,7 +142,7 @@ def test_selector_12():
     assert not def_1(obj_1, verbose=True, full_diagnostic=True)
 
 
-def test_selector_13():
+def test_selector_13(tmp_path):
     "Class selection"
     obj1 = objects.TestClassA(base_msg="Test1", item=5)
     obj2 = objects.TestClassB([1, 2, 3], base_msg="Test1")
@@ -157,20 +155,18 @@ def test_selector_13():
     assert not sel(obj2)
     assert not sel(obj2.definition)
 
-    core2.save_object(obj1, repo='test1.dry')
-    core2.save_object(obj2, repo='test2.dry')
+    first_repo = tmp_path / 'test1.dry'
+    second_repo = tmp_path / 'test2.dry'
+    core2.save_object(obj1, repo=first_repo)
+    core2.save_object(obj2, repo=second_repo)
 
     # Test selectors work with loaded classes
 
-    obj1_loaded = core2.load_object(repo='test1.dry')
-    obj2_loaded = core2.load_object(repo='test2.dry')
+    obj1_loaded = core2.load_object(repo=first_repo)
+    obj2_loaded = core2.load_object(repo=second_repo)
 
     assert sel(obj1_loaded)
     assert not sel(obj2_loaded)
-
-    os.remove('test1.dry')
-    os.remove('test2.dry')
-
 
 def test_selector_14():
     "args selection"

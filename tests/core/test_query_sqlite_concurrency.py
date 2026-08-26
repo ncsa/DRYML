@@ -13,6 +13,7 @@ from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.query.model import QueryIndexBusy, QueryIndexError
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core2.query.sqlite.index as sqlite_index_module
 from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core2.repo_plan import SaveAction, SavePlan, execute_save_plan
 from dryml.core2.store.dir import DirStore
@@ -423,6 +424,68 @@ def test_root_registration_fails_dirty_while_rebuild_claim_is_active(tmp_path):
 
     assert idx._is_dirty()
     assert idx.status().state == "dirty"
+
+
+def test_ensure_ready_does_not_initialize_while_build_claim_is_active(tmp_path, monkeypatch):
+    path = tmp_path / "index.sqlite"
+    owner = _index(path)
+    contender = _index(path)
+    monkeypatch.setattr(sqlite_index_module, "_BUILD_CLAIM_WAIT_SECONDS", 0.05)
+
+    with owner._build_claim(force=True) as acquired:
+        assert acquired
+        with pytest.raises(QueryIndexBusy, match="Timed out"):
+            contender._ensure_ready()
+
+    assert not path.exists()
+
+
+def test_live_stale_build_claim_is_not_stolen(tmp_path, monkeypatch):
+    path = tmp_path / "index.sqlite"
+    ready = tmp_path / "claim-owner-ready"
+    release = tmp_path / "release-claim-owner"
+    contender = _index(path)
+    monkeypatch.setattr(sqlite_index_module, "_BUILD_CLAIM_WAIT_SECONDS", 0.05)
+    proc = _start_worker(f'''
+import os
+
+idx = index({str(path)!r})
+with idx._build_claim(force=True) as acquired:
+    assert acquired
+    old_time = time.time() - 1000
+    os.utime(idx._build_claim_path(), (old_time, old_time))
+    Path({str(ready)!r}).write_text("ready")
+    while not Path({str(release)!r}).exists():
+        time.sleep(0.01)
+emit({{"released": True}})
+''')
+
+    try:
+        _wait_for(ready)
+        with pytest.raises(QueryIndexBusy, match="Timed out"):
+            with contender._build_claim(force=True):
+                pass
+    finally:
+        release.write_text("go")
+        assert _collect_worker(proc) == {"released": True}
+
+    assert not contender._build_claim_path().exists()
+
+
+def test_build_claim_owner_does_not_remove_successor_claim(tmp_path):
+    path = tmp_path / "index.sqlite"
+    index = _index(path)
+    claim = index._build_claim(force=True)
+    acquired = claim.__enter__()
+    assert acquired
+    claim_path = index._build_claim_path()
+    claim_path.unlink()
+    claim_path.write_text("successor\n", encoding="utf-8")
+
+    claim.__exit__(None, None, None)
+
+    assert claim_path.exists()
+    claim_path.unlink()
 
 
 def test_writer_busy_retry_succeeds_after_lock_release(tmp_path):

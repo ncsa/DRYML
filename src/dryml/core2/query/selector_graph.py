@@ -290,7 +290,7 @@ def _semantic_selector_requirements(
 
 
 def _selector_requires_scan(selector: Definition | ConcreteDefinition) -> bool:
-    """Return whether semantic lowering cannot safely express this selector."""
+    """Return whether a selector with an unresolved signature needs a scan fallback."""
 
     if not isinstance(selector, Definition):
         return False
@@ -298,20 +298,10 @@ def _selector_requires_scan(selector: Definition | ConcreteDefinition) -> bool:
     if not isinstance(selector.cls, type):
         return bool(supplied_args or selector.kwargs)
     try:
-        supplied = selector.parameters
-        params = [
-            param
-            for param in signature(selector.cls.__init__).parameters.values()
-            if param.name != "self"
-        ]
+        signature(selector.cls.__init__)
     except (TypeError, ValueError):
         return bool(supplied_args or selector.kwargs)
-    return any(
-        param.kind in {SignatureParameter.VAR_POSITIONAL, SignatureParameter.VAR_KEYWORD}
-        and param.name in supplied
-        and bool(supplied[param.name])
-        for param in params
-    )
+    return False
 
 
 def _validate_acyclic(

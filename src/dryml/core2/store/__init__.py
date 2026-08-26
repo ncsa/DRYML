@@ -1,5 +1,5 @@
 from .dir import DirStore
-from .store import Store
-from .zip import ZipStore
+from .store import Store, StoreAliasConflictError, StoreAuthorityError
+from .zip import ZipStore, ZipStoreConflictError
 
-__all__ = ["DirStore", "Store", "ZipStore"]
+__all__ = ["DirStore", "Store", "StoreAliasConflictError", "StoreAuthorityError", "ZipStore", "ZipStoreConflictError"]

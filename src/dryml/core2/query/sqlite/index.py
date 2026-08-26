@@ -4,8 +4,10 @@ from contextlib import contextmanager
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
+import fcntl
 import os
 from pathlib import Path
+import shutil
 import time
 from uuid import uuid4
 
@@ -50,6 +52,36 @@ _CODEC = QueryIndexCodec()
 _REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
+
+
+def _try_lock_claim_file(fd: int) -> bool:
+    """Try to hold the cross-process lock for a query-index claim file."""
+
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+
+    if os.fstat(fd).st_size == 0:
+        os.write(fd, b"\0")
+    os.lseek(fd, 0, os.SEEK_SET)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock_claim_file(fd: int) -> None:
+    """Release a query-index claim file lock held by this process."""
+
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return
+    os.lseek(fd, 0, os.SEEK_SET)
+    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
 
 class SQLiteStoreQueryIndex:
@@ -400,9 +432,11 @@ class SQLiteStoreQueryIndex:
             con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             replacement.close()
             self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
-        except Exception:
-            replacement.close()
-            self._cleanup_replacement(replacement_path)
+        except BaseException:
+            try:
+                replacement.close()
+            finally:
+                self._cleanup_replacement(replacement_path)
             raise
         self._clear_dirty(dirty_markers, roots=roots, clear_unscoped=True)
         if stats is not None:
@@ -627,7 +661,13 @@ class SQLiteStoreQueryIndex:
             self.rebuild()
             return
         if not self.path.exists():
-            self.initialize_empty()
+            if self._build_claim_path().exists():
+                # A missing active path can be a staged rebuild, not a new index.
+                self.rebuild(force=False)
+                return
+            with self._build_claim(force=False) as acquired:
+                if acquired and not self.path.exists():
+                    self.initialize_empty()
             return
         con = self._connections.connection(readonly=True)
         try:
@@ -815,6 +855,20 @@ class SQLiteStoreQueryIndex:
 
     @contextmanager
     def _build_claim(self, *, force: bool = False):
+        """Acquire a process-held claim for a staged sidecar rebuild.
+
+        Args:
+            force: Continue to rebuild a ready sidecar when ``True``.
+
+        Yields:
+            ``True`` for the process that owns the claim, otherwise ``False``
+            when another process already published a ready sidecar.
+
+        Raises:
+            QueryIndexBusy: If another live rebuild does not finish before the
+                configured wait deadline.
+        """
+
         claim_path = self._build_claim_path()
         start = time.monotonic()
         saw_existing_claim = False
@@ -831,14 +885,10 @@ class SQLiteStoreQueryIndex:
                     return
             try:
                 claim_path.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                fd = os.open(str(claim_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
             except FileExistsError:
                 saw_existing_claim = True
                 if self._claim_is_stale(claim_path):
-                    try:
-                        claim_path.unlink()
-                    except FileNotFoundError:
-                        pass
                     continue
                 self._connections.close_all_current_process()
                 if self.path.exists() and not self._is_dirty() and self.status().state == "ready":
@@ -848,46 +898,98 @@ class SQLiteStoreQueryIndex:
                     raise QueryIndexBusy("Timed out waiting for another SQLite query-index rebuild to finish.")
                 time.sleep(0.01)
                 continue
-            if not force and self.path.exists() and not self._is_dirty():
-                self._connections.close_all_current_process()
-                if self.status().state == "ready":
-                    os.close(fd)
-                    try:
-                        claim_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    yield False
-                    return
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(f"pid={os.getpid()}\ncreated={datetime.now(timezone.utc).isoformat()}\n")
             try:
+                if not _try_lock_claim_file(fd):
+                    raise QueryIndexBusy("Could not lock a new SQLite query-index rebuild claim.")
+                owner_token = uuid4().hex
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.write(
+                    fd,
+                    f"pid={os.getpid()}\ntoken={owner_token}\ncreated={datetime.now(timezone.utc).isoformat()}\n".encode(),
+                )
+                if not force and self.path.exists() and not self._is_dirty():
+                    self._connections.close_all_current_process()
+                    if self.status().state == "ready":
+                        self._unlink_claim_if_owned(claim_path, fd)
+                        yield False
+                        return
                 yield True
             finally:
                 try:
-                    claim_path.unlink()
-                except FileNotFoundError:
-                    pass
+                    self._unlink_claim_if_owned(claim_path, fd)
+                finally:
+                    _unlock_claim_file(fd)
+                    os.close(fd)
             return
 
     def _build_claim_path(self) -> Path:
         return self.path.with_name(f"{self.path.name}.building")
 
     def _claim_is_stale(self, claim_path: Path) -> bool:
+        """Remove an old claim only when no process currently holds its lock."""
+
         try:
-            age = time.time() - claim_path.stat().st_mtime
+            if time.time() - claim_path.stat().st_mtime <= _BUILD_CLAIM_STALE_SECONDS:
+                return False
+        except OSError:
+            return False
+        try:
+            fd = os.open(str(claim_path), os.O_RDWR)
         except FileNotFoundError:
             return False
-        return age > _BUILD_CLAIM_STALE_SECONDS
+        except OSError:
+            return False
+        try:
+            if not _try_lock_claim_file(fd):
+                return False
+            try:
+                stat = os.fstat(fd)
+                try:
+                    current = claim_path.stat()
+                except FileNotFoundError:
+                    return False
+                if not os.path.samestat(current, stat):
+                    return False
+                if time.time() - current.st_mtime <= _BUILD_CLAIM_STALE_SECONDS:
+                    return False
+                claim_path.unlink()
+                return True
+            finally:
+                _unlock_claim_file(fd)
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _unlink_claim_if_owned(claim_path: Path, fd: int) -> None:
+        """Remove a claim only if its path still identifies ``fd``'s file."""
+
+        try:
+            current = claim_path.stat()
+        except FileNotFoundError:
+            return
+        owned = os.fstat(fd)
+        if os.path.samestat(current, owned):
+            try:
+                claim_path.unlink()
+            except FileNotFoundError:
+                pass
 
     def _replacement_path(self) -> Path:
         return self.path.with_name(f"{self.path.name}.rebuild-{uuid4().hex}.tmp")
 
     def _activate_replacement(self, replacement_path: Path, *, quarantine_existing: bool) -> None:
+        """Publish a complete staged sidecar without removing the canonical path early."""
+
         self._connections.close_all_current_process()
         if quarantine_existing and self.path.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
-            self.path.replace(target)
+            try:
+                os.link(self.path, target)
+            except OSError:
+                shutil.copy2(self.path, target)
         os.replace(replacement_path, self.path)
 
     @staticmethod

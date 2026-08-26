@@ -153,6 +153,29 @@ def test_chained_query_methods_return_independent_queries():
     assert q3.selector == source
 
 
+@pytest.mark.parametrize("operation", ("exact", "restore"))
+def test_original_path_translates_each_nested_v2_cdef_boundary(operation):
+    """Query edits translate categorical paths through every V2 CDef boundary."""
+
+    from dryml.core2.query.path import get_subtree
+
+    source = Definition(
+        objects.TestNest2,
+        Definition(
+            objects.TestNest2,
+            Definition(objects.TestClass1, 10, test="leaf"),
+        ),
+    ).concretize()
+    query = Repo().query(source).categorical(recursive=True)
+
+    transformed = getattr(query, operation)(path="A.A")
+
+    assert get_subtree(transformed.selector, "A.A") == get_subtree(
+        source,
+        '$[@param("A")][@param("A")]',
+    )
+
+
 def test_restore_frozen_list_branch_preserves_query_soundness():
     repo = Repo()
     source = ConcreteDefinition._from_persisted_record(

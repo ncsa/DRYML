@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+import hashlib
 from pathlib import Path
 from io import IOBase
 import glob
@@ -8,8 +9,18 @@ import tempfile
 import os
 from io import BytesIO
 
-from .store import Store, StoreAuthorityError
+from .store import Store, StoreAuthorityError, _STATE_GENERATIONS_DIR
+from .locking import interprocess_lock
 from ..utils.general import atomic_pickle_save, pickle_load
+
+
+class ZipStoreConflictError(StoreAuthorityError):
+    """Report rejected archive publication from a stale ZipStore handle.
+
+    A path-backed Store raises this error instead of replacing roots, aliases, or
+    main-reference bytes published after the handle extracted its baseline.
+    Reopen the Store, reapply the desired mutation, and commit the new handle.
+    """
 
 
 class ZipStore(Store):
@@ -21,8 +32,13 @@ class ZipStore(Store):
             buffered in an extracted view until ``commit`` publishes the archive.
 
     Filesystem-backed commits construct and validate a complete sibling archive
-    before atomic replacement. File-like destinations cannot provide that
-    filesystem atomicity guarantee.
+    before atomic replacement. Cooperating path-backed handles serialize
+    publication and reject a dirty archive whose bytes changed since extraction;
+    reopen the Store and reapply the intended mutation before retrying. File-like
+    destinations cannot provide that filesystem atomicity guarantee. State
+    readers and writers coordinate through extracted-view leases; commits retain
+    only the pointer-reachable state generation, including after an interruption
+    leaves an inactive extracted generation behind.
     """
 
     def __init__(self, zip_dest: str | Path | IOBase):
@@ -36,7 +52,13 @@ class ZipStore(Store):
         self._main_def_dirty = False
         self._archive_dirty = False
 
-        self._extract_if_nonempty()
+        if isinstance(self.zip_dest, IOBase):
+            self._extract_if_nonempty()
+            self._archive_baseline = None
+        else:
+            with interprocess_lock(self._archive_lock_path):
+                self._extract_if_nonempty()
+                self._archive_baseline = self._archive_identity()
 
         # Hydration is read-only: retain the exact archive unless an explicit
         # save, alias, or main-definition mutation marks it dirty.
@@ -71,11 +93,47 @@ class ZipStore(Store):
                     if f.read(1):
                         _load()
 
+    @property
+    def _archive_path(self) -> str:
+        """Return the normalized filesystem destination for path-backed archives."""
+
+        return os.path.abspath(os.fspath(self.zip_dest))
+
+    @property
+    def _archive_lock_path(self) -> str:
+        """Return the path-scoped advisory lock used for archive publication."""
+
+        return f"{self._archive_path}.dryml.lock"
+
+    def _archive_identity(self, path: str | None = None) -> str | None:
+        """Return an archive's SHA-256 digest, or ``None`` when absent."""
+
+        try:
+            digest = hashlib.sha256()
+            with open(self._archive_path if path is None else path, "rb") as archive:
+                for block in iter(lambda: archive.read(1024 * 1024), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+        except FileNotFoundError:
+            return None
+
     # The DirStore-style helpers:
     def _object_dir(self, cdef: "ConcreteDefinition") -> str:
         digest = cdef.stable_hash()
         sub = digest[:2]
         return os.path.join(self.obj_dir, sub, digest)
+
+    def _state_lock_path(self, object_dir: str) -> str:
+        """Return an extracted-view-only state lease path for one object root.
+
+        Args:
+            object_dir: Stable extracted path for an object root.
+
+        Returns:
+            A lock path excluded from archive publication.
+        """
+
+        return os.path.join(self.base_dir, ".dryml", "state-locks", f"{os.path.basename(object_dir)}.lock")
 
     def has(self, cdef: "ConcreteDefinition") -> bool:
         return os.path.exists(self._def_file(cdef))
@@ -104,6 +162,21 @@ class ZipStore(Store):
         return definitions
 
     def commit(self) -> None:
+        """Publish staged references and extracted changes to the archive.
+
+        Raises:
+            StoreAuthorityError: If a staged main reference is malformed.
+            ZipStoreConflictError: If a path-backed archive changed since this
+                handle extracted it; reopen and reapply the mutation to retry.
+            OSError: If archive construction or replacement fails.
+
+        Side Effects:
+            Writes a dirty main reference into the extracted view, then replaces
+            a path-backed archive atomically when that view is dirty. A no-op
+            commit preserves the existing archive bytes. A dirty path-backed
+            commit compares its extraction baseline while holding the archive
+            publication lock before replacing matching archive bytes.
+        """
         if self._main_def_dirty and self._main_def is not None:
             self.write_main_def(self._main_def)
         if not self._archive_dirty:
@@ -122,7 +195,18 @@ class ZipStore(Store):
         self._archive_dirty = bool(token)
 
     def _write_archive_atomically(self) -> None:
-        """Validate and publish a complete path-backed archive by replacement."""
+        """Validate and publish a complete archive without overwriting peer authority.
+
+        Raises:
+            ZipStoreConflictError: If the path-backed archive changed since this
+                Store extracted it. Reopen the Store and reapply changes to retry.
+            OSError: If staging, validation, locking, or replacement fails.
+
+        Side Effects:
+            For path-backed archives, holds a path-scoped interprocess lock while
+            comparing the baseline digest and atomically replacing matching bytes.
+            File-like targets retain their previous in-place stream behavior.
+        """
 
         if isinstance(self.zip_dest, IOBase):
             # File-like targets cannot offer filesystem replacement; construct
@@ -135,7 +219,7 @@ class ZipStore(Store):
             self.zip_dest.write(payload.getvalue())
             self.zip_dest.seek(0)
             return
-        path = os.fspath(self.zip_dest)
+        path = self._archive_path
         directory = os.path.dirname(path) or "."
         fd, tmp_path = tempfile.mkstemp(prefix=".dryml-", suffix=".zip", dir=directory)
         os.close(fd)
@@ -145,7 +229,15 @@ class ZipStore(Store):
                 bad_member = archive.testzip()
                 if bad_member is not None:
                     raise OSError(f"Staged ZipStore archive is corrupt at {bad_member!r}.")
-            os.replace(tmp_path, path)
+            staged_identity = self._archive_identity(tmp_path)
+            with interprocess_lock(self._archive_lock_path):
+                if self._archive_identity() != self._archive_baseline:
+                    raise ZipStoreConflictError(
+                        "ZipStore archive changed since this handle was opened; "
+                        "reopen the Store and reapply the intended mutation before retrying."
+                    )
+                os.replace(tmp_path, path)
+                self._archive_baseline = staged_identity
         except BaseException:
             try:
                 os.unlink(tmp_path)
@@ -155,7 +247,20 @@ class ZipStore(Store):
 
     def _write_archive(self, destination) -> None:
         with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(self.base_dir):
+            for root, dirs, files in os.walk(self.base_dir):
+                relative_root = os.path.relpath(root, self.base_dir)
+                if relative_root == ".dryml":
+                    dirs[:] = [name for name in dirs if name != "state-locks"]
+                object_relative_root = os.path.relpath(root, self.obj_dir).split(os.sep)
+                if len(object_relative_root) == 3 and object_relative_root[-1] == _STATE_GENERATIONS_DIR:
+                    object_dir = os.path.dirname(root)
+                    active_state_dir = self._active_state_dir(object_dir)
+                    if active_state_dir == object_dir:
+                        dirs.clear()
+                        files.clear()
+                    else:
+                        dirs[:] = [os.path.basename(active_state_dir)]
+                        files.clear()
                 for name in files:
                     full = os.path.join(root, name)
                     rel = os.path.relpath(full, self.base_dir)
@@ -167,7 +272,7 @@ class ZipStore(Store):
     def catalog_key(self) -> str:
         if isinstance(self.zip_dest, IOBase):
             return f"{type(self).__module__}.{type(self).__qualname__}:buffer:{id(self.zip_dest)}"
-        return f"{type(self).__module__}.{type(self).__qualname__}:{os.path.abspath(os.fspath(self.zip_dest))}"
+        return f"{type(self).__module__}.{type(self).__qualname__}:{self._archive_path}"
 
     def _main_def_path(self) -> str:
         return os.path.join(self.base_dir, "def.pkl")
@@ -176,6 +281,15 @@ class ZipStore(Store):
         return os.path.join(self.base_dir, "aliases.pkl")
 
     def read_main_def(self) -> ConcreteDefinition | None:
+        """Read this archive Store's validated main reference without publishing.
+
+        Returns:
+            The cached or extracted ``ConcreteDefinition``, or ``None`` when no
+            main reference exists.
+
+        Raises:
+            StoreAuthorityError: If the extracted reference payload is malformed.
+        """
         # prefer cached version; fall back to on-disk if needed
         if self._main_def is not None:
             return self._main_def
@@ -186,41 +300,81 @@ class ZipStore(Store):
             return None
 
     def write_main_def(self, main_def: ConcreteDefinition) -> None:
+        """Validate and stage a main reference in the extracted archive view.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to publish on a later ``commit``.
+
+        Raises:
+            StoreAuthorityError: If ``main_def`` is malformed.
+            OSError: If extracted reference replacement fails.
+
+        Side Effects:
+            Replaces only the extracted reference after validation, updates its
+            cache, and marks the archive dirty without changing archive bytes.
+        """
+        self._validate_main_definition(main_def)
         atomic_pickle_save(main_def, self._main_def_path())
         self._main_def = main_def
         self._main_def_dirty = False
         self._mark_authority_dirty()
 
     def read_aliases(self) -> dict[str, ConcreteDefinition]:
+        """Read a validated copy of aliases from the extracted archive view.
+
+        Returns:
+            The persisted non-empty alias mapping, or an empty mapping.
+
+        Raises:
+            StoreAuthorityError: If the mapping, alias key, or target is
+                malformed.
+        """
         path = self._aliases_path()
         if os.path.exists(path):
             aliases = pickle_load(path)
-            if not isinstance(aliases, dict):
-                raise StoreAuthorityError("Store aliases payload is not a dictionary.")
-            for alias, cdef in aliases.items():
-                if not isinstance(alias, str):
-                    raise StoreAuthorityError("Store aliases contain a non-string alias.")
-                self._validate_alias_definition(cdef, alias)
-            return aliases
+            self._validate_aliases(aliases)
+            return dict(aliases)
         return {}
 
-    def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> None:
+    def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> dict[str, ConcreteDefinition]:
+        """Validate and stage a replacement alias mapping for archive commit.
+
+        Args:
+            aliases: Mapping of non-empty string aliases to concrete definitions.
+
+        Returns:
+            A copy of the mapping staged in the extracted view.
+
+        Raises:
+            StoreAuthorityError: If the mapping or any payload is malformed.
+            OSError: If extracted reference replacement fails.
+
+        Side Effects:
+            Replaces extracted alias bytes only after validation and marks the
+            archive dirty; path-backed archive bytes change on ``commit``.
+        """
+        self._validate_aliases(aliases)
         atomic_pickle_save(dict(aliases), self._aliases_path())
         self._mark_authority_dirty()
+        return dict(aliases)
 
     def set_main_def(self, main_def: ConcreteDefinition) -> None:
+        """Validate and cache a main reference for a later archive commit.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to make the archive default.
+
+        Raises:
+            StoreAuthorityError: If ``main_def`` is malformed.
+
+        Side Effects:
+            Updates the in-memory main-reference cache and dirty flag only;
+            neither extracted nor archive bytes change until ``commit``.
+        """
+        self._validate_main_definition(main_def)
         if main_def != self._main_def:
             self._main_def = main_def
             self._main_def_dirty = True
-
-    @staticmethod
-    def _validate_alias_definition(cdef, alias: str) -> None:
-        from ..definition import ConcreteDefinition
-
-        if not isinstance(cdef, ConcreteDefinition):
-            raise StoreAuthorityError(
-                f"Store alias {alias!r} points to {type(cdef).__name__}, not a ConcreteDefinition."
-            )
 
 
 class ZipExportStore(Store):

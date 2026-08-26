@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 
 def _module_importable(module_name: str) -> bool:
@@ -459,6 +460,140 @@ with tempfile.TemporaryDirectory() as tmp:
 assert "tensorflow" not in sys.modules
         """
     )
+
+
+def test_sqlite_rebuild_and_reconcile_hydrate_symbolic_v1_and_v2_roots_without_activation():
+    _run_import_probe(
+        """
+import sys
+import tempfile
+from pathlib import Path
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+
+from dryml.core2.bound_args import BoundArguments
+from dryml.core2.definition import ConcreteDefinition
+from dryml.core2.freeze import FrozenDict, FrozenTuple
+from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.store.dir import DirStore
+from dryml.core2.symbol import ImportRef, SourceSpec
+from dryml.core2.utils.general import pickle_save
+
+with tempfile.TemporaryDirectory() as tmp:
+    store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    v1 = ConcreteDefinition._from_persisted_record(
+        ImportRef("dryml.models.tf.keras.base", "Sequential"),
+        FrozenTuple(()),
+        FrozenDict({
+            "source": SourceSpec.from_source(
+                "raise AssertionError('V1 source must not execute')",
+                kind="function",
+            ),
+        }),
+    )
+    v2 = ConcreteDefinition._from_bound_record(
+        SourceSpec.from_source(
+            "raise AssertionError('V2 source must not execute')",
+            kind="class",
+            name="UnavailableSourceClass",
+        ),
+        BoundArguments((("backend", ImportRef("dryml.models.torch.base", "Model")),)),
+    )
+    for root in (v1, v2):
+        path = Path(store.object_dir(root)) / "def.pkl"
+        path.parent.mkdir(parents=True)
+        pickle_save(root, path)
+
+    index = store.open_query_index()
+    index.initialize_empty()
+    previous_sidecar = Path(store.query_index_path).read_bytes()
+
+    def fail_activation(self):
+        raise AssertionError("indexing must not resolve symbolic classes or execute source")
+
+    ImportRef.resolve = fail_activation
+    SourceSpec.resolve = fail_activation
+
+    rebuilt = store.rebuild_query_index()
+    reconciled = store.reconcile_query_index()
+
+    assert rebuilt.action == "rebuild"
+    assert rebuilt.definitions_scanned == 2
+    assert reconciled.action == "validate"
+    assert not reconciled.changed
+    status = store.query_index_status()
+    assert status.state == "ready"
+    assert status.row_counts["stored_roots"] == 2
+    assert Path(store.query_index_path).read_bytes() != previous_sidecar
+    with index.read_view() as view:
+        for root in (v1, v2):
+            exact = view.exact_ids(root)
+            assert exact
+            assert view.filter_stored_ids(exact) == exact
+
+assert "tensorflow" not in sys.modules
+assert "torch" not in sys.modules
+        """
+    )
+
+
+def test_sqlite_rebuild_rejects_unavailable_v1_raw_class_before_sidecar_activation():
+    import base64
+    import hashlib
+    import json
+
+    from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+    from dryml.core2.store.dir import DirStore
+    from dryml.core2.utils.general import pickle_save, unpickler
+
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "cdef_v1" / "manifest.json"
+    manifest = json.loads(fixture_path.read_text())
+    payload = base64.b64decode(manifest["payload"], validate=True)
+    assert hashlib.sha256(payload).hexdigest() == manifest["payload_sha256"]
+    assert payload[:2] == b"\x80\x05"
+    raw_class = unpickler(payload)["raw_class"]
+    core_fixture_dir = Path(__file__).resolve().parent
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+        index = store.open_query_index()
+        index.initialize_empty()
+        sidecar_digest = hashlib.sha256(Path(store.query_index_path).read_bytes()).hexdigest()
+        root_path = Path(store.object_dir(raw_class)) / "def.pkl"
+        root_path.parent.mkdir(parents=True)
+        pickle_save(raw_class, root_path)
+        authority_digest = hashlib.sha256(root_path.read_bytes()).hexdigest()
+
+        _run_import_probe(
+            f"""
+import hashlib
+import sys
+from pathlib import Path
+
+# The fixture's defining test module is deliberately unavailable to this process.
+sys.path[:] = [path for path in sys.path if Path(path or ".").resolve() != Path({str(core_fixture_dir)!r})]
+assert "core2_objects" not in sys.modules
+
+from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core2.store.dir import DirStore
+
+store = DirStore(Path({str(store.base_dir)!r}), query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+try:
+    store.rebuild_query_index()
+except ModuleNotFoundError as error:
+    assert error.name == "core2_objects"
+else:
+    raise AssertionError("unavailable raw V1 class must stop hydration")
+
+sidecar_path = Path(store.query_index_path)
+root_path = Path({str(root_path)!r})
+assert hashlib.sha256(sidecar_path.read_bytes()).hexdigest() == {sidecar_digest!r}
+assert hashlib.sha256(root_path.read_bytes()).hexdigest() == {authority_digest!r}
+assert store.query_index_status().state == "dirty"
+assert not list(sidecar_path.parent.glob(f"{{sidecar_path.name}}.rebuild-*.tmp*"))
+            """
+        )
 
 
 def test_sqlite_torch_import_refs_do_not_import_torch_for_query_terminals():

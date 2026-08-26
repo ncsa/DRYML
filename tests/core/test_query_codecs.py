@@ -100,6 +100,23 @@ def test_graph_path_codec_roundtrip_all_segments():
     assert decode_graph_path(encode_graph_path(path)) == path
 
 
+@pytest.mark.parametrize(
+    "segment",
+    [
+        Parameter("model"),
+        Kwarg("model"),
+        Arg(0),
+        Index(3),
+        Key(("tuple", 1)),
+        SetMember("def", 2),
+    ],
+)
+def test_typed_segment_codec_closure(segment):
+    path = GraphPath((segment,))
+
+    assert decode_graph_path(encode_graph_path(path)) == path
+
+
 def test_path_codec_keeps_v1_and_v2_path_kinds_distinct():
     legacy = GraphPath((Kwarg("model"),))
     semantic = GraphPath((Parameter("model"),))

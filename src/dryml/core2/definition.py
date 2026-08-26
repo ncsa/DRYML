@@ -714,7 +714,10 @@ class ConcreteDefinition(DefInterface, Mapping):
             )
         object.__setattr__(result, "_identity_version", validate_identity_version(identity_version))
         if identity_version == V2_IDENTITY_VERSION and stable_hash_cache is not None:
-            computed_hash = stable_hash_function(result)
+            computed_hash = stable_hash_function(
+                result,
+                reuse_validated_cdef_hashes=True,
+            )
             if stable_hash_cache != computed_hash:
                 raise ValueError("V2 ConcreteDefinition hash cache does not match its identity record.")
         object.__setattr__(result, "_stable_hash_cache", stable_hash_cache)

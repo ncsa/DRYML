@@ -25,14 +25,34 @@ class GraphPathError(Exception):
 QueryPathError = GraphPathError
 
 
+def _validate_segment_field(value: Any, field: str, expected_type: type, kind: str) -> None:
+    if not isinstance(value, expected_type):
+        raise QueryPathError(
+            f"Graph path {kind} field {field!r} must be {expected_type.__name__}, "
+            f"got {type(value).__name__}."
+        )
+
+
+def _validate_segment_index(value: Any, field: str, kind: str) -> None:
+    _validate_segment_field(value, field, int, kind)
+    if type(value) is not int or value < 0:
+        raise QueryPathError(f"Graph path {kind} field {field!r} must be a non-negative integer.")
+
+
 @dataclass(frozen=True, slots=True)
 class Kwarg:
     """Legacy V1 keyword-call path segment.
 
     Args:
         name: Persisted keyword argument name.
+
+    Raises:
+        QueryPathError: If ``name`` is not a string.
     """
     name: str
+
+    def __post_init__(self) -> None:
+        _validate_segment_field(self.name, "name", str, "kwarg")
 
     def __str__(self) -> str:
         return self.name
@@ -48,9 +68,15 @@ class Parameter:
 
     Attributes:
         name: The persisted semantic constructor parameter name.
+
+    Raises:
+        QueryPathError: If ``name`` is not a string.
     """
 
     name: str
+
+    def __post_init__(self) -> None:
+        _validate_segment_field(self.name, "name", str, "parameter")
 
     def __str__(self) -> str:
         return f"@param({json.dumps(self.name)})"
@@ -62,8 +88,14 @@ class Arg:
 
     Args:
         index: Zero-based position in the persisted raw argument tuple.
+
+    Raises:
+        QueryPathError: If ``index`` is not a non-negative integer.
     """
     index: int
+
+    def __post_init__(self) -> None:
+        _validate_segment_index(self.index, "index", "arg")
 
     def __str__(self) -> str:
         return f"args[{self.index}]"
@@ -75,8 +107,14 @@ class Index:
 
     Args:
         index: Zero-based index in the current sequence value.
+
+    Raises:
+        QueryPathError: If ``index`` is not a non-negative integer.
     """
     index: int
+
+    def __post_init__(self) -> None:
+        _validate_segment_index(self.index, "index", "index")
 
     def __str__(self) -> str:
         return f"[{self.index}]"
@@ -104,9 +142,17 @@ class SetMember:
     Args:
         fingerprint: Stable fingerprint of the selected member.
         ordinal: Zero-based occurrence among colliding fingerprints.
+
+    Raises:
+        QueryPathError: If ``fingerprint`` is not a string or ``ordinal`` is
+            not a non-negative integer.
     """
     fingerprint: str
     ordinal: int = 0
+
+    def __post_init__(self) -> None:
+        _validate_segment_field(self.fingerprint, "fingerprint", str, "set_member")
+        _validate_segment_index(self.ordinal, "ordinal", "set_member")
 
     def __str__(self) -> str:
         return f'@set("{self.fingerprint}", {self.ordinal})'
@@ -536,18 +582,13 @@ def _required_segment_field(data: Mapping[str, Any], field: str, expected_type: 
     if field not in data:
         raise QueryPathError(f"Graph path {kind} segment is missing required field {field!r}.")
     value = data[field]
-    if not isinstance(value, expected_type):
-        raise QueryPathError(
-            f"Graph path {kind} field {field!r} must be {expected_type.__name__}, "
-            f"got {type(value).__name__}."
-        )
+    _validate_segment_field(value, field, expected_type, kind)
     return value
 
 
 def _required_segment_index(data: Mapping[str, Any], field: str, kind: str) -> int:
     value = _required_segment_field(data, field, int, kind)
-    if type(value) is not int or value < 0:
-        raise QueryPathError(f"Graph path {kind} field {field!r} must be a non-negative integer.")
+    _validate_segment_index(value, field, kind)
     return value
 
 

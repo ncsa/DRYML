@@ -76,6 +76,15 @@ is captured when the V2 CDef is created. A later call after a Python default
 changes produces a later identity; existing V2 CDefs retain their captured
 value.
 
+Every effective default, including one supplied dynamically by
+`__prepare_args__`, must cross the same canonical boundary as an explicitly
+passed constructor value. An unsupported runtime value therefore cannot be a
+V2 default: use a canonical identity value instead, or create the dynamic
+resource as runtime state after construction. Concretization raises `TypeError`
+with the semantic parameter path, such as `client` or `options/client`, so the
+failing default can be replaced with a canonical value or moved out of the
+definition.
+
 This does not make partial expressions exact. `Definition.parameters`,
 `Selector.parameters`, and `SearchSpace.parameters` contain supplied fields
 only. When a live constructor signature is safely available, positional and

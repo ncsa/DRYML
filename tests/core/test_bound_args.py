@@ -1,5 +1,6 @@
 import pytest
 
+import dryml.core2 as core2
 from dryml.core2 import ConcreteDefinition, Definition, Object
 from dryml.core2.bound_args import (
     BoundArguments,
@@ -98,6 +99,11 @@ def test_bound_arguments_are_immutable_semantic_name_value_records():
         BoundArguments((("value", 1), ("value", 2)))
     with pytest.raises(TypeError, match="strings"):
         BoundArguments(((1, "value"),))
+
+
+def test_bound_arguments_are_private_to_the_bound_record_module():
+    assert not hasattr(core2, "BoundArguments")
+    assert "BoundArguments" not in core2.__all__
 
 
 def test_complete_binding_captures_defaults_and_normalizes_call_spelling():

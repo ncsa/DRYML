@@ -7,12 +7,12 @@ from dataclasses import replace
 from typing import Literal
 from uuid import uuid4
 
-from .store import Store, StoreAuthorityError
+from .store import Store, StoreAliasConflictError, StoreAuthorityError
+from .locking import interprocess_lock
 from ..query.model import QueryIndexError, QueryIndexStatus, QueryIndexUnavailable, ReconcileReport
 from ..query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from ..query.sqlite.index import SQLiteStoreQueryIndex
 from ..utils.general import atomic_pickle_save, pickle_load
-
 
 QueryIndexPolicy = Literal["auto", "sqlite", "memory", "none"]
 
@@ -317,51 +317,147 @@ class DirStore(Store):
     def _aliases_path(self) -> str:
         return os.path.join(self.base_dir, "aliases.pkl")
 
+    @property
+    def _reference_lock_path(self) -> str:
+        return os.path.join(self.dryml_dir, "references.lock")
+
     def read_main_def(self) -> ConcreteDefinition | None:
+        """Read this directory Store's main reference without modifying bytes.
+
+        Returns:
+            The validated ``ConcreteDefinition``, or ``None`` when absent.
+
+        Raises:
+            StoreAuthorityError: If the stored payload is not a concrete
+                definition.
+        """
         path = self._main_def_path()
         if os.path.exists(path):
             return self._read_concrete_definition(path)
         return None
 
     def set_main_def(self, main_def: ConcreteDefinition) -> None:
+        """Validate and stage a main reference for ``commit``.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to use as the Store default.
+
+        Raises:
+            StoreAuthorityError: If ``main_def`` is malformed.
+
+        Side Effects:
+            Updates the in-memory reference cache and dirty flag only; no
+            authoritative reference bytes are replaced until ``commit``.
+        """
+        self._validate_main_definition(main_def)
         if main_def != self._main_def:
             self._main_def = main_def
             self._main_def_dirty = True
 
     def write_main_def(self, main_def: ConcreteDefinition) -> None:
+        """Validate and atomically replace the main-reference payload.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to publish.
+
+        Raises:
+            StoreAuthorityError: If ``main_def`` is malformed.
+            OSError: If atomic replacement fails before publication.
+
+        Side Effects:
+            Updates the cached main reference after the new bytes are published;
+            a failed validation or replacement leaves prior bytes and cache intact.
+        """
+        self._validate_main_definition(main_def)
         path = self._main_def_path()
         atomic_pickle_save(main_def, path)
         self._main_def = main_def
         self._main_def_dirty = False
 
     def read_aliases(self) -> dict[str, ConcreteDefinition]:
+        """Read validated aliases and record their merge baseline for this handle.
+
+        Returns:
+            A copy of the persisted non-empty alias mapping.
+
+        Raises:
+            StoreAuthorityError: If the alias mapping, keys, or targets are
+                malformed.
+
+        Side Effects:
+            Records a handle-local baseline used to merge a later
+            ``write_aliases`` call without losing concurrent unrelated changes.
+        """
+        aliases = self._read_aliases_payload()
+        self._aliases_baseline = dict(aliases)
+        return aliases
+
+    def _read_aliases_payload(self) -> dict[str, ConcreteDefinition]:
         path = self._aliases_path()
         if os.path.exists(path):
             aliases = pickle_load(path)
-            if not isinstance(aliases, dict):
-                raise StoreAuthorityError("Store aliases payload is not a dictionary.")
-            for alias, cdef in aliases.items():
-                if not isinstance(alias, str):
-                    raise StoreAuthorityError("Store aliases contain a non-string alias.")
-                self._validate_alias_definition(cdef, alias)
-            return aliases
+            self._validate_aliases(aliases)
+            return dict(aliases)
         return {}
 
-    def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> None:
-        atomic_pickle_save(dict(aliases), self._aliases_path())
+    def write_aliases(self, aliases: dict[str, ConcreteDefinition]) -> dict[str, ConcreteDefinition]:
+        """Atomically merge validated aliases with concurrent DirStore updates.
+
+        Args:
+            aliases: Complete handle-local mapping of non-empty string names to
+                ``ConcreteDefinition`` values.
+
+        Returns:
+            The merged authoritative alias mapping.
+
+        Raises:
+            StoreAuthorityError: If input or existing aliases are malformed.
+            StoreAliasConflictError: If another handle changed the same alias to
+                a different value since this handle's latest read.
+            OSError: If locking or atomic replacement fails.
+
+        Side Effects:
+            Takes a Store-scoped interprocess lock, replaces ``aliases.pkl``
+            only after validation, and advances this handle's merge baseline.
+        """
+        self._validate_aliases(aliases)
+        with interprocess_lock(self._reference_lock_path):
+            current = self._read_aliases_payload()
+            baseline = getattr(self, "_aliases_baseline", current)
+            merged = dict(current)
+            missing = object()
+            for alias in set(baseline) | set(aliases):
+                previous = baseline.get(alias, missing)
+                intended = aliases.get(alias, missing)
+                if intended == previous:
+                    continue
+                observed = current.get(alias, missing)
+                if observed != previous and observed != intended:
+                    raise StoreAliasConflictError(
+                        f"Alias {alias!r} changed concurrently; reload aliases before retrying."
+                    )
+                if intended is missing:
+                    merged.pop(alias, None)
+                else:
+                    merged[alias] = intended
+            if merged != current or not os.path.exists(self._aliases_path()):
+                atomic_pickle_save(merged, self._aliases_path())
+            self._aliases_baseline = dict(merged)
+            return merged
 
     def commit(self) -> None:
+        """Publish this handle's staged main reference, if one is dirty.
+
+        Raises:
+            StoreAuthorityError: If the staged reference is malformed.
+            OSError: If atomic replacement fails.
+
+        Side Effects:
+            Calls ``write_main_def`` for the staged reference; otherwise this is
+            a no-op and does not rewrite authoritative bytes.
+        """
         if self._main_def_dirty and self._main_def is not None:
             self.write_main_def(self._main_def)
-
-    @staticmethod
-    def _validate_alias_definition(cdef, alias: str) -> None:
-        from ..definition import ConcreteDefinition
-
-        if not isinstance(cdef, ConcreteDefinition):
-            raise StoreAuthorityError(
-                f"Store alias {alias!r} points to {type(cdef).__name__}, not a ConcreteDefinition."
-            )
 
     def __repr__(self) -> str:
         return f"{type(self)}(dir: {self.base_dir})"

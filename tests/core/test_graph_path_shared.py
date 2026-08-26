@@ -69,6 +69,44 @@ def test_parameter_is_distinct_from_invocation_keyword_and_round_trips():
     assert GraphPath.from_data(parameter.to_data()) == parameter
 
 
+@pytest.mark.parametrize(
+    ("constructor", "value"),
+    [
+        (Parameter, 1),
+        (Kwarg, None),
+        (Arg, -1),
+        (Arg, True),
+        (Index, -1),
+        (Index, True),
+        (SetMember, (1, 0)),
+        (SetMember, ("hash", -1)),
+        (SetMember, ("hash", True)),
+    ],
+)
+def test_typed_segments_reject_values_the_decoder_rejects(constructor, value):
+    if isinstance(value, tuple):
+        call = lambda: constructor(*value)
+    else:
+        call = lambda: constructor(value)
+
+    with pytest.raises(QueryPathError):
+        call()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '$[@param(1)]',
+        '$.args[-1]',
+        '$[-1]',
+        '$[@set("hash", -1)]',
+    ],
+)
+def test_text_parser_rejects_values_the_decoder_rejects(text):
+    with pytest.raises(QueryPathError):
+        parse_path(text)
+
+
 def test_set_member_path_string_round_trips():
     path = GraphPath((Kwarg("items"), SetMember("abc", 2)))
 

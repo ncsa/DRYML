@@ -7,11 +7,16 @@ import shutil
 import tempfile
 from uuid import uuid4
 
+from .locking import interprocess_lock, interprocess_read_lock
 from ..utils.general import atomic_pickle_save, is_regular_file, pickle_load
 from ..query.model import QueryIndexStatus, QueryIndexUnavailable, ReconcileReport, ValidationReport
 
 class StoreAuthorityError(RuntimeError):
     """Raised when an authoritative Store definition is malformed or misplaced."""
+
+
+class StoreAliasConflictError(StoreAuthorityError):
+    """Raised when concurrent alias updates modify the same alias differently."""
 
 
 _STATE_GENERATIONS_DIR = ".state-generations"
@@ -24,7 +29,9 @@ class Store(ABC):
     Object roots are addressed by concrete-definition identity. New roots are
     published by atomic directory replacement; updates to existing roots publish
     immutable state generations through one atomic pointer so readers observe a
-    complete old or new state. Concrete backends own durability and commit timing.
+    complete old or new state. Per-root advisory reader leases defer reclamation
+    until a supported reader has completed, retaining only the active generation
+    after successful updates. Concrete backends own durability and commit timing.
     """
 
     @property
@@ -57,7 +64,15 @@ class Store(ABC):
         """
 
     def object_dir(self, cdef: "ConcreteDefinition") -> str:
-        """Return the store-local directory for an object's definition."""
+        """Return the storage directory selected by a concrete definition.
+
+        Args:
+            cdef: ``ConcreteDefinition`` whose stable identity selects the path.
+
+        Returns:
+            The Store-local directory path. Calling this method does not create
+            a directory or publish any authoritative state.
+        """
         return self._object_dir(cdef)
 
     def _def_file(self, cdef: "ConcreteDefinition") -> str:
@@ -68,7 +83,10 @@ class Store(ABC):
 
         New roots become discoverable only after staging and identity validation.
         Existing roots retain their authoritative ``def.pkl`` and publish a
-        complete replacement state generation through an atomic pointer.
+        complete replacement state generation through an atomic pointer. A
+        Store-scoped writer lease serializes supported saves of the same root;
+        after publication it reclaims inactive generations only after readers
+        using the matching reader lease have completed.
 
         Args:
             obj: Materialized object whose definition and state are persisted.
@@ -86,6 +104,23 @@ class Store(ABC):
             if not isinstance(revision, str):
                 raise ValueError("revision must be a string or None at the Store.")
         obj_dir = self.object_dir(obj.definition)
+        with interprocess_lock(self._state_lock_path(obj_dir)):
+            self._save_object_locked(obj, obj_dir, revision=revision)
+
+    def _save_object_locked(self, obj: Object, obj_dir: str, *, revision: str | None) -> None:
+        """Stage and publish one object while its root's writer lease is held.
+
+        Args:
+            obj: Materialized object whose complete state will be persisted.
+            obj_dir: Stable Store path selected by ``obj.definition``.
+            revision: Optional object-state revision selected by the object.
+
+        Raises:
+            StoreAuthorityError: If authoritative or staged definitions disagree.
+            OSError: If staging, publication, or inactive-generation reclamation
+                fails. A published old or new complete state remains recoverable.
+        """
+
         parent = os.path.dirname(obj_dir)
         os.makedirs(parent, exist_ok=True)
         existing_root = os.path.exists(obj_dir)
@@ -129,7 +164,21 @@ class Store(ABC):
 
     @classmethod
     def _publish_existing_root(cls, stage_dir: str, object_dir: str) -> None:
-        """Publish a complete state generation through one atomic pointer."""
+        """Publish a complete state generation and reclaim inactive predecessors.
+
+        The caller must retain the root's writer lease. Pointer replacement makes
+        the new complete generation active before reclamation; reader leases
+        prevent deletion of a generation being restored by a supported reader.
+
+        Args:
+            stage_dir: Complete staged state directory to publish.
+            object_dir: Existing authoritative object root.
+
+        Raises:
+            OSError: If generation movement, pointer publication, or reclamation
+                fails. Before pointer publication the prior state remains active;
+                afterwards the new state remains recoverable.
+        """
 
         generation = uuid4().hex
         generations_dir = os.path.join(object_dir, _STATE_GENERATIONS_DIR)
@@ -146,6 +195,44 @@ class Store(ABC):
             if not generation_is_active:
                 shutil.rmtree(generation_dir, ignore_errors=True)
             raise
+        cls._reclaim_inactive_state_generations(object_dir, generation)
+
+    @staticmethod
+    def _state_lock_path(object_dir: str) -> str:
+        """Return the durable advisory lease path for one object root.
+
+        Args:
+            object_dir: Stable Store path for an object root.
+
+        Returns:
+            A sibling lock-file path. Keeping it outside the root lets writers
+            coordinate initial root publication without making a root visible.
+        """
+
+        parent, name = os.path.split(object_dir)
+        return os.path.join(parent, f".{name}.state.lock")
+
+    @classmethod
+    def _reclaim_inactive_state_generations(cls, object_dir: str, active_generation: str) -> None:
+        """Delete inactive complete state directories while holding a writer lease.
+
+        Args:
+            object_dir: Existing authoritative object root.
+            active_generation: Generation named by the current state pointer.
+
+        Raises:
+            OSError: If an inactive generation cannot be removed.
+
+        Side Effects:
+            Removes only directories below ``.state-generations`` other than the
+            active generation. The caller's exclusive lease excludes supported
+            readers that may still be restoring an older generation.
+        """
+
+        generations_dir = os.path.join(object_dir, _STATE_GENERATIONS_DIR)
+        for entry in os.scandir(generations_dir):
+            if entry.name != active_generation and entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path)
 
     @classmethod
     def _publication_may_be_visible(
@@ -245,6 +332,12 @@ class Store(ABC):
             StoreAuthorityError: If the active state pointer or generation is
                 malformed or missing.
             OSError: If persisted state cannot be read.
+
+        Concurrency:
+            Holds the root's shared reader lease from pointer resolution until
+            object restoration completes. A cooperating writer waits before
+            replacing the pointer and reclaiming an inactive generation, so this
+            call observes one complete old or new state rather than a mixture.
         """
 
         cdef = obj.definition
@@ -253,8 +346,8 @@ class Store(ABC):
             return
 
         obj_dir = self.object_dir(cdef)
-
-        obj.restore_state_from_dir(self._active_state_dir(obj_dir), revision=revision)
+        with interprocess_read_lock(self._state_lock_path(obj_dir)):
+            obj.restore_state_from_dir(self._active_state_dir(obj_dir), revision=revision)
 
     def read_definition(self, cdef: "ConcreteDefinition") -> "ConcreteDefinition | None":
         """Read and validate the authoritative root matching ``cdef``.
@@ -280,24 +373,108 @@ class Store(ABC):
         return stored
 
     def read_main_def(self) -> "ConcreteDefinition" | None:
-        """Return the stored main ConcreteDefinition, or None if not present."""
+        """Read the Store's main-definition reference without changing it.
+
+        Returns:
+            The stored ``ConcreteDefinition``, or ``None`` if no main reference
+            has been published.
+
+        Raises:
+            StoreAuthorityError: If the persisted reference is not a complete
+                ``ConcreteDefinition`` payload.
+        """
         return None
 
     def write_main_def(self, main_def: "ConcreteDefinition") -> None:
-        """Persist the given main ConcreteDefinition (no-op by default)."""
+        """Atomically publish a validated main-definition reference.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to make the Store's main reference.
+
+        Raises:
+            StoreAuthorityError: If ``main_def`` is not a concrete definition.
+            OSError: If publication fails; an existing reference remains
+                authoritative until replacement succeeds.
+
+        Side Effects:
+            Concrete Stores may update a buffered reference cache and mark a
+            deferred archive or other persistence target dirty.
+        """
         pass
 
     def set_main_def(self, main_def: "ConcreteDefinition") -> None:
-        """Set the store's main def"""
+        """Stage a validated main-definition reference for a later commit.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to use as the main reference.
+
+        Raises:
+            StoreAuthorityError: If ``main_def`` is not a concrete definition.
+
+        Side Effects:
+            Buffered Stores cache the reference and mark it for explicit
+            publication; this method itself need not publish bytes.
+        """
         pass
 
     def read_aliases(self) -> dict[str, "ConcreteDefinition"]:
-        """Return stored object aliases, or an empty mapping if unsupported."""
+        """Read validated named object references without publishing changes.
+
+        Returns:
+            A new mapping from non-empty string aliases to concrete definitions,
+            or an empty mapping when no aliases are stored or supported.
+
+        Raises:
+            StoreAuthorityError: If the persisted mapping, an alias key, or a
+                definition payload is malformed.
+        """
         return {}
 
-    def write_aliases(self, aliases: dict[str, "ConcreteDefinition"]) -> None:
-        """Persist object aliases. Stores may no-op if aliases are unsupported."""
+    def write_aliases(self, aliases: dict[str, "ConcreteDefinition"]) -> dict[str, "ConcreteDefinition"]:
+        """Validate and publish named concrete-definition references.
+
+        Args:
+            aliases: Complete mapping whose keys are non-empty strings and whose
+                values are ``ConcreteDefinition`` instances.
+
+        Returns:
+            The mapping published by the Store. Stores without alias support may
+            return the supplied mapping without persistence.
+
+        Raises:
+            StoreAuthorityError: If any key or payload is malformed.
+            OSError: If replacement publication fails; prior alias bytes remain
+                authoritative.
+
+        Side Effects:
+            Implementations may atomically replace reference bytes or mark a
+            buffered archive dirty for a later commit.
+        """
         pass
+
+    @staticmethod
+    def _validate_main_definition(main_def) -> None:
+        Store._validate_reference_definition(main_def, "main definition")
+
+    @staticmethod
+    def _validate_reference_definition(cdef, reference: str) -> None:
+        from ..definition import ConcreteDefinition
+
+        if not isinstance(cdef, ConcreteDefinition):
+            raise StoreAuthorityError(
+                f"Store {reference} is {type(cdef).__name__}, not a ConcreteDefinition."
+            )
+
+    @classmethod
+    def _validate_aliases(cls, aliases) -> None:
+        if not isinstance(aliases, dict):
+            raise StoreAuthorityError("Store aliases payload is not a dictionary.")
+        for alias, cdef in aliases.items():
+            if not isinstance(alias, str):
+                raise StoreAuthorityError("Store aliases contain a non-string alias.")
+            if alias == "":
+                raise StoreAuthorityError("Store aliases contain an empty alias.")
+            cls._validate_reference_definition(cdef, f"alias {alias!r}")
 
     def commit(self) -> None:
         """Optional; useful for zips, S3, HDF5, etc."""

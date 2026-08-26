@@ -9,6 +9,7 @@ from dryml.core2.cdef_identity import same_cdef
 from dryml.core2.query.domain import StoredDomain
 from dryml.core2.query.fingerprint import target_local_fingerprint
 from dryml.core2.query.graph_plan import graph_candidate_ids
+from dryml.core2.query.lowering import LoweringDiagnostics, ScanPolicy
 from dryml.core2.query.federation import IndexGenerationVector, RepoGenerationVector
 from dryml.core2.query.model import (
     DefinitionEdgeRecord,
@@ -46,6 +47,13 @@ class ContractPair(Object):
         self.left = left
         self.right = right
         self.name = name
+
+
+class ContractVariadic(Object):
+    def __init__(self, *values, **labels):
+        super().__init__()
+        self.values = values
+        self.labels = labels
 
 
 class ContractStore(Store):
@@ -469,6 +477,56 @@ def test_contract_local_candidates_and_planner(backend_case):
         cdefs = tuple(view.cdefs_by_id(candidate_ids).values())
 
     assert cdefs == (wanted.definition,)
+
+
+def test_memory_variadic_selector_uses_semantic_requirements_without_scanning():
+    contract = MemoryContractIndex()
+    wanted = ContractVariadic("wanted", marker="wanted")
+    decoys = tuple(ContractVariadic(f"decoy-{index}", marker=f"decoy-{index}") for index in range(999))
+    definitions = (wanted.definition, *(decoy.definition for decoy in decoys))
+    contract.register_stored_roots(
+        ConcreteDefinitionGraph.from_roots(definitions),
+        definitions,
+    )
+    selector_graph = compile_selector_graph(Definition(ContractVariadic, "wanted", marker="wanted"))
+
+    assert selector_graph is not None
+    assert not selector_graph.requires_scan
+    with contract.read_view(include_cached=False) as view:
+        candidates = graph_candidate_ids(view, selector_graph, StoredDomain(view))
+        cdefs = tuple(view.cdefs_by_id(candidates).values())
+
+    assert cdefs == (wanted.definition,)
+
+
+@pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
+def test_sqlite_variadic_selector_lowers_without_scanning_or_decoding_decoys(tmp_path):
+    index = SQLiteStoreQueryIndex(
+        source_key="contract-variadic-sqlite-store",
+        path=tmp_path / "index.sqlite",
+        config=SQLiteQueryIndexConfig(journal_mode="delete", busy_timeout=1.0),
+    )
+    wanted = ContractVariadic("wanted", marker="wanted")
+    decoys = tuple(ContractVariadic(f"decoy-{index}", marker=f"decoy-{index}") for index in range(999))
+    definitions = (wanted.definition, *(decoy.definition for decoy in decoys))
+    index.register_stored_roots(ConcreteDefinitionGraph.from_roots(definitions), definitions)
+    selector_graph = compile_selector_graph(Definition(ContractVariadic, "wanted", marker="wanted"))
+    diagnostics = LoweringDiagnostics()
+
+    assert selector_graph is not None
+    with index.read_view(include_cached=False) as view:
+        plan = view.lower_selector_graph(
+            selector_graph,
+            StoredDomain(view),
+            terminal="collect",
+            scan_policy=ScanPolicy("forbid"),
+            diagnostics=diagnostics,
+        )
+        batches = tuple(view.iter_candidate_cdef_batches(plan, batch_size=1000))
+
+    assert not diagnostics.scan_required
+    assert tuple(cdef for batch in batches for cdef in batch.cdefs) == (wanted.definition,)
+    assert diagnostics.cdef_blobs_decoded == 1
 
 
 def test_contract_parent_child_and_nested_semantics(backend_case):

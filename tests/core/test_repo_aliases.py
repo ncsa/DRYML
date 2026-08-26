@@ -2,6 +2,8 @@ import pytest
 
 import core2_objects as objects
 from dryml.core2.repo import Repo, RepoLoadError, load_alias, make_store, save_object
+from dryml.core2.store.dir import DirStore
+from dryml.core2.store.store import StoreAliasConflictError
 
 
 def test_repo_alias_loads_object_in_same_repo(primary_store_set):
@@ -89,3 +91,50 @@ def test_repo_alias_conflict_across_stores_raises(store_resource_factory):
 
     with pytest.raises(RepoLoadError):
         Repo(stores=[make_store(res1.resource), make_store(res2.resource)])
+
+
+def test_dirstore_alias_flush_merges_independent_handles_and_rejects_conflicts(tmp_path):
+    store_path = tmp_path / "shared-store"
+    first = objects.TestClass1(1, test="first").definition
+    second = objects.TestClass1(2, test="second").definition
+    replacement = objects.TestClass1(3, test="replacement").definition
+
+    left = Repo(stores=DirStore(store_path, query_index="memory"))
+    right = Repo(stores=DirStore(store_path, query_index="memory"))
+    left.set_alias("first", first)
+    right.set_alias("second", second)
+    left.flush()
+    right.flush()
+
+    assert DirStore(store_path, query_index="memory").read_aliases() == {
+        "first": first,
+        "second": second,
+    }
+    assert right.aliases() == {"first": first, "second": second}
+
+    left = Repo(stores=DirStore(store_path, query_index="memory"))
+    right = Repo(stores=DirStore(store_path, query_index="memory"))
+    left.set_alias("first", replacement)
+    right.set_alias("first", second)
+    left.flush()
+    aliases_path = store_path / "aliases.pkl"
+    before_conflict = aliases_path.read_bytes()
+
+    with pytest.raises(StoreAliasConflictError, match="changed concurrently"):
+        right.flush()
+
+    assert aliases_path.read_bytes() == before_conflict
+    assert right._aliases_dirty
+    assert DirStore(store_path, query_index="memory").read_aliases() == {
+        "first": replacement,
+        "second": second,
+    }
+
+    retry = Repo(stores=DirStore(store_path, query_index="memory"))
+    retry.set_alias("retried", second)
+    retry.flush()
+    assert retry.aliases() == {
+        "first": replacement,
+        "second": second,
+        "retried": second,
+    }

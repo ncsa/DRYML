@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -50,6 +51,16 @@ class FailingSaveDirLeaf(Object):
 
     def save_state_to_dir_imp(self, dest_dir, revision=None):
         raise RuntimeError("object save failed")
+
+
+def _authority_digest(store) -> str:
+    digest = hashlib.sha256()
+    root = Path(store.base_dir)
+    for path in sorted(root.joinpath("objects").rglob("*")):
+        if path.is_file():
+            digest.update(str(path.relative_to(root)).encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def test_dirstore_query_index_default_is_auto_and_lazy(tmp_path):
@@ -501,6 +512,130 @@ def test_sqlite_failed_replacement_preserves_ready_sidecar(tmp_path, monkeypatch
     assert index.status().state == "ready"
     with index.read_view() as view:
         assert view.exact_ids(obj.definition)
+
+
+def test_sqlite_rebuild_failure_between_batches_preserves_ready_sidecar_and_authority(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    objects = [QueryIndexDirLeaf(f"between-batches-{index}", repo=repo) for index in range(2)]
+    for obj in objects:
+        repo.save_object(obj)
+    index = store.open_query_index()
+    before_sidecar = Path(index.path).read_bytes()
+    before_authority = _authority_digest(store)
+    original_graph = sqlite_index_module.ConcreteDefinitionGraph.for_query_index_roots
+    calls = 0
+    monkeypatch.setattr(sqlite_index_module, "_REBUILD_BATCH_SIZE", 1)
+
+    def fail_second_batch(cls, roots):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected failure between rebuild batches")
+        return original_graph(roots)
+
+    monkeypatch.setattr(
+        sqlite_index_module.ConcreteDefinitionGraph,
+        "for_query_index_roots",
+        classmethod(fail_second_batch),
+    )
+
+    with pytest.raises(OSError, match="between rebuild batches"):
+        index.rebuild()
+
+    assert calls == 2
+    assert Path(index.path).read_bytes() == before_sidecar
+    assert _authority_digest(store) == before_authority
+    with index.read_view() as view:
+        assert all(view.exact_ids(obj.definition) for obj in objects)
+    assert set(repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().defs()) == {
+        obj.definition for obj in objects
+    }
+    assert not list(Path(index.path).parent.glob(f"{Path(index.path).name}.rebuild-*.tmp*"))
+
+
+def test_sqlite_quarantine_keeps_canonical_sidecar_readable_until_activation(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("quarantine-read", repo=repo)
+    repo.save_object(obj)
+    index = store.open_query_index()
+    replacement_path = index._replacement_path()
+    replacement = SQLiteStoreQueryIndex(
+        source_key=index.source_key,
+        path=replacement_path,
+        config=SQLiteQueryIndexConfig(path=replacement_path, journal_mode="delete"),
+    )
+    replacement.initialize_empty(generation=index.current_generation() + 1)
+    replacement.close()
+    original_link = os.link
+    observed = {}
+
+    def read_during_quarantine(source, target):
+        original_link(source, target)
+        with index.read_view() as view:
+            observed["present"] = bool(view.exact_ids(obj.definition))
+
+    monkeypatch.setattr(os, "link", read_during_quarantine)
+
+    index._activate_replacement(replacement_path, quarantine_existing=True)
+
+    assert observed == {"present": True}
+    assert list(Path(index.path).parent.glob(f"{Path(index.path).name}.quarantine-*"))
+
+
+def test_sqlite_activation_failure_preserves_ready_sidecar_and_authority(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("quarantine-activation-failure", repo=repo)
+    repo.save_object(obj)
+    index = store.open_query_index()
+    before = Path(index.path).read_bytes()
+    before_authority = _authority_digest(store)
+    original_replace = os.replace
+
+    def fail_activation(source, destination):
+        if Path(destination) == index.path and ".rebuild-" in Path(source).name:
+            raise OSError("injected activation failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", fail_activation)
+
+    with pytest.raises(OSError, match="activation failure"):
+        index.rebuild(quarantine_existing=True)
+
+    assert Path(index.path).read_bytes() == before
+    assert _authority_digest(store) == before_authority
+    with index.read_view() as view:
+        assert view.exact_ids(obj.definition)
+    assert list(repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().defs()) == [obj.definition]
+    assert list(Path(index.path).parent.glob(f"{Path(index.path).name}.quarantine-*"))
+    assert not list(Path(index.path).parent.glob(f"{Path(index.path).name}.rebuild-*.tmp*"))
+
+
+def test_sqlite_keyboard_interrupt_cleans_staged_replacement(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=store)
+    obj = QueryIndexDirLeaf("interrupted-cleanup", repo=repo)
+    repo.save_object(obj)
+    index = store.open_query_index()
+    before_sidecar = Path(index.path).read_bytes()
+    before_authority = _authority_digest(store)
+
+    def interrupt_validation(self, *, roots):
+        raise KeyboardInterrupt("injected rebuild interruption")
+
+    monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", interrupt_validation)
+
+    with pytest.raises(KeyboardInterrupt, match="rebuild interruption"):
+        index.rebuild()
+
+    assert Path(index.path).read_bytes() == before_sidecar
+    assert _authority_digest(store) == before_authority
+    with index.read_view() as view:
+        assert view.exact_ids(obj.definition)
+    assert list(repo.query(Definition(QueryIndexDirLeaf, SKIP_ARGS)).stored().defs()) == [obj.definition]
+    assert not list(Path(index.path).parent.glob(f"{Path(index.path).name}.rebuild-*.tmp*"))
 
 
 def test_sqlite_rebuild_preserves_dirty_marker_from_concurrent_store_save(tmp_path, monkeypatch):

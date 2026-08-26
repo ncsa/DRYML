@@ -133,14 +133,36 @@ class DefinitionQuery:
         return replace(self, selector=replace_subtree(self.selector, norm, definition))
 
     def _original_path(self, path: DefinitionPath) -> DefinitionPath:
-        """Map selector spelling to an exact V2 source path when available."""
+        """Translate selector path segments to the original's V2 boundaries.
 
-        if not isinstance(self.original, ConcreteDefinition) or self.original.identity_version != V2_IDENTITY_VERSION:
-            return path
+        Categorical projections retain legacy call spelling, while each V2 CDef
+        in the original is addressed by semantic ``Parameter`` segments.
+
+        Args:
+            path: Path expressed against the current selector.
+
+        Returns:
+            The equivalent path through the original source.
+
+        Raises:
+            QueryPathError: If the path cannot be resolved through either tree.
+        """
+
         from .selector_graph import _semantic_selector_path
 
-        semantic = _semantic_selector_path(self.selector, path)
-        return path if semantic is None else semantic
+        original = self.original
+        selector = self.selector
+        translated = []
+        for segment in path:
+            original_path = DefinitionPath((segment,))
+            if isinstance(original, ConcreteDefinition) and original.identity_version == V2_IDENTITY_VERSION:
+                semantic = _semantic_selector_path(selector, DefinitionPath((segment,)))
+                if semantic is not None:
+                    original_path = semantic
+            translated.extend(original_path.segments)
+            original = get_subtree(original, original_path)
+            selector = get_subtree(selector, DefinitionPath((segment,)))
+        return DefinitionPath(tuple(translated))
 
     def class_match(self, policy: ClassMatchPolicy) -> "DefinitionQuery":
         if policy not in {"selector", "exact"}:

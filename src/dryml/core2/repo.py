@@ -282,11 +282,28 @@ class Repo:
             *,
             store=None,
             save_live: bool = True) -> ConcreteDefinition:
+        """Assign a non-empty alias to a concrete object definition.
+
+        Args:
+            alias: Non-empty string name to assign.
+            target: Object, ``Definition``, or ``ConcreteDefinition`` target.
+            store: Optional Store that receives a live object save or binding.
+            save_live: Whether an object target is persisted before assignment.
+
+        Returns:
+            The concrete definition assigned to ``alias``.
+
+        Raises:
+            TypeError: If the alias or target type is invalid.
+            ValueError: If ``alias`` is empty.
+
+        Side Effects:
+            Updates the Repo alias cache and marks aliases for Store publication
+            during ``flush``; it does not replace alias bytes immediately.
+        """
         self._validate_alias(alias)
-
-        store = self._ensure_store(store)
-
         cdef = self._alias_target_cdef(target)
+        store = self._ensure_store(store)
         if isinstance(target, Object):
             if save_live:
                 self.save_object(target, store=store)
@@ -437,6 +454,30 @@ class Repo:
             alias: str | None = None,
             ephemeral_depth: int | None = 0,
             options: RepoSaveOptions | None = None):
+        """Persist an object graph and optionally stage main or alias references.
+
+        Args:
+            obj: Root object whose graph is saved.
+            main: Whether its concrete definition becomes the main reference.
+            store: Optional target Store.
+            revision: Optional object-state revision selection.
+            alias: Optional non-empty alias for the root definition.
+            ephemeral_depth: Save-plan depth for ephemeral graph objects.
+            options: Complete save options, when supplied instead of arguments.
+
+        Returns:
+            ``True`` after the object save plan succeeds and requested references
+            have been staged.
+
+        Raises:
+            TypeError: If ``alias`` is not a string.
+            ValueError: If ``alias`` is empty.
+            StoreAuthorityError: If Store publication rejects authoritative data.
+
+        Side Effects:
+            Validates an alias before saving any object root, publishes the save
+            plan, and then stages requested main or alias references for flush.
+        """
         save_options = self._save_options(
             options=options,
             main=main,
@@ -445,6 +486,8 @@ class Repo:
             alias=alias,
             ephemeral_depth=ephemeral_depth,
         )
+        if save_options.alias is not None:
+            self._validate_alias(save_options.alias)
         store = self._ensure_store(save_options.store)
         revision = manage_revision(obj, save_options.revision)
         self.add_objects(obj, store=store)
@@ -981,6 +1024,23 @@ class Repo:
         return apply_graph_objects(self, root, func, graph_options)
 
     def set_main_def(self, main_def: ConcreteDefinition, store=None):
+        """Stage a concrete main definition in this Repo and selected Store.
+
+        Args:
+            main_def: ``ConcreteDefinition`` to make the default root.
+            store: Optional Store to receive the staged reference; defaults to
+                this Repo's default Store.
+
+        Raises:
+            TypeError: If ``main_def`` is not a concrete definition.
+            ValueError: If no Store is available.
+
+        Side Effects:
+            Changes the Repo cache only after validation and marks the Store for
+            its explicit reference-publication path.
+        """
+        if not isinstance(main_def, ConcreteDefinition):
+            raise TypeError("Main definition must be a ConcreteDefinition.")
         self.main_def = main_def
         if store is None:
             store = self.default_store
@@ -996,10 +1056,23 @@ class Repo:
         add_objects(self, args, store=store)
 
     def flush(self):
-        # Commit all stores
+        """Publish this Repo's pending aliases and commit each configured Store.
+
+        Raises:
+            StoreAuthorityError: If a reference payload is malformed or a
+                concurrent Store update conflicts with this Repo's alias change.
+            OSError: If a Store cannot publish its authoritative bytes.
+
+        Side Effects:
+            Valid aliases are merged with non-conflicting concurrent DirStore
+            changes, published to each Store, and cleared from the dirty state
+            only after every Store commits successfully.
+        """
         for store in self.stores:
             if self._aliases_dirty:
-                store.write_aliases(self.alias_index)
+                published_aliases = store.write_aliases(self.alias_index)
+                if published_aliases is not None:
+                    self.alias_index = dict(published_aliases)
             store.commit()
         self._aliases_dirty = False
 

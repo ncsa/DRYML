@@ -122,7 +122,25 @@ def stable_hash_value(value) -> str:
 # ----------------------------------------------------------------------
 
 class StableHashGraphHasher(GraphHasher):
+    def __init__(self, *, reuse_validated_cdef_hashes: bool = False):
+        self._reuse_validated_cdef_hashes = reuse_validated_cdef_hashes
+
+    def _validated_v2_cdef_hash(self, obj) -> str | None:
+        if not self._reuse_validated_cdef_hashes:
+            return None
+        from ..cdef_identity import V2_IDENTITY_VERSION
+        from ..definition import ConcreteDefinition
+
+        if (
+                isinstance(obj, ConcreteDefinition)
+                and obj.identity_version == V2_IDENTITY_VERSION
+                and obj._stable_hash_cache is not None):
+            return obj._stable_hash_cache
+        return None
+
     def is_atomic(self, obj, ctx: GraphCtx) -> bool:
+        if self._validated_v2_cdef_hash(obj) is not None:
+            return True
         from ..canonical import node_kind, NodeKind
 
         kind = node_kind(obj)
@@ -137,6 +155,9 @@ class StableHashGraphHasher(GraphHasher):
         }
 
     def hash_atomic(self, obj, ctx: GraphCtx) -> str:
+        cached_cdef_hash = self._validated_v2_cdef_hash(obj)
+        if cached_cdef_hash is not None:
+            return cached_cdef_hash
         return stable_hash_value(obj)
 
     def should_track_cycle(self, obj, ctx: GraphCtx) -> bool:
@@ -272,6 +293,24 @@ class StableHashGraphHasher(GraphHasher):
         return hasher.hexdigest()
 
 
-def stable_hash_function(structure, cache=None) -> str:
+def stable_hash_function(structure, cache=None, *, reuse_validated_cdef_hashes: bool = False) -> str:
+    """Return the deterministic structural hash for a canonical value graph.
+
+    Args:
+        structure: Canonical value or definition graph to hash.
+        cache: Optional graph-hash memo keyed by object identity.
+        reuse_validated_cdef_hashes: Whether cached nested
+            ``ConcreteDefinition`` digests may stand in for their full
+            subtrees. This is valid only when each reused cache was
+            independently validated, such as bottom-up persisted-record
+            hydration.
+
+    Returns:
+        The deterministic hexadecimal content hash.
+    """
+
     ctx = GraphCtx(memo={} if cache is None else cache)
-    return StableHashGraphHasher().hash(structure, ctx)
+    hasher = StableHashGraphHasher(
+        reuse_validated_cdef_hashes=reuse_validated_cdef_hashes,
+    )
+    return hasher.hash(structure, ctx)

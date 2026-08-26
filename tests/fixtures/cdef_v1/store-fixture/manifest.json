@@ -1,6 +1,12 @@
 {
   "format": "pre-v2-store-fixture/v1",
-  "producer": "85ea268",
+  "producer": {
+    "commit": "85ea268860091f96b97fa9031ac813beb369c749",
+    "dill": "unrecorded",
+    "pickle_protocol": 5,
+    "python": "3.8 (declared by dev-env.yaml)",
+    "runtime": "unrecorded"
+  },
   "files": {
     "dir-store/aliases.pkl": "495704e1b2de3459d00c82a179c1abe55e46b4439551c8225ab41ecfcfcbcf04",
     "dir-store/def.pkl": "6f5ed772647f549ebe444f39ed16cfb147e7c218981e2ee47bff4a07f01d67c5",
@@ -8,5 +14,6 @@
     "zip-store.zip": "9a339ed2c761f236078ad50a7aefa5df524283259419abbb96522da29fff2af6"
   },
   "root_hash": "5a5a9f87cbc54e804032afe232427df0608d8839743bc31b4ec2ae73caa83aa4",
-  "aliases": ["primary", "secondary"]
+  "aliases": ["primary", "secondary"],
+  "dir_store_tree_sha256": "15f3579c70315998515b0de837265047df044b9eeabd152b0fe0f85f6e9c5024"
 }

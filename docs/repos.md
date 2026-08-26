@@ -103,6 +103,18 @@ final replacement. These publication rules rely on the supported local
 filesystem and Python atomic-replace behavior; they do not promise atomicity
 for arbitrary `IOBase` implementations or unsupported filesystems.
 
+When an existing object state is replaced, the Store first publishes a complete
+new immutable state generation through its atomic pointer. Cooperating readers
+hold a per-root reader lease throughout restoration, while a writer holds the
+matching exclusive lease for publication and reclamation. Thus a reader finishes
+from either its complete old state or the complete new state; once no supported
+reader can use it, inactive generation directories are reclaimed and ordinary
+successful updates retain only the active generation. An interruption before
+pointer replacement keeps the previous state active; an interruption after it
+keeps the newly pointed-to state recoverable. A later successful save reclaims
+any inactive trees left by that interruption. `ZipStore` writes only the
+pointer-reachable state generation when committing an archive.
+
 ## Load Semantics
 
 Important load entry points:
@@ -154,6 +166,21 @@ repo.save_object(item, alias="baseline")
 ```
 
 Use main definitions when a store or repo should have one default root object.
+
+Alias and main-reference writers validate complete payloads before changing Repo
+caches or publishing bytes. On supported local filesystems, `DirStore` also
+serializes alias publication across handles: independently changed names merge,
+while different concurrent values for the same name fail without replacing the
+authoritative alias file. Reopen the Repo (or read aliases through a fresh
+Store handle) before retrying a conflict.
+
+Path-backed `ZipStore` archives serialize publication across cooperating
+processes with an archive-specific lock. A dirty handle publishes only when the
+archive still has the byte digest it extracted; any intervening archive
+replacement raises `ZipStoreConflictError` without replacing newer roots or
+aliases. Reopen the Store, reapply the intended mutation, and commit again.
+Read-only and no-op commits do not compare or rewrite archive bytes. This
+stale-writer protection is not available for file-like archive streams.
 
 ## Query Indexes
 
