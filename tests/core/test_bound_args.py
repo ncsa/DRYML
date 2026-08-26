@@ -8,7 +8,6 @@ from dryml.core2.bound_args import (
     decode_bound_arguments,
     project_bound_arguments,
 )
-from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core2.definition import thaw_concrete
 from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
@@ -155,7 +154,7 @@ def test_projection_uses_the_current_signature_without_changing_bound_identity()
 def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypatch):
     PreparedFixture.prepare_count = 0
 
-    cdef = _to_bound_canonical(Definition(PreparedFixture, "example"))
+    cdef = Definition(PreparedFixture, "example").concretize()
 
     assert cdef.identity_version == V2_IDENTITY_VERSION
     assert PreparedFixture.prepare_count == 1
@@ -201,11 +200,11 @@ def test_v2_thaw_uses_current_signature_projection_for_all_parameter_kinds():
 
 
 def test_private_v2_defaults_are_snapshotted_and_change_identity_later():
-    first = _to_bound_canonical(Definition(DefaultFixture))
+    first = Definition(DefaultFixture).concretize()
     old_defaults = DefaultFixture.__init__.__defaults__
     try:
         DefaultFixture.__init__.__defaults__ = (4,)
-        second = _to_bound_canonical(Definition(DefaultFixture))
+        second = Definition(DefaultFixture).concretize()
     finally:
         DefaultFixture.__init__.__defaults__ = old_defaults
 
@@ -214,7 +213,7 @@ def test_private_v2_defaults_are_snapshotted_and_change_identity_later():
     assert first != second
     assert first.stable_hash() != second.stable_hash()
 
-    mutable = _to_bound_canonical(Definition(MutableDefaultFixture))
+    mutable = Definition(MutableDefaultFixture).concretize()
     try:
         MutableDefaultFixture.__init__.__defaults__[0].append("later")
         assert mutable["parameters"]["values"] == FrozenList(())
@@ -224,11 +223,11 @@ def test_private_v2_defaults_are_snapshotted_and_change_identity_later():
 
 def test_private_v2_binding_and_canonicalization_fail_at_semantic_parameter_paths():
     with pytest.raises(TypeError, match="required"):
-        _to_bound_canonical(Definition(RequiredFixture))
+        Definition(RequiredFixture).concretize()
     with pytest.raises(TypeError, match="value"):
-        _to_bound_canonical(Definition(UnsupportedDefaultFixture))
+        Definition(UnsupportedDefaultFixture).concretize()
     with pytest.raises(TypeError, match="unknown"):
-        _to_bound_canonical(Definition(InvalidPreparedFixture, 1))
+        Definition(InvalidPreparedFixture, 1).concretize()
 
 
 def test_persisted_bound_records_reject_malformed_names_and_values_without_binding(monkeypatch):

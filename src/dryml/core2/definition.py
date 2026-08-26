@@ -556,13 +556,13 @@ class ConcreteDefinition(DefInterface, Mapping):
         surfaces are admitted only through the private hydration constructor.
         """
 
-        from .canonical import _to_bound_canonical
+        from .canonical import to_canonical
 
         if kwargs is None:
             kwargs = {}
         if not isinstance(kwargs, Mapping):
             raise TypeError("ConcreteDefinition kwargs must be a mapping.")
-        result = _to_bound_canonical(Definition(cdef_cls, *args, **dict(kwargs)))
+        result = to_canonical(Definition(cdef_cls, *args, **dict(kwargs)))
         self._copy_record(result)
 
     @classmethod
@@ -705,8 +705,7 @@ class ConcreteDefinition(DefInterface, Mapping):
                 raise ValueError("V2 CDef records cannot contain legacy args or kwargs.")
             result = cls._from_bound_record(cdef_cls, parameters)
         elif parameters is not None:
-            if identity_version != V2_IDENTITY_VERSION:
-                raise ValueError("Bound CDef records require V2 identity version.")
+            raise ValueError("Bound CDef records require V2 identity version.")
         else:
             result = cls._new_raw_record(
                 cdef_cls,

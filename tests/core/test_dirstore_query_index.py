@@ -468,7 +468,7 @@ def test_sqlite_interrupted_build_is_not_marked_ready(tmp_path, monkeypatch):
     repo.save_object(obj)
     index = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")).open_query_index()
 
-    def fail_validation(self):
+    def fail_validation(self, *, roots):
         raise RuntimeError("injected pre-ready validation failure")
 
     monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail_validation)
@@ -488,7 +488,7 @@ def test_sqlite_failed_replacement_preserves_ready_sidecar(tmp_path, monkeypatch
     index = store.open_query_index()
     before = Path(index.path).read_bytes()
 
-    def fail_validation(self):
+    def fail_validation(self, *, roots):
         raise RuntimeError("injected replacement validation failure")
 
     monkeypatch.setattr(SQLiteStoreQueryIndex, "_validate_rebuild_before_ready", fail_validation)

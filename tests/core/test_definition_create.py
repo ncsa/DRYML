@@ -2,8 +2,6 @@ import numpy as np
 import pytest
 import core2_objects as objects
 import dryml
-from dryml.core2.bound_args import BoundArguments
-from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.definition import Definition, ConcreteDefinition, SKIP_ARGS
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.object import Object
@@ -251,10 +249,8 @@ class SemanticCollisionFixture(Object):
 
 
 def test_v2_concrete_definition_exposes_immutable_semantic_parameters():
-    child = _to_bound_canonical(Definition(SemanticFixture, "child"))
-    cdef = _to_bound_canonical(
-        Definition(SemanticFixture, child, 4, "tail", keyword=5, feature=True)
-    )
+    child = Definition(SemanticFixture, "child").concretize()
+    cdef = Definition(SemanticFixture, child, 4, "tail", keyword=5, feature=True).concretize()
 
     assert cdef.parameters == FrozenDict({
         "required": child,
@@ -275,14 +271,14 @@ def test_v2_concrete_definition_exposes_immutable_semantic_parameters():
 
 
 def test_semantic_parameters_preserve_framework_member_collisions():
-    cdef = _to_bound_canonical(Definition(
+    cdef = Definition(
         SemanticCollisionFixture,
         "constructor-cls",
         "constructor-args",
         "constructor-kwargs",
         "constructor-build",
         "constructor-stable-hash",
-    ))
+    ).concretize()
 
     assert cdef.cls != "constructor-cls"
     assert cdef.args == FrozenTuple()

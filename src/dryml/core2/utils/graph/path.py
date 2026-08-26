@@ -344,7 +344,7 @@ class GraphPath:
         out = "$"
         for seg in self.segments:
             if isinstance(seg, Parameter):
-                out += f"[@param({json.dumps(seg.name)})]"
+                out += f"[{seg!s}]"
             elif isinstance(seg, Kwarg):
                 out += f".{seg.name}"
             elif isinstance(seg, Arg):

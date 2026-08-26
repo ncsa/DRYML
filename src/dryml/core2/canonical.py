@@ -747,8 +747,6 @@ class _ThawValueTransformer(GraphTransformer):
         }
 
     def dispatch(self, obj: Any, ctx: GraphCtx) -> Any:
-        from .definition import Definition
-
         kind = node_kind(obj)
 
         if kind is NodeKind.FROZEN_NDARRAY:
@@ -768,18 +766,7 @@ class _ThawValueTransformer(GraphTransformer):
             )
 
         if kind is NodeKind.CONCRETE_DEFINITION:
-            if obj.identity_version == V2_IDENTITY_VERSION:
-                from .materialization import project_cdef_call
-
-                args, kwargs = project_cdef_call(obj)
-                return Definition(
-                    obj.cls,
-                    *thaw_definition_surface_value(args),
-                    **thaw_definition_surface_value(kwargs),
-                )
-            thaw_args = thaw_definition_surface_value(obj.args)
-            thaw_kwargs = thaw_definition_surface_value(obj.kwargs)
-            return Definition(obj.cls, *thaw_args, **thaw_kwargs)
+            return thaw_definition_surface_value(obj)
 
         if kind is NodeKind.DEFLINK:
             return obj
@@ -937,29 +924,6 @@ def to_canonical(
         return _ToCanonicalTransformer().transform(x, ctx)
 
 
-def _to_bound_canonical(
-    x: Any,
-    *,
-    repo: "Repo | None" = None,
-    path: list[str | int] | tuple[str | int, ...] | None = None,
-):
-    """Build a private V2 CDef through preparation, binding, roles, and freezing.
-
-    This internal factory is also used by the public exact-construction
-    boundary after consumer activation. It remains private so persisted-record
-    hydration cannot be confused with live call binding.
-    """
-
-    from .repo import manage_repo
-
-    with manage_repo(repo=repo) as sub_repo:
-        ctx = GraphCtx(
-            path=tuple(path) if path is not None else (),
-            state={"repo": sub_repo},
-        )
-        return _ToCanonicalTransformer().transform(x, ctx)
-
-
 def thaw_value(
     x: Any,
     *,
@@ -1018,7 +982,16 @@ def thaw_definition_surface_value(value: Any) -> Any:
     kind = node_kind(value)
     if kind is NodeKind.FROZEN_NDARRAY:
         return value.thaw()
-    if kind in {NodeKind.FROZEN_LIST, NodeKind.FROZEN_TUPLE, NodeKind.FROZEN_SET, NodeKind.FROZEN_DICT}:
+    if kind in {
+        NodeKind.LIST,
+        NodeKind.TUPLE,
+        NodeKind.SET,
+        NodeKind.DICT,
+        NodeKind.FROZEN_LIST,
+        NodeKind.FROZEN_TUPLE,
+        NodeKind.FROZEN_SET,
+        NodeKind.FROZEN_DICT,
+    }:
         return transform_container(
             value,
             lambda p, v: thaw_definition_surface_value(v),

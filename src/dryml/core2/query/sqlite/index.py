@@ -359,12 +359,11 @@ class SQLiteStoreQueryIndex:
         scanned = 0
         try:
             replacement.initialize_empty(build_state="building")
-            replacement._rebuild_roots = roots
             for cdefs in chunked(roots, _REBUILD_BATCH_SIZE):
                 scanned += len(cdefs)
                 graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
                 replacement._register_stored_roots(graph, cdefs, require_ready=False)
-            replacement._validate_rebuild_before_ready()
+            replacement._validate_rebuild_before_ready(roots=roots)
             replacement._set_build_state("ready")
             con = replacement._connections.connection(readonly=False)
             con.execute("PRAGMA optimize")
@@ -647,14 +646,14 @@ class SQLiteStoreQueryIndex:
             return None, None
         return stat.st_size, stat.st_mtime_ns
 
-    def _validate_rebuild_before_ready(self) -> None:
+    def _validate_rebuild_before_ready(self, *, roots: tuple[ConcreteDefinition, ...]) -> None:
         con = self._connections.connection(readonly=True)
         issues: list[ValidationIssue] = []
         validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
         _validate_sqlite_integrity(con, issues)
         self._validate_decodable_rows(con, issues)
         self._validate_stored_roots(con, issues)
-        self._validate_store_roots(con, issues, roots=getattr(self, "_rebuild_roots", None))
+        self._validate_store_roots(con, issues, roots=roots)
         errors = tuple(issue for issue in issues if issue.severity == "error")
         if errors:
             detail = "; ".join(issue.message for issue in errors[:3])

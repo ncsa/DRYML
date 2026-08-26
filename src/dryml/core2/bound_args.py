@@ -179,16 +179,21 @@ def project_bound_arguments(cls: type, bound_args: BoundArguments) -> tuple[tupl
     )
     positional_tail = values.get(var_positional.name, ()) if var_positional is not None else ()
     has_positional_tail = bool(positional_tail)
+    last_supplied_positional_only = max(
+        (
+            index
+            for index, parameter in enumerate(parameters)
+            if parameter.kind is Parameter.POSITIONAL_ONLY and parameter.name in values
+        ),
+        default=-1,
+    )
 
     for index, parameter in enumerate(parameters):
         name = parameter.name
         if parameter.kind is Parameter.POSITIONAL_ONLY:
             if name in values:
                 args.append(values.pop(name))
-            elif has_positional_tail or any(
-                later.kind is Parameter.POSITIONAL_ONLY and later.name in values
-                for later in parameters[index + 1:]
-            ):
+            elif has_positional_tail or index < last_supplied_positional_only:
                 if parameter.default is Parameter.empty:
                     raise TypeError(f"Invalid constructor arguments at {name}: missing a required argument")
                 args.append(parameter.default)

@@ -1,11 +1,9 @@
-from io import StringIO
 import os
 
 import core2_objects as objects
 import pytest
 from dryml.core2 import Satisfies
 from dryml.core2.definition import Definition, SKIP_ARGS, selector_match
-from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.symbol import ImportRef
 import dryml.core2 as core2
 
@@ -17,7 +15,7 @@ class SemanticSelectorFixture(core2.Object):
 
 
 def test_partial_selector_matches_v2_semantic_parameters_without_defaults():
-    target = _to_bound_canonical(Definition(SemanticSelectorFixture, 7, label="target"))
+    target = Definition(SemanticSelectorFixture, 7, label="target").concretize()
 
     assert Definition(SemanticSelectorFixture, 7).match(target)
     assert Definition(SemanticSelectorFixture, value=7).match(target)

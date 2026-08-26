@@ -232,14 +232,14 @@ def stored_compatibility_decision(
         return "future-unsupported"
     if user_version < SQLITE_QUERY_INDEX_SCHEMA_VERSION:
         return "rebuild"
-    columns = {info[1] for info in con.execute("PRAGMA table_info(catalog_state)")}
+    column_names = [info[1] for info in con.execute("PRAGMA table_info(catalog_state)")]
     expected = expected_semantic_version(store_key=store_key, canonical_version=canonical_version)
-    if not set(expected.catalog_state()) <= columns:
+    if not set(expected.catalog_state()) <= set(column_names):
         return "future-unsupported"
     row = con.execute("SELECT * FROM catalog_state WHERE singleton = 1").fetchone()
     if row is None:
         return "future-unsupported"
-    state = dict(zip([info[1] for info in con.execute("PRAGMA table_info(catalog_state)")], row))
+    state = dict(zip(column_names, row))
     return compatibility_decision(state, expected=expected)
 
 

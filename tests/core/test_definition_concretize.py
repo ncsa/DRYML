@@ -1,7 +1,6 @@
 import core2_objects as objects
 from dryml.core2.definition import Definition, ConcreteDefinition, SKIP_ARGS, selector_match, \
     concretize_func, thaw_concrete
-from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
 import numpy as np
 
@@ -21,7 +20,7 @@ def test_definition_concrete_1():
 def test_public_concretization_uses_the_bound_v2_pipeline():
     definition = Definition(objects.TestClass1, 10, test="a")
 
-    private_v2 = _to_bound_canonical(definition)
+    private_v2 = definition.concretize()
 
     assert private_v2.identity_version == V2_IDENTITY_VERSION
     assert definition.concretize().identity_version == V2_IDENTITY_VERSION

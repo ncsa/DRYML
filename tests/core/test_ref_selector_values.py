@@ -15,13 +15,12 @@ from dryml.core2 import (
     SelectorSpec,
 )
 from dryml.core2.arg_roles import resolve_arg_roles
-from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph, ConcreteDefinitionGraphError
 from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.links import DefLink
-from dryml.core2.object import Object, definition_mode
+from dryml.core2.object import Object
 from dryml.core2.query.selector_graph import compile_selector_graph
-from dryml.core2.utils.graph.path import Arg, GraphPath
+from dryml.core2.utils.graph.path import GraphPath, Index, Parameter
 
 import core2_objects as objects
 
@@ -54,7 +53,7 @@ def test_ref_wrapper_is_non_materializing_cdef_edge():
     assert parent.args[0].kind is EdgeKind.REF
     assert parent.args[0].target == child
     edges = ConcreteDefinitionGraph.from_root(parent).edges()
-    assert (parent, GraphPath((Arg(0),)), child, EdgeKind.REF) == (
+    assert (parent, GraphPath((Parameter("args"), Index(0))), child, EdgeKind.REF) == (
         edges[0].parent,
         edges[0].path,
         edges[0].child,
@@ -66,8 +65,8 @@ def test_ref_role_canonicalizes_object_and_cdef_values():
     child = Definition(objects.TestClass1, 2).concretize()
     cdef = Definition(RefOwner, child).concretize()
 
-    assert cdef.args[0].kind is EdgeKind.REF
-    assert cdef.args[0].target == child
+    assert cdef.parameters["child"].kind is EdgeKind.REF
+    assert cdef.parameters["child"].target == child
     assert isinstance(resolve_arg_roles(RefOwner)["child"], RefCDefArg)
 
 
@@ -75,19 +74,19 @@ def test_optional_ref_role_resolution():
     child = Definition(objects.TestClass1, 3).concretize()
     cdef = Definition(OptionalRefOwner, child).concretize()
 
-    assert cdef.args[0].kind is EdgeKind.REF
-    assert cdef.args[0].target == child
+    assert cdef.parameters["child"].kind is EdgeKind.REF
+    assert cdef.parameters["child"].target == child
 
 
 def test_optional_role_default_and_explicit_none_match_in_private_bound_records():
-    omitted = _to_bound_canonical(Definition(OptionalRefOwner))
-    explicit = _to_bound_canonical(Definition(OptionalRefOwner, None))
+    omitted = Definition(OptionalRefOwner).concretize()
+    explicit = Definition(OptionalRefOwner, None).concretize()
 
     assert omitted == explicit
     assert omitted["parameters"]["child"] is None
 
-    selector_omitted = _to_bound_canonical(Definition(OptionalSelectorOwner))
-    selector_explicit = _to_bound_canonical(Definition(OptionalSelectorOwner, None))
+    selector_omitted = Definition(OptionalSelectorOwner).concretize()
+    selector_explicit = Definition(OptionalSelectorOwner, None).concretize()
     assert selector_omitted == selector_explicit
     assert selector_omitted["parameters"]["selector"] is None
 
@@ -96,7 +95,7 @@ def test_selector_arg_stores_quoted_selector_data_not_edge():
     selector = Selector(Definition(objects.TestClass1, test=dryml.Present()))
     cdef = Definition(SelectorOwner, selector).concretize()
 
-    assert isinstance(cdef.args[0], SelectorSpec)
+    assert isinstance(cdef.parameters["selector"], SelectorSpec)
     assert ConcreteDefinitionGraph.from_root(cdef).edges() == ()
     assert Selector(Definition(SelectorOwner, selector=selector)).matches(cdef)
 
@@ -120,7 +119,7 @@ def test_quoted_def_stores_expression_data_not_edge():
     quoted = Definition(objects.TestClass1, test=dryml.Present()).quote()
     cdef = Definition(objects.TestNest3, quoted).concretize()
 
-    assert isinstance(cdef.args[0], QuotedDef)
+    assert isinstance(cdef.parameters["args"][0], QuotedDef)
     assert ConcreteDefinitionGraph.from_root(cdef).edges() == ()
 
 

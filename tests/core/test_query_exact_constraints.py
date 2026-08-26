@@ -5,7 +5,6 @@ from dryml.core2 import Definition, Repo, SKIP_ARGS
 from dryml.core2.definition import ConcreteDefinition
 from dryml.core2.freeze import FrozenDict, FrozenSet
 from dryml.core2.query.query import _query_match
-from dryml.core2.canonical import _to_bound_canonical
 
 
 class SemanticQueryLeaf(objects.Object):
@@ -32,8 +31,8 @@ class SemanticQueryStore:
 
 def test_memory_query_uses_v2_parameters_for_partial_selector_constraints():
     repo = Repo()
-    match = _to_bound_canonical(Definition(SemanticQueryLeaf, 7, label="match"))
-    default = _to_bound_canonical(Definition(SemanticQueryLeaf))
+    match = Definition(SemanticQueryLeaf, 7, label="match").concretize()
+    default = Definition(SemanticQueryLeaf).concretize()
     store = SemanticQueryStore()
     repo._query_catalog.register_stored(match, store)
     repo._query_catalog.register_stored(default, store)
@@ -50,10 +49,10 @@ def test_memory_query_uses_v2_parameters_for_partial_selector_constraints():
 
 def test_nested_v2_selector_falls_back_to_authoritative_verification():
     repo = Repo()
-    match_child = _to_bound_canonical(Definition(SemanticQueryLeaf, 7))
-    other_child = _to_bound_canonical(Definition(SemanticQueryLeaf, 8))
-    match = _to_bound_canonical(Definition(SemanticQueryParent, match_child))
-    other = _to_bound_canonical(Definition(SemanticQueryParent, other_child))
+    match_child = Definition(SemanticQueryLeaf, 7).concretize()
+    other_child = Definition(SemanticQueryLeaf, 8).concretize()
+    match = Definition(SemanticQueryParent, match_child).concretize()
+    other = Definition(SemanticQueryParent, other_child).concretize()
     store = SemanticQueryStore()
     repo._query_catalog.register_stored(match, store)
     repo._query_catalog.register_stored(other, store)
@@ -68,9 +67,7 @@ def test_nested_v2_selector_falls_back_to_authoritative_verification():
 
 def test_v2_variadic_selectors_are_not_pruned_by_legacy_feature_paths():
     repo = Repo()
-    target = _to_bound_canonical(
-        Definition(SemanticVariadicLeaf, "first", "second", enabled=True)
-    )
+    target = Definition(SemanticVariadicLeaf, "first", "second", enabled=True).concretize()
     store = SemanticQueryStore()
     repo._query_catalog.register_stored(target, store)
 

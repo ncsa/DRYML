@@ -36,7 +36,7 @@ from .model import (
     RefreshPolicy,
     ResultUniverse,
 )
-from .path import DefinitionPathLike, QueryPathError, get_subtree, normalize_path, replace_subtree
+from .path import DefinitionPath, DefinitionPathLike, QueryPathError, get_subtree, normalize_path, replace_subtree
 from .result import DefinitionResultSet, ObjectResultSet, OccurrenceResultSet
 from .selector_graph import compile_selector_graph
 from .utils import cdef_equal
@@ -110,7 +110,7 @@ class DefinitionQuery:
         if self.original is None or self.selector is None:
             raise QueryPathError("Cannot restore() on an unconstrained query.")
         norm = normalize_path(path)
-        subtree = get_subtree(self.original, norm)
+        subtree = get_subtree(self.original, self._original_path(norm))
         replacement = deepcopy(subtree) if isinstance(subtree, Definition) else subtree
         return replace(self, selector=replace_subtree(self.selector, norm, replacement))
 
@@ -125,12 +125,22 @@ class DefinitionQuery:
         if definition is None:
             if self.original is None:
                 raise QueryPathError(f"Cannot infer exact subtree at {norm!s}; query has no original source.")
-            definition = get_subtree(self.original, norm)
+            definition = get_subtree(self.original, self._original_path(norm))
         if isinstance(definition, Object):
             definition = definition.definition
         if not isinstance(definition, ConcreteDefinition):
             raise TypeError(f"Exact constraint at {norm!s} requires a ConcreteDefinition, got {type(definition).__name__}.")
         return replace(self, selector=replace_subtree(self.selector, norm, definition))
+
+    def _original_path(self, path: DefinitionPath) -> DefinitionPath:
+        """Map selector spelling to an exact V2 source path when available."""
+
+        if not isinstance(self.original, ConcreteDefinition) or self.original.identity_version != V2_IDENTITY_VERSION:
+            return path
+        from .selector_graph import _semantic_selector_path
+
+        semantic = _semantic_selector_path(self.selector, path)
+        return path if semantic is None else semantic
 
     def class_match(self, policy: ClassMatchPolicy) -> "DefinitionQuery":
         if policy not in {"selector", "exact"}:
