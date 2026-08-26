@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core2 import Object, Repo
+from dryml.core2 import ConcreteDefinition, Object, Repo
 from dryml.core2.query.model import QueryIndexError
 from dryml.core2.store.dir import DirStore
 from dryml.core2.utils.general import pickle_save, unpickler
@@ -127,7 +127,7 @@ def test_hydration_rejects_changed_definition_and_duplicate_location(tmp_path):
 
 
 def test_v1_materialization_uses_current_omitted_default_without_inference():
-    legacy = LegacyDefaultObject().definition
+    legacy = ConcreteDefinition._from_persisted_record(LegacyDefaultObject, (), {})
     old_defaults = LegacyDefaultObject.__init__.__defaults__
     LegacyDefaultObject.__init__.__defaults__ = (4,)
     try:
