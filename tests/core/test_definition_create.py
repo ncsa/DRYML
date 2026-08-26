@@ -30,8 +30,8 @@ def test_create_definition_2():
     assert definition['cls'] == objects.TestClass1
     assert len(definition.args) == 1
     assert definition.args[0] == 10
-    assert len(definition.kwargs.keys()) == 1
-    assert definition.kwargs['test'] == 'a'
+    assert len(definition.kwargs) == 1
+    assert definition.kwargs["test"] == "a"
 
 
 def test_create_definition_3():
@@ -154,10 +154,10 @@ def test_build_definition_1():
     assert isinstance(definition.cls, ImportRef)
     assert definition.cls.resolve() is objects.TestClass1
     assert definition['cls'] == definition.cls
-    assert len(definition.args) == 1
-    assert definition.args[0] == 10
-    assert len(definition.kwargs.keys()) == 1
-    assert definition.kwargs['test'] == 'a'
+    assert definition.args == ()
+    assert definition.kwargs == {"x": 10, "test": "a"}
+    assert definition.parameters["x"] == 10
+    assert definition.parameters["test"] == "a"
 
 
 def test_build_definition_2():
@@ -166,16 +166,14 @@ def test_build_definition_2():
     definition = obj.definition
     assert isinstance(definition.cls, ImportRef)
     assert definition.cls.resolve() is objects.TestClass1
-    assert len(definition.args) == 1
-    assert len(definition.kwargs.keys()) == 1
-    assert definition.kwargs['test'] == 'a'
-    sub_def = definition.args[0]
+    assert definition.args == ()
+    assert definition.kwargs["test"] == "a"
+    sub_def = definition.parameters["x"]
     assert type(sub_def) == ConcreteDefinition
     assert isinstance(sub_def.cls, ImportRef)
     assert sub_def.cls.resolve() is objects.TestClass1
-    assert len(sub_def.args) == 1
-    assert sub_def.args[0] == 10
-    assert len(sub_def.kwargs.keys()) == 1
+    assert sub_def.args == ()
+    assert sub_def.kwargs["x"] == 10
     assert sub_def.kwargs['test'] == 'b'
 
 
@@ -186,9 +184,8 @@ def test_build_definition_3():
     definition = obj.definition
     assert isinstance(definition.cls, ImportRef)
     assert definition.cls.resolve() is objects.TestClass1
-    assert len(definition.args) == 1
-    assert len(definition.kwargs.keys()) == 1
-    assert np.all(definition.args[0] == arr)
+    assert definition.args == ()
+    assert np.all(definition.parameters["x"] == arr)
     assert definition.kwargs['test'] == 'a'
 
 
@@ -201,15 +198,13 @@ def test_build_definition_4():
     definition = obj.definition
     assert isinstance(definition.cls, ImportRef)
     assert definition.cls.resolve() is objects.TestClass1
-    assert len(definition.args) == 1
-    assert len(definition.kwargs.keys()) == 1
+    assert definition.args == ()
     assert np.all(definition.kwargs['test'] == arr1)
-    sub_def = definition.args[0]
+    sub_def = definition.parameters["x"]
     assert isinstance(sub_def.cls, ImportRef)
     assert sub_def.cls.resolve() is objects.TestClass1
-    assert len(sub_def.args) == 1
-    assert len(sub_def.kwargs.keys()) == 1
-    assert np.all(sub_def.args[0] == arr2)
+    assert sub_def.args == ()
+    assert np.all(sub_def.parameters["x"] == arr2)
     assert sub_def.kwargs['test'] == 'b'
 
 
@@ -220,7 +215,7 @@ def test_build_definition_5():
     assert obj2.x is obj1
     assert obj2.test is obj1
     def_2 = obj2.definition
-    assert def_2.args[0] is def_2.kwargs['test']
+    assert def_2.parameters["x"] is def_2.parameters["test"]
 
 
 def test_build_definition_6():
@@ -234,11 +229,11 @@ def test_build_definition_6():
     assert obj4.test is obj2
     assert obj4.x is obj3
     def_4 = obj4.definition
-    def_3 = def_4.args[0]
-    def_2 = def_4.kwargs['test']
-    def_1 = def_3.args[0]
-    assert def_3.kwargs['test'] == def_2
-    assert def_3.args[0] == def_1
+    def_3 = def_4.parameters["x"]
+    def_2 = def_4.parameters["test"]
+    def_1 = def_3.parameters["x"]
+    assert def_3.parameters["test"] == def_2
+    assert def_3.parameters["x"] == def_1
 
 
 class SemanticFixture(Object):
@@ -291,7 +286,13 @@ def test_semantic_parameters_preserve_framework_member_collisions():
 
     assert cdef.cls != "constructor-cls"
     assert cdef.args == FrozenTuple()
-    assert cdef.kwargs == FrozenDict({})
+    assert cdef.kwargs == FrozenDict({
+        "cls": "constructor-cls",
+        "args": "constructor-args",
+        "kwargs": "constructor-kwargs",
+        "build": "constructor-build",
+        "stable_hash": "constructor-stable-hash",
+    })
     assert callable(cdef.build)
     assert callable(cdef.stable_hash)
     assert cdef.parameters == FrozenDict({
@@ -322,8 +323,8 @@ def test_partial_definition_parameters_bind_only_supplied_fields(monkeypatch):
     assert not hasattr(unresolved, "required")
 
 
-def test_v1_concrete_definition_retains_raw_call_without_semantic_parameters():
-    cdef = Definition(SemanticFixture, 1, keyword=4).concretize()
+def test_private_v1_concrete_definition_retains_raw_call_without_semantic_parameters():
+    cdef = ConcreteDefinition._from_persisted_record(SemanticFixture, (1,), {"keyword": 4})
 
     assert cdef.args == FrozenTuple((1,))
     assert cdef.kwargs == FrozenDict({"keyword": 4})

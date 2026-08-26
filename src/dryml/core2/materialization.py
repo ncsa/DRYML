@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .canonical import from_canonical
+from .cdef_identity import V1_IDENTITY_VERSION
 from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
@@ -133,8 +134,9 @@ def execute_materialization_plan(
                 f"(set build_missing=True to allow fresh construction)"
             )
 
-        rt_args = from_canonical_local(cdef.args, resolve_cdef=lambda child: local_memo[child], repo=repo)
-        rt_kwargs = from_canonical_local(cdef.kwargs, resolve_cdef=lambda child: local_memo[child], repo=repo)
+        canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=cls)
+        rt_args = from_canonical_local(canonical_args, resolve_cdef=lambda child: local_memo[child], repo=repo)
+        rt_kwargs = from_canonical_local(canonical_kwargs, resolve_cdef=lambda child: local_memo[child], repo=repo)
 
         try:
             obj = cls(*rt_args, repo=repo, __cdef__=cdef, **rt_kwargs)
@@ -164,6 +166,38 @@ def execute_materialization_plan(
 
 def from_canonical_local(value: Any, *, resolve_cdef, repo):
     return from_canonical(value, repo=repo, resolve_cdef=resolve_cdef, restore_state=False)
+
+
+def project_cdef_call(
+        cdef: ConcreteDefinition,
+        *,
+        cls: type | None = None) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Project an exact identity onto its runtime constructor call surface.
+
+    Args:
+        cdef: Exact V1 or V2 identity to invoke.
+        cls: Optional already-resolved current runtime class.
+
+    Returns:
+        Canonical positional and keyword values suitable for runtime decoding.
+
+    Raises:
+        TypeError: If a V2 record is incompatible with the current class
+            signature.
+        Exception: If resolving a V2 class fails.
+
+    V1 identities retain their persisted raw call surface. V2 identities use
+    their persisted semantic record and the current class signature without
+    invoking preparation or applying defaults.
+    """
+
+    if cdef.identity_version == V1_IDENTITY_VERSION:
+        return tuple(cdef._args), dict(cdef._kwargs)
+    if cls is None:
+        cls = resolve_symbol(cdef.cls)
+    from .bound_args import project_bound_arguments
+
+    return project_bound_arguments(cls, cdef._bound_args)
 
 
 def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefinition, options: RepoLoadOptions, memo: dict) -> set[ConcreteDefinition]:

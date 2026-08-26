@@ -77,6 +77,7 @@ from dryml.core2.bound_args import BoundArguments
 from dryml.core2.definition import ConcreteDefinition, Definition, SKIP_ARGS
 from dryml.core2.freeze import FrozenTuple
 from dryml.core2.symbol import ImportRef, SourceSpec
+from dryml.core2.utils.general import get_unique_concrete_definitions
 
 tf_cdef = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
@@ -91,9 +92,11 @@ source_cdef = ConcreteDefinition._from_bound_record(
     BoundArguments((("value", "safe"),)),
 )
 selector = Definition(ImportRef("dryml.models.torch.base", "Model"), SKIP_ARGS, name="safe")
+ImportRef.resolve = lambda self: (_ for _ in ()).throw(AssertionError("graph inspection resolved class"))
 
 assert tf_cdef.layer_defs == FrozenTuple(())
 assert tf_cdef.parameters["layer_defs"] == FrozenTuple(())
+assert get_unique_concrete_definitions(tf_cdef) == {tf_cdef}
 assert source_cdef.value == "safe"
 assert source_cdef.parameters["value"] == "safe"
 assert selector.name == "safe"
@@ -120,7 +123,7 @@ from dryml.core2.utils.general import pickle_save
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index="memory")
-    cdef = ConcreteDefinition(
+    cdef = ConcreteDefinition._from_persisted_record(
         ImportRef("dryml.models.tf.keras.base", "Sequential"),
         FrozenTuple(()),
         FrozenDict({"name": "symbolic"}),
@@ -150,7 +153,7 @@ from dryml.core2.freeze import FrozenDict, FrozenTuple
 from dryml.core2.query.fingerprint import legacy_target_fingerprint
 from dryml.core2.symbol import ImportRef
 
-cdef = ConcreteDefinition(
+cdef = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
     FrozenTuple(()),
     FrozenDict({"layer_defs": FrozenTuple(())}),
@@ -184,7 +187,7 @@ class FakeStore:
     def catalog_key(self):
         return "fake-tf-store"
 
-cdef = ConcreteDefinition(
+cdef = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
     FrozenTuple(()),
     FrozenDict({"layer_defs": FrozenTuple(())}),
@@ -218,7 +221,7 @@ class FakeStore:
     def catalog_key(self):
         return "fake-torch-store"
 
-cdef = ConcreteDefinition(
+cdef = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.torch.base", "Sequential"),
     FrozenTuple(()),
     FrozenDict({"layer_defs": FrozenTuple(())}),
@@ -282,12 +285,12 @@ from dryml.core2.query.fingerprint import target_local_fingerprint
 from dryml.core2.query.selector_graph import compile_selector_graph
 from dryml.core2.symbol import ImportRef
 
-child = ConcreteDefinition(
+child = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
     FrozenTuple(()),
     FrozenDict({"layer_defs": FrozenTuple(())}),
 )
-root = ConcreteDefinition(
+root = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.torch.base", "Model"),
     FrozenTuple(()),
     FrozenDict({"child": child}),
@@ -330,12 +333,12 @@ from dryml.core2.query.fingerprint import target_local_fingerprint
 from dryml.core2.query.selector_graph import compile_selector_graph
 from dryml.core2.symbol import ImportRef
 
-child = ConcreteDefinition(
+child = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
     FrozenTuple(()),
     FrozenDict({"layer_defs": FrozenTuple(())}),
 )
-root = ConcreteDefinition(
+root = ConcreteDefinition._from_persisted_record(
     ImportRef("dryml.models.torch.base", "Model"),
     FrozenTuple(()),
     FrozenDict({"child": child.freeze()}),
@@ -387,8 +390,8 @@ with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     child_cls = ImportRef("dryml.models.tf.keras.base", "Sequential")
     root_cls = ImportRef("dryml.models.tf.base", "Model")
-    child = ConcreteDefinition(child_cls, FrozenTuple(()), FrozenDict({"name": "tf-child"}))
-    root = ConcreteDefinition(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "tf-root"}))
+    child = ConcreteDefinition._from_persisted_record(child_cls, FrozenTuple(()), FrozenDict({"name": "tf-child"}))
+    root = ConcreteDefinition._from_persisted_record(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "tf-root"}))
     index = SQLiteStoreQueryIndex(
         source_key=store.catalog_key(),
         path=store.query_index_path,
@@ -481,8 +484,8 @@ with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     child_cls = ImportRef("dryml.models.torch.base", "Wrapper")
     root_cls = ImportRef("dryml.models.torch.base", "Model")
-    child = ConcreteDefinition(child_cls, FrozenTuple(()), FrozenDict({"name": "torch-child"}))
-    root = ConcreteDefinition(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "torch-root"}))
+    child = ConcreteDefinition._from_persisted_record(child_cls, FrozenTuple(()), FrozenDict({"name": "torch-child"}))
+    root = ConcreteDefinition._from_persisted_record(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "torch-root"}))
     index = SQLiteStoreQueryIndex(
         source_key=store.catalog_key(),
         path=store.query_index_path,

@@ -23,8 +23,8 @@ def test_query_path_resolves_concrete_definition_subtrees():
 
     from dryml.core2.query.path import get_subtree
 
-    assert get_subtree(root.definition, "args[0]") == leaf.definition
-    assert get_subtree(root.definition, 'metadata["x.y"][0]') == leaf.definition
+    assert get_subtree(root.definition, '$[@param("args")][0]') == leaf.definition
+    assert get_subtree(root.definition, '$[@param("kwargs")]["metadata"]["x.y"][0]') == leaf.definition
 
 
 def test_v2_semantic_paths_resolve_without_class_projection():
@@ -49,8 +49,8 @@ def test_v2_semantic_paths_resolve_without_class_projection():
 
 
 def test_v1_keywords_and_v2_parameters_resolve_in_their_own_path_domains():
-    leaf = ConcreteDefinition(objects.TestClass1, (10,), {"test": "leaf"})
-    legacy = ConcreteDefinition(objects.TestNest3, (), {"model": leaf})
+    leaf = ConcreteDefinition._from_persisted_record(objects.TestClass1, (10,), {"test": "leaf"})
+    legacy = ConcreteDefinition._from_persisted_record(objects.TestNest3, (), {"model": leaf})
     semantic = ConcreteDefinition._from_persisted_record(
         objects.TestNest3,
         identity_version=V2_IDENTITY_VERSION,
@@ -115,12 +115,12 @@ def test_v2_invalid_semantic_path_reports_the_failing_prefix():
 def test_replace_subtree_preserves_container_types():
     from dryml.core2.query.path import get_subtree, replace_subtree
     obj = objects.TestNest3(items=("a", "b"), mapping={"k": [1, 2]})
-    replaced = replace_subtree(obj.definition, "items[1]", "c")
-    replaced = replace_subtree(replaced, "mapping.k[0]", 9)
+    replaced = replace_subtree(obj.definition, '$[@param("kwargs")]["items"][1]', "c")
+    replaced = replace_subtree(replaced, '$[@param("kwargs")]["mapping"]["k"][0]', 9)
 
-    assert isinstance(get_subtree(replaced, "items"), tuple)
-    assert get_subtree(replaced, "items[1]") == "c"
-    assert get_subtree(replaced, "mapping.k[0]") == 9
+    assert isinstance(get_subtree(replaced, '$[@param("kwargs")]["items"]'), tuple)
+    assert get_subtree(replaced, '$[@param("kwargs")]["items"][1]') == "c"
+    assert get_subtree(replaced, '$[@param("kwargs")]["mapping"]["k"][0]') == 9
 
 
 def test_query_projection_does_not_mutate_source_or_reinject_uid():
@@ -129,10 +129,13 @@ def test_query_projection_does_not_mutate_source_or_reinject_uid():
     parent = objects.TestNest3(child=child, repo=repo)
     original = parent.definition
 
-    projected = repo.query(original).categorical(path="child", recursive=True)
+    projected = repo.query(original).categorical(
+        path='$[@param("kwargs")]["child"]',
+        recursive=True,
+    )
 
     assert parent.definition == original
-    assert "uid" in original.kwargs["child"].kwargs
+    assert "uid" in original.parameters["kwargs"]["child"].parameters["kwargs"]
     assert "uid" not in projected.selector.kwargs["child"].kwargs
 
 
@@ -140,19 +143,23 @@ def test_chained_query_methods_return_independent_queries():
     repo = Repo()
     source = objects.TestNest3(child=objects.TestClass4(1, repo=repo), repo=repo).definition
     q1 = repo.query(source)
-    q2 = q1.categorical(path="child", recursive=True)
-    q3 = q2.restore(path="child")
+    q2 = q1.categorical(path='$[@param("kwargs")]["child"]', recursive=True)
+    q3 = q2.restore()
 
     assert q1 is not q2
     assert q2 is not q3
-    assert "uid" in q1.selector.kwargs["child"].kwargs
+    assert "uid" in q1.selector.parameters["kwargs"]["child"].parameters["kwargs"]
     assert "uid" not in q2.selector.kwargs["child"].kwargs
-    assert q3.selector.kwargs["child"] == source.kwargs["child"]
+    assert q3.selector == source
 
 
 def test_restore_frozen_list_branch_preserves_query_soundness():
     repo = Repo()
-    source = objects.TestNest3(items=[1, 2], repo=repo).definition
+    source = ConcreteDefinition._from_persisted_record(
+        objects.TestNest3,
+        (),
+        {"items": [1, 2]},
+    )
     match = objects.TestNest3(items=[1, 2], repo=repo)
     other = objects.TestNest3(items=[1, 3], repo=repo)
     repo.add_objects(match, other)

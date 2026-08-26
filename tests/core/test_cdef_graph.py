@@ -59,13 +59,13 @@ def test_direct_child_creates_two_nodes_and_one_edge():
 
     assert len(graph.nodes()) == 2
     assert edge.parent == parent.definition
-    assert str(edge.path) == "$.args[0]"
+    assert str(edge.path) == '$[@param("child")]'
     assert edge.child == child.definition
     assert graph.resolve(parent.definition, edge.path) == child.definition
 
 
 def test_v2_parent_uses_semantic_parameter_edge_and_keeps_legacy_child_identity():
-    child = ConcreteDefinition(GraphLeaf, ("child",), {})
+    child = ConcreteDefinition._from_persisted_record(GraphLeaf, ("child",), {})
     parent = ConcreteDefinition._from_persisted_record(
         GraphParent,
         identity_version=V2_IDENTITY_VERSION,
@@ -81,7 +81,7 @@ def test_v2_parent_uses_semantic_parameter_edge_and_keeps_legacy_child_identity(
 
 
 def test_equivalent_v2_call_spellings_produce_the_same_semantic_edge_path():
-    child = ConcreteDefinition(GraphLeaf, ("child",), {})
+    child = ConcreteDefinition._from_persisted_record(GraphLeaf, ("child",), {})
     positional = ConcreteDefinition._from_persisted_record(
         GraphParent,
         identity_version=V2_IDENTITY_VERSION,
@@ -99,13 +99,13 @@ def test_equivalent_v2_call_spellings_produce_the_same_semantic_edge_path():
 
 
 def test_mixed_version_parent_paths_follow_each_parent_identity_version():
-    leaf = ConcreteDefinition(GraphLeaf, ("leaf",), {})
+    leaf = ConcreteDefinition._from_persisted_record(GraphLeaf, ("leaf",), {})
     v2_parent = ConcreteDefinition._from_persisted_record(
         GraphParent,
         identity_version=V2_IDENTITY_VERSION,
         parameters=BoundArguments((("child", leaf),)),
     )
-    v1_root = ConcreteDefinition(GraphParent, (v2_parent,), {})
+    v1_root = ConcreteDefinition._from_persisted_record(GraphParent, (v2_parent,), {})
 
     graph = ConcreteDefinitionGraph.from_root(v1_root)
 
@@ -114,8 +114,8 @@ def test_mixed_version_parent_paths_follow_each_parent_identity_version():
 
 
 def test_v2_variadic_parameter_buckets_produce_stable_child_edges():
-    first = ConcreteDefinition(GraphLeaf, ("first",), {})
-    second = ConcreteDefinition(GraphLeaf, ("second",), {})
+    first = ConcreteDefinition._from_persisted_record(GraphLeaf, ("first",), {})
+    second = ConcreteDefinition._from_persisted_record(GraphLeaf, ("second",), {})
     parent = ConcreteDefinition._from_persisted_record(
         GraphContainer,
         identity_version=V2_IDENTITY_VERSION,
@@ -161,7 +161,10 @@ def test_same_child_at_two_paths_has_one_node_and_two_edges():
 
     assert len([node for node in graph.nodes() if node.definition == child.definition]) == 1
     assert len([edge for edge in graph.edges() if edge.child == child.definition]) == 2
-    assert {str(occ.path) for occ in occurrences} == {"$.args[0][0]", "$.args[0][1]"}
+    assert {str(occ.path) for occ in occurrences} == {
+        '$[@param("value")][0]',
+        '$[@param("value")][1]',
+    }
 
 
 def test_primary_path_of_repeated_child_returns_first_path():
@@ -171,7 +174,7 @@ def test_primary_path_of_repeated_child_returns_first_path():
 
     graph = ConcreteDefinitionGraph.from_root(parent.definition)
 
-    assert str(graph.primary_path(parent.definition, child.definition)) == "$.args[0][0]"
+    assert str(graph.primary_path(parent.definition, child.definition)) == '$[@param("value")][0]'
 
 
 def test_multi_root_graph_deduplicates_shared_nodes():
@@ -242,12 +245,14 @@ def test_iter_direct_cdef_edges_stops_at_child_boundary():
     edges = tuple(iter_direct_cdef_edges(root.definition))
 
     assert edges == ((edges[0][0], mid.definition, EdgeKind.MATERIALIZE),)
-    assert str(edges[0][0]) == "$.args[0]"
+    assert str(edges[0][0]) == '$[@param("child")]'
 
 
-def test_exact_graph_builder_rejects_plain_definition_in_cdef():
-    with pytest.raises(TypeError, match="concretize first"):
-        ConcreteDefinition(GraphContainer, FrozenTuple((Definition(GraphLeaf, "x"),)), FrozenDict({}))
+def test_public_exact_graph_builder_binds_nested_plain_definitions():
+    cdef = ConcreteDefinition(GraphContainer, FrozenTuple((Definition(GraphLeaf, "x"),)), FrozenDict({}))
+
+    assert cdef.identity_version == V2_IDENTITY_VERSION
+    assert isinstance(cdef.parameters["value"], ConcreteDefinition)
 
 
 def test_graph_rejects_missing_root_node():
@@ -300,7 +305,7 @@ def test_graph_rejects_edge_whose_path_resolves_to_different_child():
                 CDefNode(child1, child1.stable_hash()),
                 CDefNode(child2, child2.stable_hash()),
             ),
-            (CDefEdge(parent, GraphPath((Arg(0),)), child2),),
+            (CDefEdge(parent, GraphPath((Parameter("child"),)), child2),),
         )
 
 
@@ -312,7 +317,7 @@ def test_graph_rejects_edge_path_resolving_to_scalar():
         ConcreteDefinitionGraph(
             (parent,),
             (CDefNode(parent, parent.stable_hash()), CDefNode(child, child.stable_hash())),
-            (CDefEdge(parent, GraphPath((Arg(0),)), child),),
+            (CDefEdge(parent, GraphPath((Parameter("child"),)), child),),
         )
 
 

@@ -10,6 +10,7 @@ from dryml.core2.bound_args import (
 )
 from dryml.core2.canonical import _to_bound_canonical
 from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core2.definition import thaw_concrete
 from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
 
 
@@ -174,6 +175,29 @@ def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypa
     restored = object.__new__(ConcreteDefinition)
     restored.__setstate__(state)
     assert restored == cdef
+
+
+def test_public_exact_constructor_uses_v2_binding_and_compatibility_projection():
+    cdef = ConcreteDefinition(BindingFixture, (1, 4, "tail"), {"keyword": 5, "flag": True})
+
+    assert cdef.identity_version == V2_IDENTITY_VERSION
+    assert cdef.parameters == FrozenDict({
+        "positional_only": 1,
+        "value": 4,
+        "items": FrozenTuple(("tail",)),
+        "keyword": 5,
+        "options": FrozenDict({"flag": True}),
+    })
+    assert cdef.args == FrozenTuple((1, 4, "tail"))
+    assert cdef.kwargs == FrozenDict({"keyword": 5, "flag": True})
+
+
+def test_v2_thaw_uses_current_signature_projection_for_all_parameter_kinds():
+    cdef = ConcreteDefinition(BindingFixture, (1, 4, "tail"), {"keyword": 5, "flag": True})
+
+    thawed = thaw_concrete(cdef)
+
+    assert thawed.concretize() == cdef
 
 
 def test_private_v2_defaults_are_snapshotted_and_change_identity_later():

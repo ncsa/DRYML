@@ -737,7 +737,34 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
             # V2 identities persist semantic names rather than a particular
             # positional/keyword call spelling.  Partial binding deliberately
             # omits defaults, so only supplied parameters constrain matching.
-            for name, child in selector.parameters.items():
+            try:
+                selector_parameters = selector.parameters
+            except TypeError:
+                # Missing/Present selectors may intentionally mention a
+                # parameter absent from the live constructor. Bind the known
+                # portion, then retain those structural absence constraints.
+                from ..arg_roles import apply_bound_arg_roles
+                from ..bound_args import _constructor_signature, bind_partial_arguments
+
+                if selector.cls is None or not isinstance(selector.cls, type):
+                    raise
+                signature = _constructor_signature(selector.cls)
+                known_kwargs = {
+                    name: value
+                    for name, value in selector.kwargs.items()
+                    if name in signature.parameters
+                }
+                unknown_kwargs = {
+                    name: value
+                    for name, value in selector.kwargs.items()
+                    if name not in signature.parameters
+                }
+                args = () if selector.args is None else tuple(selector.args)
+                bound = bind_partial_arguments(selector.cls, args, known_kwargs)
+                bound = apply_bound_arg_roles(selector.cls, bound)
+                selector_parameters = dict(bound.items())
+                selector_parameters.update(unknown_kwargs)
+            for name, child in selector_parameters.items():
                 if name not in target.parameters:
                     if isinstance(child, Par) and child.matches(None, present=False):
                         continue

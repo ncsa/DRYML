@@ -392,7 +392,7 @@ class DefinitionLens:
         return replace_subtree(self.definition, self.path, freeze_def_value(value))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ConcreteDefinition(DefInterface, Mapping):
     """
     Exact canonical materializable object identity.
@@ -402,27 +402,109 @@ class ConcreteDefinition(DefInterface, Mapping):
     """
 
     cls: type | ImportRef | SourceSpec
-    args: FrozenTuple[Any, ...] = field(default_factory = lambda: FrozenTuple())
-    kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
+    _args: FrozenTuple[Any, ...] = field(default_factory=lambda: FrozenTuple())
+    _kwargs: FrozenDict[str, Any] = field(default_factory=lambda: FrozenDict({}))
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
     _identity_version: int = field(default=V1_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
     _bound_args: BoundArguments | None = field(default=None, init=False, repr=False, compare=False, hash=False)
 
-    def __post_init__(self) -> None:
+    def __init__(self, cdef_cls, args=(), kwargs=None) -> None:
+        """Create a validated V2 exact identity from a public call surface.
+
+        Args:
+            cdef_cls: Live class for the exact constructor call.
+            args: Positional constructor arguments before preparation.
+            kwargs: Keyword constructor arguments before preparation.
+
+        Raises:
+            TypeError: If the class or call cannot be prepared, fully bound, or
+                canonicalized into a V2 identity.
+
+        Direct construction is a convenience V2 factory. Persisted V1 call
+        surfaces are admitted only through the private hydration constructor.
+        """
+
+        from .canonical import _to_bound_canonical
+
+        if kwargs is None:
+            kwargs = {}
+        if not isinstance(kwargs, Mapping):
+            raise TypeError("ConcreteDefinition kwargs must be a mapping.")
+        result = _to_bound_canonical(Definition(cdef_cls, *args, **dict(kwargs)))
+        self._copy_record(result)
+
+    @classmethod
+    def _new_raw_record(cls, cdef_cls, args, kwargs) -> "ConcreteDefinition":
+        """Allocate a private raw V1 record after canonical validation."""
+
+        result = object.__new__(cls)
+        object.__setattr__(result, "cls", cdef_cls)
+        object.__setattr__(result, "_args", args if isinstance(args, FrozenTuple) else FrozenTuple(args))
+        object.__setattr__(result, "_kwargs", kwargs if isinstance(kwargs, FrozenDict) else FrozenDict(kwargs))
+        result._freeze_raw_call_surface()
+        object.__setattr__(result, "_stable_hash_cache", None)
+        object.__setattr__(result, "_identity_version", V1_IDENTITY_VERSION)
+        object.__setattr__(result, "_bound_args", None)
+        return result
+
+    def _freeze_raw_call_surface(self) -> None:
         from .canonical import freeze_concrete_value
 
-        args = self.args if isinstance(self.args, FrozenTuple) else FrozenTuple(self.args)
-        kwargs = self.kwargs if isinstance(self.kwargs, FrozenDict) else FrozenDict(self.kwargs)
+        args = self._args if isinstance(self._args, FrozenTuple) else FrozenTuple(self._args)
+        kwargs = self._kwargs if isinstance(self._kwargs, FrozenDict) else FrozenDict(self._kwargs)
         object.__setattr__(
             self,
-            "args",
+            "_args",
             FrozenTuple(freeze_concrete_value(v, path=("args", i)) for i, v in enumerate(args)),
         )
         object.__setattr__(
             self,
-            "kwargs",
+            "_kwargs",
             FrozenDict({k: freeze_concrete_value(v, path=("kwargs", k)) for k, v in kwargs.items()}),
         )
+
+    def _copy_record(self, record: "ConcreteDefinition") -> None:
+        """Populate this shell from a private, already-validated identity."""
+
+        object.__setattr__(self, "cls", record.cls)
+        object.__setattr__(self, "_args", record._args)
+        object.__setattr__(self, "_kwargs", record._kwargs)
+        object.__setattr__(self, "_identity_version", record.identity_version)
+        object.__setattr__(self, "_bound_args", record._bound_args)
+        object.__setattr__(self, "_stable_hash_cache", record._stable_hash_cache)
+
+    @property
+    def args(self) -> FrozenTuple[Any, ...]:
+        """Return the compatibility positional call surface.
+
+        V1 records return their persisted raw positional values. V2 records
+        resolve the current class and project their persisted semantic record;
+        this accessor can therefore import a backend or raise a current
+        signature error and is not an identity or inspection surface.
+        """
+
+        if self._bound_args is None:
+            return self._args
+        from .materialization import project_cdef_call
+
+        args, _ = project_cdef_call(self)
+        return FrozenTuple(args)
+
+    @property
+    def kwargs(self) -> FrozenDict[str, Any]:
+        """Return the compatibility keyword call surface.
+
+        V1 records return their persisted raw keyword values. V2 records use
+        the same current-signature projection as materialization and may
+        resolve or import the referenced class.
+        """
+
+        if self._bound_args is None:
+            return self._kwargs
+        from .materialization import project_cdef_call
+
+        _, kwargs = project_cdef_call(self)
+        return FrozenDict(kwargs)
 
     @property
     def identity_version(self) -> int:
@@ -479,9 +561,9 @@ class ConcreteDefinition(DefInterface, Mapping):
             stable_hash_cache: str | None = None) -> "ConcreteDefinition":
         """Hydrate a validated identity record without public canonicalization.
 
-        This internal boundary is intentionally limited to persisted records and
-        test-only V2 coexistence. Public exact construction remains V1 until
-        the later bound-record activation unit.
+        This internal boundary is intentionally limited to persisted records
+        and compatibility fixtures. Public exact construction always binds a
+        live call through the V2 pipeline.
         """
 
         if identity_version == V2_IDENTITY_VERSION:
@@ -494,7 +576,11 @@ class ConcreteDefinition(DefInterface, Mapping):
             if identity_version != V2_IDENTITY_VERSION:
                 raise ValueError("Bound CDef records require V2 identity version.")
         else:
-            result = cls(cdef_cls, () if args is None else args, {} if kwargs is None else kwargs)
+            result = cls._new_raw_record(
+                cdef_cls,
+                () if args is None else args,
+                {} if kwargs is None else kwargs,
+            )
         object.__setattr__(result, "_identity_version", validate_identity_version(identity_version))
         object.__setattr__(result, "_stable_hash_cache", stable_hash_cache)
         return result
@@ -518,7 +604,7 @@ class ConcreteDefinition(DefInterface, Mapping):
         """
 
         bound_args = validate_canonical_bound_arguments(bound_args)
-        result = cls(cdef_cls, (), {})
+        result = cls._new_raw_record(cdef_cls, (), {})
         object.__setattr__(result, "_bound_args", bound_args)
         object.__setattr__(result, "_identity_version", V2_IDENTITY_VERSION)
         return result
@@ -538,7 +624,7 @@ class ConcreteDefinition(DefInterface, Mapping):
         """Serialize V1 in its legacy slotted layout and V2 as a named record."""
 
         if self.identity_version == V1_IDENTITY_VERSION:
-            return [self.cls, self.args, self.kwargs, self._stable_hash_cache]
+            return [self.cls, self._args, self._kwargs, self._stable_hash_cache]
         if self._bound_args is not None:
             return {
                 "identity_version": self.identity_version,
@@ -549,8 +635,8 @@ class ConcreteDefinition(DefInterface, Mapping):
         return {
             "identity_version": self.identity_version,
             "cls": self.cls,
-            "args": self.args,
-            "kwargs": self.kwargs,
+            "args": self._args,
+            "kwargs": self._kwargs,
             "stable_hash_cache": self._stable_hash_cache,
         }
 
@@ -566,18 +652,13 @@ class ConcreteDefinition(DefInterface, Mapping):
             parameters=record.parameters,
             stable_hash_cache=record.stable_hash_cache,
         )
-        object.__setattr__(self, "cls", restored.cls)
-        object.__setattr__(self, "args", restored.args)
-        object.__setattr__(self, "kwargs", restored.kwargs)
-        object.__setattr__(self, "_identity_version", restored.identity_version)
-        object.__setattr__(self, "_bound_args", restored._bound_args)
-        object.__setattr__(self, "_stable_hash_cache", restored._stable_hash_cache)
+        self._copy_record(restored)
 
     def __getitem__(self, k: str) -> Any:
         if k == "cls": return self.cls
         if k == "parameters" and self._bound_args is not None: return self.parameters
-        if k == "args" and self._bound_args is None: return self.args
-        if k == "kwargs" and self._bound_args is None: return self.kwargs
+        if k == "args" and self._bound_args is None: return self._args
+        if k == "kwargs" and self._bound_args is None: return self._kwargs
         raise KeyError(k)
 
     def __iter__(self) -> Iterator[str]:
@@ -616,7 +697,7 @@ class ConcreteDefinition(DefInterface, Mapping):
                 and _structural_value_equal(self.cls, rhs.cls)
                 and _structural_value_equal(self._bound_args.as_frozen_dict(), rhs._bound_args.as_frozen_dict())
             )
-        return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self.args, rhs.args) and _structural_value_equal(self.kwargs, rhs.kwargs)
+        return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self._args, rhs._args) and _structural_value_equal(self._kwargs, rhs._kwargs)
 
     def __ne__(self, rhs):
         return not self.__eq__(rhs)

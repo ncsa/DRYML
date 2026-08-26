@@ -157,6 +157,45 @@ def _get_child(obj: Any, seg: PathSegment) -> Any:
 
 
 def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
+    if isinstance(obj, ConcreteDefinition) and obj.identity_version == V2_IDENTITY_VERSION:
+        if not isinstance(seg, Parameter):
+            raise QueryPathError(f"{seg!s} is not valid on a V2 concrete definition.")
+        if seg.name not in obj.parameters:
+            raise QueryPathError(f"Missing parameter {seg.name!r} while replacing {seg!s}.")
+        from ...bound_args import BoundArguments
+
+        parameters = dict(obj.parameters)
+        parameters[seg.name] = child
+        from ...canonical import (
+            CANONICAL_DICT_KINDS,
+            CANONICAL_SEQ_KINDS,
+            NodeKind,
+            iter_value_children,
+            node_kind,
+        )
+
+        def contains_soft_definition(value):
+            kind = node_kind(value)
+            if kind is NodeKind.DEFINITION:
+                return True
+            if kind in CANONICAL_SEQ_KINDS | CANONICAL_DICT_KINDS:
+                return any(contains_soft_definition(item) for _, item in iter_value_children(value))
+            return False
+
+        if any(contains_soft_definition(value) for value in parameters.values()):
+            # A soft replacement changes the exact root into a partial selector.
+            # Project only here, where query transformation intentionally leaves
+            # the import-free V2 identity surface.
+            from ...bound_args import project_bound_arguments
+            from ...symbol import resolve_symbol
+
+            args, kwargs = project_bound_arguments(
+                resolve_symbol(obj.cls),
+                BoundArguments(parameters),
+            )
+            return Definition(obj.cls, *args, **kwargs)
+        return ConcreteDefinition._from_bound_record(obj.cls, BoundArguments(parameters))
+
     if isinstance(obj, (Definition, ConcreteDefinition)):
         args = None if obj.args is None else list(obj.args)
         kwargs = dict(obj.kwargs)

@@ -180,17 +180,34 @@ def get_object_view(obj):
 
 
 def get_unique_concrete_definitions(obj_or_def) -> set["ConcreteDefinition"]:
+    """Collect exact CDefs without materializing or resolving V2 classes.
+
+    Args:
+        obj_or_def: Object, CDef, or canonical container to traverse.
+
+    Returns:
+        Every distinct exact CDef reachable from the supplied value.
+
+    Raises:
+        ValueError: If a partial Definition appears in the concrete graph.
+    """
+
     from ..object import Object
     from ..definition import Definition
     from ..definition import ConcreteDefinition
+    from ..cdef_identity import V2_IDENTITY_VERSION
 
 
     if isinstance(obj_or_def, Object):
         return get_unique_concrete_definitions(obj_or_def.definition)
     if isinstance(obj_or_def, ConcreteDefinition):
-        args_cdefs = list(get_unique_concrete_definitions(obj_or_def.args))
-        kwargs_cdefs = list(get_unique_concrete_definitions(obj_or_def.kwargs))
-        return set([obj_or_def] + args_cdefs + kwargs_cdefs)
+        if obj_or_def.identity_version == V2_IDENTITY_VERSION:
+            nested = get_unique_concrete_definitions(obj_or_def.parameters)
+        else:
+            nested = get_unique_concrete_definitions(obj_or_def._args)
+            nested.update(get_unique_concrete_definitions(obj_or_def._kwargs))
+        nested.add(obj_or_def)
+        return nested
 
     if isinstance(obj_or_def, Definition):
         raise ValueError("Unexpected Definition found in object graph!")

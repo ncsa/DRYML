@@ -269,6 +269,7 @@ def _validate_canonical_value(value: Any, path: tuple[str | int, ...]) -> None:
         NodeKind.IDENTITY_VALUE,
         NodeKind.FROZEN_NDARRAY,
         NodeKind.CONCRETE_DEFINITION,
+        NodeKind.DEFLINK,
         NodeKind.QUOTED_DEF,
         NodeKind.SELECTOR_SPEC,
         NodeKind.IMPORT_REF,

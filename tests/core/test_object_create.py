@@ -1,6 +1,9 @@
 import numpy as np
 import core2_objects as objects
 from dryml.core2.definition import Definition
+from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core2.object import definition_mode
+from dryml.core2.repo import Repo
 
 ### Tests for methods of creating objects. We verify they have the intended properties.
 
@@ -12,6 +15,22 @@ def test_build_from_definition_1():
     assert type(obj) == objects.TestClass1
     assert obj.test == 'a'
     assert obj.x == 10
+    assert obj.definition.identity_version == V2_IDENTITY_VERSION
+
+
+def test_all_public_exact_object_routes_emit_v2():
+    repo = Repo()
+
+    direct = objects.TestClass1(10, test="direct", repo=repo)
+    built = Definition(objects.TestClass1, 11, test="build").build(repo=repo)
+    loaded = repo.load_or_build(Definition(objects.TestClass1, 12, test="load-or-build"))
+    with definition_mode(concrete=True):
+        concrete = objects.TestClass1(13, test="concrete", repo=repo)
+
+    assert direct.definition.identity_version == V2_IDENTITY_VERSION
+    assert built.definition.identity_version == V2_IDENTITY_VERSION
+    assert loaded.definition.identity_version == V2_IDENTITY_VERSION
+    assert concrete.identity_version == V2_IDENTITY_VERSION
 
 
 def test_build_from_definition_2():

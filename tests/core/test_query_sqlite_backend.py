@@ -10,7 +10,7 @@ from dryml.core2.query.lowering import CandidateRelation, LoweringDiagnostics, S
 from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats, QueryWouldScanError
 from dryml.core2.query.domain import KnownDomain, NestedDomain, StoredDomain
 from dryml.core2.query.graph_plan import graph_candidate_ids
-from dryml.core2.query.path import GraphPath
+from dryml.core2.query.path import GraphPath, Parameter
 from dryml.core2.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode, compile_selector_graph
 from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
 import dryml.core2.query.sqlite.index as sqlite_index_module
@@ -622,7 +622,7 @@ def test_relation_operations_parent_child_domain_and_semijoin(tmp_path):
     other = SQLiteParent(child=SQLiteLeaf("other-child"), name="other-owner")
     graph = ConcreteDefinitionGraph.from_roots([owner.definition, other.definition])
     index.register_stored_roots(graph, [owner.definition, other.definition])
-    child_path = GraphPath().child("child")
+    child_path = GraphPath((Parameter("child"),))
 
     with index.read_view() as view:
         known_leaf_plan = view.lower_selector_graph(
@@ -1258,7 +1258,7 @@ def test_owner_projection_and_occurrence_capture(tmp_path):
     assert set(projection.cdefs) == {owner1.definition, owner2.definition}
     assert {occ.owner for occ in occurrences} == {owner1.definition, owner2.definition}
     assert {occ.definition for occ in occurrences} == {leaf.definition}
-    assert all(str(occ.path) == "$.child" for occ in occurrences)
+    assert all(str(occ.path) == '$[@param("child")]' for occ in occurrences)
 
 
 def test_remove_stored_roots_updates_generation_and_stored_scope(tmp_path):

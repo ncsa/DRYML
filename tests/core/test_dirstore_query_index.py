@@ -436,7 +436,11 @@ def test_sqlite_rebuild_registers_store_roots_in_batches(tmp_path, monkeypatch):
 
 def test_sqlite_rebuilds_mixed_v1_v2_authoritative_roots(tmp_path):
     store = DirStore(tmp_path / "store", query_index="memory")
-    v1 = ConcreteDefinition(ImportRef("builtins", "dict"), FrozenTuple(("v1",)), FrozenDict({}))
+    v1 = ConcreteDefinition._from_persisted_record(
+        ImportRef("builtins", "dict"),
+        FrozenTuple(("v1",)),
+        FrozenDict({}),
+    )
     v2 = ConcreteDefinition._from_persisted_record(
         ImportRef("builtins", "dict"),
         identity_version=V2_IDENTITY_VERSION,

@@ -2,7 +2,7 @@ import core2_objects as objects
 from dryml.core2.definition import Definition, ConcreteDefinition, SKIP_ARGS, selector_match, \
     concretize_func, thaw_concrete
 from dryml.core2.canonical import _to_bound_canonical
-from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
 import numpy as np
 
 
@@ -15,16 +15,17 @@ def test_definition_concrete_1():
     new_def = definition.concretize()
     assert definition != new_def
     assert type(new_def) is ConcreteDefinition
-    assert new_def.identity_version == V1_IDENTITY_VERSION
+    assert new_def.identity_version == V2_IDENTITY_VERSION
 
 
-def test_internal_bound_concretization_does_not_enable_public_v2_emission():
+def test_public_concretization_uses_the_bound_v2_pipeline():
     definition = Definition(objects.TestClass1, 10, test="a")
 
     private_v2 = _to_bound_canonical(definition)
 
     assert private_v2.identity_version == V2_IDENTITY_VERSION
-    assert definition.concretize().identity_version == V1_IDENTITY_VERSION
+    assert definition.concretize().identity_version == V2_IDENTITY_VERSION
+    assert definition.concretize() == private_v2
 
 
 def test_definition_concrete_2():
@@ -37,8 +38,8 @@ def test_definition_concrete_2():
     assert selector_match(definition, new_def, verbose=True)
     assert definition != new_def
     assert type(new_def) is ConcreteDefinition
-    assert 'uid' in new_def.kwargs
-    assert 'metadata' in new_def.kwargs
+    assert 'uid' in new_def.parameters['kwargs']
+    assert 'metadata' in new_def.parameters['kwargs']
 
 
 def test_definition_concrete_3():
@@ -57,9 +58,9 @@ def test_definition_concrete_4():
 
     concrete_def = def_2.concretize()
 
-    conc_def_1 = concrete_def.kwargs['test']
+    conc_def_1 = concrete_def.parameters['test']
 
-    assert concrete_def.args[0].match(conc_def_1, strict=True)
+    assert concrete_def.parameters['x'].match(conc_def_1, strict=True)
 
 def test_definition_concretize_types_1():
     # Test that concretize properly transforms containers and other types.
@@ -144,4 +145,4 @@ def test_object_build_from_def_1():
         1,
         base_msg='Test').build()
 
-    assert 'uid' in obj.definition.kwargs
+    assert 'uid' in obj.definition.parameters['kwargs']

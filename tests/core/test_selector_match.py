@@ -367,5 +367,5 @@ def test_definition_selector_matches_class_arg_refs():
     selector = Definition(objects.TestClass1, objects.TestClass2)
     target = selector.concretize()
 
-    assert isinstance(target.args[0], ImportRef)
+    assert isinstance(target.parameters["x"], ImportRef)
     assert selector(target)

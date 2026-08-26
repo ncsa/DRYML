@@ -95,8 +95,11 @@ class Dryml(type):
                 defn = Definition(cls, *args, **kwargs)
                 cdef = defn.concretize(repo=sub_repo)
 
-                rt_args = sub_repo.load_object(cdef.args, build_missing=True)
-                rt_kwargs = sub_repo.load_object(cdef.kwargs, build_missing=True)
+                from .materialization import project_cdef_call
+
+                canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=cls)
+                rt_args = sub_repo.load_object(canonical_args, build_missing=True)
+                rt_kwargs = sub_repo.load_object(canonical_kwargs, build_missing=True)
 
             else:
                 # Reconstruction from an existing ConcreteDefinition

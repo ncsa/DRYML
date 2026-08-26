@@ -4,7 +4,8 @@ import inspect
 import pytest
 
 from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
+from dryml.core2 import ConcreteDefinition, Definition, Object, Repo, SKIP_ARGS
+from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
 from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryIndexGenerationChanged, QueryVerifyBudgetExceeded, QueryWouldScanError
 import dryml.core2.query.federation as federation_module
 from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
@@ -734,6 +735,33 @@ def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
     assert [plan.backend for plan in results.explanation.source_plans] == ["sqlite", "sqlite"]
 
 
+def test_federation_keeps_apparent_equivalent_v1_and_v2_identities_distinct(tmp_path):
+    store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
+    repo = Repo(stores=[store1, store2])
+    v1 = ConcreteDefinition._from_persisted_record(FederationLeaf, (), {"name": "same"})
+    v1_obj = repo.load_or_build(v1, restore_state=False)
+    v2_obj = FederationLeaf(name="same", repo=repo)
+
+    repo.save_object(v1_obj, store=store1)
+    repo.save_object(v1_obj, store=store2)
+    repo.save_object(v2_obj, store=store2)
+
+    repo2 = Repo(stores=[
+        DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+        DirStore(store2.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
+    ])
+    class_only = repo2.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
+
+    assert v1.identity_version == V1_IDENTITY_VERSION
+    assert v2_obj.definition.identity_version == V2_IDENTITY_VERSION
+    assert set(class_only) == {v1, v2_obj.definition}
+    assert len(class_only.replicas(v1)) == 2
+    assert len(class_only.replicas(v2_obj.definition)) == 1
+    assert list(repo2.query(v1).stored().defs()) == [v1]
+    assert list(repo2.query(v2_obj.definition).stored().defs()) == [v2_obj.definition]
+
+
 def test_query_backed_multistore_order_stable(tmp_path, monkeypatch):
     monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
     store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
@@ -914,7 +942,7 @@ def test_sqlite_federated_nested_definitions_owners_and_occurrences(tmp_path):
     assert len(occurrences) == 1
     assert occurrences[0].owner == owner.definition
     assert occurrences[0].definition == leaf.definition
-    assert str(occurrences[0].path) == "$.child"
+    assert str(occurrences[0].path) == '$[@param("child")]'
     assert definitions.explanation.generation_vector == {repo2_store.catalog_key(): 1}
     assert owners.explanation.source_plans[0].result_count == 1
     assert owners.explanation.lowering_diagnostics["owners_found"] == 1
@@ -947,7 +975,7 @@ def test_sqlite_multistore_occurrences_deduplicate_and_keep_replica_order(tmp_pa
     assert len(occurrence_items) == 1
     assert occurrence_items[0].owner == owner.definition
     assert occurrence_items[0].definition == leaf.definition
-    assert str(occurrence_items[0].path) == "$.child"
+    assert str(occurrence_items[0].path) == '$[@param("child")]'
     assert tuple(store.base_dir for store in owners.replicas(owner.definition)) == (store2.base_dir, store1.base_dir)
 
 

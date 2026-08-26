@@ -1,8 +1,10 @@
 import pytest
 
-from dryml.core2 import Object, Repo, Serializable
+from dryml.core2 import ConcreteDefinition, Definition, Object, Repo, Serializable
+from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core2.object import WorkspaceCapable
 from dryml.core2.policies import RepoLoadOptions, RepoSaveOptions
-from dryml.core2.query.path import Arg, GraphPath, Key, SetMember, get_subtree
+from dryml.core2.query.path import Arg, GraphPath, Index, Key, Parameter, SetMember, get_subtree
 from dryml.core2.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
 from dryml.core2.repo_plan import GraphApplyResult, RuntimeBindingConflict, collect_runtime_roots
 from dryml.core2.store.dir import DirStore
@@ -20,6 +22,12 @@ class GraphNode(Object):
         super().__init__()
         self.name = name
         self.children = children
+
+
+class WorkspaceLeaf(Object, WorkspaceCapable):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
 
 
 class RepoAware(Object):
@@ -102,7 +110,7 @@ def test_apply_graph_occurrence_mode_preserves_repeated_results():
 
     assert all(isinstance(result, GraphApplyResult) for result in results)
     assert [result.value for result in results] == ["leaf", "leaf"]
-    assert [str(result.path) for result in results] == ["$.args[1]", "$.args[2]"]
+    assert [str(result.path) for result in results] == ["$[@param(\"children\")][0]", "$[@param(\"children\")][1]"]
 
 
 def test_repo_occurrence_path_preserves_arg_segment():
@@ -112,7 +120,7 @@ def test_repo_occurrence_path_preserves_arg_segment():
 
     result = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)[0]
 
-    assert isinstance(result.path[0], Arg)
+    assert isinstance(result.path[0], Parameter)
     assert get_subtree(root.definition, result.path) == leaf.definition
 
 
@@ -123,8 +131,9 @@ def test_repo_occurrence_path_preserves_mapping_key_segment():
 
     result = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)[0]
 
-    assert isinstance(result.path[0], Arg)
-    assert result.path[1] == Key(5)
+    assert isinstance(result.path[0], Parameter)
+    assert result.path[1] == Index(0)
+    assert result.path[2] == Key(5)
     assert get_subtree(root.definition, result.path) == leaf.definition
 
 
@@ -135,8 +144,9 @@ def test_repo_occurrence_path_preserves_set_member_segment():
 
     result = repo.apply_graph(root, lambda obj: obj.name, include_root=False, dedupe=False)[0]
 
-    assert isinstance(result.path[0], Arg)
-    assert isinstance(result.path[1], SetMember)
+    assert isinstance(result.path[0], Parameter)
+    assert isinstance(result.path[1], Index)
+    assert isinstance(result.path[2], SetMember)
     assert get_subtree(root.definition, result.path) == leaf.definition
 
 
@@ -175,6 +185,57 @@ def test_binding_rejects_two_live_instances_with_same_cdef_in_one_input():
 
     with pytest.raises(RuntimeBindingConflict, match="different object"):
         repo.add_objects([first, second])
+
+
+def test_mixed_v1_v2_cache_workspace_and_store_bindings_remain_independent(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(stores=store)
+
+    class WorkspaceHandle:
+        def __init__(self, key):
+            self.key = key
+
+        def path(self):
+            return str(tmp_path / "workspaces" / self.key)
+
+    class WorkspaceManager:
+        def alloc(self, key):
+            return WorkspaceHandle(key)
+
+    repo.workspace_manager = WorkspaceManager()
+    v1 = ConcreteDefinition._from_persisted_record(WorkspaceLeaf, ("same",), {})
+    v2 = Definition(WorkspaceLeaf, "same").concretize(repo=repo)
+
+    v1_obj = repo.load_or_build(v1, restore_state=False)
+    v2_obj = repo.load_or_build(v2, restore_state=False)
+    repo.pin(v1_obj)
+    repo.set_object_store(v1, store)
+    repo.set_object_store(v2, store)
+
+    assert v1.identity_version == V1_IDENTITY_VERSION
+    assert v2.identity_version == V2_IDENTITY_VERSION
+    assert v1 != v2
+    assert repo.strong_obj_cache[v1] is v1_obj
+    assert repo.weak_obj_cache[v2] is v2_obj
+    assert repo.obj_default_store[v1] is store
+    assert repo.obj_default_store[v2] is store
+    assert v1_obj.workspace != v2_obj.workspace
+
+
+def test_mixed_version_parent_child_materialization_preserves_each_identity():
+    repo = Repo()
+    v1_child = ConcreteDefinition._from_persisted_record(GraphLeaf, ("v1-child",), {})
+    v2_child = Definition(GraphLeaf, "v2-child").concretize(repo=repo)
+    v2_parent = Definition(GraphNode, "v2-parent", v1_child).concretize(repo=repo)
+    v1_parent = ConcreteDefinition._from_persisted_record(GraphNode, ("v1-parent", v2_child), {})
+
+    loaded_v2_parent = repo.load_or_build(v2_parent, restore_state=False)
+    loaded_v1_parent = repo.load_or_build(v1_parent, restore_state=False)
+
+    assert loaded_v2_parent.definition == v2_parent
+    assert loaded_v2_parent.children[0].definition == v1_child
+    assert loaded_v1_parent.definition == v1_parent
+    assert loaded_v1_parent.children[0].definition == v2_child
 
 
 def test_add_objects_assigns_store_to_unique_graph_nodes(tmp_path):

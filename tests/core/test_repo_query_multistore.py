@@ -79,7 +79,10 @@ def test_forced_refresh_deduplicates_equivalent_store_instances(tmp_path):
     repo.save_object(obj)
 
     CountingDirStore.calls = 0
-    repo2 = Repo(stores=[CountingDirStore(store.base_dir), CountingDirStore(store.base_dir)])
+    repo2 = Repo(stores=[
+        CountingDirStore(store.base_dir, query_index="memory"),
+        CountingDirStore(store.base_dir, query_index="memory"),
+    ])
 
     assert repo2.find_defs(None, refresh=True).count() == 1
     assert CountingDirStore.calls == 1

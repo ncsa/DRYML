@@ -16,6 +16,7 @@ from .types import is_pod
 from .utils.graph import GraphCtx, GraphTransformer
 from .policies import RepoLoadOptions
 from .errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
+from .cdef_identity import V2_IDENTITY_VERSION
 
 if TYPE_CHECKING:
     from .definition import ConcreteDefinition
@@ -687,34 +688,17 @@ class _ToCanonicalTransformer(GraphTransformer):
 
             live_cls = resolve_symbol(obj.cls)
             prep_args, prep_kwargs = live_cls.__prepare_args__(*obj.args, **obj.kwargs)
-            if ctx.state.get("bound_records", False):
-                from .arg_roles import apply_bound_arg_roles
-                from .bound_args import BoundArguments, bind_complete_arguments
+            from .arg_roles import apply_bound_arg_roles
+            from .bound_args import BoundArguments, bind_complete_arguments
 
-                bound_args = bind_complete_arguments(live_cls, tuple(prep_args), dict(prep_kwargs))
-                bound_args = apply_bound_arg_roles(live_cls, bound_args)
-                canonical_bound_args = BoundArguments(
-                    (name, self.transform(value, ctx.child(name)))
-                    for name, value in bound_args.items()
-                )
-                c_cls = self.transform(live_cls, ctx.child("cls"))
-                return ConcreteDefinition._from_bound_record(c_cls, canonical_bound_args)
-            from .arg_roles import apply_arg_roles
-            prep_args, prep_kwargs = apply_arg_roles(live_cls, tuple(prep_args), dict(prep_kwargs))
-            c_args = self.transform(prep_args, ctx.child("args"))
-            c_kwargs = self.transform(prep_kwargs, ctx.child("kwargs"))
+            bound_args = bind_complete_arguments(live_cls, tuple(prep_args), dict(prep_kwargs))
+            bound_args = apply_bound_arg_roles(live_cls, bound_args)
+            canonical_bound_args = BoundArguments(
+                (name, self.transform(value, ctx.child(name)))
+                for name, value in bound_args.items()
+            )
             c_cls = self.transform(live_cls, ctx.child("cls"))
-
-            if not isinstance(c_args, FrozenTuple):
-                raise TypeError(
-                    f"Prepared args did not concretize to FrozenTuple at {ctx.path_str()}"
-                )
-            if not isinstance(c_kwargs, FrozenDict):
-                raise TypeError(
-                    f"Prepared kwargs did not concretize to FrozenDict at {ctx.path_str()}"
-                )
-
-            return ConcreteDefinition(c_cls, c_args, c_kwargs)
+            return ConcreteDefinition._from_bound_record(c_cls, canonical_bound_args)
 
         if kind is NodeKind.FUNCTION:
             return symbol_ref(obj)
@@ -784,6 +768,15 @@ class _ThawValueTransformer(GraphTransformer):
             )
 
         if kind is NodeKind.CONCRETE_DEFINITION:
+            if obj.identity_version == V2_IDENTITY_VERSION:
+                from .materialization import project_cdef_call
+
+                args, kwargs = project_cdef_call(obj)
+                return Definition(
+                    obj.cls,
+                    *thaw_definition_surface_value(args),
+                    **thaw_definition_surface_value(kwargs),
+                )
             thaw_args = thaw_definition_surface_value(obj.args)
             thaw_kwargs = thaw_definition_surface_value(obj.kwargs)
             return Definition(obj.cls, *thaw_args, **thaw_kwargs)
@@ -952,9 +945,9 @@ def _to_bound_canonical(
 ):
     """Build a private V2 CDef through preparation, binding, roles, and freezing.
 
-    This internal transition seam intentionally is not exported from
-    ``dryml.core2``. Public exact construction remains on V1 until all V2
-    consumers can safely read the semantic record.
+    This internal factory is also used by the public exact-construction
+    boundary after consumer activation. It remains private so persisted-record
+    hydration cannot be confused with live call binding.
     """
 
     from .repo import manage_repo
@@ -962,7 +955,7 @@ def _to_bound_canonical(
     with manage_repo(repo=repo) as sub_repo:
         ctx = GraphCtx(
             path=tuple(path) if path is not None else (),
-            state={"repo": sub_repo, "bound_records": True},
+            state={"repo": sub_repo},
         )
         return _ToCanonicalTransformer().transform(x, ctx)
 
@@ -1032,6 +1025,15 @@ def thaw_definition_surface_value(value: Any) -> Any:
             target="runtime",
         )
     if kind is NodeKind.CONCRETE_DEFINITION:
+        if value.identity_version == V2_IDENTITY_VERSION:
+            from .materialization import project_cdef_call
+
+            args, kwargs = project_cdef_call(value)
+            return Definition(
+                value.cls,
+                *thaw_definition_surface_value(args),
+                **thaw_definition_surface_value(kwargs),
+            )
         args = thaw_definition_surface_value(value.args)
         kwargs = thaw_definition_surface_value(value.kwargs)
         return Definition(value.cls, *args, **kwargs)

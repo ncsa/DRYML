@@ -204,7 +204,11 @@ def test_prechange_cdef_fixture_keeps_v1_hashes_paths_and_topology():
         cdef = payload[name]
         assert path == f"objects/{cdef.stable_hash()[:2]}/{cdef.stable_hash()}"
 
-    expected = ConcreteDefinition(objects.TestClass1, (10,), {"test": "legacy"})
+    expected = ConcreteDefinition._from_persisted_record(
+        objects.TestClass1,
+        (10,),
+        {"test": "legacy"},
+    )
     assert payload["standalone"] == expected
     assert hash(payload["standalone"]) == hash(expected)
 
@@ -270,13 +274,21 @@ def test_v1_fixture_keeps_symbolic_hydration_import_free_and_raw_classes_explici
 
 
 def test_v1_and_private_v2_records_are_distinct_mapping_keys_and_graph_nodes():
-    child_v1 = ConcreteDefinition(objects.TestClass1, (10,), {"test": "child"})
+    child_v1 = ConcreteDefinition._from_persisted_record(
+        objects.TestClass1,
+        (10,),
+        {"test": "child"},
+    )
     child_v2 = ConcreteDefinition._from_persisted_record(
         objects.TestClass1,
         identity_version=V2_IDENTITY_VERSION,
         parameters=BoundArguments((("value", 10), ("test", "child"))),
     )
-    root_v1 = ConcreteDefinition(objects.TestClass1, (child_v1, child_v1), {"test": "root"})
+    root_v1 = ConcreteDefinition._from_persisted_record(
+        objects.TestClass1,
+        (child_v1, child_v1),
+        {"test": "root"},
+    )
     root_v2 = ConcreteDefinition._from_persisted_record(
         objects.TestClass1,
         identity_version=V2_IDENTITY_VERSION,

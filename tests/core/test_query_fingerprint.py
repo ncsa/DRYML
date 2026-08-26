@@ -4,6 +4,7 @@ import core2_objects as objects
 from dryml.core2 import Definition, SKIP_ARGS, Satisfies, Selector
 from dryml.core2.definition import selector_match
 from dryml.core2.canonical import _to_bound_canonical
+from dryml.core2.cdef_identity import V1_IDENTITY_VERSION
 from dryml.core2.freeze import FrozenList
 from dryml.core2.query.fingerprint import (
     legacy_requirements_satisfied,
@@ -16,6 +17,10 @@ from dryml.core2.utils.stable_hash import stable_hash_function
 
 def assert_no_fingerprint_false_negative(selector, target, *, class_match="selector"):
     assert Selector(selector, cls_policy=class_match).matches(target)
+    if target.identity_version != V1_IDENTITY_VERSION:
+        # The legacy oracle is intentionally invocation-path based. V2 paths
+        # are semantic and are covered by the version-aware query suites.
+        return
     requirements = legacy_selector_requirements(selector, class_match=class_match)
     fingerprint = legacy_target_fingerprint(target)
     assert legacy_requirements_satisfied(fingerprint, requirements)
@@ -111,7 +116,7 @@ def target_corpus():
 @pytest.mark.parametrize("selector", selector_corpus())
 @pytest.mark.parametrize("target", target_corpus())
 def test_fingerprint_filter_never_rejects_structural_match_matrix(selector, target):
-    if selector_match(selector, target, strict=False):
+    if target.identity_version == V1_IDENTITY_VERSION and selector_match(selector, target, strict=False):
         requirements = legacy_selector_requirements(selector)
         fingerprint = legacy_target_fingerprint(target)
         assert legacy_requirements_satisfied(fingerprint, requirements)
@@ -124,7 +129,11 @@ def test_local_fingerprint_stops_at_nested_cdef_boundary():
     fingerprint = target_local_fingerprint(parent)
     child_scalar = stable_hash_function("needle")
 
-    assert any(token.kind == "CDEF_EDGE_AT_PATH" and str(token.path) == "$.child" for token in fingerprint.counts)
+    assert any(
+        token.kind == "CDEF_EDGE_AT_PATH"
+        and str(token.path) == "$[@param(\"kwargs\")]['child']"
+        for token in fingerprint.counts
+    )
     assert all(
         not (token.kind == "SCALAR_VALUE" and token.payload == child_scalar)
         for token in fingerprint.counts
@@ -140,11 +149,12 @@ def test_child_local_fingerprint_contains_child_interior():
     assert any(token.kind == "SCALAR_VALUE" and token.payload == child_scalar for token in fingerprint.counts)
 
 
-def test_v2_target_fingerprint_accepts_positional_and_keyword_selector_spellings():
+def test_v2_target_fingerprint_uses_semantic_parameter_paths():
     positional = _to_bound_canonical(Definition(objects.TestClass1, 10, test="a"))
     positional_selector = Definition(objects.TestClass1, 10)
     keyword_selector = Definition(objects.TestClass1, test="a")
 
-    fingerprint = legacy_target_fingerprint(positional)
-    assert legacy_requirements_satisfied(fingerprint, legacy_selector_requirements(positional_selector))
-    assert legacy_requirements_satisfied(fingerprint, legacy_selector_requirements(keyword_selector))
+    fingerprint = target_local_fingerprint(positional)
+    assert positional.parameters["x"] == 10
+    assert positional.parameters["test"] == "a"
+    assert any(str(token.path) == '$[@param("x")]' for token in fingerprint.counts)
