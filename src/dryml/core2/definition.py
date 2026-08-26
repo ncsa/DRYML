@@ -11,6 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
+from .cdef_identity import (
+    V1_IDENTITY_VERSION,
+    decode_identity_record,
+    validate_identity_version,
+)
 from .utils.types import is_nonclass_callable
 from .utils.general import get_class_str
 from .utils.graph import GraphCtx, GraphTransformer, GraphMatcher
@@ -341,6 +346,7 @@ class ConcreteDefinition(DefInterface, Mapping):
     args: FrozenTuple[Any, ...] = field(default_factory = lambda: FrozenTuple())
     kwargs: FrozenDict[str, Any] = field(default_factory = lambda: FrozenDict({}))
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
+    _identity_version: int = field(default=V1_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         from .canonical import freeze_concrete_value
@@ -358,6 +364,33 @@ class ConcreteDefinition(DefInterface, Mapping):
             FrozenDict({k: freeze_concrete_value(v, path=("kwargs", k)) for k, v in kwargs.items()}),
         )
 
+    @property
+    def identity_version(self) -> int:
+        """Return the exact persisted CDef identity format version."""
+
+        return self._identity_version
+
+    @classmethod
+    def _from_persisted_record(
+            cls,
+            cdef_cls,
+            args,
+            kwargs,
+            *,
+            identity_version: int = V1_IDENTITY_VERSION,
+            stable_hash_cache: str | None = None) -> "ConcreteDefinition":
+        """Hydrate a validated identity record without public canonicalization.
+
+        This internal boundary is intentionally limited to persisted records and
+        test-only V2 coexistence. Public exact construction remains V1 until
+        the later bound-record activation unit.
+        """
+
+        result = cls(cdef_cls, args, kwargs)
+        object.__setattr__(result, "_identity_version", validate_identity_version(identity_version))
+        object.__setattr__(result, "_stable_hash_cache", stable_hash_cache)
+        return result
+
     def __hash__(self) -> int:
         return stable_int_hash(self.stable_hash())
 
@@ -368,6 +401,36 @@ class ConcreteDefinition(DefInterface, Mapping):
         value = stable_hash_function(self)
         object.__setattr__(self, "_stable_hash_cache", value)
         return value
+
+    def __getstate__(self):
+        """Serialize V1 in its legacy slotted layout and V2 as a named record."""
+
+        if self.identity_version == V1_IDENTITY_VERSION:
+            return [self.cls, self.args, self.kwargs, self._stable_hash_cache]
+        return {
+            "identity_version": self.identity_version,
+            "cls": self.cls,
+            "args": self.args,
+            "kwargs": self.kwargs,
+            "stable_hash_cache": self._stable_hash_cache,
+        }
+
+    def __setstate__(self, state):
+        """Restore legacy or versioned records without resolving or binding classes."""
+
+        record = decode_identity_record(state)
+        restored = type(self)._from_persisted_record(
+            record.cls,
+            record.args,
+            record.kwargs,
+            identity_version=record.version,
+            stable_hash_cache=record.stable_hash_cache,
+        )
+        object.__setattr__(self, "cls", restored.cls)
+        object.__setattr__(self, "args", restored.args)
+        object.__setattr__(self, "kwargs", restored.kwargs)
+        object.__setattr__(self, "_identity_version", restored.identity_version)
+        object.__setattr__(self, "_stable_hash_cache", restored._stable_hash_cache)
 
     def __getitem__(self, k: str) -> Any:
         if k == "cls": return self.cls
@@ -395,6 +458,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     def __eq__(self, rhs):
         if type(self) is not type(rhs):
             return False
+        if self.identity_version != rhs.identity_version:
+            return False
         return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self.args, rhs.args) and _structural_value_equal(self.kwargs, rhs.kwargs)
 
     def __ne__(self, rhs):
@@ -403,12 +468,14 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     def __deepcopy__(self, memo):
         """
-        Snapshot cls/args/kwargs, but re-use _obj and any repo reference.
+        Return this immutable identity record without rebinding its call surface.
         """
-        return type(self)(
-            self.cls,
-            deepcopy(self.args, memo),
-            deepcopy(self.kwargs, memo))
+        return self
+
+    def __copy__(self):
+        """Return this immutable identity record without rebinding it."""
+
+        return self
 
     def copy(self):
         return deepcopy(self)

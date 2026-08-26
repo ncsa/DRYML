@@ -191,6 +191,10 @@ class StableHashGraphHasher(GraphHasher):
 
         if isinstance(obj, (Definition, ConcreteDefinition)):
             type_marker = f"{type(obj).__module__}.{type(obj).__qualname__}"
+            if isinstance(obj, ConcreteDefinition):
+                from ..cdef_identity import stable_hash_domain
+
+                type_marker = stable_hash_domain(type_marker, obj.identity_version)
             items = [(k, obj[k]) for k in obj]
             return self._hash_mapping(type_marker, dict(items), ctx)
 
