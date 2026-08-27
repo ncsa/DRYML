@@ -414,6 +414,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(occurrences) == 1
     assert occurrences[0].owner == root
     assert occurrences[0].definition == child
+    repo.close(flush=False)
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -458,6 +459,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert list(repo.query(selector).nested().owners().defs()) == [root]
     nested_selector = Definition(root_cls, child=selector)
     assert list(repo.query(nested_selector).stored().defs()) == [root]
+    repo.close(flush=False)
 
 assert "tensorflow" not in sys.modules
         """
@@ -533,6 +535,7 @@ with tempfile.TemporaryDirectory() as tmp:
             exact = view.exact_ids(root)
             assert exact
             assert view.filter_stored_ids(exact) == exact
+    index.close()
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -575,6 +578,7 @@ def test_sqlite_rebuild_rejects_retired_globals_before_sidecar_activation():
         assert hashlib.sha256(root_path.read_bytes()).hexdigest() == authority_digest
         assert store.query_index_status().state == "dirty"
         assert not list(sidecar_path.parent.glob(f"{sidecar_path.name}.rebuild-*.tmp*"))
+        index.close()
 
 
 def test_sqlite_torch_import_refs_do_not_import_torch_for_query_terminals():
@@ -621,6 +625,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert len(occurrences) == 1
     assert occurrences[0].owner == root
     assert occurrences[0].definition == child
+    repo.close(flush=False)
 
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules

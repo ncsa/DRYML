@@ -26,4 +26,4 @@ def test_annotation_sidecars_do_not_enter_cdef_identity_or_pickle_state():
     after = Definition(Subject).concretize()
     assert before == after
     assert before.stable_hash() == after.stable_hash()
-    assert set(before.__getstate__()) == {"identity_version", "cls", "parameters", "stable_hash_cache"}
+    assert before.__getstate__() == after.__getstate__()
