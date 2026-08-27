@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
+from collections.abc import Mapping
 from typing import Any, Literal
+
+from dryml.formats import deep_freeze_json, json_ready
 
 from .errors import EnvironmentCompatibilityError
 from .schema import COMPATIBILITY_REPORT_SCHEMA_VERSION
 
-CompatibilityStatus = Literal["compatible", "warning", "incompatible", "unknown"]
+CompatibilityStatus = Literal["compatible", "warning", "incompatible", "unknown", "malformed", "unavailable"]
 IssueSeverity = Literal["error", "warning", "unknown"]
 CompatibilityPolicy = Literal["ignore", "warn", "compatible", "strict"]
 
@@ -44,6 +48,15 @@ class CompatibilityIssue:
     observed: Any = None
     schema_version: int = COMPATIBILITY_REPORT_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        """Redact and bound public diagnostic fields before exposure."""
+
+        if self.severity not in {"error", "warning", "unknown"}:
+            raise EnvironmentCompatibilityError("invalid compatibility issue severity", context={"severity": self.severity})
+        object.__setattr__(self, "message", _redact_text(self.message))
+        object.__setattr__(self, "expected", deep_freeze_json(_redact_value(self.expected)))
+        object.__setattr__(self, "observed", deep_freeze_json(_redact_value(self.observed)))
+
     def to_data(self) -> dict[str, Any]:
         """Return JSON-compatible issue data."""
 
@@ -54,8 +67,8 @@ class CompatibilityIssue:
             "message": self.message,
             "requirement_path": self.requirement_path,
             "observed_path": self.observed_path,
-            "expected": self.expected,
-            "observed": self.observed,
+            "expected": json_ready(self.expected),
+            "observed": json_ready(self.observed),
         }
 
     @classmethod
@@ -76,12 +89,27 @@ class CompatibilityIssue:
 
 @dataclass(frozen=True, slots=True)
 class CompatibilityReport:
-    """Structured result of checking a requirement against an environment."""
+    """Structured result of checking supplied environment evidence.
+
+    ``malformed`` identifies invalid caller-supplied evidence and
+    ``unavailable`` identifies an explicitly unavailable observation.  Neither
+    state substitutes facts from the local host.
+    """
 
     status: CompatibilityStatus
     issues: tuple[CompatibilityIssue, ...] = ()
     schema_version: int = COMPATIBILITY_REPORT_SCHEMA_VERSION
-    details: dict[str, Any] = field(default_factory=dict)
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate and detach one bounded immutable compatibility report."""
+
+        if self.status not in {"compatible", "warning", "incompatible", "unknown", "malformed", "unavailable"}:
+            raise EnvironmentCompatibilityError("invalid compatibility report status", context={"status": self.status})
+        if len(self.issues) > 64:
+            raise EnvironmentCompatibilityError("compatibility report exceeds issue bound", context={"limit": 64})
+        object.__setattr__(self, "issues", tuple(self.issues))
+        object.__setattr__(self, "details", deep_freeze_json(self.details))
 
     @property
     def ok(self) -> bool:
@@ -122,7 +150,7 @@ class CompatibilityReport:
             "schema_version": self.schema_version,
             "status": self.status,
             "issues": [issue.to_data() for issue in self.issues],
-            "details": dict(self.details),
+            "details": json_ready(self.details),
         }
 
     @classmethod
@@ -179,6 +207,39 @@ def report_from_issues(
     return CompatibilityReport(status, issues, details={"policy": coerced, **dict(details or {})})
 
 
+def malformed_report(message: str) -> CompatibilityReport:
+    """Return a bounded report for malformed caller-supplied evidence."""
+
+    return CompatibilityReport("malformed", (CompatibilityIssue("malformed_environment", "error", message[:512]),))
+
+
+def unavailable_report(message: str) -> CompatibilityReport:
+    """Return a bounded report for explicitly unavailable evidence."""
+
+    return CompatibilityReport("unavailable", (CompatibilityIssue("environment_unavailable", "unknown", message[:512]),))
+
+
+_SECRET_KEY = re.compile(r"(password|passwd|secret|token|api[_-]?key|credential)", re.IGNORECASE)
+_LOCAL_PATH = re.compile(r"(?:^|\s)(?:/[^\s]+|[A-Za-z]:\\[^\s]+|\\\\[^\s]+)")
+
+
+def _redact_text(value: Any) -> str:
+    text = str(value)
+    text = re.sub(r"(?i)(password|passwd|secret|token|api[_-]?key|credential)\s*=\s*[^\s,]+", r"\1=<redacted>", text)
+    text = _LOCAL_PATH.sub(" <local-path>", text)
+    return text[:512]
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): "<redacted>" if _SECRET_KEY.search(str(key)) else _redact_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return _redact_text(value) if isinstance(value, str) else value
+
+
 __all__ = [
     "CompatibilityIssue",
     "CompatibilityReport",
@@ -187,4 +248,6 @@ __all__ = [
     "IssueSeverity",
     "coerce_policy",
     "report_from_issues",
+    "malformed_report",
+    "unavailable_report",
 ]

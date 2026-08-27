@@ -1,125 +1,85 @@
-"""Canonical JSON serialization helpers for environment metadata."""
+"""Environment-facing adapters for the shared bounded v1.1 codec."""
 
 from __future__ import annotations
 
-import json
-import math
-from collections.abc import Mapping, Sequence
-from types import MappingProxyType
+from collections.abc import Mapping
 from typing import Any
+
+from dryml.formats.canonical import (
+    FrozenJson,
+    JsonPrimitive,
+    canonical_json_bytes as _canonical_json_bytes,
+    canonical_json_dumps as _canonical_json_dumps,
+    canonical_json_load_bytes as _canonical_json_load_bytes,
+    canonical_json_loads as _canonical_json_loads,
+    deep_freeze_json as _deep_freeze_json,
+    freeze_mapping as _freeze_mapping,
+    json_ready as _json_ready,
+)
+from dryml.formats.errors import CanonicalJSONError
 
 from .errors import EnvironmentSerializationError
 
 
-JsonPrimitive = str | int | float | bool | None
-FrozenJson = JsonPrimitive | tuple["FrozenJson", ...] | Mapping[str, "FrozenJson"]
+def json_ready(value: Any, **bounds: Any) -> Any:
+    """Return a detached mutable JSON projection after bounded validation."""
+
+    return _convert_error(_json_ready, value, **bounds)
 
 
-def json_ready(value: Any) -> Any:
-    """Return a JSON-compatible mutable view of frozen/canonical metadata."""
+def deep_freeze_json(value: Any, **bounds: Any) -> FrozenJson:
+    """Return a deeply immutable bounded JSON-compatible projection."""
 
-    if isinstance(value, MappingProxyType):
-        value = dict(value)
-    if isinstance(value, Mapping):
-        return {key: json_ready(value[key]) for key in _sorted_string_keys(value)}
-    if isinstance(value, tuple):
-        return [json_ready(item) for item in value]
-    if isinstance(value, list):
-        return [json_ready(item) for item in value]
-    if isinstance(value, set | frozenset):
-        return [json_ready(item) for item in sorted(value, key=repr)]
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [json_ready(item) for item in value]
-    if isinstance(value, float) and not math.isfinite(value):
-        raise EnvironmentSerializationError(
-            "environment metadata floats must be finite",
-            context={"value": repr(value)},
-        )
-    return value
+    return _convert_error(_deep_freeze_json, value, **bounds)
 
 
-def deep_freeze_json(value: Any) -> FrozenJson:
-    """Return deeply immutable canonical JSON metadata.
+def canonical_json_dumps(data: Any, **bounds: Any) -> str:
+    """Return compact deterministic JSON text after bounded validation."""
 
-    Mappings are keyed by strings in deterministic order, sequences become
-    tuples, sets are sorted, and non-JSON values are rejected before they can
-    participate in a content-addressed ID.
-    """
-
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: deep_freeze_json(value[key]) for key in _sorted_string_keys(value)}
-        )
-    if isinstance(value, list | tuple):
-        return tuple(deep_freeze_json(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return tuple(deep_freeze_json(item) for item in sorted(value, key=repr))
-    if isinstance(value, float) and not math.isfinite(value):
-        raise EnvironmentSerializationError(
-            "environment metadata floats must be finite",
-            context={"value": repr(value)},
-        )
-    if isinstance(value, str | int | float | bool) or value is None:
-        return value
-    raise EnvironmentSerializationError(
-        f"environment metadata value {value!r} is not JSON serializable",
-        context={"type": type(value).__name__},
-    )
+    return _convert_error(_canonical_json_dumps, data, **bounds)
 
 
-def canonical_json_dumps(data: Any) -> str:
-    """Return a stable JSON string for JSON-compatible data.
+def canonical_json_loads(text: str, **bounds: Any) -> Any:
+    """Decode duplicate-aware JSON text into an immutable projection."""
 
-    Dictionaries are sorted by key and separators are fixed so the output is
-    suitable for content-addressed IDs and exact serialization tests.
-    """
-
-    try:
-        return json.dumps(
-            json_ready(data),
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-    except (TypeError, ValueError) as exc:
-        raise EnvironmentSerializationError(
-            "environment metadata is not JSON serializable",
-            context={"error": str(exc)},
-        ) from exc
+    return _convert_error(_canonical_json_loads, text, **bounds)
 
 
-def canonical_json_bytes(data: Any) -> bytes:
-    """Return canonical UTF-8 JSON bytes for content hashing."""
+def canonical_json_bytes(data: Any, **bounds: Any) -> bytes:
+    """Return compact deterministic UTF-8 JSON after bounded validation."""
 
-    return canonical_json_dumps(data).encode("utf-8")
+    return _convert_error(_canonical_json_bytes, data, **bounds)
+
+
+def canonical_json_load_bytes(data: bytes, **bounds: Any) -> Any:
+    """Decode UTF-8 JSON bytes into an immutable bounded projection."""
+
+    return _convert_error(_canonical_json_load_bytes, data, **bounds)
 
 
 def freeze_mapping(mapping: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Return an immutable shallow copy with deterministic string keys.
+    """Return an immutable deterministic copy of a string-keyed mapping."""
 
-    Use this only for mappings whose values are already immutable domain
-    objects. Use :func:`deep_freeze_json` for arbitrary JSON metadata.
-    """
-
-    return MappingProxyType({str(key): mapping[key] for key in sorted(mapping or {}, key=str)})
+    return _convert_error(_freeze_mapping, mapping)
 
 
-def _sorted_string_keys(mapping: Mapping[Any, Any]) -> tuple[str, ...]:
-    keys = []
-    for key in mapping:
-        if not isinstance(key, str):
-            raise EnvironmentSerializationError(
-                "environment metadata mapping keys must be strings",
-                context={"key": repr(key), "type": type(key).__name__},
-            )
-        keys.append(key)
-    return tuple(sorted(keys))
+def _convert_error(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except CanonicalJSONError as exc:
+        message = str(exc)
+        if message.startswith("canonical JSON"):
+            message = "environment metadata" + message[len("canonical JSON"):]
+        raise EnvironmentSerializationError(message, context=exc.context) from exc
 
 
 __all__ = [
     "FrozenJson",
-    "canonical_json_dumps",
+    "JsonPrimitive",
     "canonical_json_bytes",
+    "canonical_json_dumps",
+    "canonical_json_load_bytes",
+    "canonical_json_loads",
     "deep_freeze_json",
     "freeze_mapping",
     "json_ready",

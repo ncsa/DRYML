@@ -28,7 +28,7 @@ class RequirementFragment:
     schema_versions: Mapping[str, str] = field(default_factory=dict)
     source: str | None = None
     mode: Literal["base", "add", "override"] = "add"
-    schema_version: int = ENVIRONMENT_FRAGMENT_SCHEMA_VERSION
+    schema_version: str = ENVIRONMENT_FRAGMENT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "requirements", tuple(normalize_requirement_string(req) for req in coerce_tuple(self.requirements)))
@@ -57,7 +57,23 @@ class RequirementFragment:
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "RequirementFragment":
-        """Build a requirement fragment from serialized data."""
+        """Build a requirement fragment from exact v1.1 serialized data."""
+
+        expected = {
+            "schema_version", "requirements", "excludes", "capabilities",
+            "tags", "python", "dryml_protocol", "schema_versions", "source", "mode",
+        }
+        unknown, missing = set(data) - expected, expected - set(data)
+        if unknown or missing:
+            raise EnvironmentRequirementError(
+                "environment requirement fragment fields are closed",
+                context={"unknown": sorted(unknown), "missing": sorted(missing)},
+            )
+        if data["schema_version"] != ENVIRONMENT_FRAGMENT_SCHEMA_VERSION:
+            raise EnvironmentRequirementError(
+                "unsupported environment requirement fragment version",
+                context={"observed_version": data["schema_version"], "supported_version": ENVIRONMENT_FRAGMENT_SCHEMA_VERSION},
+            )
 
         return cls(
             requirements=tuple(data.get("requirements", ())),
@@ -69,7 +85,7 @@ class RequirementFragment:
             schema_versions=data.get("schema_versions", {}),
             source=data.get("source"),
             mode=data.get("mode", "add"),
-            schema_version=data.get("schema_version", ENVIRONMENT_FRAGMENT_SCHEMA_VERSION),
+            schema_version=data["schema_version"],
         )
 
 

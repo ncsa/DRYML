@@ -1,8 +1,8 @@
 # Environments
 
-`dryml.environments` describes Python/software environments without changing DRYML object identity, Repo behavior, Store layout, or materialization semantics.
+`dryml.environments` describes Python/software environments without changing DRYML object identity, Repo behavior, Store layout, records, sidecars, or materialization semantics.
 
-The module is intentionally lightweight. Importing `dryml.environments` does not import `dryml.context`, Repo internals, TensorFlow, PyTorch, JAX, Ray, Conda Python APIs, or dispatch code.
+The module is intentionally lightweight. Importing `dryml.environments` does not inspect or probe the host, import probe workers, `dryml.records`, `dryml.context`, Repo internals, TensorFlow, PyTorch, JAX, Ray, Conda Python APIs, or dispatch code. Probing and introspection are explicit opt-in APIs.
 
 ## Inspect Current Environment
 
@@ -26,7 +26,7 @@ req = envs.EnvironmentRequirement(
     python=">=3.10,<3.13",
     requirements=("dryml>=0.3", "torch>=2.4,<2.7"),
     excludes=("tensorflow",),
-    capabilities=("dryml.environments.v1",),
+    capabilities=("dryml.environments.v1.1",),
     tags=("torch",),
 )
 
@@ -50,9 +50,11 @@ record_id = info.id
 requirement_id = req.id
 ```
 
-`EnvironmentRecord.id` includes observed provenance such as interpreter path, prefixes, platform, packages, tags, and details. It is an exact observed-environment key, not a package-solver equivalence class.
+These values emit closed `contract_version: "1.1"` envelopes. The environment families are `dryml.environment_record.v1.1` / `envrec`, `dryml.environment_requirement.v1.1` / `envreq`, `dryml.environment_spec.v1.1` / `envspec`, and `dryml.environment_lock.v1.1` / `envlock`. IDs use `<prefix>-v1.1-<sha256>` over the schema, kind, and identifying projection. Source-v1 and future contract versions are rejected; there is no metadata migration.
 
-Record, requirement, and spec metadata fields are deeply frozen at construction. Mutating an input dictionary or list after construction cannot change the object payload or invalidate its content ID. Arbitrary JSON metadata must use string mapping keys and finite numeric values; non-string keys, key collisions caused by coercion, non-finite floats, and non-JSON values are rejected at construction/freezing time.
+Record identity includes interpreter version/implementation, platform facts, normalized distribution names/versions, DRYML protocol/schema/features, kind, and tags. Interpreter paths/prefixes, distribution location/installer/editability, DRYML git revision, `details`, and envelope metadata are inspectable but non-identifying. Requirement `details` and all envelope metadata are likewise non-identifying. Specs and locks identify every payload field.
+
+Record, requirement, and spec metadata fields are deeply frozen at construction. Mutating an input dictionary or list after construction cannot change the object payload or invalidate its content ID. Canonical JSON sorts string mapping keys, uses compact UTF-8 encoding, rejects duplicate textual keys, non-string keys, non-finite floats, and non-JSON values. Shared values are bounded to depth 8, 1,024 nodes, 64 entries/container, 4,096-codepoint strings/keys, 4,096-bit integers, and 4 MiB envelopes; environment records allow 4,096 distributions, 65,536 nodes, and 16 MiB envelopes.
 
 ## Probing
 
@@ -111,7 +113,7 @@ registry = envs.EnvironmentRegistry()
 registry.register(
     "torch-dev",
     envs.CondaEnvironmentSpec(prefix="/opt/envs/torch"),
-    provides=("dryml.environments.v1",),
+    provides=("dryml.environments.v1.1",),
     tags=("torch", "dev"),
 )
 

@@ -98,7 +98,7 @@ def inspect_current() -> EnvironmentRecord:
             "compatibility_report": COMPATIBILITY_REPORT_SCHEMA_VERSION,
             "environment_fragment": ENVIRONMENT_FRAGMENT_SCHEMA_VERSION,
         },
-        features=("dryml.environments.v1",),
+        features=("dryml.environments.v1.1",),
     )
 
     return EnvironmentRecord(

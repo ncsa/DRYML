@@ -31,7 +31,9 @@ def main(argv: list[str] | None = None) -> int:
             "ok": True,
             "record": record.to_data(),
         }
-        sys.stdout.write(canonical_json_dumps(payload))
+        # Environment records have an explicit larger distribution-map bound;
+        # the typed record has already validated all ordinary nested mappings.
+        sys.stdout.write(canonical_json_dumps(payload, max_entries=4096, max_nodes=65536))
         sys.stdout.write("\n")
         return 0
     except Exception as exc:  # pragma: no cover - exercised through subprocess failures

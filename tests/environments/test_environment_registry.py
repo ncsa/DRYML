@@ -4,10 +4,10 @@ import dryml.environments as envs
 def test_registry_register_get_find_and_serialize():
     registry = envs.EnvironmentRegistry()
     spec = envs.CurrentEnvironmentSpec()
-    entry = registry.register("current", spec, provides=("dryml.environments.v1",), tags=("dev",))
+    entry = registry.register("current", spec, provides=("dryml.environments.v1.1",), tags=("dev",))
     assert registry.get("current") == entry
     assert registry.list() == (entry,)
-    req = envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",), tags=("dev",))
+    req = envs.EnvironmentRequirement(capabilities=("dryml.environments.v1.1",), tags=("dev",))
     assert registry.find(req) == entry
     clone = envs.EnvironmentRegistry.from_data(registry.to_data())
     assert clone.get("current").to_data() == entry.to_data()
@@ -46,7 +46,8 @@ def test_registry_probe_and_find_compatible():
 def test_registry_check_requirement_and_no_match_report():
     registry = envs.EnvironmentRegistry()
     registry.register("current", envs.CurrentEnvironmentSpec())
-    report = registry.check_requirement("current", envs.EnvironmentRequirement(capabilities=("dryml.environments.v1",)))
+    report = registry.check_requirement("current", envs.EnvironmentRequirement(capabilities=("dryml.environments.v1.1",)))
     assert report.ok
     no_match = registry.no_match_report(envs.EnvironmentRequirement(requirements=("torch",)))
-    assert no_match.issues[0].code == "registry_no_match"
+    assert no_match.status == "unavailable"
+    assert no_match.issues[-1].code == "registry_no_match"

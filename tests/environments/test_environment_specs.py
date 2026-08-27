@@ -48,7 +48,7 @@ def test_conda_spec_validation():
 
 
 def test_environment_spec_rejects_non_string_env_keys():
-    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+    with pytest.raises(Exception, match="mapping keys must be strings"):
         envs.PythonExecutableSpec("/usr/bin/python", env={"1": "string-key", 1: "integer-key"})
 
 

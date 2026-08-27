@@ -23,7 +23,7 @@ assert "torch" not in sys.modules
 assert "jax" not in sys.modules
 assert "ray" not in sys.modules
 import dryml.environments as envs
-assert envs.ENVIRONMENT_RECORD_SCHEMA_VERSION == 1
+assert envs.ENVIRONMENT_RECORD_SCHEMA_VERSION == "1.1"
 assert "dryml.context" not in sys.modules
 assert "dryml.core" not in sys.modules
 assert "dryml.execute" not in sys.modules

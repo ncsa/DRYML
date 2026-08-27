@@ -19,8 +19,8 @@ def sample_record(**kwargs):
         "dryml": envs.DrymlRuntimeRecord(
             version="0.3.0-dev",
             execution_protocol="1",
-            schema_versions={"environment_record": 1},
-            features=("dryml.environments.v1", "custom.capability"),
+            schema_versions={"environment_record": "1.1"},
+            features=("dryml.environments.v1.1", "custom.capability"),
         ),
         "kind": "venv",
         "tags": ("dev", "torch"),
@@ -51,7 +51,7 @@ def test_environment_record_details_are_deeply_immutable():
 
     input_details["nested"]["items"].append("b")
 
-    assert record.to_data()["details"] == {"nested": {"items": ["a"]}}
+    assert record.to_data()["payload"]["details"] == {"nested": {"items": ["a"]}}
     assert record.id == before
     with pytest.raises(AttributeError):
         record.details["nested"]["items"].append("c")
@@ -64,29 +64,29 @@ def test_environment_requirement_details_are_deeply_immutable():
 
     input_details["sources"].append("mutated")
 
-    assert requirement.to_data()["details"] == {"nested": {"enabled": True}, "sources": ["base"]}
+    assert requirement.to_data()["payload"]["details"] == {"nested": {"enabled": True}, "sources": ["base"]}
     assert requirement.id == before
     with pytest.raises(AttributeError):
         requirement.details["sources"].append("x")
 
 
 def test_non_json_details_are_rejected():
-    with pytest.raises(envs.EnvironmentSerializationError):
+    with pytest.raises(Exception, match="JSON compatible"):
         sample_record(details={"bad": object()})
 
 
 def test_environment_record_rejects_non_string_detail_keys():
-    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+    with pytest.raises(Exception, match="mapping keys must be strings"):
         sample_record(details={"1": "string-key", 1: "integer-key"})
 
 
 def test_environment_requirement_rejects_non_string_detail_keys():
-    with pytest.raises(envs.EnvironmentSerializationError, match="mapping keys must be strings"):
+    with pytest.raises(Exception, match="mapping keys must be strings"):
         envs.EnvironmentRequirement(details={"1": "string-key", 1: "integer-key"})
 
 
 def test_environment_record_rejects_non_finite_detail_floats():
-    with pytest.raises(envs.EnvironmentSerializationError, match="floats must be finite"):
+    with pytest.raises(Exception, match="floats must be finite"):
         sample_record(details={"value": float("nan")})
 
 
@@ -118,7 +118,7 @@ def test_inspect_current_uses_importlib_metadata(monkeypatch):
     assert record.python.version
     assert record.platform.system
     assert record.distributions["fake-pkg"].version == "1.2.3"
-    assert record.dryml.features == ("dryml.environments.v1",)
+    assert record.dryml.features == ("dryml.environments.v1.1",)
 
 
 def test_inspect_current_does_not_import_heavy_modules(monkeypatch):

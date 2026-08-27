@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from packaging.requirements import Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy, report_from_issues
+from dryml.formats import deep_freeze_json, json_ready, make_envelope, semantic_id, validate_envelope
+
+from .compatibility import CompatibilityIssue, CompatibilityReport, coerce_policy, malformed_report, report_from_issues
+from .errors import EnvironmentRequirementError
 from .records import EnvironmentRecord
-from .schema import ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION
-from .serialization import deep_freeze_json, json_ready
-from .ids import content_id
 from .utils import (
     coerce_specifier,
     coerce_tuple,
@@ -25,7 +26,11 @@ from .utils import (
 
 @dataclass(frozen=True, slots=True)
 class EnvironmentRequirement:
-    """Portable software constraints for an acceptable Python environment."""
+    """Portable immutable v1.1 software constraints for an environment.
+
+    The complete payload is closed.  ``details`` preserves sources and merge
+    diagnostics but is intentionally outside the semantic-ID projection.
+    """
 
     python: str | None = None
     requirements: tuple[str, ...] = ()
@@ -35,40 +40,43 @@ class EnvironmentRequirement:
     dryml_protocol: str | None = None
     schema_versions: Mapping[str, str] = field(default_factory=dict)
     details: Mapping[str, Any] = field(default_factory=dict)
-    schema_version: int = ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION
+    metadata: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:
-        normalized_requirements = tuple(
-            sorted(
-                (normalize_requirement_string(req) for req in coerce_tuple(self.requirements)),
-                key=requirement_sort_key,
-            )
-        )
+        normalized_requirements = tuple(sorted({normalize_requirement_string(req) for req in coerce_tuple(self.requirements)}, key=requirement_sort_key))
         object.__setattr__(self, "requirements", normalized_requirements)
         object.__setattr__(
             self,
             "excludes",
-            tuple(sorted(normalize_distribution_name(item) for item in coerce_tuple(self.excludes))),
+            tuple(sorted({normalize_distribution_name(item) for item in coerce_tuple(self.excludes)})),
         )
         object.__setattr__(
             self,
             "capabilities",
-            tuple(sorted(str(item) for item in coerce_tuple(self.capabilities))),
+            tuple(sorted({str(item) for item in coerce_tuple(self.capabilities)})),
         )
-        object.__setattr__(self, "tags", tuple(sorted(str(item) for item in coerce_tuple(self.tags))))
+        object.__setattr__(self, "tags", tuple(sorted({str(item) for item in coerce_tuple(self.tags)})))
         object.__setattr__(self, "schema_versions", deep_freeze_json(self.schema_versions))
         object.__setattr__(self, "details", deep_freeze_json(self.details))
+        object.__setattr__(self, "metadata", deep_freeze_json(self.metadata))
         coerce_specifier(self.python)
         if self.dryml_protocol:
             coerce_specifier(self.dryml_protocol)
         for spec in self.schema_versions.values():
             coerce_specifier(spec)
+        deep_freeze_json(self._payload())
+
+    @property
+    def semantic_id(self) -> str:
+        """Return the v1.1 ID over identifying normalized constraints."""
+
+        return semantic_id("envreq", "dryml.environment_requirement.v1.1", "environment_requirement", self._identifying_payload())
 
     @property
     def id(self) -> str:
-        """Stable content-addressed ID for this requirement."""
+        """Alias for the v1.1 semantic ID."""
 
-        return content_id("envreq", self.schema_version, self.to_data())
+        return self.semantic_id
 
     def check(self, record: EnvironmentRecord, *, policy: str = "compatible") -> CompatibilityReport:
         """Check this requirement against an observed environment record.
@@ -77,6 +85,8 @@ class EnvironmentRequirement:
         report status. The raw issue list remains machine-readable.
         """
 
+        if not isinstance(record, EnvironmentRecord):
+            return malformed_report("environment compatibility requires a supplied EnvironmentRecord")
         coerced_policy = coerce_policy(policy)
         if coerced_policy == "ignore":
             return report_from_issues((), policy=coerced_policy)
@@ -97,6 +107,45 @@ class EnvironmentRequirement:
         if not sources:
             return "Environment requirement has no recorded fragment sources."
         return "Environment requirement sources:\n" + "\n".join(f"- {source}" for source in sources)
+
+    def merge(self, other: "EnvironmentRequirement", *, sources: tuple[str, ...] = ()) -> "EnvironmentRequirement":
+        """Return the deterministic semantic intersection with ``other``.
+
+        Args:
+            other: Requirement whose hard constraints must also hold.
+            sources: Additional bounded source labels to retain diagnostically.
+
+        Returns:
+            A new immutable requirement containing the compatible intersection.
+
+        Raises:
+            EnvironmentRequirementError: If ``other`` has the wrong type or
+                the combined Python, package, protocol, schema, or exclusion
+                constraints have no supported intersection.
+        """
+
+        if not isinstance(other, EnvironmentRequirement):
+            raise EnvironmentRequirementError("environment requirement merge requires an EnvironmentRequirement")
+        details_sources = tuple(self.details.get("sources", ())) + tuple(other.details.get("sources", ())) + tuple(sources)
+        requirements = _merge_package_requirements(self.requirements, other.requirements)
+        excludes = tuple(sorted(set(self.excludes) | set(other.excludes)))
+        required_names = {normalize_distribution_name(Requirement(item).name) for item in requirements}
+        overlap = required_names & set(excludes)
+        if overlap:
+            raise EnvironmentRequirementError(
+                "required distributions cannot also be excluded",
+                context={"path": f"requirements.{sorted(overlap)[0]}"},
+            )
+        return EnvironmentRequirement(
+            python=_intersect_specifiers(self.python, other.python, path="python"),
+            requirements=requirements,
+            excludes=excludes,
+            capabilities=tuple(sorted(set(self.capabilities) | set(other.capabilities))),
+            tags=tuple(sorted(set(self.tags) | set(other.tags))),
+            dryml_protocol=_intersect_specifiers(self.dryml_protocol, other.dryml_protocol, path="dryml_protocol"),
+            schema_versions=_merge_schema_versions(self.schema_versions, other.schema_versions),
+            details={"sources": details_sources} if details_sources else {},
+        )
 
     def _check_python(self, record: EnvironmentRecord) -> tuple[CompatibilityIssue, ...]:
         if not self.python:
@@ -355,36 +404,224 @@ class EnvironmentRequirement:
             if tag not in tags
         )
 
-    def to_data(self) -> dict[str, Any]:
-        """Return JSON-compatible requirement data."""
+    def _identifying_payload(self) -> dict[str, Any]:
+        return {"python": self.python, "requirements": list(self.requirements), "excludes": list(self.excludes), "capabilities": list(self.capabilities), "tags": list(self.tags), "dryml_protocol": self.dryml_protocol, "schema_versions": json_ready(self.schema_versions)}
 
-        return {
-            "schema_version": self.schema_version,
-            "python": self.python,
-            "requirements": list(self.requirements),
-            "excludes": list(self.excludes),
-            "capabilities": list(self.capabilities),
-            "tags": list(self.tags),
-            "dryml_protocol": self.dryml_protocol,
-            "schema_versions": json_ready(self.schema_versions),
-            "details": json_ready(self.details),
-        }
+    def _payload(self) -> dict[str, Any]:
+        return {**self._identifying_payload(), "details": json_ready(self.details)}
+
+    def to_data(self) -> dict[str, Any]:
+        """Return a complete closed v1.1 environment-requirement envelope."""
+
+        return make_envelope(schema="dryml.environment_requirement.v1.1", kind="environment_requirement", prefix="envreq", payload=self._payload(), semantic_id=self.semantic_id, identifying_payload=self._identifying_payload(), metadata=self.metadata)
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> "EnvironmentRequirement":
-        """Build a requirement from serialized data."""
+        """Validate and decode a closed v1.1 requirement envelope."""
 
-        return cls(
-            python=data.get("python"),
-            requirements=tuple(data.get("requirements", ())),
-            excludes=tuple(data.get("excludes", ())),
-            capabilities=tuple(data.get("capabilities", ())),
-            tags=tuple(data.get("tags", ())),
-            dryml_protocol=data.get("dryml_protocol"),
-            schema_versions=data.get("schema_versions", {}),
-            details=data.get("details", {}),
-            schema_version=data.get("schema_version", ENVIRONMENT_REQUIREMENT_SCHEMA_VERSION),
+        raw = dict(data)
+        attached = raw.pop("id", None)
+        envelope = validate_envelope(raw, schema="dryml.environment_requirement.v1.1", kind="environment_requirement", prefix="envreq", identifying_payload=raw.get("payload", {}))
+        payload = envelope["payload"]
+        expected = {"python", "requirements", "excludes", "capabilities", "tags", "dryml_protocol", "schema_versions", "details"}
+        unknown, missing = set(payload) - expected, expected - set(payload)
+        if unknown or missing:
+            raise EnvironmentRequirementError("environment requirement fields are closed", context={"unknown": sorted(unknown), "missing": sorted(missing)})
+        value = cls(**dict(payload), metadata=envelope.get("metadata", {}))
+        if attached is not None and attached != value.semantic_id:
+            raise EnvironmentRequirementError("environment requirement attached ID does not match payload", context={"expected": value.semantic_id, "observed": attached})
+        return value
+
+
+def _intersect_specifiers(left: str | None, right: str | None, *, path: str) -> str | None:
+    if left in (None, ""):
+        return right or None
+    if right in (None, ""):
+        return left or None
+    combined = SpecifierSet(f"{left},{right}")
+    if _specifier_has_obvious_conflict(combined):
+        raise EnvironmentRequirementError(
+            "conflicting environment version constraints",
+            context={"path": path, "left": left, "right": right},
         )
+    return str(combined) or None
+
+
+def _merge_package_requirements(left: tuple[str, ...], right: tuple[str, ...]) -> tuple[str, ...]:
+    grouped: dict[tuple[str, tuple[str, ...], str | None, str | None], list[Requirement]] = {}
+    for text in left + right:
+        requirement = Requirement(text)
+        key = (
+            normalize_distribution_name(requirement.name),
+            tuple(sorted(requirement.extras)),
+            requirement.url,
+            None if requirement.marker is None else str(requirement.marker),
+        )
+        grouped.setdefault(key, []).append(requirement)
+
+    merged: list[str] = []
+    combined_groups: list[tuple[tuple[str, tuple[str, ...], str | None], str | None, SpecifierSet]] = []
+    for (name, extras, url, marker), requirements in grouped.items():
+        combined = SpecifierSet(",".join(str(item.specifier) for item in requirements if str(item.specifier)))
+        if _specifier_has_obvious_conflict(combined):
+            raise EnvironmentRequirementError(
+                "conflicting package requirement specifiers",
+                context={"path": f"requirements.{name}"},
+            )
+        identity = (name, extras, url)
+        for other_identity, other_marker, other_specifier in combined_groups:
+            if other_identity != identity or _markers_proven_disjoint(marker, other_marker):
+                continue
+            overlap = SpecifierSet(",".join(filter(None, (str(combined), str(other_specifier)))))
+            if _specifier_has_obvious_conflict(overlap):
+                raise EnvironmentRequirementError(
+                    "conflicting package requirement specifiers under overlapping markers",
+                    context={"path": f"requirements.{name}"},
+                )
+        combined_groups.append((identity, marker, combined))
+        text = name + ("[" + ",".join(extras) + "]" if extras else "")
+        if url:
+            text += f" @ {url}"
+        if str(combined):
+            text += str(combined)
+        if marker:
+            text += f"; {marker}"
+        merged.append(normalize_requirement_string(text))
+    return tuple(sorted(set(merged), key=requirement_sort_key))
+
+
+def _markers_proven_disjoint(left: str | None, right: str | None) -> bool:
+    if left is None or right is None:
+        return False
+    left_atoms = _conjunctive_marker_atoms(Requirement(f"x; {left}").marker)
+    right_atoms = _conjunctive_marker_atoms(Requirement(f"x; {right}").marker)
+    if left_atoms is None or right_atoms is None:
+        return False
+    return _marker_atoms_have_conflict(left_atoms + right_atoms)
+
+
+def _conjunctive_marker_atoms(marker: Any) -> list[tuple[Any, Any, Any]] | None:
+    atoms: list[tuple[Any, Any, Any]] = []
+
+    def visit(value: Any) -> bool:
+        if isinstance(value, tuple) and len(value) == 3:
+            atoms.append(value)
+            return True
+        if not isinstance(value, list):
+            return value == "and"
+        for item in value:
+            if item == "or" or not visit(item):
+                return False
+        return True
+
+    return atoms if visit(getattr(marker, "_markers", ())) else None
+
+
+def _marker_atoms_have_conflict(atoms: list[tuple[Any, Any, Any]]) -> bool:
+    version_variables = {"implementation_version", "python_full_version", "python_version"}
+    version_operators = {"<", "<=", ">", ">=", "==", "!=", "~=", "==="}
+    reverse_operator = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "==": "==", "!=": "!=", "===": "==="}
+    version_specifiers: dict[str, list[str]] = {}
+    string_equalities: dict[str, set[str]] = {}
+    string_exclusions: dict[str, set[str]] = {}
+    for left, operator, right in atoms:
+        if left.__class__.__name__ == "Variable" and right.__class__.__name__ == "Value":
+            variable, value, op = str(left.value), str(right.value), str(operator)
+        elif right.__class__.__name__ == "Variable" and left.__class__.__name__ == "Value":
+            variable, value = str(right.value), str(left.value)
+            op = reverse_operator.get(str(operator), "")
+        else:
+            continue
+        if variable in version_variables and op in version_operators:
+            version_specifiers.setdefault(variable, []).append(f"{op}{value}")
+        elif op == "==":
+            string_equalities.setdefault(variable, set()).add(value)
+        elif op == "!=":
+            string_exclusions.setdefault(variable, set()).add(value)
+    for values in version_specifiers.values():
+        try:
+            combined = SpecifierSet(",".join(values))
+        except InvalidSpecifier:
+            continue
+        if _specifier_has_obvious_conflict(combined):
+            return True
+    for variable, values in string_equalities.items():
+        if len(values) > 1 or values & string_exclusions.get(variable, set()):
+            return True
+    return False
+
+
+def _merge_schema_versions(left: Mapping[str, str], right: Mapping[str, str]) -> dict[str, str]:
+    result = dict(left)
+    for name, specifier in right.items():
+        result[name] = _intersect_specifiers(result.get(name), specifier, path=f"schema_versions.{name}") or ""
+    return result
+
+
+def _specifier_has_obvious_conflict(specifier: SpecifierSet) -> bool:
+    arbitrary_exact_versions = {item.version for item in specifier if item.operator == "==="}
+    if len(arbitrary_exact_versions) > 1:
+        return True
+    candidates = _specifier_witnesses(specifier)
+    if candidates and not any(candidate in specifier for candidate in candidates):
+        return True
+    exact_versions: set[Version] = set()
+    lower: tuple[Version, bool] | None = None
+    upper: tuple[Version, bool] | None = None
+    for item in specifier:
+        try:
+            version = Version(item.version)
+        except InvalidVersion:
+            return False
+        if item.operator == "==":
+            exact_versions.add(version)
+        elif item.operator in {">", ">="}:
+            inclusive = item.operator == ">="
+            if lower is None or version > lower[0] or (version == lower[0] and not inclusive and lower[1]):
+                lower = (version, inclusive)
+        elif item.operator in {"<", "<="}:
+            inclusive = item.operator == "<="
+            if upper is None or version < upper[0] or (version == upper[0] and not inclusive and upper[1]):
+                upper = (version, inclusive)
+    if len(exact_versions) > 1:
+        return True
+    if exact_versions:
+        return next(iter(exact_versions)) not in specifier
+    return lower is not None and upper is not None and (
+        lower[0] > upper[0] or (lower[0] == upper[0] and (not lower[1] or not upper[1]))
+    )
+
+
+def _specifier_witnesses(specifier: SpecifierSet) -> tuple[Version, ...]:
+    candidates: set[Version] = set()
+    for item in specifier:
+        raw = item.version.rstrip(".*")
+        try:
+            version = Version(raw)
+        except InvalidVersion:
+            return ()
+        release = version.release or (0,)
+        candidates.update(
+            (
+                version,
+                Version(".".join(str(part) for part in (*release, 0))),
+                Version(".".join(str(part) for part in (*release, 1))),
+            )
+        )
+        try:
+            candidates.add(Version(f"{version}.post1"))
+        except InvalidVersion:
+            pass
+        if release[-1] > 0:
+            candidates.add(Version(".".join(str(part) for part in (*release[:-1], release[-1] - 1, 999999))))
+        if item.operator == "~=":
+            prefix = release[:-1] if len(release) > 1 else ()
+            upper = (prefix[-1] + 1,) if len(prefix) == 1 else (*prefix[:-1], prefix[-1] + 1) if prefix else (release[0] + 1,)
+            candidates.add(Version(".".join(str(part) for part in (*upper, 0))))
+        if item.operator in {"==", "!="} and item.version.endswith(".*"):
+            candidates.add(Version(".".join(str(part) for part in (*release, 1))))
+            candidates.add(Version(".".join(str(part) for part in (*release[:-1], release[-1] + 1, 0))))
+    return tuple(candidates)
 
 
 def marker_environment_from_record(record: EnvironmentRecord) -> dict[str, str | None]:

@@ -5,9 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues
+from .compatibility import CompatibilityIssue, CompatibilityReport, report_from_issues, unavailable_report
 from .errors import EnvironmentRegistryError
-from .probe import EnvironmentProbeResult, probe
 from .requirements import EnvironmentRequirement
 from .specs import EnvironmentSpec, spec_from_data
 from .utils import coerce_tuple
@@ -123,8 +122,10 @@ class EnvironmentRegistry:
             return entry
         return None
 
-    def probe_registered(self, name: str, *, timeout: float | None = 30.0) -> EnvironmentProbeResult:
+    def probe_registered(self, name: str, *, timeout: float | None = 30.0) -> Any:
         """Probe a registered environment by name."""
+
+        from .probe import probe
 
         return probe(self.get(name).spec, timeout=timeout)
 
@@ -156,6 +157,8 @@ class EnvironmentRegistry:
         for entry in self.list():
             if requirement.tags and not set(requirement.tags) <= set(entry.tags):
                 continue
+            from .probe import probe
+
             result = probe(entry.spec, timeout=timeout)
             if not result.ok or result.record is None:
                 first_report = first_report or result.report
@@ -174,13 +177,11 @@ class EnvironmentRegistry:
     ) -> CompatibilityReport:
         """Return a structured report explaining registry selection failure."""
 
-        issue = CompatibilityIssue(
-            "registry_no_match",
-            "error",
-            message,
-            expected=None if requirement is None else requirement.to_data(),
-        )
-        return report_from_issues((issue,))
+        report = unavailable_report(message)
+        if requirement is None:
+            return report
+        issue = CompatibilityIssue("registry_no_match", "error", message, expected=requirement.to_data())
+        return CompatibilityReport("unavailable", report.issues + (issue,))
 
     def to_data(self) -> dict[str, Any]:
         """Return JSON-compatible registry data."""

@@ -3,7 +3,7 @@ import pytest
 import dryml.environments as envs
 
 
-def record(packages=None, *, python="3.11.8", features=("dryml.environments.v1",), tags=("dev",)):
+def record(packages=None, *, python="3.11.8", features=("dryml.environments.v1.1",), tags=("dev",)):
     packages = packages or {"dryml": "0.3.0", "torch": "2.5.1"}
     return envs.EnvironmentRecord(
         python=envs.PythonRecord(python, "CPython"),
@@ -45,7 +45,7 @@ def test_requirement_check_compatible():
         python=">=3.10,<3.13",
         requirements=("dryml>=0.3", "torch>=2.4,<2.7"),
         excludes=("tensorflow",),
-        capabilities=("dryml.environments.v1",),
+        capabilities=("dryml.environments.v1.1",),
         tags=("dev",),
         schema_versions={"environment_record": "==1"},
     )
@@ -220,3 +220,41 @@ def test_policy_ignore_skips_checks():
     report = envs.EnvironmentRequirement(requirements=("missing-package",)).check(record(), policy="ignore")
     assert report.status == "compatible"
     assert report.issues == ()
+
+
+def test_requirement_merge_intersects_constraints_and_preserves_sources():
+    left = envs.EnvironmentRequirement(
+        python=">=3.10",
+        requirements=("torch>=2",),
+        dryml_protocol=">=1",
+        schema_versions={"environment_record": ">=1"},
+        details={"sources": ("left",)},
+    )
+    right = envs.EnvironmentRequirement(
+        python="<3.13",
+        requirements=("torch<3",),
+        excludes=("tensorflow",),
+        dryml_protocol="<2",
+        schema_versions={"environment_record": "<2"},
+        details={"sources": ("right",)},
+    )
+
+    merged = left.merge(right, sources=("caller",))
+
+    assert merged.check(record()).status == "compatible"
+    assert merged.requirements == ("torch<3,>=2",)
+    assert merged.excludes == ("tensorflow",)
+    assert merged.details["sources"] == ("left", "right", "caller")
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        (envs.EnvironmentRequirement(python="<3"), envs.EnvironmentRequirement(python=">=3")),
+        (envs.EnvironmentRequirement(requirements=("torch<2",)), envs.EnvironmentRequirement(requirements=("torch>=2",))),
+        (envs.EnvironmentRequirement(requirements=("torch",)), envs.EnvironmentRequirement(excludes=("torch",))),
+    ],
+)
+def test_requirement_merge_rejects_empty_intersections(left, right):
+    with pytest.raises(envs.EnvironmentRequirementError, match="conflict|excluded"):
+        left.merge(right)
