@@ -382,7 +382,7 @@ class Definition(DefInterface, Mapping):
         arg_str = ", ".join(map(str, arg_elements))
         return f"{type(self).__name__}({arg_str})"
 
-    def __getstate__(self):
+    def _pickle_getstate(self):
         # Only structural data; drop ephemeral links
         return {
             'cls': self._cls,
@@ -390,7 +390,7 @@ class Definition(DefInterface, Mapping):
             'kwargs': self._kwargs
         }
 
-    def __setstate__(self, state):
+    def _pickle_setstate(self, state):
         object.__setattr__(self, "_cls", self._freeze_value(state['cls']))
         object.__setattr__(self, "_args", None if state['args'] is None else FrozenTuple(self._freeze_value(v) for v in state['args']))
         object.__setattr__(self, "_kwargs", self._freeze_kwargs(dict(state['kwargs'])))
@@ -496,6 +496,11 @@ class Definition(DefInterface, Mapping):
     def as_space(self):
         from .search_space import SearchSpace
         return SearchSpace.from_def(self)
+
+
+# Python 3.10's frozen-slots dataclass transform replaces custom pickle methods.
+Definition.__getstate__ = Definition._pickle_getstate
+Definition.__setstate__ = Definition._pickle_setstate
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,7 +766,7 @@ class ConcreteDefinition(DefInterface, Mapping):
         object.__setattr__(self, "_stable_hash_cache", value)
         return value
 
-    def __getstate__(self):
+    def _pickle_getstate(self):
         """Serialize V1 in its legacy slotted layout and V2 as a named record."""
 
         if self.identity_version == V1_IDENTITY_VERSION:
@@ -781,7 +786,7 @@ class ConcreteDefinition(DefInterface, Mapping):
             "stable_hash_cache": self._stable_hash_cache,
         }
 
-    def __setstate__(self, state):
+    def _pickle_setstate(self, state):
         """Restore legacy or versioned records without resolving or binding classes."""
 
         record = decode_identity_record(state)
@@ -946,6 +951,11 @@ class ConcreteDefinition(DefInterface, Mapping):
         from .utils.graph.value import get_subtree
 
         return get_subtree(self, path)
+
+
+# Preserve the versioned record codec on Python 3.10; see the Definition note.
+ConcreteDefinition.__getstate__ = ConcreteDefinition._pickle_getstate
+ConcreteDefinition.__setstate__ = ConcreteDefinition._pickle_setstate
 
 
 def freeze(value: Any) -> Any:

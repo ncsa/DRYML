@@ -14,6 +14,13 @@ from .locking import interprocess_lock
 from ..utils.general import atomic_pickle_save, pickle_load
 
 
+def _is_file_like(value) -> bool:
+    return isinstance(value, IOBase) or all(
+        callable(getattr(value, name, None))
+        for name in ("read", "write", "seek", "truncate")
+    )
+
+
 class ZipStoreConflictError(StoreAuthorityError):
     """Report rejected archive publication from a stale ZipStore handle.
 
@@ -52,7 +59,7 @@ class ZipStore(Store):
         self._main_def_dirty = False
         self._archive_dirty = False
 
-        if isinstance(self.zip_dest, IOBase):
+        if _is_file_like(self.zip_dest):
             self._extract_if_nonempty()
             self._archive_baseline = None
         else:
@@ -79,7 +86,7 @@ class ZipStore(Store):
             with zipfile.ZipFile(self.zip_dest, 'r') as zf:
                 zf.extractall(self.base_dir)
 
-        if isinstance(self.zip_dest, IOBase):
+        if _is_file_like(self.zip_dest):
             buf = self.zip_dest
             buf.seek(0)
             if buf.read(1):
@@ -208,7 +215,7 @@ class ZipStore(Store):
             File-like targets retain their previous in-place stream behavior.
         """
 
-        if isinstance(self.zip_dest, IOBase):
+        if _is_file_like(self.zip_dest):
             # File-like targets cannot offer filesystem replacement; construct
             # the complete archive first so a serialization failure leaves them
             # untouched.
@@ -270,7 +277,7 @@ class ZipStore(Store):
         self._tmp.cleanup()
 
     def catalog_key(self) -> str:
-        if isinstance(self.zip_dest, IOBase):
+        if _is_file_like(self.zip_dest):
             return f"{type(self).__module__}.{type(self).__qualname__}:buffer:{id(self.zip_dest)}"
         return f"{type(self).__module__}.{type(self).__qualname__}:{self._archive_path}"
 
@@ -445,7 +452,7 @@ class ZipExportStore(Store):
         - If _main_def is set, write it as def.pkl at the root of the zip.
         - Then write all include_paths (files or directories) from src_dir.
         """
-        if isinstance(self.zip_dest, IOBase):
+        if _is_file_like(self.zip_dest):
             buf = self.zip_dest
             buf.seek(0)
             buf.truncate(0)
@@ -476,7 +483,7 @@ class ZipExportStore(Store):
                     # raise FileNotFoundError(full)
                     pass
 
-        if isinstance(self.zip_dest, IOBase):
+        if _is_file_like(self.zip_dest):
             self.zip_dest.seek(0)
 
     def close(self) -> None:

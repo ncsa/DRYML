@@ -193,6 +193,7 @@ def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypa
     })
     assert "args" not in cdef
     state = cdef.__getstate__()
+    assert ConcreteDefinition.__getstate__ is ConcreteDefinition._pickle_getstate
     assert set(state) == {"identity_version", "cls", "parameters", "stable_hash_cache"}
     assert state["parameters"] == cdef["parameters"]
     monkeypatch.setattr(

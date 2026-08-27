@@ -8,6 +8,7 @@ import numpy as np
 
 from dryml.core import definition_mode
 from dryml.core.repo import Repo, default_repo
+from dryml.core.store.zip import ZipStore
 from dryml.core.dtype import dtype
 from dryml.core.tensor_spec import TensorSpec
 from dryml.core.cardinality import Cardinality
@@ -22,6 +23,15 @@ def _assert_expected_store_root_entries(store):
     entries = set(os.listdir(store.base_dir))
     assert {"def.pkl", "objects"} <= entries
     assert entries <= {"def.pkl", "aliases.pkl", "objects", ".dryml"}
+
+
+def test_make_store_accepts_delegating_file_wrapper():
+    from dryml.core.repo import make_store
+
+    with tempfile.NamedTemporaryFile() as wrapped:
+        store = make_store(wrapped)
+        assert isinstance(store, ZipStore)
+        store.close()
 
 
 def test_save_1(primary_store_set):

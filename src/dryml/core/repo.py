@@ -1236,11 +1236,29 @@ class Repo:
 
 
 def make_store(store):
+    """Normalize a Store, path, or seekable binary file into a Store.
+
+    Args:
+        store: Existing Store, directory/archive path, or seekable file-like
+            object that supplies ``read``, ``write``, ``seek``, and ``truncate``.
+
+    Returns:
+        The existing Store, a directory Store, or a ZIP-backed Store.
+
+    Raises:
+        ValueError: If ``store`` is not a supported path or file-like object.
+
+    Side Effects:
+        Path and file-like inputs may open or initialize their corresponding
+        Store backend.
+    """
     from .store.store import Store
     if isinstance(store, Store):
         return store
 
-    elif isinstance(store, IOBase):
+    elif isinstance(store, IOBase) or all(
+            callable(getattr(store, name, None))
+            for name in ("read", "write", "seek", "truncate")):
         from .store.zip import ZipStore
         # file-like => zip-backed store in a temp dir
         return ZipStore(store)
