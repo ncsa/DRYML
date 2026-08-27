@@ -30,7 +30,7 @@ def test_python_executable_probe_command():
 
 def test_conda_direct_and_conda_run_commands():
     direct = envs.CondaEnvironmentSpec(prefix="/opt/envs/a")
-    assert direct.direct_python_executable(os_name="posix") == os.path.join("/opt/envs/a", "bin", "python")
+    assert direct.direct_python_executable(os_name="posix") == os.path.join("/opt/envs/a", "bin/python")
     assert direct.direct_python_executable(os_name="nt") == os.path.join("/opt/envs/a", "python.exe")
     run_prefix = envs.CondaEnvironmentSpec(prefix="/opt/envs/a", launch_mode="conda-run")
     assert run_prefix.probe_command()[:4] == ["conda", "run", "-p", "/opt/envs/a"]
