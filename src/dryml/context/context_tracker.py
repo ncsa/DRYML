@@ -7,7 +7,7 @@ from typing import Any, Callable, Mapping, Type
 import multiprocessing
 import threading
 
-from dryml.core2.utils.general import get_unique_concrete_definitions
+from dryml.core.utils.general import get_unique_concrete_definitions
 from .resource_spec import (
     ResourceAllocation,
     ResourceSpec,

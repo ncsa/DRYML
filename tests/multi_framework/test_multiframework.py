@@ -1,7 +1,7 @@
 import pytest
 import sys
 
-from dryml.core2.backend import discover_backend
+from dryml.core.backend import discover_backend
 
 jax = pytest.importorskip("jax")
 if not hasattr(jax, "devices"):
@@ -19,7 +19,7 @@ import dryml.torch
 import dryml.tf
 import numpy as np
 
-from dryml.core2.backend import discover_backend
+from dryml.core.backend import discover_backend
 
 def test_all_backend_detectors():
     assert discover_backend(jnp.array(1)) == "jax"

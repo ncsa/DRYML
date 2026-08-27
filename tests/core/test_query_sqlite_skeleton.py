@@ -3,11 +3,11 @@ from uuid import UUID
 
 import pytest
 
-from dryml.core2.query.model import QueryIndexDirty, QueryIndexIncompatible
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.connection as connection_module
-from dryml.core2.query.sqlite.connection import SQLiteConnectionManager
-from dryml.core2.query.sqlite.schema import (
+from dryml.core.query.model import QueryIndexDirty, QueryIndexIncompatible
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.connection as connection_module
+from dryml.core.query.sqlite.connection import SQLiteConnectionManager
+from dryml.core.query.sqlite.schema import (
     IndexSemanticVersion,
     SQLITE_QUERY_INDEX_APPLICATION_ID,
     SQLITE_QUERY_INDEX_SCHEMA_VERSION,
@@ -16,7 +16,7 @@ from dryml.core2.query.sqlite.schema import (
     initialize_schema,
     validate_schema,
 )
-from dryml.core2.query.sqlite.utils import is_sqlite_busy_error, wal_runtime_is_known_safe
+from dryml.core.query.sqlite.utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")

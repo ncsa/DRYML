@@ -1,7 +1,7 @@
 import pytest
 
-from dryml.core2 import ConcreteDefinitionGraph, Definition, Object, Repo, SKIP_ARGS, SetMember
-from dryml.core2.cdef_graph import (
+from dryml.core import ConcreteDefinitionGraph, Definition, Object, Repo, SKIP_ARGS, SetMember
+from dryml.core.cdef_graph import (
     CDefEdge,
     CDefNode,
     ConcreteDefinitionGraphCycleError,
@@ -11,11 +11,11 @@ from dryml.core2.cdef_graph import (
     as_query_index_graph,
     iter_direct_cdef_edges,
 )
-from dryml.core2.bound_args import BoundArguments, bind_complete_arguments
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.path import Arg, GraphPath, Kwarg, Parameter, get_subtree
+from dryml.core.bound_args import BoundArguments, bind_complete_arguments
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.path import Arg, GraphPath, Kwarg, Parameter, get_subtree
 
 
 class GraphLeaf(Object):

@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
-import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -48,22 +47,43 @@ from .utils import is_sqlite_busy_error, wal_runtime_is_known_safe
 from .lowering import SQLiteOptimizerPolicy, SQLiteRelationCompiler
 
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - selected only on POSIX hosts.
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - selected only on Windows hosts.
+    msvcrt = None
+
+
 _CODEC = QueryIndexCodec()
 _REBUILD_BATCH_SIZE = 500
 _BUILD_CLAIM_STALE_SECONDS = 300.0
 _BUILD_CLAIM_WAIT_SECONDS = 30.0
 
 
+def _claim_lock_backend() -> str:
+    """Return the platform-selected primitive used for rebuild claim locking."""
+
+    return "windows" if os.name == "nt" else "posix"
+
+
 def _try_lock_claim_file(fd: int) -> bool:
     """Try to hold the cross-process lock for a query-index claim file."""
 
-    if fcntl is not None:
+    if _claim_lock_backend() == "posix":
+        if fcntl is None:
+            raise QueryIndexUnavailable("POSIX claim locking is unavailable for the SQLite query index.")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return False
         return True
 
+    if msvcrt is None:
+        raise QueryIndexUnavailable("Windows claim locking is unavailable for the SQLite query index.")
     if os.fstat(fd).st_size == 0:
         os.write(fd, b"\0")
     os.lseek(fd, 0, os.SEEK_SET)
@@ -77,9 +97,13 @@ def _try_lock_claim_file(fd: int) -> bool:
 def _unlock_claim_file(fd: int) -> None:
     """Release a query-index claim file lock held by this process."""
 
-    if fcntl is not None:
+    if _claim_lock_backend() == "posix":
+        if fcntl is None:
+            raise QueryIndexUnavailable("POSIX claim locking is unavailable for the SQLite query index.")
         fcntl.flock(fd, fcntl.LOCK_UN)
         return
+    if msvcrt is None:
+        raise QueryIndexUnavailable("Windows claim locking is unavailable for the SQLite query index.")
     os.lseek(fd, 0, os.SEEK_SET)
     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
@@ -427,11 +451,11 @@ class SQLiteStoreQueryIndex:
             replacement._set_build_state("ready")
             con = replacement._connections.connection(readonly=False)
             con.execute("PRAGMA optimize")
-            # Activation replaces only the database file, so checkpoint a staged
-            # WAL before closing it and atomically publishing its main file.
-            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             replacement.close()
+            self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
+            self._checkpoint_and_cleanup_sidecars(self.path, label="canonical")
             self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
+            self._cleanup_replacement(replacement_path)
         except BaseException:
             try:
                 replacement.close()
@@ -898,9 +922,13 @@ class SQLiteStoreQueryIndex:
                     raise QueryIndexBusy("Timed out waiting for another SQLite query-index rebuild to finish.")
                 time.sleep(0.01)
                 continue
+            locked = False
+            owner_identity = None
             try:
-                if not _try_lock_claim_file(fd):
+                locked = _try_lock_claim_file(fd)
+                if not locked:
                     raise QueryIndexBusy("Could not lock a new SQLite query-index rebuild claim.")
+                owner_identity = os.fstat(fd)
                 owner_token = uuid4().hex
                 os.lseek(fd, 0, os.SEEK_SET)
                 os.write(
@@ -910,16 +938,17 @@ class SQLiteStoreQueryIndex:
                 if not force and self.path.exists() and not self._is_dirty():
                     self._connections.close_all_current_process()
                     if self.status().state == "ready":
-                        self._unlink_claim_if_owned(claim_path, fd)
                         yield False
                         return
                 yield True
             finally:
                 try:
-                    self._unlink_claim_if_owned(claim_path, fd)
+                    if locked:
+                        _unlock_claim_file(fd)
                 finally:
-                    _unlock_claim_file(fd)
                     os.close(fd)
+                if locked:
+                    self._unlink_claim_if_owned(claim_path, owner_identity)
             return
 
     def _build_claim_path(self) -> Path:
@@ -939,38 +968,42 @@ class SQLiteStoreQueryIndex:
             return False
         except OSError:
             return False
+        locked = False
+        owner_identity = None
+        stale = False
         try:
-            if not _try_lock_claim_file(fd):
+            locked = _try_lock_claim_file(fd)
+            if not locked:
                 return False
+            owner_identity = os.fstat(fd)
             try:
-                stat = os.fstat(fd)
-                try:
-                    current = claim_path.stat()
-                except FileNotFoundError:
-                    return False
-                if not os.path.samestat(current, stat):
-                    return False
-                if time.time() - current.st_mtime <= _BUILD_CLAIM_STALE_SECONDS:
-                    return False
-                claim_path.unlink()
-                return True
-            finally:
-                _unlock_claim_file(fd)
+                current = claim_path.stat()
+            except FileNotFoundError:
+                return False
+            if not os.path.samestat(current, owner_identity):
+                return False
+            if time.time() - current.st_mtime <= _BUILD_CLAIM_STALE_SECONDS:
+                return False
+            stale = True
         except OSError:
             return False
         finally:
+            if locked:
+                _unlock_claim_file(fd)
             os.close(fd)
+        if stale:
+            self._unlink_claim_if_owned(claim_path, owner_identity)
+        return stale
 
     @staticmethod
-    def _unlink_claim_if_owned(claim_path: Path, fd: int) -> None:
-        """Remove a claim only if its path still identifies ``fd``'s file."""
+    def _unlink_claim_if_owned(claim_path: Path, owner_identity) -> None:
+        """Remove a closed claim only when its path still identifies its owner."""
 
         try:
             current = claim_path.stat()
         except FileNotFoundError:
             return
-        owned = os.fstat(fd)
-        if os.path.samestat(current, owned):
+        if os.path.samestat(current, owner_identity):
             try:
                 claim_path.unlink()
             except FileNotFoundError:
@@ -991,6 +1024,43 @@ class SQLiteStoreQueryIndex:
             except OSError:
                 shutil.copy2(self.path, target)
         os.replace(replacement_path, self.path)
+
+    @staticmethod
+    def _checkpoint_and_cleanup_sidecars(path: Path, *, label: str) -> None:
+        """Checkpoint and remove sidecars before a SQLite main-file replacement.
+
+        Args:
+            path: Main database path whose sidecars must be made inactive.
+            label: Diagnostic name identifying staged or canonical sidecars.
+
+        Raises:
+            QueryIndexBusy: If a live reader prevents a complete WAL checkpoint
+                or sidecar cleanup.
+        """
+
+        if not path.exists():
+            return
+        sqlite3 = require_sqlite()
+        con = sqlite3.connect(str(path), timeout=0, isolation_level=None)
+        try:
+            row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except Exception as exc:
+            if is_sqlite_busy_error(exc):
+                raise QueryIndexBusy(f"SQLite {label} sidecar checkpoint is blocked by an active reader.") from exc
+            raise QueryIndexError(f"SQLite {label} sidecar checkpoint failed.") from exc
+        finally:
+            con.close()
+        if row is None or row[0] != 0:
+            raise QueryIndexBusy(f"SQLite {label} sidecar checkpoint is blocked by an active reader.")
+        for sidecar in (
+                path.with_name(f"{path.name}-wal"),
+                path.with_name(f"{path.name}-shm")):
+            try:
+                sidecar.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise QueryIndexBusy(f"SQLite {label} sidecar cleanup is blocked by an active reader.") from exc
 
     @staticmethod
     def _cleanup_replacement(replacement_path: Path) -> None:

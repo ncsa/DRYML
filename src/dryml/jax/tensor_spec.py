@@ -1,7 +1,7 @@
 from typing import Any
 
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec
-from dryml.core2.utils.recurse import map_leaves
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec
+from dryml.core.utils.recurse import map_leaves
 from .dtype import dtype
 
 

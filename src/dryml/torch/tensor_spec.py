@@ -1,8 +1,8 @@
 from __future__ import annotations
 from typing import Any
 
-from dryml.core2.tensor_spec import TensorSpec, Dynamic, Layout
-from dryml.core2.utils.recurse import map_leaves
+from dryml.core.tensor_spec import TensorSpec, Dynamic, Layout
+from dryml.core.utils.recurse import map_leaves
 from .spec import TorchTensorSpec
 from .dtype import dtype
 

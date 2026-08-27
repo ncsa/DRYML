@@ -45,10 +45,10 @@ jobs:
           python - <<'PY'
           import importlib.util
           import dryml
-          import dryml.core2.store.store
-          import dryml.core2.utils.general
+          import dryml.core.store.store
+          import dryml.core.utils.general
 
-          assert hasattr(dryml, "core2")
+          assert hasattr(dryml, "core")
           assert importlib.util.find_spec("dryml.data.transforms") is None
           PY
 

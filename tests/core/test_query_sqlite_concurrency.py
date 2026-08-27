@@ -8,17 +8,17 @@ import time
 
 import pytest
 
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.model import QueryIndexBusy, QueryIndexError
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.index as sqlite_index_module
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.repo_plan import SaveAction, SavePlan, execute_save_plan
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
-from dryml.core2.utils.general import pickle_save
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.model import QueryIndexBusy, QueryIndexError
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.repo_plan import SaveAction, SavePlan, execute_save_plan
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
+from dryml.core.utils.general import pickle_save
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -29,11 +29,11 @@ import json
 from pathlib import Path
 import time
 
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.query.sqlite.index import (
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.index import (
     SQLiteStoreQueryIndex,
     _EncodedNode,
     _bump_generation,
@@ -41,9 +41,9 @@ from dryml.core2.query.sqlite.index import (
     _relative_def_path,
     _resolve_definition_id,
 )
-from dryml.core2.query.utils import stable_hash_to_blob
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
+from dryml.core.query.utils import stable_hash_to_blob
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
 
 
 def cdef(name):
@@ -486,6 +486,77 @@ def test_build_claim_owner_does_not_remove_successor_claim(tmp_path):
 
     assert claim_path.exists()
     claim_path.unlink()
+
+
+def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypatch):
+    """The Windows claim path releases its handle before unlinking the claim."""
+
+    class FakeMSVCRT:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+        calls = []
+
+        @classmethod
+        def locking(cls, fd, operation, size):
+            cls.calls.append((fd, operation, size))
+
+    index = _index(tmp_path / "index.sqlite")
+    closed = False
+    original_close = os.close
+    original_unlink = index._unlink_claim_if_owned
+
+    def close(fd):
+        nonlocal closed
+        closed = True
+        original_close(fd)
+
+    def unlink_after_close(path, owner_identity):
+        assert closed
+        original_unlink(path, owner_identity)
+
+    monkeypatch.setattr(sqlite_index_module, "_claim_lock_backend", lambda: "windows")
+    monkeypatch.setattr(sqlite_index_module, "msvcrt", FakeMSVCRT)
+    monkeypatch.setattr(sqlite_index_module.os, "close", close)
+    monkeypatch.setattr(index, "_unlink_claim_if_owned", unlink_after_close)
+
+    with index._build_claim(force=True) as acquired:
+        assert acquired
+
+    assert [call[1] for call in FakeMSVCRT.calls] == [FakeMSVCRT.LK_NBLCK, FakeMSVCRT.LK_UNLCK]
+    assert not index._build_claim_path().exists()
+
+
+def test_wal_rebuild_waits_for_reader_before_replacing_canonical_sidecar(tmp_path):
+    """A live WAL reader prevents mixed-generation sidecar activation."""
+
+    store = DirStore(
+        tmp_path / "store",
+        query_index=SQLiteQueryIndexConfig(journal_mode="wal", busy_timeout=0.01, max_write_retries=0),
+    )
+    root = _cdef("wal-barrier")
+    _save_root_definition(store, root)
+    index = store.open_query_index()
+    try:
+        index.initialize_empty()
+    except QueryIndexError as exc:
+        pytest.skip(f"WAL mode unavailable in this environment: {exc}")
+    store.mark_query_index_dirty()
+    sqlite3 = require_sqlite()
+    reader = sqlite3.connect(store.query_index_path, isolation_level=None)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM catalog_state").fetchall()
+        with pytest.raises(QueryIndexBusy, match="canonical sidecar checkpoint"):
+            store.rebuild_query_index()
+        assert store.query_index_is_dirty()
+        assert not list(Path(store.query_index_path).parent.glob(f"{Path(store.query_index_path).name}.rebuild-*.tmp*"))
+    finally:
+        reader.execute("ROLLBACK")
+        reader.close()
+
+    store.rebuild_query_index()
+    assert not list(Path(store.query_index_path).parent.glob(f"{Path(store.query_index_path).name}.rebuild-*.tmp*"))
+    assert store.query_index_status().state == "ready"
 
 
 def test_writer_busy_retry_succeeds_after_lock_release(tmp_path):

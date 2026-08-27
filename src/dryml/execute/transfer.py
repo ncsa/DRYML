@@ -4,12 +4,12 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any
 
-from dryml.core2 import Repo
-from dryml.core2.canonical import to_canonical
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.object import Object
-from dryml.core2.utils.general import get_unique_concrete_definitions
-from dryml.core2.utils.recurse import iter_leaves
+from dryml.core import Repo
+from dryml.core.canonical import to_canonical
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.object import Object
+from dryml.core.utils.general import get_unique_concrete_definitions
+from dryml.core.utils.recurse import iter_leaves
 
 from .protocol import StoreRef
 
@@ -32,11 +32,11 @@ def _coerce_store_ref(store, *, tmp_prefix: str):
     if isinstance(store, StoreRef):
         return store, None
 
-    from dryml.core2.store.dir import DirStore
+    from dryml.core.store.dir import DirStore
     if isinstance(store, DirStore):
         return StoreRef.directory(store.base_dir), None
 
-    from dryml.core2.store.store import Store
+    from dryml.core.store.store import Store
     if isinstance(store, Store):
         raise TypeError(
             "Local execution currently supports only directory stores as "
@@ -49,7 +49,7 @@ def _coerce_store_ref(store, *, tmp_prefix: str):
 def _default_store_ref_candidate(store):
     if store is None:
         return None
-    from dryml.core2.store.dir import DirStore
+    from dryml.core.store.dir import DirStore
     if isinstance(store, DirStore):
         return store
     return None
@@ -132,7 +132,7 @@ def prepare_call(
         repo=None,
         transfer_store=None,
         result_store=None) -> PreparedCall:
-    from dryml.core2.repo import manage_repo
+    from dryml.core.repo import manage_repo
 
     with manage_repo(repo=repo) as source_repo:
         if transfer_store is None:
@@ -171,7 +171,7 @@ def restore_result(response, *, repo=None, result_store: StoreRef):
     if repo is None:
         result_repo = Repo(stores=store)
     else:
-        from dryml.core2.repo import manage_repo
+        from dryml.core.repo import manage_repo
         with manage_repo(repo=repo) as result_repo:
             result_repo.add_store(store)
             return result_repo.load_object(

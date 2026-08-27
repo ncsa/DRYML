@@ -1,7 +1,7 @@
 import numpy as np
 
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import Dynamic, TensorSpec
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import Dynamic, TensorSpec
 from dryml.data.source import GeneratorDataset
 
 

@@ -5,8 +5,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from dryml.core2.utils.general import pickle_load, pickle_save
-from dryml.core2.utils.recurse import iter_leaves
+from dryml.core.utils.general import pickle_load, pickle_save
+from dryml.core.utils.recurse import iter_leaves
 
 from .base import Artifact
 

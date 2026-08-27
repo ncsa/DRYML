@@ -1,10 +1,11 @@
 import pytest
 
-from dryml.core2 import Object
-from dryml.core2.bound_args import BoundArguments
-from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.query.codecs import (
+from dryml.core import Object
+from dryml.core.bound_args import BoundArguments
+from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.query.codecs import (
+    CDEF_CODEC_VERSION,
     QUERY_INDEX_CODEC_VERSION,
     QueryCodecError,
     QueryIndexCodec,
@@ -16,10 +17,10 @@ from dryml.core2.query.codecs import (
     encode_feature_token,
     encode_graph_path,
 )
-from dryml.core2.query.model import FeatureToken
-from dryml.core2.query.path import Arg, GraphPath, Index, Key, Kwarg, Parameter, SetMember
-from dryml.core2.query.utils import chunked, stable_hash_from_blob, stable_hash_to_blob
-from dryml.core2.utils.general import pickler
+from dryml.core.query.model import FeatureToken
+from dryml.core.query.path import Arg, GraphPath, Index, Key, Kwarg, Parameter, SetMember
+from dryml.core.query.utils import chunked, stable_hash_from_blob, stable_hash_to_blob
+from dryml.core.utils.general import pickler
 
 
 class CodecLeaf(Object):
@@ -32,6 +33,13 @@ def test_cdef_codec_roundtrip():
     cdef = CodecLeaf("roundtrip").definition
 
     assert decode_cdef(encode_cdef(cdef)) == cdef
+
+
+def test_namespace_promotion_increments_only_the_cdef_codec_marker():
+    """The namespace break rejects old CDef blobs without changing other codecs."""
+
+    assert CDEF_CODEC_VERSION == 3
+    assert QUERY_INDEX_CODEC_VERSION == 3
 
 
 def test_cdef_codec_retains_v1_identity_when_pickle_state_has_no_version():

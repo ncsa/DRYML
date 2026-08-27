@@ -27,7 +27,7 @@ The live Python instance associated with one concrete definition. It may hold ru
 ## Typical Flow
 
 ```python
-from dryml.core2 import Object, Definition, Repo
+from dryml.core import Object, Definition, Repo
 
 
 class Layer(Object):
@@ -136,7 +136,7 @@ value that was never stored.
 DRYML can capture constructor calls as definitions instead of building runtime objects.
 
 ```python
-from dryml.core2 import definition_mode
+from dryml.core import definition_mode
 
 with definition_mode():
     layer_def = Layer(width=64)

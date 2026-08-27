@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Callable, ClassVar
 
-from dryml.core2.object import Object
-from dryml.core2.backend import discover_backends, Backend
-from dryml.core2.tensor_spec import TensorSpec
-from dryml.core2.utils.recurse import iter_leaves
+from dryml.core.object import Object
+from dryml.core.backend import discover_backends, Backend
+from dryml.core.tensor_spec import TensorSpec
+from dryml.core.utils.recurse import iter_leaves
 from .traits import Traits, BatchMode
 
 

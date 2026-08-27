@@ -14,12 +14,12 @@ from pathlib import Path
 import shutil
 import time
 
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
-from dryml.core2.utils.general import pickle_save
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
+from dryml.core.utils.general import pickle_save
 
 
 def synthetic_cdef(index: int) -> ConcreteDefinition:

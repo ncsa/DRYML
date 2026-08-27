@@ -2,10 +2,10 @@ import numpy as np
 import pytest
 
 from dryml.artifacts import Accuracy, CachedDataset, Scalar, ScalarAvg
-from dryml.core2 import ConfigRef, Repo
-from dryml.core2.repo import default_repo
-from dryml.core2.store.dir import DirStore
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core import ConfigRef, Repo
+from dryml.core.repo import default_repo
+from dryml.core.store.dir import DirStore
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArgMax, ArrayDataset, Map, NpyFileDataset, Pipe, Project, Select
 from dryml.models import Model
 

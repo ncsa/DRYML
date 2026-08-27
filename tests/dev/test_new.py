@@ -1,7 +1,7 @@
 
 
 def test_cdef_payload_frozen_lists():
-    import core2_objects as objs
+    import core_objects as objs
     d = Definition(objs.TestClass1, layer_dims=[[1,2,3],[4,5,6]]).concretize()
     assert d.args[0] == ((1,2,3),(4,5,6))
     # try to mutate nested
@@ -10,7 +10,7 @@ def test_cdef_payload_frozen_lists():
 
 
 def test_cdef_immutable_mapping():
-    import core2_objects as objs
+    import core_objects as objs
     d = Definition(objs.TestClass1, 10, test={"a": [1,2]}).concretize()
     with pytest.raises(TypeError):
         d["args"] = (20,)
@@ -19,7 +19,7 @@ def test_cdef_immutable_mapping():
 
 
 def test_definition_unhashable():
-    import core2_objects as objs
+    import core_objects as objs
     d = Definition(objs.TestClass1, 10)
     with pytest.raises(TypeError):
         hash(d)

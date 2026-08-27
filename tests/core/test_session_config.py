@@ -1,10 +1,10 @@
 import dryml
 
-from dryml.core2 import Repo, Serializable, definition_mode
-from dryml.core2.definition import ConcreteDefinition, Definition
-from dryml.core2.repo import default_repo, get_default_repo
-from dryml.core2.store.dir import DirStore
-from dryml.core2.utils.general import pickle_load, pickle_save
+from dryml.core import Repo, Serializable, definition_mode
+from dryml.core.definition import ConcreteDefinition, Definition
+from dryml.core.repo import default_repo, get_default_repo
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.general import pickle_load, pickle_save
 
 
 class SessionThing(Serializable):

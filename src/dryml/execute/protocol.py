@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from dryml.core2.utils.general import pickle_load, pickle_save, pickler, unpickler
+from dryml.core.utils.general import pickle_load, pickle_save, pickler, unpickler
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,7 @@ class StoreRef:
     def open(self):
         if self.kind != "directory":
             raise ValueError(f"Unsupported StoreRef kind {self.kind!r}.")
-        from dryml.core2.store.dir import DirStore
+        from dryml.core.store.dir import DirStore
         return DirStore(self.uri)
 
 

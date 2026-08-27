@@ -1,7 +1,7 @@
 import dryml
-from dryml.core2.definition import Definition, SKIP_ARGS
+from dryml.core.definition import Definition, SKIP_ARGS
 import os
-import core2_objects as objs
+import core_objects as objs
 
 
 # def test_selector_5():

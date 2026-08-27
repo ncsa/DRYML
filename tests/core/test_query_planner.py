@@ -1,5 +1,5 @@
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.query.query import _query_match
+from dryml.core import Definition, Object, Repo, SKIP_ARGS
+from dryml.core.query.query import _query_match
 
 
 class PlanBase(Object):
@@ -50,7 +50,7 @@ def test_empty_feature_selector_falls_back_to_full_universe():
     for idx in range(5):
         repo.add_objects(PlanBase(name=f"n{idx}", repo=repo))
 
-    from dryml.core2 import Satisfies
+    from dryml.core import Satisfies
 
     explanation = repo.query(Definition(PlanBase, Satisfies(lambda child: True, name="any-child"))).known(refresh=False).explain()
 

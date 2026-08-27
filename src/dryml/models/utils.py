@@ -4,7 +4,7 @@ from dryml.context import check_context, NoContextError, \
     WrongContextError, ContextIncompatibilityError
 from typing import Any
 
-from dryml.core2.tensor_spec import iter_specs
+from dryml.core.tensor_spec import iter_specs
 from dryml.data import Shuffle, Take, Unbatch
 from dryml.models.train_spec import TrainState
 

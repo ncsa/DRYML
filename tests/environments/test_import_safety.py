@@ -16,7 +16,7 @@ def test_import_dryml_environments_is_lightweight():
         """
 import sys
 assert "dryml.context" not in sys.modules
-assert "dryml.core2" not in sys.modules
+assert "dryml.core" not in sys.modules
 assert "dryml.execute" not in sys.modules
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -25,7 +25,7 @@ assert "ray" not in sys.modules
 import dryml.environments as envs
 assert envs.ENVIRONMENT_RECORD_SCHEMA_VERSION == 1
 assert "dryml.context" not in sys.modules
-assert "dryml.core2" not in sys.modules
+assert "dryml.core" not in sys.modules
 assert "dryml.execute" not in sys.modules
 assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
@@ -41,12 +41,12 @@ def test_top_level_dryml_submodules_are_lazy_but_accessible():
 import sys
 import dryml
 assert "dryml.context" not in sys.modules
-assert "dryml.core2" not in sys.modules
+assert "dryml.core" not in sys.modules
 _ = dryml.environments
 assert "dryml.environments" in sys.modules
 assert "dryml.context" not in sys.modules
-_ = dryml.core2
-assert "dryml.core2" in sys.modules
+_ = dryml.core
+assert "dryml.core" in sys.modules
         """
     )
 

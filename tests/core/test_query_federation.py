@@ -3,18 +3,18 @@ import inspect
 
 import pytest
 
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2 import ConcreteDefinition, Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
-from dryml.core2.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryIndexGenerationChanged, QueryVerifyBudgetExceeded, QueryWouldScanError
-import dryml.core2.query.federation as federation_module
-from dryml.core2.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
-from dryml.core2.query.query import DefinitionQuery
-from dryml.core2.query.result import DefinitionResultSet, QueryBackedDefinitionResultSet
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig
-from dryml.core2.query.sqlite.index import SQLiteQueryIndexReadView
-from dryml.core2.query.sqlite.lowering import SQLiteOptimizerPolicy
-from dryml.core2.store.dir import DirStore
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core import ConcreteDefinition, Definition, Object, Repo, SKIP_ARGS
+from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryIndexGenerationChanged, QueryVerifyBudgetExceeded, QueryWouldScanError
+import dryml.core.query.federation as federation_module
+from dryml.core.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
+from dryml.core.query.query import DefinitionQuery
+from dryml.core.query.result import DefinitionResultSet, QueryBackedDefinitionResultSet
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig
+from dryml.core.query.sqlite.index import SQLiteQueryIndexReadView
+from dryml.core.query.sqlite.lowering import SQLiteOptimizerPolicy
+from dryml.core.store.dir import DirStore
 
 
 class FederationLeaf(Object):
@@ -49,7 +49,7 @@ class RecordingIndex:
         self.registered.append((graph, tuple(roots)))
 
     def status(self):
-        from dryml.core2.query.model import QueryIndexStatus
+        from dryml.core.query.model import QueryIndexStatus
 
         return QueryIndexStatus(
             backend="recording",
@@ -697,7 +697,7 @@ def test_query_backed_resultset_holds_no_connection_or_cursor(tmp_path, monkeypa
 
 
 def test_query_backed_resultset_generation_change_fails_clearly(tmp_path, monkeypatch):
-    from dryml.core2.query.model import QueryIndexGenerationChanged
+    from dryml.core.query.model import QueryIndexGenerationChanged
 
     monkeypatch.setattr(federation_module, "_QUERY_BACKED_RESULT_THRESHOLD", 1)
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
@@ -1220,7 +1220,7 @@ def test_federated_exists_fetches_next_batch_only_if_needed(tmp_path, monkeypatc
 
     last = sorted((leaf.definition for leaf in leaves), key=lambda cdef: (cdef.stable_hash(), repr(cdef)))[-1]
     target_name = last.kwargs["name"]
-    from dryml.core2 import Satisfies
+    from dryml.core import Satisfies
 
     selector = Definition(FederationLeaf, SKIP_ARGS, name=Satisfies(lambda value: value == target_name, name="target-name"))
 

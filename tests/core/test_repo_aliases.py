@@ -1,9 +1,9 @@
 import pytest
 
-import core2_objects as objects
-from dryml.core2.repo import Repo, RepoLoadError, load_alias, make_store, save_object
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.store import StoreAliasConflictError
+import core_objects as objects
+from dryml.core.repo import Repo, RepoLoadError, load_alias, make_store, save_object
+from dryml.core.store.dir import DirStore
+from dryml.core.store.store import StoreAliasConflictError
 
 
 def test_repo_alias_loads_object_in_same_repo(primary_store_set):

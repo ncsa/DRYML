@@ -1,6 +1,6 @@
 import numpy as np
 
-from dryml.core2.backend import Backend, discover_backends
+from dryml.core.backend import Backend, discover_backends
 
 
 def test_discover_backends_for_single_numpy_arg():

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import os
 
-from dryml.core2 import Serializable
+from dryml.core import Serializable
 
 
 class Artifact(Serializable):
     """Base class for repo-backed computed payloads."""
 
     def _location(self, repo=None, *, store=None, require_exists: bool = False) -> str:
-        from dryml.core2.repo import get_default_repo
+        from dryml.core.repo import get_default_repo
 
         if repo is None:
             repo = get_default_repo()

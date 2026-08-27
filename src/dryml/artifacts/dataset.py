@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from dryml.core2.utils.general import pickle_save
+from dryml.core.utils.general import pickle_save
 
 from .base import Artifact
 

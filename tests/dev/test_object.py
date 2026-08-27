@@ -1,14 +1,14 @@
 import pytest
 import dryml
-from dryml.core2.definition import Definition
-from dryml.core2.repo import manage_repo
+from dryml.core.definition import Definition
+from dryml.core.repo import manage_repo
 import io
 import os
 import sys
 import time
 import importlib
 
-test_objs_text = """from dryml.core2 import Metadata, UniqueID
+test_objs_text = """from dryml.core import Metadata, UniqueID
 
 
 class SimpleObject(Metadata, UniqueID):
@@ -43,7 +43,7 @@ def test_save_object_1():
 
     temp_buffer.seek(0)
 
-    obj2 = dryml.core2.load_object(repo=temp_buffer)
+    obj2 = dryml.core.load_object(repo=temp_buffer)
 
     # Test that restore from buffer creates identical object in this context.
     assert obj == obj2
@@ -68,7 +68,7 @@ def test_save_object_2(create_name):
     file_name = ".".join([create_name, "dry"])
     obj.save(file_name)
 
-    obj2 = dryml.core2.load_object(repo=file_name)
+    obj2 = dryml.core.load_object(repo=file_name)
 
     assert obj == obj2
 
@@ -91,7 +91,7 @@ def test_save_object_3(create_temp_named_file):
 
     obj.save(create_temp_named_file)
 
-    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
+    obj2 = dryml.core.load_object(repo=create_temp_named_file)
 
     assert obj == obj2
 
@@ -116,7 +116,7 @@ def test_save_object_4(create_temp_file):
 
     create_temp_file.flush()
     create_temp_file.seek(0)
-    obj2 = dryml.core2.load_object(repo=create_temp_file)
+    obj2 = dryml.core.load_object(repo=create_temp_file)
 
     assert obj == obj2
 
@@ -157,7 +157,7 @@ def test_save_object_5(create_temp_file):
     create_temp_file.flush()
     create_temp_file.seek(0)
 
-    obj2 = dryml.core2.load_object(repo=create_temp_file)
+    obj2 = dryml.core.load_object(repo=create_temp_file)
 
     assert obj == obj2
 
@@ -182,7 +182,7 @@ def test_save_object_6(create_temp_named_file):
 
     obj.save(create_temp_named_file)
 
-    obj2 = dryml.core2.load_object(repo=create_temp_named_file)
+    obj2 = dryml.core.load_object(repo=create_temp_named_file)
 
     assert obj == obj2
 
@@ -222,7 +222,7 @@ def test_basic_object_def_update_1():
         import objs
         importlib.reload(objs)
 
-        obj2 = dryml.core2.load_object(repo=buffer)
+        obj2 = dryml.core.load_object(repo=buffer)
 
         return obj2
 
@@ -260,7 +260,7 @@ def test_basic_object_def_update_2(create_name):
         import objs
         importlib.reload(objs)
 
-        obj2 = dryml.core2.load_object(repo=create_name)
+        obj2 = dryml.core.load_object(repo=create_name)
 
         return obj2
 
@@ -276,7 +276,7 @@ def test_basic_object_def_update_2(create_name):
 
 
 def test_object_config_1():
-    import core2_objects as objs
+    import core_objects as objs
 
     obj = objs.HelloStr(msg="Test")
     msg = obj.get_message()
@@ -289,7 +289,7 @@ def test_object_config_1():
 
 def test_object_hash_1():
     "Test that object hashes are unique within classes"
-    import core2_objects as objs
+    import core_objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj2 = objs.HelloStr(msg="Test")
     assert obj1.definition != \
@@ -298,7 +298,7 @@ def test_object_hash_1():
 
 def test_object_hash_2():
     "Test that object hashes are are same for two elements of the same class"
-    import core2_objects as objs
+    import core_objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj2 = objs.HelloStr(msg="Test")
     assert obj1.definition.categorical() == \
@@ -308,11 +308,11 @@ def test_object_hash_2():
 @pytest.mark.usefixtures("create_name")
 def test_object_hash_3(create_name):
     "Test that object hashes are the same after saving and restoring"
-    import core2_objects as objs
+    import core_objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj1.save(repo=create_name)
 
-    obj2 = dryml.core2.load_object(repo=create_name)
+    obj2 = dryml.core.load_object(repo=create_name)
     assert obj1.definition.categorical() == \
         obj2.definition.categorical()
 
@@ -320,11 +320,11 @@ def test_object_hash_3(create_name):
 @pytest.mark.usefixtures("create_name")
 def test_object_hash_4(create_name):
     "Test that loaded objects are identical hash wise"
-    import core2_objects as objs
+    import core_objects as objs
     obj1 = objs.HelloStr(msg="Test")
     obj1.save(repo=create_name)
 
-    obj2 = dryml.core2.load_object(repo=create_name)
+    obj2 = dryml.core.load_object(repo=create_name)
     assert obj1.definition == \
         obj2.definition
 
@@ -341,7 +341,7 @@ def test_object_hash_4(create_name):
 
 # TODO: possibly redundant test
 def test_object_def_1():
-    import core2_objects as objs
+    import core_objects as objs
     obj_def = Definition(objs.HelloInt, msg=10)
     other_def = Definition(
         objs.HelloInt,
@@ -354,7 +354,7 @@ def test_object_def_1():
 
 # TODO: possibly redundant test
 def test_object_def_2():
-    import core2_objects as objs
+    import core_objects as objs
     obj_def = Definition(objs.HelloInt, msg=10)
 
     new_obj = obj_def.build()

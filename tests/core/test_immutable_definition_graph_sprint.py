@@ -1,7 +1,7 @@
 import pytest
 
 import dryml
-from dryml.core2 import (
+from dryml.core import (
     AnyValue,
     Choice,
     ConcreteDefinition,
@@ -24,14 +24,14 @@ from dryml.core2 import (
     selector_mode,
     space_mode,
 )
-from dryml.core2.object import Object
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
-from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
-from dryml.core2.query.path import Arg, Index
-from dryml.core2.utils.graph.path import GraphPath
+from dryml.core.object import Object
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
+from dryml.core.query.path import Arg, Index
+from dryml.core.utils.graph.path import GraphPath
 
-import core2_objects as objects
+import core_objects as objects
 
 Cls1 = objects.TestClass1
 Cls2 = objects.TestClass2

@@ -3,20 +3,20 @@ from dataclasses import replace
 
 import pytest
 
-from dryml.core2 import ConcreteDefinition, Definition, Object, SKIP_ARGS
-from dryml.core2.cdef_identity import V1_IDENTITY_VERSION
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
-from dryml.core2.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats, QueryWouldScanError
-from dryml.core2.query.domain import KnownDomain, NestedDomain, StoredDomain
-from dryml.core2.query.graph_plan import graph_candidate_ids
-from dryml.core2.query.path import GraphPath, Parameter
-from dryml.core2.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode, compile_selector_graph
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.index as sqlite_index_module
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.query.sqlite.lowering import SQLiteOptimizerPolicy
+from dryml.core import ConcreteDefinition, Definition, Object, SKIP_ARGS
+from dryml.core.cdef_identity import V1_IDENTITY_VERSION
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.query.fingerprint import target_local_fingerprint
+from dryml.core.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
+from dryml.core.query.model import DefinitionFingerprint, FeatureRequirement, FeatureToken, QueryIndexDirty, QueryIndexError, QueryStats, QueryWouldScanError
+from dryml.core.query.domain import KnownDomain, NestedDomain, StoredDomain
+from dryml.core.query.graph_plan import graph_candidate_ids
+from dryml.core.query.path import GraphPath, Parameter
+from dryml.core.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode, compile_selector_graph
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.query.sqlite.lowering import SQLiteOptimizerPolicy
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")

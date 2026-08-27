@@ -3,8 +3,8 @@ import pickle
 import numpy as np
 import pytest
 
-from dryml.core2.dtype import DType, normalize_dtype
-from dryml.core2.utils.stable_hash import stable_hash_function
+from dryml.core.dtype import DType, normalize_dtype
+from dryml.core.utils.stable_hash import stable_hash_function
 
 
 def test_dtype_equality_hash_and_pickle():

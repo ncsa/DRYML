@@ -1,8 +1,8 @@
 import pytest
 
-from dryml.core2 import Definition, UniformIntRange
-from dryml.core2.freeze import FrozenDict
-from dryml.core2.object import Object
+from dryml.core import Definition, UniformIntRange
+from dryml.core.freeze import FrozenDict
+from dryml.core.object import Object
 
 
 class SearchSpaceFixture(Object):

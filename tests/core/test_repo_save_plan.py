@@ -1,7 +1,7 @@
-from dryml.core2 import Object, Repo, Serializable
-from dryml.core2.repo_plan import build_save_plan, execute_save_plan
-from dryml.core2.store.dir import DirStore
-from dryml.core2.utils.general import pickle_save
+from dryml.core import Object, Repo, Serializable
+from dryml.core.repo_plan import build_save_plan, execute_save_plan
+from dryml.core.store.dir import DirStore
+from dryml.core.utils.general import pickle_save
 
 
 class SavePlanLeaf(Object):

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from dryml.core2.object import Pickleable
-from dryml.core2.tensor_spec import (
+from dryml.core.object import Pickleable
+from dryml.core.tensor_spec import (
     TensorSpec,
     as_tensor_spec,
     fake_from_spec_tree,
     match_input_batch,
     maybe_unbatch_output_spec,
 )
-from dryml.core2.utils.general import validate_class
+from dryml.core.utils.general import validate_class
 from dryml.data import collate_xy
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction

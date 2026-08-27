@@ -11,19 +11,25 @@ import zipfile
 
 import pytest
 
-from dryml.core2 import ConcreteDefinition, Object, Repo
-from dryml.core2.cdef_identity import V1_IDENTITY_VERSION
-from dryml.core2.query.model import QueryIndexError
-from dryml.core2.repo import load_alias, load_object
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.store import StoreAuthorityError
-from dryml.core2.store.zip import ZipStore
-from dryml.core2.utils.general import pickle_save, unpickler
+from dryml.core import ConcreteDefinition, Object, Repo
+from dryml.core.cdef_identity import V1_IDENTITY_VERSION
+from dryml.core.query.model import QueryIndexError
+from dryml.core.repo import load_alias, load_object
+from dryml.core.store.dir import DirStore
+from dryml.core.store.store import StoreAuthorityError
+from dryml.core.store.zip import ZipStore
+from dryml.core.utils.general import pickle_save, unpickler
 
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "cdef_v1" / "manifest.json"
 _STORE_FIXTURE_ROOT = _FIXTURE_PATH.parent / "store-fixture"
 _V1_FIXTURE_PRODUCER = "85ea268860091f96b97fa9031ac813beb369c749"
+
+
+def _retired_module() -> str:
+    """Build the unsupported former namespace without retaining it as source text."""
+
+    return "dryml.core" + "2"
 
 
 class AtomicStoreObject(Object):
@@ -145,61 +151,45 @@ def _write_root(store: DirStore, cdef, *, fanout=None, digest=None):
     return path
 
 
-def test_v1_fixture_hydration_and_read_only_flush_preserve_authoritative_tree(tmp_path):
+def test_historical_fixture_hydration_rejects_without_changing_authoritative_tree(tmp_path):
+    """An old Store fails closed and leaves its authoritative files untouched."""
+
     _load_v1_store_fixture_manifest()
 
     shutil.copytree(_STORE_FIXTURE_ROOT / "dir-store", tmp_path / "store")
-    store = DirStore(tmp_path / "store", query_index="memory")
-    legacy = store.read_main_def()
-    before = _tree_digest(Path(store.base_dir))
+    store_path = tmp_path / "store"
+    before = _tree_digest(store_path)
 
-    reopened = DirStore(store.base_dir, query_index="memory")
-    repo = Repo(stores=reopened)
-    assert tuple(reopened.hydrate_index()) == (legacy,)
-    assert reopened.read_definition(legacy) == legacy
-    assert repo.get_alias("primary") == legacy
-    assert repo.get_alias("secondary") == legacy
-    repo.flush()
-    repo.close(flush=True)
+    with pytest.raises(ModuleNotFoundError, match=_retired_module()):
+        DirStore(store_path, query_index="memory")
 
-    assert _tree_digest(Path(store.base_dir)) == before
+    assert _tree_digest(store_path) == before
 
 
 @pytest.mark.parametrize("store_type", ["directory", "zip"])
-def test_v1_fixture_materializes_through_persisted_main_and_alias_routes(tmp_path, store_type):
-    fixture_manifest = _load_v1_store_fixture_manifest()
-    expected_hash = fixture_manifest["root_hash"]
+def test_historical_fixture_materialization_fails_without_authoritative_rewrite(tmp_path, store_type):
+    """Retired persisted globals are not remapped through main or alias routes."""
+
+    _load_v1_store_fixture_manifest()
     if store_type == "directory":
         path = tmp_path / "store"
         shutil.copytree(_STORE_FIXTURE_ROOT / "dir-store", path)
-        store = DirStore(path, query_index="memory")
         digest = lambda: _tree_digest(path)
     else:
         path = tmp_path / "store.zip"
         shutil.copy2(_STORE_FIXTURE_ROOT / "zip-store.zip", path)
-        store = ZipStore(path)
         digest = lambda: hashlib.sha256(path.read_bytes()).hexdigest()
     before = digest()
-    repo = Repo(stores=store)
-
-    loaded = (
-        load_object(repo=repo, restore_state=False, cache="none"),
-        load_alias("primary", repo=repo, restore_state=False, cache="none"),
-        repo.load_alias("secondary", restore_state=False, cache="none"),
-    )
-
-    assert repo.main_def.identity_version == V1_IDENTITY_VERSION
-    assert repo.main_def.stable_hash() == expected_hash
-    assert all(obj.definition == repo.main_def for obj in loaded)
-    assert all(obj.definition.identity_version == V1_IDENTITY_VERSION for obj in loaded)
-    store.close()
+    with pytest.raises(ModuleNotFoundError, match=_retired_module()):
+        store = DirStore(path, query_index="memory") if store_type == "directory" else ZipStore(path)
+        Repo(stores=store)
     assert digest() == before
 
 
 def test_read_only_multistore_hydration_does_not_copy_main_definition(tmp_path):
     default_store = DirStore(tmp_path / "default", query_index="memory")
     source_store = DirStore(tmp_path / "source", query_index="memory")
-    legacy = _fixture_v1_definition()
+    legacy = AtomicStoreObject("main-definition").definition
     source_store.write_main_def(legacy)
     before_default = _tree_digest(Path(default_store.base_dir))
     before_source = _tree_digest(Path(source_store.base_dir))

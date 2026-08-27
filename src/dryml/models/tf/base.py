@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 
-from dryml.core2.object import Serializable
-from dryml.core2.repo import get_default_repo
-from dryml.core2.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
-from dryml.core2.utils.general import maybe_call_method, revision_path, validate_class
-from dryml.core2.utils.recurse import map_leaf_groups, map_leaves
+from dryml.core.object import Serializable
+from dryml.core.repo import get_default_repo
+from dryml.core.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
+from dryml.core.utils.general import maybe_call_method, revision_path, validate_class
+from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
 from dryml.models import TrainFunction as BaseTrainFunction

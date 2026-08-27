@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from dryml.core2.canonical import (
+from dryml.core.canonical import (
     is_canonical_key,
     iter_value_children,
     to_canonical,
@@ -10,8 +10,8 @@ from dryml.core2.canonical import (
     from_canonical,
     transform_container,
 )
-from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
-from dryml.core2.repo import Repo
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
+from dryml.core.repo import Repo
 
 
 def test_is_canonical_key_accepts_exact_str_and_int_only():

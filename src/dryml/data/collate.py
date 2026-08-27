@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from dryml.core2.utils.types import is_namedtuple
+from dryml.core.utils.types import is_namedtuple
 
 
 def default_collate(items: list[Any]) -> Any:

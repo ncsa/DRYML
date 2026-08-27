@@ -1,7 +1,7 @@
 import pytest
 import sys
 
-from dryml.core2.backend import discover_backend
+from dryml.core.backend import discover_backend
 import numpy as np
 
 torch = pytest.importorskip("torch")
@@ -10,9 +10,9 @@ if not hasattr(torch, "Tensor"):
     pytest.skip("PyTorch is not installed.", allow_module_level=True)
 import dryml.torch as dryml_torch
 
-from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
-from dryml.core2.backend import discover_backend
+from dryml.core.dtype import DType
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
+from dryml.core.backend import discover_backend
 from dryml.torch import TorchTensorSpec
 
 

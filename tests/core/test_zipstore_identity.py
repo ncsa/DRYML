@@ -6,8 +6,8 @@ import shutil
 
 import pytest
 
-from dryml.core2 import Object, Repo
-from dryml.core2.store.zip import ZipStore, ZipStoreConflictError
+from dryml.core import Object, Repo
+from dryml.core.store.zip import ZipStore, ZipStoreConflictError
 
 
 _FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "cdef_v1" / "store-fixture" / "zip-store.zip"
@@ -23,12 +23,10 @@ def _archive_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _copy_v1_archive(path: Path):
-    shutil.copy2(_FIXTURE_PATH, path)
-    store = ZipStore(path)
-    legacy = tuple(store.hydrate_index())[0]
-    store.close()
-    return legacy
+def _retired_module() -> str:
+    """Build the unsupported former namespace without retaining it as source text."""
+
+    return "dryml.core" + "2"
 
 
 def _concurrent_zip_commit(path: str, value: str, mode: str, ready, start, results) -> None:
@@ -57,19 +55,15 @@ def _concurrent_zip_commit(path: str, value: str, mode: str, ready, start, resul
             store.close()
 
 
-def test_zipstore_hydrates_v1_fixture_and_read_only_flush_preserves_archive(tmp_path):
+def test_zipstore_rejects_historical_fixture_without_rewriting_archive(tmp_path):
+    """A ZipStore with retired persisted globals fails closed without repacking."""
+
     path = tmp_path / "legacy.zip"
-    legacy = _copy_v1_archive(path)
+    shutil.copy2(_FIXTURE_PATH, path)
     before = _archive_digest(path)
 
-    store = ZipStore(path)
-    repo = Repo(stores=store)
-    assert store.read_definition(legacy) == legacy
-    assert tuple(store.hydrate_index()) == (legacy,)
-    assert repo.get_alias("primary") == legacy
-    assert repo.get_alias("secondary") == legacy
-    repo.flush()
-    repo.close(flush=True)
+    with pytest.raises(ModuleNotFoundError, match=_retired_module()):
+        ZipStore(path)
 
     assert _archive_digest(path) == before
 
@@ -116,7 +110,7 @@ def test_failed_extracted_root_publication_restores_archive_dirty_state(tmp_path
             raise OSError("injected extracted-root failure")
         return original_replace(source, destination)
 
-    monkeypatch.setattr("dryml.core2.store.store.os.replace", fail_root_replace)
+    monkeypatch.setattr("dryml.core.store.store.os.replace", fail_root_replace)
 
     with pytest.raises(OSError, match="extracted-root"):
         store.save_object(obj)

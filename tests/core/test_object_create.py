@@ -1,9 +1,9 @@
 import numpy as np
-import core2_objects as objects
-from dryml.core2.definition import Definition
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core2.object import definition_mode
-from dryml.core2.repo import Repo
+import core_objects as objects
+from dryml.core.definition import Definition
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.object import definition_mode
+from dryml.core.repo import Repo
 
 ### Tests for methods of creating objects. We verify they have the intended properties.
 

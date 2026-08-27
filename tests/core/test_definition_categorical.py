@@ -1,6 +1,6 @@
-import core2_objects as objects
-from dryml.core2.definition import Definition
-from dryml.core2.freeze import FrozenList, FrozenTuple
+import core_objects as objects
+from dryml.core.definition import Definition
+from dryml.core.freeze import FrozenList, FrozenTuple
 
 
 def test_def_1():

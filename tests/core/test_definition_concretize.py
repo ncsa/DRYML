@@ -1,7 +1,7 @@
-import core2_objects as objects
-from dryml.core2.definition import Definition, ConcreteDefinition, SKIP_ARGS, selector_match, \
+import core_objects as objects
+from dryml.core.definition import Definition, ConcreteDefinition, SKIP_ARGS, selector_match, \
     concretize_func, thaw_concrete
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 import numpy as np
 
 
@@ -63,7 +63,7 @@ def test_definition_concrete_4():
 
 def test_definition_concretize_types_1():
     # Test that concretize properly transforms containers and other types.
-    from dryml.core2.freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
+    from dryml.core.freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
 
     test_pairs = [
         ([1,2,3], FrozenList),
@@ -81,7 +81,7 @@ def test_definition_concretize_types_1():
 
 def test_definition_concretize_types_2():
     # Test that concretize properly transforms containers and other types.
-    from dryml.core2.freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
+    from dryml.core.freeze import FrozenList, FrozenTuple, FrozenSet, FrozenDict, FrozenNDArray
 
     test_pairs = [
         (FrozenList([1,2,3]), list),
@@ -138,7 +138,7 @@ def test_object_build_from_def_1():
     Test that an object definition with no id results in an object with an id.
     """
 
-    import core2_objects as objects
+    import core_objects as objects
     obj = Definition(
         objects.TestClassB,
         1,

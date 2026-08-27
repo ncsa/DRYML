@@ -1,23 +1,23 @@
-from dryml.core2.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode, selector_mode, space_mode
-from dryml.core2.definition import ConcreteDefinition, Definition, SKIP_ARGS, freeze
-from dryml.core2.arg_roles import ArgRole, MaterializeArg, RefCDef, RefCDefArg, SelectorArg, ValueArg
-from dryml.core2.links import DefLink, Mat, Ref
-from dryml.core2.params import AnyValue, Choice, Exact, IntRange, Missing, Par, Present, Satisfies, SubclassOf, UniformFromSet, UniformIntRange
-from dryml.core2.quoted import QuotedDef, SelectorSpec
-from dryml.core2.search_space import SearchSpace
-from dryml.core2.selector import Selector, selector
-from dryml.core2.repo import Repo, load_alias, load_object, save_object
-from dryml.core2.dtype import dtype, DType
-from dryml.core2.tensor_spec import (
+from dryml.core.object import Object, Serializable, UniqueID, Metadata, Compute, definition_mode, selector_mode, space_mode
+from dryml.core.definition import ConcreteDefinition, Definition, SKIP_ARGS, freeze
+from dryml.core.arg_roles import ArgRole, MaterializeArg, RefCDef, RefCDefArg, SelectorArg, ValueArg
+from dryml.core.links import DefLink, Mat, Ref
+from dryml.core.params import AnyValue, Choice, Exact, IntRange, Missing, Par, Present, Satisfies, SubclassOf, UniformFromSet, UniformIntRange
+from dryml.core.quoted import QuotedDef, SelectorSpec
+from dryml.core.search_space import SearchSpace
+from dryml.core.selector import Selector, selector
+from dryml.core.repo import Repo, load_alias, load_object, save_object
+from dryml.core.dtype import dtype, DType
+from dryml.core.tensor_spec import (
     SpecHint,
     TensorSpec,
     as_tensor_spec,
 )
-from dryml.core2.config import CONFIG_MISSING, ConfigError, ConfigRef
-from dryml.core2.factory import FactorySpec
-from dryml.core2.session import configure, reset_config, status
-from dryml.core2.symbol import ImportRef, SourceSpec, resolve_symbol, symbol_ref
-from dryml.core2.cdef_graph import (
+from dryml.core.config import CONFIG_MISSING, ConfigError, ConfigRef
+from dryml.core.factory import FactorySpec
+from dryml.core.session import configure, reset_config, status
+from dryml.core.symbol import ImportRef, SourceSpec, resolve_symbol, symbol_ref
+from dryml.core.cdef_graph import (
     CDefEdge,
     CDefNode,
     CDefOccurrence,
@@ -27,7 +27,7 @@ from dryml.core2.cdef_graph import (
     EdgeKind,
     iter_direct_cdef_edges,
 )
-from dryml.core2.query import (
+from dryml.core.query import (
     Arg,
     DefinitionPath,
     DefinitionQuery,

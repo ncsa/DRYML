@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dryml.core2.factory import FactorySpec
+from dryml.core.factory import FactorySpec
 from dryml.models.tf.base import Model
 
 

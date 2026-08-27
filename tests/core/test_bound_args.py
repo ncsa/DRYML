@@ -1,17 +1,17 @@
 import pytest
 
-import dryml.core2 as core2
-from dryml.core2 import ConcreteDefinition, Definition, Object
-from dryml.core2.bound_args import (
+import dryml.core as core
+from dryml.core import ConcreteDefinition, Definition, Object
+from dryml.core.bound_args import (
     BoundArguments,
     bind_complete_arguments,
     bind_partial_arguments,
     decode_bound_arguments,
     project_bound_arguments,
 )
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core2.definition import thaw_concrete
-from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.definition import thaw_concrete
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
 
 
 class BindingFixture(Object):
@@ -102,8 +102,8 @@ def test_bound_arguments_are_immutable_semantic_name_value_records():
 
 
 def test_bound_arguments_are_private_to_the_bound_record_module():
-    assert not hasattr(core2, "BoundArguments")
-    assert "BoundArguments" not in core2.__all__
+    assert not hasattr(core, "BoundArguments")
+    assert "BoundArguments" not in core.__all__
 
 
 def test_complete_binding_captures_defaults_and_normalizes_call_spelling():
@@ -196,7 +196,7 @@ def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypa
     assert set(state) == {"identity_version", "cls", "parameters", "stable_hash_cache"}
     assert state["parameters"] == cdef["parameters"]
     monkeypatch.setattr(
-        "dryml.core2.canonical.resolve_symbol",
+        "dryml.core.canonical.resolve_symbol",
         lambda *args, **kwargs: pytest.fail("persisted V2 decoding must not resolve classes"),
     )
     restored = object.__new__(ConcreteDefinition)
@@ -260,7 +260,7 @@ def test_private_v2_binding_and_canonicalization_fail_at_semantic_parameter_path
 
 def test_persisted_bound_records_reject_malformed_names_and_values_without_binding(monkeypatch):
     monkeypatch.setattr(
-        "dryml.core2.canonical.resolve_symbol",
+        "dryml.core.canonical.resolve_symbol",
         lambda *args, **kwargs: pytest.fail("persisted V2 decoding must not resolve classes"),
     )
     with pytest.raises(ValueError, match="duplicate"):

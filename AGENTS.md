@@ -13,7 +13,7 @@ Try to avoid executing the full test suite often. There are some tests which are
 ## Directory explanation
 
 ### `src/dryml` - The main source code repository
-`core2` - core modules of dryml.
+`core` - core modules of dryml.
 
 `code` - utilities for method instrumentation
 `execute` - The remote execution subsystem of DRYML

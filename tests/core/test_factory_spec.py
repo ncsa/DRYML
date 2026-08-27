@@ -1,7 +1,7 @@
 import pytest
 
-from dryml.core2 import FactorySpec, Object
-from dryml.core2.canonical import NodeKind, node_kind
+from dryml.core import FactorySpec, Object
+from dryml.core.canonical import NodeKind, node_kind
 
 
 class FactoryTarget:

@@ -1,12 +1,12 @@
-import core2_objects as objects
+import core_objects as objects
 import pytest
-from dryml.core2 import Satisfies
-from dryml.core2.definition import Definition, SKIP_ARGS, selector_match
-from dryml.core2.symbol import ImportRef
-import dryml.core2 as core2
+from dryml.core import Satisfies
+from dryml.core.definition import Definition, SKIP_ARGS, selector_match
+from dryml.core.symbol import ImportRef
+import dryml.core as core
 
 
-class SemanticSelectorFixture(core2.Object):
+class SemanticSelectorFixture(core.Object):
     def __init__(self, value=3, *, label="default"):
         self.value = value
         self.label = label
@@ -128,7 +128,7 @@ def test_selector_12():
         test=objects.TestClass1(
             20,
             test=objects.TestClass1(30, test='c')))
-    with core2.definition_mode():
+    with core.definition_mode():
         def_1 = objects.TestClass2(
             10,
             test=objects.TestClass1(
@@ -157,13 +157,13 @@ def test_selector_13(tmp_path):
 
     first_repo = tmp_path / 'test1.dry'
     second_repo = tmp_path / 'test2.dry'
-    core2.save_object(obj1, repo=first_repo)
-    core2.save_object(obj2, repo=second_repo)
+    core.save_object(obj1, repo=first_repo)
+    core.save_object(obj2, repo=second_repo)
 
     # Test selectors work with loaded classes
 
-    obj1_loaded = core2.load_object(repo=first_repo)
-    obj2_loaded = core2.load_object(repo=second_repo)
+    obj1_loaded = core.load_object(repo=first_repo)
+    obj2_loaded = core.load_object(repo=second_repo)
 
     assert sel(obj1_loaded)
     assert not sel(obj2_loaded)

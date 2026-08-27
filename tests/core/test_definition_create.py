@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
-import core2_objects as objects
+import core_objects as objects
 import dryml
-from dryml.core2.definition import Definition, ConcreteDefinition, SKIP_ARGS
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.object import Object
-from dryml.core2.symbol import ImportRef
+from dryml.core.definition import Definition, ConcreteDefinition, SKIP_ARGS
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.object import Object
+from dryml.core.symbol import ImportRef
 
 ### Tests for methods of creating definitions. We verify they have the intended properties.
 

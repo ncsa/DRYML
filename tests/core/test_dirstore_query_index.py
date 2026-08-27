@@ -6,19 +6,19 @@ import threading
 import time
 import pytest
 
-from dryml.core2 import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
-from dryml.core2.bound_args import BoundArguments
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.query.model import QueryIndexIncompatible, QueryIndexUnavailable, ValidationIssue, ValidationReport
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
-import dryml.core2.query.sqlite.index as sqlite_index_module
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.store.dir import DirStore
-from dryml.core2.symbol import ImportRef
-from dryml.core2.utils.general import pickle_save
+from dryml.core import Definition, Missing, Object, Ref, Repo, Selector, SKIP_ARGS
+from dryml.core.bound_args import BoundArguments
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.query.model import QueryIndexIncompatible, QueryIndexUnavailable, ValidationIssue, ValidationReport
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, require_sqlite, sqlite_available
+import dryml.core.query.sqlite.index as sqlite_index_module
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.store.dir import DirStore
+from dryml.core.symbol import ImportRef
+from dryml.core.utils.general import pickle_save
 
 
 class QueryIndexDirLeaf(Object):
@@ -213,7 +213,7 @@ def test_dirstore_sqlite_index_can_initialize_empty_sidecar(tmp_path):
 
 
 def test_sqlite_policy_unavailable_error_message(monkeypatch, tmp_path):
-    import dryml.core2.store.dir as dir_module
+    import dryml.core.store.dir as dir_module
 
     monkeypatch.setattr(dir_module, "sqlite_available", lambda: False)
     store = DirStore(tmp_path / "store", query_index="sqlite")
@@ -720,7 +720,7 @@ def test_failed_root_publication_discards_its_dirty_token(tmp_path, monkeypatch)
             raise OSError("injected root publication failure")
         return original_replace(source, destination)
 
-    monkeypatch.setattr("dryml.core2.store.store.os.replace", fail_final_replace)
+    monkeypatch.setattr("dryml.core.store.store.os.replace", fail_final_replace)
 
     with pytest.raises(OSError, match="root publication"):
         store.save_object(failed)

@@ -1,10 +1,10 @@
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, Serializable
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core2.policies import RepoLoadOptions
-from dryml.core2.repo import RepoLoadError
-from dryml.core2.store.dir import DirStore
+from dryml.core import Definition, Object, Repo, Serializable
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.policies import RepoLoadOptions
+from dryml.core.repo import RepoLoadError
+from dryml.core.store.dir import DirStore
 
 
 class LoadLeaf(Object):

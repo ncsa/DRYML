@@ -31,7 +31,7 @@ Example:
 ```python
 import numpy as np
 
-from dryml.core2 import TensorSpec
+from dryml.core import TensorSpec
 from dryml.data import ArrayDataset
 
 dataset = ArrayDataset(
@@ -106,7 +106,7 @@ These utilities assume an element structure where `x` and `y` can be selected by
 Dataset specs are important because models and methods use them to infer outputs and verify structure. A dataset yielding `(x, y)` pairs should usually expose a matching spec tree.
 
 ```python
-from dryml.core2 import TensorSpec
+from dryml.core import TensorSpec
 
 pair_spec = (
     TensorSpec("float32", shape=(128,)),

@@ -1,5 +1,5 @@
-from dryml.core2.backend import Backend
-from dryml.core2.tensor_spec import BatchMode
+from dryml.core.backend import Backend
+from dryml.core.tensor_spec import BatchMode
 from dataclasses import dataclass
 
 

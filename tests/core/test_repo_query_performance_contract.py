@@ -1,6 +1,6 @@
-from dryml.core2 import Definition, Object, Repo, Serializable, SKIP_ARGS
-from dryml.core2.store.dir import DirStore
-from dryml.core2.store.store import Store
+from dryml.core import Definition, Object, Repo, Serializable, SKIP_ARGS
+from dryml.core.store.dir import DirStore
+from dryml.core.store.store import Store
 
 
 class PerfLeaf(Object):

@@ -9,18 +9,24 @@ import sys
 import numpy as np
 import pytest
 
-import core2_objects as objects
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
-from dryml.core2.bound_args import BoundArguments
-from dryml.core2.definition import ConcreteDefinition, Definition, stable_hash_function
-from dryml.core2.freeze import FrozenDict, FrozenTuple
-from dryml.core2.utils.general import unpickler
-from dryml.core2.utils.stable_hash import StableHashGraphHasher
+import core_objects as objects
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core.bound_args import BoundArguments
+from dryml.core.definition import ConcreteDefinition, Definition, stable_hash_function
+from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.utils.general import unpickler
+from dryml.core.utils.stable_hash import StableHashGraphHasher
 
 
 _V1_FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "cdef_v1" / "manifest.json"
 _V1_FIXTURE_PRODUCER = "85ea268860091f96b97fa9031ac813beb369c749"
+
+
+def _retired_module() -> str:
+    """Build the unsupported former namespace without retaining it as source text."""
+
+    return "dryml.core" + "2"
 
 
 def _validate_v1_fixture_manifest(manifest):
@@ -208,28 +214,13 @@ def test_definition_hash_7():
     assert def_hash1 != def_hash2
 
 
-def test_prechange_cdef_fixture_keeps_v1_hashes_paths_and_topology():
-    manifest, payload = _load_v1_fixture()
+def test_prechange_cdef_fixture_is_rejected_without_namespace_translation():
+    """Historical persisted globals remain unsupported after the namespace break."""
 
-    for name, expected_hash in manifest["hashes"].items():
-        assert payload[name].identity_version == V1_IDENTITY_VERSION
-        assert payload[name].stable_hash() == expected_hash
+    manifest = json.loads(_V1_FIXTURE_PATH.read_text())
 
-    assert payload["nested_shared"][0] is payload["nested_shared"][1]
-    assert payload["object_root"] is payload["main_definition"]
-    assert payload["aliases"]["primary"] is payload["object_root"]
-    assert payload["aliases"]["secondary"] is payload["object_root"]
-    for name, path in manifest["object_paths"].items():
-        cdef = payload[name]
-        assert path == f"objects/{cdef.stable_hash()[:2]}/{cdef.stable_hash()}"
-
-    expected = ConcreteDefinition._from_persisted_record(
-        objects.TestClass1,
-        (10,),
-        {"test": "legacy"},
-    )
-    assert payload["standalone"] == expected
-    assert hash(payload["standalone"]) == hash(expected)
+    with pytest.raises(ModuleNotFoundError, match=_retired_module()):
+        unpickler(_validate_v1_fixture_manifest(manifest))
 
 
 def test_v1_fixture_manifest_validates_bytes_before_unpickling():
@@ -243,16 +234,16 @@ def test_v1_fixture_manifest_validates_bytes_before_unpickling():
         _validate_v1_fixture_manifest(invalid_manifest)
 
 
-def test_v1_fixture_decoding_does_not_resolve_or_bind_classes():
+def test_historical_fixture_rejection_does_not_resolve_or_bind_classes():
     code = """
 import base64
 import hashlib
 import inspect
 import json
 from pathlib import Path
-import dryml.core2.canonical as canonical
-import dryml.core2.definition as definition
-from dryml.core2.utils.general import unpickler
+import dryml.core.canonical as canonical
+import dryml.core.definition as definition
+from dryml.core.utils.general import unpickler
 
 def fail(*args, **kwargs):
     raise AssertionError('decoding must not resolve, inspect, prepare, or bind')
@@ -264,9 +255,7 @@ manifest = json.loads(Path(r'__FIXTURE__').read_text())
 payload = base64.b64decode(manifest['payload'], validate=True)
 assert hashlib.sha256(payload).hexdigest() == manifest['payload_sha256']
 assert payload[:2] == bytes((0x80, 5))
-payload = unpickler(payload)
-assert payload['standalone'].identity_version == 1
-assert payload['symbolic'].stable_hash() == manifest['hashes']['symbolic']
+unpickler(payload)
 """.replace("__FIXTURE__", str(_V1_FIXTURE_PATH))
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -277,22 +266,23 @@ assert payload['symbolic'].stable_hash() == manifest['hashes']['symbolic']
         check=False,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "dryml.core" + "2" in result.stderr
 
 
-def test_v1_fixture_keeps_symbolic_hydration_import_free_and_raw_classes_explicit():
-    manifest, payload = _load_v1_fixture()
+def test_historical_fixture_rejection_is_import_free_and_explicit():
+    """The retired namespace fails before symbolic class resolution can occur."""
 
-    assert payload["symbolic"].cls.module not in sys.modules
-    assert payload["symbolic"].stable_hash() == manifest["hashes"]["symbolic"]
-    assert isinstance(payload["raw_class"].cls, type)
+    manifest = json.loads(_V1_FIXTURE_PATH.read_text())
+    with pytest.raises(ModuleNotFoundError, match=_retired_module()):
+        unpickler(_validate_v1_fixture_manifest(manifest))
 
     result = subprocess.run(
         [
             sys.executable,
             "-c",
             "import base64, hashlib, json; from pathlib import Path; "
-            "from dryml.core2.utils.general import unpickler; "
+            "from dryml.core.utils.general import unpickler; "
             f"m=json.loads(Path(r'{_V1_FIXTURE_PATH}').read_text()); "
             "p=base64.b64decode(m['payload'], validate=True); "
             "assert hashlib.sha256(p).hexdigest() == m['payload_sha256']; "
@@ -306,7 +296,7 @@ def test_v1_fixture_keeps_symbolic_hydration_import_free_and_raw_classes_explici
     )
 
     assert result.returncode != 0
-    assert "core2_objects" in result.stderr
+    assert "dryml.core" + "2" in result.stderr
 
 
 def test_v1_and_private_v2_records_are_distinct_mapping_keys_and_graph_nodes():

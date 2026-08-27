@@ -1,14 +1,14 @@
 from collections.abc import Mapping
 
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS, Satisfies
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.query.graph_plan import graph_candidate_ids
-from dryml.core2.query.index import MemoryDefinitionGraphReadView
-from dryml.core2.query.model import FeatureRequirement, FeatureToken, QueryStats
-from dryml.core2.query.path import DefinitionPath, Kwarg
-from dryml.core2.query.query import _query_match
-from dryml.core2.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
-from dryml.core2.store.dir import DirStore
+from dryml.core import Definition, Object, Repo, SKIP_ARGS, Satisfies
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.query.graph_plan import graph_candidate_ids
+from dryml.core.query.index import MemoryDefinitionGraphReadView
+from dryml.core.query.model import FeatureRequirement, FeatureToken, QueryStats
+from dryml.core.query.path import DefinitionPath, Kwarg
+from dryml.core.query.query import _query_match
+from dryml.core.query.selector_graph import SelectorGraph, SelectorGraphEdge, SelectorGraphNode
+from dryml.core.store.dir import DirStore
 
 
 class PlannerLeaf(Object):

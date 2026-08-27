@@ -5,9 +5,9 @@ import types
 import numpy as np
 import pytest
 
-from dryml.core2 import ConfigRef, Repo
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core import ConfigRef, Repo
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import TFDSAdapter, NpyFileDataset
 
 

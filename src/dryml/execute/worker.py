@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import traceback
 
-from dryml.core2 import Repo
-from dryml.core2.canonical import to_canonical
+from dryml.core import Repo
+from dryml.core.canonical import to_canonical
 from dryml.context import use_context
 
 from .protocol import (

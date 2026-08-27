@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dryml.core2.object import Serializable
-from dryml.core2.utils.general import pickle_load, pickle_save, revision_path
+from dryml.core.object import Serializable
+from dryml.core.utils.general import pickle_load, pickle_save, revision_path
 
 from .train_spec import TrainState
 

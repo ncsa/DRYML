@@ -1,10 +1,10 @@
 import pytest
 
-import core2_objects as objects
-from dryml.core2 import Definition, Repo, SKIP_ARGS
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenSet
-from dryml.core2.query.query import _query_match
+import core_objects as objects
+from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenSet
+from dryml.core.query.query import _query_match
 
 
 class SemanticQueryLeaf(objects.Object):

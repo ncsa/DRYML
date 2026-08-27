@@ -4,8 +4,8 @@ from __future__ import annotations
 from typing import Any
 from enum import Enum
 
-from dryml.core2.utils.types import is_numpy
-from dryml.core2.utils.recurse import iter_leaves
+from dryml.core.utils.types import is_numpy
+from dryml.core.utils.recurse import iter_leaves
 
 
 class Backend(Enum):

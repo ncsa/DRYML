@@ -1,7 +1,7 @@
 from typing import Any
 import numpy as np
-from dryml.core2.utils.recurse import map_leaves
-from dryml.core2.tensor_spec import Dynamic, TensorSpec, SpecTree
+from dryml.core.utils.recurse import map_leaves
+from dryml.core.tensor_spec import Dynamic, TensorSpec, SpecTree
 
 
 def dims_to_np(shape):
@@ -31,7 +31,7 @@ def _tensor_spec_np(self, *, include_batch: bool = True):
     Since NumPy has no native TensorSpec object, this returns a
     `(shape, dtype)` pair.
     """
-    from dryml.core2.tensor_spec import Layout
+    from dryml.core.tensor_spec import Layout
     if self.layout is not Layout.DENSE:
         raise TypeError(f"Unsupported NumPy layout: {self.layout}")
 
@@ -82,7 +82,7 @@ def as_tensor_spec(
     batched: bool = False,
     batch_axis_name: str | None = "batch",
 ) -> SpecTree:
-    from dryml.core2.tensor_spec import Layout
+    from dryml.core.tensor_spec import Layout
     """
     Convert a NumPy ndarray or NumPy scalar value to a DRYML TensorSpec.
 
@@ -93,8 +93,8 @@ def as_tensor_spec(
         If True, interpret the leading axis as batch.
     """
     def leaf_to_spec(x: Any) -> TensorSpec:
-        from dryml.core2.tensor_spec import TensorSpec
-        from dryml.core2.dtype import dtype
+        from dryml.core.tensor_spec import TensorSpec
+        from dryml.core.dtype import dtype
         if isinstance(x, np.ndarray):
             shape = _np_shape_to_dryml(x.shape)
             sample_shape, batch = _split_batch(shape, batched=batched)

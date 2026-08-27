@@ -1,10 +1,10 @@
 import pytest
 import numpy as np
-import core2_objects as objects
-from dryml.core2.definition import Definition, \
+import core_objects as objects
+from dryml.core.definition import Definition, \
     ConcreteDefinition, stable_hash_function, selector_match, \
     SKIP_ARGS
-from dryml.core2.repo import Repo, save_object, load_object
+from dryml.core.repo import Repo, save_object, load_object
 import os
 import glob
 from io import StringIO

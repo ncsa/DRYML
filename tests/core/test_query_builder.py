@@ -1,6 +1,6 @@
-import core2_objects as objects
+import core_objects as objects
 
-from dryml.core2 import Definition, Repo, SKIP_ARGS
+from dryml.core import Definition, Repo, SKIP_ARGS
 
 
 def test_mixed_categorical_and_exact_query_keeps_only_exact_branch():
@@ -42,7 +42,7 @@ def test_restore_reinstates_original_concrete_anchor():
 
 
 def test_find_defs_scope_nested_returns_distinct_nested_definitions(tmp_path):
-    from dryml.core2.store.dir import DirStore
+    from dryml.core.store.dir import DirStore
 
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)

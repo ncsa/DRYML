@@ -1,12 +1,12 @@
-import core2_objects as objects
+import core_objects as objects
 import pytest
 
-from dryml.core2 import Definition, Repo
-from dryml.core2.bound_args import BoundArguments
-from dryml.core2.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core2.definition import ConcreteDefinition
-from dryml.core2.freeze import FrozenDict, FrozenList, FrozenTuple
-from dryml.core2.query import Arg, DefinitionPath, Index, Key, Kwarg, Parameter, QueryPathError, normalize_path
+from dryml.core import Definition, Repo
+from dryml.core.bound_args import BoundArguments
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
+from dryml.core.definition import ConcreteDefinition
+from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
+from dryml.core.query import Arg, DefinitionPath, Index, Key, Kwarg, Parameter, QueryPathError, normalize_path
 
 
 def test_query_path_parses_root_and_segments():
@@ -21,7 +21,7 @@ def test_query_path_resolves_concrete_definition_subtrees():
     leaf = objects.TestClass1(10, test="leaf")
     root = objects.TestNest3(leaf, metadata={"x.y": [leaf]})
 
-    from dryml.core2.query.path import get_subtree
+    from dryml.core.query.path import get_subtree
 
     assert get_subtree(root.definition, '$[@param("args")][0]') == leaf.definition
     assert get_subtree(root.definition, '$[@param("kwargs")]["metadata"]["x.y"][0]') == leaf.definition
@@ -40,7 +40,7 @@ def test_v2_semantic_paths_resolve_without_class_projection():
     )
     path = DefinitionPath((Parameter("model"),))
 
-    from dryml.core2.query.path import get_subtree
+    from dryml.core.query.path import get_subtree
 
     assert root.graph_path(path) == leaf
     assert root.graph_path('$[@param("model")]') == leaf
@@ -81,7 +81,7 @@ def test_v2_variadic_buckets_use_parameter_then_container_paths():
     assert root.graph_path('$[@param("sources")][1]') == leaf
     assert root.graph_path('$[@param("capabilities")]["encoder"]') == leaf
 
-    from dryml.core2.query.fingerprint import target_local_fingerprint
+    from dryml.core.query.fingerprint import target_local_fingerprint
 
     assert any(
         token.kind == "CDEF_EDGE_AT_PATH" and str(token.path) == '$[@param("sources")][1]'
@@ -91,7 +91,7 @@ def test_v2_variadic_buckets_use_parameter_then_container_paths():
 
 def test_invalid_paths_report_errors():
     obj = objects.TestNest3(child=1)
-    from dryml.core2.query.path import get_subtree
+    from dryml.core.query.path import get_subtree
 
     with pytest.raises(QueryPathError):
         normalize_path("$bad")
@@ -113,7 +113,7 @@ def test_v2_invalid_semantic_path_reports_the_failing_prefix():
 
 
 def test_replace_subtree_preserves_container_types():
-    from dryml.core2.query.path import get_subtree, replace_subtree
+    from dryml.core.query.path import get_subtree, replace_subtree
     obj = objects.TestNest3(items=("a", "b"), mapping={"k": [1, 2]})
     replaced = replace_subtree(obj.definition, '$[@param("kwargs")]["items"][1]', "c")
     replaced = replace_subtree(replaced, '$[@param("kwargs")]["mapping"]["k"][0]', 9)
@@ -157,7 +157,7 @@ def test_chained_query_methods_return_independent_queries():
 def test_original_path_translates_each_nested_v2_cdef_boundary(operation):
     """Query edits translate categorical paths through every V2 CDef boundary."""
 
-    from dryml.core2.query.path import get_subtree
+    from dryml.core.query.path import get_subtree
 
     source = Definition(
         objects.TestNest2,

@@ -3,15 +3,15 @@ from dataclasses import dataclass
 
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS
-from dryml.core2.cdef_graph import ConcreteDefinitionGraph
-from dryml.core2.cdef_identity import same_cdef
-from dryml.core2.query.domain import StoredDomain
-from dryml.core2.query.fingerprint import target_local_fingerprint
-from dryml.core2.query.graph_plan import graph_candidate_ids
-from dryml.core2.query.lowering import LoweringDiagnostics, ScanPolicy
-from dryml.core2.query.federation import IndexGenerationVector, RepoGenerationVector
-from dryml.core2.query.model import (
+from dryml.core import Definition, Object, Repo, SKIP_ARGS
+from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.cdef_identity import same_cdef
+from dryml.core.query.domain import StoredDomain
+from dryml.core.query.fingerprint import target_local_fingerprint
+from dryml.core.query.graph_plan import graph_candidate_ids
+from dryml.core.query.lowering import LoweringDiagnostics, ScanPolicy
+from dryml.core.query.federation import IndexGenerationVector, RepoGenerationVector
+from dryml.core.query.model import (
     DefinitionEdgeRecord,
     IndexWriteResult,
     OccurrenceTraversalSnapshot,
@@ -20,12 +20,12 @@ from dryml.core2.query.model import (
     StoredReplica,
     StoredRootMetadata,
 )
-from dryml.core2.query.memory import MemoryStoreQueryIndex
-from dryml.core2.query.path import DefinitionPath
-from dryml.core2.query.selector_graph import compile_selector_graph
-from dryml.core2.query.sqlite import SQLiteQueryIndexConfig, sqlite_available
-from dryml.core2.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core2.store.store import Store
+from dryml.core.query.memory import MemoryStoreQueryIndex
+from dryml.core.query.path import DefinitionPath
+from dryml.core.query.selector_graph import compile_selector_graph
+from dryml.core.query.sqlite import SQLiteQueryIndexConfig, sqlite_available
+from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
+from dryml.core.store.store import Store
 
 
 class ContractLeaf(Object):

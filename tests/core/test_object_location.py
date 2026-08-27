@@ -1,10 +1,10 @@
 import os
 
-import core2_objects as objects
+import core_objects as objects
 
-from dryml.core2 import Repo
-from dryml.core2.repo import default_repo
-from dryml.core2.store.dir import DirStore
+from dryml.core import Repo
+from dryml.core.repo import default_repo
+from dryml.core.store.dir import DirStore
 
 
 def test_object_save_accepts_explicit_store_and_sets_location(tmp_path):

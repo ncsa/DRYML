@@ -318,7 +318,8 @@ def is_canonical_value(x: Any) -> bool:
 
 
 def _is_naked_core_type(x: Any) -> bool:
-    return isinstance(x, type) and getattr(x, "__module__", "").startswith("dryml.core2")
+    module = getattr(x, "__module__", "")
+    return isinstance(x, type) and (module == "dryml.core" or module.startswith("dryml.core."))
 
 
 def is_runtime_leaf(x: Any) -> bool:

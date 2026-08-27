@@ -6,7 +6,7 @@ import sys
 
 from ..context_tracker import ContextBootstrapError
 from ..plain.context import PlainComputeContext
-from dryml.core2.utils.general import module_is_available, module_is_imported
+from dryml.core.utils.general import module_is_available, module_is_imported
 
 
 class JAXComputeContext(PlainComputeContext):

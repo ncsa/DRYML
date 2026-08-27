@@ -1,8 +1,8 @@
 import pytest
 
-from dryml.core2 import Definition, Object, Repo, SKIP_ARGS, Serializable
-from dryml.core2.query import QueryDomainError
-from dryml.core2.store.dir import DirStore
+from dryml.core import Definition, Object, Repo, SKIP_ARGS, Serializable
+from dryml.core.query import QueryDomainError
+from dryml.core.store.dir import DirStore
 
 
 class QueryLeaf(Object):

@@ -1,14 +1,14 @@
 import pytest
 
-from dryml.core2.backend import discover_backend
+from dryml.core.backend import discover_backend
 import numpy as np
 
 tf = pytest.importorskip("tensorflow")
 import dryml.tf as dryml_tf
 
-from dryml.core2.dtype import DType
-from dryml.core2.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
-from dryml.core2.backend import discover_backend
+from dryml.core.dtype import DType
+from dryml.core.tensor_spec import Dynamic, Layout, TensorSpec, as_tensor_spec
+from dryml.core.backend import discover_backend
 
 
 def test_tf_dtype_from_dtype_object():

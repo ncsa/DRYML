@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from dryml.core2 import Repo
-from dryml.core2.tensor_spec import TensorSpec
+from dryml.core import Repo
+from dryml.core.tensor_spec import TensorSpec
 from dryml.data import ArrayDataset
 from dryml.models import Experiment
 from dryml.models.sklearn import BasicTraining, RegressionModel

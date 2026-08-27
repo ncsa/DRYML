@@ -1,7 +1,7 @@
-from dryml.core2.utils.general import get_class_str, get_class_from_str, \
+from dryml.core.utils.general import get_class_str, get_class_from_str, \
     list_unique_objects, list_unique_concrete_definitions, apply_func
-from dryml.core2.definition import Definition, SKIP_ARGS
-import core2_objects as objects
+from dryml.core.definition import Definition, SKIP_ARGS
+import core_objects as objects
 
 
 def test_class_utils_1():

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import itertools
 
-from dryml.core2.cardinality import Cardinality
-from dryml.core2.tensor_spec import SpecTree, batch_spec_tree, unbatch_spec_tree
+from dryml.core.cardinality import Cardinality
+from dryml.core.tensor_spec import SpecTree, batch_spec_tree, unbatch_spec_tree
 from dryml.data.collate import default_collate
 from dryml.data.dataset import Dataset
 from dryml.data.split import default_split
