@@ -8,6 +8,7 @@ _SUBMODULE_EXPORTS = {
     "artifacts": "dryml.artifacts",
     "execute": "dryml.execute",
     "environments": "dryml.environments",
+    "worlds": "dryml.worlds",
 }
 
 _CORE_EXPORTS = {
@@ -66,6 +67,7 @@ __all__ = [
     "artifacts",
     "execute",
     "environments",
+    "worlds",
     "config",
     "configure",
     "reset_config",

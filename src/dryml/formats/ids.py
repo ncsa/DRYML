@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import Any
 
-from .canonical import canonical_json_bytes
+from .canonical import canonical_json_bytes, deep_freeze_json
 from .errors import ContentIDError
 
 CONTRACT_VERSION = "1.1"
@@ -18,8 +18,14 @@ def semantic_id(prefix: str, schema: str, kind: str, identifying_payload: Any, *
 
     if not isinstance(prefix, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", prefix):
         raise ContentIDError("invalid v1.1 ID prefix", context={"prefix": prefix})
+    deep_freeze_json(identifying_payload, **bounds)
     preimage = {"prefix": prefix, "contract_version": CONTRACT_VERSION, "schema": schema, "kind": kind, "payload": identifying_payload}
-    return f"{prefix}-v1.1-{hashlib.sha256(canonical_json_bytes(preimage, **bounds)).hexdigest()}"
+    wrapper_bounds = dict(bounds)
+    if "max_depth" in wrapper_bounds:
+        wrapper_bounds["max_depth"] += 1
+    if "max_nodes" in wrapper_bounds:
+        wrapper_bounds["max_nodes"] += 5
+    return f"{prefix}-v1.1-{hashlib.sha256(canonical_json_bytes(preimage, **wrapper_bounds)).hexdigest()}"
 
 
 def verify_semantic_id(value: str, *, prefix: str, schema: str, kind: str, identifying_payload: Any, **bounds: Any) -> None:

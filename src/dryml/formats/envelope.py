@@ -46,7 +46,7 @@ def make_envelope(*, schema: str, kind: str, prefix: str, payload: Mapping[str, 
     result: dict[str, Any] = {"contract_version": CONTRACT_VERSION, "schema": schema, "kind": kind, "payload": ready_payload, "id": semantic_id}
     if metadata is not None:
         result["metadata"] = json_ready(metadata, **bounds)
-    if len(canonical_json_bytes(result, **bounds)) > max_bytes:
+    if len(canonical_json_bytes(result, **_envelope_bounds(bounds))) > max_bytes:
         raise EnvelopeError("v1.1 envelope exceeds byte bound", context={"limit": max_bytes})
     return result
 
@@ -74,12 +74,23 @@ def validate_envelope(data: Mapping[str, Any], *, schema: str, kind: str, prefix
     if not isinstance(data["payload"], Mapping):
         raise EnvelopeError("v1.1 envelope payload must be a mapping")
     result = {key: json_ready(value, **bounds) for key, value in data.items()}
-    if len(canonical_json_bytes(result, **bounds)) > max_bytes:
+    if len(canonical_json_bytes(result, **_envelope_bounds(bounds))) > max_bytes:
         raise EnvelopeError("v1.1 envelope exceeds byte bound", context={"limit": max_bytes})
     if "metadata" in result and not isinstance(result["metadata"], Mapping):
         raise EnvelopeError("v1.1 envelope metadata must be a mapping")
     if "id" in result:
         verify_semantic_id(result["id"], prefix=prefix, schema=schema, kind=kind, identifying_payload=identifying_payload, **bounds)
+    return result
+
+
+def _envelope_bounds(bounds: Mapping[str, Any]) -> dict[str, Any]:
+    """Add only the fixed envelope wrapper overhead to payload bounds."""
+
+    result = dict(bounds)
+    if "max_depth" in result:
+        result["max_depth"] += 1
+    if "max_nodes" in result:
+        result["max_nodes"] += 6
     return result
 
 
