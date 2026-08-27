@@ -378,6 +378,29 @@ emit({{"generation": result.generation, "changed": result.changed}})
         con.close()
 
 
+def test_writer_retry_covers_connection_initialization(tmp_path, monkeypatch):
+    """A transient connection-configuration lock uses the write retry budget."""
+
+    index = _index(tmp_path / "index.sqlite", retries=1)
+    index.initialize_empty()
+    sqlite3 = require_sqlite()
+    original_connection = index._connections.connection
+    attempts = 0
+
+    def connection(*, readonly=False):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_connection(readonly=readonly)
+
+    monkeypatch.setattr(index._connections, "connection", connection)
+    index._run_write_transaction(lambda con: None)
+
+    assert attempts == 2
+    index.close()
+
+
 def test_busy_retry_exhaustion_reports_query_index_busy(tmp_path):
     path = tmp_path / "index.sqlite"
     ready = tmp_path / "writer-ready"

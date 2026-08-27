@@ -1107,9 +1107,9 @@ class SQLiteStoreQueryIndex:
         max_retries = max(0, int(self.config.max_write_retries))
         delay = 0.005
         for attempt in range(max_retries + 1):
-            con = self._connections.connection(readonly=False)
             began = False
             try:
+                con = self._connections.connection(readonly=False)
                 con.execute("BEGIN IMMEDIATE")
                 began = True
                 result = operation(con)

@@ -98,6 +98,26 @@ def test_auto_journal_mode_uses_delete_when_wal_runtime_is_not_known_safe(monkey
     manager.close_all_current_process()
 
 
+def test_existing_journal_mode_is_not_reapplied(tmp_path):
+    """Opening a peer connection does not reacquire the journal-mode lock."""
+
+    manager = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "index.sqlite", journal_mode="delete"))
+    statements = []
+
+    class Result:
+        def fetchone(self):
+            return ("delete",)
+
+    class Connection:
+        def execute(self, statement):
+            statements.append(statement)
+            return Result()
+
+    manager._configure_journal_and_durability(Connection())
+
+    assert statements == ["PRAGMA journal_mode", "PRAGMA synchronous = NORMAL"]
+
+
 def test_durability_setting_applies_synchronous_pragma(tmp_path):
     normal = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "normal.sqlite", journal_mode="delete", durability="normal"))
     full = SQLiteConnectionManager(SQLiteQueryIndexConfig(tmp_path / "full.sqlite", journal_mode="delete", durability="full"))

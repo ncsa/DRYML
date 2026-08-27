@@ -75,7 +75,11 @@ class SQLiteConnectionManager:
             if before == after or before is None:
                 break
             con.close()
-        self._initialize_connection(con, readonly=readonly)
+        try:
+            self._initialize_connection(con, readonly=readonly)
+        except BaseException:
+            con.close()
+            raise
         self._connections[key] = con
         self._file_identities[key] = after
         return con
@@ -128,7 +132,9 @@ class SQLiteConnectionManager:
         if requested == "auto":
             version = require_sqlite().sqlite_version_info
             requested = "wal" if wal_runtime_is_known_safe(version) else "delete"
-        journal_mode = con.execute(f"PRAGMA journal_mode = {requested.upper()}").fetchone()[0].lower()
+        journal_mode = con.execute("PRAGMA journal_mode").fetchone()[0].lower()
+        if journal_mode != requested:
+            journal_mode = con.execute(f"PRAGMA journal_mode = {requested.upper()}").fetchone()[0].lower()
         if requested != "delete" and journal_mode != requested:
             raise QueryIndexError(f"SQLite query index could not enable journal_mode={requested!r}; got {journal_mode!r}.")
         synchronous = "NORMAL" if self.config.durability == "normal" else "FULL"
