@@ -32,3 +32,28 @@ def test_injected_process_memory_effect_is_owned_and_resettable():
     assert memory["value"] == 50
     service.reset(RuntimeState())
     assert memory["value"] == 100
+
+
+def test_injected_releases_restore_owned_environment_affinity_and_memory():
+    """Leaving a controlling runtime restores each prior session-owned value."""
+
+    environment = {"CUSTOM": "before", "CUDA_VISIBLE_DEVICES": "all"}
+    affinity = {"value": (0, 1)}
+    memory = {"value": 100}
+    service = PublicationService(
+        environ=environment,
+        affinity_getter=lambda: affinity["value"],
+        affinity_setter=lambda value: affinity.__setitem__("value", value),
+        process_memory_getter=lambda: memory["value"],
+        process_memory_setter=lambda value: memory.__setitem__("value", value),
+    )
+    service.initialize(RuntimeState())
+    service.commit(service.stage(service.current(), RuntimeState()), EffectPlan(environment={"CUSTOM": "session", "CUDA_VISIBLE_DEVICES": "0"}, cpu_affinity=(0,), process_memory=50))
+
+    service.commit(service.stage(service.current(), RuntimeState()), EffectPlan(environment={"CUDA_VISIBLE_DEVICES": ""}, release_environment=("CUSTOM",), release_cpu_affinity=True, release_process_memory=True))
+
+    assert environment == {"CUSTOM": "before", "CUDA_VISIBLE_DEVICES": ""}
+    assert affinity["value"] == (0, 1)
+    assert memory["value"] == 100
+    service.reset(RuntimeState())
+    assert environment == {"CUSTOM": "before", "CUDA_VISIBLE_DEVICES": "all"}

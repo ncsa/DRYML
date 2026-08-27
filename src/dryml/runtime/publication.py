@@ -62,12 +62,21 @@ class PublicationCandidate:
 
 @dataclass(frozen=True, slots=True)
 class EffectPlan:
-    """Preplanned process effects accepted by the short publication transaction."""
+    """Preplanned process effects accepted by the short publication transaction.
+
+    ``release_*`` fields relinquish a previously owned reversible effect by
+    restoring the value that preceded session ownership. They are used when a
+    runtime role no longer owns a control, rather than treating deletion as a
+    valid restoration.
+    """
 
     environment: Mapping[str, str | None] = field(default_factory=dict)
     cpu_affinity: tuple[int, ...] | None = None
     process_memory: Any = None
     irreversible_outcome: str | None = None
+    release_environment: tuple[str, ...] = ()
+    release_cpu_affinity: bool = False
+    release_process_memory: bool = False
 
     def __post_init__(self) -> None:
         """Freeze and normalize process-effect inputs before publication."""
@@ -80,12 +89,18 @@ class EffectPlan:
             object.__setattr__(self, "cpu_affinity", cpus)
         if self.process_memory is not None and (isinstance(self.process_memory, bool) or not isinstance(self.process_memory, int) or self.process_memory < 0):
             raise PublicationError("process memory effects require a non-negative integer")
+        released = tuple(self.release_environment)
+        if len(released) != len(set(released)) or any(not isinstance(key, str) for key in released):
+            raise PublicationError("released environment effects require unique string keys")
+        if type(self.release_cpu_affinity) is not bool or type(self.release_process_memory) is not bool:
+            raise PublicationError("effect release flags must be exact booleans")
+        object.__setattr__(self, "release_environment", released)
         object.__setattr__(self, "environment", _freeze_mapping(self.environment))
 
     @property
     def changes_process(self) -> bool:
         """Return whether this plan can invalidate an active generation lease."""
-        return bool(self.environment or self.cpu_affinity is not None or self.process_memory is not None or self.irreversible_outcome is not None)
+        return bool(self.environment or self.cpu_affinity is not None or self.process_memory is not None or self.irreversible_outcome is not None or self.release_environment or self.release_cpu_affinity or self.release_process_memory)
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,7 +375,11 @@ class PublicationService:
             return self._generation
 
     def reset(self, runtime: Any) -> SessionGeneration:
-        """Restore only still-owned reversible effects and publish a fresh baseline."""
+        """Restore only still-owned reversible effects and publish a fresh baseline.
+
+        An equivalent effect-free baseline retains the existing generation and
+        its independently finalized statuses.
+        """
         self._check_pid()
         self._validate_runtime(runtime)
         with self._lock:
@@ -369,6 +388,8 @@ class PublicationService:
                 raise PublicationBusyError("active generation lease prevents reset")
             if current.health == "failed":
                 raise PublicationFailedError(current.restart_guidance or "restart the process")
+            if current.runtime == runtime and not self._effects:
+                return current
             if not self._rollback(list(self._effects)):
                 self._generation = SessionGeneration(current.number + 1, runtime, health="failed", restart_guidance="restart the process; session-owned effects were not safely restored")
                 self._failed = True
@@ -383,6 +404,22 @@ class PublicationService:
         self._check_pid()
         with self._lock:
             return self._effects
+
+    @property
+    def supports_cpu_affinity(self) -> bool:
+        """Return whether the injected or platform affinity seam is usable."""
+
+        try:
+            tuple(self._affinity_getter())
+        except Exception:
+            return False
+        return True
+
+    @property
+    def supports_process_memory(self) -> bool:
+        """Return whether both injected process-memory control seams exist."""
+
+        return self._process_memory_getter is not None and self._process_memory_setter is not None
 
     def _check_pid(self) -> None:
         """Reject inherited activated state before touching any inherited lock."""
@@ -429,6 +466,43 @@ class PublicationService:
         return not effects.changes_process and current.runtime == candidate.runtime and (current.inventory is None or candidate.inventory is None or current.inventory.visibility_identity == candidate.inventory.visibility_identity) and current.statuses == candidate.statuses
 
     def _apply(self, effects: EffectPlan, records: list[EffectRecord]) -> None:
+        for key in effects.release_environment:
+            target = self._environment_key(key)
+            owned = next((record for record in self._effects if record.kind == "environment" and self._environment_identity(record.key) == self._environment_identity(target)), None)
+            if owned is None:
+                continue
+            previous = self._environ.get(owned.key)
+            if previous != owned.written:
+                raise PublicationError("environment effect ownership was lost", context={"key": owned.key})
+            records.append(EffectRecord("environment_release", owned.key, previous, owned.previous))
+            if owned.previous is None:
+                self._environ.pop(owned.key, None)
+            else:
+                self._environ[owned.key] = owned.previous
+            if self._environ.get(owned.key) != owned.previous:
+                raise PublicationError("environment release readback failed", context={"key": owned.key})
+        if effects.release_cpu_affinity:
+            owned = next((record for record in self._effects if record.kind == "affinity"), None)
+            if owned is not None:
+                previous = tuple(sorted(self._affinity_getter()))
+                if previous != owned.written:
+                    raise PublicationError("CPU affinity effect ownership was lost")
+                records.append(EffectRecord("affinity_release", 0, previous, owned.previous))
+                self._affinity_setter(owned.previous)
+                if tuple(sorted(self._affinity_getter())) != owned.previous:
+                    raise PublicationError("CPU affinity release readback failed")
+        if effects.release_process_memory:
+            owned = next((record for record in self._effects if record.kind == "process_memory"), None)
+            if owned is not None:
+                if self._process_memory_getter is None or self._process_memory_setter is None:
+                    raise PublicationError("process-memory restoration is unsupported on this platform")
+                previous = self._process_memory_getter()
+                if previous != owned.written:
+                    raise PublicationError("process memory effect ownership was lost")
+                records.append(EffectRecord("process_memory_release", 0, previous, owned.previous))
+                self._process_memory_setter(owned.previous)
+                if self._process_memory_getter() != owned.previous:
+                    raise PublicationError("process memory release readback failed")
         for key, value in effects.environment.items():
             target = self._environment_key(key)
             owned = next((record for record in self._effects if record.kind == "environment" and self._environment_identity(record.key) == self._environment_identity(target)), None)
@@ -478,7 +552,12 @@ class PublicationService:
             if record.kind == "irreversible":
                 journal.append(record)
                 continue
-            index = next((index for index, old in enumerate(journal) if old.kind == record.kind and old.key == record.key), None)
+            kind = record.kind.removesuffix("_release")
+            index = next((index for index, old in enumerate(journal) if old.kind == kind and old.key == record.key), None)
+            if record.kind.endswith("_release"):
+                if index is not None:
+                    journal.pop(index)
+                continue
             if index is None:
                 journal.append(record)
             else:
@@ -490,20 +569,20 @@ class PublicationService:
         complete = True
         for record in reversed(records):
             try:
-                if record.kind == "environment":
+                if record.kind in {"environment", "environment_release"}:
                     if self._environ.get(record.key) != record.written:
                         complete = False
                     elif record.previous is None:
                         self._environ.pop(record.key, None)
                     else:
                         self._environ[record.key] = record.previous
-                elif record.kind == "affinity":
+                elif record.kind in {"affinity", "affinity_release"}:
                     if tuple(sorted(self._affinity_getter())) != record.written:
                         complete = False
                     else:
                         self._affinity_setter(record.previous)
                         complete = tuple(sorted(self._affinity_getter())) == record.previous and complete
-                elif record.kind == "process_memory":
+                elif record.kind in {"process_memory", "process_memory_release"}:
                     if self._process_memory_getter is None or self._process_memory_setter is None or self._process_memory_getter() != record.written:
                         complete = False
                     else:
