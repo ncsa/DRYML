@@ -526,6 +526,33 @@ def test_windows_claim_seam_unlocks_and_closes_before_cleanup(tmp_path, monkeypa
     assert not index._build_claim_path().exists()
 
 
+def test_rebuild_closes_managed_canonical_handles_before_checkpoint(tmp_path, monkeypatch):
+    """Rebuild releases pooled canonical handles before sidecar cleanup."""
+
+    store = DirStore(
+        tmp_path / "store",
+        query_index=SQLiteQueryIndexConfig(journal_mode="delete"),
+    )
+    _save_root_definition(store, _cdef("checkpoint-barrier"))
+    index = store.open_query_index()
+    index.initialize_empty()
+    assert index._connections._connections
+    original_checkpoint = index._checkpoint_and_cleanup_sidecars
+    observed_canonical = False
+
+    def checkpoint(path, *, label, allow_corrupt=False):
+        nonlocal observed_canonical
+        if label == "canonical":
+            observed_canonical = True
+            assert not index._connections._connections
+        return original_checkpoint(path, label=label, allow_corrupt=allow_corrupt)
+
+    monkeypatch.setattr(index, "_checkpoint_and_cleanup_sidecars", checkpoint)
+    index.rebuild()
+
+    assert observed_canonical
+
+
 def test_wal_rebuild_waits_for_reader_before_replacing_canonical_sidecar(tmp_path):
     """A live WAL reader prevents mixed-generation sidecar activation."""
 

@@ -453,6 +453,7 @@ class SQLiteStoreQueryIndex:
             con.execute("PRAGMA optimize")
             replacement.close()
             self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
+            SQLiteConnectionManager._close_current_thread_for_path(self.path)
             self._checkpoint_and_cleanup_sidecars(
                 self.path,
                 label="canonical",
