@@ -2,6 +2,7 @@ import base64
 from copy import copy, deepcopy
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -260,7 +261,13 @@ unpickler(payload)
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=Path(__file__).parents[2],
-        env={"PYTHONPATH": f"{Path(__file__).parents[1]}:{Path(__file__).parent}"},
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((
+                str(Path(__file__).parents[1]),
+                str(Path(__file__).parent),
+            )),
+        },
         text=True,
         capture_output=True,
         check=False,
@@ -289,7 +296,10 @@ def test_historical_fixture_rejection_is_import_free_and_explicit():
             "assert p[:2] == bytes((0x80, 5)); unpickler(p)",
         ],
         cwd=Path(__file__).parents[2],
-        env={"PYTHONPATH": str(Path(__file__).parents[2] / "src")},
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).parents[2] / "src"),
+        },
         text=True,
         capture_output=True,
         check=False,

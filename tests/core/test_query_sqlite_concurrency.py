@@ -475,14 +475,14 @@ emit({{"released": True}})
 def test_build_claim_owner_does_not_remove_successor_claim(tmp_path):
     path = tmp_path / "index.sqlite"
     index = _index(path)
-    claim = index._build_claim(force=True)
-    acquired = claim.__enter__()
-    assert acquired
     claim_path = index._build_claim_path()
-    claim_path.unlink()
-    claim_path.write_text("successor\n", encoding="utf-8")
+    claim_path.write_text("owner\n", encoding="utf-8")
+    owner_identity = claim_path.stat()
+    successor_path = claim_path.with_suffix(".successor")
+    successor_path.write_text("successor\n", encoding="utf-8")
+    os.replace(successor_path, claim_path)
 
-    claim.__exit__(None, None, None)
+    index._unlink_claim_if_owned(claim_path, owner_identity)
 
     assert claim_path.exists()
     claim_path.unlink()
