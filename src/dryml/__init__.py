@@ -16,6 +16,9 @@ _SUBMODULE_EXPORTS = {
     "worlds": "dryml.worlds",
     "runtime": "dryml.runtime",
     "session": "dryml.session",
+    "annotations": "dryml.annotations",
+    "env": "dryml.annotations.env",
+    "world": "dryml.annotations.world",
 }
 
 _CORE_EXPORTS = {
@@ -77,6 +80,9 @@ __all__ = [
     "worlds",
     "runtime",
     "session",
+    "annotations",
+    "env",
+    "world",
     "config",
     "configure",
     "reset_config",
