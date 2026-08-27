@@ -45,4 +45,8 @@ class ForkSafetyError(PublicationError):
     """Raised when inherited activated runtime state is used after ``fork()``."""
 
 
-__all__ = ["DeviceVisibilityError", "ForkSafetyError", "PublicationBusyError", "PublicationError", "PublicationFailedError", "PublicationReentryError", "RuntimeErrorBase", "RuntimeSpecError", "RuntimeTransitionError"]
+class FrameworkImportSafetyError(PublicationError):
+    """Raised when a watched framework cannot retain mandatory controls."""
+
+
+__all__ = ["DeviceVisibilityError", "ForkSafetyError", "FrameworkImportSafetyError", "PublicationBusyError", "PublicationError", "PublicationFailedError", "PublicationReentryError", "RuntimeErrorBase", "RuntimeSpecError", "RuntimeTransitionError"]

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -233,35 +234,40 @@ class PublicationService:
         if validator is not None:
             validator()
         records: list[EffectRecord] = []
-        with self._lock:
-            self._in_flight = True
-            current = self._require_generation()
-            try:
-                if current is not candidate.expected:
-                    raise PublicationError("publication candidate is stale", context={"expected": candidate.expected.number, "current": current.number})
-                if current.health == "failed":
-                    raise PublicationFailedError("runtime publication is terminal; restart the process")
-                equivalent = self._equivalent(current, candidate.generation, effects)
-                if self._leases and not equivalent:
-                    raise PublicationBusyError("active generation lease prevents an incompatible process transition")
-                if equivalent:
-                    return current
-                self._apply(effects, records)
-                self._generation = candidate.generation
-                self._mutated = self._mutated or effects.changes_process
-                self._effects = self._merge_effects(records)
-                return candidate.generation
-            except BaseException as exc:
-                rollback_ok = self._rollback(records)
-                irreversible_applied = any(record.kind == "irreversible" for record in records)
-                terminal = irreversible_applied or not rollback_ok or "ownership was lost" in str(exc)
-                if terminal:
-                    self._generation = SessionGeneration(current.number + 1, current.runtime, health="failed", restart_guidance="restart the process; runtime effects could not be restored safely", statuses=current.statuses, metadata={"failure": type(exc).__name__})
-                    self._failed = True
-                    raise PublicationFailedError("runtime publication failed closed; restart the process") from exc
-                raise
-            finally:
-                self._in_flight = False
+        with self._framework_registration_guard(candidate.generation):
+            with self._lock:
+                self._in_flight = True
+                current = self._require_generation()
+                try:
+                    if current is not candidate.expected:
+                        raise PublicationError("publication candidate is stale", context={"expected": candidate.expected.number, "current": current.number})
+                    if current.health == "failed":
+                        raise PublicationFailedError("runtime publication is terminal; restart the process")
+                    if getattr(current.runtime, "mode", None) is RuntimeMode.NONE and getattr(candidate.generation.runtime, "mode", None) is not RuntimeMode.NONE:
+                        loaded = tuple(root for root in ("tensorflow", "torch", "jax", "jaxlib") if root in sys.modules)
+                        if loaded:
+                            raise PublicationError("framework was imported before managed visibility control; restart the process", context={"loaded": loaded})
+                    equivalent = self._equivalent(current, candidate.generation, effects)
+                    if self._leases and not equivalent:
+                        raise PublicationBusyError("active generation lease prevents an incompatible process transition")
+                    if equivalent:
+                        return current
+                    self._apply(effects, records)
+                    self._generation = candidate.generation
+                    self._mutated = self._mutated or effects.changes_process
+                    self._effects = self._merge_effects(records)
+                    return candidate.generation
+                except BaseException as exc:
+                    rollback_ok = self._rollback(records)
+                    irreversible_applied = any(record.kind == "irreversible" for record in records)
+                    terminal = irreversible_applied or not rollback_ok or "ownership was lost" in str(exc)
+                    if terminal:
+                        self._generation = SessionGeneration(current.number + 1, current.runtime, health="failed", restart_guidance="restart the process; runtime effects could not be restored safely", statuses=current.statuses, metadata={"failure": type(exc).__name__})
+                        self._failed = True
+                        raise PublicationFailedError("runtime publication failed closed; restart the process") from exc
+                    raise
+                finally:
+                    self._in_flight = False
 
     @contextmanager
     def lease(self) -> Iterator[SessionGeneration]:
@@ -301,6 +307,58 @@ class PublicationService:
             self._generation = SessionGeneration(current.number + 1, current.runtime, current.inventory, statuses=merged, metadata=current.metadata)
             return self._generation
 
+    def apply_framework_preimport(self, admission: FrameworkAdmission, environment: Mapping[str, str]) -> None:
+        """Apply owned framework environment controls before watched module code.
+
+        Args:
+            admission: Same-control-epoch token retained by the loader lease.
+            environment: Exact string environment updates required before import.
+
+        Raises:
+            PublicationError: If the admission is stale or an owned effect fails.
+
+        Side Effects:
+            Records reversible environment ownership for later reset.
+        """
+        self._check_pid()
+        effects = EffectPlan(environment=environment)
+        records: list[EffectRecord] = []
+        with self._lock:
+            current = self._require_generation()
+            if current.health == "failed":
+                raise PublicationFailedError("runtime publication is terminal; restart the process")
+            if int(current.metadata.get("control_epoch", current.number)) != admission.control_epoch:
+                raise PublicationError("framework pre-import controls are stale")
+            try:
+                self._apply(effects, records)
+                self._effects = self._merge_effects(records)
+                self._mutated = self._mutated or effects.changes_process
+            except BaseException:
+                if not self._rollback(records):
+                    self._generation = SessionGeneration(current.number + 1, current.runtime, current.inventory, health="failed", restart_guidance="restart the process; framework pre-import controls could not be restored", statuses=current.statuses, metadata=current.metadata)
+                    self._failed = True
+                    raise PublicationFailedError("framework pre-import controls failed closed; restart the process")
+                raise
+
+    def fail_status_finalization(self, admission: FrameworkAdmission | None, failure: BaseException) -> SessionGeneration:
+        """Publish terminal health after uncertain watched-framework execution.
+
+        Args:
+            admission: Loader admission, if execution was controlled.
+            failure: Original post-execution exception retained as diagnostic type.
+
+        Returns:
+            The terminal immutable generation.
+        """
+        self._check_pid()
+        with self._lock:
+            current = self._require_generation()
+            if admission is not None and int(current.metadata.get("control_epoch", current.number)) != admission.control_epoch:
+                raise PublicationError("framework failure finalization is stale")
+            self._generation = SessionGeneration(current.number + 1, current.runtime, current.inventory, health="failed", restart_guidance="restart the process; framework execution may have changed native runtime state", statuses=current.statuses, metadata=current.metadata)
+            self._failed = True
+            return self._generation
+
     def reset(self, runtime: Any) -> SessionGeneration:
         """Restore only still-owned reversible effects and publish a fresh baseline."""
         self._check_pid()
@@ -337,6 +395,16 @@ class PublicationService:
         self._pid = self._pid_getter()
         self._lock = threading.RLock()
         self._generation = SessionGeneration(0, generation.runtime, metadata={"control_epoch": 0})
+
+    @staticmethod
+    def _framework_registration_guard(generation: SessionGeneration):
+        """Return the lazy registry guard for an active candidate generation."""
+        if getattr(generation.runtime, "mode", None) is RuntimeMode.NONE:
+            return nullcontext()
+        module = sys.modules.get("dryml.runtime.frameworks")
+        if module is None:
+            return nullcontext()
+        return module.framework_registry._publication_guard()
 
     def _require_generation(self) -> SessionGeneration:
         if self._generation is None:
