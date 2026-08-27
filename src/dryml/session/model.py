@@ -155,11 +155,12 @@ class SessionConfiguration:
             JSON-ready semantic state excluding envelope diagnostics.
         """
 
+        environment = self.environment.to_data()["payload"]
         return {
             "mode": self.mode,
             "resources": None if self.resources is None else self.resources.to_data(),
             "allocation": None if self.allocation is None else self.allocation.to_data(),
-            "environment": self.environment.to_data(),
+            "environment": environment,
             "requirement_axes": dict(self.requirement_axes),
             "controls": json_ready(self.controls),
         }
@@ -197,7 +198,7 @@ class SessionConfiguration:
             data["mode"],
             None if resources_data is None else ResourceSpec.from_data(resources_data),
             None if allocation_data is None else SelectedWorldAllocation(allocation_data["role"], ProcessAllocation.from_payload(allocation_data["process"])),
-            EnvironmentRequirement.from_data(data["environment"]),
+            EnvironmentRequirement(**dict(data["environment"])),
             data["requirement_axes"],
             data["controls"],
         )
@@ -396,13 +397,9 @@ def _identifying_configuration_payload(value: Any) -> dict[str, Any]:
     environment = payload.get("environment")
     if isinstance(environment, Mapping):
         environment = dict(environment)
-        environment.pop("metadata", None)
-        environment_payload = environment.get("payload")
-        if isinstance(environment_payload, Mapping):
-            environment_payload = dict(environment_payload)
-            environment_payload.pop("details", None)
-            environment["payload"] = environment_payload
+        environment.pop("details", None)
         payload["environment"] = environment
+    payload.pop("controls", None)
     allocation = payload.get("allocation")
     if isinstance(allocation, Mapping):
         allocation = dict(allocation)

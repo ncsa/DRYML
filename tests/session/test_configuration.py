@@ -55,6 +55,19 @@ def test_configuration_diagnostic_metadata_is_not_identity_bearing():
     assert SessionConfiguration.from_data(first.to_data()) == first
 
 
+def test_derived_controls_are_non_identifying_and_environment_is_embedded():
+    """Session identity excludes controls and embeds no nested family envelope."""
+
+    first = SessionConfiguration("python", controls={"memory": "undeclared"})
+    second = SessionConfiguration("python", controls={"memory": "declarative"})
+    data = first.to_data()
+
+    assert first.fingerprint == second.fingerprint
+    assert set(data["payload"]["environment"]) == {"python", "requirements", "excludes", "capabilities", "tags", "dryml_protocol", "schema_versions", "details"}
+    assert "contract_version" not in data["payload"]["environment"]
+    assert SessionConfiguration.from_data(data) == first
+
+
 def test_resource_memory_accepts_scalar_and_per_gpu_sequences():
     """Managed shorthand expands scalar GPU memory and retains per-device data."""
 
