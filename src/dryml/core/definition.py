@@ -110,19 +110,22 @@ class DefInterface(ABC):
             May create a runtime object and populate repository caches. It does
             not change this immutable definition.
         """
+        from dryml.runtime import materialization_admission
         from .repo import manage_repo
-        from .session import config
-        with manage_repo(repo=repo) as sub_repo:
-            concrete_def = self.concretize(repo=sub_repo)
-            loader = sub_repo.load_or_build if build_missing else sub_repo.load
-            with config(object_mode="fresh"):
-                return loader(
-                    concrete_def,
-                    instance=instance,
-                    restore_state=restore_state,
-                    reuse_weak=reuse_weak,
-                    cache=cache,
-                    revision=revision)
+        from .session import _construction_config
+
+        with materialization_admission(operation="definition_build"):
+            with manage_repo(repo=repo) as sub_repo:
+                concrete_def = self.concretize(repo=sub_repo)
+                loader = sub_repo.load_or_build if build_missing else sub_repo.load
+                with _construction_config():
+                    return loader(
+                        concrete_def,
+                        instance=instance,
+                        restore_state=restore_state,
+                        reuse_weak=reuse_weak,
+                        cache=cache,
+                        revision=revision)
 
     def match(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs) -> bool:
         """Test this definition against another definition using selector rules.

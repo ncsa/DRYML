@@ -13,14 +13,21 @@ from .symbol import resolve_symbol
 
 
 MaterializationActionKind = Literal["reuse", "construct"]
+MaterializationReuseSource = Literal["memo", "cache", None]
 
 
 @dataclass(frozen=True, slots=True)
 class MaterializationAction:
+    """Definition-only recipe for one runtime materialization step.
+
+    Reuse records only its source; execution retrieves any live Object after
+    admission instead of retaining one in the plan.
+    """
+
     definition: ConcreteDefinition
     kind: MaterializationActionKind
     primary_path: str
-    obj: Object | None = None
+    reuse_source: MaterializationReuseSource = None
     restore_state: bool = True
     store: Any | None = None
     revision: str | None = None
@@ -31,6 +38,8 @@ class MaterializationAction:
 
 @dataclass(slots=True)
 class MaterializationPlan:
+    """Definition-only ordered materialization graph and per-node actions."""
+
     graph: ConcreteDefinitionGraph
     actions: dict[ConcreteDefinition, MaterializationAction]
     order: tuple[ConcreteDefinition, ...]
@@ -45,6 +54,13 @@ def build_materialization_plan(
         revision: dict[ConcreteDefinition, str] | None = None,
         memo: dict | None = None,
         path: list[str | int] | None = None) -> MaterializationPlan:
+    """Build a definition-only plan without acquiring live cached Objects.
+
+    Plan construction remains available during strict orchestration. It may
+    inspect cache and Store availability metadata but never resolves classes,
+    restores state, or retains a live Object in the returned plan.
+    """
+
     if memo is None:
         memo = {}
     if options.instance == "new" and options.cache != "none":
@@ -58,16 +74,20 @@ def build_materialization_plan(
     actions = {}
     revision = {} if revision is None else revision
     for node in order:
-        cached_obj = repo.get_cached(node, reuse_weak=options.reuse_weak) if options.instance == "reuse" else None
-        memo_obj = memo.get(node)
-        reuse_obj = memo_obj if memo_obj is not None else cached_obj
-        kind: MaterializationActionKind = "reuse" if reuse_obj is not None else "construct"
+        memo_reuse = memo.get(node) is not None
+        cache_reuse = options.instance == "reuse" and repo.has_cached(
+            node, reuse_weak=options.reuse_weak
+        )
+        reuse_source: MaterializationReuseSource = (
+            "memo" if memo_reuse else ("cache" if cache_reuse else None)
+        )
+        kind: MaterializationActionKind = "reuse" if reuse_source is not None else "construct"
         selected_store = repo._first_store_with(node) if options.restore_state else None
         actions[node] = MaterializationAction(
             definition=node,
             kind=kind,
             primary_path=root_path if node == cdef else str(primary_paths.get(node, "<unknown>")),
-            obj=reuse_obj,
+            reuse_source=reuse_source,
             restore_state=options.restore_state,
             store=selected_store,
             revision=revision.get(node),
@@ -85,6 +105,22 @@ def execute_materialization_plan(
         memo: dict,
         revision: dict[ConcreteDefinition, str],
         root: ConcreteDefinition):
+    from dryml.runtime import materialization_admission
+    from .repo import RepoLoadError
+
+    with materialization_admission(operation="execute_materialization_plan"):
+        return _execute_materialization_plan(repo, plan, memo=memo, revision=revision, root=root)
+
+
+def _execute_materialization_plan(
+        repo,
+        plan: MaterializationPlan,
+        *,
+        memo: dict,
+        revision: dict[ConcreteDefinition, str],
+        root: ConcreteDefinition):
+    """Execute an already admitted plan without resolving classes beforehand."""
+
     from .repo import RepoLoadError
 
     local_memo = dict(memo)
@@ -96,11 +132,14 @@ def execute_materialization_plan(
         revision_str = action.revision if action.revision is not None else revision.get(cdef, None)
 
         if action.kind == "reuse":
-            obj = action.obj if action.obj is not None else repo.get_cached(cdef, reuse_weak=plan.options.reuse_weak)
+            obj = local_memo.get(cdef) if action.reuse_source == "memo" else repo.get_cached(
+                cdef, reuse_weak=plan.options.reuse_weak
+            )
             if obj is None:
+                source = "memoized" if action.reuse_source == "memo" else "cached"
                 raise RepoLoadError(
-                    f"Materialization plan requested cached reuse for {cdef} at {action.primary_path}, "
-                    "but no cached object is available."
+                    f"Materialization plan requested {source} reuse for {cdef} at {action.primary_path}, "
+                    "but no reusable object is available."
                 )
             if action.restore_state:
                 _restore_cached_if_needed(
@@ -191,13 +230,16 @@ def project_cdef_call(
     invoking preparation or applying defaults.
     """
 
-    if cdef.identity_version == V1_IDENTITY_VERSION:
-        return tuple(cdef._args), dict(cdef._kwargs)
-    if cls is None:
-        cls = resolve_symbol(cdef.cls)
-    from .bound_args import project_bound_arguments
+    from dryml.runtime import materialization_admission
 
-    return project_bound_arguments(cls, cdef._bound_args)
+    with materialization_admission(operation="project_cdef_constructor_call"):
+        if cdef.identity_version == V1_IDENTITY_VERSION:
+            return tuple(cdef._args), dict(cdef._kwargs)
+        if cls is None:
+            cls = resolve_symbol(cdef.cls)
+        from .bound_args import project_bound_arguments
+
+        return project_bound_arguments(cls, cdef._bound_args)
 
 
 def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefinition, options: RepoLoadOptions, memo: dict) -> set[ConcreteDefinition]:
@@ -209,7 +251,9 @@ def _included_nodes(repo, graph: ConcreteDefinitionGraph, root: ConcreteDefiniti
         included.add(cdef)
         if cdef in memo:
             return
-        cached = options.instance == "reuse" and repo.get_cached(cdef, reuse_weak=options.reuse_weak) is not None
+        cached = options.instance == "reuse" and repo.has_cached(
+            cdef, reuse_weak=options.reuse_weak
+        )
         if cached and not options.restore_state:
             return
         for edge in graph.outgoing(cdef):

@@ -27,6 +27,10 @@ _current_config: ContextVar[SessionConfig] = ContextVar(
     "dryml_session_config",
     default=_DEFAULT_CONFIG,
 )
+_internal_construction: ContextVar[bool] = ContextVar(
+    "dryml_internal_construction",
+    default=False,
+)
 
 
 def get_config() -> SessionConfig:
@@ -38,7 +42,34 @@ def current_repo():
 
 
 def current_object_mode() -> ObjectMode:
-    return get_config().object_mode
+    """Return the effective object mode after the public orchestrator floor.
+
+    The floor changes only the projected mode.  It deliberately leaves the
+    context-local repository, cache, and raw configured mode untouched so they
+    restore exactly after orchestration ends.
+    """
+
+    from dryml.runtime.context import active_runtime
+    from dryml.runtime.modes import RuntimeMode
+
+    cfg = get_config()
+    if (
+            active_runtime().mode is RuntimeMode.ORCHESTRATOR
+            and cfg.object_mode in {"fresh", "load_or_build"}):
+        return "definition"
+    return cfg.object_mode
+
+
+def _construction_object_mode() -> ObjectMode:
+    """Return the private mode used only by an admitted constructor chain."""
+
+    if _internal_construction.get():
+        from dryml.runtime.guards import internal_construction_admitted
+
+        if not internal_construction_admitted():
+            return current_object_mode()
+        return get_config().object_mode
+    return current_object_mode()
 
 
 def current_cache() -> CacheMode:
@@ -52,6 +83,30 @@ def _validate_object_mode(value: str) -> ObjectMode:
             f"{sorted(_OBJECT_MODES)}, got {value!r}."
         )
     return value
+
+
+def _validated_object_mode(value: str, *, internal_construction: bool = False) -> ObjectMode:
+    """Reject public materializing mode selection while orchestrating."""
+
+    mode = _validate_object_mode(value)
+    if mode in {"fresh", "load_or_build"}:
+        from dryml.runtime.context import active_runtime
+        from dryml.runtime.errors import RuntimeTransitionError
+        from dryml.runtime.guards import internal_construction_admitted
+        from dryml.runtime.modes import RuntimeMode
+
+        if (
+                active_runtime().mode is RuntimeMode.ORCHESTRATOR
+                and (not internal_construction or not internal_construction_admitted())):
+            raise RuntimeTransitionError(
+                "orchestration object-mode floor prohibits public fresh/load_or_build selection",
+                context={
+                    "mode": "orchestrator",
+                    "object_mode": mode,
+                    "fix": "use definition/concrete/selector/space modes, a fresh managed process, or a future explicit dispatch",
+                },
+            )
+    return mode
 
 
 def _validate_cache(value: str) -> CacheMode:
@@ -81,7 +136,8 @@ def _merged_config(
         *,
         repo=_UNSET,
         object_mode=_UNSET,
-        cache=_UNSET) -> SessionConfig:
+        cache=_UNSET,
+        internal_construction: bool = False) -> SessionConfig:
     updates = {}
 
     if repo is not _UNSET:
@@ -90,7 +146,9 @@ def _merged_config(
         updates["repo_owned"] = repo_owned
 
     if object_mode is not _UNSET:
-        updates["object_mode"] = _validate_object_mode(object_mode)
+        updates["object_mode"] = _validated_object_mode(
+            object_mode, internal_construction=internal_construction
+        )
 
     if cache is not _UNSET:
         updates["cache"] = _validate_cache(cache)
@@ -121,6 +179,23 @@ def config(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET):
             _close_owned_repo(new)
 
 
+@contextmanager
+def _construction_config(*, object_mode: ObjectMode = "fresh"):
+    """Enter private fresh mode only while a materialization admission is active."""
+
+    old = get_config()
+    new = _merged_config(
+        old, object_mode=object_mode, internal_construction=True
+    )
+    config_token = _current_config.set(new)
+    construction_token = _internal_construction.set(True)
+    try:
+        yield new
+    finally:
+        _internal_construction.reset(construction_token)
+        _current_config.reset(config_token)
+
+
 def reset_config() -> SessionConfig:
     old = get_config()
     _current_config.set(_DEFAULT_CONFIG)
@@ -133,10 +208,12 @@ def close_configured_repo() -> None:
 
 
 def status() -> dict[str, Any]:
+    """Return the current configuration using the effective object-mode projection."""
+
     cfg = get_config()
     return {
         "repo": cfg.repo,
-        "object_mode": cfg.object_mode,
+        "object_mode": current_object_mode(),
         "cache": cfg.cache,
         "repo_owned": cfg.repo_owned,
     }

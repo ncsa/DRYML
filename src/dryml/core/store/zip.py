@@ -417,7 +417,10 @@ class ZipExportStore(Store):
 
     def save_object(self, obj: Object) -> None:
         # No-op: export uses existing files in src_dir only.
-        return
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="zip_export_store_save_object"):
+            return
 
     def load_object(self, obj: Object) -> bool:
         # Cannot load from an export-only store.

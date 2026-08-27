@@ -956,23 +956,26 @@ def from_canonical(
     path: list[str | int] | tuple[str | int, ...] | None = None,
     resolve_cdef=None,
 ):
-    if memo is None:
-        memo = {}
+    from dryml.runtime import materialization_admission
 
-    cfg = options or RepoLoadOptions(
-        instance=instance,
-        restore_state=restore_state,
-        build_missing=build_missing,
-        reuse_weak=reuse_weak,
-        cache=cache,
-        revision=revision,
-    )
+    with materialization_admission(operation="canonical_reconstruction"):
+        if memo is None:
+            memo = {}
 
-    ctx = GraphCtx(
-        path=tuple(path) if path is not None else (),
-        memo=memo,
-    )
-    return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)
+        cfg = options or RepoLoadOptions(
+            instance=instance,
+            restore_state=restore_state,
+            build_missing=build_missing,
+            reuse_weak=reuse_weak,
+            cache=cache,
+            revision=revision,
+        )
+
+        ctx = GraphCtx(
+            path=tuple(path) if path is not None else (),
+            memo=memo,
+        )
+        return _FromCanonicalTransformer(repo, cfg, resolve_cdef=resolve_cdef).transform(x, ctx)
 
 
 def thaw_definition_surface_value(value: Any) -> Any:

@@ -100,12 +100,15 @@ class Store(ABC):
                 remains active when replacement publication fails.
         """
 
-        if revision is not None:
-            if not isinstance(revision, str):
-                raise ValueError("revision must be a string or None at the Store.")
-        obj_dir = self.object_dir(obj.definition)
-        with interprocess_lock(self._state_lock_path(obj_dir)):
-            self._save_object_locked(obj, obj_dir, revision=revision)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="store_save_object"):
+            if revision is not None:
+                if not isinstance(revision, str):
+                    raise ValueError("revision must be a string or None at the Store.")
+            obj_dir = self.object_dir(obj.definition)
+            with interprocess_lock(self._state_lock_path(obj_dir)):
+                self._save_object_locked(obj, obj_dir, revision=revision)
 
     def _save_object_locked(self, obj: Object, obj_dir: str, *, revision: str | None) -> None:
         """Stage and publish one object while its root's writer lease is held.
@@ -340,14 +343,17 @@ class Store(ABC):
             call observes one complete old or new state rather than a mixture.
         """
 
-        cdef = obj.definition
-        def_path = self._def_file(cdef)
-        if not os.path.exists(def_path):
-            return
+        from dryml.runtime import materialization_admission
 
-        obj_dir = self.object_dir(cdef)
-        with interprocess_read_lock(self._state_lock_path(obj_dir)):
-            obj.restore_state_from_dir(self._active_state_dir(obj_dir), revision=revision)
+        with materialization_admission(operation="store_restore_object"):
+            cdef = obj.definition
+            def_path = self._def_file(cdef)
+            if not os.path.exists(def_path):
+                return
+
+            obj_dir = self.object_dir(cdef)
+            with interprocess_read_lock(self._state_lock_path(obj_dir)):
+                obj.restore_state_from_dir(self._active_state_dir(obj_dir), revision=revision)
 
     def read_definition(self, cdef: "ConcreteDefinition") -> "ConcreteDefinition | None":
         """Read and validate the authoritative root matching ``cdef``.

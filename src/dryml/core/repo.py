@@ -169,36 +169,82 @@ class Repo:
         return store
 
     def cache_strong(self, obj: Object) -> None:
-        self.strong_obj_cache[obj.__cdef__] = obj
-        self._query_catalog.register_cached(obj.__cdef__)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_cache_strong"):
+            self.strong_obj_cache[obj.__cdef__] = obj
+            self._query_catalog.register_cached(obj.__cdef__)
 
     def cache_weak(self, obj: Object) -> None:
-        self.weak_obj_cache[obj.__cdef__] = obj
-        self._query_catalog.register_cached(obj.__cdef__)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_cache_weak"):
+            self.weak_obj_cache[obj.__cdef__] = obj
+            self._query_catalog.register_cached(obj.__cdef__)
 
     # --- helpers you already have ---
     def get_cached(self, cdef, *, reuse_weak: bool = True):
-        obj = self.strong_obj_cache.get(cdef)
-        if obj is not None:
-            return obj
-        if reuse_weak:
-            return self.weak_obj_cache.get(cdef)
-        return None
+        """Return a cached Object after live-object admission.
+
+        Args:
+            cdef: Exact definition used as the cache key.
+            reuse_weak: Whether the weak cache may satisfy the lookup.
+
+        Returns:
+            The cached Object, or ``None`` when no reusable entry exists.
+
+        Raises:
+            RuntimeTransitionError: If strict orchestration prohibits returning
+                the live Object.
+        """
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_get_cached"):
+            obj = self.strong_obj_cache.get(cdef)
+            if obj is not None:
+                return obj
+            if reuse_weak:
+                return self.weak_obj_cache.get(cdef)
+            return None
+
+    def has_cached(self, cdef, *, reuse_weak: bool = True) -> bool:
+        """Return cache availability without acquiring a live Object.
+
+        Args:
+            cdef: Exact definition used as the cache key.
+            reuse_weak: Whether weak-cache availability counts.
+
+        Returns:
+            Whether a reusable strong or permitted weak cache entry exists.
+
+        Side Effects:
+            None. This metadata-only check is available during strict
+            orchestration and does not retain the cached Object.
+        """
+        return cdef in self.strong_obj_cache or (
+            reuse_weak and cdef in self.weak_obj_cache
+        )
 
     def pin(self, obj):
         """Promote to strong cache."""
-        cdef = obj.__cdef__
-        self.strong_obj_cache[cdef] = obj
-        self.weak_obj_cache.pop(cdef, None)
-        self._query_catalog.register_cached(cdef)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_pin"):
+            cdef = obj.__cdef__
+            self.strong_obj_cache[cdef] = obj
+            self.weak_obj_cache.pop(cdef, None)
+            self._query_catalog.register_cached(cdef)
 
     def unpin(self, obj_or_cdef):
         """Demote to weak cache."""
-        cdef = obj_or_cdef if isinstance(obj_or_cdef, ConcreteDefinition) else obj_or_cdef.__cdef__
-        obj = self.strong_obj_cache.pop(cdef, None)
-        if obj is not None:
-            self.weak_obj_cache[cdef] = obj
-            self._query_catalog.register_cached(cdef)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_unpin"):
+            cdef = obj_or_cdef if isinstance(obj_or_cdef, ConcreteDefinition) else obj_or_cdef.__cdef__
+            obj = self.strong_obj_cache.pop(cdef, None)
+            if obj is not None:
+                self.weak_obj_cache[cdef] = obj
+                self._query_catalog.register_cached(cdef)
 
     def _load_aliases_from_stores(self) -> None:
         for store in self.stores:
@@ -243,6 +289,16 @@ class Repo:
         )
 
     def set_object_store(self, target: Object | Definition | ConcreteDefinition, store) -> Store:
+        if isinstance(target, Object):
+            from dryml.runtime import materialization_admission
+
+            with materialization_admission(operation="repo_set_object_store_live_object"):
+                return self._set_object_store(target, store)
+        return self._set_object_store(target, store)
+
+    def _set_object_store(self, target: Object | Definition | ConcreteDefinition, store) -> Store:
+        """Bind an already-admitted target definition to a Store."""
+
         store = self._ensure_store(store)
         if store is None:
             raise ValueError("No store provided for object store binding.")
@@ -256,6 +312,21 @@ class Repo:
             *,
             store=None,
             require_exists: bool = False) -> str:
+        if isinstance(target, Object):
+            from dryml.runtime import materialization_admission
+
+            with materialization_admission(operation="repo_location_live_object"):
+                return self._location(target, store=store, require_exists=require_exists)
+        return self._location(target, store=store, require_exists=require_exists)
+
+    def _location(
+            self,
+            target: Object | Definition | ConcreteDefinition,
+            *,
+            store=None,
+            require_exists: bool = False) -> str:
+        """Resolve an already-admitted target to its selected Store path."""
+
         cdef = self._object_target_cdef(target)
 
         if store is not None:
@@ -302,6 +373,22 @@ class Repo:
             during ``flush``; it does not replace alias bytes immediately.
         """
         self._validate_alias(alias)
+        if isinstance(target, Object):
+            from dryml.runtime import materialization_admission
+
+            with materialization_admission(operation="repo_set_alias_live_object"):
+                return self._set_alias_live(alias, target, store=store, save_live=save_live)
+        return self._set_alias_live(alias, target, store=store, save_live=save_live)
+
+    def _set_alias_live(
+            self,
+            alias: str,
+            target: Object | Definition | ConcreteDefinition,
+            *,
+            store=None,
+            save_live: bool = True) -> ConcreteDefinition:
+        """Apply an already-validated alias target without a second public boundary."""
+
         cdef = self._alias_target_cdef(target)
         store = self._ensure_store(store)
         if isinstance(target, Object):
@@ -335,7 +422,10 @@ class Repo:
         return dict(self.alias_index)
 
     def load_alias(self, alias: str, **kwargs):
-        return self.load_object(self.get_alias(alias), **kwargs)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_load_alias"):
+            return self.load_object(self.get_alias(alias), **kwargs)
 
     def set_config(self, key: str, value: Any) -> None:
         if not isinstance(key, str):
@@ -478,35 +568,38 @@ class Repo:
             Validates an alias before saving any object root, publishes the save
             plan, and then stages requested main or alias references for flush.
         """
-        save_options = self._save_options(
-            options=options,
-            main=main,
-            store=store,
-            revision=revision,
-            alias=alias,
-            ephemeral_depth=ephemeral_depth,
-        )
-        if save_options.alias is not None:
-            self._validate_alias(save_options.alias)
-        store = self._ensure_store(save_options.store)
-        revision = manage_revision(obj, save_options.revision)
-        self.add_objects(obj, store=store)
-        from .repo_plan import build_save_plan, execute_save_plan
+        from dryml.runtime import materialization_admission
 
-        plan = build_save_plan(
-            self,
-            obj,
-            store=store,
-            revision=revision,
-            ephemeral_depth=save_options.ephemeral_depth,
-        )
-        execute_save_plan(self, plan)
+        with materialization_admission(operation="repo_save_object"):
+            save_options = self._save_options(
+                options=options,
+                main=main,
+                store=store,
+                revision=revision,
+                alias=alias,
+                ephemeral_depth=ephemeral_depth,
+            )
+            if save_options.alias is not None:
+                self._validate_alias(save_options.alias)
+            store = self._ensure_store(save_options.store)
+            revision = manage_revision(obj, save_options.revision)
+            self.add_objects(obj, store=store)
+            from .repo_plan import build_save_plan, execute_save_plan
 
-        if save_options.main:
-            self.set_main_def(obj.definition, store=store)
-        if save_options.alias is not None:
-            self.set_alias(save_options.alias, obj, store=store, save_live=False)
-        return True
+            plan = build_save_plan(
+                self,
+                obj,
+                store=store,
+                revision=revision,
+                ephemeral_depth=save_options.ephemeral_depth,
+            )
+            execute_save_plan(self, plan)
+
+            if save_options.main:
+                self.set_main_def(obj.definition, store=store)
+            if save_options.alias is not None:
+                self.set_alias(save_options.alias, obj, store=store, save_live=False)
+            return True
 
     def save(
             self,
@@ -515,24 +608,27 @@ class Repo:
             revision: RevisionType | str | None = None,
             ephemeral_depth: int | None = 0,
             options: RepoSaveOptions | None = None):
-        save_options = self._save_options(
-            options=options,
-            main=False,
-            store=store,
-            revision=revision,
-            ephemeral_depth=ephemeral_depth,
-        )
-        if obj is None:
-            # Save all loaded objects in the cache
-            obj_list = []
-            for _, obj in self.strong_obj_cache.items():
-                if obj is not None:
-                    obj_list.append(obj)
-            self.save_object(obj_list, options=save_options)
-            self.flush()
-        else:
-            self.save_object(obj, options=save_options)
-            self.flush()
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_save"):
+            save_options = self._save_options(
+                options=options,
+                main=False,
+                store=store,
+                revision=revision,
+                ephemeral_depth=ephemeral_depth,
+            )
+            if obj is None:
+                # Save all loaded objects in the cache
+                obj_list = []
+                for _, obj in self.strong_obj_cache.items():
+                    if obj is not None:
+                        obj_list.append(obj)
+                self.save_object(obj_list, options=save_options)
+                self.flush()
+            else:
+                self.save_object(obj, options=save_options)
+                self.flush()
 
     def _first_store_with(self, cdef):
         for st in self.stores:
@@ -593,22 +689,25 @@ class Repo:
         memo: dict | None = None,
         path: list[str | int] | None = None,
     ):
-        load_options = self._load_options(
-            options=options,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-        return from_canonical(
-            x,
-            repo=self,
-            options=load_options,
-            memo=memo,
-            path=path,
-        )
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_realize"):
+            load_options = self._load_options(
+                options=options,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+            )
+            return from_canonical(
+                x,
+                repo=self,
+                options=load_options,
+                memo=memo,
+                path=path,
+            )
 
     # -------------------------------------------------------------------------
     # Core: turn a ConcreteDefinition into a live Object under load knobs
@@ -628,38 +727,41 @@ class Repo:
         memo: dict | None = None,   # cdef->obj memo for this realization pass
         path: list[str | int] | None = None,
     ):
-        if memo is None:
-            memo = {}
-        if path is None:
-            path = ["<root>"]
+        from dryml.runtime import materialization_admission
 
-        load_options = self._load_options(
-            options=options,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-        revision = manage_revision(cdef, load_options.revision)
-        from .materialization import build_materialization_plan, execute_materialization_plan
+        with materialization_admission(operation="repo_materialize_cdef"):
+            if memo is None:
+                memo = {}
+            if path is None:
+                path = ["<root>"]
 
-        plan = build_materialization_plan(
-            self,
-            cdef,
-            load_options,
-            revision=revision,
-            memo=memo,
-            path=path,
-        )
-        return execute_materialization_plan(
-            self,
-            plan,
-            memo=memo,
-            revision=revision,
-            root=cdef,
-        )
+            load_options = self._load_options(
+                options=options,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+            )
+            revision = manage_revision(cdef, load_options.revision)
+            from .materialization import build_materialization_plan, execute_materialization_plan
+
+            plan = build_materialization_plan(
+                self,
+                cdef,
+                load_options,
+                revision=revision,
+                memo=memo,
+                path=path,
+            )
+            return execute_materialization_plan(
+                self,
+                plan,
+                memo=memo,
+                revision=revision,
+                root=cdef,
+            )
 
 
     def load_object(
@@ -674,42 +776,51 @@ class Repo:
         revision: RevisionType|str | None = None,
         options: RepoLoadOptions | None = None,
     ):
-        load_options = self._load_options(
-            options=options,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-        memo: dict[ConcreteDefinition, Object] = {}
-        return self._realize(
-            x,
-            options=load_options,
-            path=[""],
-            memo=memo,
-        )
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_load_object"):
+            load_options = self._load_options(
+                options=options,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
+            )
+            memo: dict[ConcreteDefinition, Object] = {}
+            return self._realize(
+                x,
+                options=load_options,
+                path=[""],
+                memo=memo,
+            )
 
     def load(self, cdef: ConcreteDefinition, **kwargs) -> Object:
-        if not isinstance(cdef, ConcreteDefinition):
-            raise TypeError("Repo.load requires an exact ConcreteDefinition.")
-        if kwargs.get("options") is not None:
-            kwargs["options"] = replace(kwargs["options"], build_missing=False)
-        kwargs["build_missing"] = False
-        return self.load_object(cdef, **kwargs)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_load"):
+            if not isinstance(cdef, ConcreteDefinition):
+                raise TypeError("Repo.load requires an exact ConcreteDefinition.")
+            if kwargs.get("options") is not None:
+                kwargs["options"] = replace(kwargs["options"], build_missing=False)
+            kwargs["build_missing"] = False
+            return self.load_object(cdef, **kwargs)
 
     def load_or_build(self, x: object, **kwargs):
-        if isinstance(x, Object):
-            x = x.definition
-        elif isinstance(x, Definition):
-            x = x.concretize(repo=self)
-        elif not isinstance(x, ConcreteDefinition):
-            raise TypeError("Repo.load_or_build requires a Definition, ConcreteDefinition, or Object.")
-        if kwargs.get("options") is not None:
-            kwargs["options"] = replace(kwargs["options"], build_missing=True)
-        kwargs["build_missing"] = True
-        return self.load_object(x, **kwargs)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_load_or_build"):
+            if isinstance(x, Object):
+                x = x.definition
+            elif isinstance(x, Definition):
+                x = x.concretize(repo=self)
+            elif not isinstance(x, ConcreteDefinition):
+                raise TypeError("Repo.load_or_build requires a Definition, ConcreteDefinition, or Object.")
+            if kwargs.get("options") is not None:
+                kwargs["options"] = replace(kwargs["options"], build_missing=True)
+            kwargs["build_missing"] = True
+            return self.load_object(x, **kwargs)
 
 
     def __contains__(
@@ -737,12 +848,15 @@ class Repo:
 
         if unpack is true, plain objects are returned
         """
-        if not isinstance(key, ConcreteDefinition):
-            raise TypeError("Repo.__getitem__ requires a ConcreteDefinition key.")
-        result = self.query(key).known().objects()
-        if len(result) == 0:
-            raise KeyError(f"Repo doesn't contain an object with definition {key}")
-        return result.one()
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_getitem"):
+            if not isinstance(key, ConcreteDefinition):
+                raise TypeError("Repo.__getitem__ requires a ConcreteDefinition key.")
+            result = self.query(key).known().objects()
+            if len(result) == 0:
+                raise KeyError(f"Repo doesn't contain an object with definition {key}")
+            return result.one()
 
     def query(self, selector=None):
         from .query import DefinitionQuery
@@ -817,16 +931,19 @@ class Repo:
             refresh="auto",
             class_match: str = "selector",
             **load_options):
-        q = self.query(selector).class_match(class_match).refresh(refresh)
-        if scope == "stored":
-            q = q.stored()
-        elif scope == "known":
-            q = q.known()
-        elif scope == "cached":
-            q = q.cached()
-        else:
-            raise ValueError("scope must be 'stored', 'known', or 'cached'.")
-        return q.objects(**load_options)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_find"):
+            q = self.query(selector).class_match(class_match).refresh(refresh)
+            if scope == "stored":
+                q = q.stored()
+            elif scope == "known":
+                q = q.known()
+            elif scope == "cached":
+                q = q.cached()
+            else:
+                raise ValueError("scope must be 'stored', 'known', or 'cached'.")
+            return q.objects(**load_options)
 
     def find_owners(
             self,
@@ -835,14 +952,17 @@ class Repo:
             refresh="auto",
             class_match: str = "selector",
             **load_options):
-        return (
-            self.query(selector)
-            .class_match(class_match)
-            .refresh(refresh)
-            .nested()
-            .owners()
-            .objects(**load_options)
-        )
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="repo_find_owners"):
+            return (
+                self.query(selector)
+                .class_match(class_match)
+                .refresh(refresh)
+                .nested()
+                .owners()
+                .objects(**load_options)
+            )
 
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
@@ -855,41 +975,44 @@ class Repo:
             revision: RevisionType | str | None = None,
             options: RepoLoadOptions | None = None,
             verbose: bool = True) -> ObjectResultSet:
-        if sel_args is None:
-            sel_args = []
-        if sel_kwargs is None:
-            sel_kwargs = {}
-        load_options = self._load_options(
-            options=options,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-        if load_options.build_missing:
-            raise ValueError("Repo.get selects existing objects only; use Repo.load_or_build for construction.")
-        selectors = self._selector_tuple(selector)
-        if isinstance(load_options.revision, str):
-            raise ValueError("plain string revisions aren't supported in `get`.")
-        selected_objects: dict[ConcreteDefinition, Object] = {}
-        for sel in selectors:
-            if isinstance(sel, Callable) and not isinstance(sel, (Definition, ConcreteDefinition)):
-                for cdef, obj in self.strong_obj_cache.items():
-                    if sel(obj, *sel_args, **sel_kwargs):
-                        selected_objects[cdef] = obj
-                continue
+        from dryml.runtime import materialization_admission
 
-            objs = (
-                self.query(sel)
-                .known()
-                .reuse_weak(load_options.reuse_weak)
-                .objects(options=load_options)
+        with materialization_admission(operation="repo_get"):
+            if sel_args is None:
+                sel_args = []
+            if sel_kwargs is None:
+                sel_kwargs = {}
+            load_options = self._load_options(
+                options=options,
+                instance=instance,
+                restore_state=restore_state,
+                build_missing=build_missing,
+                reuse_weak=reuse_weak,
+                cache=cache,
+                revision=revision,
             )
-            selected_objects.update(objs)
+            if load_options.build_missing:
+                raise ValueError("Repo.get selects existing objects only; use Repo.load_or_build for construction.")
+            selectors = self._selector_tuple(selector)
+            if isinstance(load_options.revision, str):
+                raise ValueError("plain string revisions aren't supported in `get`.")
+            selected_objects: dict[ConcreteDefinition, Object] = {}
+            for sel in selectors:
+                if isinstance(sel, Callable) and not isinstance(sel, (Definition, ConcreteDefinition)):
+                    for cdef, obj in self.strong_obj_cache.items():
+                        if sel(obj, *sel_args, **sel_kwargs):
+                            selected_objects[cdef] = obj
+                    continue
 
-        return ObjectResultSet(self, selected_objects, domain="known")
+                objs = (
+                    self.query(sel)
+                    .known()
+                    .reuse_weak(load_options.reuse_weak)
+                    .objects(options=load_options)
+                )
+                selected_objects.update(objs)
+
+            return ObjectResultSet(self, selected_objects, domain="known")
 
     def apply(self,
               func, func_args=None, func_kwargs=None,
@@ -908,23 +1031,26 @@ class Repo:
         if func_kwargs is None:
             func_kwargs = {}
 
-        # Create apply function
-        def apply_func(obj):
-            return func(obj, *func_args, **func_kwargs)
+        from dryml.runtime import materialization_admission
 
-        # Get object list
-        objs = self.get(
-            selector=selector,
-            sel_args=sel_args, sel_kwargs=sel_kwargs,
-            options=options,
-            **kwargs)
+        with materialization_admission(operation="repo_apply"):
+            # Create apply function
+            def apply_func(obj):
+                return func(obj, *func_args, **func_kwargs)
 
-        obj_iter = objs.items()
-        if verbose:
-            obj_iter = tqdm(obj_iter)
-        return {
-            obj_def: apply_func(obj) for obj_def, obj in obj_iter
-        }
+            # Get object list
+            objs = self.get(
+                selector=selector,
+                sel_args=sel_args, sel_kwargs=sel_kwargs,
+                options=options,
+                **kwargs)
+
+            obj_iter = objs.items()
+            if verbose:
+                obj_iter = tqdm(obj_iter)
+            return {
+                obj_def: apply_func(obj) for obj_def, obj in obj_iter
+            }
 
     def _graph_options(
             self,
@@ -987,8 +1113,13 @@ class Repo:
             revision=revision,
         )
         from .repo_plan import iter_graph_objects
+        from dryml.runtime import materialization_admission
 
-        return iter(iter_graph_objects(self, root, graph_options))
+        def guarded_iterator():
+            with materialization_admission(operation="repo_iter_graph"):
+                yield from iter_graph_objects(self, root, graph_options)
+
+        return guarded_iterator()
 
     def apply_graph(
             self,
@@ -1020,8 +1151,10 @@ class Repo:
             revision=revision,
         )
         from .repo_plan import apply_graph_objects
+        from dryml.runtime import materialization_admission
 
-        return apply_graph_objects(self, root, func, graph_options)
+        with materialization_admission(operation="repo_apply_graph"):
+            return apply_graph_objects(self, root, func, graph_options)
 
     def set_main_def(self, main_def: ConcreteDefinition, store=None):
         """Stage a concrete main definition in this Repo and selected Store.
@@ -1050,10 +1183,13 @@ class Repo:
             raise ValueError("No store available to set main definition!")
 
     def add_objects(self, *args, store=None):
-        store = self._ensure_store(store)
-        from .repo_plan import add_objects
+        from dryml.runtime import materialization_admission
 
-        add_objects(self, args, store=store)
+        with materialization_admission(operation="repo_add_objects"):
+            store = self._ensure_store(store)
+            from .repo_plan import add_objects
+
+            add_objects(self, args, store=store)
 
     def flush(self):
         """Publish this Repo's pending aliases and commit each configured Store.
@@ -1243,32 +1379,41 @@ def save_object(
         alias: str | None = None,
         ephemeral_depth: int | None = 0,
         options: RepoSaveOptions | None = None):
-    with manage_repo(repo=repo) as sub_repo:
-        if options is None:
-            main = main or ((repo is not sub_repo) and isinstance(obj, Object))
-        save_options = sub_repo._save_options(
-            options=options,
-            main=main,
-            store=store,
-            revision=revision,
-            alias=alias,
-            ephemeral_depth=ephemeral_depth,
-        )
-        sub_repo.save_object(obj, options=save_options)
+    from dryml.runtime import materialization_admission
+
+    with materialization_admission(operation="global_save_object"):
+        with manage_repo(repo=repo) as sub_repo:
+            if options is None:
+                main = main or ((repo is not sub_repo) and isinstance(obj, Object))
+            save_options = sub_repo._save_options(
+                options=options,
+                main=main,
+                store=store,
+                revision=revision,
+                alias=alias,
+                ephemeral_depth=ephemeral_depth,
+            )
+            sub_repo.save_object(obj, options=save_options)
 
 
 def load_alias(alias: str, repo=None, **kwargs):
-    with manage_repo(repo=repo) as repo:
-        return repo.load_alias(alias, **kwargs)
+    from dryml.runtime import materialization_admission
+
+    with materialization_admission(operation="global_load_alias"):
+        with manage_repo(repo=repo) as repo:
+            return repo.load_alias(alias, **kwargs)
 
 
 def load_object(
         cdef=None, repo=None,
         revision: RevisionType|str|None=None,
         **kwargs):
-    with manage_repo(repo=repo) as repo:
-        if cdef is None:
-            cdef = repo.main_def
+    from dryml.runtime import materialization_admission
+
+    with materialization_admission(operation="global_load_object"):
+        with manage_repo(repo=repo) as repo:
             if cdef is None:
-                raise ValueError("When cdef is None, the repo must have a main def, we didn't find one.")
-        return repo.load_object(cdef, revision=revision, **kwargs)
+                cdef = repo.main_def
+                if cdef is None:
+                    raise ValueError("When cdef is None, the repo must have a main def, we didn't find one.")
+            return repo.load_object(cdef, revision=revision, **kwargs)

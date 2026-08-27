@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, ItemsView, Iterable, Mapping, ValuesView
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -157,24 +157,27 @@ class DefinitionResultSet:
             cache: CachePolicy = "weak",
             revision=None,
             options: RepoLoadOptions | None = None) -> "ObjectResultSet":
-        if not self.materializable:
-            raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
-        objs = {}
-        for cdef in self._definitions:
-            replicas = self._replicas.get(cdef, ())
-            if replicas:
-                self.repo.set_object_store(cdef, replicas[0])
-            objs[cdef] = self.repo.load_object(
-                cdef,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=False,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-                options=options,
-            )
-        return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="definition_result_set_objects"):
+            if not self.materializable:
+                raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
+            objs = {}
+            for cdef in self._definitions:
+                replicas = self._replicas.get(cdef, ())
+                if replicas:
+                    self.repo.set_object_store(cdef, replicas[0])
+                objs[cdef] = self.repo.load_object(
+                    cdef,
+                    instance=instance,
+                    restore_state=restore_state,
+                    build_missing=False,
+                    reuse_weak=reuse_weak,
+                    cache=cache,
+                    revision=revision,
+                    options=options,
+                )
+            return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
 
     def replicas(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:
         return self._replicas.get(cdef, ())
@@ -468,7 +471,10 @@ class ObjectResultSet(Mapping):
         object.__setattr__(self, "explanation", explanation)
 
     def __getitem__(self, key: ConcreteDefinition) -> Object:
-        return self._objects[key]
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_getitem"):
+            return self._objects[key]
 
     def __iter__(self) -> Iterator[ConcreteDefinition]:
         return iter(self._objects)
@@ -483,14 +489,63 @@ class ObjectResultSet(Mapping):
         return len(self) > 0
 
     def one(self) -> Object:
-        if len(self) != 1:
-            raise QueryCardinalityError(f"Expected exactly one object, found {len(self)}.")
-        return next(iter(self._objects.values()))
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_one"):
+            if len(self) != 1:
+                raise QueryCardinalityError(f"Expected exactly one object, found {len(self)}.")
+            return next(iter(self._objects.values()))
 
     def one_or_none(self) -> Object | None:
-        if len(self) > 1:
-            raise QueryCardinalityError(f"Expected zero or one object, found {len(self)}.")
-        return next(iter(self._objects.values())) if self._objects else None
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_one_or_none"):
+            if len(self) > 1:
+                raise QueryCardinalityError(f"Expected zero or one object, found {len(self)}.")
+            return next(iter(self._objects.values())) if self._objects else None
 
     def first(self) -> Object | None:
-        return next(iter(self._objects.values())) if self._objects else None
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_first"):
+            return next(iter(self._objects.values())) if self._objects else None
+
+    def items(self):
+        """Return a repeatable view whose iteration holds one admission lease."""
+
+        return _GuardedObjectItemsView(self)
+
+    def values(self):
+        """Return a repeatable view whose iteration holds one admission lease."""
+
+        return _GuardedObjectValuesView(self)
+
+    def apply(self, func, *args, **kwargs) -> "ObjectResultSet":
+        """Apply ``func`` to retained live objects under one materialization lease."""
+
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_apply"):
+            for obj in self._objects.values():
+                func(obj, *args, **kwargs)
+            return self
+
+
+class _GuardedObjectItemsView(ItemsView):
+    """Mapping items view that admits retained Objects for each full iteration."""
+
+    def __iter__(self):
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_items"):
+            yield from self._mapping._objects.items()
+
+
+class _GuardedObjectValuesView(ValuesView):
+    """Mapping values view that admits retained Objects for each full iteration."""
+
+    def __iter__(self):
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_result_set_values"):
+            yield from self._mapping._objects.values()

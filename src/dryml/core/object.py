@@ -81,10 +81,10 @@ class Dryml(type):
             caches, allocate a workspace, and initialize a runtime object.
         """
 
-        from .session import get_config
+        from .session import _construction_object_mode, get_config
 
         session_config = get_config()
-        object_mode = session_config.object_mode
+        object_mode = _construction_object_mode()
         active_repo = repo if repo is not None else session_config.repo
 
         if __cdef__ is None and object_mode == "definition":
@@ -100,61 +100,64 @@ class Dryml(type):
         if __cdef__ is None and object_mode == "space":
             return dryml_cls.defn(*args, **kwargs).as_space()
 
-        if __cdef__ is None and object_mode == "load_or_build":
-            from .repo import manage_repo
+        from dryml.runtime import materialization_admission
+        from .session import _construction_config
 
-            with manage_repo(repo=active_repo) as sub_repo:
-                _cache_runtime_object_args(sub_repo, args, kwargs)
-                cdef = Definition(dryml_cls, *args, **kwargs).concretize(repo=sub_repo)
-                return sub_repo.load_or_build(cdef, cache=session_config.cache)
+        with materialization_admission(operation="direct_object_construction"):
+            if __cdef__ is None and object_mode == "load_or_build":
+                from .repo import manage_repo
 
-        from .repo import default_repo, manage_repo
-        with manage_repo(repo=active_repo) as sub_repo:
-            if __cdef__ is None:
-                # First-time construction from a soft Definition
-                _cache_runtime_object_args(sub_repo, args, kwargs)
-                defn = Definition(dryml_cls, *args, **kwargs)
-                cdef = defn.concretize(repo=sub_repo)
+                with manage_repo(repo=active_repo) as sub_repo:
+                    _cache_runtime_object_args(sub_repo, args, kwargs)
+                    cdef = Definition(dryml_cls, *args, **kwargs).concretize(repo=sub_repo)
+                    return sub_repo.load_or_build(cdef, cache=session_config.cache)
 
-                from .materialization import project_cdef_call
+            from .repo import default_repo, manage_repo
+            with _construction_config(), manage_repo(repo=active_repo) as sub_repo:
+                if __cdef__ is None:
+                    # First-time construction from a soft Definition
+                    _cache_runtime_object_args(sub_repo, args, kwargs)
+                    defn = Definition(dryml_cls, *args, **kwargs)
+                    cdef = defn.concretize(repo=sub_repo)
 
-                canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=dryml_cls)
-                rt_args = sub_repo.load_object(canonical_args, build_missing=True)
-                rt_kwargs = sub_repo.load_object(canonical_kwargs, build_missing=True)
+                    from .materialization import project_cdef_call
 
-            else:
-                # Reconstruction from an existing ConcreteDefinition
-                cdef = __cdef__
-                rt_args = args
-                rt_kwargs = kwargs
+                    canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=dryml_cls)
+                    rt_args = sub_repo.load_object(canonical_args, build_missing=True)
+                    rt_kwargs = sub_repo.load_object(canonical_kwargs, build_missing=True)
 
-            # Run pre-init check
-            dryml_cls.__pre_init__()
+                else:
+                    # Reconstruction from an existing ConcreteDefinition
+                    cdef = __cdef__
+                    rt_args = args
+                    rt_kwargs = kwargs
 
-            # Resolve host/runtime-specific config leaves after identity has been
-            # computed, but before the user initializer receives its arguments.
-            rt_args = sub_repo.resolve_config(rt_args)
-            rt_kwargs = sub_repo.resolve_config(rt_kwargs)
+                # Run pre-init check
+                dryml_cls.__pre_init__()
 
-            # Actual object allocation
-            obj = dryml_cls.__new__(dryml_cls)
+                # Resolve host/runtime-specific config leaves after identity has been
+                # computed, but before the user initializer receives its arguments.
+                rt_args = sub_repo.resolve_config(rt_args)
+                rt_kwargs = sub_repo.resolve_config(rt_kwargs)
 
-            # Attach the definition to the object.
-            obj.__cdef__ = cdef
+                # Actual object allocation
+                obj = dryml_cls.__new__(dryml_cls)
 
-            # Set the workspace
-            if isinstance(obj, WorkspaceCapable):
-                ws = sub_repo.workspace_manager.alloc(cdef.stable_hash())
-                os.makedirs(ws.path(), exist_ok=True)
-                obj.__ws__ = ws
-            else:
-                obj.__ws__ = None
+                # Attach the definition to the object.
+                obj.__cdef__ = cdef
 
-            # Initialize with runtime (built) args while exposing the construction
-            # repo to code that consults get_default_repo().
-            from .session import config
-            with config(object_mode="fresh"), default_repo(sub_repo):
-                obj.__init__(*rt_args, **rt_kwargs)
+                # Set the workspace
+                if isinstance(obj, WorkspaceCapable):
+                    ws = sub_repo.workspace_manager.alloc(cdef.stable_hash())
+                    os.makedirs(ws.path(), exist_ok=True)
+                    obj.__ws__ = ws
+                else:
+                    obj.__ws__ = None
+
+                # Initialize with runtime (built) args while exposing the construction
+                # repo to code that consults get_default_repo().
+                with default_repo(sub_repo):
+                    obj.__init__(*rt_args, **rt_kwargs)
 
 
         return obj
@@ -255,33 +258,44 @@ class Object(metaclass=Dryml):
             store=None,
             alias: str | None = None,
             options=None):
+        from dryml.runtime import materialization_admission
         from .repo import save_object
-        save_object(self, repo=repo, main=main, revision=revision, store=store, alias=alias, options=options)
+
+        with materialization_admission(operation="object_save"):
+            save_object(self, repo=repo, main=main, revision=revision, store=store, alias=alias, options=options)
 
     def save_state_to_dir(self, dest_dir: str, revision: str|None = None):
-        pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
-        self.save_state_to_dir_imp(dest_dir, revision)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_save_state"):
+            pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
+            self.save_state_to_dir_imp(dest_dir, revision)
 
     def save_state_to_dir_imp(self, dest_dir: str, revision: str|None = None):
         pass
 
     def load(self, repo=None, revision: RevisionType|str|None = None):
+        from dryml.runtime import materialization_admission
         from .repo_graph import manage_revision
         from .repo import load_object
-        revision = manage_revision(self, revision)
-        load_object(self, repo=repo, revision=revision)
+        with materialization_admission(operation="object_load"):
+            revision = manage_revision(self, revision)
+            load_object(self, repo=repo, revision=revision)
             
     def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
-        loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
-        if loaded_def != self.definition:
-            expected_version = getattr(self.definition, "identity_version", "unknown")
-            loaded_version = getattr(loaded_def, "identity_version", "unknown")
-            raise ValueError(
-                "Stored definition does not match the object being restored "
-                f"(stored identity version={loaded_version!r}, "
-                f"expected identity version={expected_version!r})."
-            )
-        self.restore_state_from_dir_imp(src_dir, revision=revision)
+        from dryml.runtime import materialization_admission
+
+        with materialization_admission(operation="object_restore_state"):
+            loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
+            if loaded_def != self.definition:
+                expected_version = getattr(self.definition, "identity_version", "unknown")
+                loaded_version = getattr(loaded_def, "identity_version", "unknown")
+                raise ValueError(
+                    "Stored definition does not match the object being restored "
+                    f"(stored identity version={loaded_version!r}, "
+                    f"expected identity version={expected_version!r})."
+                )
+            self.restore_state_from_dir_imp(src_dir, revision=revision)
 
     def restore_state_from_dir_imp(self, src_dir: str, revision: str|None = None):
         pass
