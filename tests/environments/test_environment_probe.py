@@ -192,5 +192,7 @@ def test_conda_probe_uses_pythonpath_policy(monkeypatch):
     )
 
     assert result.ok
-    assert captured["command"][0] == "/conda/env/bin/python"
+    assert captured["command"][0] == os.path.join(
+        "/conda/env", "python.exe" if os.name == "nt" else "bin/python"
+    )
     assert captured["env"]["PYTHONPATH"] == "/only"
