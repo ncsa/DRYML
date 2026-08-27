@@ -1019,7 +1019,7 @@ class SQLiteStoreQueryIndex:
     def _activate_replacement(self, replacement_path: Path, *, quarantine_existing: bool) -> None:
         """Publish a complete staged sidecar without removing the canonical path early."""
 
-        self._connections.close_all_current_process()
+        SQLiteConnectionManager._close_current_thread_for_path(self.path)
         if quarantine_existing and self.path.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             target = self.path.with_name(f"{self.path.name}.quarantine-{stamp}")
@@ -1029,7 +1029,7 @@ class SQLiteStoreQueryIndex:
                 shutil.copy2(self.path, target)
         # A quarantine copy can admit a final canonical read after the first
         # close barrier; Windows requires that pooled handle closed as well.
-        self._connections.close_all_current_process()
+        SQLiteConnectionManager._close_current_thread_for_path(self.path)
         os.replace(replacement_path, self.path)
 
     @staticmethod

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import threading
+from weakref import WeakSet
 
 from ..model import QueryIndexError
 from . import SQLiteQueryIndexConfig, require_sqlite
@@ -18,10 +19,15 @@ class SQLiteConnectionManager:
     parent's connection object.
     """
 
+    _instances = WeakSet()
+    _instances_lock = threading.Lock()
+
     def __init__(self, config: SQLiteQueryIndexConfig):
         self.config = config
         self._connections = {}
         self._file_identities = {}
+        with self._instances_lock:
+            self._instances.add(self)
 
     @property
     def path(self) -> Path:
@@ -87,6 +93,17 @@ class SQLiteConnectionManager:
             if key[0] == pid:
                 self._connections.pop(key).close()
                 self._file_identities.pop(key, None)
+
+    @classmethod
+    def _close_current_thread_for_path(cls, path: str | Path) -> None:
+        """Close same-thread cached connections for one canonical index path."""
+
+        path_key = os.path.normcase(os.path.abspath(os.fspath(path)))
+        with cls._instances_lock:
+            managers = tuple(cls._instances)
+        for manager in managers:
+            if os.path.normcase(os.path.abspath(os.fspath(manager.path))) == path_key:
+                manager.close_current()
 
     def _path_identity(self) -> tuple[int, int] | None:
         try:

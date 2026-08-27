@@ -761,6 +761,7 @@ def test_sqlite_peer_connection_reopens_after_replacement(tmp_path):
     second = QueryIndexDirLeaf("second")
     store.save_object(second)
     rebuilding.rebuild()
+    assert not peer._connections._connections
 
     with peer.read_view() as view:
         assert view.generation > old_generation
