@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import shlex
@@ -11,12 +12,22 @@ import dryml.environments as envs
 from dryml.environments.probe_worker import main as probe_worker_main
 
 
-def make_fake_executable(tmp_path, payload, *, sleep=False):
-    script = tmp_path / "fake-python"
-    text = "#!/bin/sh\n"
-    if sleep:
-        text += "sleep 2\n"
-    text += f"printf '%s\\n' {shlex.quote(json.dumps(payload))}\n"
+def make_fake_executable(tmp_path, payload, *, sleep=False, name="fake-python", raw_output=False):
+    output = str(payload) if raw_output else json.dumps(payload)
+    script = tmp_path / (f"{name}.cmd" if os.name == "nt" else name)
+    if os.name == "nt":
+        encoded = base64.b64encode(output.encode()).decode("ascii")
+        delay = "time.sleep(2);" if sleep else ""
+        text = (
+            "@echo off\n"
+            f'"{sys.executable}" -c "import base64,time;{delay}'
+            f"print(base64.b64decode('{encoded}').decode())\"\n"
+        )
+    else:
+        text = "#!/bin/sh\n"
+        if sleep:
+            text += "sleep 2\n"
+        text += f"printf '%s\\n' {shlex.quote(output)}\n"
     script.write_text(text)
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return str(script)
@@ -69,10 +80,8 @@ def test_probe_python_timeout_and_malformed_output(tmp_path):
     timeout = envs.probe(envs.PythonExecutableSpec(timeout_exe), timeout=0.05)
     assert timeout.report.issues[0].code == "probe_timeout"
 
-    malformed = tmp_path / "malformed-python"
-    malformed.write_text("#!/bin/sh\nprintf '%s\\n' 'not json'\n")
-    malformed.chmod(malformed.stat().st_mode | stat.S_IXUSR)
-    result = envs.probe(envs.PythonExecutableSpec(str(malformed)))
+    malformed = make_fake_executable(tmp_path, "not json", name="malformed-python", raw_output=True)
+    result = envs.probe(envs.PythonExecutableSpec(malformed))
     assert result.report.issues[0].code == "probe_failed"
 
 
