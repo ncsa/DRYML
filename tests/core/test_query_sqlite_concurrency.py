@@ -728,6 +728,7 @@ def test_dirty_marker_recovers_object_committed_without_index_in_separate_proces
     idx = store.open_query_index()
     idx.initialize_empty()
     store.mark_query_index_dirty()
+    idx.close()
 
     result = _run_worker(f'''
 idx = store_index({str(tmp_path)!r})
