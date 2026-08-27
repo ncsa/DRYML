@@ -1027,6 +1027,9 @@ class SQLiteStoreQueryIndex:
                 os.link(self.path, target)
             except OSError:
                 shutil.copy2(self.path, target)
+        # A quarantine copy can admit a final canonical read after the first
+        # close barrier; Windows requires that pooled handle closed as well.
+        self._connections.close_all_current_process()
         os.replace(replacement_path, self.path)
 
     @staticmethod
