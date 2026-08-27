@@ -31,9 +31,11 @@ def test_successive_same_epoch_finalizers_merge_statuses():
 def _isolate_registry_freeze():
     """Keep synthetic grouped registrations independent of active tests."""
     with framework_registry._lock:
+        registrations = dict(framework_registry._registrations)
         framework_registry._frozen = False
     yield
     with framework_registry._lock:
+        framework_registry._registrations = registrations
         framework_registry._frozen = False
 
 

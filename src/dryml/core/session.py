@@ -16,6 +16,8 @@ _CACHE_MODES = {"none", "weak", "strong"}
 
 @dataclass(frozen=True, slots=True)
 class SessionConfig:
+    """Context-local repository, construction-mode, and cache configuration."""
+
     repo: Any = None
     object_mode: ObjectMode = "fresh"
     cache: CacheMode = "weak"
@@ -34,10 +36,14 @@ _internal_construction: ContextVar[bool] = ContextVar(
 
 
 def get_config() -> SessionConfig:
+    """Return the immutable current context configuration without side effects."""
+
     return _current_config.get()
 
 
 def current_repo():
+    """Return the configured repository, or ``None`` when no repo is selected."""
+
     return get_config().repo
 
 
@@ -73,6 +79,8 @@ def _construction_object_mode() -> ObjectMode:
 
 
 def current_cache() -> CacheMode:
+    """Return the configured runtime-object cache policy."""
+
     return get_config().cache
 
 
@@ -157,6 +165,24 @@ def _merged_config(
 
 
 def configure(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET) -> SessionConfig:
+    """Persist validated core configuration in the current context.
+
+    Args:
+        repo: Repo, Store input, ``None``, or omitted current value.
+        object_mode: Closed object-mode value or omitted current value.
+        cache: Closed cache policy or omitted current value.
+
+    Returns:
+        The new immutable configuration.
+
+    Raises:
+        ValueError: If a mode or cache value is invalid.
+        RuntimeTransitionError: If orchestration prohibits a materializing mode.
+
+    Side Effects:
+        Replaces context-local state and closes a replaced owned repository.
+    """
+
     old = get_config()
     new = _merged_config(old, repo=repo, object_mode=object_mode, cache=cache)
     _current_config.set(new)
@@ -168,6 +194,17 @@ def configure(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET) -> SessionConfig
 
 @contextmanager
 def config(*, repo=_UNSET, object_mode=_UNSET, cache=_UNSET):
+    """Scope and exactly restore validated core configuration.
+
+    Args and failures match :func:`configure`.
+
+    Yields:
+        The temporary immutable configuration.
+
+    Side Effects:
+        Sets context-local state and closes a temporary owned repository on exit.
+    """
+
     old = get_config()
     new = _merged_config(old, repo=repo, object_mode=object_mode, cache=cache)
     token = _current_config.set(new)
@@ -197,6 +234,8 @@ def _construction_config(*, object_mode: ObjectMode = "fresh"):
 
 
 def reset_config() -> SessionConfig:
+    """Restore defaults, close an owned repo, and return the default config."""
+
     old = get_config()
     _current_config.set(_DEFAULT_CONFIG)
     _close_owned_repo(old)
@@ -204,16 +243,35 @@ def reset_config() -> SessionConfig:
 
 
 def close_configured_repo() -> None:
+    """Close the current repository only when this configuration owns it."""
+
     _close_owned_repo(get_config())
 
 
 def status() -> dict[str, Any]:
-    """Return the current configuration using the effective object-mode projection."""
+    """Return requested and effective core object-mode configuration.
+
+    Returns:
+        A detached mapping containing the configured repository/cache, requested
+        mode, effective mode, and whether orchestration imposes its definition
+        floor. ``object_mode`` remains an alias of ``effective_object_mode``.
+
+    Side Effects:
+        Reads the PID-bound public runtime state without changing configuration.
+    """
 
     cfg = get_config()
+    effective_mode = current_object_mode()
+    from dryml.runtime.context import active_runtime
+    from dryml.runtime.modes import RuntimeMode
+
+    orchestrator_floor = active_runtime().mode is RuntimeMode.ORCHESTRATOR
     return {
         "repo": cfg.repo,
-        "object_mode": current_object_mode(),
+        "object_mode": effective_mode,
+        "requested_object_mode": cfg.object_mode,
+        "effective_object_mode": effective_mode,
+        "orchestrator_floor": orchestrator_floor,
         "cache": cfg.cache,
         "repo_owned": cfg.repo_owned,
     }

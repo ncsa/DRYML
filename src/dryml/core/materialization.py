@@ -136,6 +136,21 @@ def _execute_materialization_plan(
                 cdef, reuse_weak=plan.options.reuse_weak
             )
             if obj is None:
+                if action.reuse_source == "cache":
+                    refreshed = build_materialization_plan(
+                        repo,
+                        root,
+                        plan.options,
+                        revision=revision,
+                        memo=local_memo,
+                    )
+                    return _execute_materialization_plan(
+                        repo,
+                        refreshed,
+                        memo=memo,
+                        revision=revision,
+                        root=root,
+                    )
                 source = "memoized" if action.reuse_source == "memo" else "cached"
                 raise RepoLoadError(
                     f"Materialization plan requested {source} reuse for {cdef} at {action.primary_path}, "

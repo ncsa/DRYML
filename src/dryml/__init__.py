@@ -1,3 +1,5 @@
+"""Dependency-light root exports for DRYML declarations and core identities."""
+
 import importlib
 
 from ._framework_imports import install_builtin_roots, install_passive_finder
@@ -5,7 +7,7 @@ from ._framework_imports import install_builtin_roots, install_passive_finder
 install_builtin_roots()
 install_passive_finder()
 
-__version__ = "0.3.0-dev"
+__version__ = "0.3.0.dev0"
 
 _SUBMODULE_EXPORTS = {
     "context": "dryml.context",

@@ -2,7 +2,10 @@
 
 DRYML tests are organized by feature category and by speed tier.
 
-Categories are the existing test directories, such as `core`, `environments`, `data`, `models`, `tf`, `torch`, and `jax`. Speed tiers are applied automatically from `tests/test_tiers.json` by the DRYML pytest timing plugin.
+Maintained categories include `formats`, `annotations`, `environments`,
+`worlds`, `runtime`, `session`, `core`, `package`, `data`, `execute`, `models`,
+`ray`, `tf`, `torch`, `jax`, and `multi_framework`. Speed tiers are applied
+automatically from `tests/test_tiers.json` by the DRYML pytest timing plugin.
 
 ## Daily Commands
 
@@ -30,7 +33,11 @@ Run the full suite with coverage:
 ./tests.sh full --ignore tests/old --ignore tests/dev -x tests
 ```
 
-The default `./tests.sh` behavior remains a full run with coverage. Internally, full runs execute smoke/medium files first and heavy files second. This avoids collecting heavyweight framework tests during the fast/mid part of the run while still producing combined coverage through `pytest-cov` append mode.
+The default `./tests.sh` behavior remains a full run with coverage. Internally,
+full runs execute process-global session/runtime/orchestrator tests in a fresh
+phase, other smoke/medium files in a second phase, and heavy files last. This
+keeps intentional late-import and terminal-publication tests isolated while
+combining coverage through `pytest-cov` append mode.
 
 ## Speed Tiers
 
@@ -39,6 +46,10 @@ The default `./tests.sh` behavior remains a full run with coverage. Internally, 
 `medium` tests can cover Repo/Store integration, SQLite/query behavior, import-safety subprocess checks, current-environment inspection, and probe workers.
 
 `heavy` tests include TensorFlow, Torch, JAX, Ray, multi-framework, MNIST/tfds, training, and other long integration paths.
+
+`package` tests build an sdist and wheel beneath `/tmp/dryml`, inspect their
+contents, install the wheel into an isolated interpreter, verify exact public
+exports, and prove declaration imports remain free of optional frameworks.
 
 ## How Buckets Are Selected
 
@@ -114,6 +125,22 @@ When adding tests:
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
 
 If a new file is not listed in `path_tiers`, it inherits its category tier.
+
+The tier-administration tests require every maintained category to have an
+explicit default, reject stale metadata paths, and prove the union of all tiers
+covers every maintained test file.
+
+## Hosted Matrix
+
+The lightweight matrix installs only package and test dependencies on Ubuntu
+and Windows for Python 3.10 through 3.14, then runs smoke/medium and installed
+artifact checks. Python 3.14 is explicitly framework-reduced.
+
+The heavy matrix runs on Ubuntu for Python 3.10 through 3.13. It installs and
+preflights TensorFlow, Torch, JAX/JAXlib, and Ray before heavy tests so missing
+or broken frameworks fail rather than skip. Each job prints the resolved Python,
+DRYML, and framework versions. Workflow configuration is not support evidence
+until the jobs pass on the exact child commit.
 
 ## Context Bootstrap
 

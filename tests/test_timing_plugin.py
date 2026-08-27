@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import timing_plugin
-from tools import test_buckets
+from tests import timing_plugin
+from tests.tools import test_buckets
 
 
 class FakeItem:

@@ -1,9 +1,10 @@
-"""PID-safe runtime declarations, publication, and materialization action scopes.
+"""PID-safe runtime declarations, framework controls, and trusted scopes.
 
 The package exposes only passive ``NONE``, strict definition-only
-``ORCHESTRATOR``, and exact-allocation ``INLINE`` roles. Framework import
-interception, public session configuration, decorators, workers, and probes
-are intentionally outside this implementation unit.
+``ORCHESTRATOR``, and exact-allocation ``INLINE`` roles. Framework registration
+and import controls are process-global and dependency-light. Persistent public
+configuration belongs to :mod:`dryml.session`; workers, dispatch, and probes are
+outside this selective port.
 """
 
 from .allocation import NoAllocation, RuntimeAllocationView, is_no_allocation
@@ -35,4 +36,4 @@ def default(**kwargs):
 
     return annotation_default(**kwargs)
 
-__all__ = ["CONTROL_CATEGORIES", "ControlPlan", "ControlStatus", "DeviceVisibilityError", "DeviceVisibilityPlan", "DeviceVisibilityPolicy", "EffectPlan", "EffectRecord", "ForkSafetyError", "FrameworkAdmission", "FrameworkBootstrapPlan", "FrameworkCapabilities", "FrameworkImportPlan", "FrameworkImportSafetyError", "FrameworkPostResult", "FrameworkRegistration", "FrameworkRegistry", "LocalResourceInventory", "MaterializationAction", "NoAllocation", "PublicationBusyError", "PublicationCandidate", "PublicationError", "PublicationFailedError", "PublicationReentryError", "PublicationService", "RuntimeAllocationView", "RuntimeCompatibilityIssue", "RuntimeCompatibilityReport", "RuntimeContextSpec", "RuntimeEnforcement", "RuntimeErrorBase", "RuntimeMode", "RuntimeSpecError", "RuntimeState", "RuntimeTransitionError", "SessionGeneration", "active_runtime", "active_runtime_mode", "build_control_plan", "build_device_visibility_plan", "build_framework_bootstrap_plan", "check_runtime_spec_satisfies_requirement", "default", "framework_registry", "is_no_allocation", "materialization_action", "materialization_admission", "materialization_scope", "publication", "validate_framework_transition"]
+__all__ = ["CONTROL_CATEGORIES", "ControlPlan", "ControlStatus", "DeviceVisibilityError", "DeviceVisibilityPlan", "DeviceVisibilityPolicy", "ForkSafetyError", "FrameworkBootstrapPlan", "FrameworkCapabilities", "FrameworkImportPlan", "FrameworkImportSafetyError", "FrameworkPostResult", "FrameworkRegistration", "FrameworkRegistry", "LocalResourceInventory", "MaterializationAction", "NoAllocation", "PublicationBusyError", "PublicationError", "PublicationFailedError", "PublicationReentryError", "RuntimeAllocationView", "RuntimeCompatibilityIssue", "RuntimeCompatibilityReport", "RuntimeContextSpec", "RuntimeEnforcement", "RuntimeErrorBase", "RuntimeMode", "RuntimeSpecError", "RuntimeState", "RuntimeTransitionError", "active_runtime", "active_runtime_mode", "build_control_plan", "build_device_visibility_plan", "build_framework_bootstrap_plan", "check_runtime_spec_satisfies_requirement", "default", "framework_registry", "is_no_allocation", "materialization_scope", "validate_framework_transition"]

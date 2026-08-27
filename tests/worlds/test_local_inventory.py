@@ -10,5 +10,7 @@ def test_injected_inventory_is_authoritative_and_visibility_excludes_available_m
 
 
 def test_lightweight_inventory_never_imports_frameworks():
+    frameworks = {"tensorflow", "torch", "jax", "jaxlib"}
+    before = frameworks & set(sys.modules)
     local_inventory(environ={}, device_root=None)
-    assert not {"tensorflow", "torch", "jax", "jaxlib"} & set(sys.modules)
+    assert frameworks & set(sys.modules) == before

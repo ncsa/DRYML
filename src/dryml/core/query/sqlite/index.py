@@ -453,7 +453,11 @@ class SQLiteStoreQueryIndex:
             con.execute("PRAGMA optimize")
             replacement.close()
             self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
-            self._checkpoint_and_cleanup_sidecars(self.path, label="canonical")
+            self._checkpoint_and_cleanup_sidecars(
+                self.path,
+                label="canonical",
+                allow_corrupt=quarantine_existing,
+            )
             self._activate_replacement(replacement_path, quarantine_existing=quarantine_existing)
             self._cleanup_replacement(replacement_path)
         except BaseException:
@@ -1026,12 +1030,18 @@ class SQLiteStoreQueryIndex:
         os.replace(replacement_path, self.path)
 
     @staticmethod
-    def _checkpoint_and_cleanup_sidecars(path: Path, *, label: str) -> None:
+    def _checkpoint_and_cleanup_sidecars(
+            path: Path,
+            *,
+            label: str,
+            allow_corrupt: bool = False) -> None:
         """Checkpoint and remove sidecars before a SQLite main-file replacement.
 
         Args:
             path: Main database path whose sidecars must be made inactive.
             label: Diagnostic name identifying staged or canonical sidecars.
+            allow_corrupt: Permit a recognized corrupt main file to skip its
+                impossible checkpoint before sidecar cleanup and quarantine.
 
         Raises:
             QueryIndexBusy: If a live reader prevents a complete WAL checkpoint
@@ -1047,7 +1057,9 @@ class SQLiteStoreQueryIndex:
         except Exception as exc:
             if is_sqlite_busy_error(exc):
                 raise QueryIndexBusy(f"SQLite {label} sidecar checkpoint is blocked by an active reader.") from exc
-            raise QueryIndexError(f"SQLite {label} sidecar checkpoint failed.") from exc
+            if not (allow_corrupt and _is_sqlite_corrupt_exception(exc)):
+                raise QueryIndexError(f"SQLite {label} sidecar checkpoint failed.") from exc
+            row = (0,)
         finally:
             con.close()
         if row is None or row[0] != 0:

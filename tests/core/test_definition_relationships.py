@@ -1,4 +1,4 @@
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core import Satisfies
 from dryml.core.definition import Definition
 

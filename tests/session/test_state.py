@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from dryml.session import configure, current, enforce_requirements, manage, mode, reset, set_mode
+from dryml.session import SessionConfigurationError, configure, current, enforce_requirements, manage, mode, reset, set_mode
 from dryml.session import state
 from dryml.runtime import PublicationFailedError, PublicationService, RuntimeState
 
@@ -21,6 +21,21 @@ def test_mode_transitions_apply_defaults_and_preserve_managed_allocation(session
     assert orchestrator.allocation is None
     assert mode() == "orchestrator"
     assert reset().mode == "python"
+
+
+def test_public_session_failures_include_operation_and_category(session_runtime):
+    """Diagnostics identify the public operation and failure class."""
+
+    with pytest.raises(SessionConfigurationError) as error:
+        set_mode("worker")
+
+    assert error.value.context["operation"] == "session.set_mode"
+    assert error.value.context["category"] == "malformed"
+
+    with pytest.raises(SessionConfigurationError) as error:
+        state.require_env("api_key=supersecret")
+    assert "supersecret" not in str(error.value)
+    assert "supersecret" not in repr(error.value.context)
 
 
 def test_manage_and_allocate_preserve_axes(session_runtime):
@@ -144,8 +159,10 @@ def test_terminal_runtime_failure_never_returns_session_success(session_runtime)
     """Facade mutation propagates terminal publication health without a snapshot."""
 
     failed = session_runtime.fail_status_finalization(None, RuntimeError("synthetic"))
-    with pytest.raises(PublicationFailedError, match="restart"):
+    with pytest.raises(PublicationFailedError, match="restart") as error:
         set_mode("orchestrator")
+    assert error.value.context["operation"] == "session.set_mode"
+    assert error.value.context["category"] == "terminal"
     assert current().health == "failed"
     assert current().generation == failed.number
 

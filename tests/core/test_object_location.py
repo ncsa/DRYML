@@ -1,6 +1,6 @@
 import os
 
-import core_objects as objects
+from tests.core import core_objects as objects
 
 from dryml.core import Repo
 from dryml.core.repo import default_repo

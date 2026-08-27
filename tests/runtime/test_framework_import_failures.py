@@ -9,7 +9,7 @@ import uuid
 
 import pytest
 
-from dryml.runtime import FrameworkImportSafetyError, PublicationError, RuntimeMode, RuntimeState, publication
+from dryml.runtime import FrameworkImportSafetyError, PublicationError, RuntimeMode, RuntimeState
 from dryml.runtime import imports as runtime_imports
 from dryml.runtime.frameworks import FrameworkRegistration, framework_registry
 from dryml.runtime.publication import PublicationService
@@ -19,9 +19,11 @@ from dryml.runtime.publication import PublicationService
 def _isolate_registry_freeze():
     """Keep synthetic registrations isolated from another test's frozen epoch."""
     with framework_registry._lock:
+        registrations = dict(framework_registry._registrations)
         framework_registry._frozen = False
     yield
     with framework_registry._lock:
+        framework_registry._registrations = registrations
         framework_registry._frozen = False
 
 
@@ -36,11 +38,14 @@ def test_post_import_failure_cleans_cache_and_fails_closed(tmp_path, monkeypatch
 
     framework_registry.register(FrameworkRegistration(name, (name,), Adapter()))
     monkeypatch.syspath_prepend(str(tmp_path))
-    publication.publish(RuntimeState(RuntimeMode.ORCHESTRATOR))
+    service = PublicationService(environ=os.environ)
+    service.initialize(RuntimeState())
+    monkeypatch.setattr(runtime_imports, "publication", service)
+    service.publish(RuntimeState(RuntimeMode.ORCHESTRATOR))
     with pytest.raises(RuntimeError, match="synthetic post failure"):
         importlib.import_module(name)
     assert name not in sys.modules
-    assert publication.current().health == "failed"
+    assert service.current().health == "failed"
 
 
 def test_pre_import_failure_does_not_leave_visibility_effects(tmp_path, monkeypatch):

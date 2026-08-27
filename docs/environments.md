@@ -2,7 +2,7 @@
 
 `dryml.environments` describes Python/software environments without changing DRYML object identity, Repo behavior, Store layout, records, sidecars, or materialization semantics.
 
-The module is intentionally lightweight. Importing `dryml.environments` does not inspect or probe the host, import probe workers, `dryml.records`, `dryml.context`, Repo internals, TensorFlow, PyTorch, JAX, Ray, Conda Python APIs, or dispatch code. Probing and introspection are explicit opt-in APIs.
+The module is intentionally lightweight. Importing `dryml.environments` does not inspect the host, import optional frameworks, or activate session/runtime controls. Introspection is explicit. Existing probe helpers are separate opt-in tools and are not consumed by `dryml.session`, annotations, world planning, or runtime publication.
 
 ## Inspect Current Environment
 
@@ -39,7 +39,7 @@ Policies are `ignore`, `warn`, `compatible`, and `strict`. Reports keep structur
 
 PEP 508 environment markers are evaluated from the `EnvironmentRecord` being checked, not from the coordinator process. If a marker references platform metadata that the record cannot provide, the check reports an `unknown` compatibility issue instead of silently using local platform facts.
 
-Environment checks are software-focused. CUDA, GPU allocation, process topology, and framework runtime configuration are future provider/context/world work, not ordinary `EnvironmentRequirement` fields.
+Environment checks are software-focused. Accelerator allocation, process topology, runtime activation, and framework outcomes belong to the world/runtime layers described in [World And Runtime](world_runtime.md), not to `EnvironmentRequirement`.
 
 ## Content IDs
 
@@ -56,53 +56,13 @@ Record identity includes interpreter version/implementation, platform facts, nor
 
 Record, requirement, and spec metadata fields are deeply frozen at construction. Mutating an input dictionary or list after construction cannot change the object payload or invalidate its content ID. Canonical JSON sorts string mapping keys, uses compact UTF-8 encoding, rejects duplicate textual keys, non-string keys, non-finite floats, and non-JSON values. Shared values are bounded to depth 8, 1,024 nodes, 64 entries/container, 4,096-codepoint strings/keys, 4,096-bit integers, and 4 MiB envelopes; environment records allow 4,096 distributions, 65,536 nodes, and 16 MiB envelopes.
 
-## Probing
+## Explicit Inspection Tools
 
-Probe the current interpreter in process:
-
-```python
-result = envs.probe(envs.CurrentEnvironmentSpec())
-info = result.require_ok()
-```
-
-Probe another Python executable through the worker protocol:
-
-```python
-result = envs.probe_python("/opt/envs/torch/bin/python")
-if result.ok:
-    print(result.record.id)
-else:
-    print(result.report.explain())
-```
-
-Probe specs enforce `pythonpath_policy` before launching a worker:
-
-```python
-isolated = envs.PythonExecutableSpec(
-    "/opt/envs/torch/bin/python",
-    pythonpath_policy="none",       # remove inherited PYTHONPATH
-)
-
-explicit = envs.PythonExecutableSpec(
-    "/opt/envs/torch/bin/python",
-    pythonpath_policy="explicit",   # use only these paths
-    extra_pythonpath=("/project/src",),
-)
-```
-
-The supported policies are `none`, `explicit`, `inherit`, and `dryml-source`. `dryml-source` injects this DRYML checkout's source root without inheriting unrelated coordinator paths. `PYTHONPATH` is controlled only by `pythonpath_policy` and `extra_pythonpath`; `env={"PYTHONPATH": ...}` is ignored so callers cannot accidentally bypass the selected isolation policy.
-
-Represent Conda probes without depending on Conda Python libraries:
-
-```python
-direct = envs.CondaEnvironmentSpec(prefix="/opt/envs/torch", launch_mode="direct")
-print(direct.probe_command())
-
-conda_run = envs.CondaEnvironmentSpec(name="torch", launch_mode="conda-run")
-print(conda_run.probe_command())
-```
-
-If Conda is absent or the command fails, probing returns a structured failure report.
+`inspect_current()` is the supported lightweight in-process observation used by
+environment compatibility. Existing `probe(...)` and `probe_python(...)`
+helpers remain explicit tools, but they are not provider selection, automatic
+inference, session activation, or a dispatch protocol. No declaration example
+in this release launches a probe or another process.
 
 ## Registry
 

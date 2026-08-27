@@ -35,6 +35,9 @@ def test_orchestrator_projects_definition_without_replacing_core_configuration()
     assert status["repo"] is repo
     assert status["cache"] == "strong"
     assert status["object_mode"] == "definition"
+    assert status["requested_object_mode"] == "fresh"
+    assert status["effective_object_mode"] == "definition"
+    assert status["orchestrator_floor"] is True
     assert isinstance(ModeObject("planned"), dryml.Definition)
 
     with dryml.config(object_mode="concrete"):

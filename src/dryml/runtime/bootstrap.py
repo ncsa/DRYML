@@ -59,14 +59,28 @@ def build_framework_bootstrap_plan(registration: FrameworkRegistration, runtime:
 def validate_framework_transition(runtime: Any) -> None:
     """Reject a visibility-changing managed transition after late root import.
 
-    This function is intentionally separate from publication so the U7 facade
-    can call it before staging effects.  It never unloads or reloads modules.
+    Args:
+        runtime: Normalized target runtime state.
+
+    Returns:
+        ``None`` when no watched root was imported too early.
+
+    Raises:
+        RuntimeTransitionError: With restart-required context when a watched
+            root is already loaded.
+
+    Side Effects:
+        Reads the framework registry and module table. It never unloads,
+        reloads, or imports a framework.
     """
     if getattr(runtime, "mode", RuntimeMode.NONE) is RuntimeMode.NONE:
         return
     for registration in framework_registry.registrations().values():
         if any(root in sys.modules for root in registration.roots):
-            raise RuntimeTransitionError("framework was imported before managed visibility control; restart the process")
+            raise RuntimeTransitionError(
+                "framework was imported before managed visibility control; restart the process",
+                context={"operation": "framework_transition", "category": "restart-required"},
+            )
 
 
 __all__ = ["FrameworkBootstrapPlan", "build_framework_bootstrap_plan", "validate_framework_transition"]

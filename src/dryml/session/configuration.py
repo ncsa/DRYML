@@ -10,7 +10,7 @@ from dryml.formats import deep_freeze_json, json_ready
 from dryml.worlds import LocalResourceInventory, ProcessAllocation, ResourceSpec, WorldAllocation
 from dryml.worlds.errors import WorldError
 
-from .errors import SessionConfigurationError
+from .errors import SessionConfigurationError, session_operation
 from .model import SelectedWorldAllocation, SessionConfiguration, default_requirement_axes, freeze_requirement_axes
 
 _MODES = frozenset({"python", "managed", "orchestrator"})
@@ -18,6 +18,7 @@ _RESOURCE_FIELDS = frozenset({"cpus", "memory", "gpus", "accelerator_memory"})
 _ENVIRONMENT_FIELDS = frozenset({"requirements", "python", "excludes", "capabilities", "tags", "dryml_protocol", "schema_versions"})
 
 
+@session_operation("session.normalize_configuration")
 def normalize_configuration(
     *,
     mode: str,
@@ -72,6 +73,7 @@ def normalize_configuration(
         raise SessionConfigurationError(str(exc), context=_error_context(exc)) from exc
 
 
+@session_operation("session.select_world_allocation")
 def select_world_allocation(
     value: WorldAllocation | Mapping[str, Any],
     *,
@@ -206,7 +208,10 @@ def _validate_inventory_bounds(process: ProcessAllocation, inventory: LocalResou
             if amount > capacity:
                 raise SessionConfigurationError("exact allocation accelerator memory broadens inherited inventory", context={"accelerator": kind})
     if process.devices or process.named:
-        raise SessionConfigurationError("exact allocation unsupported device facts cannot broaden inherited inventory")
+        raise SessionConfigurationError(
+            "exact allocation unsupported device facts cannot broaden inherited inventory",
+            context={"category": "unsupported"},
+        )
     for name in ("CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
         visible = process.env.get(name)
         if visible is None:

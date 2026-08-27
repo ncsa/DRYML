@@ -18,9 +18,11 @@ from dryml.runtime.frameworks import FrameworkPostResult, FrameworkRegistration,
 def _isolate_registry_freeze():
     """Keep synthetic registrations isolated from another test's frozen epoch."""
     with framework_registry._lock:
+        registrations = dict(framework_registry._registrations)
         framework_registry._frozen = False
     yield
     with framework_registry._lock:
+        framework_registry._registrations = registrations
         framework_registry._frozen = False
 
 

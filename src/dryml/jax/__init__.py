@@ -1,7 +1,4 @@
-# Check we have the right context
-from dryml.context import check_context
 from dryml.core.utils.classes import install_method
-check_context('jax')
 
 from dryml.core.dtype import DType
 from dryml.core.tensor_spec import TensorSpec

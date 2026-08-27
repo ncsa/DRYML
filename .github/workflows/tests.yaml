@@ -2,12 +2,21 @@ name: Tests
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  tests:
-    runs-on: ubuntu-latest
+  lightweight:
+    name: Lightweight (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
@@ -18,47 +27,64 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install Dependencies
+      - name: Install lightweight dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r test_requirements.txt
-
-      - name: Install DRYML
-        run: |
           python -m pip install .
 
-      - name: Show Dependency Versions
+      - name: Show resolved versions
         run: |
           python - <<'PY'
+          import platform
           from importlib import metadata
 
-          for package in ("tensorflow", "keras", "jax", "jaxlib", "torch", "triton"):
-              try:
-                  version = metadata.version(package)
-              except metadata.PackageNotFoundError:
-                  version = "not installed"
-              print(f"{package}: {version}")
+          print(f"python: {platform.python_version()}")
+          print(f"dryml: {metadata.version('dryml')}")
           PY
 
-      - name: Installed Package Smoke Test
+      - name: Run lightweight and package tests
+        run: |
+          ./tests.sh medium --ignore tests/old --ignore tests/dev -x
+
+  heavy:
+    name: Heavy frameworks (Ubuntu, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install framework dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r test_requirements.txt -r heavy_test_requirements.txt
+          python -m pip install .
+
+      - name: Require frameworks and show resolved versions
         run: |
           python - <<'PY'
-          import importlib.util
-          import dryml
-          import dryml.core.store.store
-          import dryml.core.utils.general
+          import platform
+          from importlib import metadata
+          import jax
+          import jaxlib
+          import ray
+          import tensorflow
+          import torch
 
-          assert hasattr(dryml, "core")
-          assert importlib.util.find_spec("dryml.data.transforms") is None
+          print(f"python: {platform.python_version()}")
+          for package in ("dryml", "tensorflow", "jax", "jaxlib", "torch", "ray"):
+              print(f"{package}: {metadata.version(package)}")
           PY
 
-      - name: Run Tests
+      - name: Run heavy framework tests
         run: |
-          ./tests.sh --cov-report=xml --cov-report=html
-
-      - name: Send Codecov
-        if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v6
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          verbose: true
+          ./tests.sh heavy --ignore tests/old --ignore tests/dev -x

@@ -31,7 +31,7 @@ from dryml.core.freeze import FrozenDict, FrozenList, FrozenTuple
 from dryml.core.query.path import Arg, Index
 from dryml.core.utils.graph.path import GraphPath
 
-import core_objects as objects
+from tests.core import core_objects as objects
 
 Cls1 = objects.TestClass1
 Cls2 = objects.TestClass2

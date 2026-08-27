@@ -269,6 +269,29 @@ def test_executor_honors_materialization_action_kind():
         execute_materialization_plan(repo, plan, memo=memo, revision={}, root=cdef)
 
 
+def test_executor_replans_when_planned_weak_cache_reuse_expires():
+    import gc
+
+    repo = Repo()
+    obj = MaterialLeaf("expired", repo=repo)
+    cdef = obj.definition
+    repo.cache_weak(obj)
+    plan = build_materialization_plan(
+        repo,
+        cdef,
+        RepoLoadOptions(build_missing=True),
+        memo={},
+        path=[""],
+    )
+    assert plan.actions[cdef].reuse_source == "cache"
+
+    del obj
+    gc.collect()
+
+    rebuilt = execute_materialization_plan(repo, plan, memo={}, revision={}, root=cdef)
+    assert rebuilt.definition == cdef
+
+
 def test_parent_failure_leaves_successful_child_cached():
     repo = Repo()
     child_def = Definition(MaterialLeaf, "child")

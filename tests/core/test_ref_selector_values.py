@@ -22,7 +22,7 @@ from dryml.core.object import Object
 from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.utils.graph.path import GraphPath, Index, Parameter
 
-import core_objects as objects
+from tests.core import core_objects as objects
 
 
 class RefOwner(Object):

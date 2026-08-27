@@ -1,4 +1,4 @@
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core.definition import Definition, ConcreteDefinition, SKIP_ARGS, selector_match, \
     concretize_func, thaw_concrete
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
@@ -138,7 +138,7 @@ def test_object_build_from_def_1():
     Test that an object definition with no id results in an object with an id.
     """
 
-    import core_objects as objects
+    from tests.core import core_objects as objects
     obj = Definition(
         objects.TestClassB,
         1,

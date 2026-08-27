@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 import dryml
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core.repo import Repo, make_store
 
 

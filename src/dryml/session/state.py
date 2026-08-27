@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from functools import wraps
 from typing import Any
 
 from dryml.environments import EnvironmentRequirement, inspect_current
@@ -18,6 +19,24 @@ from .model import SelectedWorldAllocation, SessionConfiguration, SessionSnapsho
 _SESSION_CONTROL = "session_configuration"
 
 
+def _session_operation(name: str):
+    """Attach a stable public operation name while preserving failure causes."""
+
+    def decorate(func):
+        @wraps(func)
+        def call(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except (SessionConfigurationError, PublicationError) as exc:
+                exc.context["operation"] = name
+                raise
+
+        return call
+
+    return decorate
+
+
+@_session_operation("session.current")
 def current() -> SessionSnapshot:
     """Return the current session projection without host observation.
 
@@ -32,6 +51,7 @@ def current() -> SessionSnapshot:
     return _snapshot(publication.current())
 
 
+@_session_operation("session.mode")
 def mode() -> str:
     """Return the current public mode without host observation.
 
@@ -45,6 +65,7 @@ def mode() -> str:
     return _configuration(publication.current()).mode
 
 
+@_session_operation("session.set_mode")
 def set_mode(value: str) -> SessionSnapshot:
     """Set a public mode and apply only that mode's default compatibility axes.
 
@@ -70,6 +91,7 @@ def set_mode(value: str) -> SessionSnapshot:
     return _publish(value, None, None, before.environment, default_requirement_axes(value), synthesize=value == "managed")
 
 
+@_session_operation("session.manage")
 def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: int | None = None, accelerator_memory: Any = None) -> SessionSnapshot:
     """Enter managed mode using a new concise current-process allowance.
 
@@ -98,6 +120,7 @@ def manage(*, cpus: int | None = None, memory: str | int | None = None, gpus: in
     return _publish("managed", None, None, before.environment, before.requirement_axes, synthesize=True, simple_resources=supplied)
 
 
+@_session_operation("session.allocate_world")
 def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str | None = None, replica: int | None = None) -> SessionSnapshot:
     """Enter managed mode with one selected exact world-allocation process.
 
@@ -121,6 +144,7 @@ def allocate_world(value: WorldAllocation | Mapping[str, Any], /, *, role: str |
     return _publish("managed", None, (value, role, replica), before.environment, before.requirement_axes, exact=True)
 
 
+@_session_operation("session.require_env")
 def require_env(*requirements: str, python: str | None = None, excludes: Any = (), capabilities: Any = ()) -> SessionSnapshot:
     """Atomically merge current-process environment requirements.
 
@@ -153,6 +177,7 @@ def require_env(*requirements: str, python: str | None = None, excludes: Any = (
     return _publish(before.mode, before.resources, before.allocation, environment, before.requirement_axes)
 
 
+@_session_operation("session.enforce_requirements")
 def enforce_requirements(*, environment: bool, world: bool, runtime: bool) -> SessionSnapshot:
     """Replace all identity-bearing compatibility-axis values atomically.
 
@@ -179,6 +204,7 @@ def enforce_requirements(*, environment: bool, world: bool, runtime: bool) -> Se
     return _publish(before.mode, before.resources, before.allocation, before.environment, axes)
 
 
+@_session_operation("session.configure")
 def configure(
     *,
     mode: str,
@@ -223,6 +249,7 @@ def configure(
     return _publish(candidate.mode, candidate.resources, allocation_value, candidate.environment, candidate.requirement_axes, synthesize=candidate.mode == "managed" and allocation_value is None, exact=allocation_value is not None, restage_retries=restage_retries)
 
 
+@_session_operation("session.reset")
 def reset() -> SessionSnapshot:
     """Restore the ordinary Python baseline and clear every facade category.
 
@@ -422,7 +449,10 @@ def _check_current_environment(configuration: SessionConfiguration) -> None:
         return
     report = environment.check(inspect_current(), policy="strict")
     if not report.ok:
-        raise SessionConfigurationError("current environment does not satisfy managed session requirements", context={"issues": [item.code for item in report.issues]})
+        raise SessionConfigurationError(
+            "current environment does not satisfy managed session requirements",
+            context={"category": "incompatible", "issues": [item.code for item in report.issues]},
+        )
 
 
 __all__ = ["allocate_world", "configure", "current", "enforce_requirements", "manage", "mode", "require_env", "reset", "set_mode"]

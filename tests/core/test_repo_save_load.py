@@ -1,7 +1,7 @@
 import dryml
 import os
 import glob
-import core_objects as objects
+from tests.core import core_objects as objects
 import pytest
 import tempfile
 import numpy as np

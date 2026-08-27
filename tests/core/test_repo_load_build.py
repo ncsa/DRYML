@@ -1,6 +1,6 @@
 import pytest
 
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core.definition import Definition
 from dryml.core.repo import Repo
 from dryml.core import save_object, load_object
@@ -56,7 +56,7 @@ def test_build_from_definition_repo_3():
 
 
 def test_object_args_passing_1():
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
@@ -65,7 +65,7 @@ def test_object_args_passing_1():
 
 @pytest.mark.usefixtures("create_name")
 def test_object_args_passing_2(create_name):
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj = objs.TestClassB(1, base_msg="Test1")
 
@@ -80,7 +80,7 @@ def test_object_args_passing_3():
     """
     Test passing nested dryobjects as arguments
     """
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj1 = objs.TestNest(10)
 
@@ -121,7 +121,7 @@ def test_object_args_passing_4():
     """
     Test passing nested dryobjects as arguments, within a list
     """
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj1 = objs.TestNest(10)
 
@@ -145,7 +145,7 @@ def test_object_args_passing_5():
     """
     Test passing nested dryobjects as arguments, within a nested list
     """
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj1 = objs.TestNest(10)
 
@@ -169,7 +169,7 @@ def test_object_args_passing_6():
     """
     Test passing nested dryobjects as arguments, within a dict
     """
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj1 = objs.TestNest(10)
 
@@ -193,7 +193,7 @@ def test_object_args_passing_7():
     """
     Test passing nested dryobjects as arguments, within a dict with a list
     """
-    import core_objects as objs
+    from tests.core import core_objects as objs
 
     obj1 = objs.TestNest(10)
 
@@ -211,4 +211,3 @@ def test_object_args_passing_7():
     assert obj2.A is not obj2_cpy.A
     assert type(obj2.A['A'][0][0]) is type(obj1)
     assert type(obj2_cpy.A['A'][0][0]) is type(obj1)
-

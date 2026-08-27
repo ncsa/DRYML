@@ -144,5 +144,31 @@ def update_from_timings(baseline: dict[str, Any], timing_paths: list[Path]) -> d
     return updated
 
 
+def test_every_maintained_category_has_an_explicit_tier() -> None:
+    """Keep newly added test categories visible to tier selection."""
+
+    baseline = load_baseline(DEFAULT_BASELINE)
+    categories = {category_for_path(path.as_posix()) for path in iter_test_files()}
+    assert categories <= set(baseline["category_tiers"])
+
+
+def test_tier_metadata_references_existing_test_files() -> None:
+    """Reject stale file and node overrides in the checked-in baseline."""
+
+    baseline = load_baseline(DEFAULT_BASELINE)
+    references = set(baseline.get("path_tiers", {}))
+    references.update(nodeid.split("::", 1)[0] for nodeid in baseline.get("node_tiers", {}))
+    missing = sorted(path for path in references if not (ROOT / path).is_file())
+    assert missing == []
+
+
+def test_all_tiers_cover_every_maintained_test_file() -> None:
+    """Ensure the complete tier union cannot silently omit a test file."""
+
+    baseline = load_baseline(DEFAULT_BASELINE)
+    expected = {"./" + path.as_posix() for path in iter_test_files()}
+    assert set(select_files(baseline, set(VALID_TIERS))) == expected
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

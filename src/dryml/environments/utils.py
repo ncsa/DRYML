@@ -46,8 +46,8 @@ def normalize_requirement_string(requirement: str) -> str:
         req = Requirement(text)
     except InvalidRequirement as exc:
         raise EnvironmentRequirementError(
-            f"invalid package requirement {requirement!r}",
-            context={"requirement": requirement, "error": str(exc)},
+            "invalid package requirement",
+            context={"requirement": "<redacted>", "error": type(exc).__name__},
         ) from exc
 
     parts = [normalize_distribution_name(req.name)]
@@ -78,8 +78,8 @@ def coerce_specifier(value: str | None) -> SpecifierSet | None:
         return SpecifierSet(str(value))
     except InvalidSpecifier as exc:
         raise EnvironmentRequirementError(
-            f"invalid version specifier {value!r}",
-            context={"specifier": value, "error": str(exc)},
+            "invalid version specifier",
+            context={"specifier": "<redacted>", "error": type(exc).__name__},
         ) from exc
 
 

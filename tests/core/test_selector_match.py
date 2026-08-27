@@ -1,4 +1,4 @@
-import core_objects as objects
+from tests.core import core_objects as objects
 import pytest
 from dryml.core import Satisfies
 from dryml.core.definition import Definition, SKIP_ARGS, selector_match

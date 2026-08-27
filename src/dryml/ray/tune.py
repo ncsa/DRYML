@@ -1,10 +1,10 @@
 import os
 import pathlib
 import dryml
-from dryml.models import TrainSpec
-from dryml.models import Trainable
+from dryml.models import Model as Trainable
+from dryml.models import TrainState as TrainSpec
 from dryml.data import Dataset
-from dryml import Repo
+from dryml.core import Repo
 import pickle
 import uuid
 

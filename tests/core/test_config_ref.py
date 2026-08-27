@@ -1,6 +1,6 @@
 import pytest
 
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core.config import ConfigError, ConfigRef
 from dryml.core.repo import Repo
 

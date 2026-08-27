@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from dryml import session
@@ -20,6 +22,8 @@ class DefinitionOnlyObject(Object):
 
 @pytest.fixture(autouse=True)
 def reset_runtime():
+    loaded = tuple(name for name in ("tensorflow", "torch", "jax", "jaxlib") if name in sys.modules)
+    assert loaded == (), f"earlier lightweight tests leaked optional frameworks: {loaded}"
     session.reset()
     DefinitionOnlyObject.prepared = 0
     yield

@@ -1,6 +1,6 @@
 from dryml.core.utils.general import get_class_str, get_class_from_str, \
     get_unique_objects, get_unique_concrete_definitions
-import core_objects as objects
+from tests.core import core_objects as objects
 import pytest
 from dryml.core.errors import CycleError
 from dryml.core.utils.recurse import cycle_detect

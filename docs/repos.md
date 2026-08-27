@@ -45,6 +45,10 @@ loaded = repo.load(item.definition)
 
 `repo.save_object()` saves the root object and any graph objects selected by the save plan. `repo.load()` requires an exact `ConcreteDefinition`.
 
+Saving and loading are available in `python` and `managed` modes. Strict
+orchestration permits definition/reference and index administration but blocks
+all live-Object save, restore, reuse, and return paths before side effects.
+
 ## Stores
 
 The common path-backed store is `DirStore`.
@@ -62,7 +66,7 @@ A directory store uses stable definition hashes to organize object state under i
 ## CDef Format Compatibility
 
 Store definitions, aliases, and main-definition references are authoritative.
-New DRYML software reads both legacy V1 and bound V2 CDefs and writes new exact
+New DRYML software reads supported `dryml.core` V1 and bound V2 CDefs and writes new exact
 identities as V2. V1 records keep their raw call fields, original hashes, and
 paths; they are not automatically migrated or rewritten when read.
 
@@ -72,6 +76,10 @@ paths; they are not automatically migrated or rewritten when read.
 | Write an untouched V1-only Store | Writes new identities as V2 | Supported only while the Store remains V1-only |
 | Read a Store containing V1 and V2 authority | Supported | Unsupported |
 | Downgrade or rollback after V2 authority exists | Restore a pre-V2 backup | Do not attempt in place |
+
+This table applies only inside the supported `dryml.core` namespace. Persisted
+globals, symbolic references, hashes, or Store roots naming retired
+`dryml.core2` are rejected without translation. No migration rewrites them.
 
 There is no transparent V1-to-V2 migration and no recovery of historical
 defaults omitted from a V1 raw call. After V2 authoritative data exists, use a
@@ -125,6 +133,11 @@ Important load entry points:
 - `repo.find(...)` provides a higher-level query-and-load path.
 
 Use exact loading when you already have a concrete definition. Use query APIs when you want to discover matching stored objects.
+
+In strict orchestration, use `.defs()`, occurrence results, graph traversal,
+`read_definition`, alias/main CDef inspection, and index administration. Do not
+call `.objects()`, access retained `ObjectResultSet` values, load/build, cache
+retrieval, or live-object callbacks.
 
 ## Query Domains
 
@@ -222,7 +235,7 @@ Diagnostic status records include the backend, Store key, generation, schema ver
 
 ### Multi-Process Use
 
-Each process and thread opens its own SQLite connection. A worker that saves an object commits its query-index transaction after object files are published. A coordinator with an existing Store/index handle sees that committed root on its next read transaction without reconnecting.
+Each process and thread opens its own SQLite connection. Another process that saves an object commits its query-index transaction after object files are published. An existing Store/index handle sees that committed root on its next read transaction without reconnecting.
 
 WAL mode can allow long-lived readers and a writer to overlap on supported local filesystems. The default `auto` journal policy is conservative and uses rollback journal unless the SQLite runtime is known safe for WAL.
 
@@ -235,6 +248,8 @@ This means a missing or stale index affects performance or query completeness un
 ## Related Docs
 
 - [Objects and Definitions](objects_and_defs.md)
+- [Sessions](session.md)
+- [World And Runtime](world_runtime.md)
 - [Query Index Backend Contracts](query_index_backend_contracts.md)
 - [Artifacts API](artifacts.md)
 - [Data API](data.md)

@@ -2,7 +2,13 @@
 
 Status: draft.
 
-DRYML contexts describe runtime execution constraints. They help code declare and check requirements such as backend compatibility, CPU/GPU resources, memory, and process bootstrap settings.
+This page describes the legacy scoped `dryml.context` subsystem. It remains
+available, but it is distinct from the new process-global `dryml.session`,
+`dryml.worlds`, and `dryml.runtime` publication authority. Context scopes do not
+replace persistent session generations or the orchestrator materialization
+floor. See [Sessions](session.md) and [World And Runtime](world_runtime.md).
+
+DRYML contexts describe runtime execution constraints. They help existing code declare and check requirements such as backend compatibility, CPU/GPU resources, and memory.
 
 ## Core Functions
 
@@ -84,7 +90,9 @@ with use_context(requirements):
 
 ## Bootstrap Notes
 
-Contexts can provide environment information for workers. This matters for execution systems where child processes need environment variables, resource assignments, or backend-specific initialization.
+Legacy contexts may carry bootstrap-oriented information for existing execution
+subsystems. The selective session/runtime port does not publish worker state,
+launch child processes, or connect declarations to `dryml.execute`.
 
 ## Common Pitfalls
 
@@ -97,3 +105,5 @@ Contexts can provide environment information for workers. This matters for execu
 
 - [Tensor Specs](tensor_specs.md)
 - [Models API](models.md)
+- [Sessions](session.md)
+- [World And Runtime](world_runtime.md)

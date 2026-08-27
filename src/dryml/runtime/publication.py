@@ -261,7 +261,14 @@ class PublicationService:
                     if getattr(current.runtime, "mode", None) is RuntimeMode.NONE and getattr(candidate.generation.runtime, "mode", None) is not RuntimeMode.NONE:
                         loaded = tuple(root for root in ("tensorflow", "torch", "jax", "jaxlib") if root in sys.modules)
                         if loaded:
-                            raise PublicationError("framework was imported before managed visibility control; restart the process", context={"loaded": loaded})
+                            raise PublicationError(
+                                "framework was imported before managed visibility control; restart the process",
+                                context={
+                                    "operation": "runtime_publication",
+                                    "category": "restart-required",
+                                    "loaded": loaded,
+                                },
+                            )
                     equivalent = self._equivalent(current, candidate.generation, effects)
                     if self._leases and not equivalent:
                         raise PublicationBusyError("active generation lease prevents an incompatible process transition")

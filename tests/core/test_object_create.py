@@ -1,5 +1,5 @@
 import numpy as np
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core.definition import Definition
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.object import definition_mode

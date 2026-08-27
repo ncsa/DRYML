@@ -47,6 +47,11 @@ assert obj.definition == concrete
 
 Most users construct objects directly. DRYML still captures the concrete definition behind the object.
 
+This materializing example applies in `python` or `managed` mode. In strict
+`orchestrator` mode, constructor syntax produces definitions through the public
+object-mode floor and supported live-Object entry points reject before side
+effects.
+
 ## Partial Expressions And Exact CDefs
 
 `Definition` and `ConcreteDefinition` deliberately have different omission
@@ -120,7 +125,7 @@ does not rerun preparation or reapply defaults.
 
 ## Identity Versions And Legacy Data
 
-V1 CDefs retain their stored raw `cls`/`args`/`kwargs` identity, hash, paths,
+V1 CDefs created in the supported `dryml.core` namespace retain their stored raw `cls`/`args`/`kwargs` identity, hash, paths,
 and materialization behavior. V1 and V2 CDefs are distinct exact identities,
 even when their visible constructor values look equivalent. DRYML reads V1
 records but does not map, migrate, or silently substitute them with V2 records.
@@ -130,6 +135,11 @@ V1 pickle that embeds a raw live class retains the ordinary Python import
 requirement of that pickle; it is not made import-free. V1 omitted defaults are
 also legacy raw-call behavior: DRYML does not reconstruct a historical default
 value that was never stored.
+
+The `dryml.core2` to `dryml.core` promotion is a clean persisted-identity break.
+Pickles, symbolic references, hashes, and Store roots naming `dryml.core2` are
+not decoded, aliased, or migrated. This V1/V2 behavior does not make
+pre-promotion `dryml.core2` data compatible.
 
 ## Definition Mode
 
@@ -143,6 +153,34 @@ with definition_mode():
 ```
 
 Inside definition mode, class construction returns a `Definition` rather than a live object. This is useful for composing object graphs declaratively.
+
+## Definition-Only Orchestration
+
+Strict `orchestrator` mode keeps these operations available without resolving
+optional-backend classes or returning live Objects:
+
+- create and inspect `Definition` and V1/V2 `ConcreteDefinition` values
+- inspect V2 semantic parameters, hash identities, and traverse CDef graphs
+- build selectors, references, requested worlds, and materialization plans
+- run structural/exact definition and occurrence queries
+- hydrate stored CDefs and validate, reconcile, or rebuild derived indexes
+- update aliases and main references when the target is a CDef
+
+Strict orchestration blocks these operations before constructor, cache return,
+class resolution/projection, user hook, serialization, state I/O, or Store
+mutation:
+
+- direct live construction and `Definition.build()`
+- Repo load, load-or-build, live cache access, and object-yielding query access
+- materialization-plan execution and canonical runtime reconstruction
+- Object, Repo, Store, and Zip save/restore paths
+- public `fresh` and `load_or_build` core object-mode selection
+
+`dryml.runtime.materialization_scope("warn" | "off")` is a trusted advanced
+override for one admitted operation. It retains one generation lease through
+nested and lazy work. It does not restore accelerator visibility, change the
+public `definition` floor, bypass Store publication safety, or create a dispatch
+facility.
 
 ## Concrete Definitions As Identity
 
@@ -174,6 +212,9 @@ The graph is useful for saving nested objects, querying owners of nested definit
 ## Saving State
 
 `Object.save_state_to_dir()` writes the definition and delegates runtime state persistence to `save_state_to_dir_imp()`.
+
+Saving and restoring are live-Object operations and therefore reject in strict
+orchestration.
 
 ```python
 class Counter(Object):
@@ -223,5 +264,7 @@ Good saved-state fields:
 ## Related Docs
 
 - [Repos and Stores](repos.md)
+- [Sessions](session.md)
+- [World And Runtime](world_runtime.md)
 - [Models API](models.md)
 - [Artifacts API](artifacts.md)

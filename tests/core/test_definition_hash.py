@@ -9,7 +9,7 @@ import sys
 import numpy as np
 import pytest
 
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
 from dryml.core.bound_args import BoundArguments

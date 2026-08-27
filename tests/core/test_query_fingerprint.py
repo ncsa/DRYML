@@ -1,6 +1,6 @@
 import pytest
 
-import core_objects as objects
+from tests.core import core_objects as objects
 from dryml.core import Definition, SKIP_ARGS, Satisfies, Selector
 from dryml.core.definition import selector_match
 from dryml.core.cdef_identity import V1_IDENTITY_VERSION

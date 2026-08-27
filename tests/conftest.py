@@ -1,10 +1,10 @@
-from fixtures import store_resource_factory, create_name, create_temp_file, \
+from .fixtures import store_resource_factory, create_name, create_temp_file, \
     create_temp_named_file, create_temp_dir, primary_store_set, ray
 import builtins
 import os
 import sys
 
-pytest_plugins = ("timing_plugin",)
+pytest_plugins = ("tests.timing_plugin",)
 
 try:
     from mk_ic import install

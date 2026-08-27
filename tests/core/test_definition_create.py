@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-import core_objects as objects
+from tests.core import core_objects as objects
 import dryml
 from dryml.core.definition import Definition, ConcreteDefinition, SKIP_ARGS
 from dryml.core.freeze import FrozenDict, FrozenTuple
