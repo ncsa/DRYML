@@ -194,8 +194,15 @@ def test_private_v2_pipeline_prepares_once_and_captures_injected_values(monkeypa
     assert "args" not in cdef
     state = cdef.__getstate__()
     assert ConcreteDefinition.__getstate__ is ConcreteDefinition._pickle_getstate
-    assert set(state) == {"identity_version", "cls", "parameters", "stable_hash_cache"}
+    assert set(state) == {
+        "identity_version",
+        "cls",
+        "parameters",
+        "stateful_role",
+        "stable_hash_cache",
+    }
     assert state["parameters"] == cdef["parameters"]
+    assert state["stateful_role"] is False
     monkeypatch.setattr(
         "dryml.core.canonical.resolve_symbol",
         lambda *args, **kwargs: pytest.fail("persisted V2 decoding must not resolve classes"),
@@ -282,12 +289,14 @@ def test_persisted_bound_records_reject_malformed_names_and_values_without_bindi
             "identity_version": V2_IDENTITY_VERSION,
             "cls": BindingFixture,
             "parameters": (("value", 1), ("value", 2)),
+            "stateful_role": False,
         })
     with pytest.raises(ValueError, match="legacy fields"):
         restored.__setstate__({
             "identity_version": V2_IDENTITY_VERSION,
             "cls": BindingFixture,
             "parameters": FrozenDict({"value": 1}),
+            "stateful_role": False,
             "args": (),
             "kwargs": {},
         })
@@ -295,6 +304,7 @@ def test_persisted_bound_records_reject_malformed_names_and_values_without_bindi
         restored.__setstate__({
             "identity_version": V2_IDENTITY_VERSION,
             "cls": BindingFixture,
+            "stateful_role": False,
             "args": (),
             "kwargs": {},
         })

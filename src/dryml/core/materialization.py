@@ -179,7 +179,13 @@ def _execute_materialization_plan(
             cls_name = getattr(cdef.cls, "__name__", repr(cdef.cls))
             raise RepoLoadError(f"Error resolving {cls_name} at {action.primary_path}: {e}") from e
 
-        is_serializable = isinstance(cls, type) and issubclass(cls, Serializable)
+        from .cdef_codec import CDefGraphCodecError, validate_cdef_stateful_role
+
+        try:
+            validate_cdef_stateful_role(cdef, cls)
+        except CDefGraphCodecError as error:
+            raise RepoLoadError(f"Incompatible definition authority at {action.primary_path}: {error}") from error
+        is_serializable = issubclass(cls, Serializable)
 
         in_store = action.store is not None
         if action.restore_state and is_serializable and (not in_store) and (not action.build_missing):

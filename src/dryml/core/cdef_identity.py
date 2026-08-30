@@ -9,7 +9,55 @@ if TYPE_CHECKING:
 
 V1_IDENTITY_VERSION = 1
 V2_IDENTITY_VERSION = 2
-_SUPPORTED_IDENTITY_VERSIONS = frozenset((V1_IDENTITY_VERSION, V2_IDENTITY_VERSION))
+_SUPPORTED_IDENTITY_VERSIONS = frozenset(
+    (V1_IDENTITY_VERSION, V2_IDENTITY_VERSION)
+)
+
+
+def new_node_id() -> object:
+    """Allocate one private process-local CDef graph-node token.
+
+    Returns:
+        An opaque, hashable token used only by multiplicity-sensitive internal
+        graph operations. The token is intentionally never persisted or
+        included in structural identity.
+    """
+
+    return object()
+
+
+def cdef_node_key(cdef: "ConcreteDefinition") -> object:
+    """Return a CDef's private graph-node key for internal graph authority.
+
+    Args:
+        cdef: A current concrete definition.
+
+    Returns:
+        Its opaque process-local node token.
+
+    Raises:
+        TypeError: If ``cdef`` is not a concrete definition.
+    """
+
+    from .definition import ConcreteDefinition
+
+    if not isinstance(cdef, ConcreteDefinition):
+        raise TypeError(
+            f"Expected ConcreteDefinition, got {type(cdef).__name__}."
+        )
+    return cdef._node_id
+
+
+def same_cdef_node(
+    left: "ConcreteDefinition", right: "ConcreteDefinition"
+) -> bool:
+    """Report whether two CDefs name the same private graph node.
+
+    This deliberately differs from structural CDef equality and is restricted
+    to graph, realization, and other multiplicity-sensitive internals.
+    """
+
+    return cdef_node_key(left) is cdef_node_key(right)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +70,7 @@ class CDefIdentityRecord:
         args: Persisted legacy positional constructor surface.
         kwargs: Persisted legacy keyword constructor surface.
         parameters: Optional V2 semantic bound name/value record.
+        stateful_role: Identity-neutral V2 ``Serializable`` role authority.
         stable_hash_cache: Optional cached digest from the serialized object.
     """
 
@@ -31,6 +80,7 @@ class CDefIdentityRecord:
     kwargs: Any = None
     stable_hash_cache: str | None = None
     parameters: Any = None
+    stateful_role: bool | None = None
 
 
 def validate_identity_version(version: int) -> int:
@@ -47,7 +97,9 @@ def validate_identity_version(version: int) -> int:
     """
 
     if type(version) is not int or version not in _SUPPORTED_IDENTITY_VERSIONS:
-        raise ValueError(f"Unsupported ConcreteDefinition identity version {version!r}.")
+        raise ValueError(
+            f"Unsupported ConcreteDefinition identity version {version!r}."
+        )
     return version
 
 
@@ -68,7 +120,9 @@ def decode_identity_record(state: Any) -> CDefIdentityRecord:
 
     if isinstance(state, (list, tuple)):
         if len(state) not in (3, 4):
-            raise ValueError("Legacy ConcreteDefinition state must contain cls, args, kwargs, and optional hash cache.")
+            raise ValueError(
+                "Legacy ConcreteDefinition state must contain cls, args, kwargs, and optional hash cache."
+            )
         cls, args, kwargs = state[:3]
         stable_hash_cache = state[3] if len(state) == 4 else None
         return CDefIdentityRecord(
@@ -81,11 +135,25 @@ def decode_identity_record(state: Any) -> CDefIdentityRecord:
 
     if isinstance(state, dict):
         if "cls" not in state:
-            raise ValueError("ConcreteDefinition state is missing required field 'cls'.")
-        version = validate_identity_version(state.get("identity_version", V1_IDENTITY_VERSION))
+            raise ValueError(
+                "ConcreteDefinition state is missing required field 'cls'."
+            )
+        version = validate_identity_version(
+            state.get("identity_version", V1_IDENTITY_VERSION)
+        )
         if version == V2_IDENTITY_VERSION:
             if "parameters" not in state:
-                raise ValueError("V2 ConcreteDefinition state is missing required field 'parameters'.")
+                raise ValueError(
+                    "V2 ConcreteDefinition state is missing required field 'parameters'."
+                )
+            if "stateful_role" not in state:
+                raise ValueError(
+                    "V2 ConcreteDefinition state is missing required field 'stateful_role'."
+                )
+            if type(state["stateful_role"]) is not bool:
+                raise TypeError(
+                    "V2 ConcreteDefinition stateful_role must be a bool."
+                )
             legacy_fields = [key for key in ("args", "kwargs") if key in state]
             if legacy_fields:
                 raise ValueError(
@@ -99,11 +167,14 @@ def decode_identity_record(state: Any) -> CDefIdentityRecord:
                 state["cls"],
                 parameters=decode_bound_arguments(state["parameters"]),
                 stable_hash_cache=state.get("stable_hash_cache"),
+                stateful_role=state["stateful_role"],
             )
         required = ("args", "kwargs")
         missing = [key for key in required if key not in state]
         if missing:
-            raise ValueError(f"ConcreteDefinition state is missing required fields: {missing!r}.")
+            raise ValueError(
+                f"ConcreteDefinition state is missing required fields: {missing!r}."
+            )
         return CDefIdentityRecord(
             version,
             state["cls"],
@@ -112,7 +183,9 @@ def decode_identity_record(state: Any) -> CDefIdentityRecord:
             stable_hash_cache=state.get("stable_hash_cache"),
         )
 
-    raise TypeError(f"Unsupported ConcreteDefinition pickle state {type(state).__name__}.")
+    raise TypeError(
+        f"Unsupported ConcreteDefinition pickle state {type(state).__name__}."
+    )
 
 
 def stable_hash_domain(type_marker: str, version: int) -> str:

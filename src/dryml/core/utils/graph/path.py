@@ -14,8 +14,8 @@ from collections.abc import Mapping
 from typing import Any, Iterable
 
 
-GRAPH_PATH_SCHEMA_VERSION = 2
-_SUPPORTED_GRAPH_PATH_SCHEMA_VERSIONS = frozenset((1, GRAPH_PATH_SCHEMA_VERSION))
+GRAPH_PATH_SCHEMA_VERSION = 3
+_SUPPORTED_GRAPH_PATH_SCHEMA_VERSIONS = frozenset((1, 2, GRAPH_PATH_SCHEMA_VERSION))
 
 
 class GraphPathError(Exception):
@@ -366,6 +366,17 @@ class GraphPath:
             "segments": [_segment_to_data(seg) for seg in self.segments],
         }
 
+    def to_bytes(self) -> bytes:
+        """Encode this path into the canonical tagged ordering byte stream.
+
+        Returns:
+            Versioned bytes whose lexicographic order is the graph-authority
+            order for paths. The representation distinguishes every segment
+            type, including integer mapping keys versus sequence indexes.
+        """
+
+        return graph_path_bytes(self)
+
     @classmethod
     def from_data(cls, data: Any) -> "GraphPath":
         """Deserialize a supported versioned graph path.
@@ -435,6 +446,83 @@ def normalize_path(path: GraphPathLike = "$") -> GraphPath:
 
 
 normalize_graph_path = normalize_path
+
+
+def graph_path_bytes(path: GraphPathLike) -> bytes:
+    """Return canonical tagged bytes for a normalized graph path.
+
+    Args:
+        path: A typed graph path or supported normalization input.
+
+    Returns:
+        A versioned, self-delimiting byte representation suitable for stable
+        sorting and graph-record labels.
+
+    Raises:
+        QueryPathError: If a path segment or mapping key is unsupported.
+    """
+
+    normalized = normalize_path(path)
+    out = bytearray(b"DRYML-GRAPH-PATH-3\x00")
+    for segment in normalized:
+        tag, payload = _segment_bytes(segment)
+        out.extend(tag)
+        out.extend(len(payload).to_bytes(8, "big"))
+        out.extend(payload)
+    return bytes(out)
+
+
+def graph_path_sort_key(path: GraphPathLike) -> bytes:
+    """Return the deterministic total-order key for a graph path."""
+
+    return graph_path_bytes(path)
+
+
+def _segment_bytes(segment: PathSegment) -> tuple[bytes, bytes]:
+    if isinstance(segment, Parameter):
+        return b"P", segment.name.encode("utf-8")
+    if isinstance(segment, Kwarg):
+        return b"W", segment.name.encode("utf-8")
+    if isinstance(segment, Arg):
+        return b"A", _nonnegative_int_bytes(segment.index)
+    if isinstance(segment, Index):
+        return b"I", _nonnegative_int_bytes(segment.index)
+    if isinstance(segment, Key):
+        return b"K", canonical_key_bytes(segment.key)
+    if isinstance(segment, SetMember):
+        return b"S", _frame(segment.fingerprint.encode("utf-8")) + _nonnegative_int_bytes(segment.ordinal)
+    raise QueryPathError(f"Unsupported graph path segment {segment!r}.")
+
+
+def canonical_key_bytes(key: Any) -> bytes:
+    """Return canonical tagged bytes for a supported mapping key.
+
+    Args:
+        key: A canonical ``str`` or exact ``int`` mapping key.
+
+    Returns:
+        A self-delimiting typed key encoding.
+
+    Raises:
+        QueryPathError: If ``key`` is not a canonical mapping-key type.
+    """
+
+    if type(key) is str:
+        return b"s" + _frame(key.encode("utf-8"))
+    if type(key) is int:
+        sign = b"+" if key >= 0 else b"-"
+        return b"i" + sign + _frame(str(abs(key)).encode("ascii"))
+    raise QueryPathError(f"Graph path mapping keys must be str or int, got {type(key).__name__}.")
+
+
+def _frame(payload: bytes) -> bytes:
+    return len(payload).to_bytes(8, "big") + payload
+
+
+def _nonnegative_int_bytes(value: int) -> bytes:
+    if type(value) is not int or value < 0:
+        raise QueryPathError("Canonical graph path indexes must be non-negative integers.")
+    return _frame(str(value).encode("ascii"))
 
 
 def normalize_ctx_path(path: GraphPathLike | None = None) -> GraphPath:

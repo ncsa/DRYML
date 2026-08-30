@@ -83,7 +83,12 @@ def iter_value_edges(value: Any) -> tuple[ValueEdge, ...]:
         return tuple(edges)
 
     if isinstance(value, (FrozenDict, dict)):
-        return tuple(ValueEdge(Key(key), child) for key, child in value.items())
+        from .path import canonical_key_bytes
+
+        return tuple(
+            ValueEdge(Key(key), child)
+            for key, child in sorted(value.items(), key=lambda item: canonical_key_bytes(item[0]))
+        )
 
     if isinstance(value, (FrozenList, FrozenTuple, list, tuple)):
         return tuple(ValueEdge(Index(idx), child) for idx, child in enumerate(value))
@@ -194,7 +199,11 @@ def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
                 BoundArguments(parameters),
             )
             return Definition(obj.cls, *args, **kwargs)
-        return ConcreteDefinition._from_bound_record(obj.cls, BoundArguments(parameters))
+        return ConcreteDefinition._from_bound_record(
+            obj.cls,
+            BoundArguments(parameters),
+            stateful_role=obj._stateful_role,
+        )
 
     if isinstance(obj, (Definition, ConcreteDefinition)):
         args = None if obj.args is None else list(obj.args)

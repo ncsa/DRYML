@@ -14,6 +14,7 @@ from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .cdef_identity import (
     V1_IDENTITY_VERSION,
     V2_IDENTITY_VERSION,
+    new_node_id,
     decode_identity_record,
     validate_identity_version,
 )
@@ -547,6 +548,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
     _identity_version: int = field(default=V1_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
     _bound_args: BoundArguments | None = field(default=None, init=False, repr=False, compare=False, hash=False)
+    _node_id: object = field(default_factory=new_node_id, init=False, repr=False, compare=False, hash=False)
+    _stateful_role: bool = field(default=False, init=False, repr=False, compare=False, hash=False)
 
     def __init__(self, cdef_cls, args=(), kwargs=None) -> None:
         """Create a validated V2 exact identity from a public call surface.
@@ -585,6 +588,8 @@ class ConcreteDefinition(DefInterface, Mapping):
         object.__setattr__(result, "_stable_hash_cache", None)
         object.__setattr__(result, "_identity_version", V1_IDENTITY_VERSION)
         object.__setattr__(result, "_bound_args", None)
+        object.__setattr__(result, "_node_id", new_node_id())
+        object.__setattr__(result, "_stateful_role", False)
         return result
 
     def _freeze_raw_call_surface(self) -> None:
@@ -612,6 +617,8 @@ class ConcreteDefinition(DefInterface, Mapping):
         object.__setattr__(self, "_identity_version", record.identity_version)
         object.__setattr__(self, "_bound_args", record._bound_args)
         object.__setattr__(self, "_stable_hash_cache", record._stable_hash_cache)
+        object.__setattr__(self, "_node_id", record._node_id)
+        object.__setattr__(self, "_stateful_role", record._stateful_role)
 
     @property
     def args(self) -> FrozenTuple[Any, ...]:
@@ -698,6 +705,7 @@ class ConcreteDefinition(DefInterface, Mapping):
             *,
             identity_version: int = V1_IDENTITY_VERSION,
             parameters: BoundArguments | None = None,
+            stateful_role: bool | None = None,
             stable_hash_cache: str | None = None) -> "ConcreteDefinition":
         """Hydrate a validated identity record without public canonicalization.
 
@@ -711,7 +719,11 @@ class ConcreteDefinition(DefInterface, Mapping):
                 raise ValueError("V2 CDef records require bound parameters.")
             if args is not None or kwargs is not None:
                 raise ValueError("V2 CDef records cannot contain legacy args or kwargs.")
-            result = cls._from_bound_record(cdef_cls, parameters)
+            result = cls._from_bound_record(
+                cdef_cls,
+                parameters,
+                stateful_role=stateful_role,
+            )
         elif parameters is not None:
             raise ValueError("Bound CDef records require V2 identity version.")
         else:
@@ -732,7 +744,12 @@ class ConcreteDefinition(DefInterface, Mapping):
         return result
 
     @classmethod
-    def _from_bound_record(cls, cdef_cls, bound_args: BoundArguments) -> "ConcreteDefinition":
+    def _from_bound_record(
+            cls,
+            cdef_cls,
+            bound_args: BoundArguments,
+            *,
+            stateful_role: bool | None = None) -> "ConcreteDefinition":
         """Create a validated private V2 identity from an already-bound record.
 
         Args:
@@ -750,9 +767,16 @@ class ConcreteDefinition(DefInterface, Mapping):
         """
 
         bound_args = validate_canonical_bound_arguments(bound_args)
+        if stateful_role is None:
+            from .object import Serializable
+
+            stateful_role = isinstance(cdef_cls, type) and issubclass(cdef_cls, Serializable)
+        if type(stateful_role) is not bool:
+            raise TypeError("CDef stateful role must be a bool.")
         result = cls._new_raw_record(cdef_cls, (), {})
         object.__setattr__(result, "_bound_args", bound_args)
         object.__setattr__(result, "_identity_version", V2_IDENTITY_VERSION)
+        object.__setattr__(result, "_stateful_role", stateful_role)
         return result
 
     def __hash__(self) -> int:
@@ -776,6 +800,7 @@ class ConcreteDefinition(DefInterface, Mapping):
                 "identity_version": self.identity_version,
                 "cls": self.cls,
                 "parameters": self._bound_args.as_frozen_dict(),
+                "stateful_role": self._stateful_role,
                 "stable_hash_cache": self._stable_hash_cache,
             }
         return {
@@ -796,6 +821,7 @@ class ConcreteDefinition(DefInterface, Mapping):
             record.kwargs,
             identity_version=record.version,
             parameters=record.parameters,
+            stateful_role=record.stateful_role,
             stable_hash_cache=record.stable_hash_cache,
         )
         self._copy_record(restored)
@@ -832,7 +858,9 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     def __repr__(self):
         if self._bound_args is not None:
-            return f"{type(self).__name__}({self.cls}, parameters={self._bound_args.as_frozen_dict()})"
+            from .cdef_codec import render_cdef_repr
+
+            return render_cdef_repr(self)
         arg_elements = []
         arg_str = ""
         arg_elements.append(f"{self.cls}")
@@ -881,6 +909,48 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     def copy(self):
         return deepcopy(self)
+
+    def copy_graph(self) -> "ConcreteDefinition":
+        """Return an independently keyed copy of this complete CDef graph.
+
+        Returns:
+            A graph-isomorphic CDef root with fresh private node tokens.
+
+        Side Effects:
+            Does not resolve symbols, materialize objects, or mutate this
+            immutable CDef graph.
+        """
+
+        from .cdef_codec import copy_cdef_graph
+
+        return copy_cdef_graph(self)
+
+    def graph_equal(self, other: object) -> bool:
+        """Compare rooted CDef topology while ignoring private node tokens.
+
+        Args:
+            other: Candidate concrete-definition root.
+
+        Returns:
+            ``True`` only when classes, structural values, typed edges, edge
+            kinds, and shared-versus-independent node topology correspond.
+        """
+
+        from .cdef_codec import cdef_graph_equal
+
+        return cdef_graph_equal(self, other)
+
+    def graph_hash(self) -> str:
+        """Return a deterministic digest of this CDef's rooted graph topology.
+
+        Returns:
+            A token-free graph digest that distinguishes sharing from
+            independent structurally equal nodes.
+        """
+
+        from .cdef_codec import cdef_graph_hash
+
+        return cdef_graph_hash(self)
 
     def freeze(self):
         """Return a non-materializing canonical reference to this CDef.
@@ -951,6 +1021,19 @@ class ConcreteDefinition(DefInterface, Mapping):
         from .utils.graph.value import get_subtree
 
         return get_subtree(self, path)
+
+    def at(self, path: Any) -> DefinitionLens:
+        """Return a copy-on-write lens rooted at this exact CDef graph.
+
+        Args:
+            path: A typed or textual path into this CDef's semantic values.
+
+        Returns:
+            A lens whose ``set`` operation reconstructs only ancestors on the
+            selected path and preserves untouched private descendant nodes.
+        """
+
+        return DefinitionLens(self, path)
 
 
 # Preserve the versioned record codec on Python 3.10; see the Definition note.

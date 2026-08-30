@@ -17,6 +17,9 @@ from .path import (
     SetMember,
     normalize_path,
     normalize_graph_path,
+    graph_path_bytes,
+    graph_path_sort_key,
+    canonical_key_bytes,
     parse_path,
 )
 
@@ -42,5 +45,8 @@ __all__ = [
     "SetMember",
     "normalize_path",
     "normalize_graph_path",
+    "graph_path_bytes",
+    "graph_path_sort_key",
+    "canonical_key_bytes",
     "parse_path",
 ]

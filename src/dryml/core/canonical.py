@@ -594,6 +594,14 @@ def transform_container(
 # ----------------------------------------------------------------------
 
 class _ToCanonicalTransformer(GraphTransformer):
+    def memo_key(self, obj: Any, ctx: GraphCtx):
+        """Memoize graph-bearing sources by Python identity within one scope."""
+
+        kind = node_kind(obj)
+        if kind in {NodeKind.DEFINITION, NodeKind.OBJECT}:
+            return id(obj)
+        return None
+
     def is_atomic(self, obj: Any, ctx: GraphCtx) -> bool:
         if node_kind(obj) in (CANONICAL_SEQ_KINDS | CANONICAL_DICT_KINDS):
             return False
@@ -688,6 +696,11 @@ class _ToCanonicalTransformer(GraphTransformer):
                 )
 
             live_cls = resolve_symbol(obj.cls)
+            if not isinstance(live_cls, type):
+                raise TypeError(
+                    f"ConcreteDefinition class target at {ctx.path_str()} must resolve to a class, "
+                    f"got {type(live_cls).__name__}."
+                )
             prep_args, prep_kwargs = live_cls.__prepare_args__(*obj.args, **obj.kwargs)
             from .arg_roles import apply_bound_arg_roles
             from .bound_args import BoundArguments, bind_complete_arguments
@@ -698,8 +711,17 @@ class _ToCanonicalTransformer(GraphTransformer):
                 (name, self.transform(value, ctx.child(name)))
                 for name, value in bound_args.items()
             )
-            c_cls = self.transform(live_cls, ctx.child("cls"))
-            return ConcreteDefinition._from_bound_record(c_cls, canonical_bound_args)
+            # A source-backed class is already its canonical class authority.
+            # Re-symbolizing the transient class produced by ``exec`` loses
+            # its source provenance and can fail because it has no module file.
+            c_cls = obj.cls if isinstance(obj.cls, SourceSpec) else self.transform(live_cls, ctx.child("cls"))
+            from .object import Serializable
+
+            return ConcreteDefinition._from_bound_record(
+                c_cls,
+                canonical_bound_args,
+                stateful_role=issubclass(live_cls, Serializable),
+            )
 
         if kind is NodeKind.FUNCTION:
             return symbol_ref(obj)
