@@ -455,6 +455,8 @@ class SQLiteStoreQueryIndex:
                 graph = ConcreteDefinitionGraph.for_query_index_roots(cdefs)
                 replacement._register_stored_roots(graph, cdefs, require_ready=False)
             replacement._register_reference_authority(require_ready=False)
+            replacement.close()
+            self._checkpoint_and_cleanup_sidecars(replacement_path, label="staged")
             replacement._validate_rebuild_before_ready(roots=roots)
             replacement._set_build_state("ready")
             con = replacement._connections.connection(readonly=False)
@@ -1011,9 +1013,7 @@ class SQLiteStoreQueryIndex:
         return stable_hash_to_blob(stable_hash), _relative_def_path(stable_hash), None, None
 
     def _validate_rebuild_before_ready(self, *, roots: tuple[ConcreteDefinition, ...]) -> None:
-        # Reuse the staged writer's WAL snapshot; a second Windows connection can
-        # otherwise observe the main file before its committed WAL pages.
-        con = self._connections.connection(readonly=False)
+        con = self._connections.connection(readonly=True)
         issues: list[ValidationIssue] = []
         validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
         _validate_sqlite_integrity(con, issues)

@@ -163,7 +163,8 @@ with tempfile.TemporaryDirectory() as directory:
     value = Value(7, repo=repo)
     state = value.save(repo=repo)
     definition = pickle.loads(pickle.dumps(value.definition))
-    loaded = dryml.load_state_ref(state, repo=dryml.Repo(DirStore(root / "store")), reuse_live="never")
+    load_repo = dryml.Repo(DirStore(root / "store"))
+    loaded = dryml.load_state_ref(state, repo=load_repo, reuse_live="never")
     old = root / "old"
     (old / "objects" / "legacy").mkdir(parents=True)
     (old / "objects" / "legacy" / "definition.pkl").write_bytes(b"retired")
@@ -173,6 +174,8 @@ with tempfile.TemporaryDirectory() as directory:
         old_authority_rejected = True
     else:
         old_authority_rejected = False
+    load_repo.close(flush=False)
+    repo.close(flush=False)
     print(json.dumps({
         "graph_round_trip": definition.graph_equal(value.definition),
         "object_paths": len(state.object.objects),

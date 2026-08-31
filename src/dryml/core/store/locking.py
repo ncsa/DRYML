@@ -6,6 +6,7 @@ import os
 import stat
 import threading
 from contextlib import contextmanager
+from weakref import WeakValueDictionary
 
 try:
     import fcntl
@@ -15,6 +16,13 @@ except ImportError:  # pragma: no cover - exercised on Windows
 
 
 _LOCK_STATE = threading.local()
+_PROCESS_LOCKS = WeakValueDictionary()
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def _process_lock(path: str) -> threading.RLock:
+    with _PROCESS_LOCKS_GUARD:
+        return _PROCESS_LOCKS.setdefault(path, threading.RLock())
 
 
 def supports_advisory_locking(path: str) -> bool:
@@ -53,7 +61,8 @@ def interprocess_lock(path: str):
 
     Side Effects:
         Creates the lock-file parent and lock file when necessary. The lock is
-        released before the file handle closes on every exit path.
+        released before the file handle closes on every exit path. Sibling
+        threads are serialized before entering the platform lock API.
     """
 
     path = os.path.abspath(path)
@@ -66,28 +75,29 @@ def interprocess_lock(path: str):
             held[path][0] -= 1
         return
 
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    with open(path, "a+b") as lock_file:
-        if fcntl is not None:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        else:  # pragma: no cover - exercised on Windows
-            if os.fstat(lock_file.fileno()).st_size == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        held[path] = [1]
-        _LOCK_STATE.held = held
-        try:
-            yield
-        finally:
-            held.pop(path, None)
+    with _process_lock(path):
+        directory = os.path.dirname(path) or "."
+        os.makedirs(directory, exist_ok=True)
+        with open(path, "a+b") as lock_file:
             if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             else:  # pragma: no cover - exercised on Windows
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
                 lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            held[path] = [1]
+            _LOCK_STATE.held = held
+            try:
+                yield
+            finally:
+                held.pop(path, None)
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                else:  # pragma: no cover - exercised on Windows
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 @contextmanager
@@ -109,6 +119,7 @@ def interprocess_read_lock(path: str):
         readers remain safe while losing read/read overlap.
     """
 
+    path = os.path.abspath(path)
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
     with open(path, "a+b") as lock_file:
