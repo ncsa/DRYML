@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 from ..definition import ConcreteDefinition
 from ..object import Object
-from ..policies import CachePolicy, InstancePolicy, RepoLoadOptions
+from ..policies import CachePolicy
 from .model import (
     DefinitionOccurrence,
     QueryCardinalityError,
@@ -148,28 +148,13 @@ class DefinitionResultSet:
             replicas={cdef: merged_replicas.get(cdef, ()) for cdef in kept},
         )
 
-    def objects(
-            self,
-            *,
-            instance: InstancePolicy = "reuse",
-            restore_state: bool = False,
-            reuse_weak: bool = True,
-            cache: CachePolicy = "weak",
-            revision=None,
-            options: RepoLoadOptions | None = None) -> "ObjectResultSet":
+    def objects(self, *, cache: CachePolicy = "weak") -> "ObjectResultSet":
         from dryml.runtime import materialization_admission
 
         """Materialize structural definitions without implicitly selecting state.
 
         Args:
-            instance: Live-instance policy for fresh structural realization.
-            restore_state: Must remain ``False``. Exact restoration requires an
-                explicit StateRef terminal and ``Repo.load_state_ref()``.
-            reuse_weak: Whether weak live candidates may be reused.
             cache: Cache tier selected for constructed objects.
-            revision: Legacy structural state selector. It has no effect while
-                structural restoration is disabled.
-            options: Optional low-level load policy.
 
         Returns:
             Objects built from structural CDefs while preserving Ref/Mat values.
@@ -180,10 +165,6 @@ class DefinitionResultSet:
         """
 
         with materialization_admission(operation="definition_result_set_objects"):
-            if restore_state:
-                raise TypeError(
-                    "Structural query results cannot restore state; load an explicit StateRef instead."
-                )
             if not self.materializable:
                 raise QueryDomainError(f"Definitions from domain {self.domain!r} cannot be materialized directly.")
             objs = {}
@@ -191,16 +172,7 @@ class DefinitionResultSet:
                 replicas = self._replicas.get(cdef, ())
                 if replicas:
                     self.repo.set_object_store(cdef, replicas[0])
-                objs[cdef] = self.repo.load_object(
-                    cdef,
-                    instance=instance,
-                    restore_state=restore_state,
-                    build_missing=False,
-                    reuse_weak=reuse_weak,
-                    cache=cache,
-                    revision=revision,
-                    options=options,
-                )
+                objs[cdef] = self.repo.load_object(cdef, cache=cache)
             return ObjectResultSet(self.repo, objs, domain=self.domain, explanation=self.explanation)
 
     def replicas(self, cdef: ConcreteDefinition) -> tuple[Any, ...]:

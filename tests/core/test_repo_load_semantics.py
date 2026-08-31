@@ -2,7 +2,6 @@ import pytest
 
 from dryml.core import Definition, Object, Repo, Serializable
 from dryml.core.cdef_identity import V2_IDENTITY_VERSION
-from dryml.core.policies import RepoLoadOptions
 from dryml.core.repo import RepoLoadError
 from dryml.core.store.dir import DirStore
 
@@ -26,10 +25,15 @@ class PersistentLoadLeaf(Serializable):
         self.name = name
 
 
-def test_repo_load_requires_exact_concrete_definition(tmp_path):
+def test_repo_load_concretizes_a_definition_before_structural_lookup(tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
-    with pytest.raises(TypeError):
-        repo.load(Definition(LoadLeaf, "x"))
+    saved = LoadLeaf("x", repo=repo)
+    repo.save_object(saved)
+
+    loaded = Repo(stores=DirStore(tmp_path / "store")).load(Definition(LoadLeaf, "x"))
+
+    assert loaded.definition == saved.definition
+    assert loaded.name == "x"
 
 
 def test_load_or_build_concretizes_definition_once(tmp_path):
@@ -57,10 +61,13 @@ def test_load_or_build_does_not_choose_compatible_sibling(tmp_path):
     assert loaded.name == "new"
 
 
-def test_repo_load_is_structural_and_overrides_restore_options(tmp_path):
+def test_repo_load_requires_persisted_structural_authority(tmp_path):
     repo = Repo(stores=DirStore(tmp_path / "store"))
     cdef = Definition(PersistentLoadLeaf, "missing").concretize(repo=repo)
 
-    loaded = repo.load(cdef, options=RepoLoadOptions(build_missing=True))
+    with pytest.raises(RepoLoadError, match="structural CDef"):
+        repo.load(cdef)
+
+    loaded = repo.load_or_build(cdef)
 
     assert loaded.name == "missing"

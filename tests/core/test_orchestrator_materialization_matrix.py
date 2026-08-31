@@ -4,7 +4,6 @@ from dryml import session
 from dryml.core import Definition, Object, Repo
 from dryml.core.canonical import from_canonical
 from dryml.core.materialization import build_materialization_plan, execute_materialization_plan
-from dryml.core.policies import RepoLoadOptions
 from dryml.runtime import materialization_scope
 from dryml.runtime.errors import RuntimeTransitionError
 
@@ -35,7 +34,7 @@ def test_strict_rejects_constructor_cache_and_plan_execution_before_hooks():
     session.set_mode("orchestrator")
 
     plan = build_materialization_plan(
-        repo, live.definition, RepoLoadOptions(restore_state=False)
+        repo, live.definition
     )
     assert plan.actions[live.definition].reuse_source == "cache"
     assert not hasattr(plan.actions[live.definition], "obj")
@@ -45,7 +44,7 @@ def test_strict_rejects_constructor_cache_and_plan_execution_before_hooks():
             lambda: repo.get_cached(live.definition),
             lambda: live.definition.args,
             lambda: from_canonical(live.definition, repo=repo),
-            lambda: execute_materialization_plan(repo, plan, memo={}, revision={}, root=live.definition),
+            lambda: execute_materialization_plan(repo, plan, memo={}, root=live.definition),
     ):
         with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
             call()

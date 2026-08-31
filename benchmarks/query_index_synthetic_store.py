@@ -19,7 +19,7 @@ from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core.store.dir import DirStore
 from dryml.core.symbol import ImportRef
-from dryml.core.utils.general import pickle_save
+from dryml.core.store.records import DefinitionRecord
 
 
 def synthetic_cdef(index: int) -> ConcreteDefinition:
@@ -27,9 +27,9 @@ def synthetic_cdef(index: int) -> ConcreteDefinition:
 
 
 def write_root(store: DirStore, cdef: ConcreteDefinition) -> None:
-    obj_dir = Path(store.object_dir(cdef))
-    obj_dir.mkdir(parents=True, exist_ok=True)
-    pickle_save(cdef, obj_dir / "def.pkl")
+    """Publish one synthetic definition through current immutable authority."""
+
+    store.write_definition_record(DefinitionRecord(cdef))
 
 
 def main() -> None:

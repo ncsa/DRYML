@@ -149,15 +149,15 @@ assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
 from dryml.core import Definition, Repo
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.fingerprint import legacy_target_fingerprint
 from dryml.core.symbol import ImportRef
 
-cdef = ConcreteDefinition._from_persisted_record(
+cdef = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
-    FrozenTuple(()),
-    FrozenDict({"layer_defs": FrozenTuple(())}),
+    BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
 
 repo = Repo()
@@ -180,6 +180,8 @@ import sys
 
 assert "tensorflow" not in sys.modules
 from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.bound_args import BoundArguments
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.symbol import ImportRef
@@ -188,10 +190,9 @@ class FakeStore:
     def catalog_key(self):
         return "fake-tf-store"
 
-cdef = ConcreteDefinition._from_persisted_record(
+cdef = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
-    FrozenTuple(()),
-    FrozenDict({"layer_defs": FrozenTuple(())}),
+    BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
 repo = Repo()
 repo._query_catalog.register_stored(cdef, FakeStore())
@@ -214,6 +215,7 @@ import sys
 
 assert "torch" not in sys.modules
 from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.symbol import ImportRef
@@ -222,10 +224,9 @@ class FakeStore:
     def catalog_key(self):
         return "fake-torch-store"
 
-cdef = ConcreteDefinition._from_persisted_record(
+cdef = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.torch.base", "Sequential"),
-    FrozenTuple(()),
-    FrozenDict({"layer_defs": FrozenTuple(())}),
+    BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
 repo = Repo()
 repo._query_catalog.register_stored(cdef, FakeStore())
@@ -279,6 +280,7 @@ assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
 from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
@@ -286,15 +288,13 @@ from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.symbol import ImportRef
 
-child = ConcreteDefinition._from_persisted_record(
+child = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
-    FrozenTuple(()),
-    FrozenDict({"layer_defs": FrozenTuple(())}),
+    BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
-root = ConcreteDefinition._from_persisted_record(
+root = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.torch.base", "Model"),
-    FrozenTuple(()),
-    FrozenDict({"child": child}),
+    BoundArguments((("child", child),)),
 )
 
 class FakeStore:
@@ -327,6 +327,7 @@ assert "tensorflow" not in sys.modules
 assert "torch" not in sys.modules
 
 from dryml.core import Definition, Repo
+from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
@@ -334,15 +335,13 @@ from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.symbol import ImportRef
 
-child = ConcreteDefinition._from_persisted_record(
+child = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.tf.keras.base", "Sequential"),
-    FrozenTuple(()),
-    FrozenDict({"layer_defs": FrozenTuple(())}),
+    BoundArguments((("layer_defs", FrozenTuple(())),)),
 )
-root = ConcreteDefinition._from_persisted_record(
+root = ConcreteDefinition._from_bound_record(
     ImportRef("dryml.models.torch.base", "Model"),
-    FrozenTuple(()),
-    FrozenDict({"child": child.freeze()}),
+    BoundArguments((("child", child.freeze()),)),
 )
 
 class FakeStore:
@@ -380,6 +379,7 @@ assert "torch" not in sys.modules
 
 from dryml.core import Definition, Repo, SKIP_ARGS
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
@@ -391,8 +391,8 @@ with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     child_cls = ImportRef("dryml.models.tf.keras.base", "Sequential")
     root_cls = ImportRef("dryml.models.tf.base", "Model")
-    child = ConcreteDefinition._from_persisted_record(child_cls, FrozenTuple(()), FrozenDict({"name": "tf-child"}))
-    root = ConcreteDefinition._from_persisted_record(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "tf-root"}))
+    child = ConcreteDefinition._from_bound_record(child_cls, BoundArguments((("name", "tf-child"),)))
+    root = ConcreteDefinition._from_bound_record(root_cls, BoundArguments((("child", child), ("name", "tf-root"))))
     index = SQLiteStoreQueryIndex(
         source_key=store.catalog_key(),
         path=store.query_index_path,
@@ -429,6 +429,7 @@ from pathlib import Path
 
 assert "tensorflow" not in sys.modules
 from dryml.core import Definition, Repo, SKIP_ARGS
+from dryml.core.bound_args import BoundArguments
 from dryml.core.bound_args import BoundArguments
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.definition import ConcreteDefinition
@@ -594,6 +595,7 @@ assert "torch" not in sys.modules
 
 from dryml.core import Definition, Repo, SKIP_ARGS
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
@@ -605,8 +607,8 @@ with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     child_cls = ImportRef("dryml.models.torch.base", "Wrapper")
     root_cls = ImportRef("dryml.models.torch.base", "Model")
-    child = ConcreteDefinition._from_persisted_record(child_cls, FrozenTuple(()), FrozenDict({"name": "torch-child"}))
-    root = ConcreteDefinition._from_persisted_record(root_cls, FrozenTuple(()), FrozenDict({"child": child, "name": "torch-root"}))
+    child = ConcreteDefinition._from_bound_record(child_cls, BoundArguments((("name", "torch-child"),)))
+    root = ConcreteDefinition._from_bound_record(root_cls, BoundArguments((("child", child), ("name", "torch-root"))))
     index = SQLiteStoreQueryIndex(
         source_key=store.catalog_key(),
         path=store.query_index_path,
@@ -654,7 +656,7 @@ obj = Definition(
     ImportRef("tensorflow.keras.layers", "Dense"),
     1,
     input_shape=(1,),
-).build(restore_state=False, build_missing=True, cache="none")
+).build(cache="none")
 
 assert obj is not None
 assert "tensorflow" in sys.modules
@@ -682,7 +684,7 @@ obj = Definition(
     ImportRef("torch.nn", "Linear"),
     1,
     1,
-).build(restore_state=False, build_missing=True, cache="none")
+).build(cache="none")
 
 assert obj is not None
 assert "torch" in sys.modules

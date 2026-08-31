@@ -17,7 +17,7 @@ from .canonical import NodeKind, is_runtime_leaf, node_kind
 from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
 from .definition import ConcreteDefinition, Definition
 from .object import Object, Serializable
-from .policies import RepoGraphOptions, RepoLoadOptions
+from .policies import RepoGraphOptions
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 from .utils.graph.path import Parameter
@@ -228,7 +228,7 @@ def build_runtime_binding(
                 break
         if node.definition in objects:
             continue
-        obj = _cached_object(repo, node.definition, reuse_weak=True, resolve_global=resolve_global)
+        obj = _cached_object(repo, node.definition, resolve_global=resolve_global)
         if obj is not None:
             path = _node_primary_path(graph, roots, node.definition)
             bind_runtime_object(objects, node.definition, obj, path=path)
@@ -290,33 +290,23 @@ def attach_runtime_binding(
             bindings[occurrence.definition] = candidate
 
     runtime_values: dict[GraphPath, Any] = {GraphPath(): obj}
-    if cdef.identity_version == 1:
-        from .utils.graph.path import Arg, Kwarg
-
-        args = from_canonical(cdef.args, repo=repo, resolve_cdef=lambda child: bindings[child])
-        kwargs = from_canonical(cdef.kwargs, repo=repo, resolve_cdef=lambda child: bindings[child])
-        for index, value in enumerate(cdef.args):
-            _record_runtime_values(value, args[index], GraphPath((Arg(index),)), runtime_values)
-        for name, value in cdef.kwargs.items():
-            _record_runtime_values(value, kwargs[name], GraphPath((Kwarg(name),)), runtime_values)
-    else:
-        projection = runtime_parameters or from_canonical(
-            cdef.parameters,
-            repo=repo,
-            resolve_cdef=lambda child: bindings[child],
-        )
-        for name, canonical_value in cdef.parameters.items():
-            runtime_value = projection.get(name)
-            if name not in projection:
-                runtime_value = from_canonical(
-                    canonical_value, repo=repo,
-                    resolve_cdef=lambda child: bindings[child],
-                )
-            _record_runtime_values(
-                canonical_value, runtime_value,
-                GraphPath((Parameter(name),)),
-                runtime_values,
+    projection = runtime_parameters or from_canonical(
+        cdef.parameters,
+        repo=repo,
+        resolve_cdef=lambda child: bindings[child],
+    )
+    for name, canonical_value in cdef.parameters.items():
+        runtime_value = projection.get(name)
+        if name not in projection:
+            runtime_value = from_canonical(
+                canonical_value, repo=repo,
+                resolve_cdef=lambda child: bindings[child],
             )
+        _record_runtime_values(
+            canonical_value, runtime_value,
+            GraphPath((Parameter(name),)),
+            runtime_values,
+        )
     for occurrence in graph.iter_occurrences(include_roots=True):
         bound = bindings.get(occurrence.definition)
         if bound is not None:
@@ -337,7 +327,7 @@ def attach_runtime_binding(
         path = GraphPath() if node.definition is cdef else graph.primary_path(cdef, node.definition)
         object_ids[path] = object_id
 
-    for name, value in cdef.parameters.items() if cdef.identity_version != 1 else ():
+    for name, value in cdef.parameters.items():
         _collect_imported_object_ids(value, GraphPath((Parameter(name),)), object_ids)
 
     obj._realization_scope = current_realization_scope()
@@ -346,7 +336,7 @@ def attach_runtime_binding(
     obj._store_affinity = repo.obj_default_store.get(cdef)
     obj._last_state_hash = getattr(obj, "_last_state_hash", None)
     obj._object_id = getattr(obj, "_object_id", None) if isinstance(obj, Serializable) else None
-    obj._object_ref = ObjectRef(cdef, object_ids) if cdef.identity_version != 1 else None
+    obj._object_ref = ObjectRef(cdef, object_ids)
 
 
 def _collect_imported_object_ids(value: Any, path: GraphPath, out: dict) -> None:
@@ -542,7 +532,7 @@ def _iter_bound_graph_object_occurrences(
     def visit(cdef: ConcreteDefinition, path: GraphPath, explicit_obj: Object | None = None) -> None:
         obj = explicit_obj if explicit_obj is not None else binding.objects.get(cdef)
         if obj is None and resolve_global:
-            obj = _cached_object(repo, cdef, reuse_weak=options.load.reuse_weak, resolve_global=True)
+            obj = _cached_object(repo, cdef, resolve_global=True)
         if obj is None:
             obj = _resolve_missing_for_traversal(repo, cdef, path, options, load_memo)
             if obj is None:
@@ -600,7 +590,7 @@ def add_objects(repo, values: Iterable[Any], *, store=None) -> None:
                 resolve_global=True):
             _add_object_single(repo, obj, store=store)
         for missing in binding.missing:
-            if _cached_object(repo, missing, reuse_weak=True, resolve_global=True) is None:
+            if _cached_object(repo, missing, resolve_global=True) is None:
                 raise KeyError(f"No object linked to definition {missing} found in repo!")
 
 
@@ -998,14 +988,14 @@ def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]
     raise RepoGraphError(f"Unexpected object of type {type(value).__name__} at {path.legacy_str()}!")
 
 
-def _cached_object(repo, cdef: ConcreteDefinition, *, reuse_weak: bool, resolve_global: bool = False) -> Object | None:
+def _cached_object(repo, cdef: ConcreteDefinition, *, resolve_global: bool = False) -> Object | None:
     """Return one unambiguous candidate from the explicitly supplied Repo.
 
     ``resolve_global`` remains an ignored compatibility argument while callers
     migrate; no process-global Repo exists to consult.
     """
 
-    return repo.get_cached(cdef, reuse_weak=reuse_weak)
+    return repo.get_cached(cdef)
 
 
 def _resolve_missing_for_traversal(
@@ -1014,18 +1004,13 @@ def _resolve_missing_for_traversal(
         path: GraphPath,
         options: RepoGraphOptions,
         load_memo: dict[ConcreteDefinition, Object]) -> Object | None:
-    obj = repo.get_cached(cdef, reuse_weak=options.load.reuse_weak)
+    obj = repo.get_cached(cdef)
     if obj is not None:
         return obj
     if options.missing == "skip":
         return None
     if options.missing == "load":
-        return repo._materialize_cdef(
-            cdef,
-            options=options.load,
-            memo=load_memo,
-            path=list(path.legacy_tuple()),
-        )
+        return repo._materialize_cdef(cdef, memo=load_memo, path=list(path.legacy_tuple()))
     from .repo import RepoGraphError
 
     raise RepoGraphError(

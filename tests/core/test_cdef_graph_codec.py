@@ -143,7 +143,7 @@ def test_recorded_role_mismatch_fails_before_constructor_execution():
     mismatched = decode_cdef_graph(encoded)
 
     with pytest.raises(Exception, match="stateful role mismatch"):
-        mismatched.build(repo=Repo(), restore_state=False)
+        mismatched.build(repo=Repo())
 
 
 def test_graph_authority_inspection_never_resolves_symbols(monkeypatch):
@@ -172,4 +172,4 @@ def test_v2_pickle_round_trip_preserves_stateful_role_authority():
     restored = pickle.loads(pickle.dumps(root))
 
     assert encode_cdef_graph(restored)["nodes"][0]["stateful_role"] is True
-    restored.build(repo=Repo(), restore_state=False)
+    restored.build(repo=Repo())

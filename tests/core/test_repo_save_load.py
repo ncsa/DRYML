@@ -200,7 +200,7 @@ def test_structural_load_without_state_restore_builds_from_definition_authority(
     saved.value = 20
     repo.save_object(saved)
 
-    loaded = Repo(DirStore(store.base_dir)).load_object(saved.definition, restore_state=False)
+    loaded = Repo(DirStore(store.base_dir)).load_object(saved.definition)
 
     assert isinstance(loaded, RestoreValue)
     assert loaded.value == 10
@@ -246,7 +246,7 @@ def test_u7_exact_state_ref_restores_published_local_state(tmp_path):
     saved.value = 20
     state = repo.save_object(saved)
 
-    loaded = Repo(DirStore(store.base_dir)).load_object(state)
+    loaded = Repo(DirStore(store.base_dir)).load_state_ref(state, reuse_live="never")
 
     assert loaded.value == 20
 
@@ -260,7 +260,7 @@ def test_u7_exact_state_ref_restores_nested_independent_local_states(tmp_path):
     second.value = 20
     state = repo.save_object(SaveLoadNode([SaveLoadNode(first, repo=repo), second], repo=repo))
 
-    loaded = Repo(DirStore(store.base_dir)).load_object(state)
+    loaded = Repo(DirStore(store.base_dir)).load_state_ref(state, reuse_live="never")
 
     assert loaded.children[0].children.value == 10
     assert loaded.children[1].value == 20
@@ -274,8 +274,8 @@ def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp
     state = repo.save_object(SaveLoadNode([child, child], repo=repo))
     reopened = Repo(DirStore(store.base_dir))
 
-    first = reopened.load_object(state)
-    second = reopened.load_object(state)
+    first = reopened.load_state_ref(state)
+    second = reopened.load_state_ref(state)
 
     assert first.children[0] is first.children[1]
     assert first.children[0].value == 20

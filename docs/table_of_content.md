@@ -10,7 +10,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 2. [Objects and Definitions](objects_and_defs.md)
 3. [Immutable Definition Graph](immutable_definition_graph.md)
 4. [Graph Querying](graph_querying.md)
-5. [V1.1 Formats](formats.md)
+5. [Formats](formats.md)
 6. [Environments](environments.md)
 7. [World And Runtime](world_runtime.md)
 8. [Sessions](session.md)
@@ -28,7 +28,7 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 
 - DRYML programs are built from object graphs.
 - A `Definition` is a deferred construction recipe.
-- A `ConcreteDefinition` is a fully bound, versioned exact identity for an object; new identities use V2 semantic parameters.
+- A `ConcreteDefinition` is a fully bound V2 structural identity; graph topology is available through graph equality/hash.
 - `Ref` records a non-materializing exact or selector reference in a definition graph.
 - An environment record describes observed Python/software facts without changing object identity.
 - Explicit annotations declare environment, world, and runtime requirements without activation.
@@ -36,7 +36,8 @@ This documentation is the user-facing guide to DRYML. It complements API docstri
 - `dryml.session` publishes persistent `python`, `managed`, or definition-only `orchestrator` state.
 - An `Object` is the runtime instance associated with a concrete definition.
 - A `Repo` manages live objects, persistent stores, aliases, queries, saves, and loads.
-- A `Store` owns persisted object state.
+- `ObjectRef` adds durable ObjectId lineage and `StateRef` adds immutable snapshots.
+- A `Store` owns immutable graph records and local checkpoint state.
 - A `TensorSpec` describes tensor-like values independently from a specific ML backend.
 - A `Context` describes runtime resource and backend compatibility constraints.
 - `Dataset`, `Model`, and `Artifact` are higher-level APIs built on the core object/repo system.

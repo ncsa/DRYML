@@ -12,10 +12,10 @@ class SessionThing(Serializable):
         super().__init__()
         self.value = value
 
-    def save_state_to_dir_imp(self, dest_dir, revision=None):
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
         pickle_save(self.value, f"{dest_dir}/value.pkl")
 
-    def restore_state_from_dir_imp(self, src_dir, revision=None):
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
         self.value = pickle_load(f"{src_dir}/value.pkl")
 
 
@@ -69,7 +69,7 @@ def test_definition_mode_false_forces_fresh_inside_definition_mode():
     assert obj.value == 1
 
 
-def test_load_or_build_constructor_restores_saved_state(tmp_path):
+def test_load_or_build_constructor_uses_saved_structure_not_state(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = SessionThing(1, repo=repo)
@@ -80,7 +80,7 @@ def test_load_or_build_constructor_restores_saved_state(tmp_path):
     dryml.configure(repo=repo, object_mode="load_or_build", cache="strong")
     loaded = SessionThing(1)
 
-    assert loaded.value == 99
+    assert loaded.value == 1
     assert repo.strong_obj_cache[loaded.definition] is loaded
 
 
@@ -108,15 +108,15 @@ def test_fresh_context_does_not_load_root_object(tmp_path):
     assert fresh.value == 1
 
 
-def test_repo_load_or_build_restores_existing_state(tmp_path):
+def test_exact_state_ref_load_restores_existing_state(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     obj = SessionThing(1, repo=repo)
     obj.value = 42
-    repo.save_object(obj)
+    state = repo.save_object(obj)
     repo.close(flush=True)
 
     repo2 = Repo(stores=DirStore(store.base_dir))
-    loaded = repo2.load_or_build(obj.definition)
+    loaded = repo2.load_state_ref(state, reuse_live="never")
 
     assert loaded.value == 42

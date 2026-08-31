@@ -48,19 +48,23 @@ def test_v2_semantic_paths_resolve_without_class_projection():
     assert root.parameters["model"] == leaf
 
 
-def test_v1_keywords_and_v2_parameters_resolve_in_their_own_path_domains():
-    leaf = ConcreteDefinition._from_persisted_record(objects.TestClass1, (10,), {"test": "leaf"})
-    legacy = ConcreteDefinition._from_persisted_record(objects.TestNest3, (), {"model": leaf})
+def test_v2_parameters_reject_legacy_keyword_paths_and_raw_call_records():
+    leaf = ConcreteDefinition._from_persisted_record(
+        objects.TestClass1,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("value", 10), ("test", "leaf"))),
+    )
     semantic = ConcreteDefinition._from_persisted_record(
         objects.TestNest3,
         identity_version=V2_IDENTITY_VERSION,
         parameters=BoundArguments((("model", leaf),)),
     )
 
-    assert legacy.graph_path(DefinitionPath((Kwarg("model"),))) == leaf
     assert semantic.graph_path(DefinitionPath((Parameter("model"),))) == leaf
     with pytest.raises(QueryPathError):
         semantic.graph_path(DefinitionPath((Kwarg("model"),)))
+    with pytest.raises(TypeError):
+        ConcreteDefinition._from_persisted_record(objects.TestNest3, (), {"model": leaf})
 
 
 def test_v2_variadic_buckets_use_parameter_then_container_paths():
@@ -178,11 +182,7 @@ def test_original_path_translates_each_nested_v2_cdef_boundary(operation):
 
 def test_restore_frozen_list_branch_preserves_query_soundness():
     repo = Repo()
-    source = ConcreteDefinition._from_persisted_record(
-        objects.TestNest3,
-        (),
-        {"items": [1, 2]},
-    )
+    source = Definition(objects.TestNest3, items=[1, 2]).concretize(repo=repo)
     match = objects.TestNest3(items=[1, 2], repo=repo)
     other = objects.TestNest3(items=[1, 3], repo=repo)
     repo.add_objects(match, other)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Mapping
 
 from .backend import BackendBase, InlineBackend, LocalProcessBackend
-from .transfer import prepare_call, restore_result, restore_updates, update_cdefs
+from .transfer import prepare_call
 
 
 class ExecutionOrchestrator:
@@ -35,6 +35,13 @@ class ExecutionOrchestrator:
             env: Mapping[str, str] | None = None,
             **kwargs):
         from .future import OrchestratedFuture
+        from .protocol import UnsupportedReferenceTransportError
+
+        if update not in (None, False):
+            raise UnsupportedReferenceTransportError(
+                "Execution update transport is retired because it mutates current state; "
+                "publish and load an exact StateRef instead."
+            )
 
         prepared = prepare_call(
             args,
@@ -43,8 +50,6 @@ class ExecutionOrchestrator:
             transfer_store=transfer_store,
             result_store=result_store,
         )
-        cdefs_to_update = update_cdefs(update)
-
         from .protocol import ExecutionRequest
         request = ExecutionRequest.build(
             fn,
@@ -53,7 +58,7 @@ class ExecutionOrchestrator:
             transfer_store=prepared.transfer_store,
             result_store=prepared.result_store,
             context_reqs=requirements,
-            update_cdefs=cdefs_to_update,
+            update_cdefs=(),
         )
 
         backend_obj = self.backend(backend)

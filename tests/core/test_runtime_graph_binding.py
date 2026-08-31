@@ -25,7 +25,7 @@ def test_runtime_binding_retains_supplied_object_and_defensive_values():
 
     assert parent.graph_at(parent.definition.graph_path("$") and "$") is parent
     assert parent.graph_at('$[@param("child")]') is child
-    assert parent.graph_at('$[@param("values")]') == {"source": [1]}
+    assert parent.graph_at('$[@param("values")]') == {"source": [1], "changed": True}
     assert parent.graph_at('$[@param("values")]') is not parent.graph_at('$[@param("values")]')
     assert parent.object_id is not None
     assert child.object_id is None

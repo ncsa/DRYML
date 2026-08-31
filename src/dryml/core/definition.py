@@ -12,7 +12,6 @@ from typing import Any, Callable, Iterator
 
 from .utils.stable_hash import stable_int_hash, stable_hash_function
 from .cdef_identity import (
-    V1_IDENTITY_VERSION,
     V2_IDENTITY_VERSION,
     new_node_id,
     decode_identity_record,
@@ -24,7 +23,7 @@ from .utils.graph import GraphCtx, GraphTransformer, GraphMatcher
 from .types import is_pod
 from .freeze import FrozenDict, FrozenTuple
 from .errors import PathAccessError
-from .policies import InstancePolicy, CachePolicy
+from .policies import CachePolicy
 from .canonical import (
     to_canonical,
     thaw_value,
@@ -82,29 +81,17 @@ class DefInterface(ABC):
     def build(
             self, *,
             repo: "Repo | None" = None,
-            instance: "InstancePolicy" = "reuse",
-            restore_state: bool = True,
-            build_missing: bool =True,
-            reuse_weak: bool = True,
-            cache: "CachePolicy" = "weak",
-            revision: "str | None" = None) -> Object:
-        """Load or materialize this definition through a repository.
+            cache: "CachePolicy" = "weak") -> Object:
+        """Freshly materialize this structural definition through a repository.
 
         Args:
             repo: Repository used to resolve links and persisted objects.
-            instance: Instance reuse policy passed to the repository loader.
-            restore_state: Whether to restore saved object state when loading.
-            build_missing: Whether a missing exact definition may be built.
-            reuse_weak: Whether weakly cached instances may be reused.
             cache: Cache policy for the resulting object.
-            revision: Optional saved-state revision to restore.
 
         Returns:
             The loaded or newly materialized runtime object.
 
         Raises:
-            KeyError: If loading is requested but no matching persisted object
-                is available.
             TypeError: If this definition cannot be concretized or materialized.
 
         Side Effects:
@@ -118,15 +105,8 @@ class DefInterface(ABC):
         with materialization_admission(operation="definition_build"):
             with manage_repo(repo=repo) as sub_repo:
                 concrete_def = self.concretize(repo=sub_repo)
-                loader = sub_repo.load_or_build if build_missing else sub_repo.load
                 with _construction_config():
-                    return loader(
-                        concrete_def,
-                        instance=instance,
-                        restore_state=restore_state,
-                        reuse_weak=reuse_weak,
-                        cache=cache,
-                        revision=revision)
+                    return sub_repo.load_or_build(concrete_def, cache=cache)
 
     def match(self, other_def, *, strict: bool=False, verbose: bool=False, **sel_kwargs) -> bool:
         """Test this definition against another definition using selector rules.
@@ -520,17 +500,16 @@ class DefinitionLens:
 class ConcreteDefinition(DefInterface, Mapping):
     """Immutable exact canonical identity for a materializable object.
 
-    New instances are V2 identities: they persist a fully bound immutable
+    CDef V2 identities persist a fully bound immutable
     ``parameters`` name/value record, including declared defaults. Equivalent
-    positional and keyword calls therefore have one identity. V1 records remain
-    readable as legacy exact identities with raw ``args`` and ``kwargs``; V1 and
-    V2 records are never exact-equal and are not transparently migrated.
+    positional and keyword calls therefore have one identity. Pre-V2 authority
+    is rejected before it can construct a CDef.
 
     Semantic inspection through attributes, ``parameters``, ``graph_path()``,
     hashing, and graph/query processing reads the stored record without class
     resolution. Existing API names win attribute collisions; use
     ``parameters[name]`` for every V2 constructor name. ``args`` and ``kwargs``
-    are compatibility call projections for V2 only, not identity or inspection
+    are call projections, not identity or structural inspection
     surfaces, and can resolve/import the current class.
 
     Args:
@@ -546,8 +525,8 @@ class ConcreteDefinition(DefInterface, Mapping):
     _args: FrozenTuple[Any, ...] = field(default_factory=lambda: FrozenTuple())
     _kwargs: FrozenDict[str, Any] = field(default_factory=lambda: FrozenDict({}))
     _stable_hash_cache: str | None = field(default=None, init=False, repr=False, compare=False, hash=False)
-    _identity_version: int = field(default=V1_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
-    _bound_args: BoundArguments | None = field(default=None, init=False, repr=False, compare=False, hash=False)
+    _identity_version: int = field(default=V2_IDENTITY_VERSION, init=False, repr=False, compare=False, hash=False)
+    _bound_args: BoundArguments = field(init=False, repr=False, compare=False, hash=False)
     _node_id: object = field(default_factory=new_node_id, init=False, repr=False, compare=False, hash=False)
     _stateful_role: bool = field(default=False, init=False, repr=False, compare=False, hash=False)
 
@@ -563,8 +542,7 @@ class ConcreteDefinition(DefInterface, Mapping):
             TypeError: If the class or call cannot be prepared, fully bound, or
                 canonicalized into a V2 identity.
 
-        Direct construction is a convenience V2 factory. Persisted V1 call
-        surfaces are admitted only through the private hydration constructor.
+        Direct construction is a V2 factory.
         """
 
         from .canonical import to_canonical
@@ -575,38 +553,6 @@ class ConcreteDefinition(DefInterface, Mapping):
             raise TypeError("ConcreteDefinition kwargs must be a mapping.")
         result = to_canonical(Definition(cdef_cls, *args, **dict(kwargs)))
         self._copy_record(result)
-
-    @classmethod
-    def _new_raw_record(cls, cdef_cls, args, kwargs) -> "ConcreteDefinition":
-        """Allocate a private raw V1 record after canonical validation."""
-
-        result = object.__new__(cls)
-        object.__setattr__(result, "cls", cdef_cls)
-        object.__setattr__(result, "_args", args if isinstance(args, FrozenTuple) else FrozenTuple(args))
-        object.__setattr__(result, "_kwargs", kwargs if isinstance(kwargs, FrozenDict) else FrozenDict(kwargs))
-        result._freeze_raw_call_surface()
-        object.__setattr__(result, "_stable_hash_cache", None)
-        object.__setattr__(result, "_identity_version", V1_IDENTITY_VERSION)
-        object.__setattr__(result, "_bound_args", None)
-        object.__setattr__(result, "_node_id", new_node_id())
-        object.__setattr__(result, "_stateful_role", False)
-        return result
-
-    def _freeze_raw_call_surface(self) -> None:
-        from .canonical import freeze_concrete_value
-
-        args = self._args if isinstance(self._args, FrozenTuple) else FrozenTuple(self._args)
-        kwargs = self._kwargs if isinstance(self._kwargs, FrozenDict) else FrozenDict(self._kwargs)
-        object.__setattr__(
-            self,
-            "_args",
-            FrozenTuple(freeze_concrete_value(v, path=("args", i)) for i, v in enumerate(args)),
-        )
-        object.__setattr__(
-            self,
-            "_kwargs",
-            FrozenDict({k: freeze_concrete_value(v, path=("kwargs", k)) for k, v in kwargs.items()}),
-        )
 
     def _copy_record(self, record: "ConcreteDefinition") -> None:
         """Populate this shell from a private, already-validated identity."""
@@ -624,14 +570,11 @@ class ConcreteDefinition(DefInterface, Mapping):
     def args(self) -> FrozenTuple[Any, ...]:
         """Return the compatibility positional call surface.
 
-        V1 records return their persisted raw positional values. V2 records
-        resolve the current class and project their persisted semantic record;
+        The accessor resolves the current class and projects the persisted semantic record;
         this accessor can therefore import a backend or raise a current
         signature error and is not an identity or inspection surface.
         """
 
-        if self._bound_args is None:
-            return self._args
         from .materialization import project_cdef_call
 
         args, _ = project_cdef_call(self)
@@ -641,13 +584,10 @@ class ConcreteDefinition(DefInterface, Mapping):
     def kwargs(self) -> FrozenDict[str, Any]:
         """Return the compatibility keyword call surface.
 
-        V1 records return their persisted raw keyword values. V2 records use
-        the same current-signature projection as materialization and may
+        The accessor uses the current-signature projection as materialization and may
         resolve or import the referenced class.
         """
 
-        if self._bound_args is None:
-            return self._kwargs
         from .materialization import project_cdef_call
 
         _, kwargs = project_cdef_call(self)
@@ -661,18 +601,13 @@ class ConcreteDefinition(DefInterface, Mapping):
 
     @property
     def parameters(self) -> FrozenDict[str, Any]:
-        """Return this V2 CDef's immutable persisted semantic record.
+        """Return this CDef's immutable persisted semantic record.
 
         Returns:
             The canonical parameter-name/value mapping persisted with a V2
             CDef. Values are returned without resolving the CDef class.
 
-        Raises:
-            AttributeError: If this legacy V1 CDef has only raw call fields.
         """
-
-        if self._bound_args is None:
-            raise AttributeError("V1 ConcreteDefinition records have no semantic parameters.")
         return self._bound_args.as_frozen_dict()
 
     def __getattr__(self, name: str) -> Any:
@@ -685,55 +620,29 @@ class ConcreteDefinition(DefInterface, Mapping):
             The canonical persisted value for ``name``.
 
         Raises:
-            AttributeError: If this is a V1 record or ``name`` is not an
-                effective V2 parameter.
+            AttributeError: If ``name`` is not an effective V2 parameter.
         """
 
-        if self._bound_args is not None:
-            try:
-                return self._bound_args[name]
-            except KeyError:
-                pass
+        try:
+            return self._bound_args[name]
+        except KeyError:
+            pass
         raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
     @classmethod
     def _from_persisted_record(
             cls,
             cdef_cls,
-            args=None,
-            kwargs=None,
             *,
-            identity_version: int = V1_IDENTITY_VERSION,
-            parameters: BoundArguments | None = None,
+            identity_version: int,
+            parameters: BoundArguments,
             stateful_role: bool | None = None,
             stable_hash_cache: str | None = None) -> "ConcreteDefinition":
-        """Hydrate a validated identity record without public canonicalization.
+        """Hydrate validated V2 authority without class resolution."""
 
-        This internal boundary is intentionally limited to persisted records
-        and compatibility fixtures. Public exact construction always binds a
-        live call through the V2 pipeline.
-        """
-
-        if identity_version == V2_IDENTITY_VERSION:
-            if parameters is None:
-                raise ValueError("V2 CDef records require bound parameters.")
-            if args is not None or kwargs is not None:
-                raise ValueError("V2 CDef records cannot contain legacy args or kwargs.")
-            result = cls._from_bound_record(
-                cdef_cls,
-                parameters,
-                stateful_role=stateful_role,
-            )
-        elif parameters is not None:
-            raise ValueError("Bound CDef records require V2 identity version.")
-        else:
-            result = cls._new_raw_record(
-                cdef_cls,
-                () if args is None else args,
-                {} if kwargs is None else kwargs,
-            )
-        object.__setattr__(result, "_identity_version", validate_identity_version(identity_version))
-        if identity_version == V2_IDENTITY_VERSION and stable_hash_cache is not None:
+        validate_identity_version(identity_version)
+        result = cls._from_bound_record(cdef_cls, parameters, stateful_role=stateful_role)
+        if stable_hash_cache is not None:
             computed_hash = stable_hash_function(
                 result,
                 reuse_validated_cdef_hashes=True,
@@ -773,7 +682,12 @@ class ConcreteDefinition(DefInterface, Mapping):
             stateful_role = isinstance(cdef_cls, type) and issubclass(cdef_cls, Serializable)
         if type(stateful_role) is not bool:
             raise TypeError("CDef stateful role must be a bool.")
-        result = cls._new_raw_record(cdef_cls, (), {})
+        result = object.__new__(cls)
+        object.__setattr__(result, "cls", cdef_cls)
+        object.__setattr__(result, "_args", FrozenTuple())
+        object.__setattr__(result, "_kwargs", FrozenDict({}))
+        object.__setattr__(result, "_stable_hash_cache", None)
+        object.__setattr__(result, "_node_id", new_node_id())
         object.__setattr__(result, "_bound_args", bound_args)
         object.__setattr__(result, "_identity_version", V2_IDENTITY_VERSION)
         object.__setattr__(result, "_stateful_role", stateful_role)
@@ -791,34 +705,22 @@ class ConcreteDefinition(DefInterface, Mapping):
         return value
 
     def _pickle_getstate(self):
-        """Serialize V1 in its legacy slotted layout and V2 as a named record."""
+        """Serialize one named V2 identity record."""
 
-        if self.identity_version == V1_IDENTITY_VERSION:
-            return [self.cls, self._args, self._kwargs, self._stable_hash_cache]
-        if self._bound_args is not None:
-            return {
-                "identity_version": self.identity_version,
-                "cls": self.cls,
-                "parameters": self._bound_args.as_frozen_dict(),
-                "stateful_role": self._stateful_role,
-                "stable_hash_cache": self._stable_hash_cache,
-            }
         return {
             "identity_version": self.identity_version,
             "cls": self.cls,
-            "args": self._args,
-            "kwargs": self._kwargs,
+            "parameters": self._bound_args.as_frozen_dict(),
+            "stateful_role": self._stateful_role,
             "stable_hash_cache": self._stable_hash_cache,
         }
 
     def _pickle_setstate(self, state):
-        """Restore legacy or versioned records without resolving or binding classes."""
+        """Restore only a V2 record without resolving or binding classes."""
 
         record = decode_identity_record(state)
         restored = type(self)._from_persisted_record(
             record.cls,
-            record.args,
-            record.kwargs,
             identity_version=record.version,
             parameters=record.parameters,
             stateful_role=record.stateful_role,
@@ -827,70 +729,46 @@ class ConcreteDefinition(DefInterface, Mapping):
         self._copy_record(restored)
 
     def __getitem__(self, k: str) -> Any:
-        """Return a version-specific immutable record field by name.
+        """Return an immutable V2 record field by name.
 
         Args:
-            k: ``"cls"`` plus ``"parameters"`` for V2, or ``"args"`` and
-                ``"kwargs"`` for V1.
+            k: ``"cls"`` or ``"parameters"``.
 
         Returns:
             The stored canonical record field.
 
         Raises:
-            KeyError: If ``k`` is unavailable for this identity version.
+            KeyError: If ``k`` is not a V2 record field.
         """
         if k == "cls": return self.cls
-        if k == "parameters" and self._bound_args is not None: return self.parameters
-        if k == "args" and self._bound_args is None: return self._args
-        if k == "kwargs" and self._bound_args is None: return self._kwargs
+        if k == "parameters": return self.parameters
         raise KeyError(k)
 
     def __iter__(self) -> Iterator[str]:
-        if self._bound_args is not None:
-            yield from ("cls", "parameters")
-            return
-        yield from ("cls", "args", "kwargs")
+        yield from ("cls", "parameters")
 
     def __len__(self) -> int:
-        if self._bound_args is not None:
-            return 2
-        return 3
+        return 2
 
     def __repr__(self):
-        if self._bound_args is not None:
-            from .cdef_codec import render_cdef_repr
+        from .cdef_codec import render_cdef_repr
 
-            return render_cdef_repr(self)
-        arg_elements = []
-        arg_str = ""
-        arg_elements.append(f"{self.cls}")
-        for arg in self.args:
-            arg_elements.append(arg)
-        for key, v in self.kwargs.items():
-            arg_elements.append(f"{key}={v}")
-        arg_str = ", ".join(map(str, arg_elements))
-        return f"{type(self).__name__}({arg_str})"
+        return render_cdef_repr(self)
 
     def __eq__(self, rhs):
         if type(self) is not type(rhs):
             return False
-        if self.identity_version != rhs.identity_version:
-            return False
-        if self._bound_args is not None or rhs._bound_args is not None:
-            left_parameters = self._bound_args.as_frozen_dict() if self._bound_args is not None else None
-            right_parameters = rhs._bound_args.as_frozen_dict() if rhs._bound_args is not None else None
-            return (
-                left_parameters is not None
-                and right_parameters is not None
-                and _structural_value_equal(self.cls, rhs.cls)
-                and len(left_parameters) == len(right_parameters)
-                and all(
-                    key in right_parameters
-                    and _structural_value_equal(value, right_parameters[key])
-                    for key, value in left_parameters.items()
-                )
+        left_parameters = self.parameters
+        right_parameters = rhs.parameters
+        return (
+            _structural_value_equal(self.cls, rhs.cls)
+            and len(left_parameters) == len(right_parameters)
+            and all(
+                key in right_parameters
+                and _structural_value_equal(value, right_parameters[key])
+                for key, value in left_parameters.items()
             )
-        return _structural_value_equal(self.cls, rhs.cls) and _structural_value_equal(self._args, rhs._args) and _structural_value_equal(self._kwargs, rhs._kwargs)
+        )
 
     def __ne__(self, rhs):
         return not self.__eq__(rhs)
@@ -1003,19 +881,18 @@ class ConcreteDefinition(DefInterface, Mapping):
         return self
 
     def graph_path(self, path: Any = "$") -> Any:
-        """Resolve a version-aware graph path without materializing this CDef.
+        """Resolve a V2 semantic graph path without materializing this CDef.
 
         Args:
-            path: A typed ``GraphPath`` or textual graph path. V1 records use
-                legacy ``Arg`` and ``Kwarg`` segments; V2 records require
-                semantic ``Parameter`` segments.
+            path: A typed ``GraphPath`` or textual graph path using semantic
+                ``Parameter`` segments.
 
         Returns:
             The canonical value addressed by ``path``.
 
         Raises:
             QueryPathError: If the path is malformed or cannot be resolved
-                under this CDef's identity-version path semantics.
+            under V2 semantic path rules.
         """
 
         from .utils.graph.value import get_subtree

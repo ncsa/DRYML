@@ -14,7 +14,7 @@ from .freeze import (
 )
 from .types import is_pod
 from .utils.graph import GraphCtx, GraphTransformer
-from .policies import RepoLoadOptions
+from .policies import CachePolicy
 from .errors import CannotConcretizeParameterizedDefinition, CannotConcretizeSelectorReference, CycleError
 from .cdef_identity import V2_IDENTITY_VERSION
 
@@ -846,9 +846,9 @@ class _ThawValueTransformer(GraphTransformer):
 
 
 class _FromCanonicalTransformer(GraphTransformer):
-    def __init__(self, repo: "Repo", config: RepoLoadOptions, *, resolve_cdef=None, resolve_reference=None):
+    def __init__(self, repo: "Repo", cache: CachePolicy, *, resolve_cdef=None, resolve_reference=None):
         self.repo = repo
-        self.config = config
+        self.cache = cache
         self.resolve_cdef = resolve_cdef
         self.resolve_reference = resolve_reference
 
@@ -897,7 +897,7 @@ class _FromCanonicalTransformer(GraphTransformer):
                 return self.resolve_cdef(obj)
             return self.repo._materialize_cdef(
                 obj,
-                options=self.config,
+                cache=self.cache,
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
@@ -914,7 +914,7 @@ class _FromCanonicalTransformer(GraphTransformer):
             reference = obj.object if isinstance(obj, StateRef) else obj
             realized = self.repo._materialize_cdef(
                 reference.definition,
-                options=self.config,
+                cache=self.cache,
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
@@ -936,7 +936,7 @@ class _FromCanonicalTransformer(GraphTransformer):
                 return self.resolve_cdef(cdef)
             return self.repo._materialize_cdef(
                 cdef,
-                options=self.config,
+                cache=self.cache,
                 memo=ctx.memo,
                 path=list(ctx.path),
             )
@@ -944,15 +944,7 @@ class _FromCanonicalTransformer(GraphTransformer):
         if kind is NodeKind.OBJECT:
             if self.resolve_cdef is not None:
                 return self.resolve_cdef(obj.definition)
-            if self.config.instance == "new":
-                return self.repo._materialize_cdef(
-                    obj.definition,
-                    options=self.config,
-                    memo=ctx.memo,
-                    path=list(ctx.path),
-                )
-
-            if self.repo.get_cached(obj.definition, reuse_weak=self.config.reuse_weak) is None:
+            if self.repo.get_cached(obj.definition) is None:
                 self.repo.cache_weak(obj)
 
             return obj
@@ -1027,13 +1019,7 @@ def from_canonical(
     x: Any,
     *,
     repo: "Repo",
-    options: RepoLoadOptions | None = None,
-    instance: str = "reuse",
-    restore_state: bool = True,
-    build_missing: bool = False,
-    reuse_weak: bool = True,
-    cache: str = "weak",
-    revision=None,
+    cache: CachePolicy = "weak",
     memo: dict | None = None,
     path: list[str | int] | tuple[str | int, ...] | None = None,
     resolve_cdef=None,
@@ -1045,21 +1031,12 @@ def from_canonical(
         if memo is None:
             memo = {}
 
-        cfg = options or RepoLoadOptions(
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-
         ctx = GraphCtx(
             path=tuple(path) if path is not None else (),
             memo=memo,
         )
         return _FromCanonicalTransformer(
-            repo, cfg, resolve_cdef=resolve_cdef,
+            repo, cache, resolve_cdef=resolve_cdef,
             resolve_reference=resolve_reference,
         ).transform(x, ctx)
 
@@ -1106,19 +1083,14 @@ def thaw_definition_surface_value(value: Any, *, memo: dict | None = None) -> An
         cached = memo.get(key)
         if cached is not None:
             return cached
-        if value.identity_version == V2_IDENTITY_VERSION:
-            from .materialization import project_cdef_call
+        from .materialization import project_cdef_call
 
-            args, kwargs = project_cdef_call(value)
-            result = Definition(
-                value.cls,
-                *thaw_definition_surface_value(args, memo=memo),
-                **thaw_definition_surface_value(kwargs, memo=memo),
-            )
-        else:
-            args = thaw_definition_surface_value(value.args, memo=memo)
-            kwargs = thaw_definition_surface_value(value.kwargs, memo=memo)
-            result = Definition(value.cls, *args, **kwargs)
+        args, kwargs = project_cdef_call(value)
+        result = Definition(
+            value.cls,
+            *thaw_definition_surface_value(args, memo=memo),
+            **thaw_definition_surface_value(kwargs, memo=memo),
+        )
         memo[key] = result
         return result
     if kind is NodeKind.DEFLINK:

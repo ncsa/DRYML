@@ -116,7 +116,7 @@ def test_structural_query_is_fresh_while_exact_state_ref_load_restores_state(tmp
     second_state = repo.save_object(obj, store=store2, deep_capture=True)
 
     repo2 = Repo(stores=[DirStore(store2.base_dir), DirStore(store1.base_dir)])
-    structural = repo2.load_or_build(obj.definition, instance="new", cache="none")
+    structural = repo2.load_or_build(obj.definition, cache="none")
     exact = repo2.load_state_ref(second_state, reuse_live="never")
 
     assert first_state != second_state

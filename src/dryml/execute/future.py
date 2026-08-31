@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .transfer import restore_result, restore_updates
+from .transfer import restore_result
 
 
 class OrchestratedFuture:
@@ -33,10 +33,6 @@ class OrchestratedFuture:
         result = restore_result(
             response,
             repo=self.repo,
-            result_store=self.prepared.result_store,
-        )
-        restore_updates(
-            self.update_targets,
             result_store=self.prepared.result_store,
         )
         self._result = result

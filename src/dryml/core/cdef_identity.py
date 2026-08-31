@@ -7,11 +7,8 @@ if TYPE_CHECKING:
     from .definition import ConcreteDefinition
 
 
-V1_IDENTITY_VERSION = 1
 V2_IDENTITY_VERSION = 2
-_SUPPORTED_IDENTITY_VERSIONS = frozenset(
-    (V1_IDENTITY_VERSION, V2_IDENTITY_VERSION)
-)
+_SUPPORTED_IDENTITY_VERSIONS = frozenset((V2_IDENTITY_VERSION,))
 
 
 def new_node_id() -> object:
@@ -65,22 +62,18 @@ class CDefIdentityRecord:
     """Decoded persisted CDef identity data without constructor binding.
 
     Attributes:
-        version: Exact identity format version. Missing legacy data is V1.
+        version: Exact identity format version. Only V2 is authoritative.
         cls: Persisted class or symbolic class reference.
-        args: Persisted legacy positional constructor surface.
-        kwargs: Persisted legacy keyword constructor surface.
-        parameters: Optional V2 semantic bound name/value record.
+        parameters: V2 semantic bound name/value record.
         stateful_role: Identity-neutral V2 ``Serializable`` role authority.
         stable_hash_cache: Optional cached digest from the serialized object.
     """
 
     version: int
     cls: Any
-    args: Any = None
-    kwargs: Any = None
     stable_hash_cache: str | None = None
     parameters: Any = None
-    stateful_role: bool | None = None
+    stateful_role: bool = False
 
 
 def validate_identity_version(version: int) -> int:
@@ -98,110 +91,68 @@ def validate_identity_version(version: int) -> int:
 
     if type(version) is not int or version not in _SUPPORTED_IDENTITY_VERSIONS:
         raise ValueError(
-            f"Unsupported ConcreteDefinition identity version {version!r}."
+            "Unsupported ConcreteDefinition identity version "
+            f"{version!r}; supported version is {V2_IDENTITY_VERSION}. "
+            "This authority predates CDef V2 and cannot be loaded; recreate it "
+            "with the current API."
         )
     return version
 
 
 def decode_identity_record(state: Any) -> CDefIdentityRecord:
-    """Decode legacy or versioned CDef pickle state without resolving symbols.
+    """Decode one V2 CDef record without resolving symbols.
 
     Args:
-        state: Pickle state emitted by a legacy slotted CDef or a versioned
-            CDef record.
+        state: Pickle state emitted by the V2 CDef record codec.
 
     Returns:
-        A normalized identity record. Legacy state with no version is V1.
+        A normalized V2 identity record.
 
     Raises:
         TypeError: If the state has no recognized CDef record layout.
         ValueError: If a required field is missing or the version is unknown.
     """
 
-    if isinstance(state, (list, tuple)):
-        if len(state) not in (3, 4):
-            raise ValueError(
-                "Legacy ConcreteDefinition state must contain cls, args, kwargs, and optional hash cache."
-            )
-        cls, args, kwargs = state[:3]
-        stable_hash_cache = state[3] if len(state) == 4 else None
-        return CDefIdentityRecord(
-            V1_IDENTITY_VERSION,
-            cls,
-            args=args,
-            kwargs=kwargs,
-            stable_hash_cache=stable_hash_cache,
+    if not isinstance(state, dict):
+        raise ValueError(
+            "Unsupported pre-V2 ConcreteDefinition authority: expected a V2 "
+            "mapping with identity_version=2, not a raw tuple/list record. "
+            "Recreate the definition with the current API."
         )
-
-    if isinstance(state, dict):
-        if "cls" not in state:
-            raise ValueError(
-                "ConcreteDefinition state is missing required field 'cls'."
-            )
-        version = validate_identity_version(
-            state.get("identity_version", V1_IDENTITY_VERSION)
+    required = {"identity_version", "cls", "parameters", "stateful_role", "stable_hash_cache"}
+    if set(state) != required:
+        legacy_fields = sorted(set(state) & {"args", "kwargs"})
+        detail = f"; legacy fields {legacy_fields!r}" if legacy_fields else ""
+        raise ValueError(
+            "Unsupported ConcreteDefinition authority: V2 requires exactly "
+            f"{sorted(required)!r}{detail}. Recreate it with the current API."
         )
-        if version == V2_IDENTITY_VERSION:
-            if "parameters" not in state:
-                raise ValueError(
-                    "V2 ConcreteDefinition state is missing required field 'parameters'."
-                )
-            if "stateful_role" not in state:
-                raise ValueError(
-                    "V2 ConcreteDefinition state is missing required field 'stateful_role'."
-                )
-            if type(state["stateful_role"]) is not bool:
-                raise TypeError(
-                    "V2 ConcreteDefinition stateful_role must be a bool."
-                )
-            legacy_fields = [key for key in ("args", "kwargs") if key in state]
-            if legacy_fields:
-                raise ValueError(
-                    "V2 ConcreteDefinition state cannot contain legacy fields: "
-                    f"{legacy_fields!r}."
-                )
-            from .bound_args import decode_bound_arguments
+    version = validate_identity_version(state["identity_version"])
+    if type(state["stateful_role"]) is not bool:
+        raise TypeError("V2 ConcreteDefinition stateful_role must be a bool.")
+    from .bound_args import decode_bound_arguments
 
-            return CDefIdentityRecord(
-                version,
-                state["cls"],
-                parameters=decode_bound_arguments(state["parameters"]),
-                stable_hash_cache=state.get("stable_hash_cache"),
-                stateful_role=state["stateful_role"],
-            )
-        required = ("args", "kwargs")
-        missing = [key for key in required if key not in state]
-        if missing:
-            raise ValueError(
-                f"ConcreteDefinition state is missing required fields: {missing!r}."
-            )
-        return CDefIdentityRecord(
-            version,
-            state["cls"],
-            args=state["args"],
-            kwargs=state["kwargs"],
-            stable_hash_cache=state.get("stable_hash_cache"),
-        )
-
-    raise TypeError(
-        f"Unsupported ConcreteDefinition pickle state {type(state).__name__}."
+    return CDefIdentityRecord(
+        version,
+        state["cls"],
+        parameters=decode_bound_arguments(state["parameters"]),
+        stable_hash_cache=state["stable_hash_cache"],
+        stateful_role=state["stateful_role"],
     )
 
 
 def stable_hash_domain(type_marker: str, version: int) -> str:
-    """Return the structural-hash domain for one CDef identity version.
+    """Return the structural-hash domain for the V2 CDef identity version.
 
     Args:
         type_marker: Historical concrete-definition type marker.
         version: Validated CDef identity version.
 
     Returns:
-        The unchanged marker for V1 or a distinct marker for V2.
+        A V2-specific marker.
     """
 
     version = validate_identity_version(version)
-    if version == V1_IDENTITY_VERSION:
-        return type_marker
     return f"{type_marker}:identity-v{version}"
 
 

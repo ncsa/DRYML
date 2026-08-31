@@ -12,10 +12,10 @@ class StoreBoundaryObject(Serializable):
         super().__init__()
         self.value = value
 
-    def save_state_to_dir_imp(self, dest_dir, revision=None):
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
         pickle_save(self.value, f"{dest_dir}/value.pkl")
 
-    def restore_state_from_dir_imp(self, src_dir, revision=None):
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
         self.value = pickle_load(f"{src_dir}/value.pkl")
 
 
@@ -36,26 +36,23 @@ def test_strict_rejects_live_store_mutation_and_restoration_before_io(tmp_path):
 
     for call in (
             lambda: repo.save_object(obj),
-            lambda: repo.location(obj, store=store),
-            lambda: store.restore_object(obj),
-            lambda: obj.save_state_to_dir(str(tmp_path / "direct")),
-            lambda: obj.restore_state_from_dir(str(tmp_path / "missing")),
+            lambda: obj.save_state_to_dir(str(tmp_path / "direct"), codec="pkl"),
+            lambda: obj.restore_state_from_dir(str(tmp_path / "missing"), codec="pkl"),
     ):
         with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
             call()
 
 
-def test_definition_alias_and_main_reference_publication_remain_available(tmp_path):
+def test_typed_alias_resolution_remains_available_without_materialization(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
-    obj = StoreBoundaryObject("reference", repo=repo)
-    cdef = obj.definition
+    state = repo.save_object(StoreBoundaryObject("reference", repo=repo), alias="reference")
+    repo.set_state_alias("checkpoint", state)
 
     session.set_mode("orchestrator")
 
-    repo.set_main_def(cdef)
-    repo.set_alias("reference", cdef)
-    repo.flush()
+    object_ref = repo.resolve_object_alias("reference")
+    state_ref = repo.resolve_state_alias(object_ref, "checkpoint")
 
-    assert repo.get_alias("reference") == cdef
-    assert Repo(stores=DirStore(store.base_dir)).main_def == cdef
+    assert object_ref == state.object
+    assert state_ref == state

@@ -64,8 +64,8 @@ def test_direct_child_creates_two_nodes_and_one_edge():
     assert graph.resolve(parent.definition, edge.path) == child.definition
 
 
-def test_v2_parent_uses_semantic_parameter_edge_and_keeps_legacy_child_identity():
-    child = ConcreteDefinition._from_persisted_record(GraphLeaf, ("child",), {})
+def test_v2_parent_uses_semantic_parameter_edge():
+    child = GraphLeaf("child").definition
     parent = ConcreteDefinition._from_persisted_record(
         GraphParent,
         identity_version=V2_IDENTITY_VERSION,
@@ -81,7 +81,7 @@ def test_v2_parent_uses_semantic_parameter_edge_and_keeps_legacy_child_identity(
 
 
 def test_equivalent_v2_call_spellings_produce_the_same_semantic_edge_path():
-    child = ConcreteDefinition._from_persisted_record(GraphLeaf, ("child",), {})
+    child = GraphLeaf("child").definition
     positional = ConcreteDefinition._from_persisted_record(
         GraphParent,
         identity_version=V2_IDENTITY_VERSION,
@@ -98,24 +98,28 @@ def test_equivalent_v2_call_spellings_produce_the_same_semantic_edge_path():
     assert ConcreteDefinitionGraph.from_root(keyword).edges()[0].path == GraphPath((Parameter("child"),))
 
 
-def test_mixed_version_parent_paths_follow_each_parent_identity_version():
-    leaf = ConcreteDefinition._from_persisted_record(GraphLeaf, ("leaf",), {})
+def test_v2_parent_paths_use_semantic_parameters_at_each_boundary():
+    leaf = GraphLeaf("leaf").definition
     v2_parent = ConcreteDefinition._from_persisted_record(
         GraphParent,
         identity_version=V2_IDENTITY_VERSION,
         parameters=BoundArguments((("child", leaf),)),
     )
-    v1_root = ConcreteDefinition._from_persisted_record(GraphParent, (v2_parent,), {})
+    v2_root = ConcreteDefinition._from_persisted_record(
+        GraphParent,
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments((("child", v2_parent),)),
+    )
 
-    graph = ConcreteDefinitionGraph.from_root(v1_root)
+    graph = ConcreteDefinitionGraph.from_root(v2_root)
 
-    assert {str(edge.path) for edge in graph.edges()} == {"$.args[0]", '$[@param("child")]'}
-    assert {node.definition for node in graph.nodes()} == {v1_root, v2_parent, leaf}
+    assert {str(edge.path) for edge in graph.edges()} == {'$[@param("child")]'}
+    assert {node.definition for node in graph.nodes()} == {v2_root, v2_parent, leaf}
 
 
 def test_v2_variadic_parameter_buckets_produce_stable_child_edges():
-    first = ConcreteDefinition._from_persisted_record(GraphLeaf, ("first",), {})
-    second = ConcreteDefinition._from_persisted_record(GraphLeaf, ("second",), {})
+    first = GraphLeaf("first").definition
+    second = GraphLeaf("second").definition
     parent = ConcreteDefinition._from_persisted_record(
         GraphContainer,
         identity_version=V2_IDENTITY_VERSION,

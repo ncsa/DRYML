@@ -33,6 +33,7 @@ def test_sqlite_reference_rows_rebuild_from_unchanged_authority(tmp_path):
 
     assert repo.references().object_id(state.object_id).state_refs().one() == state
     index = repo.default_store.open_query_index()
+    index.rebuild()
     con = sqlite3.connect(index.path)
     before = tuple(con.execute("SELECT reference_kind, reference_digest FROM reference_records ORDER BY 1, 2"))
     assert before

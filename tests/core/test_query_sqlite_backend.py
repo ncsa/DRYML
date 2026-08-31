@@ -4,7 +4,6 @@ from dataclasses import replace
 import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Object, SKIP_ARGS
-from dryml.core.cdef_identity import V1_IDENTITY_VERSION
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.query.lowering import CandidateRelation, LoweringDiagnostics, ScanPolicy
@@ -333,22 +332,12 @@ def test_lowered_plan_reports_local_posting_anchor_kind(tmp_path):
     assert diagnostics.relation_strategy == "rare-anchor-cte"
 
 
-def test_lowered_child_edge_join_matches_v1_path(tmp_path):
+def test_lowered_child_edge_join_matches_v2_parameter_path(tmp_path):
     index = sqlite_index(tmp_path)
-    wanted_child = ConcreteDefinition._from_persisted_record(SQLiteLeaf, (), {"name": "wanted"})
-    other_child = ConcreteDefinition._from_persisted_record(SQLiteLeaf, (), {"name": "other"})
-    wanted = ConcreteDefinition._from_persisted_record(
-        SQLiteParent,
-        (),
-        {"child": wanted_child, "name": "root"},
-    )
-    other = ConcreteDefinition._from_persisted_record(
-        SQLiteParent,
-        (),
-        {"child": other_child, "name": "root"},
-    )
-    assert wanted.identity_version == V1_IDENTITY_VERSION
-    assert other.identity_version == V1_IDENTITY_VERSION
+    wanted_child = Definition(SQLiteLeaf, name="wanted").concretize()
+    other_child = Definition(SQLiteLeaf, name="other").concretize()
+    wanted = Definition(SQLiteParent, child=wanted_child, name="root").concretize()
+    other = Definition(SQLiteParent, child=other_child, name="root").concretize()
     graph = ConcreteDefinitionGraph.from_roots([wanted, other])
     index.register_stored_roots(graph, [wanted, other])
 

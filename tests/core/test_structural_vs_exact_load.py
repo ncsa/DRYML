@@ -23,7 +23,7 @@ def test_repo_load_remains_structural_while_exact_load_restores_state(tmp_path):
     state = repo.save_object(saved)
     reopened = Repo(DirStore(tmp_path / "store"))
 
-    structural = reopened.load_or_build(saved.definition, instance="new", cache="none")
+    structural = reopened.load_or_build(saved.definition, cache="none")
     exact = reopened.load_state_ref(state, reuse_live="never")
 
     assert structural.value == 1

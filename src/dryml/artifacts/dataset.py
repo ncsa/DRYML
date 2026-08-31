@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import numpy as np
-
-from dryml.core.utils.general import pickle_save
-
 from .base import Artifact
-
-
-_CACHE_META_FILENAME = "cache.pkl"
-
 
 class CachedDataset(Artifact):
     def __init__(
@@ -24,30 +14,20 @@ class CachedDataset(Artifact):
         self.pattern = pattern
         self.allow_pickle = allow_pickle
 
-    def _item_path(self, root: Path, index: int) -> Path:
-        rel = Path(self.pattern.format(index=index))
-        if rel.is_absolute() or ".." in rel.parts:
-            raise ValueError("CachedDataset pattern must stay inside the artifact location.")
-        if rel.suffix != ".npy":
-            rel = rel.with_suffix(".npy")
-        return root / rel
-
     def compute(self, repo=None, *, store=None) -> str:
-        location = self._location(repo, store=store, require_exists=True)
-        root = Path(location)
-        root.mkdir(parents=True, exist_ok=True)
+        """Reject the retired mutable object-directory cache protocol.
 
-        for path in root.rglob("*.npy"):
-            path.unlink()
+        Args:
+            repo: Retired Store-root cache selector.
+            store: Retired Store-root cache selector.
 
-        count = 0
-        for index, item in enumerate(self.src):
-            path = self._item_path(root, index)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            np.save(path, item, allow_pickle=self.allow_pickle)
-            count += 1
+        Raises:
+            RuntimeError: Always, because current Stores expose immutable local
+                states rather than mutable object directories.
+        """
 
-        pickle_save({"count": count}, root / _CACHE_META_FILENAME)
-        return location
+        raise RuntimeError(
+            "CachedDataset mutable Store-root caches are retired; use an explicit external cache."
+        )
 
 CachedDataset.__module__ = "dryml.artifacts"

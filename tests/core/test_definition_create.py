@@ -319,9 +319,6 @@ def test_partial_definition_parameters_bind_only_supplied_fields(monkeypatch):
     assert not hasattr(unresolved, "required")
 
 
-def test_private_v1_concrete_definition_retains_raw_call_without_semantic_parameters():
-    cdef = ConcreteDefinition._from_persisted_record(SemanticFixture, (1,), {"keyword": 4})
-
-    assert cdef.args == FrozenTuple((1,))
-    assert cdef.kwargs == FrozenDict({"keyword": 4})
-    assert not hasattr(cdef, "parameters")
+def test_private_persisted_constructor_rejects_retired_raw_call_arguments():
+    with pytest.raises(TypeError):
+        ConcreteDefinition._from_persisted_record(SemanticFixture, (1,), {"keyword": 4})

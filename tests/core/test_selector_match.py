@@ -164,8 +164,8 @@ def test_selector_13(tmp_path):
 
     # Exact StateRef restoration is intentionally a later boundary; selector
     # matching only requires the current structural reconstruction seam.
-    obj1_loaded = core.load_object(obj1.definition, repo=first_repo, restore_state=False)
-    obj2_loaded = core.load_object(obj2.definition, repo=second_repo, restore_state=False)
+    obj1_loaded = core.load_object(obj1.definition, repo=first_repo)
+    obj2_loaded = core.load_object(obj2.definition, repo=second_repo)
 
     assert sel(obj1_loaded)
     assert not sel(obj2_loaded)

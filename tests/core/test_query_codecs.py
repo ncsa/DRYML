@@ -2,7 +2,7 @@ import pytest
 
 from dryml.core import Object
 from dryml.core.bound_args import BoundArguments
-from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.query.codecs import (
     CDEF_CODEC_VERSION,
@@ -41,32 +41,19 @@ def test_reference_query_promotion_increments_its_index_codec_markers():
 
     assert CDEF_CODEC_VERSION == 3
     assert FEATURE_CODEC_VERSION == 3
-    assert QUERY_INDEX_CODEC_VERSION == 4
+    assert QUERY_INDEX_CODEC_VERSION == 5
 
 
-def test_cdef_codec_retains_v1_identity_when_pickle_state_has_no_version():
-    cdef = ConcreteDefinition._from_persisted_record(CodecLeaf, ("legacy",), {})
-    decoded = decode_cdef(encode_cdef(cdef))
-
-    assert isinstance(cdef.__getstate__(), list)
-    assert decoded.identity_version == V1_IDENTITY_VERSION
-    assert decoded == cdef
-    assert decoded.stable_hash() == cdef.stable_hash()
-
-
-def test_cdef_codec_decodes_private_v2_record_in_a_distinct_hash_domain():
+def test_cdef_codec_decodes_current_v2_record():
     cdef = ConcreteDefinition._from_persisted_record(
         CodecLeaf,
         identity_version=V2_IDENTITY_VERSION,
         parameters=BoundArguments((("value", "legacy"),)),
     )
     decoded = decode_cdef(encode_cdef(cdef))
-    v1 = ConcreteDefinition._from_persisted_record(CodecLeaf, ("legacy",), {})
 
     assert decoded.identity_version == V2_IDENTITY_VERSION
     assert decoded == cdef
-    assert decoded != v1
-    assert decoded.stable_hash() != v1.stable_hash()
 
 
 def test_query_index_codec_facade_roundtrips_all_payloads():

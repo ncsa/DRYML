@@ -20,8 +20,7 @@ from uuid import uuid4
 from .definition import Definition, ConcreteDefinition
 from .object import Object, Serializable
 from .store.store import Store
-from .policies import InstancePolicy, CachePolicy, LiveReusePolicy, RepoGraphOptions, RepoLoadOptions
-from .repo_graph import manage_revision
+from .policies import CachePolicy, LiveReusePolicy, RepoGraphOptions
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
 from .query.federation import RepoQueryIndex
@@ -418,12 +417,10 @@ class Repo:
             self._query_catalog.register_cached(obj.__cdef__)
 
     # --- helpers you already have ---
-    def _cached_candidates(self, cdef, *, reuse_weak: bool) -> tuple[Object, ...]:
+    def _cached_candidates(self, cdef) -> tuple[Object, ...]:
         """Return distinct live candidates for one exact private CDef node."""
 
-        candidates = self.strong_obj_cache.candidates(cdef)
-        if reuse_weak:
-            candidates += self.weak_obj_cache.candidates(cdef)
+        candidates = self.strong_obj_cache.candidates(cdef) + self.weak_obj_cache.candidates(cdef)
         return _unique_objects(candidates)
 
     def _all_live_candidates(self) -> tuple[Object, ...]:
@@ -443,14 +440,12 @@ class Repo:
         self.strong_obj_cache.discard(obj.definition, obj)
         self.weak_obj_cache.discard(obj.definition, obj)
 
-    def get_cached(self, cdef, *, reuse_weak: bool = True):
+    def get_cached(self, cdef):
         """Return a cached Object after live-object admission.
 
         Args:
             cdef: Exact private-node definition used as the cache key; this is
                 not a structural-equality lookup.
-            reuse_weak: Whether the weak cache may satisfy the lookup.
-
         Returns:
             The sole cached Object, or ``None`` when no reusable entry exists
             or candidates are ambiguous across the selected cache tiers.
@@ -462,17 +457,15 @@ class Repo:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_get_cached"):
-            candidates = self._cached_candidates(cdef, reuse_weak=reuse_weak)
+            candidates = self._cached_candidates(cdef)
             return candidates[0] if len(candidates) == 1 else None
 
-    def has_cached(self, cdef, *, reuse_weak: bool = True) -> bool:
+    def has_cached(self, cdef) -> bool:
         """Return cache availability without acquiring a live Object.
 
         Args:
             cdef: Exact private-node definition used as the cache key; this is
                 not a structural-equality lookup.
-            reuse_weak: Whether weak-cache availability counts.
-
         Returns:
             Whether exactly one reusable candidate exists across the selected
             strong and weak cache tiers.
@@ -481,7 +474,7 @@ class Repo:
             None. This metadata-only check is available during strict
             orchestration and does not retain the cached Object.
         """
-        return len(self._cached_candidates(cdef, reuse_weak=reuse_weak)) == 1
+        return len(self._cached_candidates(cdef)) == 1
 
     def pin(self, obj):
         """Promote to strong cache."""
@@ -504,10 +497,6 @@ class Repo:
                 self.strong_obj_cache.discard(cdef, obj)
                 self.weak_obj_cache.add(cdef, obj)
                 self._query_catalog.register_cached(cdef)
-
-    def _load_aliases_from_stores(self) -> None:
-        """Retired CDef alias caches have no projection from reference authority."""
-        return None
 
     @staticmethod
     def _validate_alias(alias: str) -> None:
@@ -546,46 +535,6 @@ class Repo:
         if isinstance(target, Object):
             target._store_affinity = store
         return store
-
-    def location(
-            self,
-            target: Object | Definition | ConcreteDefinition,
-            *,
-            store=None,
-            require_exists: bool = False) -> str:
-        if isinstance(target, Object):
-            from dryml.runtime import materialization_admission
-
-            with materialization_admission(operation="repo_location_live_object"):
-                return self._location(target, store=store, require_exists=require_exists)
-        return self._location(target, store=store, require_exists=require_exists)
-
-    def _location(
-            self,
-            target: Object | Definition | ConcreteDefinition,
-            *,
-            store=None,
-            require_exists: bool = False) -> str:
-        """Resolve an already-admitted target to its selected Store path."""
-
-        cdef = self._object_target_cdef(target)
-
-        if store is not None:
-            store = self.set_object_store(cdef, store)
-        else:
-            store = self.obj_default_store.get(cdef)
-            if store is None:
-                store = self._first_store_with(cdef)
-                if store is not None:
-                    self.obj_default_store[cdef] = store
-            if store is None:
-                store = self.default_store
-
-        if store is None:
-            raise RuntimeError("No store available for object location.")
-        if require_exists and not store.has(cdef):
-            raise RuntimeError("Object is not saved in the selected store.")
-        return store.object_dir(cdef)
 
     def _selected_writable_store(self, store, operation: str) -> Store:
         """Select one writable Store or reject ambiguous reference mutation."""
@@ -715,6 +664,25 @@ class Repo:
         _, record = self._single_alias_target(alias)
         return record.object_ref
 
+    def resolve_object_alias(self, alias: str):
+        """Resolve a Store object alias to its complete ObjectRef.
+
+        Args:
+            alias: Non-empty Store-local object alias.
+
+        Returns:
+            The authoritative ObjectRef selected from identical Store replicas.
+
+        Raises:
+            KeyError: If no connected Store defines ``alias``.
+            RepoLoadError: If connected Stores disagree about its target.
+
+        Side Effects:
+            None. This reads mutable alias authority and does not construct an
+            Object or select a StateRef.
+        """
+        return self.get_alias(alias)
+
     def delete_alias(self, alias: str, *, store=None):
         """Retire unsupported legacy CDef alias deletion.
 
@@ -804,19 +772,29 @@ class Repo:
             raise RepoLoadError("State alias points to missing or incompatible StateRef authority.")
         return state.state_ref
 
-    def load_alias(self, alias: str, **kwargs):
-        """Materialize an object alias's structural recipe pending U7 restore.
+    def resolve_state_alias(self, object_ref, alias: str):
+        """Resolve one ObjectRef-scoped state alias to an exact StateRef.
 
-        Alias lookup remains ObjectRef-authoritative.  U7 will replace this
-        temporary structural materialization with exact StateRef restoration;
-        keeping it here preserves ConfigRef's current public construction path
-        without projecting the alias back to a retired CDef record.
+        Args:
+            object_ref: Complete ObjectRef scope for the state alias.
+            alias: Non-empty Store-local state alias.
+
+        Returns:
+            The immutable StateRef selected from non-conflicting Stores.
+
+        Raises:
+            TypeError: If ``object_ref`` is not an ObjectRef.
+            KeyError: If no connected Store defines the scoped alias.
+            RepoLoadError: If replica authority conflicts or is incomplete.
+
+        Side Effects:
+            None. Alias resolution reads authority only and never restores state.
         """
-        if "restore_state" in kwargs:
-            raise TypeError(
-                "Object aliases name ObjectRefs, not state; exact restoration is unavailable until U7."
-            )
-        return self.load_object(self.get_alias(alias).definition, restore_state=False, **kwargs)
+        from .reference_values import ObjectRef, StateSelectorRef
+
+        if not isinstance(object_ref, ObjectRef):
+            raise TypeError("resolve_state_alias requires an ObjectRef scope.")
+        return self.resolve_state_selector(StateSelectorRef(object_ref, alias))
 
     def _references(self):
         """Yield every Store-authoritative ObjectRef once with its Store/source."""
@@ -1243,9 +1221,7 @@ class Repo:
             if lease is None:
                 raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef in U7.")
             acquired.append(lease)
-            obj = self.load_object(
-                reference.definition, restore_state=False, build_missing=True
-            )
+            obj = self._load_structural(reference.definition)
             apply_exact_reference_identity(obj, reference)
             obj._store_affinity = selected
             obj._claim_lease = lease
@@ -1633,6 +1609,15 @@ class Repo:
             finally:
                 self._publishing_claim_lease = previous_lease
             state_ref = result[0] if report_stores else result
+            # StateRef publication is authoritative; only then may the derived
+            # query index expose this root. A registration failure leaves the
+            # Store authority intact and the sidecar explicitly dirty.
+            clear_dirty = getattr(store, "clear_query_index_dirty", None)
+            if clear_dirty is not None:
+                clear_dirty()
+            self._query_index.register_saved_graph(
+                plan.graph, {store: (obj.definition,)}
+            )
             if isinstance(lease, _ClaimLease):
                 obj._claim_lease = None
             if main:
@@ -1673,31 +1658,9 @@ class Repo:
                 return st
         return None
 
-    def _load_options(
-            self,
-            *,
-            options: RepoLoadOptions | None = None,
-            instance: InstancePolicy = "reuse",
-            restore_state: bool = True,
-            build_missing: bool = False,
-            reuse_weak: bool = True,
-            cache: CachePolicy = "weak",
-            revision: RevisionType | str | None = None) -> RepoLoadOptions:
-        if options is not None:
-            return options
-        return RepoLoadOptions(
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
-
-    def _candidate_cdefs(self, *, reuse_weak: bool = True) -> set[ConcreteDefinition]:
+    def _candidate_cdefs(self) -> set[ConcreteDefinition]:
         cdefs = {obj.definition for _, obj in self.strong_obj_cache.items()}
-        if reuse_weak:
-            cdefs.update(obj.definition for _, obj in self.weak_obj_cache.items())
+        cdefs.update(obj.definition for _, obj in self.weak_obj_cache.items())
         cdefs.update(self.light_index)
         return cdefs
 
@@ -1716,32 +1679,17 @@ class Repo:
         self,
         x: Any,
         *,
-        instance: InstancePolicy = "reuse",
-        restore_state: bool = True,
-        build_missing: bool = False,
-        reuse_weak: bool = True,
         cache: CachePolicy = "weak",
-        revision: RevisionType | None = None,
-        options: RepoLoadOptions | None = None,
         memo: dict | None = None,
         path: list[str | int] | None = None,
     ):
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_realize"):
-            load_options = self._load_options(
-                options=options,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-            )
             return from_canonical(
                 x,
                 repo=self,
-                options=load_options,
+                cache=cache,
                 memo=memo,
                 path=path,
             )
@@ -1752,13 +1700,7 @@ class Repo:
     def _materialize_cdef(
         self,
         cdef,
-        revision: RevisionType | str | None = None,
         *,
-        options: RepoLoadOptions | None = None,
-        instance: InstancePolicy = "reuse",
-        restore_state: bool = True,
-        build_missing: bool = False,
-        reuse_weak: bool = True,
         cache: CachePolicy = "weak",
         # internal
         memo: dict | None = None,   # cdef->obj memo for this realization pass
@@ -1772,23 +1714,12 @@ class Repo:
             if path is None:
                 path = ["<root>"]
 
-            load_options = self._load_options(
-                options=options,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-            )
-            revision = manage_revision(cdef, load_options.revision)
             from .materialization import build_materialization_plan, execute_materialization_plan
 
             plan = build_materialization_plan(
                 self,
                 cdef,
-                load_options,
-                revision=revision,
+                cache=cache,
                 memo=memo,
                 path=path,
             )
@@ -1796,49 +1727,64 @@ class Repo:
                 self,
                 plan,
                 memo=memo,
-                revision=revision,
                 root=cdef,
             )
 
 
-    def load_object(
+    def _load_structural(
         self,
         x: object,
         *,
-        instance: InstancePolicy = "reuse",
-        restore_state: bool = True,
-        build_missing: bool = False,
-        reuse_weak: bool = True,
         cache: CachePolicy = "weak",
-        revision: RevisionType|str | None = None,
-        options: RepoLoadOptions | None = None,
+        require_store: bool = False,
     ):
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_load_object"):
-            from .reference_values import StateRef
-
-            if isinstance(x, StateRef):
-                return self.load_state_ref(x)
             from .repo_plan import _NodeBindings, realization_scope
 
             with realization_scope():
-                load_options = self._load_options(
-                    options=options,
-                    instance=instance,
-                    restore_state=restore_state,
-                    build_missing=build_missing,
-                    reuse_weak=reuse_weak,
-                    cache=cache,
-                    revision=revision,
-                )
                 memo = _NodeBindings()
+                if isinstance(x, ConcreteDefinition) and require_store and self._first_store_with(x) is None:
+                    raise RepoLoadError("No connected Store contains this structural CDef; use load_or_build to construct it.")
                 return self._realize(
                     x,
-                    options=load_options,
+                    cache=cache,
                     path=[""],
                     memo=memo,
                 )
+
+    def load_object(self, x: Definition | ConcreteDefinition | Object, *, cache: CachePolicy = "weak") -> Object:
+        """Load existing structural authority without restoring mutable state.
+
+        Args:
+            x: Definition, CDef, or Object projected to its structural CDef.
+            cache: Cache tier for the resulting realization.
+
+        Returns:
+            A structural live Object.
+
+        Raises:
+            TypeError: If ``x`` is an exact reference or unsupported root type.
+            RepoLoadError: If no connected Store has the structural authority.
+
+        Side Effects:
+            May construct and cache live objects. Exact snapshots are loaded only
+            by :meth:`load_state_ref`.
+        """
+        from .reference_values import ObjectRef, StateRef, StateSelectorRef
+
+        if isinstance(x, (ObjectRef, StateRef, StateSelectorRef)):
+            raise TypeError("Repo.load_object is structural; use build_object_ref or load_state_ref for exact references.")
+        if isinstance(x, Object):
+            x = x.definition
+        if isinstance(x, Definition):
+            x = x.concretize(repo=self)
+        if not isinstance(x, ConcreteDefinition):
+            raise TypeError("Repo.load_object requires a Definition, ConcreteDefinition, or Object.")
+        if self._first_store_with(x) is None:
+            raise RepoLoadError("No connected Store contains this structural CDef; use load_or_build to construct it.")
+        return self._load_structural(x, require_store=True, cache=cache)
 
     def load_state_ref(
             self,
@@ -1881,21 +1827,13 @@ class Repo:
                 self, plan, reuse_live=reuse_live, cache=cache,
             )
 
-    def load(self, cdef: ConcreteDefinition, **kwargs) -> Object:
+    def load(self, cdef: ConcreteDefinition, *, cache: CachePolicy = "weak") -> Object:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_load"):
-            if not isinstance(cdef, ConcreteDefinition):
-                raise TypeError("Repo.load requires an exact ConcreteDefinition.")
-            if kwargs.get("options") is not None:
-                kwargs["options"] = replace(
-                    kwargs["options"], build_missing=False, restore_state=False
-                )
-            kwargs["build_missing"] = False
-            kwargs["restore_state"] = False
-            return self.load_object(cdef, **kwargs)
+            return self.load_object(cdef, cache=cache)
 
-    def load_or_build(self, x: object, **kwargs):
+    def load_or_build(self, x: Definition | ConcreteDefinition | Object, *, cache: CachePolicy = "weak") -> Object:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_load_or_build"):
@@ -1905,13 +1843,7 @@ class Repo:
                 x = x.concretize(repo=self)
             elif not isinstance(x, ConcreteDefinition):
                 raise TypeError("Repo.load_or_build requires a Definition, ConcreteDefinition, or Object.")
-            if kwargs.get("options") is not None:
-                kwargs["options"] = replace(
-                    kwargs["options"], build_missing=True, restore_state=False
-                )
-            kwargs["build_missing"] = True
-            kwargs["restore_state"] = False
-            return self.load_object(x, **kwargs)
+            return self._load_structural(x, cache=cache)
 
 
     def __contains__(
@@ -2074,13 +2006,7 @@ class Repo:
     def get(self,
             selector:  SelectorType | tuple[SelectorType] | list[SelectorType] | None = None,
             sel_args=None, sel_kwargs=None,
-            instance: InstancePolicy = "reuse",
-            restore_state: bool = True,
-            build_missing: bool = False,
-            reuse_weak: bool = True,
             cache: CachePolicy = "weak",
-            revision: RevisionType | str | None = None,
-            options: RepoLoadOptions | None = None,
             verbose: bool = True) -> ObjectResultSet:
         from dryml.runtime import materialization_admission
 
@@ -2089,20 +2015,7 @@ class Repo:
                 sel_args = []
             if sel_kwargs is None:
                 sel_kwargs = {}
-            load_options = self._load_options(
-                options=options,
-                instance=instance,
-                restore_state=restore_state,
-                build_missing=build_missing,
-                reuse_weak=reuse_weak,
-                cache=cache,
-                revision=revision,
-            )
-            if load_options.build_missing:
-                raise ValueError("Repo.get selects existing objects only; use Repo.load_or_build for construction.")
             selectors = self._selector_tuple(selector)
-            if isinstance(load_options.revision, str):
-                raise ValueError("plain string revisions aren't supported in `get`.")
             selected_objects: dict[ConcreteDefinition, Object] = {}
             for sel in selectors:
                 if isinstance(sel, Callable) and not isinstance(sel, (Definition, ConcreteDefinition)):
@@ -2114,8 +2027,7 @@ class Repo:
                 objs = (
                     self.query(sel)
                     .known()
-                    .reuse_weak(load_options.reuse_weak)
-                    .objects(options=load_options)
+                    .objects(cache=cache)
                 )
                 selected_objects.update(objs)
 
@@ -2126,7 +2038,6 @@ class Repo:
               selector: Optional[Callable] = None,
               sel_args=None, sel_kwargs=None,
               verbose: bool = False,
-              options: RepoLoadOptions | None = None,
               **kwargs):
         """
         Apply a function to all objects tracked by the repo.
@@ -2149,7 +2060,6 @@ class Repo:
             objs = self.get(
                 selector=selector,
                 sel_args=sel_args, sel_kwargs=sel_kwargs,
-                options=options,
                 **kwargs)
 
             obj_iter = objs.items()
@@ -2166,25 +2076,10 @@ class Repo:
             include_root: bool = True,
             order: str = "post",
             missing: str = "raise",
-            dedupe: bool = True,
-            instance: InstancePolicy = "reuse",
-            restore_state: bool = True,
-            build_missing: bool = False,
-            reuse_weak: bool = True,
-            cache: CachePolicy = "weak",
-            revision: RevisionType | str | None = None) -> RepoGraphOptions:
+            dedupe: bool = True) -> RepoGraphOptions:
         if options is not None:
             return options
-        load_options = self._load_options(
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
-        )
         return RepoGraphOptions(
-            load=load_options,
             include_root=include_root,
             order=order,
             missing=missing,
@@ -2199,25 +2094,13 @@ class Repo:
             include_root: bool = True,
             order: str = "post",
             missing: str = "raise",
-            dedupe: bool = True,
-            instance: InstancePolicy = "reuse",
-            restore_state: bool = True,
-            build_missing: bool = False,
-            reuse_weak: bool = True,
-            cache: CachePolicy = "weak",
-            revision: RevisionType | str | None = None):
+            dedupe: bool = True):
         graph_options = self._graph_options(
             options=options,
             include_root=include_root,
             order=order,
             missing=missing,
             dedupe=dedupe,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
         )
         from .repo_plan import iter_graph_objects
         from dryml.runtime import materialization_admission
@@ -2237,25 +2120,13 @@ class Repo:
             include_root: bool = True,
             order: str = "post",
             missing: str = "raise",
-            dedupe: bool = True,
-            instance: InstancePolicy = "reuse",
-            restore_state: bool = True,
-            build_missing: bool = False,
-            reuse_weak: bool = True,
-            cache: CachePolicy = "weak",
-            revision: RevisionType | str | None = None):
+            dedupe: bool = True):
         graph_options = self._graph_options(
             options=options,
             include_root=include_root,
             order=order,
             missing=missing,
             dedupe=dedupe,
-            instance=instance,
-            restore_state=restore_state,
-            build_missing=build_missing,
-            reuse_weak=reuse_weak,
-            cache=cache,
-            revision=revision,
         )
         from .repo_plan import apply_graph_objects
         from dryml.runtime import materialization_admission
@@ -2537,18 +2408,23 @@ def save_object(
             )
 
 
-def load_alias(alias: str, repo=None, **kwargs):
-    from dryml.runtime import materialization_admission
-
-    with materialization_admission(operation="global_load_alias"):
-        with manage_repo(repo=repo) as repo:
-            return repo.load_alias(alias, **kwargs)
-
-
 def load_object(
-        cdef=None, repo=None,
-        revision: RevisionType|str|None=None,
-        **kwargs):
+        cdef: ConcreteDefinition | None = None, repo=None,
+        *, cache: CachePolicy = "weak") -> Object:
+    """Load existing structural CDef authority through a managed Repo.
+
+    Args:
+        cdef: CDef to construct, or ``None`` to select the Store main CDef.
+        repo: Explicit Repo or Store-like source.
+        cache: Cache tier for the resulting structural realization.
+
+    Returns:
+        A live structural Object without exact state restoration.
+
+    Raises:
+        ValueError: If neither ``cdef`` nor a Store main CDef is available.
+        RepoLoadError: If the selected CDef lacks current Store authority.
+    """
     from dryml.runtime import materialization_admission
 
     with materialization_admission(operation="global_load_object"):
@@ -2557,4 +2433,23 @@ def load_object(
                 cdef = repo.main_def
                 if cdef is None:
                     raise ValueError("When cdef is None, the repo must have a main def, we didn't find one.")
-            return repo.load_object(cdef, revision=revision, **kwargs)
+            return repo.load_object(cdef, cache=cache)
+
+
+def load_state_ref(state_ref, repo=None, *, reuse_live: LiveReusePolicy = "matching", cache: CachePolicy = "weak") -> Object:
+    """Exactly load one immutable StateRef through a managed Repo.
+
+    Args:
+        state_ref: Exact immutable snapshot authority.
+        repo: Explicit Repo or Store-like source containing the full closure.
+        reuse_live: Policy for eligible already-live exact nodes.
+        cache: Cache tier for the completed realization.
+
+    Returns:
+        A graph restored from the requested exact StateRef.
+
+    Raises:
+        RepoLoadError: If exact authority or its local-state closure is missing.
+    """
+    with manage_repo(repo=repo) as sub_repo:
+        return sub_repo.load_state_ref(state_ref, reuse_live=reuse_live, cache=cache)

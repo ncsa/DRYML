@@ -201,7 +201,7 @@ class DefinitionQuery:
         translated = []
         for segment in path:
             original_path = DefinitionPath((segment,))
-            if isinstance(original, ConcreteDefinition) and original.identity_version == V2_IDENTITY_VERSION:
+            if isinstance(original, ConcreteDefinition):
                 semantic = _semantic_selector_path(selector, DefinitionPath((segment,)))
                 if semantic is not None:
                     original_path = semantic
@@ -860,7 +860,7 @@ def _query_match(selector, target, *, strict: bool, class_match: ClassMatchPolic
         if selector.cls is not None:
             if not _query_match_class(selector.cls, target.cls, strict=strict, class_match=class_match):
                 return False
-        if isinstance(target, ConcreteDefinition) and target.identity_version == V2_IDENTITY_VERSION:
+        if isinstance(target, ConcreteDefinition):
             # V2 identities persist semantic names rather than a particular
             # positional/keyword call spelling.  Partial binding deliberately
             # omits defaults, so only supplied parameters constrain matching.

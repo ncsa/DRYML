@@ -116,9 +116,8 @@ def compile_selector_graph(
         root=root,
         nodes=tuple(compiler.nodes),
         edges=tuple(compiler.edges),
-        # A parent V2 CDef addresses children by Parameter while V1 uses its
-        # persisted call spelling.  Until lowering can union those edge
-        # relations, direct verification is the only sound candidate plan.
+        # CDef authority uses semantic Parameter paths; soft Definitions retain
+        # call spelling, so direct verification remains the sound candidate plan.
         requires_scan=compiler.requires_scan,
     )
 

@@ -126,8 +126,8 @@ class Dryml(type):
                     from .materialization import project_cdef_call
 
                     canonical_args, canonical_kwargs = project_cdef_call(cdef, cls=dryml_cls)
-                    rt_args = sub_repo.load_object(canonical_args, build_missing=True)
-                    rt_kwargs = sub_repo.load_object(canonical_kwargs, build_missing=True)
+                    rt_args = sub_repo._load_structural(canonical_args)
+                    rt_kwargs = sub_repo._load_structural(canonical_kwargs)
 
                 else:
                     # Reconstruction from an existing ConcreteDefinition
@@ -279,14 +279,6 @@ class Object(metaclass=Dryml):
         return self.__ws__.path()
 
     @property
-    def location(self) -> str:
-        repo = getattr(self, "_store_affinity", None)
-        if repo is not None:
-            return repo.object_dir(self.definition)
-        raise RuntimeError("Object has no retained Store affinity.")
-
-
-    @property
     def definition(self) -> "ConcreteDefinition":
         # Get a `Definition` object for this particular object.
         return self.__cdef__
@@ -340,8 +332,8 @@ class Object(metaclass=Dryml):
     def save(
             self,
             repo=None,
-            *,
             main=True,
+            *,
             store=None,
             alias: str | None = None,
             deep_capture: bool = False,
@@ -405,14 +397,6 @@ class Object(metaclass=Dryml):
         """
         pass
 
-    def load(self, repo=None, revision: RevisionType|str|None = None):
-        from dryml.runtime import materialization_admission
-        from .repo_graph import manage_revision
-        from .repo import load_object
-        with materialization_admission(operation="object_load"):
-            revision = manage_revision(self, revision)
-            load_object(self, repo=repo, revision=revision)
-            
     def restore_state_from_dir(self, src_dir: str, *, codec: str) -> None:
         from dryml.runtime import materialization_admission
 

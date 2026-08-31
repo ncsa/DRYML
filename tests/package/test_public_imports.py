@@ -15,8 +15,11 @@ _EXPECTED_ROOT_EXPORTS = {
     "Selector", "SelectorArg", "SelectorSpec", "SubclassOf", "UniformFromSet",
     "UniformIntRange", "annotations", "artifacts", "config", "configure",
     "context", "core", "definition_mode", "env", "environments", "execute",
-    "freeze", "reset_config", "selector_mode", "session", "space_mode",
-    "status", "runtime", "world", "worlds",
+    "freeze", "load_object", "load_state_ref", "Object", "ObjectId",
+    "ObjectRef", "Repo", "save_object", "Serializable", "StateRef",
+    "StateSelectorRef", "StoreReport", "object_namespace", "reset_config",
+    "selector_mode", "session", "space_mode", "status", "runtime", "world",
+    "worlds",
 }
 
 

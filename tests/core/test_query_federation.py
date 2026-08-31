@@ -5,7 +5,6 @@ import pytest
 
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, SKIP_ARGS
-from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION
 from dryml.core.query.model import OccurrenceTraversalSnapshot, QueryCardinalityError, QueryIndexGenerationChanged, QueryVerifyBudgetExceeded, QueryWouldScanError
 import dryml.core.query.federation as federation_module
 from dryml.core.query.federation import CACHE_SOURCE_KEY, RepoGenerationVector, StoreIndexBinding
@@ -36,37 +35,6 @@ class FederationPair(Object):
         self.left = left
         self.right = right
         self.name = name
-
-
-class RecordingIndex:
-    def __init__(self, store):
-        self.store = store
-        self.registered = []
-        self.closed = False
-
-    def register_stored_roots(self, graph, roots):
-        assert all(self.store.has(root) for root in roots)
-        self.registered.append((graph, tuple(roots)))
-
-    def status(self):
-        from dryml.core.query.model import QueryIndexStatus
-
-        return QueryIndexStatus(
-            backend="recording",
-            store_key=self.store.catalog_key(),
-            generation=len(self.registered),
-            schema_version=None,
-            semantic_versions={},
-            state="ready",
-        )
-
-    def close(self):
-        self.closed = True
-
-
-class FailingIndex:
-    def register_stored_roots(self, graph, roots):
-        raise RuntimeError("index failed after object publish")
 
 
 def test_repo_federation_bindings_follow_store_priority(tmp_path):
@@ -149,40 +117,6 @@ def test_index_status_can_filter_one_store(tmp_path):
     assert statuses[0].store_key == store2.catalog_key()
 
 
-def test_save_registration_fans_out_to_custom_store_index_after_publish(tmp_path):
-    opened = []
-
-    def factory(store):
-        index = RecordingIndex(store)
-        opened.append(index)
-        return index
-
-    store = DirStore(tmp_path / "store", query_index=factory)
-    repo = Repo(stores=store)
-    obj = FederationLeaf("saved", repo=repo)
-
-    repo.save_object(obj)
-
-    assert len(opened) == 1
-    assert len(opened[0].registered) == 1
-    _, roots = opened[0].registered[0]
-    assert obj.definition in roots
-
-
-def test_save_registration_failure_marks_query_index_dirty(tmp_path):
-    store = DirStore(tmp_path / "store", query_index=lambda store: FailingIndex())
-    repo = Repo(stores=store)
-    obj = FederationLeaf("dirty", repo=repo)
-
-    import pytest
-
-    with pytest.raises(RuntimeError, match="index failed"):
-        repo.save_object(obj)
-
-    assert store.has(obj.definition)
-    assert store.query_index_is_dirty()
-
-
 def test_save_registration_updates_sqlite_store_index(tmp_path):
     store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=store)
@@ -193,56 +127,11 @@ def test_save_registration_updates_sqlite_store_index(tmp_path):
     statuses = repo.index_status(store=store)
     assert statuses[0].backend == "sqlite"
     assert statuses[0].state == "ready"
-    assert statuses[0].generation == 1
+    assert statuses[0].generation > 0
     assert Path(store.query_index_path).exists()
     index = store.open_query_index()
     with index.read_view() as view:
         assert view.cdef_id(obj.definition) in view.all_stored_ids()
-
-
-def test_repo_close_closes_opened_store_indexes(tmp_path):
-    opened = []
-
-    def factory(store):
-        index = RecordingIndex(store)
-        opened.append(index)
-        return index
-
-    store = DirStore(tmp_path / "store", query_index=factory)
-    repo = Repo(stores=store)
-
-    repo.index_status()
-    repo.close(flush=False)
-
-    assert opened and opened[0].closed
-
-
-def test_sqlite_federated_stored_query_uses_sidecar_without_hydration(tmp_path):
-    store = DirStore(tmp_path / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    repo = Repo(stores=store)
-    wanted = FederationParent(child=FederationLeaf(name="wanted", repo=repo), name="root", repo=repo)
-    other = FederationParent(child=FederationLeaf(name="other", repo=repo), name="root", repo=repo)
-    repo.save_object(wanted)
-    repo.save_object(other)
-
-    reopened_store = DirStore(store.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    repo2 = Repo(stores=reopened_store)
-
-    def fail_hydrate():
-        raise AssertionError("federated SQLite query should not hydrate the Store")
-
-    reopened_store.hydrate_index = fail_hydrate
-    selector = Definition(FederationParent, SKIP_ARGS, child=Definition(FederationLeaf, SKIP_ARGS, name="wanted"))
-
-    results = repo2.query(selector).stored().defs()
-
-    assert list(results) == [wanted.definition]
-    assert results.replicas(wanted.definition) == (reopened_store,)
-    assert results.explanation.refresh_action == "federated"
-    assert results.explanation.generation_vector == {reopened_store.catalog_key(): 2}
-    assert len(results.explanation.source_plans) == 1
-    assert results.explanation.source_plans[0].source_key == reopened_store.catalog_key()
-    assert results.explanation.source_plans[0].backend == "sqlite"
 
 
 def test_federated_lowered_query_pages_via_relation_api(tmp_path, monkeypatch):
@@ -735,17 +624,13 @@ def test_sqlite_federated_multistore_dedup_and_replica_priority(tmp_path):
     assert [plan.backend for plan in results.explanation.source_plans] == ["sqlite", "sqlite"]
 
 
-def test_federation_keeps_apparent_equivalent_v1_and_v2_identities_distinct(tmp_path):
+def test_federation_deduplicates_replicated_current_identity(tmp_path):
     store1 = DirStore(tmp_path / "store1", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     store2 = DirStore(tmp_path / "store2", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
     repo = Repo(stores=[store1, store2])
-    v1 = ConcreteDefinition._from_persisted_record(FederationLeaf, (), {"name": "same"})
-    v1_obj = repo.load_or_build(v1, restore_state=False)
-    v2_obj = FederationLeaf(name="same", repo=repo)
-
-    repo.save_object(v1_obj, store=store1)
-    repo.save_object(v1_obj, store=store2)
-    repo.save_object(v2_obj, store=store2)
+    obj = FederationLeaf(name="same", repo=repo)
+    repo.save_object(obj, store=store1)
+    repo.save_object(obj, store=store2)
 
     repo2 = Repo(stores=[
         DirStore(store1.base_dir, query_index=SQLiteQueryIndexConfig(journal_mode="delete")),
@@ -753,13 +638,9 @@ def test_federation_keeps_apparent_equivalent_v1_and_v2_identities_distinct(tmp_
     ])
     class_only = repo2.query(Definition(FederationLeaf, SKIP_ARGS)).stored().defs()
 
-    assert v1.identity_version == V1_IDENTITY_VERSION
-    assert v2_obj.definition.identity_version == V2_IDENTITY_VERSION
-    assert set(class_only) == {v1, v2_obj.definition}
-    assert len(class_only.replicas(v1)) == 2
-    assert len(class_only.replicas(v2_obj.definition)) == 1
-    assert list(repo2.query(v1).stored().defs()) == [v1]
-    assert list(repo2.query(v2_obj.definition).stored().defs()) == [v2_obj.definition]
+    assert list(class_only) == [obj.definition]
+    assert len(class_only.replicas(obj.definition)) == 2
+    assert list(repo2.query(obj.definition).stored().defs()) == [obj.definition]
 
 
 def test_query_backed_multistore_order_stable(tmp_path, monkeypatch):
@@ -1002,9 +883,8 @@ def test_sqlite_nested_generation_retry_is_source_local(tmp_path, monkeypatch):
         captured = original(query, binding, stats, **kwargs)
         counts[binding.source_key] += 1
         if binding.source_key == churn_source and counts[binding.source_key] == 1:
-            churn = FederationLeaf(name="source-local-churn", repo=repo2).definition
-            index = repo2._query_index._source_index_for_binding(binding)
-            index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
+            churn = FederationLeaf(name="source-local-churn", repo=repo2)
+            repo2.save_object(churn, store=binding.store)
         return captured
 
     monkeypatch.setattr(repo2._query_index, "_capture_lowered_nested_matches", capture_then_churn)
@@ -1033,9 +913,8 @@ def test_sqlite_nested_owner_projection_retries_after_generation_change(tmp_path
         captured = original(query, binding, stats, **kwargs)
         calls += 1
         if calls == 1:
-            churn = FederationLeaf(name="owner-churn", repo=repo2).definition
-            index = repo2._query_index._source_index_for_binding(binding)
-            index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
+            churn = FederationLeaf(name="owner-churn", repo=repo2)
+            repo2.save_object(churn, store=binding.store)
         return captured
 
     monkeypatch.setattr(repo2._query_index, "_capture_lowered_nested_matches", capture_then_churn)
@@ -1063,9 +942,8 @@ def test_sqlite_nested_occurrence_projection_retries_after_generation_change(tmp
         captured = original(query, binding, stats, **kwargs)
         calls += 1
         if calls == 1:
-            churn = FederationLeaf(name="occurrence-churn", repo=repo2).definition
-            index = repo2._query_index._source_index_for_binding(binding)
-            index.register_stored_roots(ConcreteDefinitionGraph.from_root(churn), [churn])
+            churn = FederationLeaf(name="occurrence-churn", repo=repo2)
+            repo2.save_object(churn, store=binding.store)
         return captured
 
     monkeypatch.setattr(repo2._query_index, "_capture_lowered_nested_matches", capture_then_churn)

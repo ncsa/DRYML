@@ -2,6 +2,8 @@ import pytest
 
 import dryml.execute as execute
 from dryml.core import Repo, definition_mode
+from dryml.core.repo import default_repo
+from dryml.execute.protocol import UnsupportedReferenceTransportError
 from dryml.core.tensor_spec import TensorSpec
 from dryml.data import Cast, Flatten, Map, Scale, Select, TFDSAdapter, Zip
 from dryml.metrics import categorical_accuracy
@@ -83,7 +85,8 @@ def test_torch_basic_mnist_classifier_with_tfds_adapter():
     )
     exp = Experiment(model, train_fn, train_data=train_ds, val_data=val_ds)
 
-    exp.train()
+    with default_repo(Repo()):
+        exp.train()
 
     assert categorical_accuracy(model, val_ds, batch_size=64) > 0.1
     assert Map(val_ds, Select(0), model).spec == TensorSpec("float32", shape=(10,), backend="torch")
@@ -174,7 +177,7 @@ _MNIST_EXEC_CASES = [
     "experiment_factory,backend",
     _MNIST_EXEC_CASES,
 )
-def test_mnist_execute_multi_framework_train_and_score_matches_model_score(
+def test_mnist_execute_trains_a_structural_copy_without_mutating_the_caller(
         tmp_path,
         backend,
         experiment_factory):
@@ -183,38 +186,26 @@ def test_mnist_execute_multi_framework_train_and_score_matches_model_score(
     repo = Repo(stores=repo_dir)
     exp_def = experiment_factory()
 
-    exp = repo.load_object(
-        exp_def,
-        restore_state=False,
-        build_missing=True,
-        cache="strong",
-    )
+    exp = repo.load_or_build(exp_def, cache="strong")
 
     train_score = execute.run(
         _train_experiment_and_score,
         exp,
         backend=backend,
         repo=repo,
-        update=[exp, exp.model],
-    )
-    model_score = execute.run(
-        _score_model,
-        exp.val_data,
-        exp.model,
-        backend=backend,
-        repo=repo,
+        transfer_store=tmp_path / "transfer",
+        result_store=tmp_path / "result",
     )
 
-    assert train_score == pytest.approx(model_score)
     assert train_score > 0.1
-    assert exp.state.phase == "trained"
+    assert exp.state.phase != "trained"
 
 
 @pytest.mark.parametrize(
     "experiment_factory,backend",
     _MNIST_EXEC_CASES,
 )
-def test_mnist_execute_definition_only_train_and_score_matches_model_score(
+def test_mnist_execute_rejects_retired_mutating_update_transport(
         tmp_path,
         backend,
         experiment_factory):
@@ -225,20 +216,11 @@ def test_mnist_execute_definition_only_train_and_score_matches_model_score(
     model_def = exp_def.parameters["model"]
     val_data_def = exp_def.parameters["val_data"]
 
-    train_score = execute.run(
-        _train_experiment_and_score,
-        exp_def,
-        backend=backend,
-        repo=repo,
-        update=[exp_def, model_def],
-    )
-    model_score = execute.run(
-        _score_model,
-        val_data_def,
-        model_def,
-        backend=backend,
-        repo=repo,
-    )
-
-    assert train_score == pytest.approx(model_score)
-    assert train_score > 0.1
+    with pytest.raises(UnsupportedReferenceTransportError, match="retired"):
+        execute.run(
+            _train_experiment_and_score,
+            exp_def,
+            backend=backend,
+            repo=repo,
+            update=[exp_def, model_def],
+        )

@@ -87,17 +87,6 @@ def _default_store_ref_candidate(store):
     return None
 
 
-def _target_cdef(item) -> ConcreteDefinition:
-    if isinstance(item, Object):
-        return item.definition
-    if isinstance(item, ConcreteDefinition):
-        return item
-    raise TypeError(
-        "Update targets must be DRYML Objects or ConcreteDefinitions, "
-        f"got {type(item).__name__}."
-    )
-
-
 def _store_matches_ref(store, store_ref: StoreRef) -> bool:
     return (
         store is not None
@@ -135,26 +124,6 @@ def _save_live_objects(value, source_repo, transfer_repo: Repo, transfer_ref: St
         if obj.definition in available_cdefs:
             continue
         transfer_repo.save_object(obj)
-
-
-def update_cdefs(update=None) -> tuple[ConcreteDefinition, ...]:
-    if update is None or update is False:
-        return ()
-    if update is True:
-        raise NotImplementedError("update=True is not implemented yet; pass explicit objects.")
-    if isinstance(update, (Object, ConcreteDefinition)):
-        update = (update,)
-    return tuple(_target_cdef(item) for item in update)
-
-
-def update_targets(update=None) -> tuple[Object, ...]:
-    if update is None or update is False:
-        return ()
-    if update is True:
-        raise NotImplementedError("update=True is not implemented yet; pass explicit objects.")
-    if isinstance(update, Object):
-        update = (update,)
-    return tuple(item for item in update if isinstance(item, Object))
 
 
 def prepare_call(
@@ -212,26 +181,6 @@ def restore_result(response, *, repo=None, result_store: StoreRef):
         from dryml.core.repo import manage_repo
         with manage_repo(repo=repo) as result_repo:
             result_repo.add_store(store)
-            return result_repo.load_object(
-                response.result_canonical,
-                restore_state=True,
-                build_missing=True,
-            )
+            return result_repo._load_structural(response.result_canonical)
 
-    return result_repo.load_object(
-        response.result_canonical,
-        restore_state=True,
-        build_missing=True,
-    )
-
-
-def restore_updates(targets, *, result_store: StoreRef) -> None:
-    targets = update_targets(targets)
-    if not targets:
-        return
-    result_repo = Repo(stores=result_store.open())
-    for target in targets:
-        store = result_repo._first_store_with(target.definition)
-        if store is None:
-            continue
-        store.restore_object(target)
+    return result_repo._load_structural(response.result_canonical)

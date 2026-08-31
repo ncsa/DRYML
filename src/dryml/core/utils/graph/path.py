@@ -1,8 +1,9 @@
 """Typed, serializable paths through canonical definition graph values.
 
-V2 CDefs address constructor fields with ``Parameter`` segments, while legacy
-V1 CDefs retain invocation-oriented ``Arg`` and ``Kwarg`` segments. These
-types describe paths only; resolving a path is owned by graph-value utilities.
+CDef V2 addresses constructor fields with ``Parameter`` segments. ``Arg`` and
+``Kwarg`` remain soft Definition syntax only and cannot address CDef authority.
+These types describe paths only; resolving a path is owned by graph-value
+utilities.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ def _validate_segment_index(value: Any, field: str, kind: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class Kwarg:
-    """Legacy V1 keyword-call path segment.
+    """Soft Definition keyword-call path segment.
 
     Args:
         name: Persisted keyword argument name.
@@ -84,7 +85,7 @@ class Parameter:
 
 @dataclass(frozen=True, slots=True)
 class Arg:
-    """Legacy V1 positional-call path segment.
+    """Soft Definition positional-call path segment.
 
     Args:
         index: Zero-based position in the persisted raw argument tuple.

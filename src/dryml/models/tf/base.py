@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 
 from dryml.core.object import Serializable
 from dryml.core.repo import get_default_repo
@@ -143,7 +144,21 @@ class Wrapper(Serializable):
         self._restore_status = None
 
     def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Save backend checkpoint files when the wrapped object has state.
+
+        Args:
+            dest_dir: Empty local-state data directory owned by the Store.
+            codec: Active local-state codec identifier.
+
+        Side Effects:
+            Writes TensorFlow checkpoint files only when TensorFlow can emit a
+            non-empty checkpoint, preserving the Store manifest's regular-file
+            payload invariant for stateless wrapped values.
+        """
         import tensorflow as tf
+
+        if not getattr(self, "_checkpoint_stateful", True):
+            return
 
         ckpt_dir = os.path.join(dest_dir, "object.ckpt")
         os.makedirs(ckpt_dir, exist_ok=True)
@@ -154,6 +169,8 @@ class Wrapper(Serializable):
 
         manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=1)
         manager.save()
+        if not any(files for _, _, files in os.walk(ckpt_dir)):
+            shutil.rmtree(ckpt_dir)
 
     def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         import tensorflow as tf
@@ -213,6 +230,20 @@ class Optimizer(Wrapper):
 
 class Loss(Wrapper):
     """First-class Keras loss object for experiment hyperparameters."""
+
+    _checkpoint_stateful = False
+
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Leave local state empty because Keras losses are structural values.
+
+        Args:
+            dest_dir: Empty Store-owned local-state data directory.
+            codec: Active local-state codec identifier.
+
+        Side Effects:
+            None. Loss configuration is already represented by its immutable
+            concrete definition, so no empty checkpoint directory is emitted.
+        """
 
 
 class Metric(Wrapper):

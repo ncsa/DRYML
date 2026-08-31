@@ -47,7 +47,7 @@ def test_promoted_package_keeps_the_destination_export_manifest():
     core = importlib.import_module("dryml.core")
 
     assert core.__all__ == [
-        "load_object", "load_alias", "save_object", "Object", "Serializable", "UniqueID",
+        "load_object", "save_object", "load_state_ref", "LiveReusePolicy", "StoreReport", "Object", "Serializable", "UniqueID",
         "Metadata", "Compute", "Definition", "ConcreteDefinition", "DefLink", "Ref", "Mat",
         "ObjectId", "ObjectRef", "StateRef", "StateSelectorRef", "object_namespace", "freeze",
         "ArgRole", "RefCDef", "RefCDefArg", "SelectorArg", "MaterializeArg",
@@ -61,6 +61,6 @@ def test_promoted_package_keeps_the_destination_export_manifest():
         "ConcreteDefinitionGraphCycleError", "ConcreteDefinitionGraphError", "EdgeKind",
         "iter_direct_cdef_edges", "Arg", "DefinitionPath", "DefinitionQuery", "DefinitionResultSet",
         "GraphPathError", "Index", "Key", "Kwarg", "Parameter", "ObjectResultSet",
-        "OccurrenceResultSet", "QueryCardinalityError", "QueryDomainError", "QueryError",
-        "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember",
+        "ObjectRefResultSet", "OccurrenceResultSet", "ReferenceOccurrence", "ReferenceQuery", "ReferenceResultSet", "QueryCardinalityError", "QueryDomainError", "QueryError",
+        "QueryExplanation", "QueryIndexError", "QueryPathError", "SetMember", "StateRefResultSet",
     ]

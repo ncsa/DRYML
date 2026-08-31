@@ -6,7 +6,8 @@ import pickle
 import pytest
 
 from dryml.core.definition import ConcreteDefinition
-from dryml.core.freeze import FrozenDict, FrozenTuple
+from dryml.core.bound_args import BoundArguments
+from dryml.core.cdef_identity import V2_IDENTITY_VERSION
 from dryml.core.symbol import ImportRef
 
 
@@ -31,8 +32,8 @@ def test_new_pickle_globals_and_symbolic_identity_use_promoted_namespace():
 
     cdef = ConcreteDefinition._from_persisted_record(
         ImportRef("dryml.core.object", "Object"),
-        FrozenTuple(()),
-        FrozenDict({}),
+        identity_version=V2_IDENTITY_VERSION,
+        parameters=BoundArguments(),
     )
 
     assert b"dryml.core" in pickle.dumps(ConcreteDefinition)

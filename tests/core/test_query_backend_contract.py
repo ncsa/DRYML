@@ -25,7 +25,7 @@ from dryml.core.query.path import DefinitionPath
 from dryml.core.query.selector_graph import compile_selector_graph
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig, sqlite_available
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
-from dryml.core.store.store import Store
+from dryml.core.store.dir import DirStore
 
 
 class ContractLeaf(Object):
@@ -56,40 +56,12 @@ class ContractVariadic(Object):
         self.labels = labels
 
 
-class ContractStore(Store):
-    def __init__(self, key="contract-memory-store"):
-        self.key = key
-
-    @property
-    def base_dir(self):
-        return self.key
-
-    @property
-    def object_root_dir(self):
-        return self.key
-
-    def has(self, cdef):
-        return False
-
-    def hydrate_index(self):
-        return ()
-
-    def _object_dir(self, cdef):
-        return self.key
-
-    def commit(self):
-        return None
-
-    def catalog_key(self):
-        return self.key
-
-
 class MemoryContractIndex:
     source_key = "contract-memory-index"
 
-    def __init__(self):
-        self.repo = Repo(stores=ContractStore())
-        self.store = self.repo.default_store
+    def __init__(self, store):
+        self.repo = Repo(stores=store)
+        self.store = store
         self.index = MemoryStoreQueryIndex(self.repo._query_catalog, self.store)
 
     def read_view(self, *, include_cached=True):
@@ -402,7 +374,7 @@ def backend_case(request, tmp_path):
     if request.param == "fake":
         return BackendCase("fake", FakeContractIndex())
     if request.param == "memory":
-        return BackendCase("memory", MemoryContractIndex())
+        return BackendCase("memory", MemoryContractIndex(DirStore(tmp_path / "memory", query_index="memory")))
     if not sqlite_available():
         pytest.skip("sqlite3 is unavailable")
     return BackendCase(
@@ -479,8 +451,8 @@ def test_contract_local_candidates_and_planner(backend_case):
     assert cdefs == (wanted.definition,)
 
 
-def test_memory_variadic_selector_uses_semantic_requirements_without_scanning():
-    contract = MemoryContractIndex()
+def test_memory_variadic_selector_uses_semantic_requirements_without_scanning(tmp_path):
+    contract = MemoryContractIndex(DirStore(tmp_path / "memory", query_index="memory"))
     wanted = ContractVariadic("wanted", marker="wanted")
     decoys = tuple(ContractVariadic(f"decoy-{index}", marker=f"decoy-{index}") for index in range(999))
     definitions = (wanted.definition, *(decoy.definition for decoy in decoys))

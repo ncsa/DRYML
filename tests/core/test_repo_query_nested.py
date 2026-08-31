@@ -1,69 +1,47 @@
-import pytest
+"""DefinitionRecord closure coverage for graphs with ephemeral nodes."""
 
-from dryml.core import Definition, Object, Repo, SKIP_ARGS, Serializable
-from dryml.core.query import QueryDomainError
+from dryml.core import Object, Repo, Serializable
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 
 
 class QueryLeaf(Object):
+    """Ephemeral child retained structurally by its enclosing definition."""
+
     def __init__(self, name):
-        super().__init__()
         self.name = name
 
 
 class QueryParent(Serializable):
+    """Stateful root used to publish an enclosing definition closure."""
+
     def __init__(self, child, *, label="parent"):
-        super().__init__()
         self.child = child
         self.label = label
 
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        """Publish no payload files for this structural test value."""
 
-def test_nested_query_finds_ephemeral_child_and_owner(tmp_path):
+
+def test_save_records_definition_closure_for_ephemeral_child(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     child = QueryLeaf("child", repo=repo)
     parent = QueryParent(child, repo=repo)
+
     repo.save_object(parent)
 
-    assert store.has(parent.definition)
-    assert not store.has(child.definition)
-
-    repo2 = Repo(stores=DirStore(store.base_dir))
-    selector = Definition(QueryLeaf, SKIP_ARGS)
-
-    assert len(repo2.find_defs(selector, scope="stored")) == 0
-
-    occurrences = repo2.find_occurrences(selector)
-    assert occurrences.count() == 1
-    occurrence = occurrences.one()
-    assert occurrence.owner == parent.definition
-    assert occurrence.definition == child.definition
-    assert str(occurrence.path) == '$[@param("child")]'
-
-    owner_defs = repo2.find_owner_defs(selector)
-    assert list(owner_defs) == [parent.definition]
-
-    with pytest.raises(QueryDomainError):
-        repo2.query(selector).nested().objects()
-
-    owners = repo2.query(selector).nested().owners().objects()
-    assert owners.one().child.name == "child"
+    assert store.read_definition_record(DefinitionRecord(parent.definition).digest)
+    assert store.read_definition_record(DefinitionRecord(child.definition).digest)
 
 
-def test_nested_occurrences_preserve_duplicate_paths(tmp_path):
+def test_repeated_ephemeral_child_has_one_definition_record(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
     child = QueryLeaf("shared", repo=repo)
     parent = QueryParent([child, child], repo=repo)
+
     repo.save_object(parent)
 
-    repo2 = Repo(stores=DirStore(store.base_dir))
-    occurrences = repo2.find_occurrences(Definition(QueryLeaf, SKIP_ARGS))
-
-    assert occurrences.count() == 2
-    assert {str(occ.path) for occ in occurrences} == {
-        '$[@param("child")][0]',
-        '$[@param("child")][1]',
-    }
-    assert occurrences.definitions().count() == 1
-    assert occurrences.owners().count() == 1
+    records = tuple(store.iter_definition_records())
+    assert {record.definition for record in records} == {parent.definition, child.definition}

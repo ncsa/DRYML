@@ -56,7 +56,7 @@ def test_soft_state_selector_resolves_once_before_cdef_identity():
 def test_soft_state_selector_fails_without_or_outside_repo_scope():
     state = _state_ref()
     selector = state.object.state("best")
-    with pytest.raises(TypeError, match="managing Repo"):
+    with pytest.raises(KeyError, match="no alias"):
         Definition(CanonicalOwner, selector).concretize()
 
     class BadRepo:

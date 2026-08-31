@@ -125,21 +125,19 @@ class StableHashGraphHasher(GraphHasher):
     def __init__(self, *, reuse_validated_cdef_hashes: bool = False):
         self._reuse_validated_cdef_hashes = reuse_validated_cdef_hashes
 
-    def _validated_v2_cdef_hash(self, obj) -> str | None:
+    def _validated_cdef_hash(self, obj) -> str | None:
         if not self._reuse_validated_cdef_hashes:
             return None
-        from ..cdef_identity import V2_IDENTITY_VERSION
         from ..definition import ConcreteDefinition
 
         if (
                 isinstance(obj, ConcreteDefinition)
-                and obj.identity_version == V2_IDENTITY_VERSION
                 and obj._stable_hash_cache is not None):
             return obj._stable_hash_cache
         return None
 
     def is_atomic(self, obj, ctx: GraphCtx) -> bool:
-        if self._validated_v2_cdef_hash(obj) is not None:
+        if self._validated_cdef_hash(obj) is not None:
             return True
         from ..canonical import node_kind, NodeKind
 
@@ -157,7 +155,7 @@ class StableHashGraphHasher(GraphHasher):
         }
 
     def hash_atomic(self, obj, ctx: GraphCtx) -> str:
-        cached_cdef_hash = self._validated_v2_cdef_hash(obj)
+        cached_cdef_hash = self._validated_cdef_hash(obj)
         if cached_cdef_hash is not None:
             return cached_cdef_hash
         return stable_hash_value(obj)

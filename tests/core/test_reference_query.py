@@ -62,7 +62,7 @@ def test_object_terminal_preserves_nested_ref_state_reference(tmp_path):
     state = repo.save_object(ReferenceQueryLeaf(3, repo=repo))
     parent = repo.save_object(ReferenceQueryRefParent(Ref(state), repo=repo))
 
-    loaded = repo.query(parent.definition).stored().objects(instance="new", cache="none").one()
+    loaded = repo.query(parent.definition).stored().objects(cache="none").one()
 
     assert loaded.selected == state
     assert loaded.definition.parameters["selected"].target == state

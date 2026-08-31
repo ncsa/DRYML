@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from dryml.core import Mat, Object, ObjectRef, Repo, Serializable, StateRef
+from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
 from dryml.core.utils.graph.path import GraphPath, Parameter
 from dryml.core.store.dir import DirStore
 from dryml.core.store.zip import ZipStore
@@ -29,23 +29,14 @@ class ImportedWrapper(Object):
         self.child = child
 
 
-@pytest.mark.parametrize("wrap", [lambda value: value, Mat], ids=["bare", "mat"])
-def test_imported_exact_reference_rebases_live_nested_bindings_for_deep_capture(tmp_path, wrap):
+def test_unpublished_object_ref_rejects_import_into_a_new_exact_graph(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(store)
     leaf = CountingState("nested", repo=repo)
     imported = ImportedWrapper(EphemeralRoot(leaf, repo=repo), repo=repo)
-    outer = ImportedWrapper(wrap(imported.object_ref), repo=repo)
-    imported_path = GraphPath((Parameter("child"),))
-    nested_path = imported_path.child(Parameter("child")).child(Parameter("children"))
-    CountingState.saves = 0
 
-    state = outer.save(repo=repo, deep_capture=True)
-
-    assert outer.graph_at(imported_path) is outer.child
-    assert outer.graph_at(nested_path) is outer.child.child.children
-    assert state.states[nested_path] == outer.child.child.children._last_state_hash
-    assert CountingState.saves == 1
+    with pytest.raises(ValueError, match="ObjectRef objects must contain"):
+        ImportedWrapper(imported.object_ref, repo=repo)
 
 
 def test_imported_state_ref_rebases_live_nested_bindings_without_owning_ref_edges(tmp_path):

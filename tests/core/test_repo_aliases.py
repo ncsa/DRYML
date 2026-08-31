@@ -2,7 +2,7 @@ import pytest
 
 from tests.core import core_objects as objects
 from dryml.core import ObjectRef
-from dryml.core.repo import Repo, RepoLoadError, load_alias, make_store, save_object
+from dryml.core.repo import Repo, RepoLoadError, make_store
 from dryml.core.store.dir import DirStore
 
 
@@ -17,7 +17,7 @@ def _require_writable(repo):
         pytest.skip("reference publication requires a writable Store")
 
 
-def test_repo_alias_loads_object_in_same_repo(primary_store_set):
+def test_repo_object_alias_resolves_typed_reference_for_structural_load(primary_store_set):
     _require_writable_reference_store(primary_store_set)
     repo = Repo(stores=primary_store_set.stores)
     _require_writable(repo)
@@ -25,11 +25,13 @@ def test_repo_alias_loads_object_in_same_repo(primary_store_set):
 
     repo.save_object(obj, alias="train_data_1")
 
-    assert repo.get_alias("train_data_1") == obj.object_ref
-    assert repo.load_alias("train_data_1").definition == obj.definition
+    reference = repo.resolve_object_alias("train_data_1")
+
+    assert reference == obj.object_ref
+    assert repo.load_object(reference.definition).definition == obj.definition
 
 
-def test_repo_alias_persists_across_reopen(primary_store_set):
+def test_repo_object_alias_persists_across_reopen(primary_store_set):
     _require_writable_reference_store(primary_store_set)
     repo = Repo(stores=primary_store_set.stores)
     _require_writable(repo)
@@ -38,7 +40,8 @@ def test_repo_alias_persists_across_reopen(primary_store_set):
     repo.close(flush=True)
 
     repo2 = Repo(stores=primary_store_set.fresh_stores())
-    loaded = repo2.load_alias("train_data_1")
+    reference = repo2.resolve_object_alias("train_data_1")
+    loaded = repo2.load_object(reference.definition)
 
     assert repo2.get_alias("train_data_1") == obj.object_ref
     assert loaded.definition == obj.definition
@@ -46,19 +49,36 @@ def test_repo_alias_persists_across_reopen(primary_store_set):
     assert loaded.test == "train"
 
 
-def test_top_level_load_alias(primary_store_set):
+def test_object_alias_resolution_requires_an_explicit_repo(primary_store_set):
     _require_writable_reference_store(primary_store_set)
-    if not primary_store_set.stores[0].publication_capabilities.writable:
-        pytest.skip("reference publication requires a writable Store")
     obj = objects.TestClass1(20, test="eval")
-    save_object(obj, repo=primary_store_set.stores, alias="eval_data")
+    repo = Repo(stores=primary_store_set.stores)
+    repo.save_object(obj, alias="eval_data")
+    repo.close(flush=True)
 
-    loaded = load_alias("eval_data", repo=primary_store_set.fresh_stores())
+    reopened = Repo(stores=primary_store_set.fresh_stores())
+    reference = reopened.resolve_object_alias("eval_data")
+    loaded = reopened.load_object(reference.definition)
 
     assert loaded.definition == obj.definition
 
     assert loaded.x == 20
     assert loaded.test == "eval"
+
+
+def test_repo_state_alias_resolves_an_exact_state_ref(primary_store_set):
+    _require_writable_reference_store(primary_store_set)
+    repo = Repo(stores=primary_store_set.stores)
+    obj = objects.TestClass1(25, test="checkpoint")
+    state = repo.save_object(obj)
+    repo.set_state_alias("checkpoint", state)
+    repo.close(flush=True)
+
+    reopened = Repo(stores=primary_store_set.fresh_stores())
+    resolved = reopened.resolve_state_alias(state.object, "checkpoint")
+
+    assert resolved == state
+    assert reopened.load_state_ref(resolved, reuse_live="never").definition == obj.definition
 
 
 def test_repo_alias_deletion_is_not_a_legacy_cdef_mutation(primary_store_set):

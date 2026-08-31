@@ -2,28 +2,14 @@ import pytest
 
 from tests.core import core_objects as objects
 from dryml.core import Definition, SKIP_ARGS, Satisfies, Selector
-from dryml.core.definition import selector_match
-from dryml.core.cdef_identity import V1_IDENTITY_VERSION
 from dryml.core.freeze import FrozenList
-from dryml.core.query.fingerprint import (
-    legacy_requirements_satisfied,
-    legacy_selector_requirements,
-    legacy_target_fingerprint,
-    target_local_fingerprint,
-)
+from dryml.core.query.fingerprint import target_local_fingerprint
 from dryml.core.utils.graph.path import Arg, Kwarg
 from dryml.core.utils.stable_hash import stable_hash_function
 
 
 def assert_no_fingerprint_false_negative(selector, target, *, class_match="selector"):
     assert Selector(selector, cls_policy=class_match).matches(target)
-    if target.identity_version != V1_IDENTITY_VERSION:
-        # The legacy oracle is intentionally invocation-path based. V2 paths
-        # are semantic and are covered by the version-aware query suites.
-        return
-    requirements = legacy_selector_requirements(selector, class_match=class_match)
-    fingerprint = legacy_target_fingerprint(target)
-    assert legacy_requirements_satisfied(fingerprint, requirements)
 
 
 def test_fingerprint_never_rejects_container_compatible_target():
@@ -111,15 +97,6 @@ def target_corpus():
         objects.TestNest3(members={exact_child}).definition,
         objects.TestNest3(members={objects.TestNest3(a=1, b=2)}).definition,
     ]
-
-
-@pytest.mark.parametrize("selector", selector_corpus())
-@pytest.mark.parametrize("target", target_corpus())
-def test_fingerprint_filter_never_rejects_structural_match_matrix(selector, target):
-    if target.identity_version == V1_IDENTITY_VERSION and selector_match(selector, target, strict=False):
-        requirements = legacy_selector_requirements(selector)
-        fingerprint = legacy_target_fingerprint(target)
-        assert legacy_requirements_satisfied(fingerprint, requirements)
 
 
 def test_local_fingerprint_stops_at_nested_cdef_boundary():

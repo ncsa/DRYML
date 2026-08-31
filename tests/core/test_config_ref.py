@@ -51,7 +51,8 @@ def test_config_ref_keeps_identity_stable_across_runtime_config(primary_store_se
     repo.close(flush=True)
 
     repo2 = Repo(stores=primary_store_set.fresh_stores(), config={"data.root": "/cloud/data"})
-    loaded = repo2.load_alias("configured")
+    reference = repo2.resolve_object_alias("configured")
+    loaded = repo2.load_object(reference.definition)
 
     assert loaded.definition == obj.definition
     assert loaded.value == "/cloud/data"

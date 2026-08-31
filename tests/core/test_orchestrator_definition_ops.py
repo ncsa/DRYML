@@ -4,6 +4,7 @@ import pytest
 
 from dryml import session
 from dryml.core import Definition, Object, Repo
+from dryml.core.store.dir import DirStore
 from dryml.runtime.errors import RuntimeTransitionError
 
 
@@ -30,18 +31,19 @@ def reset_runtime():
     session.reset()
 
 
-def test_definition_identity_and_structural_query_paths_remain_available():
-    repo = Repo()
+def test_definition_identity_and_structural_query_paths_remain_available(tmp_path):
+    repo = Repo(DirStore(tmp_path / "store", query_index="memory"))
     definition = Definition(DefinitionOnlyObject, "planned")
     cdef = definition.concretize(repo=repo)
-    repo.set_alias("planned", cdef)
+    state = repo.save_object(DefinitionOnlyObject("planned", repo=repo))
+    repo.set_alias("planned", state.object)
 
     session.set_mode("orchestrator")
 
     assert cdef.stable_hash()
-    assert repo.get_alias("planned") == cdef
+    assert repo.get_alias("planned") == state.object
     assert repo.definition_graph(cdef).roots == (cdef,)
-    assert list(repo.find_defs(cdef, scope="cached")) == []
+    assert list(repo.find_defs(cdef, scope="cached")) == [cdef]
 
 
 def test_definition_build_rejects_before_preparation_or_constructor():

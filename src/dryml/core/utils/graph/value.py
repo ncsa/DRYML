@@ -70,7 +70,7 @@ def resolve_set_member(values: Iterable[Any], segment: SetMember) -> Any:
 
 
 def iter_value_edges(value: Any) -> tuple[ValueEdge, ...]:
-    if isinstance(value, ConcreteDefinition) and value.identity_version == V2_IDENTITY_VERSION:
+    if isinstance(value, ConcreteDefinition):
         return tuple(ValueEdge(Parameter(name), child) for name, child in value.parameters.items())
 
     if isinstance(value, (Definition, ConcreteDefinition)):
@@ -123,10 +123,10 @@ def replace_subtree(obj: Any, path: DefinitionPathLike, replacement: Any) -> Any
 
 
 def _get_child(obj: Any, seg: PathSegment) -> Any:
-    if isinstance(obj, ConcreteDefinition) and obj.identity_version == V2_IDENTITY_VERSION:
+    if isinstance(obj, ConcreteDefinition):
         if isinstance(seg, Parameter):
             return obj.parameters[seg.name]
-        raise TypeError(f"{seg!s} is not valid on a V2 concrete definition.")
+        raise TypeError(f"{seg!s} is not valid on a concrete definition; use Parameter.")
 
     if isinstance(obj, (Definition, ConcreteDefinition)):
         if isinstance(seg, Kwarg):
@@ -162,9 +162,9 @@ def _get_child(obj: Any, seg: PathSegment) -> Any:
 
 
 def _replace_child(obj: Any, seg: PathSegment, child: Any) -> Any:
-    if isinstance(obj, ConcreteDefinition) and obj.identity_version == V2_IDENTITY_VERSION:
+    if isinstance(obj, ConcreteDefinition):
         if not isinstance(seg, Parameter):
-            raise QueryPathError(f"{seg!s} is not valid on a V2 concrete definition.")
+            raise QueryPathError(f"{seg!s} is not valid on a concrete definition; use Parameter.")
         if seg.name not in obj.parameters:
             raise QueryPathError(f"Missing parameter {seg.name!r} while replacing {seg!s}.")
         from ...bound_args import BoundArguments

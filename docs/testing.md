@@ -124,6 +124,15 @@ When adding tests:
 5. Run `./tests.sh smoke` first, then `./tests.sh medium`, then relevant `heavy` tests.
 6. Run `./tests.sh profile --unknown-only` to populate node-tier timings for new tests.
 
+## CDef V2 Gates
+
+The focused CDef V2 gate covers rejection of pre-port authority before mutation,
+public signatures and exports, exact-reference transport rejection, lazy Ray
+imports, and tracked documentation links/API examples. Use `tests/fixtures/`
+only for minimal malformed authority fixtures; do not add migration or dual-read
+fixtures. Run the focused gate before broader core tests and do not weaken its
+rejection assertions.
+
 If a new file is not listed in `path_tiers`, it inherits its category tier.
 
 The tier-administration tests require every maintained category to have an

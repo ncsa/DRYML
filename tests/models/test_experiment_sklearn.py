@@ -42,10 +42,15 @@ def test_experiment_save_load_restores_train_state_and_model(tmp_path):
     exp.train()
 
     repo = Repo(stores=tmp_path)
-    repo.save_object(exp, alias="exp")
+    state = repo.save_object(exp, alias="exp")
+    repo.set_state_alias("checkpoint", state)
     repo.close(flush=True)
 
-    loaded = Repo(stores=tmp_path).load_alias("exp")
+    reopened = Repo(stores=tmp_path)
+    assert reopened.resolve_object_alias("exp") == state.object
+    loaded = reopened.load_state_ref(
+        reopened.resolve_state_alias(state.object, "checkpoint"), reuse_live="never"
+    )
 
     assert loaded.state.epoch == 1
     assert loaded.state.step == 3

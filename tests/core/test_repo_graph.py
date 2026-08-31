@@ -1,9 +1,8 @@
 import pytest
 
 from dryml.core import ConcreteDefinition, Definition, Object, Repo, Serializable
-from dryml.core.cdef_identity import V1_IDENTITY_VERSION, V2_IDENTITY_VERSION, cdef_node_key
+from dryml.core.cdef_identity import cdef_node_key
 from dryml.core.object import WorkspaceCapable
-from dryml.core.policies import RepoLoadOptions
 from dryml.core.query.path import GraphPath, Index, Key, Parameter, SetMember, get_subtree
 from dryml.core.repo import RepoGraphError, RepoSaveError, default_repo, get_default_repo
 from dryml.core.repo_plan import GraphApplyResult, collect_runtime_roots
@@ -240,7 +239,7 @@ def test_get_cached_is_exact_and_rejects_cross_tier_ambiguity():
     assert not repo.has_cached(first.definition)
 
 
-def test_mixed_v1_v2_cache_workspace_and_store_bindings_remain_independent(tmp_path):
+def test_independent_current_nodes_keep_workspace_and_store_bindings(tmp_path):
     store = DirStore(tmp_path / "store")
     repo = Repo(stores=store)
 
@@ -258,39 +257,22 @@ def test_mixed_v1_v2_cache_workspace_and_store_bindings_remain_independent(tmp_p
             )
 
     repo.workspace_manager = WorkspaceManager()
-    v1 = ConcreteDefinition._from_persisted_record(WorkspaceLeaf, ("same",), {})
-    v2 = Definition(WorkspaceLeaf, "same").concretize(repo=repo)
+    first = Definition(WorkspaceLeaf, "same").concretize(repo=repo)
+    second = Definition(WorkspaceLeaf, "same").concretize(repo=repo)
 
-    v1_obj = repo.load_or_build(v1, restore_state=False)
-    v2_obj = repo.load_or_build(v2, restore_state=False)
-    repo.pin(v1_obj)
-    repo.set_object_store(v1, store)
-    repo.set_object_store(v2, store)
+    first_obj = repo.load_or_build(first)
+    second_obj = repo.load_or_build(second)
+    repo.pin(first_obj)
+    repo.set_object_store(first, store)
+    repo.set_object_store(second, store)
 
-    assert v1.identity_version == V1_IDENTITY_VERSION
-    assert v2.identity_version == V2_IDENTITY_VERSION
-    assert v1 != v2
-    assert repo.strong_obj_cache[v1] is v1_obj
-    assert repo.weak_obj_cache[v2] is v2_obj
-    assert repo.obj_default_store[v1] is store
-    assert repo.obj_default_store[v2] is store
-    assert v1_obj.workspace != v2_obj.workspace
-
-
-def test_mixed_version_parent_child_materialization_preserves_each_identity():
-    repo = Repo()
-    v1_child = ConcreteDefinition._from_persisted_record(GraphLeaf, ("v1-child",), {})
-    v2_child = Definition(GraphLeaf, "v2-child").concretize(repo=repo)
-    v2_parent = Definition(GraphNode, "v2-parent", v1_child).concretize(repo=repo)
-    v1_parent = ConcreteDefinition._from_persisted_record(GraphNode, ("v1-parent", v2_child), {})
-
-    loaded_v2_parent = repo.load_or_build(v2_parent, restore_state=False)
-    loaded_v1_parent = repo.load_or_build(v1_parent, restore_state=False)
-
-    assert loaded_v2_parent.definition == v2_parent
-    assert loaded_v2_parent.children[0].definition == v1_child
-    assert loaded_v1_parent.definition == v1_parent
-    assert loaded_v1_parent.children[0].definition == v2_child
+    assert first == second
+    assert cdef_node_key(first) is not cdef_node_key(second)
+    assert repo.strong_obj_cache[first] is first_obj
+    assert repo.weak_obj_cache[second] is second_obj
+    assert repo.obj_default_store[first] is store
+    assert repo.obj_default_store[second] is store
+    assert first_obj.workspace != second_obj.workspace
 
 
 def test_add_objects_assigns_store_to_unique_graph_nodes(tmp_path):
@@ -327,7 +309,7 @@ def test_iter_graph_missing_cdef_can_load_from_store(tmp_path):
     repo1.save_object(leaf)
 
     repo2 = Repo(stores=DirStore(store.base_dir))
-    loaded = list(repo2.iter_graph(leaf.definition, missing="load", restore_state=False))
+    loaded = list(repo2.iter_graph(leaf.definition, missing="load"))
 
     assert len(loaded) == 1
     assert loaded[0].name == "leaf"
@@ -343,20 +325,6 @@ def test_object_init_sees_explicit_construction_repo_and_restores_outer_repo():
         assert get_default_repo() is outer_repo
 
 
-def test_get_and_apply_share_load_options():
-    repo = Repo()
-    weak = GraphLeaf("weak", repo=repo)
-    strong = GraphLeaf("strong", repo=repo)
-    repo.pin(strong)
-
-    options = RepoLoadOptions(reuse_weak=False)
-
-    selected = repo.get(options=options)
-    applied = repo.apply(lambda obj: obj.name, options=options)
-
-    assert weak.definition not in selected
-    assert strong.definition in selected
-    assert applied == {strong.definition: "strong"}
 
 
 def test_save_object_uses_direct_state_ref_controls(tmp_path):

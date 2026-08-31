@@ -195,17 +195,12 @@ def get_unique_concrete_definitions(obj_or_def) -> set["ConcreteDefinition"]:
     from ..object import Object
     from ..definition import Definition
     from ..definition import ConcreteDefinition
-    from ..cdef_identity import V2_IDENTITY_VERSION
 
 
     if isinstance(obj_or_def, Object):
         return get_unique_concrete_definitions(obj_or_def.definition)
     if isinstance(obj_or_def, ConcreteDefinition):
-        if obj_or_def.identity_version == V2_IDENTITY_VERSION:
-            nested = get_unique_concrete_definitions(obj_or_def.parameters)
-        else:
-            nested = get_unique_concrete_definitions(obj_or_def._args)
-            nested.update(get_unique_concrete_definitions(obj_or_def._kwargs))
+        nested = get_unique_concrete_definitions(obj_or_def.parameters)
         nested.add(obj_or_def)
         return nested
 

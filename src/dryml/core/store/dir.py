@@ -323,6 +323,14 @@ class DirStore(Store):
             existing = self._read_file(path, record_type)
             if existing is not None:
                 if existing != record:
+                    if (
+                        isinstance(existing, DefinitionRecord)
+                        and isinstance(record, DefinitionRecord)
+                        and existing.definition.graph_equal(record.definition)
+                    ):
+                        # Private CDef node allocations are runtime-local and do
+                        # not distinguish immutable graph authority.
+                        return existing
                     raise StoreAuthorityError(f"Immutable {record_type.schema} collision at {path!r}.")
                 return existing
             self._atomic_write(path, record.to_bytes())
@@ -378,7 +386,7 @@ class DirStore(Store):
             record = self.read_definition_record(DefinitionRecord(cdef).digest)
         except Exception:
             return None
-        if record is not None and record.definition == cdef:
+        if record is not None and record.definition.graph_equal(cdef):
             return record.definition
         return None
 
@@ -389,11 +397,12 @@ class DirStore(Store):
             cdef: Definition represented by a prospective stored-root row.
 
         Returns:
-            ``(record_digest, relative_path, size, mtime_ns)`` when the exact
-            immutable DefinitionRecord exists, otherwise ``None``.
+            ``(record_digest, relative_path, size, mtime_ns)`` when a
+            graph-equivalent immutable DefinitionRecord exists, otherwise
+            ``None``.
         """
         record = self.read_definition_record(DefinitionRecord(cdef).digest)
-        if record is None or record.definition != cdef:
+        if record is None or not record.definition.graph_equal(cdef):
             return None
         path = self._definition_path(record.digest)
         metadata = os.stat(path)

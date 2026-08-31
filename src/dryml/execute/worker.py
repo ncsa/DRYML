@@ -6,6 +6,7 @@ import traceback
 from dryml.core import Repo
 from dryml.core.canonical import to_canonical
 from dryml.core.object import Object
+from dryml.core.repo import default_repo
 from dryml.context import use_context
 
 from .protocol import (
@@ -16,41 +17,48 @@ from .protocol import (
 
 
 def execute_request(request) -> ExecutionResponse:
+    """Execute one validated request with its transfer/result stores as default Repo.
+
+    Args:
+        request: Decoded immutable execution request and Store references.
+
+    Returns:
+        A success response containing canonical output or a failure response with
+        the captured exception and traceback.
+
+    Side Effects:
+        Materializes request inputs and may publish result state to the request's
+        result Store. The worker-local Repo is active while user code runs so
+        backend helpers can resolve graph-local runtime associations.
+    """
     transfer_store = request.transfer_store.open()
     result_store = request.result_store.open()
     repo = Repo(stores=[transfer_store, result_store])
 
     def run_call():
-        fn = request.load_fn()
-        args = repo.load_object(
-            request.args_canonical,
-            restore_state=True,
-            build_missing=True,
-        )
-        kwargs = repo.load_object(
-            request.kwargs_canonical,
-            restore_state=True,
-            build_missing=True,
-        )
+        with default_repo(repo):
+            fn = request.load_fn()
+            args = repo._load_structural(request.args_canonical)
+            kwargs = repo._load_structural(request.kwargs_canonical)
 
-        result = fn(*args, **kwargs)
-        result_canonical = to_canonical(result, repo=repo)
-        if request.save_result_objects and isinstance(result, Object):
-            repo.save_object(result_canonical, store=result_store)
+            result = fn(*args, **kwargs)
+            result_canonical = to_canonical(result, repo=repo)
+            if request.save_result_objects and isinstance(result, Object):
+                repo.save_object(result_canonical, store=result_store)
 
-        updated = []
-        for cdef in request.update_cdefs:
-            obj = repo.get_cached(cdef)
-            if obj is None:
-                obj = repo.load_object(cdef, restore_state=True, build_missing=False)
-            repo.save_object(obj, store=result_store)
-            updated.append(cdef)
+            updated = []
+            for cdef in request.update_cdefs:
+                obj = repo.get_cached(cdef)
+                if obj is None:
+                    obj = repo.load_object(cdef)
+                repo.save_object(obj, store=result_store)
+                updated.append(cdef)
 
-        repo.flush()
-        return ExecutionResponse.success(
-            result_canonical=result_canonical,
-            updated_cdefs=updated,
-        )
+            repo.flush()
+            return ExecutionResponse.success(
+                result_canonical=result_canonical,
+                updated_cdefs=updated,
+            )
 
     try:
         if request.context_reqs:

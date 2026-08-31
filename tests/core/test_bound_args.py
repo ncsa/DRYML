@@ -171,7 +171,7 @@ def test_materialization_preserves_constructor_parameter_named_cls():
         dryml_cls=Definition,
     ).concretize()
 
-    rebuilt = cdef.build(instance="new", cache="none")
+    rebuilt = cdef.build(cache="none")
 
     assert direct.cls is Object
     assert direct.dryml_cls is Definition
@@ -287,10 +287,11 @@ def test_persisted_bound_records_reject_malformed_names_and_values_without_bindi
     with pytest.raises(ValueError, match="duplicate"):
         restored.__setstate__({
             "identity_version": V2_IDENTITY_VERSION,
-            "cls": BindingFixture,
-            "parameters": (("value", 1), ("value", 2)),
-            "stateful_role": False,
-        })
+                "cls": BindingFixture,
+                "parameters": (("value", 1), ("value", 2)),
+                "stateful_role": False,
+                "stable_hash_cache": None,
+            })
     with pytest.raises(ValueError, match="legacy fields"):
         restored.__setstate__({
             "identity_version": V2_IDENTITY_VERSION,
