@@ -119,21 +119,19 @@ from pathlib import Path
 
 assert "tensorflow" not in sys.modules
 from dryml.core.definition import ConcreteDefinition
+from dryml.core.bound_args import BoundArguments
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef
-from dryml.core.utils.general import pickle_save
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index="memory")
-    cdef = ConcreteDefinition._from_persisted_record(
+    cdef = ConcreteDefinition._from_bound_record(
         ImportRef("dryml.models.tf.keras.base", "Sequential"),
-        FrozenTuple(()),
-        FrozenDict({"name": "symbolic"}),
+        BoundArguments((("name", "symbolic"),)),
     )
-    path = Path(store.object_dir(cdef)) / "def.pkl"
-    path.parent.mkdir(parents=True)
-    pickle_save(cdef, path)
+    store.write_definition_record(DefinitionRecord(cdef))
     assert tuple(store.hydrate_index()) == (cdef,)
     assert store.read_definition(cdef) == cdef
 
@@ -478,23 +476,21 @@ assert "torch" not in sys.modules
 
 from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
-from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef, SourceSpec
-from dryml.core.utils.general import pickle_save
 
 with tempfile.TemporaryDirectory() as tmp:
     store = DirStore(Path(tmp) / "store", query_index=SQLiteQueryIndexConfig(journal_mode="delete"))
-    v1 = ConcreteDefinition._from_persisted_record(
+    v1 = ConcreteDefinition._from_bound_record(
         ImportRef("dryml.models.tf.keras.base", "Sequential"),
-        FrozenTuple(()),
-        FrozenDict({
-            "source": SourceSpec.from_source(
+        BoundArguments((
+            ("source", SourceSpec.from_source(
                 "raise AssertionError('V1 source must not execute')",
                 kind="function",
-            ),
-        }),
+            )),
+        )),
     )
     v2 = ConcreteDefinition._from_bound_record(
         SourceSpec.from_source(
@@ -505,9 +501,7 @@ with tempfile.TemporaryDirectory() as tmp:
         BoundArguments((("backend", ImportRef("dryml.models.torch.base", "Model")),)),
     )
     for root in (v1, v2):
-        path = Path(store.object_dir(root)) / "def.pkl"
-        path.parent.mkdir(parents=True)
-        pickle_save(root, path)
+        store.write_definition_record(DefinitionRecord(root))
 
     index = store.open_query_index()
     index.initialize_empty()
@@ -543,8 +537,8 @@ assert "torch" not in sys.modules
     )
 
 
-def test_sqlite_rebuild_rejects_retired_globals_before_sidecar_activation():
-    """Rebuild rejects historical authority without activating a replacement index."""
+def test_sqlite_rebuild_rejects_malformed_definition_record_before_sidecar_activation():
+    """Rebuild rejects malformed direct authority without activating a replacement index."""
 
     import base64
     import hashlib
@@ -552,6 +546,7 @@ def test_sqlite_rebuild_rejects_retired_globals_before_sidecar_activation():
 
     from dryml.core.query.sqlite import SQLiteQueryIndexConfig
     from dryml.core.store.dir import DirStore
+    from dryml.core.store.store import StoreAuthorityError
 
     fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "cdef_v1" / "manifest.json"
     manifest = json.loads(fixture_path.read_text())
@@ -564,13 +559,19 @@ def test_sqlite_rebuild_rejects_retired_globals_before_sidecar_activation():
         index = store.open_query_index()
         index.initialize_empty()
         sidecar_digest = hashlib.sha256(Path(store.query_index_path).read_bytes()).hexdigest()
-        digest = "a" * 64
-        root_path = Path(store.object_root_dir) / digest[:2] / digest / "def.pkl"
-        root_path.parent.mkdir(parents=True)
+        from dryml.core import Object
+        from dryml.core.store.records import DefinitionRecord
+
+        class DirectRecordAuthority(Object):
+            pass
+
+        record = DefinitionRecord(DirectRecordAuthority().definition)
+        store.write_definition_record(record)
+        root_path = Path(store.base_dir, "definitions", record.digest[:2], f"{record.digest}.record")
         root_path.write_bytes(payload)
         authority_digest = hashlib.sha256(root_path.read_bytes()).hexdigest()
 
-        with pytest.raises(ModuleNotFoundError, match="dryml.core" + "2"):
+        with pytest.raises(StoreAuthorityError, match="Malformed Store record"):
             store.rebuild_query_index()
 
         sidecar_path = Path(store.query_index_path)

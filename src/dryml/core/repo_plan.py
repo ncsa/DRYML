@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import copy
+import hashlib
+import os
+import re
+import shutil
+from types import MappingProxyType
 from threading import Lock
 import uuid
-from typing import Any, Callable, Generic, Iterable, Iterator, Literal, TypeVar
+from typing import Any, Callable, Generic, Iterable, Iterator, TypeVar
 
 from .canonical import NodeKind, is_runtime_leaf, node_kind
 from .cdef_graph import ConcreteDefinitionGraph, EdgeKind
@@ -146,19 +150,42 @@ class GraphApplyResult(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class SaveAction:
+    """One owned Serializable node selected for graph-state publication."""
+
+    path: GraphPath
     definition: ConcreteDefinition
     obj: Object
-    store: Any
-    revision: str | None
-    minimum_root_depth: int
-    reason: Literal["serializable", "explicit-root", "ephemeral-depth"]
+    state_hash: str | None = None
+    source_store: Any = None
 
 
 @dataclass(slots=True)
 class SavePlan:
+    """Preflighted live graph evidence used to publish one exact StateRef."""
+
     graph: ConcreteDefinitionGraph
     binding: RuntimeGraphBinding
     actions: tuple[SaveAction, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class StoreReport:
+    """Ephemeral Store selections required to resolve one saved StateRef.
+
+    Attributes:
+        target_store: Store containing the enclosing StateRef record.
+        state_stores: One selected Store for each canonical StateRef path.
+        required_stores: Deduplicated complete Store set needed for resolution.
+    """
+
+    target_store: Any
+    state_stores: MappingProxyType
+    required_stores: tuple[Any, ...]
+
+    def __init__(self, target_store: Any, state_stores: dict[GraphPath, Any], required_stores: Iterable[Any]):
+        object.__setattr__(self, "target_store", target_store)
+        object.__setattr__(self, "state_stores", MappingProxyType(dict(state_stores)))
+        object.__setattr__(self, "required_stores", tuple(_unique_stores(required_stores)))
 
 
 def collect_runtime_roots(value: Any) -> tuple[RuntimeRoot, ...]:
@@ -284,6 +311,7 @@ def attach_runtime_binding(repo, cdef: ConcreteDefinition, obj: Object, memo) ->
         bound = bindings.get(occurrence.definition)
         if bound is not None:
             runtime_values[occurrence.path] = bound
+    _rebase_imported_runtime_projections(cdef, obj, GraphPath(), runtime_values)
 
     object_ids = {}
     for node in graph.nodes():
@@ -387,6 +415,51 @@ def _record_runtime_values(canonical: Any, runtime: Any, path: GraphPath, out: d
     for edge in canonical_edges:
         if edge.segment in runtime_edges:
             _record_runtime_values(edge.value, runtime_edges[edge.segment], path.child(edge.segment), out)
+
+
+def _rebase_imported_runtime_projections(
+        canonical: Any, runtime: Any, path: GraphPath, out: dict[GraphPath, Any]) -> None:
+    """Expose materialized exact-reference bindings below their outer occurrence.
+
+    Bare, materializing ``Mat(ObjectRef)``, and ``StateRef`` values construct a
+    live subtree. Its private runtime projection remains authoritative, but its
+    paths must also be visible from the enclosing root for exact graph saves.
+    ``Ref`` links deliberately retain their immutable reference value and never
+    contribute owned runtime bindings.
+    """
+
+    from .cdef_graph import EdgeKind
+    from .links import DefLink
+    from .reference_values import ObjectRef, StateRef
+
+    if isinstance(canonical, (ObjectRef, StateRef)):
+        if not isinstance(runtime, Object):
+            raise ValueError(f"Materialized exact reference at {path!s} did not produce an Object.")
+        for inner_path, value in runtime._runtime_projection.items():
+            target = path.join(inner_path)
+            previous = out.get(target)
+            if previous is not None and previous is not value:
+                raise ValueError(f"Conflicting exact runtime binding at {target!s}.")
+            out[target] = value
+        return
+    if isinstance(canonical, ConcreteDefinition):
+        for edge in iter_value_edges(canonical):
+            child_path = path.child(edge.segment)
+            runtime_child = out.get(child_path)
+            if runtime_child is not None:
+                _rebase_imported_runtime_projections(
+                    edge.value, runtime_child, child_path, out
+                )
+        return
+    if isinstance(canonical, DefLink):
+        if canonical.kind is EdgeKind.MATERIALIZE:
+            _rebase_imported_runtime_projections(canonical.target, runtime, path, out)
+        return
+    canonical_edges = tuple(iter_value_edges(canonical))
+    runtime_edges = {edge.segment: edge.value for edge in iter_value_edges(runtime)} if canonical_edges else {}
+    for edge in canonical_edges:
+        if edge.segment in runtime_edges:
+            _rebase_imported_runtime_projections(edge.value, runtime_edges[edge.segment], path.child(edge.segment), out)
 
 
 def _copy_runtime_value(value: Any) -> Any:
@@ -509,67 +582,334 @@ def add_objects(repo, values: Iterable[Any], *, store=None) -> None:
 
 def build_save_plan(
         repo,
-        value: Any,
+        value: Object,
         *,
-        store=None,
-        revision: dict[ConcreteDefinition, str] | None = None,
-        ephemeral_depth: int | None = 0) -> SavePlan:
-    _validate_ephemeral_depth(ephemeral_depth)
-    revision = revision or {}
+        store=None) -> SavePlan:
+    """Build complete owned-state save evidence from retained U3 bindings.
+
+    Args:
+        repo: Repository owning live bindings.
+        value: Live root Object to publish.
+        store: Selected StateRef target Store.
+
+    Returns:
+        A graph plan with each unique owned Serializable node exactly once.
+
+    Raises:
+        RepoSaveError: If retained bindings cannot prove a total ObjectRef map.
+    """
+    if not isinstance(value, Object):
+        raise TypeError("Graph save requires one live Object root.")
     binding = build_runtime_binding(repo, value)
     if binding.missing:
         from .repo import RepoSaveError
 
         missing = next(iter(binding.missing))
         raise RepoSaveError(f"Definition of object {missing} is not reachable in this repo!")
+    reference = getattr(value, "_object_ref", None)
+    if reference is None or not reference.definition.graph_equal(value.definition):
+        from .repo import RepoSaveError
 
-    explicit_roots = {root.definition for root in binding.roots}
-    min_depth = _minimum_depths(binding.graph, binding.roots)
+        raise RepoSaveError("Live root lacks complete retained ObjectRef evidence.")
     actions: list[SaveAction] = []
-    for cdef in binding.graph.topological_order(dependencies_first=True):
-        if cdef not in binding.objects:
+    seeds = _seed_state_refs(value.definition)
+    for path in reference.objects:
+        try:
+            obj = value.graph_at(path)
+        except Exception:
+            obj = None
+        if isinstance(obj, Serializable):
+            actions.append(SaveAction(path, obj.definition, obj))
             continue
-        obj = binding.objects[cdef]
-        reason = _save_reason(
-            obj,
-            cdef,
-            explicit_roots=explicit_roots,
-            min_depth=min_depth,
-            ephemeral_depth=ephemeral_depth,
-        )
-        if reason is None:
+        seed = seeds.get(path)
+        if seed is not None:
+            definition, state_hash = seed
+            actions.append(SaveAction(path, definition, value, state_hash=state_hash))
             continue
-        action_store = _select_save_store(repo, cdef, store)
-        actions.append(SaveAction(
-            definition=cdef,
-            obj=obj,
-            store=action_store,
-            revision=revision.get(cdef),
-            minimum_root_depth=min_depth.get(cdef, 0),
-            reason=reason,
-        ))
+        from .repo import RepoSaveError
+
+        raise RepoSaveError(f"No retained Serializable binding or exact seed state at {path!s}.")
     return SavePlan(graph=binding.graph, binding=binding, actions=tuple(actions))
 
 
-def execute_save_plan(repo, plan: SavePlan) -> None:
-    saved_objs: dict[str, set[ConcreteDefinition]] = {}
-    saved_roots_by_store: dict[Any, set[ConcreteDefinition]] = {}
-    graph_registered = False
-    for action in plan.actions:
-        store_key = repo._query_catalog.store_id(action.store)
-        saved = saved_objs.setdefault(store_key, set())
-        if action.definition in saved:
+def execute_save_plan(
+        repo,
+        plan: SavePlan,
+        *,
+        store,
+        deep_capture: bool = False,
+        federated: bool = False,
+        report_stores: bool = False):
+    """Publish local states then the complete enclosing StateRef record last.
+
+    All invalid codecs, Store capabilities, retained-binding gaps, reusable-state
+    integrity failures, and embedded StateRef authority failures are checked
+    before a serializer hook runs. A later hook or immutable install failure can
+    leave only unreferenced completed local-state directories.
+    """
+    from .reference_values import StateRef
+    from .store.records import DefinitionRecord, StateRefRecord
+
+    reference = plan.binding.roots[0].obj.object_ref
+    state_actions = list(plan.actions)
+    _validate_codecs(state_actions)
+    embedded = _resolve_embedded_state_refs(repo, plan.binding.roots[0].definition)
+    reusable: dict[GraphPath, Any] = {}
+    captures: list[SaveAction] = []
+    for action in state_actions:
+        if action.state_hash is not None:
+            source = _find_local_state(repo, action.definition, action.state_hash)
+            if source is None:
+                raise _save_error(action.path, "exact seed local state is not available in a connected Store")
+            reusable[action.path] = source
             continue
-        action.store.save_object(action.obj, revision=action.revision)
-        saved.add(action.definition)
-        saved_roots_by_store.setdefault(action.store, set()).add(action.definition)
-        if not graph_registered:
-            repo._query_catalog.register_graph(plan.graph)
-            graph_registered = True
-        repo._query_catalog.register_stored_root(action.definition, action.store)
-        repo._num_saves += 1
-    if saved_roots_by_store:
-        repo._query_index.register_saved_graph(plan.graph, saved_roots_by_store)
+        state_hash = getattr(action.obj, "_last_state_hash", None)
+        source = None if deep_capture or state_hash is None else _find_local_state(repo, action.definition, state_hash)
+        if source is None:
+            captures.append(action)
+        else:
+            reusable[action.path] = source
+
+    # Capability and closure checks deliberately precede every user hook.
+    store.preflight_publication("save graph", local_state=bool(captures or (not federated and (reusable or embedded))))
+    for _, record, state_sources in embedded:
+        if record is None:
+            raise _save_error(GraphPath(), "embedded StateRef has no authority record in a connected Store")
+        for _, _, source in state_sources:
+            if source is None:
+                raise _save_error(GraphPath(), "embedded StateRef local state is not available in a connected Store")
+
+    for node in plan.graph.nodes():
+        store.write_definition_record(DefinitionRecord(node.definition))
+    for action in state_actions:
+        store.write_definition_record(DefinitionRecord(action.definition))
+
+    selected: dict[GraphPath, Any] = {}
+    states: dict[GraphPath, str] = {}
+    for action in captures:
+        state_hash = _publish_local_state(action.obj, action.definition, store, action.path)
+        states[action.path] = state_hash
+        selected[action.path] = store
+    for action in state_actions:
+        if action.path in states:
+            continue
+        source = reusable[action.path]
+        state_hash = action.state_hash or getattr(action.obj, "_last_state_hash")
+        if not federated and source is not store:
+            store.copy_local_state_from(source, action.definition, state_hash)
+            source = store
+        states[action.path] = state_hash
+        selected[action.path] = source
+
+    for _, record, state_sources in embedded:
+        if not federated:
+            for definition, state_hash, source in state_sources:
+                if source is not store:
+                    store.copy_local_state_from(source, definition, state_hash)
+            store.write_state_ref_record(record)
+
+    state_ref = StateRef(reference, states)
+    # This is the graph-level publication boundary. Nothing mutable is updated
+    # until the immutable total StateRef record has been installed.
+    with store.writer_lock():
+        repo._complete_initial_state_ref(state_ref, store)
+        store.write_state_ref_record(StateRefRecord(state_ref))
+        repo._mark_initial_state_ref_complete(state_ref, store)
+    repo._num_saves += 1
+    required = [store]
+    required.extend(selected.values())
+    if federated:
+        for _, _, state_sources in embedded:
+            required.extend(source for _, _, source in state_sources)
+        required.extend(record_store for record_store, _, _ in embedded)
+    report = StoreReport(store, selected, required)
+    return (state_ref, report) if report_stores else state_ref
+
+
+_CODEC_RE = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
+def _validate_codecs(actions: Iterable[SaveAction]) -> None:
+    """Validate every selected developer codec before any serializer runs."""
+    for action in actions:
+        if action.state_hash is not None:
+            continue
+        codec = getattr(action.obj, "state_codec", None)
+        if not isinstance(codec, str) or not _CODEC_RE.fullmatch(codec):
+            raise _save_error(action.path, "state_codec must match [A-Za-z0-9]{1,32}")
+
+
+def _publish_local_state(obj: Object, definition: ConcreteDefinition, store, path: GraphPath) -> str:
+    """Write, manifest, and atomically install one local Serializable payload.
+
+    Args:
+        obj: Live Serializable node that contributes the payload.
+        definition: Exact graph definition for the local state.
+        store: Target Store that owns staging and immutable installation.
+        path: Enclosing exact StateRef path used in diagnostics.
+
+    Returns:
+        The installed codec-qualified local state hash.
+
+    Raises:
+        RepoSaveError: If hooks, manifest creation, or installation fails.
+
+    Side Effects:
+        Creates and removes Store-owned staging as needed. A completed immutable
+        local state may remain unreferenced if a later graph publication fails.
+    """
+    from .store.records import DefinitionRecord, LocalStateManifest
+
+    codec = obj.state_codec
+    stage = os.fspath(store.create_local_state_staging())
+    reservation = getattr(obj, "_save_load_reservation", None)
+    if reservation is None or not reservation.acquire(blocking=False):
+        shutil.rmtree(stage, ignore_errors=True)
+        raise _save_error(path, "local state is already reserved by save or restore")
+    data_dir = os.path.join(stage, "data")
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        if os.listdir(data_dir):
+            raise ValueError("local-state staging data directory is not empty")
+        obj.save_state_to_dir(data_dir, codec=codec)
+        definition_record = DefinitionRecord(definition)
+        definition_bytes = definition_record.to_bytes()
+        with open(os.path.join(stage, "def.pkl"), "wb") as target:
+            target.write(definition_bytes)
+        manifest = LocalStateManifest(
+            codec, definition_record.graph_hash, definition_record.digest,
+            hashlib.sha256(definition_bytes).hexdigest(),
+            _manifest_files(data_dir),
+        )
+        with open(os.path.join(stage, "manifest.record"), "wb") as target:
+            target.write(manifest.to_bytes())
+        store.install_local_state(stage, manifest)
+        obj._last_state_hash = manifest.state_hash
+    except BaseException as error:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise _save_error(path, f"local state publication failed for codec {codec!r}", error) from error
+    finally:
+        reservation.release()
+    return manifest.state_hash
+
+
+def _manifest_files(data_dir: str) -> tuple[tuple[str, int, str], ...]:
+    """Return the exhaustive regular payload manifest for a staging data tree."""
+    files: list[tuple[str, int, str]] = []
+    for root, directories, names in os.walk(data_dir, followlinks=False):
+        for directory in directories:
+            path = os.path.join(root, directory)
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise ValueError(f"unsupported payload directory entry {path!r}")
+        for name in names:
+            path = os.path.join(root, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise ValueError(f"unsupported payload file entry {path!r}")
+            digest = hashlib.sha256()
+            with open(path, "rb") as source:
+                for block in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(block)
+            relative = os.path.relpath(path, data_dir).replace(os.sep, "/")
+            files.append((relative, os.path.getsize(path), digest.hexdigest()))
+    return tuple(sorted(files))
+
+
+def _find_local_state(repo, definition: ConcreteDefinition, state_hash: str):
+    """Return the connected Store carrying one verified reusable local state."""
+    for candidate in repo.stores:
+        try:
+            candidate.validate_local_state(definition, state_hash)
+        except Exception:
+            continue
+        return candidate
+    return None
+
+
+def _seed_state_refs(definition: ConcreteDefinition) -> dict[GraphPath, tuple[ConcreteDefinition, str]]:
+    """Expand embedded materializing exact StateRefs into enclosing state paths."""
+    result: dict[GraphPath, tuple[ConcreteDefinition, str]] = {}
+    for outer, reference in _embedded_state_refs(definition):
+        for path, state_hash in reference.states.items():
+            result[outer.join(path)] = (reference.object.at(path).definition, state_hash)
+    return result
+
+
+def _embedded_state_refs(definition: ConcreteDefinition):
+    """Yield materializing StateRefs with their paths in one enclosing CDef."""
+    from .cdef_graph import EdgeKind
+    from .links import DefLink
+    from .reference_values import StateRef
+
+    result = []
+    visited: set[object] = set()
+
+    def visit_value(value: Any, path: GraphPath) -> None:
+        if isinstance(value, StateRef):
+            result.append((path, value))
+            return
+        if isinstance(value, ConcreteDefinition):
+            visit_cdef(value, path)
+            return
+        if isinstance(value, DefLink):
+            if value.kind is EdgeKind.MATERIALIZE:
+                visit_value(value.target, path)
+            return
+        for edge in iter_value_edges(value):
+            visit_value(edge.value, path.child(edge.segment))
+
+    def visit_cdef(cdef: ConcreteDefinition, path: GraphPath) -> None:
+        key = cdef_node_key(cdef)
+        if key in visited:
+            return
+        visited.add(key)
+        for edge in iter_value_edges(cdef):
+            visit_value(edge.value, path.child(edge.segment))
+
+    visit_cdef(definition, GraphPath())
+    return tuple(result)
+
+
+def _resolve_embedded_state_refs(repo, definition: ConcreteDefinition):
+    """Resolve exact-reference record and local-state authority before hooks run."""
+    resolved = []
+    for _, reference in _embedded_state_refs(definition):
+        record_store = None
+        for candidate in repo.stores:
+            try:
+                record = candidate.read_state_ref_record(reference.digest())
+            except Exception:
+                continue
+            if record is not None and record.state_ref == reference:
+                record_store = candidate
+                break
+        state_sources = []
+        for path, state_hash in reference.states.items():
+            source = _find_local_state(repo, reference.object.at(path).definition, state_hash)
+            state_sources.append((reference.object.at(path).definition, state_hash, source))
+        resolved.append((record_store, None if record_store is None else record_store.read_state_ref_record(reference.digest()), tuple(state_sources)))
+    return tuple(resolved)
+
+
+def _unique_stores(stores: Iterable[Any]) -> tuple[Any, ...]:
+    """Deduplicate Store objects by identity without relying on their equality."""
+    result = []
+    seen = set()
+    for store in stores:
+        if store is None or id(store) in seen:
+            continue
+        seen.add(id(store))
+        result.append(store)
+    return tuple(result)
+
+
+def _save_error(path: GraphPath, message: str, cause: BaseException | None = None):
+    """Return a path-specific RepoSaveError retaining a useful failure cause."""
+    from .repo import RepoSaveError
+
+    error = RepoSaveError(f"Graph save at {path!s}: {message}.")
+    if cause is not None:
+        error.__cause__ = cause
+    return error
 
 
 def _collect_runtime_roots(value: Any, path: GraphPath, roots: list[RuntimeRoot]) -> None:
@@ -659,22 +999,6 @@ def _add_object_single(repo, obj: Object, *, store=None) -> None:
             repo.set_object_store(obj, repo.default_store)
 
 
-def _minimum_depths(graph: ConcreteDefinitionGraph, roots: tuple[RuntimeRoot, ...]) -> dict[ConcreteDefinition, int]:
-    depths: dict[ConcreteDefinition, int] = {}
-    queue = deque((root.definition, 0) for root in roots)
-    while queue:
-        cdef, depth = queue.popleft()
-        old = depths.get(cdef)
-        if old is not None and old <= depth:
-            continue
-        depths[cdef] = depth
-        for edge in graph.outgoing(cdef):
-            if edge.kind is not EdgeKind.MATERIALIZE:
-                continue
-            queue.append((edge.child, depth + 1))
-    return depths
-
-
 def _materialize_reachable_nodes(graph: ConcreteDefinitionGraph, roots: tuple[RuntimeRoot, ...]) -> set[ConcreteDefinition]:
     out: set[ConcreteDefinition] = set()
     stack = [root.definition for root in roots]
@@ -689,47 +1013,8 @@ def _materialize_reachable_nodes(graph: ConcreteDefinitionGraph, roots: tuple[Ru
     return out
 
 
-def _save_reason(
-        obj: Object,
-        cdef: ConcreteDefinition,
-        *,
-        explicit_roots: set[ConcreteDefinition],
-        min_depth: dict[ConcreteDefinition, int],
-        ephemeral_depth: int | None) -> Literal["serializable", "explicit-root", "ephemeral-depth"] | None:
-    if isinstance(obj, Serializable):
-        return "serializable"
-    if cdef in explicit_roots:
-        return "explicit-root"
-    if ephemeral_depth is None:
-        return "ephemeral-depth"
-    if min_depth.get(cdef, 0) <= ephemeral_depth:
-        return "ephemeral-depth"
-    return None
-
-
-def _select_save_store(repo, cdef: ConcreteDefinition, explicit_store):
-    store = explicit_store
-    if store is None:
-        store = repo.obj_default_store.get(cdef)
-    if store is None:
-        store = repo.default_store
-    if store is None:
-        from .repo import RepoSaveError
-
-        raise RepoSaveError("No store available to save object!")
-    return store
-
-
 def _validate_graph_options(options: RepoGraphOptions) -> None:
     if options.order not in ("pre", "post"):
         raise ValueError("Repo graph order must be 'pre' or 'post'.")
     if options.missing not in ("raise", "skip", "load"):
         raise ValueError("Repo graph missing policy must be 'raise', 'skip', or 'load'.")
-
-
-def _validate_ephemeral_depth(ephemeral_depth: int | None) -> None:
-    if ephemeral_depth is not None:
-        if not isinstance(ephemeral_depth, int):
-            raise TypeError("ephemeral_depth must be a non-negative integer or None.")
-        if ephemeral_depth < 0:
-            raise ValueError("ephemeral_depth must be a non-negative integer or None.")

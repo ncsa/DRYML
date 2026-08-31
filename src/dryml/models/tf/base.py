@@ -5,7 +5,7 @@ import os
 from dryml.core.object import Serializable
 from dryml.core.repo import get_default_repo
 from dryml.core.tensor_spec import Dynamic, TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
-from dryml.core.utils.general import maybe_call_method, revision_path, validate_class
+from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
@@ -142,10 +142,10 @@ class Wrapper(Serializable):
         self._restore_checkpoint = None
         self._restore_status = None
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import tensorflow as tf
 
-        ckpt_dir = revision_path("object", "ckpt", dest_dir, revision=revision)
+        ckpt_dir = os.path.join(dest_dir, "object.ckpt")
         os.makedirs(ckpt_dir, exist_ok=True)
         try:
             checkpoint = tf.train.Checkpoint(obj=self.obj)
@@ -155,10 +155,10 @@ class Wrapper(Serializable):
         manager = tf.train.CheckpointManager(checkpoint, ckpt_dir, max_to_keep=1)
         manager.save()
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         import tensorflow as tf
 
-        ckpt_dir = revision_path("object", "ckpt", src_dir, revision=revision)
+        ckpt_dir = os.path.join(src_dir, "object.ckpt")
         latest = tf.train.latest_checkpoint(ckpt_dir)
         if latest is None:
             return
@@ -182,10 +182,10 @@ class Optimizer(Wrapper):
         self._restore_checkpoint = None
         self._restore_status = None
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import tensorflow as tf
 
-        ckpt_dir = revision_path("optimizer", "ckpt", dest_dir, revision=revision)
+        ckpt_dir = os.path.join(dest_dir, "optimizer.ckpt")
         os.makedirs(ckpt_dir, exist_ok=True)
         manager = tf.train.CheckpointManager(
             tf.train.Checkpoint(optimizer=self.obj),
@@ -194,10 +194,10 @@ class Optimizer(Wrapper):
         )
         manager.save()
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         import tensorflow as tf
 
-        ckpt_dir = revision_path("optimizer", "ckpt", src_dir, revision=revision)
+        ckpt_dir = os.path.join(src_dir, "optimizer.ckpt")
         latest = tf.train.latest_checkpoint(ckpt_dir)
         if latest is None:
             return
@@ -299,10 +299,10 @@ class Model(BaseModel, Serializable):
 
         return maybe_unbatch_output_spec(tf_as_tensor_spec(output, batched=True), input_spec)
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import tensorflow as tf
 
-        ckpt_dir = revision_path("model", "ckpt", dest_dir, revision=revision)
+        ckpt_dir = os.path.join(dest_dir, "model.ckpt")
         os.makedirs(ckpt_dir, exist_ok=True)
         manager = tf.train.CheckpointManager(
             tf.train.Checkpoint(model=self.obj),
@@ -311,10 +311,10 @@ class Model(BaseModel, Serializable):
         )
         manager.save()
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         import tensorflow as tf
 
-        ckpt_dir = revision_path("model", "ckpt", src_dir, revision=revision)
+        ckpt_dir = os.path.join(src_dir, "model.ckpt")
         latest = tf.train.latest_checkpoint(ckpt_dir)
         if latest is None:
             return

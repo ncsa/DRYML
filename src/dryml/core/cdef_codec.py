@@ -20,7 +20,7 @@ from .reference_values import ObjectRef, StateRef
 from .utils.graph.path import GraphPath, graph_path_sort_key
 from .utils.graph.value import iter_value_edges
 
-CDEF_GRAPH_CODEC_VERSION = 1
+CDEF_GRAPH_CODEC_VERSION = 2
 
 
 class CDefGraphCodecError(ValueError):

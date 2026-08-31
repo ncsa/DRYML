@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dryml.core.object import Serializable
-from dryml.core.utils.general import pickle_load, pickle_save, revision_path
+from dryml.core.utils.general import pickle_load, pickle_save
 
 from .train_spec import TrainState
 
@@ -30,11 +30,11 @@ class Experiment(Serializable):
             self.state.phase = TrainState.trained
         return result
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
-        pickle_save(self.state, revision_path("experiment_state", "pkl", dest_dir, revision=revision))
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        pickle_save(self.state, f"{dest_dir}/experiment_state.pkl")
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None = None):
-        self.state = pickle_load(revision_path("experiment_state", "pkl", src_dir, revision=revision))
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
+        self.state = pickle_load(f"{src_dir}/experiment_state.pkl")
 
 
 __all__ = ["Experiment"]

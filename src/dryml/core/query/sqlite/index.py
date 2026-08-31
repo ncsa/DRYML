@@ -420,8 +420,8 @@ class SQLiteStoreQueryIndex:
         )
 
     def _rebuild_owned(self, *, stats: QueryStats | None = None, quarantine_existing: bool = False) -> None:
-        if self.store is None or not hasattr(self.store, "hydrate_index"):
-            raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with hydrate_index().")
+        if self.store is None or not hasattr(self.store, "iter_definition_records"):
+            raise QueryIndexUnavailable("SQLite query-index rebuild requires an owning Store with iter_definition_records().")
         self._assert_sidecar_rebuildable()
 
         dirty_markers = self._dirty_markers()
@@ -476,7 +476,7 @@ class SQLiteStoreQueryIndex:
     def _preflight_store_roots(self) -> tuple[ConcreteDefinition, ...]:
         """Read and type-check every authoritative root before sidecar creation."""
 
-        roots = tuple(self.store.hydrate_index())
+        roots = tuple(record.definition for record in self.store.iter_definition_records())
         for cdef in roots:
             if not isinstance(cdef, ConcreteDefinition):
                 raise QueryIndexError(f"Store {self.store!r} yielded {type(cdef).__name__}, not ConcreteDefinition.")
@@ -590,15 +590,14 @@ class SQLiteStoreQueryIndex:
 
             for root in roots:
                 root_id = cdef_to_id[root]
-                stable_hash = root.stable_hash()
-                def_size, def_mtime_ns = self._root_file_metadata(stable_hash)
+                storage_hash, relative_def_path, def_size, def_mtime_ns = self._root_record_metadata(root)
                 cur = con.execute(
                     """
                     INSERT OR IGNORE INTO stored_roots (
                         def_id, storage_hash, relative_def_path, def_size, def_mtime_ns, indexed_generation
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (root_id, stable_hash_to_blob(stable_hash), _relative_def_path(stable_hash), def_size, def_mtime_ns, next_generation),
+                    (root_id, storage_hash, relative_def_path, def_size, def_mtime_ns, next_generation),
                 )
                 if cur.rowcount:
                     counters.roots_added += 1
@@ -702,7 +701,7 @@ class SQLiteStoreQueryIndex:
         try:
             validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version)
         except QueryIndexDirty:
-            if self.store is None or not hasattr(self.store, "hydrate_index"):
+            if self.store is None or not hasattr(self.store, "iter_definition_records"):
                 raise
             self.rebuild()
 
@@ -721,12 +720,12 @@ class SQLiteStoreQueryIndex:
             markers = (*markers, self.dirty_path)
         return markers
 
-    @staticmethod
     def _clear_dirty(
+            self,
             markers: tuple[Path, ...], *,
             roots: tuple[ConcreteDefinition, ...],
             clear_unscoped: bool = False) -> None:
-        root_hashes = {root.stable_hash() for root in roots}
+        root_keys = {self._root_marker_key(root) for root in roots}
         for marker in markers:
             try:
                 mutation = marker.read_text(encoding="utf-8").strip()
@@ -736,7 +735,7 @@ class SQLiteStoreQueryIndex:
                 len(mutation) == 64
                 and all(char in "0123456789abcdef" for char in mutation)
             )
-            if mutation not in root_hashes and not (clear_unscoped and not is_scoped):
+            if mutation not in root_keys and not (clear_unscoped and not is_scoped):
                 continue
             try:
                 marker.unlink()
@@ -760,15 +759,31 @@ class SQLiteStoreQueryIndex:
                 pass
         return max(current + 1, time.time_ns())
 
-    def _root_file_metadata(self, stable_hash: str) -> tuple[int | None, int | None]:
-        if self.store is None or not hasattr(self.store, "base_dir"):
-            return None, None
-        path = Path(self.store.base_dir) / _relative_def_path(stable_hash)
-        try:
-            stat = path.stat()
-        except FileNotFoundError:
-            return None, None
-        return stat.st_size, stat.st_mtime_ns
+    def _root_marker_key(self, cdef: ConcreteDefinition) -> str:
+        """Return the dirty-token identity for a stored root.
+
+        Current DirStores publish DefinitionRecords, so their token must name
+        that record rather than the retired object-root stable hash. Standalone
+        SQLite indexes retain the stable-hash key used by their public API.
+        """
+        metadata = getattr(self.store, "query_index_record_metadata", None)
+        if metadata is not None:
+            result = metadata(cdef)
+            if result is not None:
+                return result[0]
+        return cdef.stable_hash()
+
+    def _root_record_metadata(self, cdef: ConcreteDefinition) -> tuple[bytes, str, int | None, int | None]:
+        """Return derived root-row metadata without treating the row as authority."""
+        metadata = getattr(self.store, "query_index_record_metadata", None)
+        if metadata is not None:
+            result = metadata(cdef)
+            if result is None:
+                raise QueryIndexError("Stored root has no matching authoritative DefinitionRecord.")
+            record_digest, relative_path, size, mtime_ns = result
+            return stable_hash_to_blob(record_digest), relative_path, size, mtime_ns
+        stable_hash = cdef.stable_hash()
+        return stable_hash_to_blob(stable_hash), _relative_def_path(stable_hash), None, None
 
     def _validate_rebuild_before_ready(self, *, roots: tuple[ConcreteDefinition, ...]) -> None:
         con = self._connections.connection(readonly=True)
@@ -819,29 +834,25 @@ class SQLiteStoreQueryIndex:
             except Exception as exc:
                 issues.append(ValidationIssue("error", "Stored root CDef failed to decode.", f"{did}: {exc!r}"))
                 continue
-            stable_hash = cdef.stable_hash()
             try:
                 stored_hash = stable_hash_from_blob(storage_hash)
             except Exception as exc:
                 issues.append(ValidationIssue("error", "Stored root storage hash is invalid.", f"{did}: {exc!r}"))
                 continue
-            if stored_hash != stable_hash:
-                issues.append(ValidationIssue("error", "Stored root storage hash mismatch.", f"{did}: stored={stored_hash}, decoded={stable_hash}"))
-            expected_path = _relative_def_path(stable_hash)
-            if relative_def_path != expected_path:
-                issues.append(ValidationIssue("error", "Stored root relative def path mismatch.", f"{did}: stored={relative_def_path}, expected={expected_path}"))
-            if self.store is None or not hasattr(self.store, "base_dir"):
-                continue
-            def_path = Path(self.store.base_dir) / relative_def_path
             try:
-                stat = def_path.stat()
-            except FileNotFoundError:
-                issues.append(ValidationIssue("error", "Stored root def.pkl is missing.", f"{did}: {relative_def_path}"))
+                expected_hash, expected_path, expected_size, expected_mtime_ns = self._root_record_metadata(cdef)
+                expected_key = stable_hash_from_blob(expected_hash)
+            except Exception as exc:
+                issues.append(ValidationIssue("error", "Stored DefinitionRecord is missing or invalid.", f"{did}: {exc!r}"))
                 continue
-            if def_size is not None and def_size != stat.st_size:
-                issues.append(ValidationIssue("error", "Stored root def.pkl size mismatch.", f"{did}: stored={def_size}, actual={stat.st_size}"))
-            if def_mtime_ns is not None and def_mtime_ns != stat.st_mtime_ns:
-                issues.append(ValidationIssue("warning", "Stored root def.pkl mtime changed.", f"{did}: stored={def_mtime_ns}, actual={stat.st_mtime_ns}"))
+            if stored_hash != expected_key:
+                issues.append(ValidationIssue("error", "Stored root authority key mismatch.", f"{did}: stored={stored_hash}, expected={expected_key}"))
+            if relative_def_path != expected_path:
+                issues.append(ValidationIssue("error", "Stored DefinitionRecord relative path mismatch.", f"{did}: stored={relative_def_path}, expected={expected_path}"))
+            if def_size is not None and expected_size is not None and def_size != expected_size:
+                issues.append(ValidationIssue("error", "Stored DefinitionRecord size mismatch.", f"{did}: stored={def_size}, actual={expected_size}"))
+            if def_mtime_ns is not None and expected_mtime_ns is not None and def_mtime_ns != expected_mtime_ns:
+                issues.append(ValidationIssue("warning", "Stored DefinitionRecord mtime changed.", f"{did}: stored={def_mtime_ns}, actual={expected_mtime_ns}"))
 
     def _validate_store_roots(
             self,
@@ -849,11 +860,11 @@ class SQLiteStoreQueryIndex:
             issues: list[ValidationIssue],
             *,
             roots: tuple[ConcreteDefinition, ...] | None = None) -> None:
-        if self.store is None or not hasattr(self.store, "hydrate_index"):
+        if self.store is None or not hasattr(self.store, "iter_definition_records"):
             return
         if roots is None:
             try:
-                roots = tuple(self.store.hydrate_index())
+                roots = tuple(record.definition for record in self.store.iter_definition_records())
             except Exception as exc:
                 issues.append(ValidationIssue("error", "Store root scan failed.", repr(exc)))
                 return

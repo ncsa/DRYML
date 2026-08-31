@@ -62,10 +62,10 @@ class Scalar(Artifact):
         super().__init__()
         self.value = value
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         _write_scalar(dest_dir, self.value)
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None = None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         value, exists = _read_scalar_if_present(src_dir)
         if exists:
             self.value = value
@@ -82,11 +82,11 @@ class ScalarAgg(Artifact):
     def aggregate(self, values: Iterable[Any]):
         raise NotImplementedError
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         if hasattr(self, "value"):
             _write_scalar(dest_dir, self.value)
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None = None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         value, exists = _read_scalar_if_present(src_dir)
         if exists:
             self.value = value

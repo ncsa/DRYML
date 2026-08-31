@@ -6,7 +6,7 @@ from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
 from dryml.core.repo import get_default_repo
 from dryml.core.tensor_spec import TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
-from dryml.core.utils.general import maybe_call_method, revision_path, validate_class
+from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
 from dryml.data import Batch, Map, Project, Select
 from dryml.models import Model as BaseModel
@@ -129,17 +129,17 @@ class Wrapper(Serializable):
         self.kwargs = kwargs
         self.obj = self.cls(*args, **kwargs)
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         if hasattr(self.obj, "state_dict"):
             import torch
 
-            torch.save(self.obj.state_dict(), revision_path("state", "pth", dest_dir, revision=revision))
+            torch.save(self.obj.state_dict(), os.path.join(dest_dir, "state.pth"))
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         if hasattr(self.obj, "load_state_dict"):
             import torch
 
-            state_path = revision_path("state", "pth", src_dir, revision=revision)
+            state_path = os.path.join(src_dir, "state.pth")
             self.obj.load_state_dict(torch.load(state_path, map_location="cpu"))
 
 
@@ -156,15 +156,15 @@ class Optimizer(Serializable):
             raise ValueError("Torch Optimizer target exposes no trainable parameters.")
         self.obj = self.cls(parameters, *args, **kwargs)
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import torch
 
-        torch.save(self.obj.state_dict(), revision_path("optimizer", "pth", dest_dir, revision=revision))
+        torch.save(self.obj.state_dict(), os.path.join(dest_dir, "optimizer.pth"))
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         import torch
 
-        state_path = revision_path("optimizer", "pth", src_dir, revision=revision)
+        state_path = os.path.join(src_dir, "optimizer.pth")
         if os.path.exists(state_path):
             self.obj.load_state_dict(torch.load(state_path, map_location="cpu"))
 
@@ -232,15 +232,15 @@ class Model(BaseModel, Serializable):
         if hasattr(self.obj, "eval"):
             self.obj.eval()
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str | None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         import torch
 
-        torch.save(self.obj.state_dict(), revision_path("state", "pth", dest_dir, revision=revision))
+        torch.save(self.obj.state_dict(), os.path.join(dest_dir, "state.pth"))
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str | None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         import torch
 
-        state_path = revision_path("state", "pth", src_dir, revision=revision)
+        state_path = os.path.join(src_dir, "state.pth")
         self.obj.load_state_dict(torch.load(state_path, map_location=self.device or "cpu"))
 
     def infer_output_spec(self, input_spec):

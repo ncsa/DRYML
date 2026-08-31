@@ -17,7 +17,6 @@ import json
 import re
 from typing import Any, Iterator
 from uuid import UUID, uuid4
-import unicodedata
 
 from .freeze import FrozenDict
 from .utils.graph.path import GraphPath, GraphPathLike, graph_path_sort_key, normalize_path
@@ -25,7 +24,7 @@ from .utils.stable_hash import stable_int_hash
 
 
 _NAMESPACE = ContextVar("dryml_object_namespace", default=())
-_NAMESPACE_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_NAMESPACE_PART = re.compile(r"[A-Za-z0-9]+\Z")
 _STATE_HASH = re.compile(r"[A-Za-z0-9]{1,32}-[0-9a-f]{64}\Z")
 _MAX_NAMESPACE_DEPTH = 16
 _MAX_NAMESPACE_PART_LENGTH = 64
@@ -42,11 +41,9 @@ def _normalize_namespace(namespace: tuple[str, ...] | list[str]) -> tuple[str, .
     for part in namespace:
         if not isinstance(part, str):
             raise TypeError("ObjectId namespace parts must be strings.")
-        normalized = unicodedata.normalize("NFC", part)
-        if normalized != part or not _NAMESPACE_PART.fullmatch(part):
+        if not _NAMESPACE_PART.fullmatch(part):
             raise ValueError(
-                "ObjectId namespace parts must be NFC ASCII identifiers containing "
-                "letters, digits, '.', '_' or '-'."
+                "ObjectId namespace parts must be non-empty ASCII alphanumeric strings."
             )
         if len(part) > _MAX_NAMESPACE_PART_LENGTH:
             raise ValueError(

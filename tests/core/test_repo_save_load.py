@@ -1,633 +1,285 @@
-import dryml
-import os
-import glob
-from tests.core import core_objects as objects
-import pytest
+"""U5 direct-record save, structural-load, and future exact-restore contracts."""
+
+import inspect
 import tempfile
-import numpy as np
+from pathlib import Path
 
-from dryml.core import definition_mode
-from dryml.core.repo import Repo, default_repo
+import pytest
+
+from dryml import session
+from dryml.core import Object, ObjectRef, Repo, Serializable, StateRef
+from dryml.core.repo import make_store
+from dryml.core.repo import RepoSaveError
+from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord, MainRefRecord
 from dryml.core.store.zip import ZipStore
-from dryml.core.dtype import dtype
-from dryml.core.tensor_spec import TensorSpec
-from dryml.core.cardinality import Cardinality
+from dryml.runtime.errors import RuntimeTransitionError
 
 
-def _persistent_query_index_count(store) -> int:
-    path = getattr(store, "query_index_path", None)
-    return int(path is not None and os.path.exists(path))
+class SaveLoadValue(Serializable):
+    saves = 0
+
+    def __init__(self, value):
+        self.value = value
+
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        type(self).saves += 1
+        Path(dest_dir, "value.txt").write_text(str(self.value), encoding="ascii")
 
 
-def _assert_expected_store_root_entries(store):
-    entries = set(os.listdir(store.base_dir))
-    assert {"def.pkl", "objects"} <= entries
-    assert entries <= {"def.pkl", "aliases.pkl", "objects", ".dryml"}
+class SaveLoadNode(Object):
+    def __init__(self, children):
+        self.children = children
 
 
-def test_make_store_accepts_delegating_file_wrapper():
-    from dryml.core.repo import make_store
+class RestoreValue(Serializable):
+    def __init__(self, value):
+        self.value = value
 
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        Path(dest_dir, "value.txt").write_text(str(self.value), encoding="ascii")
+
+    def restore_state_from_dir_imp(self, src_dir, *, codec):
+        self.value = int(Path(src_dir, "value.txt").read_text(encoding="ascii"))
+
+
+class FailingSave(Serializable):
+    def save_state_to_dir_imp(self, dest_dir, *, codec):
+        Path(dest_dir, "partial.txt").write_text("partial", encoding="ascii")
+        raise RuntimeError("serializer failed")
+
+
+def test_public_save_returns_state_ref_and_publishes_local_state(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = SaveLoadValue(10, repo=repo)
+
+    state = obj.save(repo=repo, main=False)
+
+    assert isinstance(state, StateRef)
+    assert state.object == obj.object_ref
+    assert store.read_state_ref_record(state.digest()).state_ref == state
+    path, state_hash = next(iter(state.states.items()))
+    assert path in state.object.objects
+    assert store.validate_local_state(obj.definition, state_hash)
+
+
+def test_save_publishes_state_ref_before_main_and_object_alias(tmp_path, monkeypatch):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = SaveLoadValue(10, repo=repo)
+    calls = []
+    write_state_ref = store.write_state_ref_record
+    write_main = store.write_main_ref
+    write_alias = store.write_object_alias
+
+    monkeypatch.setattr(store, "write_state_ref_record", lambda record: (calls.append("state"), write_state_ref(record))[1])
+    monkeypatch.setattr(store, "write_main_ref", lambda record: (calls.append("main"), write_main(record))[1])
+    monkeypatch.setattr(store, "write_object_alias", lambda record: (calls.append("alias"), write_alias(record))[1])
+
+    state = repo.save_object(obj, main=True, alias="latest")
+
+    assert calls == ["state", "main", "alias"]
+    assert repo.main_def.graph_equal(obj.definition)
+    assert store.read_main_ref() == MainRefRecord(DefinitionRecord(obj.definition).digest)
+    alias = store.read_object_alias("latest")
+    assert isinstance(alias.object_ref, ObjectRef)
+    assert alias.object_ref == state.object
+
+
+def test_shared_nodes_save_once_and_equal_independent_nodes_stay_distinct(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    SaveLoadValue.saves = 0
+    shared = SaveLoadValue("same", repo=repo)
+
+    shared_state = SaveLoadNode([shared, shared], repo=repo).save(repo=repo, main=False)
+
+    assert SaveLoadValue.saves == 1
+    assert len(shared_state.states) == 1
+
+    SaveLoadValue.saves = 0
+    first = SaveLoadValue("same", repo=repo)
+    second = SaveLoadValue("same", repo=repo)
+    independent_state = SaveLoadNode([first, second], repo=repo).save(repo=repo, main=False)
+
+    assert SaveLoadValue.saves == 2
+    assert len(independent_state.states) == 2
+
+
+def test_save_copies_reusable_state_by_default_and_can_federate_it(tmp_path):
+    source = DirStore(tmp_path / "source")
+    copied = DirStore(tmp_path / "copied")
+    federated = DirStore(tmp_path / "federated")
+    repo = Repo([source, copied, federated])
+    child = SaveLoadValue("child", repo=repo)
+    child_state = repo.save_object(child, store=source)
+    root = SaveLoadNode(child, repo=repo)
+
+    copied_state, copied_report = repo.save_object(root, store=copied, report_stores=True)
+    copied_path = next(path for path, object_id in copied_state.object.objects.items() if object_id == child.object_id)
+    assert copied_report.required_stores == (copied,)
+    assert copied.validate_local_state(child.definition, copied_state.states[copied_path])
+
+    federated_state, federated_report = repo.save_object(
+        root, store=federated, federated=True, report_stores=True
+    )
+    federated_path = next(path for path, object_id in federated_state.object.objects.items() if object_id == child.object_id)
+    assert federated_state.states[federated_path] == child_state.states[next(iter(child_state.states))]
+    assert federated_report.state_stores[federated_path] is source
+    assert federated_report.required_stores == (federated, source)
+
+
+def test_failed_local_state_save_never_publishes_a_state_ref(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = FailingSave(repo=repo)
+
+    with pytest.raises(RepoSaveError, match="local state publication"):
+        repo.save_object(obj)
+
+    assert obj._last_state_hash is None
+    assert not (tmp_path / "store" / "state-refs").exists()
+    staging = tmp_path / "store" / ".staging"
+    assert not staging.exists() or not any(staging.iterdir())
+
+
+def test_orchestrator_guard_rejects_live_save_before_publication(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    obj = SaveLoadValue(10, repo=repo)
+
+    session.set_mode("orchestrator")
+    try:
+        with pytest.raises(RuntimeTransitionError, match="prohibits Object materialization"):
+            repo.save_object(obj)
+    finally:
+        session.reset()
+
+    assert not (tmp_path / "store" / "state-refs").exists()
+
+
+def test_changed_save_surface_rejects_retired_revision_options_and_generation_keywords():
+    for callable_ in (Repo.save_object, Repo.save, SaveLoadValue.save):
+        names = set(inspect.signature(callable_).parameters)
+        assert not {"revision", "options", "generation", "ephemeral_depth"} & names
+
+    repo = Repo()
+    for keyword, value in (("revision", "retired"), ("options", {}), ("generation", 1)):
+        with pytest.raises(TypeError):
+            repo.save_object(SaveLoadValue(1), **{keyword: value})
+
+
+def test_make_store_accepts_a_delegating_binary_file_wrapper():
     with tempfile.NamedTemporaryFile() as wrapped:
         store = make_store(wrapped)
-        assert isinstance(store, ZipStore)
-        store.close()
+        try:
+            assert isinstance(store, ZipStore)
+        finally:
+            store.close()
 
 
-def test_save_1(primary_store_set):
-    # Create repo and save object
-    repo = Repo(stores=primary_store_set.stores)
-    repo.add_objects(objects.HelloStr(msg='test'))
-    assert len(repo.strong_obj_cache) == 1
-    repo.save()
-    repo.close(flush=True)
+def test_direct_layout_has_no_retired_object_or_generation_paths(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    state = repo.save_object(SaveLoadValue(10, repo=repo))
 
-    primary_store_set.rewind_all()
+    paths = {path.name for path in Path(store.base_dir).rglob("*")}
 
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core.Repo(stores=primary_store_set.stores)
+    assert store.read_state_ref_record(state.digest()).state_ref == state
+    assert "objects" not in paths
+    assert ".state-generations" not in paths
+    assert ".state-current.pkl" not in paths
+    assert "generation" not in " ".join(str(path) for path in Path(store.base_dir).rglob("*"))
 
-    assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
-    assert repo._num_constructions == 0
 
-    # Auto discovery finds definitions without materializing objects.
-    defs = repo.find_defs(None)
-    assert len(defs) == 1
-    assert repo._num_constructions == 0
-    if _persistent_query_index_count(primary_store_set.stores[0]) == 0:
-        assert len(repo.light_index) == 1
+def test_structural_load_without_state_restore_builds_from_definition_authority(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    saved = RestoreValue(10, repo=repo)
+    saved.value = 20
+    repo.save_object(saved)
 
-    # Save again should be no-op-ish and not corrupt anything
-    repo.save()
-    repo.close(flush=True)
+    loaded = Repo(DirStore(store.base_dir)).load_object(saved.definition, restore_state=False)
 
-    primary_store_set.rewind_all()
+    assert isinstance(loaded, RestoreValue)
+    assert loaded.value == 10
 
-    # Still exactly one stored object after reopening again
-    repo = dryml.core.Repo(stores=primary_store_set.stores)
-    assert len(repo.find_defs(None)) == 1
 
-    # Test that we can load a single object
-    objs_loaded = repo.get(restore_state=True)
-    assert len(objs_loaded) == 1
+def test_reopen_hydrates_definition_authority_and_discovers_queries_without_materializing(tmp_path):
+    store = DirStore(tmp_path / "store", query_index="memory")
+    repo = Repo(store)
+    first = SaveLoadValue("first", repo=repo)
+    second = SaveLoadValue("second", repo=repo)
+    repo.save_object(first)
+    repo.save_object(second)
 
+    reopened = Repo(DirStore(store.base_dir, query_index="memory"))
 
-def test_save_2(primary_store_set):
-    repo = dryml.core.Repo(stores=primary_store_set.stores)
+    assert reopened.find_defs(None, refresh=False).count() == 0
+    assert reopened._num_constructions == 0
+    assert set(reopened.find_defs(None, refresh=True)) == {first.definition, second.definition}
+    assert reopened._num_constructions == 0
+    assert set(reopened.default_store.hydrate_index()) == {first.definition, second.definition}
 
-    repo.add_objects(objects.HelloStr(msg='test'))
 
-    # Save objects in repository
-    repo.save()
+def test_reopening_main_definition_is_read_only_hydration(tmp_path):
+    source = DirStore(tmp_path / "source")
+    target = DirStore(tmp_path / "target")
+    definition = DefinitionRecord(SaveLoadValue(3).definition)
+    source.write_definition_record(definition)
+    source.write_main_ref(MainRefRecord(definition.digest))
+    before = tuple(Path(target.base_dir).rglob("*"))
 
-    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    repo = Repo([target, source])
 
-    # Delete the repo
-    del repo
+    assert repo.main_def == definition.definition
+    assert target.read_main_ref() is None
+    assert target.read_definition_record(definition.digest) is None
+    assert tuple(Path(target.base_dir).rglob("*")) == before
 
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
-    result = repo.get(build_missing=False)
-    assert len(result) == 1
+@pytest.mark.xfail(strict=True, reason="U7 exact StateRef restore has no load seam yet")
+def test_u7_exact_state_ref_restores_published_local_state(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    saved = RestoreValue(10, repo=repo)
+    saved.value = 20
+    state = repo.save_object(saved)
 
-    repo.save()
+    loaded = Repo(DirStore(store.base_dir)).load_object(state)
 
-    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    assert loaded.value == 20
 
 
-def test_save_3(primary_store_set):
-    repo = dryml.core.Repo(stores=primary_store_set.stores)
+@pytest.mark.xfail(strict=True, reason="U7 exact StateRef restore has no load seam yet")
+def test_u7_exact_state_ref_restores_nested_independent_local_states(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    first = RestoreValue(1, repo=repo)
+    second = RestoreValue(2, repo=repo)
+    first.value = 10
+    second.value = 20
+    state = repo.save_object(SaveLoadNode([SaveLoadNode(first, repo=repo), second], repo=repo))
 
-    repo.add_objects(objects.HelloStr(msg='test'))
+    loaded = Repo(DirStore(store.base_dir)).load_object(state)
 
-    # Save objects in repository
-    repo.save()
-    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
+    assert loaded.children[0].children.value == 10
+    assert loaded.children[1].value == 20
 
-    # Delete the repo
-    del repo
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core.Repo(stores=primary_store_set.stores)
 
-    assert len(repo.find_defs(None, refresh=False)) == _persistent_query_index_count(primary_store_set.stores[0])
-    result = repo.get(build_missing=False)
-    assert len(result) == 1
-
-    repo.save()
-
-    assert len(dryml.core.Repo.dir_store_inspect(primary_store_set.stores[0].base_dir)) == 1
-
-
-@pytest.fixture
-def prep_and_clean_test_dir2():
-    with tempfile.TemporaryDirectory() as dir1, \
-         tempfile.TemporaryDirectory() as dir2:
-        yield dir1, dir2
-
-
-def test_save_4(prep_and_clean_test_dir2):
-    from dryml.core.repo import make_store
-
-    dir1, dir2 = prep_and_clean_test_dir2
-    store1 = make_store(dir1)
-    store2 = make_store(dir2)
-    repo = dryml.core.Repo([store1, store2])
-
-    repo.add_objects(objects.HelloStr(msg='test'))
-    store1 = make_store(dir1)
-    repo.set_default_store(store2)
-    repo.add_objects(objects.HelloInt(msg=5))
-
-    # Save objects in repository
-    repo.save()
-
-    # Delete the repo
-    repo.close(flush=False)
-    del repo
-
-    assert len(dryml.core.Repo.dir_store_inspect(dir1)) == 1
-    assert len(dryml.core.Repo.dir_store_inspect(dir2)) == 1
-
-    # Load the repository objects should not be loaded right away
-    repo = dryml.core.Repo(dir1)
-
-    assert len(repo.find_defs(None)) == 1
-    with pytest.raises(ValueError, match="load_or_build"):
-        repo.get(build_missing=True)
-
-    repo.close(flush=False)
-    del repo
-
-    repo = dryml.core.Repo(dir2)
-
-    assert len(repo.find_defs(None)) == 1
-    with pytest.raises(ValueError, match="load_or_build"):
-        repo.get(build_missing=True)
-
-    repo.close(flush=False)
-    repo = dryml.core.Repo([dir1, dir2])
-    assert len(repo.find_defs(None)) == 2
-    assert len(repo.get()) == 2
-
-    assert len(dryml.core.Repo.dir_store_inspect(dir1)) == 1
-    assert len(dryml.core.Repo.dir_store_inspect(dir2)) == 1
-    repo.close(flush=False)
-
-
-def test_object_save_restore_1(primary_store_set):
-    """
-    We test save and restore of nested objects through arguments
-    """
-
-    # Create the data containing objects
-    data_obj1 = objects.TestClassC2(10)
-    data_obj1.set_val(20)
-
-    data_obj2 = objects.TestClassC2(20)
-    data_obj2.set_val(40)
-
-    # Enclose them in another object
-    obj = objects.TestClassC(data_obj1, B=data_obj2)
-
-    # Save to the backend
-    obj.save(repo=primary_store_set.stores)
-
-    # For file-like backends (buffer / zip_buffer), rewind before reading
-    primary_store_set.rewind_all()
-
-    # Load back
-    obj2 = dryml.core.load_object(repo=primary_store_set.stores)
-
-    assert obj.definition == obj2.definition
-    assert obj.A.data == obj2.A.data
-    assert obj.B.data == obj2.B.data
-
-
-def test_object_save_restore_2(primary_store_set):
-    """
-    We test save and restore of nested objects through arguments
-    This time, we make sure identical objects are loaded as
-    the same object.
-    """
-    # Create the data containing objects
-    data_obj1 = objects.TestClassC2(10)
-    data_obj1.set_val(20)
-
-    # Enclose them in another object
-    obj = objects.TestClassC(data_obj1, B=data_obj1)
-
-    # Save to the backend
-    obj.save(repo=primary_store_set.stores)
-
-    # For file-like backends (buffer / zip_buffer), rewind before reading
-    primary_store_set.rewind_all()
-
-    # Load the object from the file
-    obj2 = dryml.core.load_object(repo=primary_store_set.stores)
-
-    assert obj.definition == obj2.definition
-    assert obj.A is obj.B
-
-
-def test_object_save_restore_3(primary_store_set):
-    """
-    We test save and restore of nested objects through arguments
-    Deeper nesting
-    """
-    # Create the data containing objects
-    data_obj1 = objects.TestClassC2(10)
-    data_obj1.set_val(20)
-
-    data_obj2 = objects.TestClassC2(20)
-    data_obj2.set_val(40)
-
-    data_obj3 = objects.TestClassC2('test')
-    data_obj3.set_val('test')
-
-    data_obj4 = objects.TestClassC2(0.5)
-    data_obj4.set_val(30.5)
-
-    obj1 = objects.TestClassC(data_obj1, B=data_obj2)
-    obj2 = objects.TestClassC(data_obj3, B=data_obj4)
-
-    # Enclose them in another object
-    obj = objects.TestClassC(obj1, B=obj2)
-
-    # Save to the backend
-    obj.save(repo=primary_store_set.stores)
-
-    # For file-like backends (buffer / zip_buffer), rewind before reading
-    primary_store_set.rewind_all()
-
-    # Load the object from the file
-    obj2 = dryml.core.load_object(repo=primary_store_set.stores)
-
-    assert obj.definition == obj2.definition
-    assert obj.A.A.data == obj2.A.A.data
-    assert obj.A.B.data == obj2.A.B.data
-    assert obj.B.A.data == obj2.B.A.data
-    assert obj.B.B.data == obj2.B.B.data
-
-
-def test_object_save_restore_4(primary_store_set):
-    """
-    Test saving/restoring arguments/kwargs
-    """
-    # Create the data containing objects
-    data_obj1 = objects.TestClassC2(10)
-    data_obj1.set_val(20)
-
-    data_obj2 = objects.TestClassC2(20)
-    data_obj2.set_val(40)
-
-    data_obj3 = objects.TestClassC2('test')
-    data_obj3.set_val('test')
-
-    data_obj4 = objects.TestClassC2(0.5)
-    data_obj4.set_val(30.5)
-
-    obj1 = objects.TestClassC(data_obj1, B=data_obj2)
-    obj2 = objects.TestClassC(data_obj3, B=data_obj4)
-
-    args = (obj1, obj2)
-    args_def = (obj1.definition, obj2.definition)
-
-    # Save objects to a buffer
-    dryml.core.save_object(args, repo=primary_store_set.stores)
-
-    primary_store_set.rewind_all()
-
-    # Load objects from buffer
-    new_args = dryml.core.load_object(args_def, repo=primary_store_set.stores)
-
-    assert type(new_args[0]) is objects.TestClassC
-    assert type(new_args[1]) is objects.TestClassC
-
-    assert obj1.A.data == new_args[0].A.data
-    assert obj1.B.data == new_args[0].B.data
-    assert obj2.A.data == new_args[1].A.data
-    assert obj2.B.data == new_args[1].B.data
-
-
-def test_object_save_restore_5(primary_store_set):
-    """
-    Test saving/restoring arguments/kwargs
-    """
-    # Create the data containing objects
-    model_obj = objects.TestNest2(A=10)
-    opt_obj = objects.TestNest3(20, model=model_obj)
-    loss_obj = objects.TestNest2(A='func')
-    train_fn_obj = objects.TestNest3(
-        optimizer=opt_obj,
-        loss=loss_obj,
-        epochs=10)
-
-    trainable_obj = objects.TestNest3(
-        model=model_obj,
-        train_fn=train_fn_obj
-    )
-
-    args = (trainable_obj,)
-
-    args_defs = (trainable_obj.definition,)
-
-    dryml.core.save_object(args, repo=primary_store_set.stores)
-
-    primary_store_set.rewind_all()
-
-    new_args = dryml.core.load_object(args_defs, repo=primary_store_set.stores)
-
-    recon_trainable_obj = new_args[0]
-    assert type(recon_trainable_obj) is objects.TestNest3
-
-    assert recon_trainable_obj['model'] is \
-        recon_trainable_obj['train_fn']['optimizer']['model']
-    assert recon_trainable_obj['train_fn']['epochs'] == 10
-    assert recon_trainable_obj['model'].A == 10
-    assert recon_trainable_obj['train_fn']['optimizer'][0] == 20
-
-
-def test_save_load_1(primary_store_set):
-    # Test save/load to/from a directory
-    obj1 = objects.TestClass5(10, test='a')
-
-    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
-    dryml.core.save_object(obj1, repo=repo, main=True)
-    repo.flush()
-
-    _assert_expected_store_root_entries(repo.stores[0])
-    assert len(os.listdir(repo.stores[0].object_root_dir)) == 1
-
-    del repo
-
-    obj1_2 = dryml.core.load_object(obj1.definition, repo=primary_store_set.stores)
-    assert obj1_2.x == 10
-    assert obj1_2.test == 'a'
-
-
-def test_save_load_2(primary_store_set):
-    # Test save/load to/from a directory
-    obj1 = objects.TestClass5(10, test='a')
-    obj2 = objects.TestClass5(20, test='b')
-    obj3 = objects.TestClass5(obj1, test=obj2)
-    obj4 = objects.TestClass5(obj3, test=obj2)
-    assert obj3.x is obj1
-    assert obj3.test is obj2
-    assert obj4.test is obj2
-    assert obj4.x is obj3
-
-    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
-    dryml.core.save_object(obj4, repo=repo, main=True)
-    repo.flush()
-
-    _assert_expected_store_root_entries(repo.stores[0])
-    obj_dirs = glob.glob(os.path.join(repo.stores[0].object_root_dir, '*', '*'))
-    assert len(obj_dirs) == 1
-    del repo
-
-    obj4_2 = dryml.core.load_object(obj4.definition, repo=primary_store_set.stores)
-    assert obj4_2 is not obj4
-    obj3_2 = obj4_2.x
-    obj2_2 = obj4_2.test
-    assert obj3_2.test is obj2_2
-    assert obj4
-
-
-def test_save_load_3(primary_store_set):
-    # Test save/load to/from a directory another nested object
-    obj1 = objects.TestClass5(10, test='a')
-    obj2 = objects.TestClass5(20, test='b')
-    obj3 = objects.TestClass5(30, test='c')
-    obj4 = objects.TestClass5(40, test='d')
-
-    obj5 = objects.TestClass5(obj1, test=obj2)
-    obj6 = objects.TestClass5(obj2, test=obj3)
-    obj7 = objects.TestClass5(obj3, test=obj4)
-
-    obj8 = objects.TestClass5(obj5, test=obj6)
-    obj9 = objects.TestClass5(obj6, test=obj7)
-
-    obj10 = objects.TestClass5(obj8, test=obj9)
-
-    obj11 = objects.TestClass5(obj10, test=obj10)
-
-    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
-    dryml.core.save_object(obj11, repo=repo, main=True)
-    repo.flush()
-
-    _assert_expected_store_root_entries(repo.stores[0])
-    obj_dirs = glob.glob(os.path.join(repo.stores[0].object_root_dir, '*', '*'))
-    assert len(obj_dirs) == 1
-
-    del repo
-
-    obj11_2 = dryml.core.load_object(obj11.definition, repo=primary_store_set.stores)
-    obj10_2 = obj11_2.x
-    assert obj11_2.test is obj10_2
-    obj6_2 = obj10_2.x.test
-    assert obj6_2 is obj10_2.test.x
-    obj2_2 = obj6_2.x
-    assert obj2_2 is obj10_2.x.x.test
-    obj3_2 = obj6_2.test
-    assert obj3_2 is obj10_2.test.test.x
-
-
-def f_test(x):
-    return x+10
-
-default_compare = lambda a, b: a == b
-
-@pytest.fixture(
-    params=[
-        pytest.param(
-            (lambda: 'a', default_compare),
-            id='str',
-        ),
-        pytest.param(
-            (lambda: 20, default_compare),
-            id='int',
-        ),
-        pytest.param(
-            (lambda: 3.5, default_compare),
-            id='float',
-        ),
-        pytest.param(
-            (lambda: np.array([1., 2., 3.], dtype=np.float32), lambda a, b: np.all(a == b)),
-            id='np_array',
-        ),
-        pytest.param(
-            (lambda: dtype("float32"), default_compare),
-            id='dtype',
-        ),
-        pytest.param(
-            (lambda: TensorSpec(shape=(1, 2, 3), dtype=dtype("float32")), lambda a, b: a == b),
-            id='tensor_spec',
-        ),
-        pytest.param(
-            (lambda: Cardinality.UNKNOWN, default_compare),
-            id='cardinality_unknown'
-        ),
-        pytest.param(
-            (lambda: Cardinality.INFINITE, default_compare),
-            id='cardinality_infinite'
-        ),
-        pytest.param(
-            (lambda: Cardinality(10), default_compare),
-            id='cardinality_infinite'
-        ),
-        pytest.param(
-            (
-                lambda: f_test,
-                lambda a, b: (
-                    a(0) == 10 and
-                    b(0) == 10 and
-                    a(15) == 25 and
-                    b(15) == 25
-                )
-            ),
-            id='function'
-        )
-    ]
-)
-def leaf_case(request):
-    make_obj, check_equal = request.param
-    return make_obj(), check_equal
-
-
-def test_save_load_leaf_roundtrip(primary_store_set, leaf_case):
-    test_obj, test_check = leaf_case
-    # Test save/load to/from a directory
-    obj1 = objects.TestClass5(10, test=test_obj)
-    obj1.save(primary_store_set.stores)
-
-    obj1_2 = dryml.core.load_object(obj1.definition, repo=primary_store_set.stores)
-    assert obj1_2.x == 10
-    assert test_check(test_obj, obj1_2.test)
-
-
-def test_save_load_revision_1(primary_store_set):
-    # Test that we can save revisions and load them again
-    obj = objects.TestClassC2(10)
-    obj.set_val(1)
-
-    assert obj.data == 1
-
-    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
-
-    repo.save_object(obj, revision='A')
-
-    obj.set_val(2)
-
-    assert obj.data == 2
-
-    repo.save_object(obj, revision='B')
-
-    store = primary_store_set.stores[0]
-    store_dir = store.base_dir
-
-    assert len(dryml.core.Repo.dir_store_inspect(store_dir)) == 1
-    active_dir = store._active_state_dir(store.object_dir(obj.definition))
-    assert len(glob.glob(os.path.join(active_dir, '*.pkl'))) == 3
-
-    # Remove the objects
-    del repo
-    del obj
-
-    # Re-create repo
-    repo = dryml.core.repo.Repo(stores=primary_store_set.stores)
-
-    with dryml.core.definition_mode():
-        obj_def = objects.TestClassC2(10)
-
-    obj = repo.load_object(obj_def, revision='A')
-
-    assert obj.data == 1
-
-    obj = repo.load_object(obj_def, revision='B')
-
-    assert obj.data == 2
-
-
-def test_save_load_revision_2(primary_store_set):
-    # Test that we can save nested revisions and load them again
-
-    repo = Repo(stores=primary_store_set.stores)
-
-    with default_repo(repo):
-        obj1 = objects.TestClassC2(10)
-        obj1_cdef = obj1.definition
-
-        obj1.set_val(1)
-        repo.save_object(obj1, revision='A')
-
-        obj1.set_val(2)
-        repo.save_object(obj1, revision='B')
-
-        obj2 = objects.TestClassC2(20)
-        obj2_cdef = obj2.definition
-
-        obj2.set_val(1)
-        repo.save_object(obj2, revision='A')
-
-        obj2.set_val(2)
-        repo.save_object(obj2, revision='B')
-
-        obj3 = objects.TestNest3(obj1, obj2)
-
-        repo.save_object(obj3)
-
-    # Clear objects
-    del obj1, obj2, obj3, repo
-
-    repo = Repo(stores=primary_store_set.stores)
-
-    with definition_mode():
-        test_nest_def = objects.TestNest3(
-            obj1_cdef,
-            obj2_cdef)
-
-    obj = repo.load_object(
-        test_nest_def,
-        revision = {
-            obj1_cdef: 'A',
-            obj2_cdef: 'A' })
-
-    assert obj.args[0].C == 10
-    assert obj.args[0].data == 1
-    assert obj.args[1].C == 20
-    assert obj.args[1].data == 1
-
-    obj = repo.load_object(
-        test_nest_def,
-        revision = {
-            obj1_cdef: 'A',
-            obj2_cdef: 'B' })
-
-    assert obj.args[0].C == 10
-    assert obj.args[0].data == 1
-    assert obj.args[1].C == 20
-    assert obj.args[1].data == 2
-
-    obj = repo.load_object(
-        test_nest_def,
-        revision = {
-            obj1_cdef: 'B',
-            obj2_cdef: 'A' })
-
-    assert obj.args[0].C == 10
-    assert obj.args[0].data == 2
-    assert obj.args[1].C == 20
-    assert obj.args[1].data == 1
-
-    obj = repo.load_object(
-        test_nest_def,
-        revision = {
-            obj1_cdef: 'B',
-            obj2_cdef: 'B' })
-
-    assert obj.args[0].C == 10
-    assert obj.args[0].data == 2
-    assert obj.args[1].C == 20
-    assert obj.args[1].data == 2
+@pytest.mark.xfail(strict=True, reason="U7 exact StateRef restore has no load seam yet")
+def test_u7_exact_state_ref_restores_shared_nodes_and_reuses_the_exact_graph(tmp_path):
+    store = DirStore(tmp_path / "store")
+    repo = Repo(store)
+    child = RestoreValue(10, repo=repo)
+    child.value = 20
+    state = repo.save_object(SaveLoadNode([child, child], repo=repo))
+    reopened = Repo(DirStore(store.base_dir))
+
+    first = reopened.load_object(state)
+    second = reopened.load_object(state)
+
+    assert first.children[0] is first.children[1]
+    assert first.children[0].value == 20
+    assert second is first

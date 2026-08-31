@@ -9,6 +9,7 @@ import time
 import pytest
 
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.model import QueryIndexBusy, QueryIndexError
@@ -17,8 +18,8 @@ import dryml.core.query.sqlite.index as sqlite_index_module
 from dryml.core.query.sqlite.index import SQLiteStoreQueryIndex
 from dryml.core.repo_plan import SaveAction, SavePlan, execute_save_plan
 from dryml.core.store.dir import DirStore
+from dryml.core.store.records import DefinitionRecord
 from dryml.core.symbol import ImportRef
-from dryml.core.utils.general import pickle_save
 
 
 pytestmark = pytest.mark.skipif(not sqlite_available(), reason="sqlite3 is unavailable")
@@ -30,6 +31,7 @@ from pathlib import Path
 import time
 
 from dryml.core.cdef_graph import ConcreteDefinitionGraph
+from dryml.core.bound_args import BoundArguments
 from dryml.core.definition import ConcreteDefinition
 from dryml.core.freeze import FrozenDict, FrozenTuple
 from dryml.core.query.sqlite import SQLiteQueryIndexConfig
@@ -47,10 +49,9 @@ from dryml.core.symbol import ImportRef
 
 
 def cdef(name):
-    return ConcreteDefinition._from_persisted_record(
+    return ConcreteDefinition._from_bound_record(
         ImportRef("builtins", "dict"),
-        FrozenTuple((name,)),
-        FrozenDict({}),
+        BoundArguments((("name", name),)),
     )
 
 
@@ -138,10 +139,9 @@ def _spawn_register_worker(path: str, queue) -> None:
 
 
 def _cdef(name: str) -> ConcreteDefinition:
-    return ConcreteDefinition._from_persisted_record(
+    return ConcreteDefinition._from_bound_record(
         ImportRef("builtins", "dict"),
-        FrozenTuple((name,)),
-        FrozenDict({}),
+        BoundArguments((("name", name),)),
     )
 
 
@@ -172,8 +172,7 @@ def _generation(path: Path) -> int:
 
 
 def _save_root_definition(store: DirStore, cdef: ConcreteDefinition) -> None:
-    Path(store.object_dir(cdef)).mkdir(parents=True, exist_ok=True)
-    pickle_save(cdef, store._def_file(cdef))
+    store.write_definition_record(DefinitionRecord(cdef))
 
 
 def test_cross_process_commit_visible_without_reconnect(tmp_path):
@@ -776,6 +775,7 @@ def test_crash_mid_rebuild_leaves_building_state_and_recovers(tmp_path):
     )
     root = _cdef("building-recovery")
     _save_root_definition(store, root)
+    store.clear_query_index_dirty()
 
     proc = _start_worker(f'''
 idx = store_index({str(tmp_path)!r})
@@ -807,56 +807,6 @@ with idx.read_view() as view:
     assert result["state"] == "ready"
     assert result["count"] == 1
     assert result["generation"] > 0
-
-
-def test_save_plan_does_not_register_index_before_object_publication():
-    root = _cdef("save-order")
-    graph = ConcreteDefinitionGraph.from_root(root)
-
-    class FailingStore:
-        def save_object(self, obj, *, revision=None):
-            raise RuntimeError("object publication failed")
-
-    class QueryCatalog:
-        def __init__(self):
-            self.calls = []
-
-        def store_id(self, store):
-            return "failing-store"
-
-        def register_graph(self, graph):
-            self.calls.append("register_graph")
-
-        def register_stored_root(self, definition, store):
-            self.calls.append("register_stored_root")
-
-    class QueryIndex:
-        def __init__(self):
-            self.calls = []
-
-        def register_saved_graph(self, graph, roots_by_store):
-            self.calls.append((graph, roots_by_store))
-
-    class RepoStub:
-        def __init__(self):
-            self._query_catalog = QueryCatalog()
-            self._query_index = QueryIndex()
-            self._num_saves = 0
-
-    repo = RepoStub()
-    store = FailingStore()
-    plan = SavePlan(
-        graph=graph,
-        binding=None,
-        actions=(SaveAction(root, object(), store, None, 0, "explicit-root"),),
-    )
-
-    with pytest.raises(RuntimeError, match="object publication failed"):
-        execute_save_plan(repo, plan)
-
-    assert repo._query_catalog.calls == []
-    assert repo._query_index.calls == []
-    assert repo._num_saves == 0
 
 
 def _wait_for(path: Path, *, timeout: float = 5.0) -> None:

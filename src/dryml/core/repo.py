@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import glob
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 from contextlib import contextmanager
@@ -14,11 +14,13 @@ from collections.abc import Iterable, Mapping
 from collections import defaultdict
 import numpy as np
 import atexit
+import time
+from uuid import uuid4
 
 from .definition import Definition, ConcreteDefinition
 from .object import Object, Serializable
 from .store.store import Store
-from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions, RepoSaveOptions
+from .policies import InstancePolicy, CachePolicy, RepoGraphOptions, RepoLoadOptions
 from .repo_graph import manage_revision
 from .canonical import from_canonical
 from .config import CONFIG_MISSING, ConfigError, ConfigRef
@@ -181,6 +183,16 @@ class RepoGraphError(Exception):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _ClaimLease:
+    """One live first-construction fence retained until initial StateRef publication."""
+
+    store: Store
+    object_ref: object
+    generation: int
+    owner: str
+
+
 SelectorType = Callable | Definition | ConcreteDefinition
 RevisionType = dict[ConcreteDefinition, str]
 
@@ -222,7 +234,11 @@ class Repo:
 
 
     # Helper class for saving objects
-    def __init__(self, stores=None, config: Mapping[str, Any] | None = None):
+    def __init__(
+            self, stores=None, config: Mapping[str, Any] | None = None,
+            *, clock: Callable[[], float] | None = None,
+            lease_duration: float = 30.0,
+            owner_token_factory: Callable[[], str] | None = None):
         # Initialize caches
         self.weak_obj_cache = _CandidateCache(weak=True)
         self.strong_obj_cache = _CandidateCache()
@@ -231,6 +247,11 @@ class Repo:
         self.cdef_cache = weakref.WeakValueDictionary()
         self.obj_config = {}
         self.config = dict(config or {})
+        if not isinstance(lease_duration, (int, float)) or not 0 < lease_duration <= 3600:
+            raise ValueError("lease_duration must be a positive bounded number of seconds.")
+        self._clock = clock or time.time
+        self._lease_duration = float(lease_duration)
+        self._owner_token_factory = owner_token_factory or (lambda: uuid4().hex)
         self.alias_index = {}
         self._aliases_dirty = False
         # Compatibility facade and live cache overlay. Store-owned indexes handle
@@ -258,24 +279,17 @@ class Repo:
                     self.stores.append(store)
         self._query_index = RepoQueryIndex(self)
 
-        # Try to read main def from first store
+        # Main remains a structural reference in current Store authority.
         if len(self.stores) > 0:
-            # Attempt to read from the default store first.
-            main_def = None
-            if self.default_store is not None:
-                main_def = self.default_store.read_main_def()
-            if main_def is None:
-                for store in self.stores:
-                    main_def = store.read_main_def()
-                    if main_def is not None:
-                        break
-            if main_def is not None:
-                # Hydration is read-only. Explicit set_main_def() calls own
-                # propagation to a selected Store.
-                self.main_def = main_def
-
-            self._load_aliases_from_stores()
-            self._aliases_dirty = False
+            for store in self.stores:
+                main = store.read_main_ref()
+                if main is None:
+                    continue
+                definition = store.read_definition_record(main.definition_digest)
+                if definition is None:
+                    raise RepoLoadError("Main reference points to a missing DefinitionRecord.")
+                self.main_def = definition.definition
+                break
 
     # Store Methods
 
@@ -397,17 +411,8 @@ class Repo:
                 self._query_catalog.register_cached(cdef)
 
     def _load_aliases_from_stores(self) -> None:
-        for store in self.stores:
-            for alias, cdef in store.read_aliases().items():
-                self._validate_alias(alias)
-                if not isinstance(cdef, ConcreteDefinition):
-                    raise RepoLoadError(
-                        f"Alias {alias!r} points to {type(cdef).__name__}, not a ConcreteDefinition."
-                    )
-                existing = self.alias_index.get(alias)
-                if existing is not None and existing != cdef:
-                    raise RepoLoadError(f"Conflicting definitions found for alias {alias!r}.")
-                self.alias_index[alias] = cdef
+        """Retired CDef alias caches have no projection from reference authority."""
+        return None
 
     @staticmethod
     def _validate_alias(alias: str) -> None:
@@ -415,17 +420,6 @@ class Repo:
             raise TypeError("Object aliases must be strings.")
         if alias == "":
             raise ValueError("Object aliases cannot be empty strings.")
-
-    def _alias_target_cdef(self, target: Object | Definition | ConcreteDefinition) -> ConcreteDefinition:
-        if isinstance(target, Object):
-            return target.definition
-        if isinstance(target, ConcreteDefinition):
-            return target
-        if isinstance(target, Definition):
-            return target.concretize(repo=self)
-        raise TypeError(
-            "Alias target must be an Object, Definition, or ConcreteDefinition."
-        )
 
     def _object_target_cdef(self, target: Object | Definition | ConcreteDefinition) -> ConcreteDefinition:
         if isinstance(target, Object):
@@ -498,86 +492,470 @@ class Repo:
             raise RuntimeError("Object is not saved in the selected store.")
         return store.object_dir(cdef)
 
-    def set_alias(
-            self,
-            alias: str,
-            target: Object | Definition | ConcreteDefinition,
-            *,
-            store=None,
-            save_live: bool = True) -> ConcreteDefinition:
-        """Assign a non-empty alias to a concrete object definition.
+    def _selected_writable_store(self, store, operation: str) -> Store:
+        """Select one writable Store or reject ambiguous reference mutation."""
+        if store is not None:
+            selected = self._ensure_store(store)
+            selected.preflight_publication(operation)
+            return selected
+        candidates = [candidate for candidate in self.stores if candidate.publication_capabilities.writable]
+        if len(candidates) != 1:
+            raise RepoSaveError(f"{operation} requires an explicit Store or exactly one writable Repo Store.")
+        candidates[0].preflight_publication(operation)
+        return candidates[0]
 
-        Args:
-            alias: Non-empty string name to assign.
-            target: Object, ``Definition``, or ``ConcreteDefinition`` target.
-            store: Optional Store that receives a live object save or binding.
-            save_live: Whether an object target is persisted before assignment.
+    def _reference_authoritative_in(self, store: Store, reference) -> bool:
+        """Return whether a complete ObjectRef is authoritative in one Store."""
+        from .store.records import DeclarationRecord
 
-        Returns:
-            The concrete definition assigned to ``alias``.
+        declaration = store.read_declaration_record(reference.digest())
+        if declaration is not None:
+            if declaration.object_ref != reference:
+                raise RepoLoadError("Declaration digest collision has incompatible ObjectRef authority.")
+            return True
+        return any(record.state_ref.object == reference for record in store.iter_state_ref_records())
 
-        Raises:
-            TypeError: If the alias or target type is invalid.
-            ValueError: If ``alias`` is empty.
+    def _alias_records(self, alias: str, *, state_scope=None):
+        records = []
+        for store in self.stores:
+            record = (
+                store.read_state_alias(state_scope.digest(), alias)
+                if state_scope is not None else store.read_object_alias(alias)
+            )
+            if record is not None:
+                records.append((store, record))
+        return records
 
-        Side Effects:
-            Updates the Repo alias cache and marks aliases for Store publication
-            during ``flush``; it does not replace alias bytes immediately.
+    def _single_alias_target(self, alias: str, *, state_scope=None):
+        self._validate_alias(alias)
+        records = self._alias_records(alias, state_scope=state_scope)
+        if not records:
+            raise KeyError(f"Repo has no alias {alias!r}.")
+        targets = {
+            record.state_ref_digest if state_scope is not None else record.object_ref.digest()
+            for _, record in records
+        }
+        if len(targets) != 1:
+            detail = ", ".join(
+                f"{store!r}={record.state_ref_digest if state_scope is not None else record.object_ref.digest()}"
+                for store, record in records
+            )
+            raise RepoLoadError(f"Alias {alias!r} conflicts across connected Stores: {detail}.")
+        return records[0]
+
+    def set_alias(self, alias: str, target, *, store=None, save_live: bool = True):
+        """Publish a Store-local alias for existing ObjectRef authority.
+
+        Live objects are first saved when ``save_live`` is true; aliases never
+        create a declaration or StateRef on their own.
         """
+        from .reference_values import ObjectRef, StateRef
+        from .store.records import ObjectAliasRecord
+
         self._validate_alias(alias)
+        selected = self._selected_writable_store(store, "write object alias")
         if isinstance(target, Object):
-            from dryml.runtime import materialization_admission
+            if not save_live:
+                raise ValueError("Object aliases require an authoritative ObjectRef; save the live object first.")
+            target = self.save_object(target, store=selected).object
+        elif isinstance(target, StateRef):
+            target = target.object
+        if not isinstance(target, ObjectRef):
+            raise TypeError("Object aliases target ObjectRef, StateRef, or a saved live Object.")
+        with selected.writer_lock():
+            if not self._reference_authoritative_in(selected, target):
+                raise RepoLoadError("Object aliases require same-Store declaration or StateRef authority.")
+            selected.write_object_alias(ObjectAliasRecord(alias, target))
+        return target
 
-            with materialization_admission(operation="repo_set_alias_live_object"):
-                return self._set_alias_live(alias, target, store=store, save_live=save_live)
-        return self._set_alias_live(alias, target, store=store, save_live=save_live)
+    def get_alias(self, alias: str):
+        """Resolve an ObjectRef alias, accepting only identical Store replicas."""
+        _, record = self._single_alias_target(alias)
+        return record.object_ref
 
-    def _set_alias_live(
-            self,
-            alias: str,
-            target: Object | Definition | ConcreteDefinition,
-            *,
-            store=None,
-            save_live: bool = True) -> ConcreteDefinition:
-        """Apply an already-validated alias target without a second public boundary."""
+    def delete_alias(self, alias: str, *, store=None):
+        """Retire unsupported legacy CDef alias deletion.
 
-        cdef = self._alias_target_cdef(target)
-        store = self._ensure_store(store)
-        if isinstance(target, Object):
-            if save_live:
-                self.save_object(target, store=store)
-            else:
-                self.add_objects(target, store=store)
+        Mutable reference deletion was not part of U6's authority protocol; it
+        is rejected rather than silently updating retired alias state.
+        """
+        raise NotImplementedError("Deleting reference aliases is not implemented by the current Store protocol.")
 
-        if self.alias_index.get(alias) != cdef:
-            self.alias_index[alias] = cdef
-            self._aliases_dirty = True
-        return cdef
+    def aliases(self) -> dict[str, object]:
+        """Return the legacy in-memory alias cache, which is intentionally empty."""
+        return {}
 
-    def get_alias(self, alias: str) -> ConcreteDefinition:
+    def set_state_alias(self, alias: str, state_ref, *, store=None):
+        """Publish a state alias scoped by the complete ObjectRef identity."""
+        from .reference_values import StateRef
+        from .store.records import StateAliasRecord
+
         self._validate_alias(alias)
-        try:
-            return self.alias_index[alias]
-        except KeyError as e:
-            raise KeyError(f"Repo has no alias {alias!r}.") from e
+        if not isinstance(state_ref, StateRef):
+            raise TypeError("State aliases require an exact StateRef target.")
+        selected = self._selected_writable_store(store, "write state alias")
+        with selected.writer_lock():
+            record = selected.read_state_ref_record(state_ref.digest())
+            if record is None or record.state_ref != state_ref:
+                raise RepoLoadError("State aliases require same-Store exact StateRef authority.")
+            selected.write_state_alias(StateAliasRecord(alias, state_ref.object, state_ref.digest()))
+        return state_ref
 
-    def delete_alias(self, alias: str) -> ConcreteDefinition:
-        self._validate_alias(alias)
-        try:
-            cdef = self.alias_index.pop(alias)
-            self._aliases_dirty = True
-            return cdef
-        except KeyError as e:
-            raise KeyError(f"Repo has no alias {alias!r}.") from e
+    def resolve_state_selector(self, selector):
+        """Resolve one soft StateSelectorRef through non-conflicting Store refs."""
+        from .reference_values import StateSelectorRef
 
-    def aliases(self) -> dict[str, ConcreteDefinition]:
-        return dict(self.alias_index)
+        if not isinstance(selector, StateSelectorRef):
+            raise TypeError("resolve_state_selector requires a StateSelectorRef.")
+        store, record = self._single_alias_target(selector.alias, state_scope=selector.object)
+        state = store.read_state_ref_record(record.state_ref_digest)
+        if state is None or state.state_ref.object != selector.object:
+            raise RepoLoadError("State alias points to missing or incompatible StateRef authority.")
+        return state.state_ref
 
     def load_alias(self, alias: str, **kwargs):
-        from dryml.runtime import materialization_admission
+        """Materialize an object alias's recipe pending U7 exact restoration.
 
-        with materialization_admission(operation="repo_load_alias"):
-            return self.load_object(self.get_alias(alias), **kwargs)
+        Alias lookup remains ObjectRef-authoritative.  U7 will replace this
+        temporary structural materialization with exact StateRef restoration;
+        keeping it here preserves ConfigRef's current public construction path
+        without projecting the alias back to a retired CDef record.
+        """
+        return self.load_object(self.get_alias(alias).definition, **kwargs)
+
+    def _references(self):
+        """Yield every Store-authoritative ObjectRef once with its Store/source."""
+        seen = set()
+        for store in self.stores:
+            for record in store.iter_declaration_records():
+                reference = record.object_ref
+                key = (reference.digest(), store.catalog_key())
+                if key not in seen:
+                    seen.add(key)
+                    yield store, reference, "declaration"
+            for record in store.iter_state_ref_records():
+                reference = record.state_ref.object
+                key = (reference.digest(), store.catalog_key())
+                if key not in seen:
+                    seen.add(key)
+                    yield store, reference, "state-ref"
+
+    def find_object_refs(self, object_id=None, *, namespace=None, contains=None):
+        """Scan current authority for complete refs matching durable identity facts.
+
+        Args:
+            object_id: Optional complete ``ObjectId`` to match.
+            namespace: Optional tuple namespace prefix to match exactly at the
+                beginning of a contained ObjectId namespace.
+            contains: Optional ObjectRef that must occur as a closed subtree.
+
+        Returns:
+            Deterministically ordered ``(Store, ObjectRef)`` pairs.  This direct
+            scan deliberately remains correct without a derived query index.
+        """
+        from .reference_values import ObjectId, ObjectRef
+
+        if object_id is not None and not isinstance(object_id, ObjectId):
+            raise TypeError("object_id must be an ObjectId.")
+        if namespace is not None:
+            namespace = tuple(namespace)
+            # Validate the supplied prefix without allocating an ID.
+            ObjectId._trusted(namespace, uuid4())
+        if contains is not None and not isinstance(contains, ObjectRef):
+            raise TypeError("contains must be an ObjectRef.")
+        matches = []
+        for store, reference, _ in self._references():
+            if object_id is not None and object_id not in reference.objects.values():
+                continue
+            if namespace is not None and not any(value.namespace[:len(namespace)] == namespace for value in reference.objects.values()):
+                continue
+            if contains is not None and not any(reference.at(path) == contains for path in reference.objects):
+                continue
+            matches.append((store, reference))
+        return tuple(matches)
+
+    def lookup_object_ref(self, object_id):
+        """Resolve one ObjectId to its canonical closed ObjectRef subtree.
+
+        Raises ``RepoLoadError`` when no authority exists or records use the same
+        ObjectId for incompatible closed subtrees.
+        """
+        candidates = []
+        for store, reference in self.find_object_refs(object_id):
+            for path, candidate_id in reference.objects.items():
+                if candidate_id == object_id:
+                    candidates.append((store, reference.at(path)))
+        if not candidates:
+            raise KeyError(f"No Store authority names ObjectId {object_id!s}.")
+        target = candidates[0][1]
+        if any(candidate != target for _, candidate in candidates[1:]):
+            details = ", ".join(f"{store!r}={reference.digest()}" for store, reference in candidates)
+            raise RepoLoadError(f"ObjectId {object_id!s} has incompatible closed-subtree authority: {details}.")
+        return target
+
+    find_object_ref = lookup_object_ref
+
+    def _assert_compatible_object_ids(self, reference) -> None:
+        """Reject reuse of an ObjectId with a different authoritative closure."""
+        for path, object_id in reference.objects.items():
+            try:
+                existing = self.lookup_object_ref(object_id)
+            except KeyError:
+                continue
+            if existing != reference.at(path):
+                raise RepoLoadError(
+                    f"ObjectId {object_id!s} is already authoritative for an incompatible closed subtree."
+                )
+
+    def _declaration_reference(self, cdef, namespace):
+        """Allocate only CDef-owned unidentified Serializable node IDs."""
+        from .reference_values import ObjectId, ObjectRef, _expected_paths
+
+        by_key, _ = _expected_paths(cdef)
+        objects = {}
+        allocated = 0
+        for key, path in by_key.items():
+            if key[0] == "object-id":
+                objects[path] = key[1]
+            else:
+                objects[path] = ObjectId(namespace)
+                allocated += 1
+        if not objects:
+            raise ValueError("Cannot declare an all-ephemeral graph; build its CDef normally.")
+        if not allocated:
+            raise ValueError("Declaration has no new durable lineage; build its CDef normally.")
+        return ObjectRef(cdef, objects)
+
+    def _register_declaration(self, reference, store, *, allow_preallocated: bool = False):
+        """Publish Definition, available claim, then declaration under one fence."""
+        from .reference_values import ObjectRef
+        from .store.records import ClaimRecord, DeclarationRecord, DefinitionRecord
+
+        if not isinstance(reference, ObjectRef) or not reference.objects:
+            raise ValueError("Declarations require a complete non-empty ObjectRef.")
+        store.preflight_publication("declare ObjectRef")
+        with store.writer_lock():
+            self._assert_compatible_object_ids(reference)
+            store.write_definition_record(DefinitionRecord(reference.definition))
+            existing = store.read_declaration_record(reference.digest())
+            claim = store.read_claim_record(reference.digest())
+            if existing is not None:
+                if existing.object_ref != reference:
+                    raise RepoLoadError("Declaration digest collision has incompatible ObjectRef authority.")
+                if claim is None:
+                    raise RepoLoadError("Declaration exists without ClaimRecord; Store authority is corrupt.")
+                return reference
+            # An interrupted claim without a declaration is not authority. Its
+            # complete record can safely be replaced by registration's fence.
+            if claim is None or claim.object_digest != reference.digest():
+                store.write_claim_record(ClaimRecord(reference.digest(), 0, "available"))
+            elif claim.status != "available":
+                raise RepoLoadError("Unregistered ObjectRef claim is not available for recovery.")
+            store.write_declaration_record(DeclarationRecord(reference))
+        return reference
+
+    def declare_object(self, cdef: ConcreteDefinition, *, store=None, namespace=None):
+        """Preallocate and register one first-construction ObjectRef.
+
+        The selected Store receives DefinitionRecord, ClaimRecord, and finally
+        DeclarationRecord under its writer fence.  The declaration is the only
+        registration boundary.
+        """
+        if not isinstance(cdef, ConcreteDefinition):
+            raise TypeError("declare_object requires a ConcreteDefinition.")
+        selected = self._selected_writable_store(store, "declare ObjectRef")
+        reference = self._declaration_reference(cdef, namespace)
+        return self._register_declaration(reference, selected)
+
+    def _matching_state_ref(self, store, reference):
+        """Return a matching complete StateRef record, if initial completion exists."""
+        for record in store.iter_state_ref_records():
+            if record.state_ref.object == reference:
+                return record
+        return None
+
+    def _acquire_claim(self, reference, store):
+        """Acquire or recover one declaration claim under the Store writer fence."""
+        from .store.records import ClaimRecord
+
+        with store.writer_lock():
+            declaration = store.read_declaration_record(reference.digest())
+            claim = store.read_claim_record(reference.digest())
+            if declaration is None:
+                raise RepoLoadError("build_object_ref requires a registered declaration in its selected Store.")
+            if declaration.object_ref != reference or claim is None:
+                raise RepoLoadError("Declaration and ClaimRecord authority is missing or incompatible.")
+            if claim.object_digest != reference.digest():
+                raise RepoLoadError("ClaimRecord does not match its declaration.")
+            completed = self._matching_state_ref(store, reference)
+            if completed is not None:
+                if claim.status != "completed" or claim.state_ref_digest != completed.digest:
+                    store.write_claim_record(ClaimRecord(reference.digest(), claim.generation, "completed", state_ref_digest=completed.digest))
+                return None
+            now = self._clock()
+            if claim.status == "completed":
+                raise RepoLoadError("Declared ObjectRef is already completed; choose its exact StateRef.")
+            if claim.status == "claimed" and claim.lease_until > now:
+                raise RepoLoadError("Declared ObjectRef has an active first-construction claim.")
+            owner = self._owner_token_factory()
+            if not isinstance(owner, str) or not owner:
+                raise ValueError("owner_token_factory must return a non-empty string.")
+            generation = claim.generation + 1
+            store.write_claim_record(ClaimRecord(reference.digest(), generation, "claimed", owner, now + self._lease_duration))
+            return _ClaimLease(store, reference, generation, owner)
+
+    def _renew_claim(self, lease: _ClaimLease) -> None:
+        """Extend a live first-build lease only when its full fence still matches."""
+        from .store.records import ClaimRecord
+
+        with lease.store.writer_lock():
+            declaration = lease.store.read_declaration_record(lease.object_ref.digest())
+            claim = lease.store.read_claim_record(lease.object_ref.digest())
+            now = self._clock()
+            if declaration is None or declaration.object_ref != lease.object_ref or claim is None:
+                raise RepoLoadError("Cannot renew a missing declaration claim.")
+            if (claim.generation != lease.generation or claim.owner != lease.owner
+                    or claim.status != "claimed" or claim.lease_until <= now):
+                raise RepoLoadError("Cannot renew a stale first-construction claim.")
+            lease.store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "claimed", claim.owner, now + self._lease_duration))
+
+    def _abandon_claim(self, lease: _ClaimLease) -> bool:
+        """Release exactly one matching live generation; stale leases do nothing."""
+        from .store.records import ClaimRecord
+
+        with lease.store.writer_lock():
+            declaration = lease.store.read_declaration_record(lease.object_ref.digest())
+            claim = lease.store.read_claim_record(lease.object_ref.digest())
+            if declaration is None or declaration.object_ref != lease.object_ref or claim is None:
+                return False
+            if claim.generation != lease.generation or claim.owner != lease.owner or claim.status != "claimed":
+                return False
+            lease.store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "available"))
+            return True
+
+    def abandon_object_ref(self, live_object: Object) -> bool:
+        """Abandon the exact live graph's current initial-construction claim."""
+        lease = getattr(live_object, "_claim_lease", None)
+        if not isinstance(lease, _ClaimLease):
+            return False
+        result = self._abandon_claim(lease)
+        if result:
+            live_object._claim_lease = None
+        return result
+
+    def build_object_ref(self, reference, *, store=None):
+        """Construct one registered ObjectRef through its unique active claim.
+
+        Exact StateRef restoration and completed-declaration reuse remain U7;
+        this U6 entry point only owns state-free first construction.
+        """
+        from .reference_values import ObjectRef
+        from .repo_plan import apply_exact_reference_identity
+
+        if not isinstance(reference, ObjectRef) or not reference.objects:
+            raise ValueError("build_object_ref requires a non-empty ObjectRef.")
+        selected = self._selected_declaration_store(reference, store)
+        lease = self._acquire_claim(reference, selected)
+        if lease is None:
+            raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef in U7.")
+        try:
+            obj = self.load_object(reference.definition, build_missing=True)
+            apply_exact_reference_identity(obj, reference)
+            obj._store_affinity = selected
+            obj._claim_lease = lease
+            self._renew_claim(lease)
+            return obj
+        except BaseException:
+            self._abandon_claim(lease)
+            raise
+
+    def _selected_declaration_store(self, reference, store):
+        """Resolve one declaration Store explicitly or from unambiguous authority."""
+        if store is not None:
+            selected = self._ensure_store(store)
+            declaration = selected.read_declaration_record(reference.digest())
+            if declaration is None or declaration.object_ref != reference:
+                raise RepoLoadError("Selected Store does not contain this ObjectRef declaration.")
+            return selected
+        matches = [candidate for candidate in self.stores if (record := candidate.read_declaration_record(reference.digest())) is not None and record.object_ref == reference]
+        if len(matches) != 1:
+            raise RepoLoadError("build_object_ref requires an explicit declaration Store or one unambiguous connected Store.")
+        return matches[0]
+
+    def _complete_initial_state_ref(self, state_ref, store) -> None:
+        """Fence initial StateRef publication against the live claim generation."""
+        from .store.records import ClaimRecord
+
+        lease = getattr(self, "_publishing_claim_lease", None)
+        if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
+            return
+        declaration = store.read_declaration_record(state_ref.object.digest())
+        claim = store.read_claim_record(state_ref.object.digest())
+        now = self._clock()
+        if declaration is None or declaration.object_ref != state_ref.object or claim is None:
+            raise RepoSaveError("Initial StateRef publication lost declaration authority.")
+        if (claim.generation != lease.generation or claim.owner != lease.owner
+                or claim.status != "claimed" or claim.lease_until <= now):
+            raise RepoSaveError("Initial StateRef publication lost its claim generation.")
+
+    def _mark_initial_state_ref_complete(self, state_ref, store) -> None:
+        """Replace a verified live claim with completed StateRef authority."""
+        from .store.records import ClaimRecord
+
+        lease = getattr(self, "_publishing_claim_lease", None)
+        if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
+            return
+        claim = store.read_claim_record(state_ref.object.digest())
+        if claim is None or claim.generation != lease.generation or claim.owner != lease.owner or claim.status != "claimed":
+            raise RepoSaveError("Initial StateRef was published but its claim fence changed.")
+        store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "completed", state_ref_digest=state_ref.digest()))
+        self._publishing_claim_lease = None
+
+    def fork_object_ref(self, reference, *, store=None, namespace=None):
+        """Rekey a non-empty ObjectRef and register a fresh state-free declaration."""
+        from .reference_values import ObjectId, ObjectRef
+
+        if not isinstance(reference, ObjectRef) or not reference.objects:
+            raise ValueError("fork_object_ref requires a non-empty ObjectRef.")
+        selected = self._selected_writable_store(store, "fork ObjectRef")
+        replacement = {
+            path: ObjectId._trusted(object_id.namespace if namespace is None else namespace, uuid4())
+            for path, object_id in reference.objects.items()
+        }
+        fork = ObjectRef(reference.definition.copy_graph(), replacement)
+        return self._register_declaration(fork, selected, allow_preallocated=True)
+
+    def fork_state_ref(self, state_ref, *, store=None, namespace=None, federated: bool = False):
+        """Rekey verified state authority and publish the fork only after closure staging."""
+        from .reference_values import ObjectId, ObjectRef, StateRef
+        from .store.records import DefinitionRecord, StateRefRecord
+        from .repo_plan import _find_local_state
+
+        if not isinstance(state_ref, StateRef) or not state_ref.object.objects:
+            raise ValueError("fork_state_ref requires a non-empty StateRef.")
+        selected = self._selected_writable_store(store, "fork StateRef")
+        # Every source state must be verified before any new-ID boundary exists.
+        sources = []
+        for path, state_hash in state_ref.states.items():
+            definition = state_ref.object.at(path).definition
+            source = _find_local_state(self, definition, state_hash)
+            if source is None:
+                raise RepoLoadError(f"Fork source lacks verified local state at {path!s}.")
+            sources.append((definition, state_hash, source))
+        objects = {
+            path: ObjectId._trusted(object_id.namespace if namespace is None else namespace, uuid4())
+            for path, object_id in state_ref.object.objects.items()
+        }
+        fork_object = ObjectRef(state_ref.object.definition.copy_graph(), objects)
+        fork = StateRef(fork_object, state_ref.states)
+        with selected.writer_lock():
+            for definition, state_hash, source in sources:
+                selected.write_definition_record(DefinitionRecord(definition))
+                if not federated and source is not selected:
+                    selected.copy_local_state_from(source, definition, state_hash)
+            selected.write_definition_record(DefinitionRecord(fork.definition))
+            selected.write_state_ref_record(StateRefRecord(fork))
+        return fork
 
     def set_config(self, key: str, value: Any) -> None:
         if not isinstance(key, str):
@@ -634,8 +1012,11 @@ class Repo:
         return value
 
     def has_cdef_light(self, cdef: ConcreteDefinition) -> bool:
-        # do any stores have data for this cdef?
-        return any(store.has(cdef) for store in self.stores)
+        """Return whether current definition authority exists in any Store."""
+        from .store.records import DefinitionRecord
+
+        digest = DefinitionRecord(cdef).digest
+        return any(store.read_definition_record(digest) is not None for store in self.stores)
 
     def hydrate_from_stores(self):
         """
@@ -668,48 +1049,29 @@ class Repo:
     def __len__(self):
         return len(self.strong_obj_cache)
 
-    def _save_options(
-            self,
-            *,
-            options: RepoSaveOptions | None = None,
-            main: bool = False,
-            store=None,
-            revision: RevisionType | str | None = None,
-            alias: str | None = None,
-            ephemeral_depth: int | None = 0) -> RepoSaveOptions:
-        if options is not None:
-            return options
-        return RepoSaveOptions(
-            main=main,
-            store=store,
-            revision=revision,
-            alias=alias,
-            ephemeral_depth=ephemeral_depth,
-        )
-
     def save_object(
             self,
             obj,
-            main=False,
+            *,
+            main: bool = False,
             store=None,
-            revision=None,
             alias: str | None = None,
-            ephemeral_depth: int | None = 0,
-            options: RepoSaveOptions | None = None):
-        """Persist an object graph and optionally stage main or alias references.
+            deep_capture: bool = False,
+            federated: bool = False,
+            report_stores: bool = False):
+        """Publish one live graph as immutable local states and a StateRef.
 
         Args:
             obj: Root object whose graph is saved.
             main: Whether its concrete definition becomes the main reference.
             store: Optional target Store.
-            revision: Optional object-state revision selection.
-            alias: Optional non-empty alias for the root definition.
-            ephemeral_depth: Save-plan depth for ephemeral graph objects.
-            options: Complete save options, when supplied instead of arguments.
+            alias: Optional object alias written after StateRef publication.
+            deep_capture: Whether every owned Serializable node is serialized.
+            federated: Whether reusable dependencies may remain external.
+            report_stores: Whether to return an ephemeral StoreReport.
 
         Returns:
-            ``True`` after the object save plan succeeds and requested references
-            have been staged.
+            The complete StateRef, or it with the requested StoreReport.
 
         Raises:
             TypeError: If ``alias`` is not a string.
@@ -717,74 +1079,72 @@ class Repo:
             StoreAuthorityError: If Store publication rejects authoritative data.
 
         Side Effects:
-            Validates an alias before saving any object root, publishes the save
-            plan, and then stages requested main or alias references for flush.
+            Publishes every local state and the enclosing StateRef before main or
+            object-alias references can change.
         """
         from dryml.runtime import materialization_admission
+        from .store.records import DefinitionRecord, MainRefRecord, ObjectAliasRecord
 
         with materialization_admission(operation="repo_save_object"):
-            save_options = self._save_options(
-                options=options,
-                main=main,
-                store=store,
-                revision=revision,
-                alias=alias,
-                ephemeral_depth=ephemeral_depth,
-            )
-            if save_options.alias is not None:
-                self._validate_alias(save_options.alias)
-            store = self._ensure_store(save_options.store)
-            revision = manage_revision(obj, save_options.revision)
+            if alias is not None:
+                self._validate_alias(alias)
+            store = self._ensure_store(store) or self.default_store
+            if store is None:
+                raise RepoSaveError("No Store available to save object.")
+            lease = getattr(obj, "_claim_lease", None)
+            if isinstance(lease, _ClaimLease):
+                if store is not lease.store:
+                    raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
+                self._renew_claim(lease)
             self.add_objects(obj, store=store)
             from .repo_plan import build_save_plan, execute_save_plan
 
-            plan = build_save_plan(
-                self,
-                obj,
-                store=store,
-                revision=revision,
-                ephemeral_depth=save_options.ephemeral_depth,
-            )
-            execute_save_plan(self, plan)
-
-            if save_options.main:
-                self.set_main_def(obj.definition, store=store)
-            if save_options.alias is not None:
-                self.set_alias(save_options.alias, obj, store=store, save_live=False)
-            return True
+            plan = build_save_plan(self, obj, store=store)
+            previous_lease = getattr(self, "_publishing_claim_lease", None)
+            self._publishing_claim_lease = lease
+            try:
+                result = execute_save_plan(
+                    self, plan, store=store, deep_capture=deep_capture,
+                    federated=federated, report_stores=report_stores,
+                )
+            finally:
+                self._publishing_claim_lease = previous_lease
+            state_ref = result[0] if report_stores else result
+            if main:
+                store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
+                self.main_def = obj.definition
+            if alias is not None:
+                self.set_alias(alias, state_ref.object, store=store, save_live=False)
+            return result
 
     def save(
             self,
-            obj: Object | None = None,
+            obj: Object,
+            *,
+            main: bool = False,
             store=None,
-            revision: RevisionType | str | None = None,
-            ephemeral_depth: int | None = 0,
-            options: RepoSaveOptions | None = None):
+            alias: str | None = None,
+            deep_capture: bool = False,
+            federated: bool = False,
+            report_stores: bool = False):
+        """Publish one object graph through the direct StateRef save surface."""
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="repo_save"):
-            save_options = self._save_options(
-                options=options,
-                main=False,
-                store=store,
-                revision=revision,
-                ephemeral_depth=ephemeral_depth,
+            result = self.save_object(
+                obj, main=main, store=store, alias=alias,
+                deep_capture=deep_capture, federated=federated,
+                report_stores=report_stores,
             )
-            if obj is None:
-                # Save all loaded objects in the cache
-                obj_list = []
-                for _, obj in self.strong_obj_cache.items():
-                    if obj is not None:
-                        obj_list.append(obj)
-                self.save_object(obj_list, options=save_options)
-                self.flush()
-            else:
-                self.save_object(obj, options=save_options)
-                self.flush()
+            self.flush()
+            return result
 
     def _first_store_with(self, cdef):
+        from .store.records import DefinitionRecord
+
+        digest = DefinitionRecord(cdef).digest
         for st in self.stores:
-            if st.has(cdef):
+            if st.read_definition_record(digest) is not None:
                 return st
         return None
 
@@ -1329,13 +1689,15 @@ class Repo:
         """
         if not isinstance(main_def, ConcreteDefinition):
             raise TypeError("Main definition must be a ConcreteDefinition.")
-        self.main_def = main_def
         if store is None:
             store = self.default_store
-        if store is not None:
-            store.set_main_def(self.main_def)
-        else:
+        if store is None:
             raise ValueError("No store available to set main definition!")
+        from .store.records import DefinitionRecord, MainRefRecord
+
+        record = store.write_definition_record(DefinitionRecord(main_def))
+        store.write_main_ref(MainRefRecord(record.digest))
+        self.main_def = main_def
 
     def add_objects(self, *args, store=None):
         from dryml.runtime import materialization_admission
@@ -1360,10 +1722,6 @@ class Repo:
             only after every Store commits successfully.
         """
         for store in self.stores:
-            if self._aliases_dirty:
-                published_aliases = store.write_aliases(self.alias_index)
-                if published_aliases is not None:
-                    self.alias_index = dict(published_aliases)
             store.commit()
         self._aliases_dirty = False
 
@@ -1567,27 +1925,24 @@ def manage_repo(repo=None):
 def save_object(
         obj,
         repo=None,
+        *,
         main=False,
-        revision: RevisionType|str|None=None,
         store=None,
         alias: str | None = None,
-        ephemeral_depth: int | None = 0,
-        options: RepoSaveOptions | None = None):
+        deep_capture: bool = False,
+        federated: bool = False,
+        report_stores: bool = False):
+    """Publish one Object graph through its current immutable StateRef boundary."""
     from dryml.runtime import materialization_admission
 
     with materialization_admission(operation="global_save_object"):
         with manage_repo(repo=repo) as sub_repo:
-            if options is None:
-                main = main or ((repo is not sub_repo) and isinstance(obj, Object))
-            save_options = sub_repo._save_options(
-                options=options,
-                main=main,
-                store=store,
-                revision=revision,
-                alias=alias,
-                ephemeral_depth=ephemeral_depth,
+            main = main or ((repo is not sub_repo) and isinstance(obj, Object))
+            return sub_repo.save_object(
+                obj, main=main, store=store, alias=alias,
+                deep_capture=deep_capture, federated=federated,
+                report_stores=report_stores,
             )
-            sub_repo.save_object(obj, options=save_options)
 
 
 def load_alias(alias: str, repo=None, **kwargs):

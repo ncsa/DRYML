@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from threading import Lock
 
 import uuid
 import time
 import os
 from contextlib import contextmanager
 
-from .utils.general import pickle_save, pickle_load, revision_path
+from .utils.general import pickle_save, pickle_load
 from .definition import Definition
 
 if TYPE_CHECKING:
@@ -143,6 +144,11 @@ class Dryml(type):
 
                 # Actual object allocation
                 obj = dryml_cls.__new__(dryml_cls)
+
+                # This reservation is framework runtime state, not payload.
+                # Save and exact restore use it to prevent concurrent mutation
+                # of one live object during a state transition.
+                obj._save_load_reservation = Lock()
 
                 # Attach the definition to the object.
                 obj.__cdef__ = cdef
@@ -330,26 +336,69 @@ class Object(metaclass=Dryml):
     def save(
             self,
             repo=None,
-            main=True,
-            revision: RevisionType|str|None = None,
             *,
+            main=True,
             store=None,
             alias: str | None = None,
-            options=None):
+            deep_capture: bool = False,
+            federated: bool = False,
+            report_stores: bool = False):
+        """Publish this graph as an immutable exact StateRef.
+
+        Args:
+            repo: Repository or Store authority used for publication.
+            main: Whether to update the target Store's structural main reference
+                after StateRef publication succeeds.
+            store: Optional selected target Store.
+            alias: Optional object alias to update after StateRef publication.
+            deep_capture: Whether to serialize every owned Serializable node.
+            federated: Whether validated dependency states may remain external.
+            report_stores: Whether to also return the selected Store report.
+
+        Returns:
+            The published ``StateRef``, or it paired with a ``StoreReport``.
+
+        Raises:
+            StoreAuthorityError: If checkpoint or graph publication cannot be
+                completed atomically.
+        """
         from dryml.runtime import materialization_admission
         from .repo import save_object
 
         with materialization_admission(operation="object_save"):
-            save_object(self, repo=repo, main=main, revision=revision, store=store, alias=alias, options=options)
+            return save_object(
+                self, repo=repo, main=main, store=store, alias=alias,
+                deep_capture=deep_capture, federated=federated,
+                report_stores=report_stores,
+            )
 
-    def save_state_to_dir(self, dest_dir: str, revision: str|None = None):
+    def save_state_to_dir(self, dest_dir: str, *, codec: str) -> None:
+        """Run every applicable local-state writer in MRO order.
+
+        Args:
+            dest_dir: Empty framework-provided payload directory.
+            codec: Validated opaque state codec identifier.
+
+        Side Effects:
+            Invokes each class-local ``save_state_to_dir_imp`` hook with the
+            unchanged codec. Framework metadata is deliberately not written to
+            ``dest_dir``.
+        """
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="object_save_state"):
-            pickle_save(self.definition, os.path.join(dest_dir, 'def.pkl'))
-            self.save_state_to_dir_imp(dest_dir, revision)
+            for cls in type(self).__mro__:
+                hook = cls.__dict__.get("save_state_to_dir_imp")
+                if hook is not None:
+                    hook(self, dest_dir, codec=codec)
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str|None = None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
+        """Write this class's local payload contribution, if any.
+
+        Args:
+            dest_dir: Framework-provided empty payload directory.
+            codec: Validated opaque codec selected by the Serializable class.
+        """
         pass
 
     def load(self, repo=None, revision: RevisionType|str|None = None):
@@ -360,27 +409,28 @@ class Object(metaclass=Dryml):
             revision = manage_revision(self, revision)
             load_object(self, repo=repo, revision=revision)
             
-    def restore_state_from_dir(self, src_dir: str, revision: str|None = None):
+    def restore_state_from_dir(self, src_dir: str, *, codec: str) -> None:
         from dryml.runtime import materialization_admission
 
         with materialization_admission(operation="object_restore_state"):
-            loaded_def = pickle_load(os.path.join(src_dir, "def.pkl"))
-            if loaded_def != self.definition:
-                expected_version = getattr(self.definition, "identity_version", "unknown")
-                loaded_version = getattr(loaded_def, "identity_version", "unknown")
-                raise ValueError(
-                    "Stored definition does not match the object being restored "
-                    f"(stored identity version={loaded_version!r}, "
-                    f"expected identity version={expected_version!r})."
-                )
-            self.restore_state_from_dir_imp(src_dir, revision=revision)
+            for cls in type(self).__mro__:
+                hook = cls.__dict__.get("restore_state_from_dir_imp")
+                if hook is not None:
+                    hook(self, src_dir, codec=codec)
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str|None = None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         pass
 
 
 class Serializable(Object):
-    """Object with repo-backed persisted state by default."""
+    """Object with a codec-selected immutable local-state payload.
+
+    Subclasses may set ``state_codec`` to a 1-32 character ASCII alphanumeric
+    identifier. DRYML validates and forwards that opaque value unchanged to
+    every applicable state hook; it does not assign codec semantics.
+    """
+
+    state_codec = "pkl"
 
 
 class Pickleable(Serializable):
@@ -393,26 +443,22 @@ class Pickleable(Serializable):
         "_object_ref",
         "_object_id",
         "_last_state_hash",
+        "_save_load_reservation",
         "_store_affinity",
         "_realization_scope",
     }
 
-    def save_state_to_dir_imp(self, dest_dir: str, revision: str|None=None):
+    def save_state_to_dir_imp(self, dest_dir: str, *, codec: str) -> None:
         # Grab all heavy-state data
         heavy_state = {k: v for k, v in self.__dict__.items()
                        if k not in self._HEAVY_EXCLUDE}
 
         # Save the entire object as a pickle
-        rev_path = revision_path("heavy", "pkl", dest_dir, revision=revision)
-        pickle_save(
-            heavy_state,
-            rev_path
-            )
+        pickle_save(heavy_state, os.path.join(dest_dir, "heavy.pkl"))
 
-    def restore_state_from_dir_imp(self, src_dir: str, revision: str|None):
+    def restore_state_from_dir_imp(self, src_dir: str, *, codec: str) -> None:
         # heavy-state data is stored in heavy.pkl
-        heavy_state = pickle_load(
-            revision_path("heavy", "pkl", src_dir, revision=revision))
+        heavy_state = pickle_load(os.path.join(src_dir, "heavy.pkl"))
 
         self.__dict__.update(heavy_state)
 
