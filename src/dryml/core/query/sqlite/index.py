@@ -2421,8 +2421,22 @@ def _status_diagnostics(con, journal_mode: str) -> dict[str, object]:
 
 def _validate_sqlite_integrity(con, issues: list[ValidationIssue]) -> None:
     quick = con.execute("PRAGMA quick_check").fetchall()
+    legacy_reference_blob_false_positive = False
+    reference_blob_error = "NULL value in reference_records.reference_blob"
+    if (
+            require_sqlite().sqlite_version_info < (3, 41, 0)
+            and any(row[0] == reference_blob_error for row in quick)
+    ):
+        # Older SQLite mischecks non-key columns in WITHOUT ROWID tables.
+        legacy_reference_blob_false_positive = all(
+            row[0] is not None
+            for row in con.execute("SELECT reference_blob FROM reference_records")
+        )
     for row in quick:
-        if row[0] != "ok":
+        if row[0] != "ok" and not (
+                row[0] == reference_blob_error
+                and legacy_reference_blob_false_positive
+        ):
             issues.append(ValidationIssue("error", "SQLite quick_check failed.", str(row[0])))
     fk_rows = con.execute("PRAGMA foreign_key_check").fetchall()
     for row in fk_rows:

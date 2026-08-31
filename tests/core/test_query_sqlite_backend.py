@@ -1352,6 +1352,49 @@ def test_building_index_reports_and_blocks_reads(tmp_path):
         index.current_generation()
 
 
+@pytest.mark.parametrize(
+    ("sqlite_version", "reference_blobs", "expected_issue_count"),
+    (
+        ((3, 40, 1), (b"object-ref", b"state-ref"), 0),
+        ((3, 40, 1), (b"object-ref", None), 1),
+        ((3, 41, 0), (b"object-ref", b"state-ref"), 1),
+    ),
+)
+def test_integrity_validation_suppresses_only_legacy_reference_blob_false_positive(
+        monkeypatch, sqlite_version, reference_blobs, expected_issue_count):
+    class Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def __iter__(self):
+            return iter(self.values)
+
+        def fetchall(self):
+            return self.values
+
+    class Connection:
+        def execute(self, statement):
+            if statement == "PRAGMA quick_check":
+                return Rows([
+                    ("NULL value in reference_records.reference_blob",),
+                ])
+            if statement == "SELECT reference_blob FROM reference_records":
+                return Rows([(blob,) for blob in reference_blobs])
+            if statement == "PRAGMA foreign_key_check":
+                return Rows([])
+            raise AssertionError(f"Unexpected SQL: {statement}")
+
+    class SQLiteModule:
+        sqlite_version_info = sqlite_version
+
+    monkeypatch.setattr(sqlite_index_module, "require_sqlite", lambda: SQLiteModule)
+    issues = []
+
+    sqlite_index_module._validate_sqlite_integrity(Connection(), issues)
+
+    assert len(issues) == expected_issue_count
+
+
 def test_register_retries_transient_busy_writer(tmp_path):
     path = tmp_path / "index.sqlite"
     holder_ready = threading.Event()
