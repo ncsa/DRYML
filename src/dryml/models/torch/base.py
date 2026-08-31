@@ -4,7 +4,7 @@ import os
 
 from dryml.core.factory import FactorySpec
 from dryml.core.object import Serializable
-from dryml.core.repo import get_default_repo
+from dryml.core.repo import manage_repo
 from dryml.core.tensor_spec import TensorSpec, fake_from_spec_tree, maybe_unbatch_output_spec, spec_tree_is_batched
 from dryml.core.utils.general import maybe_call_method, validate_class
 from dryml.core.utils.recurse import map_leaf_groups, map_leaves
@@ -95,12 +95,20 @@ def _metric_results(metrics):
     return out
 
 
-def _collect_trainable_parameters(target, *, repo=None):
-    """Collect graph trainables using explicit or context-local Repo authority."""
+def _collect_trainable_parameters(target, *, repo):
+    """Collect graph trainables using supplied explicit Repo authority.
 
-    repo = repo or get_default_repo()
-    if repo is None:
-        raise RuntimeError("Torch trainable-parameter collection requires an active Repo.")
+    Args:
+        target: Live DRYML graph root whose trainable nodes are collected.
+        repo: Bounded Repo authority used to traverse retained runtime bindings.
+
+    Returns:
+        A flat list of PyTorch trainable parameters in post-order graph order.
+
+    Raises:
+        KeyError: If a required runtime binding is unavailable from ``target``.
+    """
+
     results = repo.apply_graph(
         target,
         lambda obj: maybe_call_method(
@@ -144,14 +152,36 @@ class Wrapper(Serializable):
 
 
 class Optimizer(Serializable):
-    """Torch optimizer spec with runtime state bound when model parameters exist."""
+    """Torch optimizer bound to trainable parameters from a live model graph.
+
+    Parameter graph traversal receives temporary explicit Repo authority only
+    while collecting retained runtime bindings. The optimizer retains the
+    resulting PyTorch parameter objects and its own mutable optimizer state.
+    """
 
     def __init__(self, cls, *args, target, **kwargs):
+        """Construct a PyTorch optimizer for a target model graph.
+
+        Args:
+            cls: PyTorch optimizer class.
+            *args: Positional arguments after the collected parameters.
+            target: Live DRYML graph root that exposes trainable parameters.
+            **kwargs: Keyword arguments passed to ``cls``.
+
+        Raises:
+            ValueError: If ``target`` exposes no trainable parameters.
+            KeyError: If ``target`` lacks a retained runtime binding.
+
+        Side Effects:
+            Creates ``self.obj`` and temporarily installs managed Repo
+            authority only while traversing ``target``.
+        """
         self.cls = validate_class(cls)
         self.args = args
         self.kwargs = kwargs
         self.target = target
-        parameters = _collect_trainable_parameters(target)
+        with manage_repo() as repo:
+            parameters = _collect_trainable_parameters(target, repo=repo)
         if not parameters:
             raise ValueError("Torch Optimizer target exposes no trainable parameters.")
         self.obj = self.cls(parameters, *args, **kwargs)
@@ -316,6 +346,25 @@ class Training(TrainFunction):
         self.verbose = verbose
 
     def __call__(self, exp):
+        """Train one Experiment with the PyTorch optimizer loop.
+
+        Args:
+            exp: Experiment providing model, data, state, and optional
+                optimizer, loss, and metric capabilities.
+
+        Returns:
+            Per-batch scalar loss values in training order.
+
+        Raises:
+            ValueError: If the data is empty or the model exposes no trainable
+                PyTorch parameters.
+            KeyError: If the model graph lacks a retained runtime binding.
+
+        Side Effects:
+            Updates model parameters, optimizer state, metrics, progress output,
+            and ``exp.state``. Graph traversal uses a temporary explicit Repo
+            only for the duration of trainable-parameter collection.
+        """
         import torch
 
         train_data = prepare_training_data(
@@ -426,8 +475,27 @@ class Training(TrainFunction):
         return _normalize_list(getattr(exp, "metrics", ()))
 
     def _make_optimizer(self, torch, model, exp):
+        """Return an optimizer configured for one model's trainable graph.
+
+        Args:
+            torch: Imported PyTorch module.
+            model: Live DRYML model graph root.
+            exp: Experiment supplying optional optimizer capabilities.
+
+        Returns:
+            A PyTorch optimizer ready to update ``model``.
+
+        Raises:
+            ValueError: If ``model`` exposes no trainable parameters.
+            KeyError: If ``model`` lacks a retained runtime binding.
+
+        Side Effects:
+            Temporarily installs managed Repo authority only while collecting
+            trainable parameters.
+        """
         optimizer = _unwrap_backend_obj(self._optimizer(exp))
-        parameters = _collect_trainable_parameters(model)
+        with manage_repo() as repo:
+            parameters = _collect_trainable_parameters(model, repo=repo)
         if not parameters:
             raise ValueError("Torch model graph exposes no trainable parameters.")
         if optimizer is not None:

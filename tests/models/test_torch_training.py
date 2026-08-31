@@ -15,8 +15,10 @@ if not hasattr(torch, "Tensor"):
 
 
 def test_torch_basic_training_updates_experiment_state():
+    from dryml.core.repo import get_default_repo
     from dryml.models.torch import Model, Optimizer, Training
 
+    assert get_default_repo() is None
     x = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=np.float32)
     y = np.array([[0.0], [2.0], [4.0], [6.0]], dtype=np.float32)
     ds = ArrayDataset((x, y))
@@ -40,6 +42,7 @@ def test_torch_basic_training_updates_experiment_state():
     assert exp.state.phase == "trained"
     assert optimizer.obj is not None
     assert optimizer.obj.param_groups[0]["lr"] == 0.01
+    assert get_default_repo() is None
 
 
 def test_torch_sequential_accepts_constructor_tuple_shorthand():
