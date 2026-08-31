@@ -143,6 +143,32 @@ def test_register_encodes_only_missing_rows_before_write_transaction(tmp_path, m
     assert events == ["transaction"]
 
 
+def test_register_retries_busy_graph_preflight(tmp_path, monkeypatch):
+    index = sqlite_index(tmp_path)
+    root = SQLiteLeaf("busy-preflight")
+    graph = ConcreteDefinitionGraph.from_root(root.definition)
+    index.register_stored_roots(graph, [root.definition])
+    original_validate = sqlite_index_module.validate_schema
+    attempts = 0
+    delays = []
+
+    def flaky_validate(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise require_sqlite().OperationalError("database is locked")
+        return original_validate(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite_index_module, "validate_schema", flaky_validate)
+    monkeypatch.setattr(sqlite_index_module.time, "sleep", delays.append)
+
+    result = index.register_stored_roots(graph, [root.definition])
+
+    assert result.changed is False
+    assert attempts == 3
+    assert delays == [0.005]
+
+
 def test_register_graph_persists_rows_without_stored_root(tmp_path):
     index = sqlite_index(tmp_path)
     leaf = SQLiteLeaf("graph-only")

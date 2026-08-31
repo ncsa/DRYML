@@ -813,22 +813,43 @@ class SQLiteStoreQueryIndex:
         if not self.path.exists():
             return {}, tuple(missing_nodes)
 
-        con = self._connections.connection(readonly=True)
-        validate_schema(
-            con,
-            store_key=self.source_key,
-            canonical_version=self.canonical_version,
-            require_ready=require_ready,
+        max_retries = max(0, int(self.config.max_write_retries))
+        delay = 0.005
+        for attempt in range(max_retries + 1):
+            try:
+                con = self._connections.connection(readonly=True)
+                validate_schema(
+                    con,
+                    store_key=self.source_key,
+                    canonical_version=self.canonical_version,
+                    require_ready=require_ready,
+                )
+                existing_node_ids: dict[ConcreteDefinition, int] = {}
+                missing_nodes = []
+                for node in graph_nodes:
+                    did = _existing_definition_id(
+                        con,
+                        node.definition,
+                        stable_hash_blob=node_hash_blobs[node.definition],
+                    )
+                    if did is None:
+                        missing_nodes.append(node.definition)
+                    else:
+                        existing_node_ids[node.definition] = did
+                return existing_node_ids, tuple(missing_nodes)
+            except Exception as exc:
+                if is_sqlite_busy_error(exc):
+                    if attempt < max_retries:
+                        time.sleep(delay)
+                        delay = min(delay * 2, 0.25)
+                        continue
+                    raise QueryIndexBusy(
+                        f"SQLite query index is busy after {max_retries + 1} preflight attempts."
+                    ) from exc
+                raise
+        raise QueryIndexBusy(
+            f"SQLite query index is busy after {max_retries + 1} preflight attempts."
         )
-        existing_node_ids: dict[ConcreteDefinition, int] = {}
-        missing_nodes = []
-        for node in graph_nodes:
-            did = _existing_definition_id(con, node.definition, stable_hash_blob=node_hash_blobs[node.definition])
-            if did is None:
-                missing_nodes.append(node.definition)
-            else:
-                existing_node_ids[node.definition] = did
-        return existing_node_ids, tuple(missing_nodes)
 
     def remove_stored_roots(self, roots):
         roots = tuple(dict.fromkeys(roots))
@@ -990,7 +1011,9 @@ class SQLiteStoreQueryIndex:
         return stable_hash_to_blob(stable_hash), _relative_def_path(stable_hash), None, None
 
     def _validate_rebuild_before_ready(self, *, roots: tuple[ConcreteDefinition, ...]) -> None:
-        con = self._connections.connection(readonly=True)
+        # Reuse the staged writer's WAL snapshot; a second Windows connection can
+        # otherwise observe the main file before its committed WAL pages.
+        con = self._connections.connection(readonly=False)
         issues: list[ValidationIssue] = []
         validate_schema(con, store_key=self.source_key, canonical_version=self.canonical_version, require_ready=False)
         _validate_sqlite_integrity(con, issues)
