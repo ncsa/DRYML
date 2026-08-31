@@ -52,6 +52,84 @@ def _unique_objects(objects):
     return tuple(unique)
 
 
+def _fork_rekey_reference(reference, namespace):
+    """Rekey an exact reference graph, including materializing embedded refs.
+
+    The CDef codec is used as the immutable graph reconstruction boundary.  A
+    single old-to-new ObjectId map preserves sharing across the root and every
+    embedded materializing ObjectRef/StateRef without using local state bytes as
+    identity evidence.
+    """
+    from .cdef_codec import decode_cdef_graph, encode_cdef_graph
+    from .reference_values import ObjectId, ObjectRef, StateRef, _expected_paths
+
+    replacements = {}
+    object_cache = {}
+    state_cache = {}
+
+    def replacement(old):
+        result = replacements.get(old)
+        if result is None:
+            result = ObjectId._trusted(
+                old.namespace if namespace is None else namespace, uuid4()
+            )
+            replacements[old] = result
+        return result
+
+    def transform_value(data):
+        kind = data.get("kind")
+        if kind == "object_ref":
+            data["value"] = rekey_object(ObjectRef.from_data(data["value"])).to_data()
+        elif kind == "state_ref":
+            data["value"] = rekey_state(StateRef.from_data(data["value"])).to_data()
+        elif kind == "link":
+            transform_value(data["target"])
+        elif kind == "dict":
+            for _, value in data["items"]:
+                transform_value(value)
+        elif kind in {"list", "tuple", "set"}:
+            for value in data["items"]:
+                transform_value(value)
+
+    def rekey_definition(definition):
+        data = encode_cdef_graph(definition)
+        for node in data["nodes"]:
+            transform_value(node["parameters"])
+        return decode_cdef_graph(data)
+
+    def rekey_object(old):
+        cached = object_cache.get(old.digest())
+        if cached is not None:
+            return cached
+        definition = rekey_definition(old.definition)
+        expected, _ = _expected_paths(definition)
+        objects = {}
+        for key, path in expected.items():
+            if key[0] == "object-id":
+                objects[path] = key[1]
+            else:
+                objects[path] = replacement(old.objects[path])
+        result = ObjectRef(definition, objects)
+        object_cache[old.digest()] = result
+        return result
+
+    def rekey_state(old):
+        cached = state_cache.get(old.digest())
+        if cached is not None:
+            return cached
+        result = StateRef(rekey_object(old.object), old.states)
+        state_cache[old.digest()] = result
+        return result
+
+    if isinstance(reference, StateRef):
+        root = rekey_state(reference)
+    elif isinstance(reference, ObjectRef):
+        root = rekey_object(reference)
+    else:
+        raise TypeError("Fork rekeying requires an ObjectRef or StateRef.")
+    return root, tuple(state_cache.values())
+
+
 class _NodeMap(dict):
     """Dictionary which never collapses equal but independent CDefs."""
 
@@ -546,8 +624,33 @@ class Repo:
     def set_alias(self, alias: str, target, *, store=None, save_live: bool = True):
         """Publish a Store-local alias for existing ObjectRef authority.
 
-        Live objects are first saved when ``save_live`` is true; aliases never
-        create a declaration or StateRef on their own.
+        Args:
+            alias: Non-empty path-safe alias text.
+            target: Existing ``ObjectRef`` or ``StateRef``, or a live ``Object``.
+            store: Explicit writable target Store, required when writable Repo
+                Stores are ambiguous.
+            save_live: Whether a live target may be saved before aliasing.
+
+        Returns:
+            The authoritative ObjectRef selected for the alias.
+
+        Raises:
+            TypeError: If the alias or target type is invalid.
+            ValueError: If the alias is empty or a live target is not saveable.
+            RepoLoadError: If the target lacks same-Store declaration or StateRef
+                authority.
+
+        Side Effects:
+            May save a live graph, then atomically replaces one mutable alias
+            record. It never creates declaration or StateRef authority itself.
+
+        Concurrency:
+            Mutation holds the selected Store writer lock. A stale claimant cannot
+            create StateRef authority through this method.
+
+        Store Requirements:
+            The selected Store must be writable and provide atomic mutable-record
+            replacement and writer serialization.
         """
         from .reference_values import ObjectRef, StateRef
         from .store.records import ObjectAliasRecord
@@ -569,7 +672,29 @@ class Repo:
         return target
 
     def get_alias(self, alias: str):
-        """Resolve an ObjectRef alias, accepting only identical Store replicas."""
+        """Resolve an ObjectRef alias, accepting only identical Store replicas.
+
+        Args:
+            alias: Non-empty object alias to resolve.
+
+        Returns:
+            The complete authoritative ObjectRef.
+
+        Raises:
+            KeyError: If no connected Store defines the alias.
+            RepoLoadError: If connected Stores define conflicting targets.
+
+        Side Effects:
+            None. This reads authoritative mutable records and never constructs a
+            live Object or consults a derived index.
+
+        Concurrency:
+            Readers observe a complete old or new record through atomic Store
+            replacement; identical replicated values are deduplicated.
+
+        Store Requirements:
+            Every connected Store must implement object-alias reads.
+        """
         _, record = self._single_alias_target(alias)
         return record.object_ref
 
@@ -586,7 +711,32 @@ class Repo:
         return {}
 
     def set_state_alias(self, alias: str, state_ref, *, store=None):
-        """Publish a state alias scoped by the complete ObjectRef identity."""
+        """Publish a state alias scoped by the complete ObjectRef identity.
+
+        Args:
+            alias: Non-empty path-safe state alias text.
+            state_ref: Existing exact StateRef to name.
+            store: Explicit writable target Store when Repo Stores are ambiguous.
+
+        Returns:
+            The supplied StateRef.
+
+        Raises:
+            TypeError: If ``state_ref`` is not a StateRef.
+            RepoLoadError: If its exact immutable record is not in the selected
+                Store.
+
+        Side Effects:
+            Atomically replaces one Store-local mutable state-alias record; it
+            does not publish state, mutate a CDef, or create ObjectRef authority.
+
+        Concurrency:
+            The selected Store writer lock serializes replacement with competing
+            aliases and StateRef publication.
+
+        Store Requirements:
+            The selected Store must be writable and carry the exact StateRef.
+        """
         from .reference_values import StateRef
         from .store.records import StateAliasRecord
 
@@ -602,7 +752,31 @@ class Repo:
         return state_ref
 
     def resolve_state_selector(self, selector):
-        """Resolve one soft StateSelectorRef through non-conflicting Store refs."""
+        """Resolve one soft StateSelectorRef through non-conflicting Store refs.
+
+        Args:
+            selector: StateSelectorRef containing complete ObjectRef scope and
+                Store-local alias text.
+
+        Returns:
+            The exact immutable StateRef named by the selector.
+
+        Raises:
+            TypeError: If ``selector`` is not a StateSelectorRef.
+            KeyError: If no connected Store has the scoped alias.
+            RepoLoadError: If aliases conflict or their target record is missing
+                or has a different ObjectRef.
+
+        Side Effects:
+            None. Selector resolution reads authority only and never materializes
+            state or changes an alias.
+
+        Concurrency:
+            A reader accepts only one identical target across connected Stores.
+
+        Store Requirements:
+            Connected Stores must expose state aliases and StateRef records.
+        """
         from .reference_values import StateSelectorRef
 
         if not isinstance(selector, StateSelectorRef):
@@ -614,14 +788,18 @@ class Repo:
         return state.state_ref
 
     def load_alias(self, alias: str, **kwargs):
-        """Materialize an object alias's recipe pending U7 exact restoration.
+        """Materialize an object alias's structural recipe pending U7 restore.
 
         Alias lookup remains ObjectRef-authoritative.  U7 will replace this
         temporary structural materialization with exact StateRef restoration;
         keeping it here preserves ConfigRef's current public construction path
         without projecting the alias back to a retired CDef record.
         """
-        return self.load_object(self.get_alias(alias).definition, **kwargs)
+        if "restore_state" in kwargs:
+            raise TypeError(
+                "Object aliases name ObjectRefs, not state; exact restoration is unavailable until U7."
+            )
+        return self.load_object(self.get_alias(alias).definition, restore_state=False, **kwargs)
 
     def _references(self):
         """Yield every Store-authoritative ObjectRef once with its Store/source."""
@@ -652,6 +830,22 @@ class Repo:
         Returns:
             Deterministically ordered ``(Store, ObjectRef)`` pairs.  This direct
             scan deliberately remains correct without a derived query index.
+
+        Raises:
+            TypeError: If an identity, namespace prefix, or containment reference
+                has an unsupported type.
+            ValueError: If a namespace prefix violates ObjectId validation.
+
+        Side Effects:
+            None. This scans declaration and StateRef authority; local-state bytes
+            and query indexes do not participate in identity resolution.
+
+        Concurrency:
+            Each scanned record is complete immutable authority. Results may span
+            Store generations when another writer publishes during the scan.
+
+        Store Requirements:
+            Connected Stores must expose iterable declaration and StateRef records.
         """
         from .reference_values import ObjectId, ObjectRef
 
@@ -677,8 +871,27 @@ class Repo:
     def lookup_object_ref(self, object_id):
         """Resolve one ObjectId to its canonical closed ObjectRef subtree.
 
-        Raises ``RepoLoadError`` when no authority exists or records use the same
-        ObjectId for incompatible closed subtrees.
+        Args:
+            object_id: Complete durable ObjectId to resolve.
+
+        Returns:
+            The canonical closed ObjectRef subtree named by the identity.
+
+        Raises:
+            TypeError: If ``object_id`` is not an ObjectId.
+            KeyError: If no connected authoritative record names it.
+            RepoLoadError: If records use the same ID for incompatible subtrees.
+
+        Side Effects:
+            None. The lookup scans immutable declaration and StateRef authority,
+            never a derived index or local state bytes.
+
+        Concurrency:
+            Immutable records make each candidate stable; concurrent publication
+            can add a later candidate but cannot rewrite an observed one.
+
+        Store Requirements:
+            Connected Stores must expose authoritative record iteration.
         """
         candidates = []
         for store, reference in self.find_object_refs(object_id):
@@ -757,9 +970,35 @@ class Repo:
     def declare_object(self, cdef: ConcreteDefinition, *, store=None, namespace=None):
         """Preallocate and register one first-construction ObjectRef.
 
-        The selected Store receives DefinitionRecord, ClaimRecord, and finally
-        DeclarationRecord under its writer fence.  The declaration is the only
-        registration boundary.
+        Args:
+            cdef: V2 ConcreteDefinition with at least one new owned Serializable
+                lineage.
+            store: Explicit writable registration Store when Repo Stores are
+                ambiguous.
+            namespace: Optional ObjectId namespace; ``None`` uses the active
+                allocation scope and ``()`` is explicitly empty.
+
+        Returns:
+            Complete registered non-empty ObjectRef.
+
+        Raises:
+            TypeError: If ``cdef`` is not concrete.
+            ValueError: If the graph is all-ephemeral or already has no new
+                durable lineage to allocate.
+            RepoLoadError: If an existing ObjectId has incompatible authority.
+
+        Side Effects:
+            Under one writer lock, installs/verifies DefinitionRecord, writes an
+            available ClaimRecord, then writes DeclarationRecord as the only
+            registration boundary.
+
+        Concurrency:
+            Writer serialization prevents competing registration from reusing an
+            ID with a different closed subtree.
+
+        Store Requirements:
+            The selected Store must support immutable install, atomic claim
+            replacement, and writer serialization.
         """
         if not isinstance(cdef, ConcreteDefinition):
             raise TypeError("declare_object requires a ConcreteDefinition.")
@@ -804,6 +1043,77 @@ class Repo:
             store.write_claim_record(ClaimRecord(reference.digest(), generation, "claimed", owner, now + self._lease_duration))
             return _ClaimLease(store, reference, generation, owner)
 
+    def _pending_declaration_references(self, reference):
+        """Return materializing nested declarations in dependency-first order.
+
+        Args:
+            reference: Registered parent ``ObjectRef`` to inspect.
+
+        Returns:
+            Tuples of materializing ``GraphPath`` and unique nested ``ObjectRef``
+            values, ordered with each nested dependency before its parent.
+
+        Raises:
+            TypeError: If ``reference`` is not an ObjectRef.
+            RepoLoadError: If a materializing nested ObjectRef has no unambiguous
+                declaration Store or materializing declarations form a cycle.
+
+        Side Effects:
+            None. The direct authority scan neither claims nor constructs a node.
+
+        Store Requirements:
+            Each nested ObjectRef must be registered in exactly one connected
+            Store. Ref-only links and embedded StateRefs are not declarations.
+        """
+        from .cdef_graph import EdgeKind
+        from .definition import ConcreteDefinition
+        from .links import DefLink
+        from .reference_values import ObjectRef, StateRef
+        from .utils.graph.path import GraphPath
+        from .utils.graph.value import iter_value_edges
+
+        if not isinstance(reference, ObjectRef):
+            raise TypeError("Pending declaration traversal requires an ObjectRef.")
+        result = []
+        seen = {reference.digest()}
+        active = set()
+
+        def visit_value(value, path):
+            if isinstance(value, ObjectRef):
+                visit_reference(value, path)
+            elif isinstance(value, StateRef):
+                return
+            elif isinstance(value, ConcreteDefinition):
+                visit_cdef(value, path)
+            elif isinstance(value, DefLink):
+                if value.kind is EdgeKind.MATERIALIZE:
+                    visit_value(value.target, path)
+            else:
+                for edge in iter_value_edges(value):
+                    visit_value(edge.value, path.child(edge.segment))
+
+        def visit_cdef(cdef, path):
+            for edge in iter_value_edges(cdef):
+                visit_value(edge.value, path.child(edge.segment))
+
+        def visit_reference(child, path):
+            digest = child.digest()
+            if digest in active:
+                raise RepoLoadError("Materializing declaration references cannot form a cycle.")
+            if digest in seen:
+                return
+            active.add(digest)
+            try:
+                self._selected_declaration_store(child, None)
+                visit_cdef(child.definition, path)
+                result.append((path, child))
+                seen.add(digest)
+            finally:
+                active.remove(digest)
+
+        visit_cdef(reference.definition, GraphPath())
+        return tuple(result)
+
     def _renew_claim(self, lease: _ClaimLease) -> None:
         """Extend a live first-build lease only when its full fence still matches."""
         from .store.records import ClaimRecord
@@ -814,7 +1124,8 @@ class Repo:
             now = self._clock()
             if declaration is None or declaration.object_ref != lease.object_ref or claim is None:
                 raise RepoLoadError("Cannot renew a missing declaration claim.")
-            if (claim.generation != lease.generation or claim.owner != lease.owner
+            if (claim.object_digest != lease.object_ref.digest()
+                    or claim.generation != lease.generation or claim.owner != lease.owner
                     or claim.status != "claimed" or claim.lease_until <= now):
                 raise RepoLoadError("Cannot renew a stale first-construction claim.")
             lease.store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "claimed", claim.owner, now + self._lease_duration))
@@ -828,13 +1139,36 @@ class Repo:
             claim = lease.store.read_claim_record(lease.object_ref.digest())
             if declaration is None or declaration.object_ref != lease.object_ref or claim is None:
                 return False
-            if claim.generation != lease.generation or claim.owner != lease.owner or claim.status != "claimed":
+            if (claim.object_digest != lease.object_ref.digest()
+                    or claim.generation != lease.generation or claim.owner != lease.owner
+                    or claim.status != "claimed" or claim.lease_until <= self._clock()):
                 return False
             lease.store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "available"))
             return True
 
     def abandon_object_ref(self, live_object: Object) -> bool:
-        """Abandon the exact live graph's current initial-construction claim."""
+        """Abandon the exact live graph's current initial-construction claim.
+
+        Args:
+            live_object: Object returned by ``build_object_ref``.
+
+        Returns:
+            Whether this call released its still-current claim generation.
+
+        Raises:
+            None. Missing, completed, or stale claims return ``False``.
+
+        Side Effects:
+            Atomically returns only this live generation to ``available`` and
+            clears the live object's lease when successful.
+
+        Concurrency:
+            Generation and owner comparisons under the Store writer lock prevent
+            stale builders from abandoning a successor's claim.
+
+        Store Requirements:
+            The original declaration Store must remain writable and connected.
+        """
         lease = getattr(live_object, "_claim_lease", None)
         if not isinstance(lease, _ClaimLease):
             return False
@@ -846,8 +1180,32 @@ class Repo:
     def build_object_ref(self, reference, *, store=None):
         """Construct one registered ObjectRef through its unique active claim.
 
-        Exact StateRef restoration and completed-declaration reuse remain U7;
-        this U6 entry point only owns state-free first construction.
+        Args:
+            reference: Complete non-empty registered ObjectRef.
+            store: Its explicit declaration Store, or omitted only when exactly
+                one connected Store contains the declaration.
+
+        Returns:
+            Fresh live Object graph retaining the exact reference and active claim
+            generations through initial StateRef publication.
+
+        Raises:
+            ValueError: If ``reference`` is empty or not an ObjectRef.
+            RepoLoadError: If registration is missing, ambiguous, completed,
+                actively claimed, stale, or nested declaration authority fails.
+
+        Side Effects:
+            Acquires unique nested declarations before their parent, constructs
+            the graph, attaches exact IDs and leases, and releases only claims
+            acquired by this attempt in reverse order on failure.
+
+        Concurrency:
+            Each acquire and renewal compares declaration digest, generation,
+            owner, status, and lease under Store writer serialization.
+
+        Store Requirements:
+            The declaration Store for every pending materializing ObjectRef must
+            be connected, unambiguous, writable, and writer-serialized.
         """
         from .reference_values import ObjectRef
         from .repo_plan import apply_exact_reference_identity
@@ -855,18 +1213,47 @@ class Repo:
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("build_object_ref requires a non-empty ObjectRef.")
         selected = self._selected_declaration_store(reference, store)
-        lease = self._acquire_claim(reference, selected)
-        if lease is None:
-            raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef in U7.")
+        acquired = []
         try:
-            obj = self.load_object(reference.definition, build_missing=True)
+            dependencies = self._pending_declaration_references(reference)
+            for _, dependency in dependencies:
+                dependency_store = self._selected_declaration_store(dependency, None)
+                dependency_lease = self._acquire_claim(dependency, dependency_store)
+                if dependency_lease is None:
+                    raise RepoLoadError("Nested ObjectRef is already completed; choose an exact StateRef.")
+                acquired.append(dependency_lease)
+            lease = self._acquire_claim(reference, selected)
+            if lease is None:
+                raise RepoLoadError("Declared ObjectRef is complete; load its exact StateRef in U7.")
+            acquired.append(lease)
+            obj = self.load_object(
+                reference.definition, restore_state=False, build_missing=True
+            )
             apply_exact_reference_identity(obj, reference)
             obj._store_affinity = selected
             obj._claim_lease = lease
+            obj._claim_leases = tuple(acquired)
+            pending = []
+            for path, dependency in dependencies:
+                try:
+                    dependency_obj = obj.graph_at(path)
+                except Exception as error:
+                    raise RepoLoadError(
+                        f"Nested ObjectRef at {path!s} did not retain a live construction binding."
+                    ) from error
+                if not isinstance(dependency_obj, Object):
+                    raise RepoLoadError(
+                        f"Nested ObjectRef at {path!s} did not materialize an Object."
+                    )
+                child_lease = next(item for item in acquired if item.object_ref == dependency)
+                dependency_obj._claim_lease = child_lease
+                pending.append((child_lease, dependency_obj))
+            obj._pending_claim_dependencies = tuple(pending)
             self._renew_claim(lease)
             return obj
         except BaseException:
-            self._abandon_claim(lease)
+            for acquired_lease in reversed(acquired):
+                self._abandon_claim(acquired_lease)
             raise
 
     def _selected_declaration_store(self, reference, store):
@@ -905,54 +1292,143 @@ class Repo:
         lease = getattr(self, "_publishing_claim_lease", None)
         if not isinstance(lease, _ClaimLease) or lease.store is not store or lease.object_ref != state_ref.object:
             return
+        declaration = store.read_declaration_record(state_ref.object.digest())
         claim = store.read_claim_record(state_ref.object.digest())
-        if claim is None or claim.generation != lease.generation or claim.owner != lease.owner or claim.status != "claimed":
+        now = self._clock()
+        if (declaration is None or declaration.object_ref != state_ref.object or claim is None
+                or claim.object_digest != lease.object_ref.digest()
+                or claim.generation != lease.generation or claim.owner != lease.owner
+                or claim.status != "claimed" or claim.lease_until <= now):
             raise RepoSaveError("Initial StateRef was published but its claim fence changed.")
         store.write_claim_record(ClaimRecord(claim.object_digest, claim.generation, "completed", state_ref_digest=state_ref.digest()))
         self._publishing_claim_lease = None
 
     def fork_object_ref(self, reference, *, store=None, namespace=None):
-        """Rekey a non-empty ObjectRef and register a fresh state-free declaration."""
-        from .reference_values import ObjectId, ObjectRef
+        """Rekey a non-empty ObjectRef and register a state-free declaration.
+
+        Args:
+            reference: Complete non-empty source ObjectRef.
+            store: Explicit writable declaration Store when Repo Stores are
+                ambiguous.
+            namespace: Replacement namespace for every new ObjectId, or ``None``
+                to preserve each source namespace independent of active scopes.
+
+        Returns:
+            A graph-isomorphic ObjectRef with fresh nonces and a new available
+            ClaimRecord/DeclarationRecord boundary.
+
+        Raises:
+            ValueError: If the reference is empty or namespace validation fails.
+            TypeError: If the reference has an unsupported type.
+            RepoLoadError: If existing identity authority conflicts.
+
+        Side Effects:
+            Allocates IDs and publishes the fork declaration only after the
+            selected Store can install its DefinitionRecord and claim.
+
+        Concurrency:
+            Registration runs under one Store writer lock; the fork has no
+            authority if publication fails before DeclarationRecord installation.
+
+        Store Requirements:
+            The selected Store must provide current writable declaration and claim
+            publication semantics.
+        """
+        from .reference_values import ObjectRef
 
         if not isinstance(reference, ObjectRef) or not reference.objects:
             raise ValueError("fork_object_ref requires a non-empty ObjectRef.")
         selected = self._selected_writable_store(store, "fork ObjectRef")
-        replacement = {
-            path: ObjectId._trusted(object_id.namespace if namespace is None else namespace, uuid4())
-            for path, object_id in reference.objects.items()
-        }
-        fork = ObjectRef(reference.definition.copy_graph(), replacement)
+        fork, _ = _fork_rekey_reference(reference, namespace)
         return self._register_declaration(fork, selected, allow_preallocated=True)
 
     def fork_state_ref(self, state_ref, *, store=None, namespace=None, federated: bool = False):
-        """Rekey verified state authority and publish the fork only after closure staging."""
-        from .reference_values import ObjectId, ObjectRef, StateRef
+        """Rekey verified state authority and publish only after closure staging.
+
+        Args:
+            state_ref: Complete non-empty authoritative StateRef to fork.
+            store: Explicit writable target Store when Repo Stores are ambiguous.
+            namespace: Replacement namespace for all newly allocated IDs, or
+                ``None`` to preserve source namespaces despite active scopes.
+            federated: Whether verified dependency state may remain in connected
+                source Stores instead of being copied into ``store``.
+
+        Returns:
+            New exact StateRef with fresh ObjectIds and the source local-state
+            hashes.
+
+        Raises:
+            ValueError: If the source is not a non-empty StateRef.
+            RepoLoadError: If the root or materializing seed authority/local state
+                is missing, conflicting, or fails verification.
+            StoreAuthorityError: If target publication or copying fails.
+
+        Side Effects:
+            Verifies every local state before allocating fork authority. A
+            non-federated target receives verified local states, DefinitionRecords,
+            and embedded seed records before the final StateRef boundary.
+
+        Concurrency:
+            Final record publication is serialized by the target Store writer
+            lock. Pre-boundary failure leaves no fork StateRef authority.
+
+        Store Requirements:
+            Source Stores must remain connected for closure verification. The
+            target must provide writable immutable-record and local-state install
+            semantics; federated forks retain their connected source dependencies.
+        """
+        from .reference_values import StateRef
         from .store.records import DefinitionRecord, StateRefRecord
-        from .repo_plan import _find_local_state
+        from .repo_plan import _embedded_state_refs, _find_local_state
 
         if not isinstance(state_ref, StateRef) or not state_ref.object.objects:
             raise ValueError("fork_state_ref requires a non-empty StateRef.")
         selected = self._selected_writable_store(store, "fork StateRef")
-        # Every source state must be verified before any new-ID boundary exists.
+        # Validate the root and every materializing exact seed before allocating
+        # new identities. A non-federated fork must carry this complete closure.
+        references = []
+        seen_references = set()
+
+        def collect(reference):
+            if reference.digest() in seen_references:
+                return
+            source_record = None
+            for candidate in self.stores:
+                record = candidate.read_state_ref_record(reference.digest())
+                if record is not None:
+                    if record.state_ref != reference:
+                        raise RepoLoadError("StateRef digest collision has incompatible authority.")
+                    source_record = record
+                    break
+            if source_record is None:
+                raise RepoLoadError("Fork source lacks an authoritative exact StateRef record.")
+            seen_references.add(reference.digest())
+            references.append(reference)
+            for _, seed in _embedded_state_refs(reference.definition):
+                collect(seed)
+
+        collect(state_ref)
         sources = []
-        for path, state_hash in state_ref.states.items():
-            definition = state_ref.object.at(path).definition
-            source = _find_local_state(self, definition, state_hash)
-            if source is None:
-                raise RepoLoadError(f"Fork source lacks verified local state at {path!s}.")
-            sources.append((definition, state_hash, source))
-        objects = {
-            path: ObjectId._trusted(object_id.namespace if namespace is None else namespace, uuid4())
-            for path, object_id in state_ref.object.objects.items()
-        }
-        fork_object = ObjectRef(state_ref.object.definition.copy_graph(), objects)
-        fork = StateRef(fork_object, state_ref.states)
+        for reference in references:
+            for path, state_hash in reference.states.items():
+                definition = reference.object.at(path).definition
+                source = _find_local_state(self, definition, state_hash)
+                if source is None:
+                    raise RepoLoadError(f"Fork source lacks verified local state at {path!s}.")
+                sources.append((definition, state_hash, source))
+        fork, forked_seeds = _fork_rekey_reference(state_ref, namespace)
         with selected.writer_lock():
+            # DefinitionRecords are graph-aware, but every local-state entry is
+            # independently verified against its node definition before copying.
             for definition, state_hash, source in sources:
                 selected.write_definition_record(DefinitionRecord(definition))
                 if not federated and source is not selected:
                     selected.copy_local_state_from(source, definition, state_hash)
+            if not federated:
+                for seed in forked_seeds:
+                    if seed != fork:
+                        selected.write_definition_record(DefinitionRecord(seed.definition))
+                        selected.write_state_ref_record(StateRefRecord(seed))
             selected.write_definition_record(DefinitionRecord(fork.definition))
             selected.write_state_ref_record(StateRefRecord(fork))
         return fork
@@ -1058,7 +1534,8 @@ class Repo:
             alias: str | None = None,
             deep_capture: bool = False,
             federated: bool = False,
-            report_stores: bool = False):
+            report_stores: bool = False,
+            _capture_memo: set[object] | None = None):
         """Publish one live graph as immutable local states and a StateRef.
 
         Args:
@@ -1096,6 +1573,29 @@ class Repo:
                 if store is not lease.store:
                     raise RepoSaveError("The initial StateRef must be published in the declaration Store.")
                 self._renew_claim(lease)
+            capture_memo = set() if _capture_memo is None else _capture_memo
+            # Complete nested declarations before publishing an enclosing graph.
+            # The nested immutable StateRef then supplies reusable state for
+            # adoption, so deep capture does not serialize it a second time.
+            for dependency_lease, dependency_obj in getattr(obj, "_pending_claim_dependencies", ()):
+                if dependency_lease is lease:
+                    continue
+                self.save_object(
+                    dependency_obj,
+                    store=dependency_lease.store,
+                    deep_capture=deep_capture,
+                    federated=federated,
+                    _capture_memo=capture_memo,
+                )
+                from .repo_plan import build_save_plan
+
+                capture_memo.update(
+                    action.obj.object_id
+                    for action in build_save_plan(
+                        self, dependency_obj, store=dependency_lease.store
+                    ).actions
+                    if isinstance(action.obj, Serializable)
+                )
             self.add_objects(obj, store=store)
             from .repo_plan import build_save_plan, execute_save_plan
 
@@ -1106,10 +1606,18 @@ class Repo:
                 result = execute_save_plan(
                     self, plan, store=store, deep_capture=deep_capture,
                     federated=federated, report_stores=report_stores,
+                    capture_memo=capture_memo,
                 )
+            except BaseException:
+                for pending_lease in reversed(
+                        getattr(obj, "_claim_leases", (lease,) if lease else ())):
+                    self._abandon_claim(pending_lease)
+                raise
             finally:
                 self._publishing_claim_lease = previous_lease
             state_ref = result[0] if report_stores else result
+            if isinstance(lease, _ClaimLease):
+                obj._claim_lease = None
             if main:
                 store.write_main_ref(MainRefRecord(DefinitionRecord(obj.definition).digest))
                 self.main_def = obj.definition

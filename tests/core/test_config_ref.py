@@ -44,6 +44,8 @@ def test_repo_resolve_config_handles_nested_values():
 
 def test_config_ref_keeps_identity_stable_across_runtime_config(primary_store_set):
     repo = Repo(stores=primary_store_set.stores, config={"data.root": "/local/data"})
+    if not repo.default_store.publication_capabilities.writable:
+        pytest.skip("ObjectRef alias publication requires a writable Store")
     obj = objects.ConfigConsumer(ConfigRef("data.root"), repo=repo)
     repo.save_object(obj, alias="configured")
     repo.close(flush=True)

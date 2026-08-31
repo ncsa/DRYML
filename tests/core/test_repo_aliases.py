@@ -1,23 +1,38 @@
 import pytest
 
 from tests.core import core_objects as objects
+from dryml.core import ObjectRef
 from dryml.core.repo import Repo, RepoLoadError, load_alias, make_store, save_object
 from dryml.core.store.dir import DirStore
-from dryml.core.store.store import StoreAliasConflictError
+
+
+def _require_writable_reference_store(primary_store_set):
+    """Skip file-like Zip fixtures that cannot atomically publish aliases."""
+    if not primary_store_set.stores[0].publication_capabilities.writable:
+        pytest.skip("file-like ZipStore deliberately rejects mutable reference authority")
+
+
+def _require_writable(repo):
+    if not repo.default_store.publication_capabilities.writable:
+        pytest.skip("reference publication requires a writable Store")
 
 
 def test_repo_alias_loads_object_in_same_repo(primary_store_set):
+    _require_writable_reference_store(primary_store_set)
     repo = Repo(stores=primary_store_set.stores)
+    _require_writable(repo)
     obj = objects.TestClass1(10, test="train")
 
     repo.save_object(obj, alias="train_data_1")
 
-    assert repo.get_alias("train_data_1") == obj.definition
-    assert repo.load_alias("train_data_1") is obj
+    assert repo.get_alias("train_data_1") == obj.object_ref
+    assert repo.load_alias("train_data_1").definition == obj.definition
 
 
 def test_repo_alias_persists_across_reopen(primary_store_set):
+    _require_writable_reference_store(primary_store_set)
     repo = Repo(stores=primary_store_set.stores)
+    _require_writable(repo)
     obj = objects.TestClass1(10, test="train")
     repo.save_object(obj, alias="train_data_1")
     repo.close(flush=True)
@@ -25,12 +40,16 @@ def test_repo_alias_persists_across_reopen(primary_store_set):
     repo2 = Repo(stores=primary_store_set.fresh_stores())
     loaded = repo2.load_alias("train_data_1")
 
+    assert repo2.get_alias("train_data_1") == obj.object_ref
     assert loaded.definition == obj.definition
     assert loaded.x == 10
     assert loaded.test == "train"
 
 
 def test_top_level_load_alias(primary_store_set):
+    _require_writable_reference_store(primary_store_set)
+    if not primary_store_set.stores[0].publication_capabilities.writable:
+        pytest.skip("reference publication requires a writable Store")
     obj = objects.TestClass1(20, test="eval")
     save_object(obj, repo=primary_store_set.stores, alias="eval_data")
 
@@ -42,18 +61,15 @@ def test_top_level_load_alias(primary_store_set):
     assert loaded.test == "eval"
 
 
-def test_repo_delete_alias_persists(primary_store_set):
+def test_repo_alias_deletion_is_not_a_legacy_cdef_mutation(primary_store_set):
+    _require_writable_reference_store(primary_store_set)
     repo = Repo(stores=primary_store_set.stores)
+    _require_writable(repo)
     obj = objects.TestClass1(30, test="delete")
     repo.save_object(obj, alias="old_alias")
-    repo.flush()
-
-    assert repo.delete_alias("old_alias") == obj.definition
-    repo.close(flush=True)
-
-    repo2 = Repo(stores=primary_store_set.fresh_stores())
-    with pytest.raises(KeyError):
-        repo2.get_alias("old_alias")
+    with pytest.raises(NotImplementedError, match="reference aliases"):
+        repo.delete_alias("old_alias")
+    assert repo.get_alias("old_alias") == obj.object_ref
 
 
 def test_repo_unknown_alias_raises(primary_store_set):
@@ -65,6 +81,7 @@ def test_repo_unknown_alias_raises(primary_store_set):
 
 def test_repo_rejects_bad_alias_name(primary_store_set):
     repo = Repo(stores=primary_store_set.stores)
+    _require_writable(repo)
     obj = objects.TestClass1(40, test="bad")
 
     with pytest.raises(TypeError):
@@ -89,52 +106,20 @@ def test_repo_alias_conflict_across_stores_raises(store_resource_factory):
     repo2.save_object(objects.TestClass1(2, test="b"), alias="shared")
     repo2.close(flush=True)
 
-    with pytest.raises(RepoLoadError):
-        Repo(stores=[make_store(res1.resource), make_store(res2.resource)])
+    repo = Repo(stores=[make_store(res1.resource), make_store(res2.resource)])
+    with pytest.raises(RepoLoadError, match="conflicts across connected Stores"):
+        repo.get_alias("shared")
 
 
-def test_dirstore_alias_flush_merges_independent_handles_and_rejects_conflicts(tmp_path):
+def test_dirstore_object_alias_replaces_only_its_current_record(tmp_path):
     store_path = tmp_path / "shared-store"
-    first = objects.TestClass1(1, test="first").definition
-    second = objects.TestClass1(2, test="second").definition
-    replacement = objects.TestClass1(3, test="replacement").definition
+    repo = Repo(stores=DirStore(store_path, query_index="memory"))
+    first = repo.save_object(objects.TestClass1(1, test="first"))
+    replacement = repo.save_object(objects.TestClass1(3, test="replacement"))
 
-    left = Repo(stores=DirStore(store_path, query_index="memory"))
-    right = Repo(stores=DirStore(store_path, query_index="memory"))
-    left.set_alias("first", first)
-    right.set_alias("second", second)
-    left.flush()
-    right.flush()
+    repo.set_alias("current", first.object)
+    repo.set_alias("current", replacement.object)
 
-    assert DirStore(store_path, query_index="memory").read_aliases() == {
-        "first": first,
-        "second": second,
-    }
-    assert right.aliases() == {"first": first, "second": second}
-
-    left = Repo(stores=DirStore(store_path, query_index="memory"))
-    right = Repo(stores=DirStore(store_path, query_index="memory"))
-    left.set_alias("first", replacement)
-    right.set_alias("first", second)
-    left.flush()
-    aliases_path = store_path / "aliases.pkl"
-    before_conflict = aliases_path.read_bytes()
-
-    with pytest.raises(StoreAliasConflictError, match="changed concurrently"):
-        right.flush()
-
-    assert aliases_path.read_bytes() == before_conflict
-    assert right._aliases_dirty
-    assert DirStore(store_path, query_index="memory").read_aliases() == {
-        "first": replacement,
-        "second": second,
-    }
-
-    retry = Repo(stores=DirStore(store_path, query_index="memory"))
-    retry.set_alias("retried", second)
-    retry.flush()
-    assert retry.aliases() == {
-        "first": replacement,
-        "second": second,
-        "retried": second,
-    }
+    record = DirStore(store_path, query_index="memory").read_object_alias("current")
+    assert isinstance(record.object_ref, ObjectRef)
+    assert record.object_ref == replacement.object

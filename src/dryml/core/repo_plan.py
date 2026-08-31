@@ -639,13 +639,39 @@ def execute_save_plan(
         store,
         deep_capture: bool = False,
         federated: bool = False,
-        report_stores: bool = False):
+        report_stores: bool = False,
+        capture_memo: set[object] | None = None):
     """Publish local states then the complete enclosing StateRef record last.
 
-    All invalid codecs, Store capabilities, retained-binding gaps, reusable-state
-    integrity failures, and embedded StateRef authority failures are checked
-    before a serializer hook runs. A later hook or immutable install failure can
-    leave only unreferenced completed local-state directories.
+    Args:
+        repo: Repo owning the retained live bindings and claim fence hooks.
+        plan: Complete preflighted graph save plan.
+        store: Writable StateRef target Store.
+        deep_capture: Whether to serialize every uncaptured live state node.
+        federated: Whether reusable immutable state may remain in connected Stores.
+        report_stores: Whether to return an ephemeral StoreReport with the StateRef.
+        capture_memo: Internal ObjectId set already captured by pending-declaration
+            completion; those states are adopted instead of serialized again.
+
+    Returns:
+        Complete StateRef, optionally paired with StoreReport.
+
+    Raises:
+        RepoSaveError: If retained bindings, codecs, closure, or publication fails.
+        StoreAuthorityError: If a Store rejects immutable state or record authority.
+
+    Side Effects:
+        Publishes local state directories and then the enclosing StateRef. A later
+        hook or immutable install failure can leave only unreferenced completed
+        local-state directories.
+
+    Concurrency:
+        The final StateRef publication executes under the target Store writer
+        fence and validates a matching initial-construction claim when present.
+
+    Store Requirements:
+        ``store`` must support writable same-Store staging for captures, immutable
+        StateRef installation, atomic small-record replacement, and writer locks.
     """
     from .reference_values import StateRef
     from .store.records import DefinitionRecord, StateRefRecord
@@ -654,6 +680,7 @@ def execute_save_plan(
     state_actions = list(plan.actions)
     _validate_codecs(state_actions)
     embedded = _resolve_embedded_state_refs(repo, plan.binding.roots[0].definition)
+    capture_memo = set() if capture_memo is None else capture_memo
     reusable: dict[GraphPath, Any] = {}
     captures: list[SaveAction] = []
     for action in state_actions:
@@ -664,7 +691,10 @@ def execute_save_plan(
             reusable[action.path] = source
             continue
         state_hash = getattr(action.obj, "_last_state_hash", None)
-        source = None if deep_capture or state_hash is None else _find_local_state(repo, action.definition, state_hash)
+        source = (
+            None if (deep_capture and action.obj.object_id not in capture_memo) or state_hash is None
+            else _find_local_state(repo, action.definition, state_hash)
+        )
         if source is None:
             captures.append(action)
         else:
